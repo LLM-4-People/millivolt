@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="dashboard-version" content="__DASHBOARD_VERSION__">
+<link rel="icon" type="image/svg+xml" href="/favicon.ico">
+<title>millivolt · precision instrument on the wire</title>
+<link rel="stylesheet" href="/dash/css/dashboard.css">
+<!-- BEGIN vendored uPlot v1.6.32 CSS (MIT - https://github.com/leeoniya/uPlot) -->
+<link rel="stylesheet" href="/dash/vendor/uplot.css">
+<!-- BEGIN vendored uPlot v1.6.32 (MIT - https://github.com/leeoniya/uPlot).
+     Vendored IIFE build (25k gz): exposes window.uPlot; canvas 2D, zero deps.
+     jsdom safety: the IIFE itself runs under jsdom (so a bare typeof guard is
+     not the shield) - renderChart skips uPlot when the chart box measures
+     w < 80 || h < 40 (jsdom clientWidth/Height are 0). Keep that size guard.
+     Do not strip the license header in vendor/uplot.js. -->
+<script defer src="/dash/vendor/uplot.js"></script>
+<script defer src="/dash/js/core.js"></script>
+<script defer src="/dash/js/chrome.js"></script>
+<script defer src="/dash/js/chart.js"></script>
+<script defer src="/dash/js/entities.js"></script>
+<script defer src="/dash/js/log.js"></script>
+<script defer src="/dash/js/explorer.js"></script>
+<script defer src="/dash/js/live.js"></script>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="brand-logo" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <!-- graduated scale: minor ticks + a baseline -->
+        <g stroke="var(--scale-tick)" stroke-width="1" opacity=".55" stroke-linecap="round">
+          <path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/>
+        </g>
+        <path d="M1.5 12.8H16.5" stroke="var(--scale-base)" stroke-width="1" opacity=".5" stroke-linecap="round"/>
+        <!-- the probe trace: a soft pulse riding the scale -->
+        <path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5"
+              stroke="url(#mv)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+        <defs>
+          <linearGradient id="mv" x1="1.5" y1="9" x2="16.5" y2="9" gradientUnits="userSpaceOnUse">
+            <stop stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/>
+          </linearGradient>
+        </defs>
+      </svg>
+    </div>
+    <h1>millivolt</h1>
+  </div>
+  <span class="sub">· precision instrument on the wire</span>
+  <div class="refresh-controls">
+    <div class="menu-wrap">
+      <button class="btn" id="btn-pause" onclick="togglePauseMenu(event)" aria-haspopup="menu" aria-controls="pause-menu" aria-expanded="false" aria-pressed="false" aria-label="Pause" title="Pause">
+        <svg class="hdr-ico solid" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx="0.8"/><rect x="9.4" y="3" width="2.6" height="10" rx="0.8"/></svg>
+      </button>
+      <div class="hdr-menu" id="pause-menu" hidden>
+        <div class="clear-menu-hd">Hold requests…</div>
+        <div id="pf-holds" class="pause-holds"></div>
+        <div class="clear-opts">
+          <label>scope
+            <select id="pf-scope" onchange="onPauseScopeChange()"></select>
+          </label>
+          <label>until
+            <select id="pf-dur"></select>
+          </label>
+        </div>
+        <div class="pause-known">
+          <div>
+            <div class="pause-known-hd">Known clients</div>
+            <div id="pf-clients" class="pause-clients"></div>
+          </div>
+          <div>
+            <div class="pause-known-hd">Known providers</div>
+            <div id="pf-providers" class="pause-clients"></div>
+          </div>
+        </div>
+        <div class="clear-opts pause-cap-row">
+          <label>queue cap
+            <input type="number" id="pf-cap" min="0" step="1" placeholder="default">
+          </label>
+        </div>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="pause-count"></span>
+          <div class="clear-actions">
+            <button class="btn" id="btn-pause-apply" onclick="applyPauseMenu()" disabled>Pause</button>
+            <button class="btn" id="btn-pause-resume" onclick="resumePauseMenu()" disabled>Resume all</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-debug" onclick="toggleDebugMenu(event)" aria-haspopup="menu" aria-controls="debug-menu" aria-expanded="false" aria-pressed="false" aria-label="Debug" title="Debug">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6v2.2"/><path d="M8 11.2v2.2"/><circle cx="8" cy="8" r="2.4"/><path d="M3.4 4.2 4.9 5.7M11.1 10.3l1.5 1.5M3.4 11.8 4.9 10.3M11.1 5.7l1.5-1.5"/></svg>
+      </button>
+      <div class="hdr-menu" id="debug-menu" hidden>
+        <div class="clear-menu-hd">Capture debug…</div>
+        <div id="df-holds" class="pause-holds"></div>
+        <div class="clear-opts">
+          <label>until
+            <select id="df-dur"></select>
+          </label>
+        </div>
+        <div class="pause-known">
+          <div>
+            <div class="pause-known-hd">Known clients</div>
+            <div id="df-clients" class="pause-clients"></div>
+          </div>
+          <div>
+            <div class="pause-known-hd">Known providers</div>
+            <div id="df-providers" class="pause-clients"></div>
+          </div>
+        </div>
+        <div class="pause-known pause-known-one">
+          <div>
+            <div class="pause-known-hd">Known models</div>
+            <div id="df-models" class="pause-clients"></div>
+          </div>
+        </div>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="debug-count"></span>
+          <div class="clear-actions">
+            <button class="btn" id="btn-debug-apply" onclick="applyDebugMenu()" disabled>Start</button>
+            <button class="btn" id="btn-debug-stop" onclick="stopDebugMenu()" disabled>Stop all</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-limits" onclick="toggleLimitsMenu(event)" aria-haspopup="menu" aria-controls="limits-menu" aria-expanded="false" aria-pressed="false" aria-label="Limits" title="Limits">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 12.3a5.6 5.6 0 1 1 9.6 0"/><path d="M8 12.3 11.1 7.5"/><circle cx="8" cy="12.3" r="1.05" fill="currentColor" stroke="none"/></svg>
+      </button>
+      <div class="hdr-menu" id="limits-menu" hidden>
+        <div class="clear-menu-hd">Provider limits…</div>
+        <div id="lim-holds" class="pause-holds"></div>
+        <div class="clear-opts">
+          <label>provider
+            <select id="lim-provider" onchange="onLimitProviderChange()"></select>
+          </label>
+          <label>concurrency
+            <input type="number" id="lim-conc" min="0" step="1" placeholder="off">
+          </label>
+          <label>requests
+            <input type="number" id="lim-req" min="0" step="1" placeholder="off">
+          </label>
+          <label>per
+            <select id="lim-reqw"></select>
+          </label>
+          <label>tokens
+            <input type="number" id="lim-tok" min="0" step="1" placeholder="off">
+          </label>
+          <label>per
+            <select id="lim-tokw"></select>
+          </label>
+        </div>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="lim-count"></span>
+          <div class="clear-actions">
+            <button class="btn" id="btn-limits-apply" onclick="applyLimitsMenu()" disabled>Apply</button>
+            <button class="btn" id="btn-limits-clear" onclick="clearLimitsMenu()" disabled>Clear</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-logs" onclick="toggleLogsMenu(event)" aria-haspopup="menu" aria-controls="logs-menu" aria-expanded="false" aria-label="Logs" title="Logs">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.8v7.4"/><path d="M5.1 7.6 8 10.6l2.9-3"/><path d="M3.2 13.2h9.6"/></svg>
+      </button>
+      <div class="hdr-menu" id="logs-menu" hidden>
+        <div class="clear-menu-hd">Download logs (JSON)…</div>
+        <div class="clear-opts">
+          <label>provider <select id="lf-provider"></select></label>
+          <label>model <select id="lf-model"></select></label>
+          <label>client <select id="lf-client"></select></label>
+          <label>status <select id="lf-status"></select></label>
+          <label>errors <select id="lf-errors"></select></label>
+          <label>debug <select id="lf-debug"></select></label>
+          <label>older than <select id="lf-age"></select></label>
+        </div>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="logs-count"></span>
+          <div class="clear-actions">
+            <button class="btn" id="btn-logs-filtered" onclick="downloadLogsFiltered()" disabled>Download matching</button>
+            <button class="btn btn-danger-outline" onclick="downloadLogsAll()">Download all</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-clear" onclick="toggleClearMenu(event)" aria-haspopup="menu" aria-controls="clear-menu" aria-expanded="false" aria-label="Clear" title="Clear">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 5.4h9.6"/><path d="M6.1 5.4V4.3A1.2 1.2 0 0 1 7.3 3.1h1.4A1.2 1.2 0 0 1 9.9 4.3v1.1"/><path d="M4.2 5.4l.7 7.4a1 1 0 0 0 1 .8h5.2a1 1 0 0 0 1-.8l.7-7.4"/></svg>
+      </button>
+      <div class="hdr-menu" id="clear-menu" hidden>
+        <div class="clear-menu-hd">Delete records…</div>
+        <div class="clear-opts">
+          <label>provider <select id="cf-provider"></select></label>
+          <label>model <select id="cf-model"></select></label>
+          <label>client <select id="cf-client"></select></label>
+          <label>status <select id="cf-status"></select></label>
+          <label>errors <select id="cf-errors"></select></label>
+          <label>debug <select id="cf-debug"></select></label>
+          <label>older than <select id="cf-age"></select></label>
+        </div>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="clear-count"></span>
+          <div class="clear-actions">
+            <button class="btn btn-danger" id="btn-clear-filtered" onclick="clearFiltered()">Delete matching</button>
+            <button class="btn btn-danger-solid" id="btn-clear-all" onclick="clearAll()">Delete everything</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-restart" onclick="toggleRestartMenu(event)" aria-haspopup="menu" aria-controls="restart-menu" aria-expanded="false" aria-label="Restart" title="Restart">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.97-4.23"/><path d="M13.6 2.4v2.9h-2.9"/></svg>
+      </button>
+      <div class="hdr-menu" id="restart-menu" hidden>
+        <div class="clear-menu-hd">Rebuild &amp; restart…</div>
+        <p class="restart-description" id="restart-description">Build the latest source, finish in-flight streams, and save metrics before the new process takes over. New requests queue during the handoff.</p>
+        <ol class="restart-steps" id="restart-steps" hidden aria-live="polite"></ol>
+        <div class="clear-menu-ft">
+          <span class="clear-count" id="restart-count" role="status"></span>
+          <div class="clear-actions restart-actions">
+            <button class="btn btn-accent" id="btn-restart-now" onclick="restartProxy()" aria-describedby="restart-description">Restart now</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
+      <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.6v1.5M8 11.9v1.5M2.6 8h1.5M11.9 8h1.5M4.05 4.05l1.05 1.05M10.9 10.9l1.05 1.05M11.95 4.05l-1.05 1.05M5.1 10.9l-1.05 1.05"/></svg>
+    </button>
+  </div>
+</header>
+
+<main>
+  <div class="kpis" id="kpis"></div>
+
+  <!-- The explorer is the central organizing surface. Traffic, footer, and
+       request log react to its scope; the KPI band stays global. -->
+  <section class="card" id="explorer" aria-label="Explorer">
+    <div class="xp-scope" id="xp-scope"></div>
+    <div class="xp-body">
+      <div class="xp-rail-col">
+        <button type="button" class="xp-dim-trigger" id="xp-dim-trigger" aria-haspopup="listbox" aria-controls="xp-rail" aria-expanded="false"></button>
+        <div class="xp-rail" id="xp-rail" role="group" aria-label="Dimensions"></div>
+      </div>
+      <div class="xp-main">
+        <div class="xp-gallery" id="xp-gallery"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Under the explorer: traffic + requests side-by-side on wide screens,
+       stacked on narrow. Both react to the explorer scope. -->
+  <div class="grid-pair">
+    <div class="card traffic-card">
+      <div class="card-hd"><h2>Timeline</h2>
+        <div class="chart-controls">
+          <select id="chart-preset" aria-label="Chart metric" title="Chart metric"></select>
+          <select id="chart-window" aria-label="Chart time window" title="Chart time window"></select>
+          <select id="chart-pct" aria-label="Percentile" title="Percentile applied to speed and latency" hidden></select>
+        </div>
+      </div>
+      <div class="chart-totals" id="chart-totals" aria-live="polite"></div>
+      <div class="chart-axes" id="chart-axes"></div>
+      <div class="chart-wrap" id="chart-traffic"><div id="chart-hover" hidden aria-hidden="true"></div></div>
+      <div class="legend" id="traffic-legend"></div>
+      <div class="chart-context" id="chart-context"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-hd"><h2>Requests</h2>
+        <span class="htext" id="f-stats">0 records</span>
+        <select id="f-status" class="req-status"></select>
+      </div>
+      <div class="scroll" id="tbl-requests"></div>
+    </div>
+  </div>
+</main>
+
+<div class="st-veil" id="settings-veil" onclick="closeSettings()"></div>
+<section class="st-sheet" id="settings-sheet" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+  <div class="st-hd">
+    <h3 id="settings-title">Settings</h3>
+    <input type="search" id="settings-q" placeholder="find a setting" autocomplete="off" oninput="filterSettings()" aria-label="find a setting">
+    <button class="btn" type="button" id="btn-settings-close" onclick="closeSettings()">✕ esc</button>
+  </div>
+  <div class="st-body">
+    <div class="st-side">
+      <nav class="st-rail" id="settings-rail" aria-label="Categories"></nav>
+      <div class="st-live" id="settings-live"></div>
+    </div>
+    <div class="st-main">
+      <div class="st-pane-hd" id="settings-pane-hd"></div>
+      <div class="st-fields" id="settings-fields"></div>
+    </div>
+  </div>
+  <div class="st-ft">
+    <span class="st-status" id="settings-count"></span>
+    <div class="st-actions">
+      <button class="btn" type="button" id="btn-settings-revert" onclick="revertSettings()" disabled>Revert</button>
+      <button class="btn btn-accent" type="button" id="btn-settings-apply" onclick="applySettings()" disabled>Apply</button>
+    </div>
+  </div>
+</section>
+
+<div class="drawer-veil" id="drawer-veil" onclick="closeDrawer()"></div>
+<aside class="drawer" id="drawer" hidden inert tabindex="-1" role="dialog" aria-modal="true" aria-label="Request detail">
+  <div class="drawer-hd">
+    <h3 id="drawer-title">request</h3>
+    <div class="nav-btns">
+      <button class="btn" onclick="drawerNav(-1)" title="previous (newer)">‹</button>
+      <button class="btn" onclick="drawerNav(1)" title="next (older)">›</button>
+    </div>
+    <button class="btn" onclick="closeDrawer()">✕ esc</button>
+  </div>
+  <div class="drawer-body" id="drawer-body"></div>
+</aside>
+
+<footer>
+  <span class="f-cell"><span class="f-live" id="f-live">●</span><span id="f-state">live</span></span>
+  <span class="f-sep">│</span>
+  <span class="f-cell">scope <b id="f-scope">-</b></span>
+  <span class="f-right">
+    <span class="f-cell" id="f-clock">-</span>
+  </span>
+</footer>
+<div id="client-tip" hidden aria-hidden="true"></div>
+
+<script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>
+</body>
+</html>

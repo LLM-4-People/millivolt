@@ -1,0 +1,46 @@
+# Deny by default: a build must never receive operator state or credentials.
+**
+!Dockerfile
+!.dockerignore
+!go.mod
+!go.sum
+!VERSION
+!version.go
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!cmd/
+!cmd/proxy/
+!cmd/proxy/**
+!internal/
+!internal/**
+!scripts/
+!scripts/licenses/
+!scripts/licenses/**
+# These final rules also exclude private files nested inside allowed source.
+# Keep the unanchored exclusions aligned with .gitignore.
+**/.git
+**/*.test
+**/*.out
+**/*.prof
+**/*.pprof
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+**/*.log
+**/*.pid
+**/.env
+**/.env.*
+**/*.local.yaml
+**/*.local.yml
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/proxy.yaml
+**/.proxy.yaml-*

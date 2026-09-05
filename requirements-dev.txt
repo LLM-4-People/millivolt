@@ -1,0 +1,6 @@
+# Browser fixtures use the direct Python API, not pytest.
+# Chromium is installed by this Playwright version's own installer.
+playwright==1.60.0
+greenlet==3.5.1
+pyee==13.0.1
+typing_extensions==4.15.0

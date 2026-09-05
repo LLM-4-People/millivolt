@@ -1,0 +1,49 @@
+# Build artifacts (anchor command names so cmd/proxy stays includable)
+/proxy
+/stress
+/bin/
+/dist/
+*.test
+*.out
+*.prof
+*.pprof
+
+# Private runtime state, including renamed databases and write temporaries
+/proxy.yaml
+/.proxy.yaml-*
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+*.pid
+/backups/
+/captures/
+/exports/
+
+# Credentials and private local overrides; examples remain publishable
+.env
+.env.*
+!.env.example
+*.local.yaml
+*.local.yml
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Installed dependencies and generated checks
+/node_modules/
+/.venv/
+__pycache__/
+*.py[cod]
+/coverage/
+/test-results/
+/playwright-report/
+.DS_Store
+
+# Scraped research pages
+/docs_*.txt
+/grafana_com_.txt

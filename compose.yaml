@@ -1,0 +1,25 @@
+services:
+  millivolt:
+    image: ${MILLIVOLT_IMAGE:-ghcr.io/llm-4-people/millivolt:main}
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:${MILLIVOLT_PORT:-8080}:8080"
+    volumes:
+      - data:/data
+      - config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    # SIGTERM cancels streams. Allow time beyond shutdown_timeout for SQLite
+    # draining; this grace is configurable, not a lossless shutdown guarantee.
+    stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+
+volumes:
+  data:
+  config:

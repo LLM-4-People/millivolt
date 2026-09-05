@@ -1,0 +1,442 @@
+// Command containercheck owns only disposable, network-isolated Docker fixtures.
+// The host dev proxy lifecycle remains exclusively owned by scripts/dev.sh.
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"os/signal"
+	"path/filepath"
+	"regexp"
+	"runtime"
+	"slices"
+	"strings"
+	"syscall"
+	"time"
+)
+
+const (
+	smokeAddress = "http://127.0.0.1:8080" // Container loopback only, after isolation guards.
+	smokeEnv     = "MILLIVOLT_CONTAINER_SMOKE"
+	smokeRows    = 321              // Neutral persisted Settings fixture.
+	smokeTimeout = 45 * time.Second // Internal smoke-test deadline, not server configuration.
+)
+
+var imageID = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+
+func main() {
+	image := flag.String("image", "", "already-loaded local image ID")
+	inside := flag.String("inside", "", "internal container phase")
+	flag.Parse()
+	var err error
+	if flag.NArg() != 0 {
+		err = errors.New("unexpected arguments")
+	} else if *inside != "" {
+		err = probe(*inside)
+	} else {
+		err = check(*image)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "container check:", err)
+		os.Exit(1)
+	}
+}
+func dockerCommand(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = env
+	data, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(string(data)))
+	}
+	return bytes.TrimSpace(data), nil
+}
+
+type dockerCLI struct {
+	endpoint string
+	env      []string
+}
+
+func (d dockerCLI) command(ctx context.Context, args ...string) ([]byte, error) {
+	return dockerCommand(ctx, d.env, append([]string{"--host", d.endpoint}, args...)...)
+}
+
+func localDaemon(ctx context.Context) (dockerCLI, error) {
+	// DOCKER_CONTEXT overrides DOCKER_HOST. Resolve once, then pin the verified
+	// endpoint on every operation, including cleanup, regardless of later context changes.
+	host := os.Getenv("DOCKER_HOST")
+	if selected := os.Getenv("DOCKER_CONTEXT"); selected != "" || host == "" {
+		args := []string{"context", "inspect", "--format", "{{.Endpoints.docker.Host}}"}
+		if selected != "" {
+			args = append(args, selected)
+		}
+		endpoint, err := dockerCommand(ctx, os.Environ(), args...)
+		if err != nil {
+			return dockerCLI{}, err
+		}
+		host = string(endpoint)
+	}
+	u, err := url.Parse(host)
+	if err != nil || u.Scheme != "unix" || u.Host != "" || !filepath.IsAbs(u.Path) || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return dockerCLI{}, errors.New("only a local absolute Unix-socket Docker endpoint is allowed")
+	}
+	env := slices.DeleteFunc(os.Environ(), func(value string) bool {
+		key, _, _ := strings.Cut(value, "=")
+		return key == "DOCKER_HOST" || key == "DOCKER_CONTEXT" || key == "DOCKER_TLS" || key == "DOCKER_TLS_VERIFY" || key == "DOCKER_CERT_PATH"
+	})
+	return dockerCLI{endpoint: host, env: env}, nil
+}
+func check(image string) error {
+	if runtime.GOOS != "linux" || !imageID.MatchString(image) {
+		return errors.New("requires Linux and an already-loaded sha256 image ID")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithTimeout(ctx, 4*smokeTimeout)
+	defer cancel()
+	daemon, err := localDaemon(ctx)
+	if err != nil {
+		return err
+	}
+	if err := daemon.checkCompose(ctx); err != nil {
+		return err
+	}
+	command := daemon.command
+	user, err := command(ctx, "image", "inspect", "--format", "{{.Config.User}}", image)
+	if err != nil {
+		return err
+	}
+	if string(user) != "65532:65532" {
+		return fmt.Errorf("unexpected image user %q", user)
+	}
+	arch, err := command(ctx, "image", "inspect", "--format", "{{.Architecture}}", image)
+	if err != nil {
+		return err
+	}
+	if string(arch) != runtime.GOARCH {
+		return errors.New("smoke requires a native image")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	token := make([]byte, 12)
+	if _, err := rand.Read(token); err != nil {
+		return err
+	}
+	name := "millivolt-smoke-" + hex.EncodeToString(token)
+	volumes := []string{name + "-data", name + "-config"}
+	var created []string
+	var container string
+	defer func() {
+		cleanup, cancel := context.WithTimeout(context.Background(), smokeTimeout)
+		defer cancel()
+		// Every target is a literal ID minted by this invocation, never a user path.
+		if container != "" {
+			if _, err := command(cleanup, "rm", "--force", container); err != nil {
+				fmt.Fprintln(os.Stderr, "container cleanup:", err)
+			}
+		}
+		for _, volume := range created {
+			if _, err := command(cleanup, "volume", "rm", volume); err != nil {
+				fmt.Fprintln(os.Stderr, "volume cleanup:", err)
+			}
+		}
+	}()
+	for _, volume := range volumes {
+		if _, err := command(ctx, "volume", "create", volume); err != nil {
+			return err
+		}
+		created = append(created, volume)
+	}
+	args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
+		"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
+		"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
+		"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
+		"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
+		"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
+	containerID, err := command(ctx, args...)
+	if err != nil {
+		return err
+	}
+	if !imageID.MatchString("sha256:" + string(containerID)) {
+		return errors.New("Docker did not return a container ID")
+	}
+	container = string(containerID)
+	defer func() {
+		logsContext, cancel := context.WithTimeout(context.Background(), smokeTimeout)
+		defer cancel()
+		if logs, err := command(logsContext, "logs", container); err == nil {
+			fmt.Fprintln(os.Stderr, string(logs))
+		}
+	}()
+	if _, err := command(ctx, "start", container); err != nil {
+		return err
+	}
+	for _, phase := range []string{"seed", "verify"} {
+		if _, err := command(ctx, "exec", container, "/containercheck", "-inside", phase); err != nil {
+			return err
+		}
+		if phase == "seed" {
+			version, err := command(ctx, "exec", container, "/millivolt", "-version")
+			if err != nil {
+				return err
+			}
+			var info struct {
+				Version string `json:"version"`
+			}
+			if err := json.Unmarshal(version, &info); err != nil {
+				return err
+			}
+			want, err := os.ReadFile("VERSION")
+			if err != nil {
+				return err
+			}
+			if info.Version != strings.TrimSpace(string(want)) {
+				return fmt.Errorf("image version %q differs from VERSION", info.Version)
+			}
+			defaults, err := command(ctx, "exec", container, "/millivolt", "-print-config")
+			if err != nil {
+				return err
+			}
+			example, err := os.ReadFile("proxy.example.yaml")
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(bytes.TrimSpace(defaults), bytes.TrimSpace(example)) {
+				return errors.New("image config defaults differ from committed example")
+			}
+		}
+		if _, err := command(ctx, "stop", "--time", "30", container); err != nil {
+			return err
+		}
+		code, err := command(ctx, "inspect", "--format", "{{.State.ExitCode}}", container)
+		if err != nil {
+			return err
+		}
+		if string(code) != "0" {
+			return fmt.Errorf("unclean container exit %s", code)
+		}
+		if phase == "seed" {
+			if _, err := command(ctx, "start", container); err != nil {
+				return err
+			}
+		}
+	}
+	fmt.Printf("container HTTP/config/SQLite/restart smoke passed (%s)\n", runtime.GOARCH)
+	return nil
+}
+
+func (d dockerCLI) checkCompose(ctx context.Context) error {
+	// Validate the committed deployment, not operator environment/override files.
+	d.env = slices.DeleteFunc(slices.Clone(d.env), func(value string) bool {
+		return strings.HasPrefix(value, "COMPOSE_") || strings.HasPrefix(value, "MILLIVOLT_")
+	})
+	data, err := d.command(ctx, "compose", "--env-file", os.DevNull, "--project-name", "millivolt-check", "--file", "compose.yaml", "config", "--format", "json")
+	if err != nil {
+		return err
+	}
+	return validateCompose(data)
+}
+
+func validateCompose(data []byte) error {
+	var model struct {
+		Services map[string]struct {
+			ReadOnly bool `json:"read_only"`
+			Ports    []struct {
+				HostIP string `json:"host_ip"`
+			} `json:"ports"`
+			Volumes []struct{ Type, Source, Target string } `json:"volumes"`
+		} `json:"services"`
+	}
+	if err := json.Unmarshal(data, &model); err != nil {
+		return err
+	}
+	service, ok := model.Services["millivolt"]
+	if !ok || len(model.Services) != 1 || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" {
+		return errors.New("Compose must contain one read-only, loopback-published millivolt service")
+	}
+	if len(service.Volumes) != 2 {
+		return errors.New("Compose must keep exactly two named persistence volumes")
+	}
+	seen := map[string]bool{}
+	for _, volume := range service.Volumes {
+		if volume.Type != "volume" || volume.Source == "" || (volume.Target != "/data" && volume.Target != "/config") || seen[volume.Target] {
+			return errors.New("Compose must keep separate named /data and /config volumes")
+		}
+		seen[volume.Target] = true
+	}
+	return nil
+}
+func probeGuard() error {
+	if os.Getenv(smokeEnv) != "1" || os.Getuid() != 65532 {
+		return errors.New("internal probe requires isolated nonroot container")
+	}
+	target, err := os.Readlink("/proc/1/exe")
+	if err != nil || filepath.Clean(target) != "/millivolt" {
+		return errors.New("PID 1 is not the fixture binary")
+	}
+	if _, err := os.Stat("/.dockerenv"); err != nil {
+		return errors.New("not a Docker container")
+	}
+	return nil
+}
+
+type snapshot struct {
+	Records []struct {
+		Client string `json:"client"`
+		Model  string `json:"model"`
+		Usage  struct {
+			TotalTokens int64 `json:"total_tokens"`
+		} `json:"usage"`
+	} `json:"records"`
+	Storage struct {
+		Enabled bool  `json:"enabled"`
+		Dropped int64 `json:"dropped"`
+	} `json:"storage"`
+}
+type settings struct {
+	Revision  string         `json:"revision"`
+	Values    map[string]any `json:"values"`
+	Effective map[string]any `json:"effective"`
+}
+
+func request(client *http.Client, method, path string, body []byte) ([]byte, error) {
+	r, err := http.NewRequest(method, smokeAddress+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	res, err := client.Do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s %s returned %d: %s", method, path, res.StatusCode, data)
+	}
+	return data, nil
+}
+func readJSON(client *http.Client, path string, out any) error {
+	data, err := request(client, http.MethodGet, path, nil)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
+}
+func probe(phase string) error {
+	if phase != "seed" && phase != "verify" {
+		return errors.New("unknown probe phase")
+	}
+	if err := probeGuard(); err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer client.CloseIdleConnections()
+	deadline := time.Now().Add(smokeTimeout)
+	var snap snapshot
+	for {
+		if err := readJSON(client, "/metrics/bootstrap", &snap); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return errors.New("container HTTP readiness timed out")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !snap.Storage.Enabled || snap.Storage.Dropped != 0 {
+		return errors.New("durability unavailable or dropped records")
+	}
+	html, err := request(client, http.MethodGet, "/", nil)
+	if err != nil {
+		return err
+	}
+	if !bytes.Contains(html, []byte("<html")) {
+		return errors.New("dashboard HTML missing")
+	}
+	var restart struct {
+		Available bool `json:"available"`
+	}
+	if err := readJSON(client, "/admin/restart", &restart); err != nil {
+		return err
+	}
+	if restart.Available {
+		return errors.New("source-less image falsely offers rebuild")
+	}
+	var cfg settings
+	if err := readJSON(client, "/admin/config", &cfg); err != nil {
+		return err
+	}
+	if phase == "seed" {
+		if len(snap.Records) != 0 {
+			return errors.New("fixture volume was not empty")
+		}
+		body, _ := json.Marshal(map[string]any{"revision": cfg.Revision, "values": map[string]any{"dash_log_rows": smokeRows}})
+		if _, err := request(client, http.MethodPost, "/admin/config", body); err != nil {
+			return err
+		}
+		const response = `{"id":"fixture","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, response)
+		}))
+		defer upstream.Close()
+		r, err := http.NewRequest(http.MethodPost, smokeAddress+"/v1/chat/completions", strings.NewReader(`{"model":"fixture-model","messages":[{"role":"user","content":"hello"}]}`))
+		if err != nil {
+			return err
+		}
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("X-Proxy-Base-URL", upstream.URL)
+		r.Header.Set("X-Proxy-Provider", "fixture.example")
+		r.Header.Set("X-Proxy-Client", "container-fixture")
+		res, err := client.Do(r)
+		if err != nil {
+			return err
+		}
+		data, err := io.ReadAll(res.Body)
+		res.Body.Close()
+		if err != nil {
+			return err
+		}
+		if res.StatusCode != 200 || string(data) != response {
+			return fmt.Errorf("mock inference changed: %d %s", res.StatusCode, data)
+		}
+	}
+	if err := readJSON(client, "/admin/config", &cfg); err != nil {
+		return err
+	}
+	if cfg.Values["dash_log_rows"] != float64(smokeRows) || cfg.Effective["dash_log_rows"] != float64(smokeRows) {
+		return errors.New("Settings did not persist and apply")
+	}
+	if err := readJSON(client, "/metrics/bootstrap", &snap); err != nil {
+		return err
+	}
+	if len(snap.Records) != 1 || snap.Records[0].Model != "fixture-model" || snap.Records[0].Usage.TotalTokens != 5 {
+		return fmt.Errorf("wrong durable fixture record: %+v", snap.Records)
+	}
+	data, err := os.ReadFile("/data/proxy.db")
+	if err != nil {
+		return err
+	}
+	if !bytes.HasPrefix(data, []byte("SQLite format 3\x00")) {
+		return errors.New("SQLite file header missing")
+	}
+	return nil
+}

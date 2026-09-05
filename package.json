@@ -1,0 +1,12 @@
+{
+  "name": "millivolt-dev-tools",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "test": "node ui_check.js"
+  },
+  "description": "Dev-only test harness dependencies. The proxy itself has no build step and no runtime JS dependencies.",
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

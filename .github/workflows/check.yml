@@ -1,0 +1,160 @@
+name: Checks and images
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Validate clean source identity
+        env:
+          REVISION: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          args=(release -revision "$REVISION")
+          if [ -n "$RELEASE_TAG" ]; then args+=(-tag "$RELEASE_TAG"); fi
+          bash scripts/check.sh "${args[@]}"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          python3 -m pip install -r requirements-dev.txt
+          python3 -m playwright install --with-deps chromium
+      - name: Check source and unit tests
+        run: bash scripts/check.sh
+      - name: Check isolated browser fixtures
+        env:
+          DEV_PORT: "18081"
+          DEV_HOST: "127.0.0.1"
+          DEV_DB: "/tmp/millivolt/millivolt-dev-ci.db"
+          DEV_CONFIG: "proxy.example.yaml"
+          DEV_COPY_DB: "0"
+        run: |
+          trap 'scripts/dev.sh stop' EXIT
+          scripts/dev.sh up
+          bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"
+
+  container:
+    needs: checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build native image without publishing
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          push: false
+          tags: millivolt:check
+          build-args: REVISION=${{ github.sha }}
+      - name: Check isolated container
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.imageid }}
+        run: bash scripts/check.sh container --image "$IMAGE_ID"
+
+  publish:
+    needs: [checks, container]
+    if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Validate release identity
+        id: release
+        env:
+          REVISION: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          args=(release -revision "$REVISION")
+          if [ -n "$RELEASE_TAG" ]; then args+=(-tag "$RELEASE_TAG"); fi
+          bash scripts/check.sh "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Define image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/llm-4-people/millivolt
+          flavor: latest=false
+          tags: |
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long
+            type=raw,value=${{ steps.release.outputs.version }},enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && steps.release.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.release.outputs.version }}
+            org.opencontainers.image.revision=${{ steps.release.outputs.revision }}
+            org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
+            org.opencontainers.image.licenses=MIT
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish verified multi-platform image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: REVISION=${{ steps.release.outputs.revision }}
