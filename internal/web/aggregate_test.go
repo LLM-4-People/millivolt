@@ -64,7 +64,7 @@ func get(t *testing.T, h http.Handler, target string) map[string]any {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != 200 {
-		t.Fatalf("%s: status %d", target, rec.Code)
+		t.Fatalf("%s: status %d body=%s", target, rec.Code, rec.Body.String())
 	}
 	var out map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
