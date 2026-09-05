@@ -5,34 +5,51 @@ Clients choose the upstream URL and credentials on each request; no endpoint or
 API-key registry is required. Optional provider mappings enrich usage, cost,
 headers, and model discovery.
 
+![Dashboard showing request charts, usage and a live request log](docs/images/dashboard.png)
+
+## What you get
+
+- Live streaming rows, retries and in-flight state, with traffic, token,
+  speed/latency and cost charts from short windows through All time.
+- History exploration by provider, model, client, conversation, tool, time,
+  status, error and key. Explicit parent links connect main/sub-conversations.
+- Provider-reported usage and cost, with cents below $1 and separate error/429
+  counts. Zero health badges stay hidden; missing cost is not a zero bill.
+- Scoped Pause, provider-wide Limits, opt-in Debug, filtered export/deletion
+  and revision-checked Settings. Source builds also support rebuild/restart.
+
+![Explorer showing main and sub-conversation cards with parent links](docs/images/explorer.png)
+
+Screenshots use synthetic local fixtures, not private requests or provider data.
+
 ## Before you run
 
-millivolt has **no operator authentication or user isolation**. Inference,
-dashboard, SQL, Debug, Settings, deletion, and restart share one listener. Use a
-trusted machine/network or an appropriately protected ingress. An upstream API
-key does not authenticate an operator. The supplied listen setting binds all
-interfaces; both quickstarts below restrict the host port to loopback.
-See [Security](SECURITY.md) before exposing it.
+millivolt has **no operator authentication or user isolation**. Inference and
+administration share one listener. Both quickstarts restrict the host port to
+loopback; use a trusted machine or protected ingress. An upstream API key does
+not secure the dashboard. Read [Security](SECURITY.md) before network exposure.
 
 Durable metrics are **best-effort**: sustained overload can drop records even
 when inference succeeds. The dashboard warns about process-local storage drops.
-The [storage follow-up](docs/explorer-storage-2026-09-05.md#remaining-capacity-failure)
-records an unresolved end-to-end overload failure, not a lossless guarantee.
+See [storage and accounting](docs/operations.md#storage-and-accounting) for
+capacity, memory and backup limitations.
 
 ## Quickstart
 
-Linux is the supported platform. Clone the
-[repository](https://github.com/LLM-4-People/millivolt), then choose a container
-or source deployment from the checkout root.
+Linux is supported. Normal Docker deployment needs only the Compose file,
+not Go, Node, a source checkout or an image build. Use an unused host port;
+for development alongside an existing instance, use
+[isolated development](CONTRIBUTING.md#isolated-development).
 
 ### Docker Compose
 
-With Docker Engine and the Compose plugin installed, pull the published image
-and start it without installing Go on the host:
+With Docker Engine and the Compose plugin installed, run these commands from
+a new, empty deployment directory:
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/LLM-4-People/millivolt/main/compose.yaml -o compose.yaml
 docker compose pull
-docker compose up -d --no-build
+docker compose up -d
 docker compose logs --tail 50
 ```
 
@@ -42,32 +59,42 @@ history and private Settings configuration when the container is replaced; an
 initially empty config volume uses built-in defaults. The runtime is non-root
 with a read-only root filesystem. Dashboard rebuild is unavailable in an image.
 
-To build the current checkout instead, including before its image is published:
-
-```sh
-MILLIVOLT_IMAGE=millivolt:local docker compose up -d --build --pull never
-```
-
 See [container operation](docs/operations.md#containers) for image selection,
-configuration, updates, backups and shutdown. Stop with `docker compose stop`.
+configuration, updates, backups and shutdown, or the
+[reverse-proxy guide](docs/reverse-proxy.md) for NGINX and protected ingress.
+Stop with `docker compose stop`. Local image builds use a separate
+[development Compose overlay](CONTRIBUTING.md#container-development).
 
 ### From source
 
 Install the Go toolchain required by [go.mod](go.mod):
 
 ```sh
+git clone https://github.com/LLM-4-People/millivolt.git
+cd millivolt
 # Create a local config only if one does not already exist.
 test -e proxy.yaml || cp proxy.example.yaml proxy.yaml
 go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 ```
 
-Choose an unused port for a new deployment. For development alongside an existing
-instance, use [the isolated development workflow](CONTRIBUTING.md#isolated-development),
-not another process on its port.
+### Connect a client
 
-Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard. Point your
-OpenAI-compatible client at this address and supply `X-Proxy-Base-URL`; the
-upstream credential comes from `X-Proxy-Key` or `Authorization`.
+Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard, then set
+your OpenAI-compatible client's connection options:
+
+| Client setting | Value |
+| --- | --- |
+| API base URL | `http://127.0.0.1:8080/v1` |
+| API key | Your actual upstream key, forwarded through `Authorization`; it does not authenticate dashboard access. |
+| Custom header `X-Proxy-Base-URL` | Your upstream API base URL, including its path, such as `/v1`. |
+| Optional header `X-Proxy-Client` | A label for this client in the dashboard. |
+
+The client must support custom headers, or middleware that adds them. Select a
+model supported by your upstream; millivolt does not register providers or keys.
+If the client is another container, its `localhost` is not the proxy: on a shared
+Compose network, use the proxy service URL `http://millivolt:8080/v1` instead.
+For protected remote access, follow the
+[reverse-proxy authentication guidance](docs/reverse-proxy.md#credentials-and-access-control).
 
 For example, with your own upstream URL, key, and supported model:
 
@@ -83,22 +110,6 @@ The URL variables above are supplied by you, not millivolt settings. For a model
 name containing JSON-special characters, use your client's JSON encoder.
 The [protocol guide](docs/protocol.md) covers path joining, all routing headers,
 native-format adapters, and model listing.
-
-## What you get
-
-- Live request rows, retry attempts, in-flight state, and durable-history
-  exploration. The KPI band is global; chart and explorer use the selected scope.
-- Traffic, tokens, speed/latency, errors, and cost charts with longer ranges and
-  All time. One percentile control owns the speed/latency selection.
-- Provider-reported usage and cost, never a per-model price table. Totals include
-  only detected provider costs; missing cost is not evidence of a zero bill.
-  USD amounts below $1 display in cents throughout the dashboard.
-- Separate affected-request error and HTTP 429 counts. Zero badges are hidden;
-  a request with both a genuine failure and 429 can appear in both counts.
-- Explicit main/sub-conversation relationships and exact parent links. Clients
-  must declare parents; historical ancestry is not inferred.
-- Scoped Pause, provider-wide Limits, opt-in Debug captures, filtered export and
-  deletion, revision-checked Settings, and source-build rebuild/restart progress.
 
 Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive

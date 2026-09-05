@@ -55,14 +55,17 @@ runtime image. JavaScript/CSS are embedded in the Go binary; Node and Python
 are test tools, not runtime dependencies. The binary is stripped of debug and
 symbol tables. The final stage copies only that binary, dependency notices and
 prepared state directories onto the minimal distroless base.
-The [Compose quickstart](../README.md#docker-compose) uses the
-same [compose.yaml](../compose.yaml) for registry images and local builds.
+The [Compose quickstart](../README.md#docker-compose) downloads the image-only
+[compose.yaml](../compose.yaml). Normal deployment never builds from source.
+Local builds use the separate
+[development overlay](../CONTRIBUTING.md#container-development).
 A registry tag is usable only after its publishing workflow succeeds.
 
 ### Compose operation
 
-Run commands from the same checkout directory so Compose keeps the same project
-and named volumes. The deployment inputs are `MILLIVOLT_IMAGE` (image reference),
+Keep the same Compose project name to reuse its named volumes. The normal file
+names the project `millivolt`; an explicit `-p` overrides it. The deployment
+inputs are `MILLIVOLT_IMAGE` (image reference),
 `MILLIVOLT_PORT` (loopback host port), and `MILLIVOLT_STOP_GRACE_PERIOD` (container
 stop grace). Their defaults live in [compose.yaml](../compose.yaml), not server
 configuration. Supply them consistently through the environment or an ignored
@@ -71,7 +74,7 @@ local `.env` file. `docker compose config` shows the resolved deployment.
 ```sh
 # Start or adopt a newly pulled image while preserving volumes.
 docker compose pull
-docker compose up -d --no-build
+docker compose up -d
 docker compose ps
 docker compose logs --tail 100
 
@@ -90,10 +93,9 @@ See Docker's [Compose lifecycle](https://docs.docker.com/reference/cli/docker/co
 and [volume removal](https://docs.docker.com/reference/cli/docker/compose/down/)
 documentation for the underlying behavior.
 
-For a local checkout build, set `MILLIVOLT_IMAGE=millivolt:local` and use
-`docker compose up -d --build --pull never`. Keep that image override for later
-commands that recreate the service. A plain pull/update selects the configured
-registry image; it does not preserve uncommitted local source changes.
+Do not add a build section to the deployment file. The
+[development Compose overlay](../CONTRIBUTING.md#container-development) owns
+source builds, its private port and its separate project identity.
 
 The Compose service drops Linux capabilities, disallows privilege escalation,
 uses a read-only root filesystem and a bounded temporary filesystem. These
@@ -258,14 +260,21 @@ Enqueue is bounded and nonblocking. Overflow or write failures can lose durable
 records even when HTTP succeeds. Bootstrap's `storage:{enabled,dropped}` reports
 cumulative process-local loss; a nonzero value appears in the status footer.
 Increasing queue size absorbs bursts, not arbitrary sustained overload.
-The [follow-up measurements](explorer-storage-2026-09-05.md#remaining-capacity-failure)
-still show confirmed durable loss.
+Storage overload remains an unresolved capacity boundary, not a lossless mode.
+Measure it with the [isolated stress workflow](../CONTRIBUTING.md#performance-evidence):
+successful responses, exact durable accounting and process-local drops are
+separate acceptance criteria. A short successful burst does not establish
+sustainable writer throughput or an absolute request-capacity ceiling.
 
 One shared analytical projection retains compact data and sorted metric orders
 proportional to stored history. Initial preload costs startup CPU/RAM; fast
 dashboard reuse is not free startup or bounded total-history memory.
 Concurrent independent proxy writers sharing a database are not a supported
 coherent-KPI deployment.
+
+Scheduler groups and some observed-identity sets also retain historical labels.
+Bounded request queues do not bound all process memory; long-running workloads
+with many unique identities need their own memory/cardinality measurements.
 
 Use the existing online backup into a new destination:
 
@@ -280,8 +289,10 @@ exports as sensitive data.
 ## Known limits
 
 - Recognized provider fields drive usage/cost; this is not independent billing.
-- Large non-streaming responses exceed bounded inspection; optional non-streaming
-  translation buffers the entire body. Discovery budgets do not bound that path.
+- Non-streaming usage/cost inspection keeps a bounded prefix, so larger valid
+  responses can forward completely without complete accounting. Optional
+  non-streaming translation buffers the entire body; discovery budgets do not
+  bound that path.
 - General multi-line SSE accounting/native event assembly remains incomplete;
   some split terminal/content shapes can affect classification, not just metrics.
 - SQL result limits do not bound every intermediate SQLite allocation.

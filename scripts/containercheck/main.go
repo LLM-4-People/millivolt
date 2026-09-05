@@ -243,39 +243,89 @@ func (d dockerCLI) checkCompose(ctx context.Context) error {
 	d.env = slices.DeleteFunc(slices.Clone(d.env), func(value string) bool {
 		return strings.HasPrefix(value, "COMPOSE_") || strings.HasPrefix(value, "MILLIVOLT_")
 	})
-	data, err := d.command(ctx, "compose", "--env-file", os.DevNull, "--project-name", "millivolt-check", "--file", "compose.yaml", "config", "--format", "json")
+	var models [][]byte
+	for _, dev := range []bool{false, true} {
+		args := []string{"compose", "--env-file", os.DevNull, "--file", "compose.yaml"}
+		if dev {
+			args = append(args, "--file", "compose.dev.yaml")
+		}
+		data, err := d.command(ctx, append(args, "config", "--format", "json")...)
+		if err != nil {
+			return err
+		}
+		models = append(models, data)
+	}
+	return validateCompose(models[0], models[1])
+}
+
+type composeModel struct {
+	Name     string `json:"name"`
+	Services map[string]struct {
+		Image string `json:"image"`
+		Build *struct {
+			Context string `json:"context"`
+		} `json:"build"`
+		PullPolicy string `json:"pull_policy"`
+		ReadOnly   bool   `json:"read_only"`
+		Ports      []struct {
+			HostIP    string `json:"host_ip"`
+			Published string `json:"published"`
+			Target    int    `json:"target"`
+		} `json:"ports"`
+		Volumes []struct{ Type, Source, Target string } `json:"volumes"`
+	} `json:"services"`
+	Volumes map[string]struct {
+		Name     string `json:"name"`
+		External bool   `json:"external"`
+	} `json:"volumes"`
+}
+
+func decodeCompose(data []byte) (composeModel, error) {
+	var model composeModel
+	if err := json.Unmarshal(data, &model); err != nil {
+		return model, err
+	}
+	service, ok := model.Services["millivolt"]
+	if !ok || model.Name == "" || len(model.Services) != 1 || service.Image == "" || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Published == "" || service.Ports[0].Target != 8080 {
+		return model, errors.New("Compose must contain one named, read-only, loopback-published millivolt service")
+	}
+	if len(service.Volumes) != 2 || len(model.Volumes) != 2 {
+		return model, errors.New("Compose must keep exactly two named persistence volumes")
+	}
+	seen, names := map[string]bool{}, map[string]bool{}
+	for _, volume := range service.Volumes {
+		definition := model.Volumes[volume.Source]
+		if volume.Type != "volume" || definition.Name == "" || definition.External || names[definition.Name] || (volume.Target != "/data" && volume.Target != "/config") || seen[volume.Target] {
+			return model, errors.New("Compose must keep separate project-owned /data and /config volumes")
+		}
+		seen[volume.Target] = true
+		names[definition.Name] = true
+	}
+	return model, nil
+}
+
+func validateCompose(deployment, development []byte) error {
+	normal, err := decodeCompose(deployment)
 	if err != nil {
 		return err
 	}
-	return validateCompose(data)
-}
-
-func validateCompose(data []byte) error {
-	var model struct {
-		Services map[string]struct {
-			ReadOnly bool `json:"read_only"`
-			Ports    []struct {
-				HostIP string `json:"host_ip"`
-			} `json:"ports"`
-			Volumes []struct{ Type, Source, Target string } `json:"volumes"`
-		} `json:"services"`
-	}
-	if err := json.Unmarshal(data, &model); err != nil {
+	dev, err := decodeCompose(development)
+	if err != nil {
 		return err
 	}
-	service, ok := model.Services["millivolt"]
-	if !ok || len(model.Services) != 1 || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" {
-		return errors.New("Compose must contain one read-only, loopback-published millivolt service")
+	normalService, devService := normal.Services["millivolt"], dev.Services["millivolt"]
+	if normalService.Build != nil || devService.Build == nil || devService.Build.Context == "" || devService.PullPolicy != "build" {
+		return errors.New("only the explicit development Compose may build source")
 	}
-	if len(service.Volumes) != 2 {
-		return errors.New("Compose must keep exactly two named persistence volumes")
+	if normal.Name == dev.Name || normalService.Image == devService.Image || normalService.Ports[0].Published == devService.Ports[0].Published || devService.Ports[0].Published == "8080" {
+		return errors.New("development Compose must isolate its project, image and published port")
 	}
-	seen := map[string]bool{}
-	for _, volume := range service.Volumes {
-		if volume.Type != "volume" || volume.Source == "" || (volume.Target != "/data" && volume.Target != "/config") || seen[volume.Target] {
-			return errors.New("Compose must keep separate named /data and /config volumes")
+	for _, volume := range normal.Volumes {
+		for _, devVolume := range dev.Volumes {
+			if volume.Name == devVolume.Name {
+				return errors.New("deployment and development Compose share persistence")
+			}
 		}
-		seen[volume.Target] = true
 	}
 	return nil
 }

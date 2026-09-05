@@ -106,6 +106,36 @@ async def accepted_view(page, label, dim, matches):
         !document.querySelector('#xp-gallery .empty')''', timeout=15000)
 
 
+def docs_snapshot(document, client, count):
+    """Fail closed before publishing images: only this fixture may be visible.
+
+    A private path can still contain copied operator history. Global totals,
+    complete rows and pending state must agree, not merely the selected scope.
+    Go encodes empty snapshot slices as null; missing fields are not empty.
+    """
+    require(isinstance(document, dict), 'missing documentation snapshot')
+    for key in ('records', 'in_flight_records'):
+        require(key in document and (document[key] is None or isinstance(document[key], list)),
+                'invalid documentation snapshot rows: ' + key)
+    rows = document['records'] or []
+    require(len(rows) == count and all(isinstance(row, dict) and row.get('client') == client for row in rows),
+            'documentation snapshot contains non-fixture or incomplete history')
+    require(not document['in_flight_records'], 'documentation snapshot has pending requests')
+    for section, key, expected in (('kpi', 'requests', count), ('kpi', 'in_flight', 0), ('storage', 'dropped', 0)):
+        value = document.get(section)
+        require(isinstance(value, dict) and type(value.get(key)) is int and value[key] == expected,
+                'documentation snapshot has unexpected ' + section + '.' + key)
+
+
+async def docs_preflight(request, base, client, count):
+    response = await request.get(base + '/metrics/bootstrap', max_redirects=0)
+    try:
+        require(response.status == 200, ('documentation preflight status', response.status))
+        docs_snapshot(await response.json(), client, count)
+    finally:
+        await response.dispose()
+
+
 async def layout(page):
     return await page.evaluate('''() => {
         const targets = ['#explorer','#xp-rail','#xp-dim-trigger','.xp-rail-item',
@@ -143,6 +173,8 @@ async def check(args):
                 require(document.get('effective', {}).get('max_retries', 0) >= 1, 'dev config must allow at least one retry')
             finally:
                 await response.dispose()
+            if args.docs_images:
+                await docs_preflight(context.request, base, label, 0)
             upstream = ThreadingHTTPServer(('127.0.0.1', 0), FixtureUpstream)
             upstream.fixture_lock = threading.Lock()
             upstream.calls, upstream.errors = {}, []
@@ -267,6 +299,25 @@ async def check(args):
             require(not upstream.errors, upstream.errors)
             require(upstream.calls == {'fixture-success': 3, 'fixture-retry429': 2, 'fixture-retry500': 2, 'fixture-final429': 1}, ('upstream attempts', upstream.calls))
             require(not results['browser_errors'], results['browser_errors'])
+            if args.docs_images:
+                # Reload real server state after presentation-only regressions.
+                # Never manufacture chart history or publish failure captures.
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+                await page.goto(navigation(base, [('client', label)]), wait_until='domcontentloaded')
+                await accepted_view(page, label, 'conversation', 6)
+                await page.wait_for_function('''() => chartAgg && lastData && kpiAgg?.requests === 6 &&
+                    !_renderQueued && !_renderDirty''')
+                await page.evaluate('() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+                await docs_preflight(context.request, base, label, 6)
+                docs_snapshot(await page.evaluate('() => ({...lastData,kpi:kpiAgg,storage:storageState})'), label, 6)
+                require(not results['browser_errors'], results['browser_errors'])
+                output = Path(args.docs_images)
+                output.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(output / 'dashboard.png'), full_page=True,
+                                      type='png', scale='css', animations='disabled')
+                await page.locator('#explorer').screenshot(path=str(output / 'explorer.png'),
+                                                         type='png', scale='css', animations='disabled')
+                results['checks'].append('documentation images: complete synthetic-only server and browser snapshots')
             results['mock_attempts'] = upstream.calls
             print(json.dumps(results))
         except Exception:
@@ -293,5 +344,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', required=True)
     parser.add_argument('--screenshots', help='optional scratch screenshot directory')
+    parser.add_argument('--docs-images', help='publish dashboard.png and explorer.png only after synthetic-only checks; requires fresh empty dev history')
     args = parser.parse_args()
     asyncio.run(check(args))

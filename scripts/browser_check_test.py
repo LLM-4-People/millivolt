@@ -1,10 +1,12 @@
 import argparse
 import asyncio
+import copy
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from playwright.async_api import async_playwright
 
 import browser_check as fixture
+from explorer_check import docs_snapshot
 from browser_check import require
 
 try:
@@ -44,6 +46,37 @@ except RuntimeError:
     pass
 else:
     raise RuntimeError('accepted ambiguous database restart')
+
+# Publication must reject copied history, partial snapshots and malformed
+# counters even when target/database guards accepted the private instance.
+empty = {'records': None, 'in_flight_records': None,
+         'kpi': {'requests': 0, 'in_flight': 0}, 'storage': {'dropped': 0}}
+docs_snapshot(empty, 'fixture', 0)
+complete = {**empty, 'records': [{'client': 'fixture'}], 'kpi': {'requests': 1, 'in_flight': 0}}
+docs_snapshot(complete, 'fixture', 1)
+for section, key, value in (
+        ('kpi', 'requests', 2), ('kpi', 'requests', True), ('kpi', 'requests', '1'),
+        ('kpi', 'in_flight', 1), ('storage', 'dropped', 1),
+        (None, 'records', [{'client': 'private'}]), (None, 'records', []),
+        (None, 'records', {}), (None, 'records', [None]),
+        (None, 'in_flight_records', [{'client': 'fixture'}]), (None, 'kpi', None)):
+    invalid = copy.deepcopy(complete)
+    (invalid[section] if section else invalid)[key] = value
+    try:
+        docs_snapshot(invalid, 'fixture', 1)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError('accepted unsafe documentation snapshot: ' + str((section, key, value)))
+for key in empty:
+    invalid = copy.deepcopy(empty)
+    del invalid[key]
+    try:
+        docs_snapshot(invalid, 'fixture', 0)
+    except RuntimeError:
+        pass
+    else:
+        raise RuntimeError('accepted incomplete documentation snapshot: ' + key)
 
 hits = []
 class Receiver(BaseHTTPRequestHandler):

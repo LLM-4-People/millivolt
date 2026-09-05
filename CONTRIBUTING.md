@@ -80,6 +80,56 @@ They disable SSE and test bootstrap/poll rendering, not uninterrupted live-feed
 delivery. They remove only their synthetic client records. Their assertions must
 remain enabled under Python `-O`; the guard suite verifies this.
 
+## Container development
+
+Normal [compose.yaml](compose.yaml) only runs a published image. For a local
+source build, use [compose.dev.yaml](compose.dev.yaml) from the checkout root
+with Docker Compose 2.24.4 or newer:
+
+```sh
+docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml up -d --build
+docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml logs --tail 50
+docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml down
+```
+
+The explicit development project keeps its containers and named volumes separate
+from a normal deployment, including when `COMPOSE_PROJECT_NAME` is set outside
+the checkout. The overlay replaces, rather than adds to, the published port.
+Its `MILLIVOLT_DEV_PORT` and `MILLIVOLT_DEV_IMAGE` inputs are defined only there;
+it inherits runtime security and persistence from the base file. Choose an unused
+development port if `scripts/dev.sh` is already running.
+
+Rerun the same `up --build` command after source changes. The resulting runtime
+image has no compiler or source tree, so dashboard rebuild is unavailable.
+`down` preserves its named volumes unless you explicitly request deletion.
+This source-image workflow does not replace `scripts/dev.sh`: the host browser
+and stress fixtures require that script's private process/database identity.
+
+## Documentation screenshots
+
+Publish real application captures using the existing explorer fixture, never a
+running operator's history. From a checkout with the browser dependencies installed:
+
+```sh
+(
+  set -e
+  export DEV_PORT=18081 DEV_HOST=127.0.0.1
+  export DEV_DB=/tmp/millivolt/millivolt-dev-docs.db
+  export DEV_CONFIG=proxy.example.yaml DEV_COPY_DB=0
+  trap 'scripts/dev.sh stop' EXIT
+  scripts/dev.sh up
+  python3 -B -O scripts/explorer_check.py \
+    --target "http://${DEV_HOST}:${DEV_PORT}" --docs-images docs/images
+)
+```
+
+Choose an unused permitted dev port. The command creates six synthetic local
+requests and captures `dashboard.png` and `explorer.png` after the fixture checks.
+It rejects copied/private history using global totals, visible rows, pending work
+and storage-drop checks before publishing images. Fixture records are cleaned up;
+the exit trap stops its private process. Review both images before committing.
+These are illustrative UI captures, not performance or provider-compatibility claims.
+
 ## Performance evidence
 
 With the private dev instance already running:
@@ -96,7 +146,10 @@ Read `go run ./cmd/stress -h` for workload/safety controls.
 Report workload, duration, concurrency, configuration, contention and whether
 storage/observers were active. Separate request throughput from durable
 throughput. Closed-loop bursts, microbenchmarks and local upstreams do not
-establish sustained production capacity; see the [dated reports](docs/README.md#historical-evidence).
+establish sustained production capacity. The current storage contract and
+capacity caveats live in [operations](docs/operations.md#storage-and-accounting).
+Use the existing `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`
+for isolated writer/contention comparisons; neither replaces a real HTTP run.
 
 ## Versioning and publication
 

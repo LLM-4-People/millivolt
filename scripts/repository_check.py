@@ -26,6 +26,10 @@ PUBLIC_PATHS = (
     "README.md", "AGENTS.md", "CONTRIBUTING.md", "SECURITY.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "internal/web/static/vendor/uplot.LICENSE",
     "docs/architecture.md", "scripts/check.sh", "scripts/repository_check.py",
+    "Dockerfile", ".dockerignore", "compose.yaml", "compose.dev.yaml", "VERSION",
+    "version.go", "cmd/release/main.go", "scripts/containercheck/main.go",
+    "scripts/licenses/main.go", "deploy/nginx.conf", "docs/reverse-proxy.md",
+    "docs/images/dashboard.png", "docs/images/explorer.png",
     ".github/workflows/check.yml",
     ".github/dependabot.yml", ".github/pull_request_template.md", ".env.example",
 )

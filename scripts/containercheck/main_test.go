@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -150,19 +151,54 @@ fi
 }
 
 func TestComposeIsolationContract(t *testing.T) {
-	const good = `{"services":{"millivolt":{"read_only":true,"ports":[{"host_ip":"127.0.0.1"}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}}}`
-	if err := validateCompose([]byte(good)); err != nil {
+	const normal = `{"name":"millivolt","services":{"millivolt":{"image":"released","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt_data"},"config":{"name":"millivolt_config"}}}`
+	dev := strings.NewReplacer(`"name":"millivolt"`, `"name":"millivolt-dev"`,
+		`"image":"released"`, `"image":"built","build":{"context":"/fixture"},"pull_policy":"build"`,
+		`"published":"8080"`, `"published":"8081"`, `millivolt_data`, `millivolt-dev_data`, `millivolt_config`, `millivolt-dev_config`).Replace(normal)
+	if err := validateCompose([]byte(normal), []byte(dev)); err != nil {
 		t.Fatal(err)
 	}
 	for _, bad := range []string{
-		strings.Replace(good, `"read_only":true`, `"read_only":false`, 1),
-		strings.Replace(good, "127.0.0.1", "0.0.0.0", 1),
-		strings.Replace(good, `"type":"volume"`, `"type":"bind"`, 1),
-		strings.Replace(good, `"target":"/config"`, `"target":"/data"`, 1),
+		strings.Replace(normal, `"read_only":true`, `"read_only":false`, 1),
+		strings.Replace(normal, "127.0.0.1", "0.0.0.0", 1),
+		strings.Replace(normal, `"type":"volume"`, `"type":"bind"`, 1),
+		strings.Replace(normal, `"target":"/config"`, `"target":"/data"`, 1),
+		strings.Replace(normal, `"image":"released"`, `"image":"released","build":{"context":"."}`, 1),
 		`{"services":{}}`, `null`, `invalid`,
 	} {
-		if err := validateCompose([]byte(bad)); err == nil {
+		if err := validateCompose([]byte(bad), []byte(dev)); err == nil {
 			t.Errorf("accepted unsafe Compose model %s", bad)
 		}
+	}
+	for _, bad := range []string{
+		strings.Replace(dev, `"build":{"context":"/fixture"},`, "", 1),
+		strings.Replace(dev, `"pull_policy":"build"`, `"pull_policy":"always"`, 1),
+		strings.Replace(dev, `"published":"8081"`, `"published":"8080"`, 1),
+		strings.Replace(dev, `"name":"millivolt-dev"`, `"name":"millivolt"`, 1),
+		strings.Replace(dev, `millivolt-dev_data`, `millivolt_data`, 1),
+		strings.Replace(dev, `"ports":[`, `"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080},`, 1),
+	} {
+		if err := validateCompose([]byte(normal), []byte(bad)); err == nil {
+			t.Errorf("accepted unsafe development Compose model %s", bad)
+		}
+	}
+}
+
+func TestInstalledComposeFiles(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("Docker CLI is optional for core checks; container mode requires it")
+	}
+	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
+		t.Skip("Compose plugin is optional for core checks; container mode requires it")
+	}
+	t.Chdir(filepath.Join("..", ".."))
+	t.Setenv("COMPOSE_PROJECT_NAME", "must-not-use")
+	t.Setenv("COMPOSE_FILE", "/must-not-read.yaml")
+	t.Setenv("MILLIVOLT_IMAGE", "must-not-use")
+	t.Setenv("MILLIVOLT_DEV_PORT", "8080")
+	// `config` must be daemon-free, so even an unavailable Unix socket works.
+	d := dockerCLI{endpoint: "unix:///millivolt-compose-config-test.sock", env: os.Environ()}
+	if err := d.checkCompose(t.Context()); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,0 +1,12 @@
+# Explicit source-build override. Requires Compose 2.24.4 or newer for !override.
+# Apply after compose.yaml; never merge the deployment's published port.
+name: millivolt-dev
+
+services:
+  millivolt:
+    image: ${MILLIVOLT_DEV_IMAGE:-millivolt:dev}
+    build:
+      context: .
+    pull_policy: build
+    ports: !override
+      - "127.0.0.1:${MILLIVOLT_DEV_PORT:-8081}:8080"
