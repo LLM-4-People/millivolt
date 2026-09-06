@@ -1877,7 +1877,8 @@ func isAlphaNum(c byte) bool {
 
 // HandleQuery serves a JSON array of rows for a SELECT query passed as
 // ?q=... (URL-decoded). Enforces SELECT-only, single-statement, and a bounded
-// execution time. Same-origin dashboard endpoint; no CORS header.
+// execution time. A nil store returns 503, never inference fallback.
+// Same-origin dashboard endpoint; no CORS header.
 func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fail := func(status int, message string) {
@@ -1887,6 +1888,10 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		fail(http.StatusMethodNotAllowed, "GET only")
+		return
+	}
+	if s == nil {
+		fail(http.StatusServiceUnavailable, "durable storage is disabled")
 		return
 	}
 	q := r.URL.Query().Get("q")

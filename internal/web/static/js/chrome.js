@@ -91,18 +91,24 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   if (lastData) scheduleRenderLive();
 }
 
-function closeHeaderMenus(except) {
+const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-clear': 'clear-menu', 'btn-restart': 'restart-menu' };
+function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
-  ['pause-menu', 'debug-menu', 'limits-menu', 'logs-menu', 'clear-menu', 'restart-menu'].forEach(id => {
+  let closed = false;
+  for (const [button, id] of Object.entries(HEADER_MENUS)) {
     const el = $(id);
-    if (el && id !== except) el.hidden = true;
-  });
+    if (el && !el.hidden && id !== except) {
+      el.hidden = true;
+      closed = true;
+      if (restoreFocus) $(button)?.focus();
+    }
+  }
   syncHdrMenuExpanded();
+  return closed;
 }
 
 function syncHdrMenuExpanded() {
-  const map = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-clear': 'clear-menu', 'btn-restart': 'restart-menu' };
-  for (const [bid, mid] of Object.entries(map)) {
+  for (const [bid, mid] of Object.entries(HEADER_MENUS)) {
     const b = $(bid), m = $(mid);
     if (b && m) b.setAttribute('aria-expanded', m.hidden ? 'false' : 'true');
   }

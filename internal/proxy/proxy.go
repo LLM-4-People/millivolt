@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -338,7 +339,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	body, rec, err := readRequest(r, s.cfg().MaxRequestBytes, s.cfg().CaptureBodyPreview)
 	if err != nil {
-		http.Error(w, errJSON("invalid_request_error", err.Error()), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		var overflow *http.MaxBytesError
+		if errors.As(err, &overflow) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		http.Error(w, errJSON("invalid_request_error", err.Error()), status)
 		return
 	}
 	stream, model := rec.Stream, rec.Model

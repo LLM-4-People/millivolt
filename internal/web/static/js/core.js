@@ -112,6 +112,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (settingsIsOpen()) { closeSettings(); return; }
     if (closeDimMenu()) return;
+    if (closeHeaderMenus(undefined, true)) { e.preventDefault(); return; }
     if (drawerId) closeDrawer();
     return;
   }

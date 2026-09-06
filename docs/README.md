@@ -4,6 +4,8 @@
 | --- | --- |
 | Start a local instance | [README](../README.md#quickstart) |
 | Explore the dashboard visually | [Dashboard guide](dashboard.md) |
+| See the complete feature overview | [What you get](../README.md#what-you-get) |
+| Understand CPU, RAM, throughput and image size | [Performance and footprint](operations.md#performance-and-footprint) |
 | Run Docker Compose or manage persistent volumes | [Container operation](operations.md#containers) |
 | Add NGINX or another protected ingress | [Reverse proxy](reverse-proxy.md) |
 | Choose an image or understand version identity | [Versions and images](operations.md#versions-and-images) |

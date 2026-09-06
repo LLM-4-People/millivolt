@@ -1,8 +1,8 @@
 # Contributing
 
-Start with the [architecture map](docs/architecture.md) and
-[mandatory working rules](AGENTS.md). Keep changes focused on existing shared
-owners, include regressions, and use neutral fixtures rather than real providers.
+Start with the [architecture map](docs/architecture.md). Keep changes focused on
+existing shared owners, include regressions, and use neutral fixtures rather
+than real providers. Setup, safety and verification rules live in this guide.
 
 Use the [issue tracker](https://github.com/LLM-4-People/millivolt/issues) for
 non-sensitive bugs and proposals, and
@@ -42,9 +42,14 @@ scripts/check.sh
 
 The shared script owns the core verification commands, including offline
 documentation-link, publication-ignore and typography regressions (Git is required).
-`npm test` runs the jsdom suite separately. Use targeted Go tests while iterating,
-then re-run checks
-after your last edit. Concurrency changes need race coverage; JavaScript unit
+`npm test` runs the jsdom suite separately. All tests and disposable harnesses
+live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
+temporary overlay adds its required virtual `_test.go` names; Python unit
+modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
+checks and `scripts/check.sh go vet` or `scripts/check.sh go mod tidy` to include
+test code and dependencies. Raw `go test ./...` does not discover the relocated
+tests and can report success without running them. Re-run checks after your
+last edit. Concurrency changes need race coverage; JavaScript unit
 checks do not establish real canvas rendering, layout or browser timing.
 
 For changes to configuration, update the Config/default/validation/schema owners
@@ -125,7 +130,7 @@ From a checkout with browser dependencies installed and that authorized source:
   export DEV_CONFIG=proxy.example.yaml DEV_COPY_DB=redacted
   trap 'scripts/dev.sh stop' EXIT
   scripts/dev.sh up
-  python3 -B -O scripts/explorer_check.py \
+  python3 -B -O -m tests.explorer_check \
     --target "http://${DEV_HOST}:${DEV_PORT}" --docs-history docs/images
 )
 ```
@@ -140,8 +145,11 @@ The capture mode revalidates every row and its provenance, plus exact public
 configuration bytes, before and after browser capture. It permits only read-only
 same-origin requests: no inference, POST, purge or Settings save. Images are
 staged before publication, and the exit trap stops the private process. Review
-all seven images before committing. SSE is deliberately disabled, so the images'
+every gallery image before committing. SSE is deliberately disabled, so the images'
 offline indicator describes a static capture session, not current service health.
+Captures keep the same category folders under `docs/images/`: `overview`,
+`charts`, `explorer`, `requests`, `menus` and `settings`. Update the existing
+capture owner and Markdown links together when adding a view.
 
 The independent `--docs-images` option remains a strict synthetic regression.
 Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,
@@ -161,6 +169,11 @@ The harness does not manage or reconfigure the proxy. It uses a local synthetic
 upstream and checks exact bytes, durable rows/tokens/cost and the same-process
 storage-drop delta. A drop is a failed stage even if every HTTP request succeeded.
 Read `go run ./cmd/stress -h` for workload/safety controls.
+The ramp retains its cumulative fixture history across measured stages, then
+removes only its unique client records after measurements finish. Cleanup has
+its own bounded wait even after cancellation and revalidates private process,
+config and database ownership before every deletion. A cleanup failure is
+reported, never silently treated as success.
 
 Report workload, duration, concurrency, configuration, contention and whether
 storage/observers were active. Separate request throughput from durable

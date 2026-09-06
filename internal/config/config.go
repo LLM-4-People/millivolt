@@ -35,12 +35,12 @@ type Config struct {
 	DBPath string `yaml:"db_path" json:"db_path"`
 
 	// HistorySize is the in-memory ring buffer depth and the number of records
-	// backfilled from storage on startup; the dashboard shows at most this many
-	// recent requests.
+	// backfilled from storage on startup. Durable history and log paging can
+	// extend beyond this recent-record window.
 	HistorySize int `yaml:"history_size" json:"history_size"`
 
-	// ShutdownTimeout bounds graceful HTTP shutdown (waiting for in-flight
-	// requests) before the process exits anyway.
+	// ShutdownTimeout bounds HTTP shutdown after active request contexts are
+	// canceled. Storage draining follows separately, outside this HTTP timer.
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" json:"shutdown_timeout"`
 
 	// RestartDrainTimeout bounds the drain phase of a UI-triggered restart
@@ -212,8 +212,8 @@ type Config struct {
 	// DashPollInterval is the KPI / pause / SSE-fallback poll cadence.
 	// Hot-reloads.
 	DashPollInterval time.Duration `yaml:"dash_poll_interval" json:"dash_poll_interval"`
-	// DashChartRefresh is how often the traffic chart re-fetches server
-	// aggregates to correct the live overlay. Hot-reloads.
+	// DashChartRefresh is how often the traffic chart re-fetches authoritative
+	// server buckets and period totals. Hot-reloads.
 	DashChartRefresh time.Duration `yaml:"dash_chart_refresh" json:"dash_chart_refresh"`
 	// DashExplorerStale is how old a cached explorer breakdown may be before
 	// the dashboard re-fetches it. Hot-reloads.
@@ -227,17 +227,18 @@ type Config struct {
 
 	// ProviderAliases merges provider labels: an old label recorded under a
 	// previous naming scheme is rewritten to its canonical label at capture
-	// time, in stored history (boot + reload), and therefore everywhere the
-	// label is read - one provider, one entity. Data-driven and
-	// provider-agnostic: the proxy never names providers in code.
+	// time and in existing stored history (boot + reload). Already-buffered
+	// records keep their prior label until age-out/restart; removing a mapping
+	// cannot recover rewritten spellings. This is separate from model display
+	// grouping and never infers provider aliases from hardcoded names.
 	ProviderAliases map[string]string `yaml:"provider_aliases" json:"provider_aliases"`
 
 	// Model canonicalization merges spelling variants of the same model in
 	// every grouped surface (explorer model dimension, scope filters, debug
 	// checklist) through a fully data-driven ordered rule list - see
 	// internal/config/modelcanon.go (the semantic owner). Dashboard display
-	// only - records, the log leaf, debug session matching, and purge/export
-	// filters keep the exact stored spelling.
+	// only - records, request details, and purge/export filters keep the stored
+	// spelling. Debug matching has separate native base-model normalization.
 	ModelRules []ModelRule `yaml:"model_rules" json:"model_rules"`
 }
 

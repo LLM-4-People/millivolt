@@ -27,7 +27,7 @@
 
 # ---- Server ----
 # Bind address, database, and ring depth restart to apply. shutdown_timeout applies at the
-# next SIGTERM.
+# next SIGINT/SIGTERM.
 # Host:port the HTTP server binds. Restart required.
 # Hot-reload: NO (restart required).
 #   type: string · default :8080
@@ -38,14 +38,15 @@ listen: ":8080"
 #   type: string · default proxy.db
 db_path: "proxy.db"
 
-# In-memory ring depth and startup backfill count. The dashboard request log holds at most
-# this many records. Restart required.
+# In-memory ring depth and startup backfill count. Durable history and paged request logs
+# can extend beyond this window. Restart required.
 # Hot-reload: NO (restart required).
 #   type: int · range 1..1000000 · default 10000
 history_size: 10000
 
-# How long to wait for in-flight requests on SIGTERM/SIGINT before exiting. Must be > 0.
-# Applies at the next SIGTERM (the listener is not restarted).
+# HTTP shutdown wait after active request contexts are canceled on SIGINT/SIGTERM. Storage
+# draining follows separately. Must be > 0; applies at the next shutdown without
+# restarting the listener.
 # Hot-reload: yes.
 #   type: duration · range > 0 · default 5s
 shutdown_timeout: 5s
@@ -299,7 +300,7 @@ dash_log_rows: 60
 #   type: duration · range > 0 · default 5s
 dash_poll_interval: 5s
 
-# How often the traffic chart re-fetches server aggregates to correct the live overlay.
+# How often the traffic chart re-fetches server-authoritative buckets and period totals.
 # Must be > 0.
 # Hot-reload: yes.
 #   type: duration · range > 0 · default 15s
@@ -321,8 +322,9 @@ dash_explorer_stale: 15s
 # strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing
 # architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies
 # `.` with `-` between digits. An explicitly empty list groups by the exact stored
-# spelling. The stored spelling stays raw: debug session matching and purge/export match
-# it exactly, and the request detail always shows the original. Hot-reloads.
+# spelling. Stored values remain unchanged; purge/export match them exactly and request
+# details show the original. Debug matching uses separate native base-model normalization,
+# not these display rules. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {mode: exact|pattern|lower, from, to} rewrite rules · default: the shipped pipeline (lower · strip vendor/ · strip :tag · strip architecture/quant suffix · unify . and - between digits); restorable in Settings with ↺ default pipeline
 model_rules:
@@ -371,9 +373,10 @@ providers:
       "x-grok-client-version": "1.0.13"
       "x-grok-req-id": "{{uuid4}}"
 
-# Merge an old provider label into its canonical one (old → canonical). Rewrites stored
-# history at boot and on reload; new requests carry the canonical label immediately. One
-# provider, one entity.
+# Map an old provider label to a canonical label. Rewrites existing stored history at boot
+# and on reload; new requests use the canonical label. Existing in-memory records keep
+# their prior label until they age out or the process restarts. Removing a mapping does
+# not restore rewritten history. Chains and self-maps are rejected.
 # Hot-reload: yes.
 #   type: map of old provider label → canonical label
 provider_aliases: {}

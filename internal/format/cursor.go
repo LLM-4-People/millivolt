@@ -13,8 +13,8 @@ package format
 // The request body is a single enveloped AgentClientMessage; the response is a
 // Connect stream of enveloped AgentServerMessage frames terminated by a JSON
 // EndStreamResponse frame. Field numbers below come from the decoded agent.v1
-// descriptor (see AGENTS.md / the design notes); they are the stable wire
-// contract, not user-tunable, so they live as named constants here.
+// descriptor used by this adapter. These protocol identifiers are not
+// user-tunable, so they live as named constants here.
 //
 // Scope: OpenAI chat + tool calling over agent.v1 Run. History is sha256
 // blobs on the KV channel; client tools are declared as McpTools and

@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 die() { echo "check: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found: $1"; }
-usage="usage: scripts/check.sh [core | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
+usage="usage: scripts/check.sh [core | go COMMAND [ARGS...] | browser --target URL | container --image SHA256 | release -revision SHA [-tag vVERSION]]"
 mode="${1:-core}"
 case "$mode" in
   core)
@@ -16,11 +16,12 @@ case "$mode" in
     node --version
     npm --version
     python3 --version
-    python3 -B -O scripts/repository_check_test.py
-    python3 -B scripts/repository_check.py
-    python3 -B -O scripts/check_release_test.py
-    python3 -B -O scripts/backup_db_test.py
-    unformatted="$(gofmt -l version.go version_test.go cmd internal scripts/containercheck scripts/licenses)"
+    python3 -B -O -m tests.python.repository
+    python3 -B -m tests.repository_check
+    python3 -B -O -m tests.python.release
+    python3 -B -O -m tests.python.backup_db
+    python3 -B -O -m tests.python.go
+    unformatted="$(gofmt -l version.go cmd internal scripts/licenses tests)"
     [ -z "$unformatted" ] || die "gofmt required: $unformatted"
     for script in scripts/*.sh; do bash -n "$script"; done
     go mod verify
@@ -29,18 +30,25 @@ case "$mode" in
     check_dir="$(mktemp -d /tmp/millivolt-check.XXXXXX)"
     trap 'rm -rf -- "$check_dir"' EXIT
     go build -mod=readonly -o "$check_dir/" ./...
-    go vet -mod=readonly ./...
-    go test -mod=readonly ./... -count=1
-    go test -mod=readonly -race ./... -count=1
+    python3 -B -m tests.go vet -mod=readonly ./...
+    python3 -B -m tests.go test -mod=readonly ./... -count=1
+    python3 -B -m tests.go test -mod=readonly -race ./... -count=1
     npm test
+    ;;
+  go)
+    (( $# >= 2 )) || die "$usage"
+    need python3
+    need go
+    need git
+    python3 -B -m tests.go "${@:2}"
     ;;
   browser)
     (( $# == 3 )) && [ "$2" = --target ] || die "$usage"
     need python3
     # -B leaves no bytecode in the source tree; -O proves guards stay enabled.
-    python3 -B -O scripts/browser_check_test.py
-    python3 -B -O scripts/browser_check.py --target "$3"
-    python3 -B -O scripts/explorer_check.py --target "$3"
+    python3 -B -O -m tests.python.browser
+    python3 -B -O -m tests.browser_check --target "$3"
+    python3 -B -O -m tests.explorer_check --target "$3"
     ;;
   container)
     (( $# == 3 )) && [ "$2" = --image ] || die "$usage"
@@ -48,7 +56,7 @@ case "$mode" in
     need docker
     check_dir="$(mktemp -d /tmp/millivolt-container.XXXXXX)"
     trap 'rm -rf -- "$check_dir"' EXIT
-    CGO_ENABLED=0 go build -mod=readonly -trimpath -o "$check_dir/containercheck" ./scripts/containercheck
+    CGO_ENABLED=0 go build -mod=readonly -trimpath -o "$check_dir/containercheck" ./tests/containercheck
     "$check_dir/containercheck" -image "$3"
     ;;
   release)

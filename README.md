@@ -5,27 +5,19 @@ Clients choose the upstream URL and credentials on each request; no endpoint or
 API-key registry is required. Optional provider mappings enrich usage, cost,
 headers, and model discovery.
 
+[Quickstart](#quickstart) · [What you get](#what-you-get) ·
+[Visual guide](docs/dashboard.md) · [Documentation](docs/README.md)
+
 ## Dashboard overview
 
 Global totals, scoped exploration, timelines and the request log share one view.
 See the [visual dashboard guide](docs/dashboard.md) for focused screenshots of
 tokens, speed/latency, cost, providers, models and Settings.
 
-![Dashboard showing request charts, usage and a request log](docs/images/dashboard.png)
+![Dashboard showing request charts, usage and a request log](docs/images/overview/dashboard.png)
 
 This static capture retains recorded metrics from an authorized history snapshot
 with replaced identifiers. The guide explains its capture limitations.
-
-## What you get
-
-- Live streaming rows, retries and in-flight state, with traffic, token,
-  speed/latency and cost charts from short windows through All time.
-- History exploration by provider, model, client, conversation, tool, time,
-  status, error and key. Explicit parent links connect main/sub-conversations.
-- Provider-reported usage and cost, with cents below $1 and separate error/429
-  counts. Zero health badges stay hidden; missing cost is not a zero bill.
-- Scoped Pause, provider-wide Limits, opt-in Debug, filtered export/deletion
-  and revision-checked Settings. Source builds also support rebuild/restart.
 
 ## Before you run
 
@@ -64,8 +56,8 @@ history and private Settings configuration when the container is replaced.
 Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
 including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles).
 No separate config download is needed; existing saved settings are not overwritten.
-The runtime is non-root
-with a read-only root filesystem. Dashboard rebuild is unavailable in an image.
+The runtime is non-root with a read-only root filesystem. Dashboard rebuild is
+unavailable in an image.
 
 See [container operation](docs/operations.md#containers) for image selection,
 configuration, updates, backups and shutdown, or the
@@ -123,6 +115,108 @@ Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive
 comments and failure signaling, optional format translation, and constructed
 model lists. This is not an unconditional byte-for-byte or exactly-once contract.
+
+## What you get
+
+### Route requests without a provider registry
+
+- Choose the upstream base URL, credentials, authentication header/prefix,
+  path and query on each request. Optional header overrides support custom
+  integrations without adding a provider-specific relay branch.
+- Constrain accepted upstream URL prefixes through configuration. This helps
+  control destinations but does not replace network access or egress controls.
+- Forward ordinary HTTP bodies, including streaming responses, with bounded
+  request inspection, connection pooling and configurable SSE keepalives.
+- Coordinate provider-plus-key concurrency and queues; retry eligible transport,
+  transient 429 and server failures with provider hints and configurable backoff.
+  Provider-wide concurrency, request-rate and token-rate limits are separate.
+- Discover models through the standard model-list routes, with recognized-list
+  normalization, supported pagination and optional metadata enrichment.
+- Opt into Anthropic Messages translation or the Cursor Connect text/tool
+  bridge. Supported expired-token refresh can return fresh credentials or
+  refresh in place; clients remain responsible for their own authorization.
+
+See [routing, timing and discovery](docs/protocol.md) and
+[adapter support and limitations](docs/adapters.md). Compatibility profiles are
+editable configuration, not a guarantee of provider access or protocol coverage.
+
+### Explore live traffic and retained history
+
+- View global request/token/cost totals and timing averages alongside event-driven
+  in-flight rows. Initial HTML embeds server-computed state; live SSE and polling
+  maintain the same observation model across reconnects and successful restarts.
+- Drill into Providers, Models, Client, Conversations, Tools, Time, Status,
+  Errors and Keys. Entity links and browser navigation preserve the selected
+  scope; chart and request-log filters work together.
+- Use automatic conversation grouping for stateless clients, or explicit
+  session/parent headers for main/sub-conversation relationships. Missing or
+  conflicting ancestry remains unresolved instead of being guessed.
+- Compare all five timelines: Traffic, Tokens, Speed + latency, Errors and
+  Cost. Choose windows from minutes through All time, toggle individual series,
+  and select one percentile for both speed and first-token latency.
+- Inspect provider-reported input/output, cache and reasoning usage. Costs below
+  $1 display in cents everywhere; data/API values remain USD. Error and HTTP 429
+  counts are distinct, zero badges disappear, and a 429 alone is not an error.
+- Browse the newest request rows and scroll into durable history. Expand retry
+  attempts or open a request drawer for timing, usage, cost, request parameters,
+  conversation sizes, tools, queue waits and available outcome metadata.
+
+The [visual guide](docs/dashboard.md) shows the controls.
+[Data interpretation](docs/operations.md#dashboard-data-and-request-inspection)
+explains timing, scope and missing measurements. This is observability, not
+independent billing or a complete compliance audit log.
+
+### Control traffic from the dashboard
+
+| Control | What it does |
+| --- | --- |
+| Pause | Hold matching new sends/retries by client/provider, all requests or previously unseen clients; choose duration and queue cap, then resume one hold or all holds. |
+| Limits | Set provider-wide concurrency, requests-per-window and tokens-per-window policies; inspect their source and remaining budgets. |
+| Debug | Start a scoped capture session with timed or manual stop. Captured bodies are opt-in, bounded, retained separately and still sensitive. |
+| Logs | Download all or exactly filtered finalized records as JSON. |
+| Clear | Preview and confirm a filtered deletion, or deliberately delete all retained records. Newer completions are protected by the deletion fence. |
+| Restart | On supported source deployments, rebuild and hand off after draining active work. Busy controls and progress reflect the actual restart state. |
+| Settings | Search configuration, edit typed fields/maps/rules, review restart markers and apply revision-checked changes. |
+
+See the [operator workflows and API routes](docs/operations.md#operator-and-data-routes)
+before changing state. A protected listener is essential: these are operator
+actions, not per-user permissions.
+
+### Customize and deploy
+
+- One generated configuration reference covers request limits, upstream pools,
+  queue/retry policy, conversation grouping, adapters, SQLite, dashboard cadence,
+  model rules, provider field mappings, aliases and templated upstream headers.
+  Settings and the CLI use the same defaults, validation and reload metadata.
+- Use SQLite for retained history and consistent online backups, or run with
+  the in-memory ring only. Storage drops are visible; asynchronous accounting
+  remains best-effort under overload or write failure.
+- Integrate with JSON snapshots, scoped aggregates, export, restricted SQL and
+  Prometheus. Their history scopes differ and are documented explicitly.
+- Run the lightweight, non-root image with ordinary Docker Compose, without a
+  source build or frontend runtime. Separate source/development workflows,
+  persistent volumes and the protected NGINX example cover other deployments.
+- Track source identity through the version CLI and published image tags/digests.
+  GitHub checks source, browser and native-container behavior before publishing
+  multi-platform images. The application is MIT licensed.
+
+[Operations](docs/operations.md) owns configuration, persistence and upgrades;
+[reverse proxy](docs/reverse-proxy.md) owns remote access;
+[Contributing](CONTRIBUTING.md) owns isolated development and verification.
+
+### Performance and footprint
+
+The runtime is one Go service with embedded dashboard assets, a stripped binary
+and a minimal container base; it needs no Node, Python, compiler or shell in the
+image. Request inspection is bounded, connections are reused and metrics enqueue
+does not wait for SQLite. Shared history aggregation and embedded bootstrap state
+reduce repeated dashboard work.
+
+Small images do not imply fixed RAM or negligible CPU. Active streams, configured
+buffers, stored-history projections and identity cardinality contribute separate
+costs. See [performance and footprint](docs/operations.md#performance-and-footprint)
+for measurement scope and resource tradeoffs; no universal latency or capacity
+ceiling is promised.
 
 ## Configuration and documentation
 

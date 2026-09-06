@@ -24,6 +24,8 @@
 /exports/
 
 # Credentials and private local overrides; examples remain publishable
+AGENTS.md
+agents.md
 .env
 .env.*
 !.env.example

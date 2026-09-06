@@ -20,6 +20,8 @@
 # These final rules also exclude private files nested inside allowed source.
 # Keep the unanchored exclusions aligned with .gitignore.
 **/.git
+**/AGENTS.md
+**/agents.md
 **/*.test
 **/*.out
 **/*.prof

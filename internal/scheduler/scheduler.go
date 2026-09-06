@@ -428,8 +428,7 @@ func (s *Scheduler) EndSend(key string, keepSerial bool) {
 
 // backoffMultiplier is the exponential factor for both attempt-level
 // (BackoffFor, no hint) and request-level (FailSend) backoff. "Double"
-// is the algorithm - not a config knob. Jitter stays a named constant
-// (AGENTS.md: not a tunable).
+// is the algorithm, with a fixed jitter band rather than an operator setting.
 const (
 	backoffMultiplier   = 2
 	backoffJitterSpread = 0.5  // width of the jitter band

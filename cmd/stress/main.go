@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -16,11 +18,13 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -48,7 +52,7 @@ func main() {
 	flag.DurationVar(&o.duration, "duration", 5*time.Second, "time starting requests at each level; active requests then drain")
 	flag.DurationVar(&o.hold, "stream-duration", time.Second, "upstream stream duration; 0 measures fast responses")
 	flag.IntVar(&o.chunks, "chunks", 10, "content frames per upstream response")
-	flag.DurationVar(&o.timeout, "timeout", 10*time.Second, "per-request and accounting-drain timeout")
+	flag.DurationVar(&o.timeout, "timeout", 10*time.Second, "per-request, accounting-drain and final fixture-cleanup timeout")
 	flag.DurationVar(&o.sample, "sample", 100*time.Millisecond, "proxy CPU/RSS/FD sampling cadence")
 	flag.Float64Var(&o.maxRSS, "max-rss-mib", 2048, "stop the ramp if sampled proxy RSS exceeds this safety budget")
 	flag.Parse()
@@ -159,9 +163,58 @@ func (c control) get(ctx context.Context, path string, dst any) error {
 }
 
 type settings struct {
-	Path      string            `json:"path"`
-	Overrides map[string]string `json:"overrides"`
-	Effective map[string]any    `json:"effective"`
+	Path            string            `json:"path"`
+	RestartRequired []string          `json:"restart_required"`
+	Overrides       map[string]string `json:"overrides"`
+	Effective       map[string]any    `json:"effective"`
+}
+
+// Match dev.sh's reserved disposable namespace, including the explicit database
+// override. A saved setting can differ from the running database during restart.
+func validateDevSettings(cfg settings, u *url.URL) error {
+	expected := "/tmp/millivolt/millivolt-dev-" + u.Port()
+	if cfg.Path != expected+".yaml" || cfg.Overrides["listen"] != u.Host {
+		return errors.New("target is not a scripts/dev.sh private-config instance")
+	}
+	if slices.Contains(cfg.RestartRequired, "db_path") {
+		return errors.New("target has an ambiguous pending database restart")
+	}
+	override := cfg.Overrides["db_path"]
+	effective, ok := cfg.Effective["db_path"].(string)
+	if !ok || override == "" {
+		return errors.New("target requires an explicit dev database override")
+	}
+	if override == "none" {
+		if effective != "" {
+			return errors.New("disabled database override does not match effective state")
+		}
+		return nil
+	}
+	if effective != override || filepath.Clean(effective) != effective ||
+		filepath.Dir(effective) != filepath.Dir(expected) ||
+		!strings.HasPrefix(filepath.Base(effective), "millivolt-dev") ||
+		!strings.HasSuffix(effective, ".db") {
+		return errors.New("target database is outside the private dev namespace")
+	}
+	return nil
+}
+
+// Files are checked without reading their contents. Reject symlink aliases and
+// hard links: a disposable-looking path must not name another instance's file.
+func privateFile(path string) error {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return errors.New("private dev file is missing or has a symlink alias")
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return errors.New("private dev file is not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Nlink != 1 {
+		return errors.New("private dev file has ambiguous link ownership")
+	}
+	return nil
 }
 
 func verifyDev(ctx context.Context, c control, u *url.URL) (settings, int, error) {
@@ -170,8 +223,16 @@ func verifyDev(ctx context.Context, c control, u *url.URL) (settings, int, error
 		return cfg, 0, err
 	}
 	expected := "/tmp/millivolt/millivolt-dev-" + u.Port()
-	if cfg.Path != expected+".yaml" || cfg.Overrides["listen"] != u.Host {
-		return cfg, 0, errors.New("target is not a scripts/dev.sh private-config instance")
+	if err := validateDevSettings(cfg, u); err != nil {
+		return cfg, 0, err
+	}
+	if err := privateFile(cfg.Path); err != nil {
+		return cfg, 0, err
+	}
+	if cfg.Overrides["db_path"] != "none" {
+		if err := privateFile(cfg.Overrides["db_path"]); err != nil {
+			return cfg, 0, err
+		}
 	}
 	var status struct {
 		PID int `json:"pid"`
@@ -184,6 +245,84 @@ func verifyDev(ctx context.Context, c control, u *url.URL) (settings, int, error
 		return cfg, 0, errors.New("dev PID identity could not be verified")
 	}
 	return cfg, status.PID, nil
+}
+
+// clearClients runs only after generators have drained. Verify ownership at
+// each mutation after waiting for known pending records at the deletion fence;
+// otherwise a canceled request could finalize after its fixture was removed.
+func (c control) clearClients(ctx context.Context, tags []string, sample time.Duration, verify func(context.Context) error) error {
+	for _, tag := range tags {
+		if tag == "" {
+			return errors.New("empty fixture client cannot be cleaned up")
+		}
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+	for {
+		var snapshot struct {
+			FeedID  string          `json:"feed_id"`
+			Pending json.RawMessage `json:"in_flight_records"`
+		}
+		if err := c.get(ctx, "/metrics/bootstrap", &snapshot); err != nil {
+			return err
+		}
+		if snapshot.FeedID == "" || len(snapshot.Pending) == 0 {
+			return errors.New("fixture cleanup requires a complete pending snapshot")
+		}
+		var pending []struct {
+			Client string `json:"client"`
+		}
+		if err := json.Unmarshal(snapshot.Pending, &pending); err != nil {
+			return errors.New("invalid fixture pending snapshot")
+		}
+		busy := false
+		for _, row := range pending {
+			busy = busy || slices.Contains(tags, row.Client)
+		}
+		if !busy {
+			break
+		}
+		select {
+		case <-time.After(sample):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	for _, tag := range tags {
+		if verify == nil {
+			return errors.New("fixture cleanup requires an ownership verifier")
+		}
+		if err := verify(ctx); err != nil {
+			return err
+		}
+		// The administrative filter's client field is an exact match. Encode a
+		// nonempty object, never an empty body (which means all history).
+		body, err := json.Marshal(struct {
+			Client string `json:"client"`
+		}{tag})
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/metrics/purge", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.client.Do(req)
+		if err != nil {
+			return err
+		}
+		var result struct {
+			OK bool `json:"ok"`
+		}
+		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || decodeErr != nil || !result.OK {
+			return fmt.Errorf("fixture cleanup failed for %s (HTTP %d)", tag, resp.StatusCode)
+		}
+	}
+	return nil
 }
 
 type processSample struct {
@@ -308,7 +447,7 @@ func percentileMs(v []int64, pct float64) float64 {
 	return metrics.Percentile(v, pct) / float64(time.Millisecond)
 }
 
-func stage(ctx context.Context, c control, clients []*http.Client, pid int, hz float64, o options, upstreams []string, f *fixture, concurrency int, durable bool) (result, error) {
+func stage(ctx context.Context, c control, clients []*http.Client, pid int, hz float64, o options, upstreams []string, f *fixture, concurrency int, durable bool, tag string) (result, error) {
 	res := result{Concurrency: concurrency}
 	startSample, err := readProcess(pid)
 	if err != nil {
@@ -325,7 +464,6 @@ func stage(ctx context.Context, c control, clients []*http.Client, pid int, hz f
 	res.GeneratorPeakRSSMiB, res.GeneratorPeakFDs = generatorStart.rssMiB, generatorStart.fds
 	f.peak.Store(0)
 	f.accepted.Store(0)
-	tag := fmt.Sprintf("stress-%d-%d", time.Now().UnixNano(), concurrency)
 	payload := `{"model":"load-fixture","stream":true,"messages":[{"role":"user","content":"synthetic local capacity test"}]}`
 	results := make(chan outcome, concurrency)
 	workCtx, stop := context.WithCancel(ctx)
@@ -483,7 +621,7 @@ loop:
 	return res, ctx.Err()
 }
 
-func run(ctx context.Context, o options) error {
+func run(ctx context.Context, o options) (err error) {
 	u, levels, err := validate(o)
 	if err != nil {
 		return err
@@ -494,6 +632,30 @@ func run(ctx context.Context, o options) error {
 	if err != nil {
 		return err
 	}
+	var tags []string
+	defer func() {
+		if len(tags) == 0 {
+			return
+		}
+		// Cleanup is outside all stage timing/drop measurements, so later ramp
+		// levels retain the existing cumulative-history baseline. Cancellation
+		// does not abandon fixtures, and the existing timeout bounds all cleanup.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), o.timeout)
+		defer cancel()
+		cleanupErr := c.clearClients(cleanupCtx, tags, o.sample, func(ctx context.Context) error {
+			current, currentPID, err := verifyDev(ctx, c, u)
+			if err != nil {
+				return err
+			}
+			if currentPID != pid || current.Overrides["db_path"] != cfg.Overrides["db_path"] {
+				return errors.New("dev identity changed; fixture cleanup refused")
+			}
+			return nil
+		})
+		if cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleanup incomplete for clients %v: %w", tags, cleanupErr))
+		}
+	}()
 	ticks, err := exec.CommandContext(ctx, "getconf", "CLK_TCK").Output()
 	if err != nil {
 		return err
@@ -538,7 +700,9 @@ func run(ctx context.Context, o options) error {
 				return err
 			}
 		}
-		r, err := stage(ctx, c, clients, pid, hz, o, upstreams, f, n, durable)
+		tag := "stress-" + rand.Text()
+		tags = append(tags, tag) // before the first attempt, including failures
+		r, err := stage(ctx, c, clients, pid, hz, o, upstreams, f, n, durable, tag)
 		if err == nil && durable {
 			var after storageState
 			err = c.get(ctx, "/metrics/bootstrap", &after)

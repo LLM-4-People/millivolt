@@ -676,7 +676,7 @@ func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, re
 		return nil, nil, err
 	}
 	if int64(len(body)) > maxBytes {
-		return nil, nil, fmt.Errorf("request body exceeds %d bytes", maxBytes)
+		return nil, nil, &http.MaxBytesError{Limit: maxBytes}
 	}
 	// Request timing excludes upload, but includes the unified metadata decode
 	// and any later format translation. This is the sole Start owner.

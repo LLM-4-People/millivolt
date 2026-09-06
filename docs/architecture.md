@@ -1,7 +1,7 @@
 # Architecture and ownership
 
 millivolt is one Go HTTP service with an embedded, no-build dashboard.
-[AGENTS.md](../AGENTS.md) contains mandatory change rules;
+[Contributing](../CONTRIBUTING.md) covers change and verification rules;
 [protocol](protocol.md) and [operations](operations.md) describe public behavior.
 
 ## Source map
@@ -67,7 +67,9 @@ a missing different row without rolling back the gauge. Full bootstrap closes
 the stream before capture; only the winning refresh reopens it. Stale same-feed
 full SSE snapshots recapture through that barrier by sequence/pending revision.
 
-See buffer snapshot/stream tests and `ui_check.js` lifecycle/bootstrap races.
+Tests live under [tests/](../tests/README.md), with Go package mirrors in
+`tests/_go/`. Use the overlay-aware `scripts/check.sh go test` entry point.
+See buffer snapshot/stream tests and `tests/ui_check.js` lifecycle/bootstrap races.
 Do not collapse these row, gauge, epoch and request-ownership gates into a
 whole-event drop rule.
 
@@ -129,9 +131,9 @@ and 429 may overlap. The shared first-membership gate keeps duplicate tool/error
 occurrences from duplicating these health counts without changing event/sample
 multiplicity. Tests cover raw/projected/durable/ring/pending parity.
 
-See `aggregate_projection*_test.go`, `aggregate_dimensions_test.go`,
-`aggregate_percentile*_test.go`, `aggregate_explorer_fold_test.go`,
-`aggregate_rate_limit_test.go` and `conversation_lineage_test.go`.
+See the files under `tests/_go/internal/web/`: `aggregate_projection.go`,
+`aggregate_dimensions.go`, `aggregate_percentiles.go`, `aggregate_explorer_fold.go`,
+`aggregate_rate_limit.go` and `conversation_lineage.go`.
 
 ## Canonical observer meaning and conversation lineage
 

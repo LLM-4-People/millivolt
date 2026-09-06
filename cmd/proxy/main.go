@@ -249,9 +249,6 @@ func main() {
 	mux.Handle("/metrics/agg/explorer", aggGet(agg.HandleAggExplorer))
 	mux.Handle("/metrics/agg/log", aggGet(agg.HandleLogPage))
 	mux.Handle("/metrics/bootstrap", aggGet(agg.HandleBootstrap))
-	if store != nil {
-		mux.Handle("/metrics/query", http.HandlerFunc(store.HandleQuery))
-	}
 	registerLogRoutes(mux, buf, store)
 
 	// Operator pause: in-flight requests finish, new ones queue until resume.

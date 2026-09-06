@@ -93,6 +93,9 @@ func (w *exportWriter) Write(p []byte) (int, error) {
 }
 
 func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storage.Store) {
+	// Reserve the read-only SQL endpoint even when storage is disabled, so
+	// requests cannot fall through to inference. HandleQuery owns both cases.
+	mux.HandleFunc("/metrics/query", store.HandleQuery)
 	mux.HandleFunc("/metrics/export", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodGet) {
 			return

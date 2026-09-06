@@ -4,6 +4,21 @@ millivolt accepts OpenAI-compatible requests and routes them using per-request
 headers. It does not require an endpoint/API-key registry. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access.
 
+## Endpoint behavior
+
+The dashboard, embedded assets, `/admin/*` actions and registered `/metrics/*`
+routes belong to millivolt. Their methods and meanings are listed in
+[operations](operations.md#operator-and-data-routes). `GET /v1/models` and
+`GET /models` use the discovery path described below. Other paths reach the
+relay catch-all and require valid routing headers; the client chooses the
+upstream endpoint and model.
+
+Forwarding a body is not the same as understanding every field in it. The normal
+relay does not rewrite an unfamiliar JSON shape just to observe it, but usage,
+first-token timing and quality classification depend on recognized formats.
+Native translation is explicit and narrower than arbitrary HTTP forwarding.
+There is no automatic provider failover or model-selection registry.
+
 ## Routing headers
 
 Only `X-Proxy-Base-URL` is required by the proxy. The upstream may require a key.
@@ -84,7 +99,8 @@ An unauthenticated local upstream needs no dummy API key.
 ## Relay, retries and model discovery
 
 Ordinary requests preserve original body bytes, but the request is buffered up
-to `max_request_bytes` before metadata extraction and sending. Invalid JSON is
+to `max_request_bytes` before metadata extraction and sending. Larger requests
+are rejected with HTTP 413 without an upstream send. Invalid JSON is
 passed through on the nontranslated path. The proxy can retry transient
 transport failures, 429 and 5xx before returning the final response. Durable
 quota/billing 429s are not treated as transient. Provider retry hints and
@@ -95,6 +111,29 @@ SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTT
 in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
 neither transparency nor exactly-once upstream execution is unconditional.
+
+### Scheduling and timing
+
+The provider-plus-key group controls simultaneous upstream sends and its waiting
+queue. The separate provider-wide Limits policy combines all keys and clients.
+Queue capacity and wait limits can reject work locally; the configured
+`queue_retry_after` supplies the caller's retry hint. Operator-hold time is
+excluded from the ordinary queue-wait limit. A hold's own queue cap still applies.
+
+`upstream_timeout` limits waiting for response headers, not the streaming body.
+`X-Proxy-Timeout-Ms` instead gives each upstream send a fresh deadline covering
+headers and body. Neither is a total end-to-end deadline across queueing, holds,
+retries and backoff; client cancellation is the way to stop the whole request.
+Provider Retry-After/reset hints are not clamped by the ordinary adaptive
+backoff cap. A long provider hint can therefore outlast that cap.
+
+A finalized request retains its absorbed attempts and final outcome in one
+record. Recovered upstream failures can count as errors even when the final
+status succeeds. A final or retried 429 is a separate affected-request signal.
+See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
+for duration, first-token latency and throughput.
+
+### Model discovery
 
 `GET /v1/models` and `GET /models` are constructed discovery services, not
 ordinary inference records. The proxy normalizes recognized model lists,
@@ -109,6 +148,23 @@ also changes transport headers and may decompress an upstream gzip response;
 do not compare transport framing as a byte-identical contract.
 
 ## Main and sub-conversations
+
+### Automatic grouping
+
+An explicit `X-Proxy-Session` takes precedence. Without one, the tracker partitions
+requests by client label and credential hash, then compares total user/assistant/
+tool turn counts against its open conversations. A nonexpired conversation with
+the greatest previous count no larger than the new count is the nearest match.
+A reset or idle gap can start another conversation, and the configured open-session
+cap evicts the oldest tracked conversation in that partition.
+
+This is a heuristic for clients that send conversation history, not a content
+comparison or a universal agent identity. Parallel tasks with similar turn counts
+can be ambiguous. Tracker state is process-local, so use explicit session IDs
+when predictable continuity matters and keep the client/key namespace stable.
+Automatic grouping never establishes a parent/child relationship.
+
+### Declaring a parent
 
 A parent sends `X-Proxy-Session: main-task`. Its child sends its own
 `X-Proxy-Session: worker-1` plus `X-Proxy-Parent-Session: main-task`, using the

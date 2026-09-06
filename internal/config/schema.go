@@ -53,7 +53,7 @@ func num(v float64) *float64 { return &v }
 // Categories is the Settings menu's section list, in display order.
 func Categories() []Category {
 	return []Category{
-		{ID: "server", Label: "Server", Help: "Bind address, database, and ring depth restart to apply. shutdown_timeout applies at the next SIGTERM."},
+		{ID: "server", Label: "Server", Help: "Bind address, database, and ring depth restart to apply. shutdown_timeout applies at the next SIGINT/SIGTERM."},
 		{ID: "request", Label: "Request", Help: "Inbound body cap, SSRF allowlist, optional body-preview, and debug-capture retention."},
 		{ID: "upstream", Label: "Upstream", Help: "Connection pool, header timeout, and stream keepalives."},
 		{ID: "queue", Label: "Queue & retry", Help: "Per-key concurrency, transparent 429/5xx retry, and quality re-asks."},
@@ -78,10 +78,10 @@ func Schema() []Field {
 			Help: "SQLite metrics store. Empty disables durability (ring only). Restart required.",
 			Kind: KindString, HotReload: false},
 		{Key: "history_size", Category: "server", Label: "History size",
-			Help: "In-memory ring depth and startup backfill count. The dashboard request log holds at most this many records. Restart required.",
+			Help: "In-memory ring depth and startup backfill count. Durable history and paged request logs can extend beyond this window. Restart required.",
 			Kind: KindInt, HotReload: false, Min: num(1), Max: num(1_000_000)},
 		{Key: "shutdown_timeout", Category: "server", Label: "Shutdown timeout",
-			Help: "How long to wait for in-flight requests on SIGTERM/SIGINT before exiting. Must be > 0. Applies at the next SIGTERM (the listener is not restarted).",
+			Help: "HTTP shutdown wait after active request contexts are canceled on SIGINT/SIGTERM. Storage draining follows separately. Must be > 0; applies at the next shutdown without restarting the listener.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "restart_drain_timeout", Category: "server", Label: "Restart drain timeout",
 			Help: "How long a dashboard-triggered restart waits for in-flight streams. Expiry aborts the restart and resumes accepting traffic; unfinished streams are not killed. New connections queue during a successful handoff.",
@@ -218,7 +218,7 @@ func Schema() []Field {
 			Help: "KPI / pause / SSE-fallback poll cadence. Must be > 0.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "dash_chart_refresh", Category: "dashboard", Label: "Chart refresh",
-			Help: "How often the traffic chart re-fetches server aggregates to correct the live overlay. Must be > 0.",
+			Help: "How often the traffic chart re-fetches server-authoritative buckets and period totals. Must be > 0.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "dash_explorer_stale", Category: "dashboard", Label: "Explorer stale after",
 			Help: "How old a cached explorer breakdown may be before it is re-fetched. Must be > 0.",
@@ -229,11 +229,11 @@ func Schema() []Field {
 			Help: "Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment, and headers (a string map). Field names only, never static prices. Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion. Header values expand {{uuid4}} to a fresh UUID and {{platform}} to the server's Rust-style os; arch pair; unknown templates stay literal. On HTTP relay requests, configured headers override forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor bridge construct headers separately and do not apply X-Proxy-Headers. Headers can contain secrets; keep runtime configuration private.",
 			Kind: KindProviders, HotReload: true},
 		{Key: "provider_aliases", Category: "providers", Label: "Provider aliases",
-			Help: "Merge an old provider label into its canonical one (old → canonical). Rewrites stored history at boot and on reload; new requests carry the canonical label immediately. One provider, one entity.",
+			Help: "Map an old provider label to a canonical label. Rewrites existing stored history at boot and on reload; new requests use the canonical label. Existing in-memory records keep their prior label until they age out or the process restarts. Removing a mapping does not restore rewritten history. Chains and self-maps are rejected.",
 			Kind: KindAliases, HotReload: true},
 		// ---- models ----
 		{Key: "model_rules", Category: "models", Label: "Model grouping rules",
-			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. The stored spelling stays raw: debug session matching and purge/export match it exactly, and the request detail always shows the original. Hot-reloads.",
+			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
 	}
 }

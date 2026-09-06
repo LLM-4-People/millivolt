@@ -55,6 +55,66 @@ Use the derived provider label as the map key. The example file and Settings
 schema document other maps, model rules and header templates; do not maintain
 a second complete list of defaults here.
 
+### Finding a setting
+
+The generated example is the complete field reference: it includes defaults,
+types, ranges, units and hot-reload/restart behavior. `GET /admin/config` exposes
+the same field/category metadata alongside saved values, neutral defaults,
+CLI overrides, the process-effective snapshot and the current revision.
+Settings searches labels, keys and help across categories.
+
+| Settings category | Configuration area |
+| --- | --- |
+| Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
+| Request | Upload bound, allowed upstream prefixes, content preview, debug retention and token refresh. |
+| Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
+| Queue & retry | Per-key admission, queue capacity/wait, retry hints, backoff and quality retries. |
+| Conversations | Automatic grouping idle gap and open-conversation cap. |
+| Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
+| Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
+| Dashboard | Request-log page size and KPI/chart/explorer refresh cadence. |
+| Models | Ordered model-name grouping rules and their preview. |
+| Providers | Usage/cost field paths, discovery enrichment, upstream headers and provider aliases. |
+
+The table is a navigation aid, not another source of default values.
+[Schema](../internal/config/schema.go), configuration validation and generated
+YAML remain authoritative when a setting is added or changed.
+
+### Saving settings safely
+
+Settings collects a draft until Apply. Revert reloads the saved document, and
+closing a dirty sheet keeps it open until Apply or Revert. The server validates the whole
+result and compares its revision before writing. A stale tab receives 409;
+reload/review its values instead of resubmitting an old full form.
+
+API saves overlay supplied top-level keys on the saved config. Omitted keys
+remain unchanged, but a supplied map/list replaces that entire field. For
+example, `providers`, `provider_aliases` and `model_rules` are not recursively
+patched. Read the current document and preserve wanted entries when editing a
+structured field. Explicitly empty collections clear those fields.
+
+The response separates saved values from the effective snapshot and reports
+restart-required keys. A successful file write can still be followed by a reload
+failure; `saved:true` means the file changed even when the response reports an
+error. Do not assume rollback. The `writable` indicator means a config path is
+configured, not that filesystem permissions or every future write are guaranteed.
+See [persistence](#persistent-state-and-configuration) and
+[reload behavior](#reload-restart-and-shutdown) before changing startup-bound fields.
+
+### Provider aliases and model grouping
+
+`provider_aliases` merges provider labels in stored history at boot/reload and
+rekeys new requests. It rejects self-maps and alias chains. This is a durable
+rename, not a temporary view: removing the alias does not reconstruct original
+labels. Existing in-memory ring records can retain their previous label until
+they age out or the process restarts. Back up before an intentional history rename.
+
+`model_rules` instead controls display/grouping. Its ordered exact, pattern and
+lowercase steps keep stored model spellings unchanged; an empty rule list groups
+by those raw spellings. The Settings editor supports reordering, parking and
+previewing rules. Raw export/delete predicates do not silently expand to a
+display group. Debug's native-model normalization is separate from these rules.
+
 ## Containers
 
 The [Dockerfile](../Dockerfile) builds Linux `amd64` and `arm64` targets and runs
@@ -246,20 +306,76 @@ supported methods; wrong-method requests must not fall through to inference.
 | `POST /metrics/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
 | `POST /metrics/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
 | `GET /metrics/debug?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. |
-| `GET /metrics/query?q=` | Durable-store-only restricted SELECT with timeout/output limits; not a hostile-query sandbox. |
+| `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
 | `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
 
-Pause holds and Debug sessions support indefinite or preset durations, partial
-ID-preserving edits, and conflict rejection for overlapping scopes. Pause lets
-already-running sends finish; matching new sends/retries wait. A hold cap can
-refuse excess waiters. Limits are provider-wide; group concurrency is separate.
-
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
+
+### Pause and Limits
+
+Pause creates holds; it does not disconnect already-running sends. Matching new
+sends and retries wait until the hold expires or is resumed. Choose all traffic,
+named clients/providers, or clients that were unseen when a New-clients hold was
+created. "New" does not mean new requests or new conversations. Multiple names
+within a dimension are alternatives; provider and client constraints intersect.
+When named clients and New are combined, either client condition may match.
+
+A hold has its own duration and queue cap. Excess waiting work can be refused;
+an indefinite hold needs an explicit resume. Existing holds can be edited in
+place or resumed individually, while Resume all clears all holds. Overlapping
+scopes are rejected instead of silently replacing a different hold.
+
+Limits applies to a provider across all clients and keys, independently of the
+per-key concurrency/queue settings. Choose concurrency, requests per window and
+tokens per window, then Apply; Clear removes that provider policy. The menu
+shows whether a policy came from the UI or a request header, together with
+available budget and in-flight/queued state. Header semantics are in
+[protocol](protocol.md#routing-headers). Persisted policy does not mean the live
+scheduler's counters and in-flight requests survive a restart.
+
+### Debug and preview capture
+
+Debug selects clients, providers and/or models and starts a capture session for
+a chosen duration or until stopped. At least one dimension is required; selected
+dimensions intersect, with alternatives inside each dimension. It does not have
+an unrestricted "all" switch. Sessions can be edited or stopped individually;
+Stop all ends every active session. Conflicting scopes are rejected.
+
+Debug model matching uses the native-model normalization in
+[debug.go](../internal/proxy/debug.go), separate from display-only model rules.
+Do not assume that every model spelling is an independent exact scope.
+
+The session timer selects future captures. `debug_capture_ttl` separately
+controls retained capture lifetime after completion, and
+`debug_capture_max_bytes` bounds captured request plus client-facing response
+bytes. Oversized captures are marked truncated. The request drawer loads an
+available sidecar only for a captured request; expired/absent captures are not
+recreated from ordinary metrics.
+
+`capture_body_preview` is a different opt-in feature: it retains short prompt/
+response previews in the normal record without starting a Debug session. Both
+features can retain sensitive content even when credential headers are redacted.
+Exports/backups can outlive the configured retention period. See
+[Security](../SECURITY.md#upstream-destinations-and-credentials).
+
+### Logs and Clear
+
+Logs downloads finalized request records as JSON, not the process's stderr log
+and not a complete administrative audit trail. With durable storage it reads the
+database; otherwise it uses available ring records. Open the menu, choose a
+filter and review its matching count before Download matching, or deliberately
+choose Download all. A debug-only export can include retained capture sidecars.
+
+Clear uses the same filter/count owner. Deletion requires confirmation in the
+dashboard; it does not happen when the menu opens. A selected filter makes a
+read-only `POST /metrics/purge/count` preview. Current traffic can change the
+count before the action, but the UI retains the previewed age cutoff rather
+than silently moving it. Delete everything is irreversible without a backup.
 
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
@@ -268,6 +384,112 @@ beyond the menu's common choices. See the shared
 [PurgeFilter](../internal/storage/store.go). Empty-body full deletion is
 deliberate and destructive; never use malformed JSON as an all-records command.
 The delete fence preserves newer completions and in-flight work.
+
+### Settings and Restart
+
+Settings only reads configuration when opened. Its search, category rail and
+structured editors work on a local draft; Apply uses the
+[revision-checked save contract](#saving-settings-safely).
+
+Opening Restart reads availability and status. Restart now is disabled while a
+restart is in progress or rebuilding is unavailable. Progress reports actual
+build/drain/flush/handoff phases; it is not a simulated timer. After a successful
+handoff, reconnect/bootstrap refreshes history, aggregates, operator state and
+config. Changed embedded frontend assets trigger a page reload through that same
+refresh owner. The [lifecycle section](#reload-restart-and-shutdown) distinguishes
+source rebuilds from container replacement and ordinary shutdown.
+
+## Dashboard data and request inspection
+
+The KPI band is global. Explorer selections and the request status filter scope
+the timeline and request log; selecting a card adds a filter and entity links
+pivot within that shared route. Browser back/forward restores hash-based scopes.
+Chart preset, range, percentile and series visibility persist in browser storage.
+These saved views are local browser state, not shared server settings.
+
+Explorer dimensions are Providers, Models, Client, Conversations, Tools, Time,
+Status, Errors and Keys. Their meanings are server-owned: model grouping and
+time-bucket membership are not browser guesses. Conversations can show declared
+parents and main/sub/unresolved counts; read the
+[lineage contract](protocol.md#main-and-sub-conversations) before interpreting them.
+Tools and error occurrences can have multiple memberships per request, while
+error/429 health badges count distinct affected requests.
+
+The [visual guide](dashboard.md) covers every timeline and its controls. Traffic
+compares requests/errors; Tokens separates available input/output/reasoning/cache
+usage; Speed + latency uses independent throughput/TTFT axes; Errors compares
+error count/rate; Cost places reported USD spend beside request volume. One
+percentile selection controls the timing series. Period percentiles are computed
+from period samples, not averages of bucket percentiles. Insufficient samples
+remain unavailable. All time means the available retained history, not deleted,
+dropped or never-observed requests.
+
+### Request rows and details
+
+The log starts with recent rows and pages older durable records as you scroll.
+Live rows show in-flight/queue/retry progress; final rows retain their outcomes.
+Retry disclosure opens absorbed attempts under the original request, not another
+inference record. Click the detail arrow or a non-link row cell to open its
+drawer; previous/next controls navigate requests without changing the scope.
+
+The drawer presents available facts in sections: request identity/status/times;
+client/runtime and provider metadata; requested model and parameters; conversation
+turns and content-size counts; input/output/cache/reasoning tokens; performance,
+cost and finish state; tool names/calls; queue/rate-limit information; retries,
+errors and retained headers. Recognized parameters include sampling and output
+limits, stop/logprob controls, reasoning/verbosity, response format, tool choice
+and streaming flags. Missing fields are not inferred from defaults, and explicit
+zero/false parameters remain distinct from absent ones.
+
+Opening ordinary details does not fetch private request content. Prompt/response
+previews appear only if captured, and Debug sidecars use their separate opt-in
+and retention contract. Even ordinary labels, error text and headers can be
+sensitive; do not publish request drawers from private history without review.
+
+### Reading timing, cost and health
+
+Request duration starts after upload and includes metadata work, queue/hold/retry
+waits and response handling. First-token latency uses the final upstream attempt's
+start when recorded, not accumulated retry delay. Overall throughput divides
+output tokens by the full request duration; chart speed can use the measured
+generation window when overall throughput is unavailable. These are different
+measurements, not interchangeable claims about provider speed.
+
+Money stays USD in storage and APIs. The shared UI formatter uses cents below
+$1, including fractional cents, and dollars for larger magnitudes. Usage/cost
+comes from recognized upstream fields or configured field mappings; unavailable
+reporting and a displayed zero do not establish a zero bill. Reasoning/cache
+splits depend on what the upstream actually reports.
+
+Errors count affected requests with a genuine failure, including recovered
+upstream failures. HTTP 429 counts requests that encountered a final or retried
+429; the two signals can overlap, but 429 alone is not an error. Client-local
+cancellation is likewise distinct from an upstream failure. Zero explorer health
+badges are hidden independently. Error-dimension headline counts can count error
+occurrences, so do not treat every displayed error number as the same metric.
+
+### Snapshots, live feeds and monitoring
+
+The HTML includes the canonical bootstrap state so the first paint need not wait
+for a second state request. Live SSE carries pending progress and finalization;
+KPI/operator polling and configured aggregate refresh keep derived surfaces current.
+Reconnects use sequence/feed identity and fall back to full snapshots when replay
+cannot be trusted. The footer distinguishes live/offline, active holds/Debug and
+process-local storage drops. An offline indicator alone does not prove inference
+is down. None of these mechanisms makes initial history preload instantaneous.
+
+For integrations, use the documented read routes rather than scraping the DOM.
+Bootstrap/live data is a recent observation window; scoped aggregate routes query
+available history; JSON export provides finalized records; restricted SQL queries
+durable data within configured time/output limits. The API is in initial
+development, so pin and verify the selected revision for integrations.
+
+Prometheus is a bounded-ring view. Its request/token/error totals are gauges that
+can shrink after eviction, purge or restart, not monotonic lifetime counters;
+do not apply counter-only `rate()`/`increase()` assumptions to them. Its TTFT
+quantiles use the ring's sample contract, which differs from dashboard R7 history
+percentiles. Metric names and units are exposed with HELP/TYPE metadata at
+`/metrics/prometheus`; [prometheus.go](../internal/metrics/prometheus.go) owns them.
 
 ## Storage and accounting
 
@@ -304,6 +526,39 @@ python3 scripts/backup_db.py proxy.db /path/to/new-backup.db
 The helper opens the source read-only and includes committed WAL state. Do not
 plain-copy an open database or omit its WAL. Protect backups, debug captures and
 exports as sensitive data.
+
+## Performance and footprint
+
+Separate deployment size, cold startup, idle footprint, request overhead and
+loaded throughput. They answer different questions; a small image is not a RAM
+limit, and a cached dashboard read is not a cold-start measurement.
+
+The runtime contains a stripped Go binary with embedded UI assets, dependency
+notices and the generated configuration, on a minimal non-root base. There is
+no frontend build/runtime dependency in deployment. Docker's reported image
+size describes an image artifact, not compressed network transfer, persistent
+volume growth or the process's resident memory.
+
+On the request path, one bounded body read/metadata decode feeds shared routing
+and accounting. Upstream connections are pooled; streamed observation and durable
+enqueue avoid a per-request history scan or synchronous SQLite write. On the
+dashboard path, the initial HTML embeds bootstrap state and shared analytical
+projections/cache slots avoid building a separate history copy for each view.
+These implementation choices reduce repeated work, not every cost of a request.
+
+RAM still includes active request/response buffers, connection pools, the live
+ring and pending state, and the history/cardinality costs documented under
+[storage](#storage-and-accounting). Raising queue/body/pool limits or concurrency
+changes that footprint. Retained history and observed identities have no universal
+process-memory cap; configuration limits must be evaluated together.
+
+Use the [isolated performance workflow](../CONTRIBUTING.md#performance-evidence)
+and report the exact source/image revision, platform, CPU resources, configuration,
+history size and workload. Distinguish idle from loaded CPU/RSS, cold from warm
+reads, proxy overhead from upstream time, and HTTP success from durable records,
+tokens/cost reconciliation and storage-drop deltas. Include observer load and
+whether Debug/body previews were enabled. Short local-upstream bursts are useful
+regressions, not sustained production capacity or provider-latency guarantees.
 
 ## Known limits
 
