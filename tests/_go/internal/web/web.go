@@ -142,6 +142,15 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
+	Favicon().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatalf("GET /favicon.ico → %d %s, want 200 image/svg+xml", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("<svg")) {
+		t.Fatal("GET /favicon.ico body is not the brand SVG")
+	}
+
+	rec = httptest.NewRecorder()
 	Favicon().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/favicon.ico", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /favicon.ico → %d, want 405", rec.Code)

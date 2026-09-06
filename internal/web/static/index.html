@@ -47,10 +47,14 @@
     <h1>millivolt</h1>
   </div>
   <span class="sub">· precision instrument on the wire</span>
-  <div class="refresh-controls">
+  <button class="btn" id="btn-nav" type="button" onclick="toggleNavMenu(event)" aria-haspopup="true" aria-controls="hdr-actions" aria-expanded="false" aria-label="Actions" title="Actions">
+    <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>
+  </button>
+  <div class="refresh-controls" id="hdr-actions">
     <div class="menu-wrap">
       <button class="btn" id="btn-pause" onclick="togglePauseMenu(event)" aria-haspopup="menu" aria-controls="pause-menu" aria-expanded="false" aria-pressed="false" aria-label="Pause" title="Pause">
         <svg class="hdr-ico solid" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx="0.8"/><rect x="9.4" y="3" width="2.6" height="10" rx="0.8"/></svg>
+        <span class="hdr-btn-label">Pause</span>
       </button>
       <div class="hdr-menu" id="pause-menu" hidden>
         <div class="clear-menu-hd">Hold requests…</div>
@@ -90,6 +94,7 @@
     <div class="menu-wrap">
       <button class="btn" id="btn-debug" onclick="toggleDebugMenu(event)" aria-haspopup="menu" aria-controls="debug-menu" aria-expanded="false" aria-pressed="false" aria-label="Debug" title="Debug">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.6v2.2"/><path d="M8 11.2v2.2"/><circle cx="8" cy="8" r="2.4"/><path d="M3.4 4.2 4.9 5.7M11.1 10.3l1.5 1.5M3.4 11.8 4.9 10.3M11.1 5.7l1.5-1.5"/></svg>
+        <span class="hdr-btn-label">Debug</span>
       </button>
       <div class="hdr-menu" id="debug-menu" hidden>
         <div class="clear-menu-hd">Capture debug…</div>
@@ -127,6 +132,7 @@
     <div class="menu-wrap">
       <button class="btn" id="btn-limits" onclick="toggleLimitsMenu(event)" aria-haspopup="menu" aria-controls="limits-menu" aria-expanded="false" aria-pressed="false" aria-label="Limits" title="Limits">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 12.3a5.6 5.6 0 1 1 9.6 0"/><path d="M8 12.3 11.1 7.5"/><circle cx="8" cy="12.3" r="1.05" fill="currentColor" stroke="none"/></svg>
+        <span class="hdr-btn-label">Limits</span>
       </button>
       <div class="hdr-menu" id="limits-menu" hidden>
         <div class="clear-menu-hd">Provider limits…</div>
@@ -163,6 +169,7 @@
     <div class="menu-wrap">
       <button class="btn" id="btn-logs" onclick="toggleLogsMenu(event)" aria-haspopup="menu" aria-controls="logs-menu" aria-expanded="false" aria-label="Logs" title="Logs">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.8v7.4"/><path d="M5.1 7.6 8 10.6l2.9-3"/><path d="M3.2 13.2h9.6"/></svg>
+        <span class="hdr-btn-label">Logs</span>
       </button>
       <div class="hdr-menu" id="logs-menu" hidden>
         <div class="clear-menu-hd">Download logs (JSON)…</div>
@@ -187,6 +194,7 @@
     <div class="menu-wrap">
       <button class="btn" id="btn-clear" onclick="toggleClearMenu(event)" aria-haspopup="menu" aria-controls="clear-menu" aria-expanded="false" aria-label="Clear" title="Clear">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 5.4h9.6"/><path d="M6.1 5.4V4.3A1.2 1.2 0 0 1 7.3 3.1h1.4A1.2 1.2 0 0 1 9.9 4.3v1.1"/><path d="M4.2 5.4l.7 7.4a1 1 0 0 0 1 .8h5.2a1 1 0 0 0 1-.8l.7-7.4"/></svg>
+        <span class="hdr-btn-label">Clear</span>
       </button>
       <div class="hdr-menu" id="clear-menu" hidden>
         <div class="clear-menu-hd">Delete records…</div>
@@ -211,6 +219,7 @@
     <div class="menu-wrap">
       <button class="btn" id="btn-restart" onclick="toggleRestartMenu(event)" aria-haspopup="menu" aria-controls="restart-menu" aria-expanded="false" aria-label="Restart" title="Restart">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.97-4.23"/><path d="M13.6 2.4v2.9h-2.9"/></svg>
+        <span class="hdr-btn-label">Restart</span>
       </button>
       <div class="hdr-menu" id="restart-menu" hidden>
         <div class="clear-menu-hd">Rebuild &amp; restart…</div>
@@ -226,6 +235,7 @@
     </div>
     <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
       <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4.4"/><circle cx="8" cy="8" r="1.5"/><path d="M8 2.6v1.5M8 11.9v1.5M2.6 8h1.5M11.9 8h1.5M4.05 4.05l1.05 1.05M10.9 10.9l1.05 1.05M11.95 4.05l-1.05 1.05M5.1 10.9l-1.05 1.05"/></svg>
+      <span class="hdr-btn-label">Settings</span>
     </button>
   </div>
 </header>

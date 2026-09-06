@@ -4,7 +4,7 @@ Read the [security boundary](../SECURITY.md) before exposing the listener.
 The whole embedded dashboard is protected: every dashboard, `/metrics/*` and
 `/admin/*` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential and is
 denied while it is not configured. Only the unauthenticated `/healthz`
-liveness probe and transparent inference stay open; see
+liveness probe, `/favicon.ico` and transparent inference stay open; see
 [operator access](#operator-access).
 
 ## Configuration and CLI
@@ -421,6 +421,7 @@ the credential gates both.
 | Route | Action / important contract |
 | --- | --- |
 | `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
+| `GET /favicon.ico` | Unauthenticated brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
@@ -452,8 +453,8 @@ proxy.yaml, so it cannot leak through Settings, `-print-config`,
 The gate is deny by default and lives in one chokepoint in front of every
 route:
 
-- Open: `GET /healthz` and transparent inference. Provider credentials ride
-  the same header name and are never inspected by the gate.
+- Open: `GET /healthz`, `GET /favicon.ico` and transparent inference. Provider
+  credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
   and every `/admin/*` route, including unclassified future admin paths and
   unsupported methods.
@@ -462,8 +463,9 @@ Present the credential as `Authorization: Bearer <value>`. A valid Bearer
 request also mints a session cookie, because the dashboard's live feed uses
 EventSource, which cannot send Authorization headers. The cookie is HttpOnly
 (script never reads it), SameSite Strict, scoped to 12 hours, and signed with
-a per-process random key, so restarts invalidate it and it never outlives the
-process that verified it. The cookie deliberately carries no `Secure` flag:
+a key derived from the operator token, so a container restart with the same
+credential keeps the session. Rotating the token invalidates outstanding
+cookies. The cookie deliberately carries no `Secure` flag:
 millivolt's listener is plain HTTP, and the documented TLS deployments
 terminate at the ingress, where the remaining loopback hop is trusted-local.
 Do not expose the listener over plaintext networks anyway. The no-JS login
@@ -488,7 +490,7 @@ response is `429` with a coarse rounded `Retry-After` and a generic body.
 
 With the variable unset or empty the gate stays armed: the whole dashboard
 returns 403
-and only `/healthz` and inference respond. A nonempty value shorter than 16
+and only `/healthz`, `/favicon.ico` and inference respond. A nonempty value shorter than 16
 or longer than 512 characters fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart

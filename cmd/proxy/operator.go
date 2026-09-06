@@ -22,13 +22,14 @@ import (
 
 // The operator plane is the whole embedded dashboard, standardized as the
 // gated route set below: dashboard HTML/assets, every /metrics/* surface and
-// every /admin/* action require the operator credential. Only two surfaces
-// stay open: the /healthz liveness probe (Docker healthchecks and load
-// balancers cannot carry the credential) and transparent inference (the mux
-// catch-all; provider credentials ride the same header name and are never
-// inspected). The gate is this file's middleware, the single lowest
-// chokepoint every request passes through (main wraps the whole mux with it,
-// including the restart-handoff clone).
+// every /admin/* action require the operator credential. Open surfaces are
+// the /healthz liveness probe (Docker healthchecks and load balancers cannot
+// carry the credential), /favicon.ico (browsers fetch it without
+// Authorization, and it carries no dashboard data), and transparent
+// inference (the mux catch-all; provider credentials ride the same header
+// name and are never inspected). The gate is this file's middleware, the
+// single lowest chokepoint every request passes through (main wraps the whole
+// mux with it, including the restart-handoff clone).
 
 // operatorTokenEnv holds the operator credential. It is read once at boot and
 // never enters config.Config, YAML, /admin/config output, snapshots or logs.
@@ -49,9 +50,9 @@ const (
 
 // Session cookie bounds. The cookie exists because EventSource cannot send
 // Authorization headers: it is HttpOnly (script never reads it), SameSite
-// Strict (cross-site navigation never carries it), and its HMAC is keyed by a
-// per-process random key, so restarts invalidate outstanding cookies and the
-// credential never outlives the process that verified it.
+// Strict (cross-site navigation never carries it), and its HMAC is derived
+// from the operator token so a container restart with the same credential
+// keeps the session. Rotating the token invalidates outstanding cookies.
 const (
 	sessionCookieName = "millivolt-operator"
 	sessionCookieTTL  = 12 * time.Hour
@@ -110,8 +111,8 @@ func mustOperatorToken() string {
 }
 
 // operatorGate owns the credential state: the token digest (hashed so the
-// comparison cannot leak length), the per-process cookie key and the
-// per-IP failure throttle.
+// comparison cannot leak length), the cookie MAC key derived from that
+// token, and the per-IP failure throttle.
 type operatorGate struct {
 	// armed distinguishes "no credential configured" from a configured
 	// credential: an unset MILLIVOLT_OPERATOR_TOKEN still hashes to a real
@@ -125,10 +126,22 @@ type operatorGate struct {
 func newOperatorGate(token string) *operatorGate {
 	g := &operatorGate{armed: token != ""}
 	g.tokenHash = sha256.Sum256([]byte(token))
-	if _, err := rand.Read(g.sessionKey[:]); err != nil {
+	if token != "" {
+		g.sessionKey = sessionKeyFromToken(token)
+	} else if _, err := rand.Read(g.sessionKey[:]); err != nil {
 		log.Fatalf("operator gate: session key: %v", err)
 	}
 	return g
+}
+
+// sessionKeyFromToken derives the cookie MAC key from the operator token so
+// a restarted process with the same credential accepts cookies it minted.
+func sessionKeyFromToken(token string) [32]byte {
+	mac := hmac.New(sha256.New, []byte("millivolt-operator-session-key-v1"))
+	mac.Write([]byte(token))
+	var key [32]byte
+	copy(key[:], mac.Sum(nil))
+	return key
 }
 
 // valid reports whether the presented credential matches, comparing fixed
@@ -141,10 +154,10 @@ func (g *operatorGate) valid(presented string) bool {
 // gatedPath reports whether the request belongs to the dashboard/operator
 // plane. The exact namespace roots are gated too: /admin, /metrics and /dash
 // are millivolt-owned, so a look-alike path can never reach the inference
-// catch-all. Everything else (registered /healthz plus the catch-all) passes
-// untouched.
+// catch-all. Everything else (registered /healthz, /favicon.ico and the
+// catch-all) passes untouched.
 func gatedPath(path string) bool {
-	return path == "/" || path == "/index.html" || path == "/favicon.ico" ||
+	return path == "/" || path == "/index.html" ||
 		path == "/admin" || path == "/metrics" || path == "/dash" ||
 		strings.HasPrefix(path, "/dash/") ||
 		strings.HasPrefix(path, "/metrics/") ||
@@ -162,10 +175,10 @@ func bearerToken(r *http.Request) (string, bool) {
 	return header[len(prefix):], true
 }
 
-// sessionMAC signs the cookie's expiry instant and per-mint nonce; a
-// per-process key means outstanding cookies die with the process that issued
-// them, and the nonce means concurrent operators never share one value (a
-// future denylist can target single cookies).
+// sessionMAC signs the cookie's expiry instant and per-mint nonce. The key
+// is derived from the operator token (stable across process restarts); the
+// nonce means concurrent operators never share one value (a future denylist
+// can target single cookies).
 func (g *operatorGate) sessionMAC(expires int64, nonce []byte) []byte {
 	var stamp [8]byte
 	binary.BigEndian.PutUint64(stamp[:], uint64(expires))
@@ -393,8 +406,8 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		if hasBearer {
 			// Only presented-but-wrong credentials count as brute force.
 			// Credential-less requests (an expired session cookie polling in
-			// a background tab, a browser favicon fetch) are denied without
-			// burning the budget: they carry no candidate to guess.
+			// a background tab) are denied without burning the budget: they
+			// carry no candidate to guess.
 			gate.limiter.failure(ip, time.Now())
 		}
 		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
@@ -496,28 +509,64 @@ const loginPageHTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
 <title>millivolt operator sign-in</title>
 <style>
+* { box-sizing: border-box; }
 :root { color-scheme: dark; }
-body { margin: 0; min-height: 100dvh; display: grid; place-items: center;
-  background: #0e1116; color: #e8eaed; font: 13px/1.5 ui-monospace, monospace; }
-form { width: min(340px, calc(100vw - 40px)); border: 1px solid #2a2f3a;
-  border-radius: 10px; background: #151a22; padding: 22px; }
-h1 { font-size: 14px; margin: 0 0 6px; }
-p { color: #98a0ad; margin: 0 0 14px; }
-input { width: 100%; box-sizing: border-box; font: inherit; color: #e8eaed;
-  background: #0e1116; border: 1px solid #2a2f3a; border-radius: 7px; padding: 8px 10px; }
-input:focus { border-color: #5b8cff; outline: none; }
-button { font: inherit; margin-top: 12px; width: 100%; color: #e8eaed;
-  background: #1d2430; border: 1px solid #2a2f3a; border-radius: 7px; padding: 8px 10px; cursor: pointer; }
+html, body { margin: 0; min-height: 100dvh; overflow-x: hidden; }
+body {
+  display: grid; place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+  background: #141210; color: #e8e4de;
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+form {
+  width: min(22rem, 100%);
+  border: 1px solid #3a342b; border-radius: 14px; background: #1a1714;
+  padding: 22px; box-shadow: 0 18px 40px rgba(0,0,0,.35);
+}
+.brand { display: flex; align-items: center; gap: 11px; margin: 0 0 14px; }
+.logo {
+  width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
+  background: radial-gradient(130% 130% at 30% 22%, #2a2440 0%, #1b1826 70%);
+  display: grid; place-items: center;
+  box-shadow: 0 0 0 1px rgba(154,107,255,.28) inset, 0 4px 16px rgba(154,107,255,.28);
+}
+h1 { margin: 0; font: 650 15px/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace; letter-spacing: -.01em; }
+p { color: #97907e; margin: 0 0 16px; font-size: 13px; }
+input {
+  width: 100%; font: 13px/1.4 ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color: #e8e4de; background: #100e0b; border: 1px solid #2b2620;
+  border-radius: 8px; padding: 10px 12px; min-height: 42px;
+}
+input:focus { border-color: #5b8cff; outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.16); }
+button {
+  font: 650 13px/1.2 inherit; margin-top: 12px; width: 100%; min-height: 42px;
+  color: #141210; background: #5b8cff; border: 1px solid #5b8cff;
+  border-radius: 8px; padding: 10px 12px; cursor: pointer;
+}
+button:hover { background: #7aa0ff; border-color: #7aa0ff; }
 button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
 </style>
 </head>
 <body>
 <form method="post" action="/admin/session">
+<div class="brand">
+<div class="logo" aria-hidden="true">
+<svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+<g stroke="#7a72a0" stroke-width="1" opacity=".55" stroke-linecap="round">
+<path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/>
+</g>
+<path d="M1.5 12.8H16.5" stroke="#56507a" stroke-width="1" opacity=".5" stroke-linecap="round"/>
+<path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="#9a6bff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+</div>
 <h1>millivolt</h1>
+</div>
 <p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>
 <input type="password" name="token" autocomplete="current-password" autofocus aria-label="Operator token" required>
 <button type="submit">Sign in</button>

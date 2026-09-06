@@ -18,11 +18,11 @@ import (
 )
 
 // TestOperatorPlaneBoundary is the deny-by-default regression for the whole
-// dashboard gate: only /healthz and the inference catch-all pass without the
-// credential, every dashboard/metrics/admin route needs it (Bearer or the
-// session cookie the gate mints), the unauthenticated HTML entrypoint gets
-// the login page, same-origin mutation checks stay armed behind the
-// credential, and an unconfigured credential denies the whole plane.
+// dashboard gate: only /healthz, /favicon.ico and the inference catch-all
+// pass without the credential, every dashboard/metrics/admin route needs it
+// (Bearer or the session cookie the gate mints), the unauthenticated HTML
+// entrypoint gets the login page, same-origin mutation checks stay armed
+// behind the credential, and an unconfigured credential denies the whole plane.
 func TestOperatorPlaneBoundary(t *testing.T) {
 	const token = "operator-fixture-credential"
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
@@ -31,6 +31,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		requests := []*http.Request{
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/healthz", nil),
+			httptest.NewRequest(http.MethodGet, "http://proxy.example/favicon.ico", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/anything/else/for/upstream", nil),
@@ -51,7 +52,6 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		requests := []*http.Request{
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/index.html", nil),
-			httptest.NewRequest(http.MethodGet, "http://proxy.example/favicon.ico", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/dash/js/core.js", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/metrics/bootstrap", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/metrics/agg/log", nil),
@@ -118,6 +118,24 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("tampered cookie: status=%d want=401", w.Code)
 		}
+		// A new process with the same operator token must accept the cookie
+		// (container restart). A rotated token must not.
+		restart := protectOperatorRequests(next, newOperatorGate(token))
+		w = httptest.NewRecorder()
+		again := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+		again.AddCookie(set[0])
+		restart.ServeHTTP(w, again)
+		if w.Code != http.StatusNoContent {
+			t.Errorf("restarted process rejected the session cookie: status=%d want=204", w.Code)
+		}
+		rotated := protectOperatorRequests(next, newOperatorGate("rotated-fixture-credential"))
+		w = httptest.NewRecorder()
+		stale := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+		stale.AddCookie(set[0])
+		rotated.ServeHTTP(w, stale)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("rotated token accepted the old cookie: status=%d want=401", w.Code)
+		}
 	})
 
 	t.Run("unauthenticated HTML entry gets the login page", func(t *testing.T) {
@@ -126,6 +144,9 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
 		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) {
 			t.Fatalf("GET / without credential: status=%d want=401 login page", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "box-sizing: border-box") {
+			t.Error("login page must box-size the card so padding cannot overflow the viewport")
 		}
 		if got := w.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("login page cache-control=%q want no-store", got)
@@ -169,7 +190,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		// The liveness probe and the inference catch-all stay open while the
 		// plane is disabled; the session handshake hands off to its own
 		// handler, which denies an unarmed plane (asserted below).
-		for _, target := range []string{"/healthz", "/v1/chat/completions", "/admin/session"} {
+		for _, target := range []string{"/healthz", "/favicon.ico", "/v1/chat/completions", "/admin/session"} {
 			r := httptest.NewRequest(http.MethodPost, "http://proxy.example"+target, nil)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)

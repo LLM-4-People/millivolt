@@ -559,6 +559,9 @@ async function main() {
   const styles = bts.map(b => w.getComputedStyle(b).minWidth);
   check('header action buttons share one min-width', styles.every(s => s === styles[0] && s) && styles[0] !== 'auto');
   check('header actions are icon-only', bts.every(b => b && b.querySelector('svg.hdr-ico') && b.getAttribute('aria-label')));
+  check('header hamburger exists', !!d.getElementById('btn-nav') && d.getElementById('btn-nav').getAttribute('aria-controls') === 'hdr-actions');
+  check('header hamburger is hidden on desktop', w.getComputedStyle(d.getElementById('btn-nav')).display === 'none');
+  check('header action labels are present for the mobile panel', bts.every(b => b.querySelector('.hdr-btn-label')));
   w.refreshFooterState();
   check('pause icon survives pressed-state refresh', !!d.getElementById('btn-pause').querySelector('svg.hdr-ico'));
   check('debug icon survives pressed-state refresh', !!d.getElementById('btn-debug').querySelector('svg.hdr-ico'));

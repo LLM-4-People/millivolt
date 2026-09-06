@@ -172,7 +172,7 @@ function askOperatorToken() {
       dialog.setAttribute('role', 'dialog');
       dialog.setAttribute('aria-modal', 'true');
       dialog.setAttribute('aria-labelledby', 'operator-dialog-title');
-      dialog.innerHTML = `<div class="operator-dialog-panel"><div class="drawer-hd"><h3 id="operator-dialog-title">Operator credential</h3><button class="btn" type="button" data-operator-auth="cancel" aria-label="Cancel credential prompt">Cancel</button></div><p class="operator-dialog-note">This millivolt instance is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value to use the dashboard. It stays in this browser tab for the session and is never sent anywhere else.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="off" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="submit">Save credential</button></div></form></div>`;
+      dialog.innerHTML = `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><g stroke="var(--scale-tick)" stroke-width="1" opacity=".55" stroke-linecap="round"><path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/></g><path d="M1.5 12.8H16.5" stroke="var(--scale-base)" stroke-width="1" opacity=".5" stroke-linecap="round"/><path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="url(#mv-login)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="mv-login" x1="1.5" y1="9" x2="16.5" y2="9" gradientUnits="userSpaceOnUse"><stop stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/></linearGradient></defs></svg></div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`;
       document.body.appendChild(dialog);
     }
     const input = $('operator-dialog-input');
@@ -189,6 +189,7 @@ function askOperatorToken() {
       finish(input.value.trim());
     };
     closeHeaderMenus();
+    closeNavMenu();
     closeDimMenu();
     openModal(dialog);
     input.focus();
@@ -310,6 +311,24 @@ function syncHdrMenuExpanded() {
     const b = $(bid), m = $(mid);
     if (b && m) b.setAttribute('aria-expanded', m.hidden ? 'false' : 'true');
   }
+}
+
+function closeNavMenu(restoreFocus = false) {
+  const nav = $('hdr-actions'), btn = $('btn-nav');
+  if (!nav?.classList.contains('is-open')) return false;
+  nav.classList.remove('is-open');
+  btn?.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) btn?.focus();
+  return true;
+}
+function toggleNavMenu(e) {
+  e.stopPropagation();
+  const nav = $('hdr-actions'), btn = $('btn-nav');
+  if (!nav || !btn) return;
+  const open = !nav.classList.contains('is-open');
+  if (open) closeHeaderMenus();
+  nav.classList.toggle('is-open', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 function hideHdrMenu(id) {
   const el = $(id);
@@ -443,6 +462,7 @@ function toggleSettings(e) {
   if (e) e.stopPropagation();
   if (settingsIsOpen()) { closeSettings(); return; }
   closeHeaderMenus('settings');
+  closeNavMenu();
   if (typeof closeDrawer === 'function') closeDrawer();
   const s = $('settings-sheet');
   const v = $('settings-veil');
@@ -2493,6 +2513,7 @@ document.addEventListener('click', e => {
   const path = e.composedPath();
   const inside = selector => path.some(node => node.matches?.(selector));
   if (!inside('.menu-wrap')) closeHeaderMenus();
+  if (!inside('#hdr-actions') && !inside('#btn-nav')) closeNavMenu();
   if (!inside('.xp-rail-col')) closeDimMenu();
 });
 

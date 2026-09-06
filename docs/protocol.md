@@ -7,8 +7,8 @@ maps the default OpenAI-compatible relay and supported native translations.
 No endpoint/API-key registry is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
-([operator access](operations.md#operator-access)); only `/healthz` and the
-relay stay open.
+([operator access](operations.md#operator-access)); only `/healthz`,
+`/favicon.ico` and the relay stay open.
 
 ## Endpoint behavior
 

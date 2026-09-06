@@ -591,12 +591,15 @@ func probe(phase string) error {
 	if !snap.Storage.Enabled || snap.Storage.Dropped != 0 {
 		return errors.New("durability unavailable or dropped records")
 	}
-	// The liveness probe is the one open server route: no credential, no
-	// dashboard data. The ungated dashboard entry denies with the no-JS
-	// login page, whose handshake mints the session cookie (EventSource
-	// cannot send Authorization headers).
+	// The liveness probe and brand favicon are open server routes: no
+	// credential, no dashboard data. The ungated dashboard entry denies
+	// with the no-JS login page, whose handshake mints the session cookie
+	// (EventSource cannot send Authorization headers).
 	if status, _, err := do(plain, http.MethodGet, "/healthz", nil, nil); err != nil || status != http.StatusOK {
 		return fmt.Errorf("healthz probe returned %d, %v", status, err)
+	}
+	if status, body, err := do(plain, http.MethodGet, "/favicon.ico", nil, nil); err != nil || status != http.StatusOK || !bytes.Contains(body, []byte("<svg")) {
+		return fmt.Errorf("ungated favicon returned %d, %v", status, err)
 	}
 	status, login, err := do(plain, http.MethodGet, "/", nil, nil)
 	if err != nil {

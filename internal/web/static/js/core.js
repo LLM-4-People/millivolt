@@ -113,6 +113,7 @@ document.addEventListener('keydown', e => {
     if (settingsIsOpen()) { closeSettings(); return; }
     if (closeDimMenu()) return;
     if (closeHeaderMenus(undefined, true)) { e.preventDefault(); return; }
+    if (closeNavMenu(true)) { e.preventDefault(); return; }
     if (drawerId) closeDrawer();
     return;
   }

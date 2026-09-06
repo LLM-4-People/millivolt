@@ -235,9 +235,9 @@ func Handler(agg *AggAPI) http.Handler {
 
 // Favicon serves the brand mark as an SVG favicon, so a browser's automatic
 // /favicon.ico request never falls through to the LLM proxy (which would 400).
-// The response is no-cache rather than long-lived public: the route sits on
-// the authenticated operator plane, where a cacheable response must
-// revalidate before reuse.
+// The route is ungated: browsers fetch it without Authorization and it
+// carries no dashboard data. no-cache plus ETag still forces revalidation
+// after a rebuild.
 func Favicon() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnlessGetHead(w, r) {

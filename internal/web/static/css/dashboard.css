@@ -38,7 +38,7 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
-  html { color-scheme: dark; }
+  html { color-scheme: dark; overflow-x: clip; }
   /* Butter-smooth: every interactive surface eases its color/border/background
      changes instead of snapping. Kept off layout properties for perf. */
   *, *::before, *::after {
@@ -106,13 +106,32 @@
     stroke-linecap: round; stroke-linejoin: round;
   }
   .hdr-ico.solid { fill: currentColor; stroke: none; }
-  /* Mobile: the tagline drops so the brand + controls fit on one row. Side
-     padding shrinks so the content uses more of the narrow width (less dead
-     margin on the left/right). */
-  @media (max-width: 640px) {
-    header { padding: 0 14px; gap: 10px; --hdr-btn: 30px; }
+  .hdr-btn-label { display: none; }
+  #btn-nav { display: none; min-width: var(--hdr-btn); width: var(--hdr-btn); height: var(--hdr-btn); padding: 0;
+    align-items: center; justify-content: center; }
+  /* Narrow viewports: brand + hamburger only. The seven actions live in a
+     labeled panel so they cannot force horizontal scrolling. */
+  @media (max-width: 800px) {
+    header { padding: 0 14px; gap: 10px; }
     header .sub { display: none; }
-    .refresh-controls { gap: 4px; }
+    #btn-nav { display: inline-flex; margin-left: auto; }
+    .refresh-controls {
+      display: none; margin-left: 0; position: absolute; z-index: 90;
+      top: calc(100% + var(--rail-tick) + 4px); right: 8px; left: 8px;
+      flex-direction: column; align-items: stretch; gap: 2px;
+      max-height: min(70dvh, calc(100dvh - var(--rail-h) - 16px));
+      overflow: auto; overscroll-behavior: contain;
+      padding: 8px; border: 1px solid var(--border2); border-radius: 12px;
+      background: var(--panel); box-shadow: 0 18px 40px rgba(0,0,0,.4);
+    }
+    .refresh-controls.is-open { display: flex; }
+    .refresh-controls > .btn,
+    .refresh-controls > .menu-wrap > .btn {
+      width: 100%; min-width: 0; height: 44px; justify-content: flex-start;
+      padding: 0 12px; gap: 10px;
+    }
+    .refresh-controls .menu-wrap { width: 100%; }
+    .hdr-btn-label { display: inline; font: 650 12px var(--sans); color: var(--text); }
   }
   .pause-check { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text); text-transform: none; letter-spacing: 0; }
   .pause-check input { accent-color: var(--accent); }
@@ -180,6 +199,13 @@
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(0,0,0,.5); padding: 12px; font-family: var(--mono);
   }
+  @media (max-width: 800px) {
+    .hdr-menu, #pause-menu, #debug-menu, #limits-menu, #restart-menu {
+      position: static; width: 100%; top: auto; right: auto; margin-top: 4px;
+      box-shadow: none;
+    }
+    .clear-opts { grid-template-columns: 1fr; }
+  }
   .clear-menu-hd { font-size: 11px; font-weight: 600; color: var(--text); margin-bottom: 10px; }
   .clear-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .clear-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
@@ -245,14 +271,31 @@
   .storm-facts dt { color: var(--muted); }
   .storm-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
   .storm-explanation { margin: 14px 0 0; color: var(--muted); }
-  .operator-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.6); }
+  .operator-dialog {
+    position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
+    padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
+      max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+    background: rgba(16,14,11,.72); overflow: auto;
+  }
   .operator-dialog[hidden] { display: none; }
-  .operator-dialog-panel { width: min(440px, 100%); border: 1px solid var(--border2); background: var(--panel); padding: 0 18px 18px; font: 11px/1.5 var(--mono); color: var(--text); }
-  .operator-dialog-panel h3 { margin: 0; }
-  .operator-dialog-note { margin: 12px 0 0; color: var(--muted); }
-  .operator-dialog input { width: 100%; box-sizing: border-box; margin: 12px 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px; }
+  .operator-dialog-panel {
+    width: min(22rem, 100%); max-width: 100%;
+    border: 1px solid var(--border2); border-radius: 14px; background: var(--panel);
+    padding: 22px; color: var(--text);
+    box-shadow: 0 18px 40px rgba(0,0,0,.4);
+  }
+  .operator-dialog-brand { display: flex; align-items: center; gap: 11px; margin: 0 0 12px; }
+  .operator-dialog-brand .brand-logo { width: 28px; height: 28px; }
+  .operator-dialog-panel h3 { margin: 0; font: 650 15px/1.2 var(--mono); letter-spacing: -.01em; }
+  .operator-dialog-note { margin: 0 0 16px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+  .operator-dialog input {
+    width: 100%; box-sizing: border-box; margin: 0 0 14px; min-height: 42px;
+    font: 13px var(--mono); color: var(--text); background: var(--rail);
+    border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  }
   .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
-  .operator-dialog-actions { display: flex; justify-content: flex-end; }
+  .operator-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .operator-dialog-actions .btn { width: 100%; min-height: 42px; }
   .storm-resolution { margin: 12px 0 0; color: var(--text); }
   @media (max-width: 600px) { .storm-banner { padding: 9px 11px; font-size: 10px; } }
 

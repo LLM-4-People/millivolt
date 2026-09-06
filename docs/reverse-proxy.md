@@ -3,8 +3,9 @@
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
 credential; there is no tenant isolation and no per-user identity. Only the
-unauthenticated `/healthz` probe and transparent inference stay open, so a
-load balancer can health-check the service without holding the credential.
+unauthenticated `/healthz` probe, `/favicon.ico` and transparent inference
+stay open, so a load balancer can health-check the service without holding
+the credential.
 See [operator access](operations.md#operator-access). Read
 [Security](../SECURITY.md) first.
 
