@@ -44,6 +44,13 @@ Token-refresh response headers contain credentials for the client to adopt.
 Do not publish them, browser exports, databases, backups, local config,
 login-script output or screenshots containing private history.
 
+Provider favicons can make browser requests to Google's favicon service, exposing
+the provider hostname and the browser's network address to that service.
+`referrerpolicy="no-referrer"` omits the dashboard referrer, not the requested
+hostname. Hostname syntax checks do not establish that every qualified provider
+label is public. The documentation capture workflow blocks all external browser
+requests; that isolation is not the ordinary dashboard's network policy.
+
 ## Administrative data and resource limits
 
 SQL is restricted to read-only queries with execution/output limits, not a

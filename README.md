@@ -5,7 +5,16 @@ Clients choose the upstream URL and credentials on each request; no endpoint or
 API-key registry is required. Optional provider mappings enrich usage, cost,
 headers, and model discovery.
 
-![Dashboard showing request charts, usage and a live request log](docs/images/dashboard.png)
+## Dashboard overview
+
+Global totals, scoped exploration, timelines and the request log share one view.
+See the [visual dashboard guide](docs/dashboard.md) for focused screenshots of
+tokens, speed/latency, cost, providers, models and Settings.
+
+![Dashboard showing request charts, usage and a request log](docs/images/dashboard.png)
+
+This static capture retains recorded metrics from an authorized history snapshot
+with replaced identifiers. The guide explains its capture limitations.
 
 ## What you get
 
@@ -17,10 +26,6 @@ headers, and model discovery.
   counts. Zero health badges stay hidden; missing cost is not a zero bill.
 - Scoped Pause, provider-wide Limits, opt-in Debug, filtered export/deletion
   and revision-checked Settings. Source builds also support rebuild/restart.
-
-![Explorer showing main and sub-conversation cards with parent links](docs/images/explorer.png)
-
-Screenshots use synthetic local fixtures, not private requests or provider data.
 
 ## Before you run
 
@@ -55,8 +60,11 @@ docker compose logs --tail 50
 
 [compose.yaml](compose.yaml) publishes only on host loopback. Set
 `MILLIVOLT_PORT` to an unused host port if needed. Its named volumes retain
-history and private Settings configuration when the container is replaced; an
-initially empty config volume uses built-in defaults. The runtime is non-root
+history and private Settings configuration when the container is replaced.
+Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
+including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles).
+No separate config download is needed; existing saved settings are not overwritten.
+The runtime is non-root
 with a read-only root filesystem. Dashboard rebuild is unavailable in an image.
 
 See [container operation](docs/operations.md#containers) for image selection,
@@ -119,8 +127,10 @@ model lists. This is not an unconditional byte-for-byte or exactly-once contract
 ## Configuration and documentation
 
 [proxy.example.yaml](proxy.example.yaml) is the generated, documented example.
-`proxy.yaml` is your ignored local configuration; do not commit it. Defaults and
-validation belong to `internal/config`, and Settings uses that same schema.
+It includes enabled compatibility profiles without registering provider keys or
+upstream URLs. `proxy.yaml` is your ignored local configuration; do not commit it.
+Defaults, example profiles and validation are defined in `internal/config`, and
+Settings uses that same schema.
 See [operations](docs/operations.md) for overrides, reloads, backups, and restart
 requirements.
 

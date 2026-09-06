@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -72,17 +73,64 @@ func TestDefaultHasNoZeroTunables(t *testing.T) {
 
 // The public example is generated, including every field and its documentation.
 // Never inspect the operator's ignored local proxy.yaml in a repository test.
-func TestProxyExampleMatchesDefaults(t *testing.T) {
+func TestProxyExampleMatchesExample(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join("..", "..", "proxy.example.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var want bytes.Buffer
-	if err := WriteYAML(&want, Default()); err != nil {
+	if err := WriteYAML(&want, Example()); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got, want.Bytes()) {
-		t.Fatal("proxy.example.yaml differs from generated defaults; regenerate with go run ./cmd/proxy -print-config")
+		t.Fatal("proxy.example.yaml differs from generated example; regenerate with go run ./cmd/proxy -print-example-config")
+	}
+}
+
+func TestExampleProfilesAreIsolated(t *testing.T) {
+	example, pristine, defaults := Example(), Example(), Default()
+	if err := example.Validate(); err != nil {
+		t.Fatalf("shipped example is invalid: %v", err)
+	}
+	if len(defaults.Providers) != 0 || len(example.Providers) != 2 {
+		t.Fatal("only the shipped example should enable the two provider profiles")
+	}
+	withoutProfiles := example.Clone()
+	withoutProfiles.Providers = nil
+	if !reflect.DeepEqual(withoutProfiles.Map(), defaults.Map()) {
+		t.Fatal("example duplicates or changes server defaults")
+	}
+	for _, label := range []string{"cursor.sh", "x.ai"} {
+		profile, ok := example.Providers[label]
+		if !ok || len(profile.Headers) == 0 || len(profile.CostKeys) != 0 || len(profile.UsageKeys) != 0 {
+			t.Errorf("profile %q must retain headers and automatic cost/usage detection", label)
+		}
+		for header := range profile.Headers {
+			if strings.EqualFold(header, "Authorization") || strings.EqualFold(header, "Cookie") || strings.Contains(strings.ToLower(header), "api-key") {
+				t.Errorf("example contains credential header %q", header)
+			}
+		}
+	}
+	xai := example.Providers["x.ai"]
+	if xai.ModelsPath != "/language-models" || !reflect.DeepEqual(xai.ModelsKeys, map[string]string{
+		"input_modalities": "input_modalities", "output_modalities": "output_modalities",
+	}) {
+		t.Fatal("xAI example must use documented modality fields, never version as context length")
+	}
+	if xai.Headers["User-Agent"] != xai.Headers["x-grok-client-identifier"]+"/"+xai.Headers["x-grok-client-version"]+" ({{platform}})" {
+		t.Fatal("Grok compatibility identity must share its version")
+	}
+	for _, profile := range example.Providers {
+		for name := range profile.Headers {
+			profile.Headers[name] = "changed"
+		}
+		for name := range profile.ModelsKeys {
+			profile.ModelsKeys[name] = "changed"
+		}
+	}
+	example.ModelRules[0].Mode = "changed"
+	if !reflect.DeepEqual(pristine.Map(), Example().Map()) || !reflect.DeepEqual(defaults.Map(), Default().Map()) {
+		t.Fatal("Example returned shared mutable configuration")
 	}
 }
 

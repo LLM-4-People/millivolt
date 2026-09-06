@@ -1,12 +1,18 @@
 import argparse
 import asyncio
 import copy
+import subprocess
+import sys
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from playwright.async_api import async_playwright
 
 import browser_check as fixture
-from explorer_check import docs_snapshot
+from explorer_check import docs_directory, docs_snapshot, history_route
 from browser_check import require
 
 try:
@@ -79,6 +85,59 @@ for key in empty:
         raise RuntimeError('accepted incomplete documentation snapshot: ' + key)
 
 hits = []
+
+# Reject ambiguous publication modes before a browser, network request or
+# output directory exists, including with interpreter assertions disabled.
+with tempfile.TemporaryDirectory(prefix='millivolt-capture-guard-') as directory:
+    output = Path(directory) / 'unpublished'
+    require(docs_directory(output) == output, 'direct publication directory was rejected')
+    link = Path(directory) / 'linked'
+    link.symlink_to(output, target_is_directory=True)
+    for unsafe in (link, link / 'nested'):
+        try:
+            docs_directory(unsafe)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError('accepted symlinked publication directory')
+    for conflicting in ('--docs-images', '--screenshots'):
+        result = subprocess.run(
+            [sys.executable, '-B', '-O', str(Path(__file__).with_name('explorer_check.py')),
+             '--target', base, '--docs-history', str(output), conflicting, str(output)],
+            capture_output=True, text=True, timeout=10,
+        )
+        require(result.returncode == 2 and 'error:' in result.stderr and not output.exists(),
+                'ambiguous documentation publication did not fail before capture')
+
+
+async def history_method_checks():
+    with patch.object(fixture, 'browser_route', new_callable=AsyncMock) as delegated:
+        for method in ('POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT', 'get'):
+            route = SimpleNamespace(request=SimpleNamespace(method=method), abort=AsyncMock())
+            errors = []
+            await history_route(route, base, errors)
+            route.abort.assert_awaited_once_with()
+            delegated.assert_not_awaited()
+            require(len(errors) == 1, 'non-read documentation request did not report rejection')
+        for method in ('GET', 'HEAD'):
+            route = SimpleNamespace(request=SimpleNamespace(method=method, url=base + '/'), abort=AsyncMock())
+            errors = []
+            await history_route(route, base, errors)
+            delegated.assert_awaited_once_with(route, base, errors)
+            route.abort.assert_not_awaited()
+            require(not errors, 'read-only documentation request was rejected')
+            delegated.reset_mock()
+        for path in ('/v1/models', '/v1/chat/completions', '/metrics/export', '/admin/pause',
+                     '/dash/../v1/models', '/dash/%2e%2e/private.js', '/dash//private.js',
+                     '/dash/../private.js', '/dash/private.db', '/dash/\\private.js'):
+            route = SimpleNamespace(request=SimpleNamespace(method='GET', url=base + path), abort=AsyncMock())
+            errors = []
+            await history_route(route, base, errors)
+            route.abort.assert_awaited_once_with()
+            delegated.assert_not_awaited()
+            require(len(errors) == 1, 'non-dashboard GET was admitted during capture')
+
+
 class Receiver(BaseHTTPRequestHandler):
     def do_GET(self):
         hits.append(self.path)
@@ -106,6 +165,7 @@ for server in (receiver, origin):
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
 async def main():
+    await history_method_checks()
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         try:
@@ -126,7 +186,7 @@ async def main():
             except Exception:
                 pass
             require(not hits and any('foreign origin' in error for error in errors), ('origin guard failed', hits, errors))
-            print('PASS: explicit guards, database namespace/restart, same-origin browser load, redirected/direct foreign browser origins blocked')
+            print('PASS: explicit guards, database namespace/restart, publication directories/modes, read-only dashboard capture, same-origin browser load, redirected/direct foreign browser origins blocked')
         finally:
             await browser.close()
 try:

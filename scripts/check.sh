@@ -19,6 +19,7 @@ case "$mode" in
     python3 -B -O scripts/repository_check_test.py
     python3 -B scripts/repository_check.py
     python3 -B -O scripts/check_release_test.py
+    python3 -B -O scripts/backup_db_test.py
     unformatted="$(gofmt -l version.go version_test.go cmd internal scripts/containercheck scripts/licenses)"
     [ -z "$unformatted" ] || die "gofmt required: $unformatted"
     for script in scripts/*.sh; do bash -n "$script"; done

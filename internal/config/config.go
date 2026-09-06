@@ -475,6 +475,47 @@ func Default() *Config {
 	}
 }
 
+// Example returns the shipped configuration, reusing every server default and
+// enabling two optional public provider profiles. These noncredential headers
+// are compatibility snapshots, not verified or stable provider API contracts.
+// Operators can edit or remove them in their private config or Settings.
+// Built-in defaults remain provider-neutral; loading no config never adds them.
+func Example() *Config {
+	c := Default()
+	const grokVersion = "1.0.13" // Keep the compatibility identity internally consistent.
+	c.Providers = map[string]ProviderOverride{
+		"cursor.sh": {
+			UsageKeys:  map[string]string{},
+			ModelsKeys: map[string]string{},
+			Headers: map[string]string{
+				"X-Cursor-Agent-Allowed-Tools": "mcp_tool_call",
+				"x-cursor-client-type":         "cli",
+				"x-cursor-client-version":      "cli-2026.08.11-0000000",
+				"x-ghost-mode":                 "true",
+				"x-request-id":                 "{{uuid4}}",
+			},
+		},
+		"x.ai": {
+			// The documented language-models endpoint reports modalities.
+			// Its version field is a model version, never a context length.
+			// Cost/usage remain automatic, including USD tick conversion.
+			UsageKeys:  map[string]string{},
+			ModelsPath: "/language-models",
+			ModelsKeys: map[string]string{
+				"input_modalities":  "input_modalities",
+				"output_modalities": "output_modalities",
+			},
+			Headers: map[string]string{
+				"User-Agent":               "grok-shell/" + grokVersion + " ({{platform}})",
+				"x-grok-client-identifier": "grok-shell",
+				"x-grok-client-version":    grokVersion,
+				"x-grok-req-id":            "{{uuid4}}",
+			},
+		},
+	}
+	return c
+}
+
 func yamlKeySet(present map[string]any, key string) bool {
 	_, ok := present[key]
 	return ok

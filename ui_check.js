@@ -236,6 +236,15 @@ const dom = dashboardDOM(html, pageOptions);
 
 const w = dom.window;
 const d = w.document;
+for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
+  'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
+  'bad_label.example', '-host.example', 'host-.example', 'host..example']) {
+  check('provider favicon rejects non-public host label ' + JSON.stringify(name),
+    w.providerOrigin(name) === '' && !w.entityBadge('provider', name).includes('<img'));
+}
+check('qualified provider favicon keeps the canonical host',
+  w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
+  w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const rows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row[data-id]')].filter(tr => !tr.classList.contains('retry-sub'));

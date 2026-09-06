@@ -6,6 +6,8 @@ Reuses browser_check's canonical target/database/browser guards. Starts one
 loopback mock only AFTER the private-config check, creates a unique client,
 and purges only that synthetic client in finally. No operator setting changes.
 SSE is disabled by the shared route guard: this exercises HTTP/bootstrap/poll.
+The separate --docs-history mode publishes only a revalidated derived history
+copy using read-only browser requests; it never creates or purges fixtures.
 """
 
 import argparse
@@ -13,14 +15,16 @@ import asyncio
 import hashlib
 import json
 import threading
+import tempfile
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 from playwright.async_api import async_playwright
 
 import browser_check as guards
+from backup_db import verify_docs_copy
 from browser_check import require
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
@@ -134,6 +138,144 @@ async def docs_preflight(request, base, client, count):
         docs_snapshot(await response.json(), client, count)
     finally:
         await response.dispose()
+
+
+def docs_directory(value):
+    output = Path(value).absolute()
+    require(output.resolve() == output and (not output.exists() or output.is_dir()),
+            'documentation output must be a direct directory, without symlinked ancestors')
+    return output
+
+
+async def capture_image(page, destination, selector=None):
+    docs_directory(destination.parent)
+    require(not destination.is_symlink(), 'refusing a symlinked documentation image')
+    # Use actual responsive layout and wait for font/canvas commits. No CSS,
+    # chart arrays or record values are changed to manufacture a prettier view.
+    await page.evaluate('''async () => {
+        await document.fonts.ready;
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }''')
+    subject = page.locator(selector) if selector else page
+    options = {'path': str(destination), 'type': 'png', 'scale': 'css', 'animations': 'disabled'}
+    if not selector:
+        options['full_page'] = True
+    await subject.screenshot(**options)
+
+
+async def history_route(route, base, errors):
+    # Documentation capture cannot submit inference or operator mutations.
+    if route.request.method not in ('GET', 'HEAD'):
+        errors.append('documentation capture attempted a non-read request')
+        await route.abort()
+        return
+    path = urlsplit(route.request.url).path
+    # GET is not enough: the proxy catch-all can forward GET model discovery
+    # upstream. Only dashboard resources and the reads used by this workflow
+    # are admitted. The shared guard still enforces origin/redirect/SSE rules.
+    if path not in ('/', '/favicon.ico', '/admin/config', '/admin/restart',
+                    '/metrics/bootstrap', '/metrics/agg/chart', '/metrics/agg/explorer',
+                    '/metrics/agg/log', '/metrics/live/stream') and not (
+            path.startswith('/dash/') and path.endswith(('.js', '.css'))
+            and all(part not in ('', '.', '..') for part in path[1:].split('/'))
+            and '%' not in path and '\\' not in path):
+        errors.append('documentation capture attempted a non-dashboard resource')
+        await route.abort()
+        return
+    await guards.browser_route(route, base, errors)
+
+
+async def capture_history(args):
+    """Capture only an explicitly derived, revalidated history copy.
+
+    This is separate from the synthetic regression above: no fixture requests,
+    purge, configuration changes, raw history, or failure images are produced.
+    """
+    base = guards.target(args.target)
+    output = docs_directory(args.docs_history)
+    errors = []
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch()
+        try:
+            context = await browser.new_context(viewport={'width': 1440, 'height': 1000}, service_workers='block')
+            await context.route('**/*', lambda route: history_route(route, base, errors))
+            response = await context.request.get(base + '/admin/config', max_redirects=0)
+            try:
+                require(response.status == 200, 'documentation configuration preflight failed')
+                document = await response.json()
+            finally:
+                await response.dispose()
+            guards.private_config(document, base)
+            public_config = Path(__file__).resolve().parent.parent / 'proxy.example.yaml'
+            require(Path(document['path']).read_bytes() == public_config.read_bytes(),
+                    'history capture requires the public example, never a private operator config')
+            database = Path(document['effective']['db_path'])
+            summary = verify_docs_copy(database)
+            require(summary['records'] > 0, 'history capture requires recorded requests')
+            page = await context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+
+            async def ready(dim):
+                await page.wait_for_function('''([dim,n]) => explorerAgg?.dim === dim &&
+                    explorerAgg.scope?.matches === n && kpiAgg?.requests === n &&
+                    chartAgg?.buckets.reduce((sum,b) => sum+b.req,0) === n &&
+                    lastData && _up && !_renderQueued && !_renderDirty''',
+                    arg=[dim, summary['records']], timeout=30000)
+                require(await page.evaluate('''() => kpiInFlight() === 0 &&
+                    !lastData.in_flight_records?.length && storageState?.dropped === 0'''),
+                    'history capture has pending work or storage loss')
+                require(not errors, errors)
+
+            # Stage every image outside the repository. A failed guard leaves
+            # the published gallery unchanged, and no failure image is retained.
+            with tempfile.TemporaryDirectory(prefix='millivolt-docs-images-') as temporary:
+                staging = Path(temporary)
+                await page.goto(navigation(base, [], 'provider'), wait_until='domcontentloaded')
+                await page.select_option('#chart-window', 'all')
+                await ready('provider')
+                await capture_image(page, staging / 'dashboard.png')
+                # The natural-height desktop layout leaves room for the full
+                # dimension rail in focused explorer captures.
+                await page.set_viewport_size({'width': 1440, 'height': 900})
+                await ready('provider')
+                await capture_image(page, staging / 'explorer.png', '#explorer')
+
+                await page.goto(navigation(base, [], 'model'), wait_until='domcontentloaded')
+                await ready('model')
+                await capture_image(page, staging / 'models.png', '#explorer')
+
+                # Below the existing 1200px breakpoint, the chart spans the
+                # full content width. This is the app's layout, not injected CSS.
+                await page.set_viewport_size({'width': 1180, 'height': 1000})
+                for preset, filename in (('tokens', 'tokens.png'), ('latency', 'speed-latency.png'), ('cost', 'cost.png')):
+                    await page.select_option('#chart-preset', preset)
+                    if preset == 'latency':
+                        await page.select_option('#chart-pct', '95')
+                    await ready('model')
+                    await capture_image(page, staging / filename, '.traffic-card')
+
+                await page.set_viewport_size({'width': 1440, 'height': 720})
+                await page.locator('#btn-settings').click()
+                await page.locator('#settings-rail [data-st-cat="dashboard"]').click()
+                await page.wait_for_function('''() => settingsDoc && settingsCat === 'dashboard' &&
+                    document.querySelector('#btn-settings-apply').disabled''')
+                await ready('model')
+                await capture_image(page, staging / 'settings.png', '#settings-sheet')
+                require(verify_docs_copy(database) == summary, 'history changed while capturing')
+                require(Path(document['path']).read_bytes() == public_config.read_bytes(),
+                        'configuration changed while capturing')
+                require(not errors, errors)
+                output = docs_directory(output)
+                output.mkdir(parents=True, exist_ok=True)
+                require(all(not (output / snapshot.name).is_symlink() for snapshot in staging.iterdir()),
+                        'refusing a symlinked documentation image')
+                for snapshot in staging.iterdir():
+                    # Screenshots are generated output, not retained database,
+                    # exports, traces, raw identifiers or pseudonym mappings.
+                    (output / snapshot.name).write_bytes(snapshot.read_bytes())
+            print(json.dumps({'history': summary, 'images': 7, 'browser_errors': errors}))
+        finally:
+            await browser.close()
 
 
 async def layout(page):
@@ -311,12 +453,10 @@ async def check(args):
                 await docs_preflight(context.request, base, label, 6)
                 docs_snapshot(await page.evaluate('() => ({...lastData,kpi:kpiAgg,storage:storageState})'), label, 6)
                 require(not results['browser_errors'], results['browser_errors'])
-                output = Path(args.docs_images)
+                output = docs_directory(args.docs_images)
                 output.mkdir(parents=True, exist_ok=True)
-                await page.screenshot(path=str(output / 'dashboard.png'), full_page=True,
-                                      type='png', scale='css', animations='disabled')
-                await page.locator('#explorer').screenshot(path=str(output / 'explorer.png'),
-                                                         type='png', scale='css', animations='disabled')
+                await capture_image(page, output / 'dashboard.png')
+                await capture_image(page, output / 'explorer.png', '#explorer')
                 results['checks'].append('documentation images: complete synthetic-only server and browser snapshots')
             results['mock_attempts'] = upstream.calls
             print(json.dumps(results))
@@ -344,6 +484,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--target', required=True)
     parser.add_argument('--screenshots', help='optional scratch screenshot directory')
-    parser.add_argument('--docs-images', help='publish dashboard.png and explorer.png only after synthetic-only checks; requires fresh empty dev history')
+    publication = parser.add_mutually_exclusive_group()
+    publication.add_argument('--docs-images', help='publish two synthetic fixture images; requires fresh empty dev history')
+    publication.add_argument('--docs-history', help='publish seven images of an explicitly redacted history copy; no fixture requests or mutations')
     args = parser.parse_args()
-    asyncio.run(check(args))
+    if args.docs_history and args.screenshots:
+        parser.error('--docs-history cannot retain diagnostic screenshots')
+    asyncio.run(capture_history(args) if args.docs_history else check(args))

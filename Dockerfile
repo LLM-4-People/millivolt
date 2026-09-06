@@ -22,6 +22,9 @@ COPY --from=build /out/millivolt /millivolt
 COPY --from=build /out/licenses /usr/share/licenses/millivolt
 COPY --from=build --chown=65532:65532 /out/data/ /data/
 COPY --from=build --chown=65532:65532 /out/config/ /config/
+# Docker seeds a fresh config volume from this generated example. Existing
+# volume contents are retained; Settings owns subsequent private edits.
+COPY --chown=65532:65532 --chmod=0600 proxy.example.yaml /config/proxy.yaml
 USER 65532:65532
 WORKDIR /data
 EXPOSE 8080

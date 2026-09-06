@@ -19,13 +19,13 @@ func TestVersionOnly(t *testing.T) {
 		flag.CommandLine = flag.NewFlagSet("proxy", flag.ExitOnError)
 		os.Args = []string{"proxy", "-version", "-config", "invalid.yaml",
 			"-listen", "not-an-address", "-db-path", "missing/never.db", "-pid-file", "never.pid"}
-		if mode == "conflict" {
-			os.Args = append(os.Args, "-print-config")
+		if mode != "version" {
+			os.Args = append(os.Args, "-"+mode)
 		}
 		main()
 		os.Exit(0)
 	}
-	for _, mode := range []string{"version", "conflict"} {
+	for _, mode := range []string{"version", "print-config", "print-example-config"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			invalid := []byte("unknown-setting: [\n")
@@ -40,7 +40,7 @@ func TestVersionOnly(t *testing.T) {
 			var stderr bytes.Buffer
 			cmd.Stderr = &stderr
 			output, err := cmd.Output()
-			if mode == "conflict" {
+			if mode != "version" {
 				if err == nil || len(output) != 0 || !bytes.Contains(stderr.Bytes(), []byte("mutually exclusive")) {
 					t.Fatalf("conflicting flags: output %q, stderr %q, err %v", output, &stderr, err)
 				}

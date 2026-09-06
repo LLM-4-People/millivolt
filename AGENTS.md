@@ -25,6 +25,9 @@ OpenAI-compatible inference proxy and embedded dashboard. Read
   [proxy.example.yaml](proxy.example.yaml). Document type/range/reload behavior.
   Never add a consumer fallback default. Internal safety/implementation constants
   remain named and explained in the owning file.
+  Deployment examples use `config.Example()`, which reuses `Default()` and owns
+  enabled compatibility profiles; regenerate them with `-print-example-config`.
+  `-print-config` remains the neutral built-in default document.
 - Prefer idiomatic maintained APIs; confirm the installed version's behavior.
 - Provider-agnostic mechanisms and neutral fixtures are mandatory. Provider data
   belongs in config mappings, not label branches or static model-price tables.
@@ -59,6 +62,11 @@ target only a verified private instance and clean up their unique fixture scope.
 Use scoped ownership for helper processes; no paid-provider or production calls
 unless the user explicitly authorizes them. Never copy a live SQLite database
 as a plain file; use the existing online-backup helper.
+
+Documentation history requires explicit authorization and the separate redacted
+copy workflow in [Contributing](CONTRIBUTING.md#documentation-screenshots).
+Never serve raw copied history for publication or weaken the synthetic fixture
+guard to accept it. Captures are static, not evidence of current live status.
 
 ## Core invariants
 

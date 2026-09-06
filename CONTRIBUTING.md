@@ -73,7 +73,9 @@ Overrides are deliberately restricted: `DEV_PORT` is a non-production port,
 `DEV_HOST` is loopback, and `DEV_DB` is a permitted scratch filename or `none`.
 `DEV_COPY_DB=1` seeds a consistent online backup of local history: use it only
 when that history is authorized for the task, and treat the scratch copy as
-sensitive. Do not use broad process kills or start an ad-hoc second main instance.
+sensitive. `DEV_COPY_DB=redacted` instead derives the separately validated
+documentation copy described below; `0` keeps fresh fixture state. Do not use
+broad process kills or start an ad-hoc second main instance.
 
 The browser fixtures share private-target/config/database and redirect guards.
 They disable SSE and test bootstrap/poll rendering, not uninterrupted live-feed
@@ -107,28 +109,45 @@ and stress fixtures require that script's private process/database identity.
 
 ## Documentation screenshots
 
-Publish real application captures using the existing explorer fixture, never a
-running operator's history. From a checkout with the browser dependencies installed:
+The published gallery uses recorded metrics from an explicitly authorized,
+redacted local-history snapshot, not fabricated timing or cost values. Never
+point capture tools at a main instance or serve a raw history copy for screenshots.
+The source is the checkout's local `proxy.db`, opened read-only through the existing
+online-backup helper. This workflow needs explicit authorization for that history.
+
+From a checkout with browser dependencies installed and that authorized source:
 
 ```sh
 (
   set -e
   export DEV_PORT=18081 DEV_HOST=127.0.0.1
   export DEV_DB=/tmp/millivolt/millivolt-dev-docs.db
-  export DEV_CONFIG=proxy.example.yaml DEV_COPY_DB=0
+  export DEV_CONFIG=proxy.example.yaml DEV_COPY_DB=redacted
   trap 'scripts/dev.sh stop' EXIT
   scripts/dev.sh up
   python3 -B -O scripts/explorer_check.py \
-    --target "http://${DEV_HOST}:${DEV_PORT}" --docs-images docs/images
+    --target "http://${DEV_HOST}:${DEV_PORT}" --docs-history docs/images
 )
 ```
 
-Choose an unused permitted dev port. The command creates six synthetic local
-requests and captures `dashboard.png` and `explorer.png` after the fixture checks.
-It rejects copied/private history using global totals, visible rows, pending work
-and storage-drop checks before publishing images. Fixture records are cleaned up;
-the exit trap stops its private process. Review both images before committing.
-These are illustrative UI captures, not performance or provider-compatibility claims.
+Choose an unused permitted dev port. Before startup, `dev.sh` derives a new
+metrics-only database: identifiers are replaced, content/headers/debug data are
+removed, and recorded timing, token and cost values are retained. The raw online
+snapshot is temporary and never served. Treat even the derived database as
+sensitive; retained usage and timestamps can reveal activity patterns.
+
+The capture mode revalidates every row and its provenance, plus exact public
+configuration bytes, before and after browser capture. It permits only read-only
+same-origin requests: no inference, POST, purge or Settings save. Images are
+staged before publication, and the exit trap stops the private process. Review
+all seven images before committing. SSE is deliberately disabled, so the images'
+offline indicator describes a static capture session, not current service health.
+
+The independent `--docs-images` option remains a strict synthetic regression.
+Run it only with `DEV_COPY_DB=0` and direct those two images to a scratch directory,
+not `docs/images`. It creates and cleans up its own six-request fixture and
+rejects copied history. Neither capture mode is a performance or compatibility
+benchmark; do not weaken one mode's admission checks to accommodate the other.
 
 ## Performance evidence
 

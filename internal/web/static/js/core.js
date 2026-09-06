@@ -130,14 +130,15 @@ document.addEventListener('keydown', e => {
 // its first segment. Hosts without a public favicon (IPs, localhost, *.internal)
 // keep the type-icon sibling, as do icons that fail to load.
 function providerOrigin(name) {
-  if (!name) return '';
+  if (typeof name !== 'string' || !name) return '';
+  name = name.toLowerCase();
   if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?$/.test(name)) return '';          // IPv4
   if (name.includes(':') || name.startsWith('[')) return '';           // IPv6 / host:port
-  if (name === 'localhost' || name.endsWith('.local') || name.endsWith('.internal')) return '';
-  // Single-label provider (e.g. "openai", "deepseek") - best-guess the public
-  // host for the favicon. A wrong guess just 404s and is cached as broken, so
-  // this is a safe progressive enhancement, never a correctness dependency.
-  if (!name.includes('.')) return name.toLowerCase() + '.com';
+  if (name === 'localhost' || name.endsWith('.localhost') || name.endsWith('.local') || name.endsWith('.internal')) return '';
+  // Only qualified DNS hostnames are candidates. Arbitrary provider labels
+  // and private single-label hosts must not become guessed external lookups.
+  if (name.length > 253 || !name.includes('.') || !name.split('.').every(label =>
+    /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return '';
   return name;
 }
 function providerLabel(name) {

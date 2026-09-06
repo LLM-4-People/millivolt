@@ -29,7 +29,9 @@ PUBLIC_PATHS = (
     "Dockerfile", ".dockerignore", "compose.yaml", "compose.dev.yaml", "VERSION",
     "version.go", "cmd/release/main.go", "scripts/containercheck/main.go",
     "scripts/licenses/main.go", "deploy/nginx.conf", "docs/reverse-proxy.md",
-    "docs/images/dashboard.png", "docs/images/explorer.png",
+    "docs/dashboard.md", "docs/images/dashboard.png", "docs/images/explorer.png",
+    "docs/images/models.png", "docs/images/tokens.png", "docs/images/speed-latency.png",
+    "docs/images/cost.png", "docs/images/settings.png",
     ".github/workflows/check.yml",
     ".github/dependabot.yml", ".github/pull_request_template.md", ".env.example",
 )

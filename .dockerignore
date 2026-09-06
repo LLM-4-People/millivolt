@@ -8,6 +8,7 @@
 !version.go
 !LICENSE
 !THIRD_PARTY_NOTICES.md
+!proxy.example.yaml
 !cmd/
 !cmd/proxy/
 !cmd/proxy/**

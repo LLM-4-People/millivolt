@@ -5,6 +5,35 @@ Select an adapter with `X-Proxy-Format`; do not infer one from a provider label.
 See [protocol](protocol.md) for routing/auth headers and
 [operations](operations.md#known-limits) for current limitations.
 
+## Bundled compatibility profiles
+
+The generated [configuration example](../proxy.example.yaml) enables Grok and
+Cursor profiles. `config.Example()` in [internal/config](../internal/config)
+owns their exact mappings and header values; built-in `config.Default()` remains
+provider-neutral. The image installs the example into fresh config volumes.
+Existing saved configurations are not silently replaced.
+
+These are operator-selected compatibility snapshots, not verified current public
+API fingerprints or permission to use an account service. They contain no keys
+and do not choose the upstream URL or protocol adapter for a request. Review
+them for your integration and remove or adjust any unwanted profile in Settings.
+
+The Grok profile supplies client-identity/request-ID headers and model-modality
+enrichment through the model discovery endpoint. Model `version` is not context
+length, and the profile does not invent that mapping. Standard usage detection
+and USD-tick scaling already handle recognized cost fields; custom `cost_keys`
+must name USD values rather than bypassing that scaling. Streaming cost requires
+the upstream to report usage; missing cost is not evidence of a free request.
+See xAI's [model reference](https://docs.x.ai/developers/rest-api-reference/inference/models)
+and [cost tracking](https://docs.x.ai/developers/cost-tracking).
+
+The Cursor profile supplies CLI compatibility, allowed-tool and request-ID
+headers. Its ghost-mode field is a supplied wire preference, not a privacy or
+retention guarantee. Cursor's [public authentication documentation](https://cursor.com/docs/cli/reference/authentication)
+does not establish a stable public contract for this native bridge or its
+compatibility headers. Keep authorization and current service support separate
+from a successful local fixture test.
+
 ## Anthropic-compatible Messages
 
 `anthropic` translates common OpenAI chat requests/responses: message history,
@@ -72,9 +101,9 @@ capability table. Discovery budgets cover this path as well as optional enrichme
 Owners: [proxy/cursor_bidi.go](../internal/proxy/cursor_bidi.go),
 [proxy/cursor_store.go](../internal/proxy/cursor_store.go),
 [format/cursor_run.go](../internal/format/cursor_run.go), and neighboring
-format/protocol tests. Keep protocol constants distinct from configurable
-provider headers; no unverified first-party fingerprint values belong in public
-defaults.
+format/protocol tests. Keep protocol constants distinct from the configurable
+[compatibility profile](#bundled-compatibility-profiles); built-in defaults remain
+neutral and the example does not establish provider support.
 
 ## Token refresh
 

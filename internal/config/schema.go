@@ -226,7 +226,7 @@ func Schema() []Field {
 
 		// ---- providers ----
 		{Key: "providers", Category: "providers", Label: "Provider field maps",
-			Help: "Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment, and headers (a string map). Field names only, never static prices. Header values expand {{uuid4}} to a fresh UUID and {{platform}} to the server's Rust-style os; arch pair; unknown templates stay literal. On HTTP relay requests, configured headers override forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor bridge construct headers separately and do not apply X-Proxy-Headers. Headers can contain secrets; keep runtime configuration private.",
+			Help: "Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment, and headers (a string map). Field names only, never static prices. Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion. Header values expand {{uuid4}} to a fresh UUID and {{platform}} to the server's Rust-style os; arch pair; unknown templates stay literal. On HTTP relay requests, configured headers override forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor bridge construct headers separately and do not apply X-Proxy-Headers. Headers can contain secrets; keep runtime configuration private.",
 			Kind: KindProviders, HotReload: true},
 		{Key: "provider_aliases", Category: "providers", Label: "Provider aliases",
 			Help: "Merge an old provider label into its canonical one (old → canonical). Rewrites stored history at boot and on reload; new requests carry the canonical label immediately. One provider, one entity.",

@@ -3,6 +3,7 @@
 | If you want to… | Read |
 | --- | --- |
 | Start a local instance | [README](../README.md#quickstart) |
+| Explore the dashboard visually | [Dashboard guide](dashboard.md) |
 | Run Docker Compose or manage persistent volumes | [Container operation](operations.md#containers) |
 | Add NGINX or another protected ingress | [Reverse proxy](reverse-proxy.md) |
 | Choose an image or understand version identity | [Versions and images](operations.md#versions-and-images) |

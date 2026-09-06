@@ -6,9 +6,12 @@ The proxy does not provide an authenticated operator plane.
 ## Configuration and CLI
 
 [proxy.example.yaml](../proxy.example.yaml) is generated from the canonical
-`config.Default()` and schema documentation. It is an example, not mutable
-runtime state. Copy it to an ignored local `proxy.yaml` for a new deployment;
-do not start Settings against the committed example.
+`config.Example()` and schema documentation. `Example()` starts with neutral
+`config.Default()` values and adds the enabled
+[Grok/Cursor compatibility profiles](adapters.md#bundled-compatibility-profiles).
+It is not mutable repository state. Source deployments copy it to ignored local
+`proxy.yaml`; images bundle their own copy for fresh config volumes. Do not start
+Settings against the committed example.
 
 | Flag | Behavior |
 | --- | --- |
@@ -16,8 +19,12 @@ do not start Settings against the committed example.
 | `-listen ADDRESS` | Override the configured listen address. |
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
-| `-print-config` | Print the generated default YAML and exit without loading local config or starting runtime services. |
-| `-version` | Print JSON build identity and exit without loading config or starting runtime services. Mutually exclusive with `-print-config`. |
+| `-print-config` | Print neutral built-in default YAML. |
+| `-print-example-config` | Print the deployment example, including its enabled compatibility profiles. |
+| `-version` | Print JSON build identity. |
+
+The three output-only flags are mutually exclusive and exit without loading local
+config, opening a database or starting runtime services.
 
 Precedence is built-in defaults, then the YAML file, then CLI overrides.
 A missing file currently loads defaults; verify the path rather than assuming
@@ -28,12 +35,13 @@ fail load. CLI-overridden fields cannot be saved from Settings.
 To regenerate the public example after changing its canonical owners:
 
 ```sh
-go run ./cmd/proxy -print-config > proxy.example.yaml
+go run ./cmd/proxy -print-example-config > proxy.example.yaml
 ```
 
-The shared checks verify generated-file consistency. Do not copy local provider
-fingerprints or credentials into defaults. Optional mappings are mechanisms,
-not required provider registrations, for example:
+The shared checks verify generated-file consistency. Built-in defaults remain
+neutral; compatibility-profile values belong only in `config.Example()`, never
+consumer fallbacks or private credentials. Optional mappings are mechanisms,
+not provider registrations, for example:
 
 ```yaml
 providers:
@@ -53,8 +61,8 @@ The [Dockerfile](../Dockerfile) builds Linux `amd64` and `arm64` targets and run
 as UID/GID `65532:65532`, with no source tree, Go toolchain or shell in the
 runtime image. JavaScript/CSS are embedded in the Go binary; Node and Python
 are test tools, not runtime dependencies. The binary is stripped of debug and
-symbol tables. The final stage copies only that binary, dependency notices and
-prepared state directories onto the minimal distroless base.
+symbol tables. The final stage copies only that binary, dependency notices,
+the generated example and prepared state directories onto the minimal distroless base.
 The [Compose quickstart](../README.md#docker-compose) downloads the image-only
 [compose.yaml](../compose.yaml). Normal deployment never builds from source.
 Local builds use the separate
@@ -108,10 +116,20 @@ see Docker's [Linux post-installation guidance](https://docs.docker.com/engine/i
 | Container path | Persistence and permissions |
 | --- | --- |
 | `/data` | Writable database directory, including SQLite WAL/SHM sidecars. Mount the directory, not just `proxy.db`. |
-| `/config` | Writable private configuration directory if Settings should save. The default file is `/config/proxy.yaml`; a missing file uses built-in defaults. |
+| `/config` | Writable private configuration directory. The image bundles `/config/proxy.yaml` from the generated example; if deliberately absent, the application uses neutral built-in defaults. |
 
-Fresh named volumes use the image's prepared directories. Existing volumes and
-host bind mounts must permit the runtime UID to read/write their contents.
+Fresh named config volumes receive the image's bundled example, owned by
+UID/GID `65532:65532` with mode `0600`. No separate configuration download is
+required. Replacing an image does not overwrite an existing saved configuration;
+review example-profile changes deliberately when upgrading.
+
+These bundle semantics apply to images built from this revision. Existing release
+images are not changed by a main-branch update; consult the documentation at the
+selected release tag for older images.
+
+Existing volumes and host bind mounts must permit the runtime UID to read/write
+their contents. Bind mounts hide bundled files: supply a config yourself when
+using one, or intentionally accept the application's missing-file defaults.
 Use private directory permissions and mode `0600` for a supplied config; with
 rootless Docker or user namespaces, account for the host UID mapping. Do not
 make sensitive directories world-writable to work around ownership failures.
@@ -136,7 +154,8 @@ another reachable host address; it is not included in the supplied deployment.
 Arguments after the image replace its complete default command. If overriding
 a server flag, also keep `-config /config/proxy.yaml -db-path /data/proxy.db`
 unless intentionally selecting other paths or disabling storage. The
-`-print-config` command can print the public defaults without starting a server.
+`-print-config` and `-print-example-config` commands print their respective
+documents without starting a server.
 
 Replace the container to upgrade or adopt startup-bound settings; the dashboard
 cannot rebuild an immutable image. Keep the same volumes and back them up before

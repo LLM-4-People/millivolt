@@ -20,13 +20,14 @@
 #   DEV_DB     dev scratch DB path      (default /tmp/millivolt/millivolt-dev.db;
 #                                        "none" = in-memory)
 #   DEV_CONFIG source config file (default proxy.example.yaml, relative to repo root)
-#   DEV_COPY_DB=1  seed the dev DB from proxy.db on (re)start (default: fresh)
+#   DEV_COPY_DB   0=fresh, 1=private online backup, redacted=docs-safe metrics
 set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
 DEV_PORT="${DEV_PORT:-8081}"
 DEV_HOST="${DEV_HOST:-127.0.0.1}"
 DEV_CONFIG="${DEV_CONFIG:-proxy.example.yaml}"
+DEV_COPY_DB="${DEV_COPY_DB:-0}"
 # Reserved disposable namespace; an internal safety boundary, not a setting.
 DEV_DIR=/tmp/millivolt
 # Scratch DB lives in /tmp/millivolt (not the repo) so it never dirties the tree.
@@ -34,6 +35,7 @@ DEV_DB="${DEV_DB:-${DEV_DIR}/millivolt-dev.db}"
 # Safety boundary, including status/stop: overrides can never target production
 # or arbitrary files. This namespace belongs exclusively to disposable dev data.
 die() { echo "dev: $*" >&2; exit 1; }
+case "$DEV_COPY_DB" in 0|1|redacted) ;; *) die "DEV_COPY_DB must be 0, 1, or redacted" ;; esac
 [[ "$DEV_PORT" =~ ^[0-9]{1,5}$ ]] || die "DEV_PORT must be a numeric port"
 DEV_PORT=$((10#$DEV_PORT))
 (( DEV_PORT >= 1024 && DEV_PORT <= 65535 && DEV_PORT != 8080 )) || die "DEV_PORT must be 1024..65535 and not production port 8080"
@@ -94,6 +96,10 @@ esac
 # scratch data. Stop/status intentionally do not depend on a source config.
 [ -f "$DEV_CONFIG" ] && [ -r "$DEV_CONFIG" ] || die "DEV_CONFIG must name a readable regular file: $DEV_CONFIG"
 [ ! "$DEV_CONFIG" -ef "$CONFIG_FILE" ] || die "DEV_CONFIG must not be this instance's private destination"
+if [ "$DEV_COPY_DB" != 0 ]; then
+  [ "$DEV_DB" != none ] || die "DEV_COPY_DB requires a scratch database file"
+  [ -f proxy.db ] && [ -r proxy.db ] || die "DEV_COPY_DB requires a readable proxy.db source"
+fi
 
 # 1. Build latest source. Fail fast - never run a stale binary.
 echo "building…"
@@ -105,12 +111,15 @@ fi
 # 2. Stop any prior dev instance on this port (PID-file scoped; never pkill).
 if is_running; then stop; fi
 
-# 3. Scratch DB. Fresh by default; seed from prod only if DEV_COPY_DB=1.
+# 3. Scratch DB. Explicit copies use the online-backup owner. Redaction derives
+# a new metrics-only file before a server can read it; raw pages are never served.
 if [ "$DEV_DB" != "none" ]; then
   rm -f "$DEV_DB" "$DEV_DB-shm" "$DEV_DB-wal"
-  if [ "${DEV_COPY_DB:-0}" = "1" ] && [ -f proxy.db ]; then
-    python3 scripts/backup_db.py proxy.db "$DEV_DB"
-    echo "seeded dev DB from a consistent read-only snapshot of proxy.db"
+  if [ "$DEV_COPY_DB" != 0 ]; then
+    backup_args=()
+    if [ "$DEV_COPY_DB" = redacted ]; then backup_args+=(--docs-safe); fi
+    python3 scripts/backup_db.py "${backup_args[@]}" proxy.db "$DEV_DB"
+    echo "seeded dev DB from a consistent read-only snapshot (mode: $DEV_COPY_DB)"
   fi
 fi
 

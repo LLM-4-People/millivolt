@@ -70,6 +70,7 @@ func protectOperatorRequests(next http.Handler) http.Handler {
 func main() {
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
+	printExampleConfig := flag.Bool("print-example-config", false, "print the documented example with enabled provider profiles and exit without loading configuration")
 	printVersion := flag.Bool("version", false, "print application and source build metadata as JSON and exit without loading configuration")
 	// Override flags let a dev instance run alongside the main one on a
 	// different port + scratch DB (see scripts/dev.sh) without editing the
@@ -81,10 +82,16 @@ func main() {
 	// with its own pid on boot.
 	pidFile := flag.String("pid-file", "", "write the process pid to this file after boot")
 	flag.Parse()
-	if *printVersion {
-		if *printConfig {
-			log.Fatal("-version and -print-config are mutually exclusive")
+	outputs := 0
+	for _, enabled := range []bool{*printVersion, *printConfig, *printExampleConfig} {
+		if enabled {
+			outputs++
 		}
+	}
+	if outputs > 1 {
+		log.Fatal("-version, -print-config and -print-example-config are mutually exclusive")
+	}
+	if *printVersion {
 		info, err := millivolt.CurrentBuild()
 		if err != nil {
 			log.Fatalf("version: %v", err)
@@ -94,10 +101,14 @@ func main() {
 		}
 		return
 	}
-	// Printing defaults is read-only, even if operational flags name an
+	// Printing configuration is read-only, even if operational flags name an
 	// invalid config, database, PID file, or listen address.
-	if *printConfig {
-		if err := config.WriteYAML(os.Stdout, config.Default()); err != nil {
+	if *printConfig || *printExampleConfig {
+		configuration := config.Default
+		if *printExampleConfig {
+			configuration = config.Example
+		}
+		if err := config.WriteYAML(os.Stdout, configuration()); err != nil {
 			log.Fatalf("print config: %v", err)
 		}
 		return
