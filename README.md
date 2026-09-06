@@ -212,6 +212,14 @@ image. Request inspection is bounded, connections are reused and metrics enqueue
 does not wait for SQLite. Shared history aggregation and embedded bootstrap state
 reduce repeated dashboard work.
 
+In the [documented local measurements](docs/operations.md#measured-example), the
+amd64 image was **26.5 MB**, idle RAM was **20.5 MiB** with empty history and
+**217 MiB** with 99,304 retained records. A five-second fast-response stage reached
+**11,073 HTTP requests/s** with exact stored accounting afterward. A higher-load
+stage dropped records, and the report includes that failure. A separate streaming
+test completed at 1,024 client workers, with upstream concurrency capped at 512
+by configuration. These are scoped examples, not deployment guarantees.
+
 Small images do not imply fixed RAM or negligible CPU. Active streams, configured
 buffers, stored-history projections and identity cardinality contribute separate
 costs. See [performance and footprint](docs/operations.md#performance-and-footprint)

@@ -560,6 +560,98 @@ tokens/cost reconciliation and storage-drop deltas. Include observer load and
 whether Debug/body previews were enabled. Short local-upstream bursts are useful
 regressions, not sustained production capacity or provider-latency guarantees.
 
+### Measured example
+
+Measured on 2026-09-06 UTC at source revision
+[`495464c`](https://github.com/LLM-4-People/millivolt/commit/495464c5b485a4b8d021e5b36dcecc9f291f5a2c):
+Go 1.26.6, Linux/amd64 under WSL2, Intel Core Ultra 9 285H, 12 visible logical
+CPUs and 70.7 GiB of visible RAM. This was a shared workstation, not dedicated
+benchmark hardware. Builds/tests were finished before measurement. CPU/RSS
+figures describe the native Go process, not Docker's container-wide accounting.
+
+The public example configuration was used, with only private listen/database
+paths supplied by `scripts/dev.sh`. Debug and body previews were off. No browser
+or live observer was attached during the load runs; the harness read control,
+bootstrap and accounting endpoints outside the measured request stages.
+
+| Artifact or idle state | Measured size |
+| --- | --- |
+| Local amd64 runtime image | 26,503,314 bytes, about 26.5 MB or 25.3 MiB |
+| Fresh process, empty SQLite history | 20.5 MiB RSS |
+| Process with 99,304 redacted history records, after readiness | 217.0 MiB RSS |
+| Same history after All time chart and model-explorer reads | 217.1 MiB RSS |
+
+The local image ID was
+`sha256:bd9f40a0ac119b87d47297130fd63787ed793c6d71b8f56578ce6d3459b247dc`.
+It passed the isolated container smoke test. Image size is Docker's reported
+artifact size, not compressed download size. Idle RSS was sampled after a
+15-second quiet interval. No additional process CPU tick was observed in those
+intervals at 10 ms tick resolution; this does not mean the service uses literally
+zero CPU. These samples do not measure cold-start time or browser rendering.
+
+#### Streaming concurrency
+
+The local upstream emitted ten content frames across approximately one second,
+followed by usage and a terminator. Six closed-loop stages used 1, 8, 32, 128,
+512 and 1,024 workers, each starting work for five seconds and then draining
+active requests. Selected stages:
+
+| Client workers | Peak upstream concurrency | HTTP requests/s | End-to-end p95 | Proxy CPU | Peak proxy RSS |
+| --- | --- | --- | --- | --- | --- |
+| 32 | 32 | 31.6 | 1,011 ms | 3.9% | 25.9 MiB |
+| 512 | 512 | 495.4 | 1,076 ms | 41.6% | 94.7 MiB |
+| 1,024 | 512 | 504.4 | 2,034 ms | 40.6% | 141.0 MiB |
+
+Every stage had unchanged response bytes, zero failed responses, exact stored
+row/token/cost reconciliation and zero storage-drop delta. At 1,024 workers,
+the example's 512-connection per-host limit held upstream concurrency at 512;
+the additional clients waited. That is a configured bottleneck, not a universal
+1,024-request capacity ceiling. The roughly one-second upstream workload is
+included in these latency figures, not proxy overhead.
+
+#### Fast-response throughput and storage overload
+
+A separate fresh process used the same ten-frame response without intentional
+upstream delay. Each stage ran for five seconds. The 512-worker stage was not
+attempted because the harness stopped on storage loss at 128 workers.
+
+| Client workers | HTTP requests/s | End-to-end p50 / p95 | Proxy CPU | Peak proxy RSS | Stored accounting |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1,453 | 0.61 / 1.14 ms | 47.6% | 52.3 MiB | Exact |
+| 8 | 7,092 | 0.95 / 2.00 ms | 259.7% | 80.6 MiB | Exact |
+| 32 | 11,073 | 2.35 / 6.42 ms | 386.8% | 89.5 MiB | Exact |
+| 128 | 16,626 | 7.02 / 15.00 ms | 503.1% | 130.5 MiB | Failed: records dropped |
+
+At 32 workers, all 55,388 responses reconciled with stored rows, tokens and
+fixture cost. At 128 workers, all 83,241 HTTP responses succeeded, but only
+42,045 records persisted and 41,196 were reported dropped. The higher HTTP
+throughput is therefore **not** a complete-accounting result. Increasing queue
+capacity alone cannot make sustained overload lossless.
+
+CPU uses 100% for one logical CPU and excludes the load generator/local upstream.
+For context, that separate process used 229.3% CPU and 19.6 MiB peak RSS at the
+32-worker fast stage, and 39.1% CPU and 63.1 MiB at the 512-worker streaming stage.
+RSS was sampled every 100 ms, so shorter peaks may be missed. Latencies cover
+the complete local HTTP exchange, including the synthetic upstream, and are
+not isolated proxy-only overhead. Percentiles use the harness's nearest-rank
+sample contract.
+
+Each ramp retained its cumulative history between stages and cleaned up only
+its unique client records afterward. HTTP rates and process CPU cover the
+request stage; durable reconciliation can wait up to the harness's separate
+accounting timeout afterward. Consequently, these are short HTTP-load results
+with checked eventual accounting, not sustained durable-writer rates. Real
+payload sizes, identity cardinality, observers, upstream delays, disk speed and
+configuration can materially change the outcome.
+
+Reproduce through the [private development workflow](../CONTRIBUTING.md#performance-evidence),
+using a fresh `DEV_COPY_DB=0` instance for each command:
+
+```sh
+go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128,512,1024 -duration 5s -stream-duration 1s
+go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128,512 -duration 5s -stream-duration 0
+```
+
 ## Known limits
 
 - Recognized provider fields drive usage/cost; this is not independent billing.
