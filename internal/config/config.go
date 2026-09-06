@@ -97,16 +97,12 @@ type Config struct {
 	// AutoTokenRefresh enables stateless expired-token refresh: when a client
 	// presents a JWT access token whose exp has passed (within a small
 	// margin) plus its own refresh token in X-Proxy-Refresh-Token, the proxy
-	// exchanges it at the provider's refresh endpoint. On LLM requests xAI
-	// (x.ai OAuth) is a handback mechanism: the fresh pair is returned to the
-	// client (HTTP 401 + X-Proxy-Access-Token / X-Proxy-Refresh-Token response
-	// headers, error code "token_expired") and the request is not proxied -
-	// the client swaps its key and retries, so the exchange runs once per
-	// rotation instead of on every request. Model discovery
-	// (GET /v1/models) is exempt and refreshes transparently. Cursor's
-	// exchange is in-place: the fresh token is sent upstream for that request
-	// and the pair rides the same response headers. The proxy stores nothing;
-	// only providers with a known refresh mechanism are touched. Hot-reloads.
+	// exchanges it at the provider's refresh endpoint. Every supported mechanism
+	// uses handback on inference: HTTP 401 with code "token_expired", the new
+	// X-Proxy-Access-Token and optional X-Proxy-Refresh-Token response header.
+	// No inference is sent; the client adopts the credentials and retries.
+	// Model discovery is exempt and refreshes transparently without returning
+	// token headers. The proxy retains no reusable credentials. Hot-reloads.
 	AutoTokenRefresh bool `yaml:"auto_token_refresh" json:"auto_token_refresh"`
 
 	// ---- upstream connection pool ----

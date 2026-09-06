@@ -329,10 +329,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {
-		// Model discovery is always TRANSPARENT, even for a handback refresh
-		// mechanism: the tooling that fetches models never implements the
-		// handback contract, so the fresh token is used in place and nothing
-		// is returned (resolveKeyTransparent).
+		// Model discovery keeps its separate transparent-refresh contract for
+		// every mechanism: use the refreshed key without returning token headers.
 		s.serveModels(w, r, t, extractKey(r))
 		return
 	}

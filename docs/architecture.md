@@ -32,6 +32,13 @@ request and concurrency limits layered at the same grant owner. Acquisition
 release settles exactly once. Policy generations prevent clearing/replacing a
 cap from charging another generation's reservation.
 
+[tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
+from response policy. Exchange adapters return credential data only; the shared
+`resolveKey` ends successful inference refreshes with handback before admission,
+live publication or recording. `resolveKeyTransparent` owns the model-discovery
+exception. The token-refresh tests cover both mechanisms, adoption/retry, absent
+replacement tokens, applicability/failure gates and bounded exchange responses.
+
 Retries, provider hints, hold waits and per-send deadlines have distinct owners.
 Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is

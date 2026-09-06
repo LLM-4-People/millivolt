@@ -136,8 +136,9 @@ model lists. This is not an unconditional byte-for-byte or exactly-once contract
 - Discover models through the standard model-list routes, with recognized-list
   normalization, supported pagination and optional metadata enrichment.
 - Opt into Anthropic Messages translation or the Cursor Connect text/tool
-  bridge. Supported expired-token refresh can return fresh credentials or
-  refresh in place; clients remain responsible for their own authorization.
+  bridge. Supported inference-token refresh returns credentials through a shared
+  handback response; clients adopt them and retry. Model discovery refreshes
+  transparently. Clients remain responsible for their own authorization.
 
 See [routing, timing and discovery](docs/protocol.md) and
 [adapter support and limitations](docs/adapters.md). Compatibility profiles are

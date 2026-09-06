@@ -10,10 +10,12 @@
 # Copy the printed headers into private client config. This is for FIRST-TIME
 # login only; renewal is the proxy's job (stateless auto-refresh): while the
 # client presents X-Proxy-Refresh-Token, the proxy exchanges it on Cursor's
-# own host when the JWT expires and keeps the request flowing (in-place
-# refresh; the fresh pair also rides the X-Proxy-Access-Token /
-# X-Proxy-Refresh-Token response headers). If the refresh token is ever
-# rejected upstream, just run this login again.
+# own host when the JWT expires or is about to. Inference returns HTTP 401
+# (code "token_expired") without an upstream send. Adopt X-Proxy-Access-Token
+# and any returned X-Proxy-Refresh-Token, retain the old refresh token when
+# no replacement is returned, then retry. Model discovery refreshes
+# transparently without returning token headers. If the refresh token is
+# rejected upstream, run this login again. See docs/adapters.md#token-refresh.
 #
 # Requires: curl (HTTP/2 for auth/poll), openssl, jq. Nothing is written to disk.
 #

@@ -38,13 +38,13 @@ const (
 	fAgentClientMessageRunRequest = 1
 
 	// AgentRunRequest fields
-	fRunRequestConversationState    = 1  // ConversationStateStructure
-	fRunRequestAction               = 2  // ConversationAction
-	fRunRequestModelDetails         = 3  // ModelDetails
-	fRunRequestMcpTools             = 4  // McpTools (always emitted, may be empty)
-	fRunRequestConversationID       = 5  // string
-	fRunRequestRequestedModel       = 9  // RequestedModel
-	fRunRequestConversationIDMirror = 16 // string (mirrors field 5 on the wire)
+	fRunRequestConversationState   = 1  // ConversationStateStructure
+	fRunRequestAction              = 2  // ConversationAction
+	fRunRequestModelDetails        = 3  // ModelDetails
+	fRunRequestMcpTools            = 4  // McpTools (always emitted, may be empty)
+	fRunRequestConversationID      = 5  // string
+	fRunRequestRequestedModel      = 9  // RequestedModel
+	fRunRequestConversationGroupID = 16 // string, distinct from conversation_id
 
 	// ConversationStateStructure.root_prompt_messages_json (repeated bytes)
 	fConversationStateRootPromptMessagesJSON = 1
@@ -70,8 +70,8 @@ const (
 	// RequestedModel fields
 	fRequestedModelModelID    = 1 // string
 	fRequestedModelMaxMode    = 2 // bool
-	fRequestedModelParameters = 3 // repeated RequestedModel_ModelParameterbytes
-	// RequestedModel_ModelParameterbytes fields (all values are strings).
+	fRequestedModelParameters = 3 // repeated RequestedModel.ModelParameterValue
+	// RequestedModel.ModelParameterValue fields (all values are strings).
 	fModelParameterID    = 1 // string ("effort"|"reasoning"|"thinking"|"fast"|"context")
 	fModelParameterValue = 2 // string
 
@@ -368,7 +368,9 @@ func translateCursorRunRequest(openaiBody []byte, conversationID string, forceUs
 	// so the model can call them; always emit the (possibly empty) McpTools.
 	runRequest = appendMessage(runRequest, fRunRequestMcpTools, cursorMcpTools(in.Tools))
 	runRequest = appendString(runRequest, fRunRequestConversationID, conversationID)
-	runRequest = appendString(runRequest, fRunRequestConversationIDMirror, conversationID)
+	// The bridge places each conversation in its own upstream group. Equal
+	// values are our policy, not an alias between these distinct schema fields.
+	runRequest = appendString(runRequest, fRunRequestConversationGroupID, conversationID)
 	runRequest = appendMessage(runRequest, fRunRequestRequestedModel, requestedModel)
 
 	clientMessage = appendMessage(nil, fAgentClientMessageRunRequest, runRequest)

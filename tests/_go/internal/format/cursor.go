@@ -247,6 +247,14 @@ func TestTranslateCursorRunRequestBasic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Independent descriptor field numbers pin conversation_id (5) and
+	// conversation_group_id (16). The bridge currently uses one group per
+	// conversation; these are not two aliases for one wire field.
+	conversation, group := firstField(rr, 5), firstField(rr, 16)
+	if conversation == nil || group == nil || conversation.wire != wireBytes ||
+		group.wire != wireBytes || len(conversation.raw) == 0 || !bytes.Equal(conversation.raw, group.raw) {
+		t.Fatalf("conversation/group identity mismatch: conversation=%+v group=%+v", conversation, group)
+	}
 
 	// model_id present in RequestedModel (the canonical agent.v1 field; the real
 	// client omits ModelDetails).

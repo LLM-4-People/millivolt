@@ -119,6 +119,31 @@ format/protocol tests. Keep protocol constants distinct from the configurable
 [compatibility profile](#bundled-compatibility-profiles); built-in defaults remain
 neutral and the example does not establish provider support.
 
+### Cursor service and protobuf versions
+
+The service name, transport version and codec are different layers, not two
+protobuf implementations running together:
+
+| Layer | What millivolt uses |
+| --- | --- |
+| Cursor service | `agent.v1.AgentService`: bidirectional `Run` and unary `GetUsableModels`. The `v1` is part of the service namespace. |
+| Connect transport | `Connect-Protocol-Version: 1`. Run uses framed `application/connect+proto`; model discovery uses unframed `application/proto`. |
+| Protobuf codec | The limited handwritten encoder/decoder in [proto.go](../internal/format/proto.go), using the adapter's mapped fields. There is no Go protobuf APIv1 or APIv2 dependency. |
+
+The [Connect specification](https://connectrpc.com/docs/protocol/) defines its
+version header separately from protobuf. Likewise, Go's
+[APIv1/APIv2 distinction](https://go.dev/blog/protobuf-apiv2) and Buf's
+[JavaScript runtime v2](https://buf.build/blog/protobuf-es-v2) are library versions,
+not instructions to change `agent.v1` to `agent.v2` or protobuf syntax to proto2.
+The small codec avoids a generated-runtime dependency, but requires maintaining
+explicit field mappings and does not promise general protobuf conformance.
+
+A read-only check on 2026-09-06 of the installed Cursor CLI bundle
+`2026.08.11-e8db854` found `agent.v1` descriptors with proto3 semantics and
+`@bufbuild/protobuf` **1.10.1**, not v2. This is evidence about that inspected
+client artifact, not a claim about every client release or the current server.
+No live login or inference was used for this check.
+
 ## First-login helpers
 
 [grok-login.sh](../scripts/grok-login.sh) and
@@ -253,7 +278,7 @@ establish support for arbitrary identity providers or compatible service clones.
 | Approval times out, expires or is denied | Verify the account/browser approval, then rerun for a fresh login challenge. Never reuse an expired code. |
 | No refresh token is printed | The helper warns and omits that header. Millivolt cannot renew without it; obtain another login when the access token expires. |
 | Login succeeds but inference returns 401/403 | Check client headers, upstream base, account permissions and model availability. Login alone does not prove inference access. |
-| Grok repeatedly returns `token_expired` | The client must adopt the returned access token and any rotated refresh token, then retry. Repeating the old credentials does not complete handback. |
+| Grok or Cursor repeatedly returns `token_expired` | The client must adopt the returned access token and any rotated refresh token, then retry. Repeating the old credentials does not complete handback. |
 | Refresh is rejected | Recheck provider access and perform a new interactive login. Do not publish token responses or credential headers for troubleshooting. |
 
 ## Token refresh
@@ -263,12 +288,18 @@ With `auto_token_refresh` enabled, a request may supply its own
 mechanisms; it stores neither a credential database nor reusable refresh state.
 The JWT expiry check is not signature authentication.
 
-Two response behaviors are explicit:
+**Grok and Cursor use the same inference handback behavior.** A successful
+exchange returns HTTP 401 with error type `authentication_error` and code
+`token_expired`, plus `X-Proxy-Access-Token` and an optional
+`X-Proxy-Refresh-Token` when returned by the exchange. No inference is sent or
+recorded for that handback. The client stores the returned access token, adopts
+any returned refresh token, and retries the original request.
 
-| Mechanism | Inference behavior |
-| --- | --- |
-| Handback (xAI OAuth) | Return 401 with `token_expired` and `X-Proxy-Access-Token`, plus `X-Proxy-Refresh-Token` when returned by the exchange; no inference is sent. The client adopts the updated credentials and retries. |
-| In-place (Cursor exchange) | Use the refreshed access token for this request and return it in `X-Proxy-Access-Token`, plus `X-Proxy-Refresh-Token` when returned by the exchange. |
+Starting with **0.2.0**, Cursor no longer refreshes in place on inference requests.
+Clients that previously relied on that behavior must now handle the same 401
+handback as Grok. Update client handling before upgrading; a generic client that
+discards those response headers cannot complete automatic renewal. Retry only
+after adopting the fresh access token, not by blindly replaying an old key.
 
 Model discovery refreshes transparently instead of requiring the handback
 workflow, but does not return updated token headers to the client.

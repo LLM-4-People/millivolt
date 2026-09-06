@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# grok-login.sh - first-time interactive Grok (SuperGrok / X Premium) login.
+# grok-login.sh - first-time interactive Grok account login.
 #
 # ONE job: run xAI's OAuth device-code flow (RFC 8628) once and print the
 # exact headers to configure a millivolt client. You approve the sign-in in a
-# browser; the resulting access token is a subscription-backed credential for
-# https://api.x.ai/v1 - NOT a pay-as-you-go xai-… API key.
+# browser; the result is an account access token for https://api.x.ai/v1,
+# not creation of an xai-… API key. Account eligibility and billing remain
+# provider-controlled; successful login does not guarantee inference access.
 #
 # The script writes no files, but its output contains credentials: terminal
 # scrollback, redirection and CI logs may retain them. Never share this output.
 # Copy the printed headers into private client config. This is for FIRST-TIME
 # login only; renewal is the proxy's job (stateless auto-refresh): while the
 # client presents X-Proxy-Refresh-Token, the proxy exchanges it when the JWT
-# expires - xAI is a HANDBACK mechanism, so an LLM request is answered with
-# HTTP 401 (code "token_expired") carrying the fresh pair in the
-# X-Proxy-Access-Token / X-Proxy-Refresh-Token response headers; store the
-# pair, swap the key, and retry. Model discovery (GET /v1/models) refreshes
-# transparently. If the refresh token is ever rejected upstream, just run
-# this login again.
+# expires or is about to. Inference returns HTTP 401 (code "token_expired")
+# without an upstream send. Adopt X-Proxy-Access-Token and any returned
+# X-Proxy-Refresh-Token, retain the old refresh token when no replacement is
+# returned, then retry. Model discovery refreshes transparently without
+# returning token headers. If the refresh token is rejected upstream, run
+# this login again. See docs/adapters.md#token-refresh.
 #
 # Login traffic goes to auth.x.ai directly and is unaffected by any proxy
 # base-URL override on inference calls.
@@ -28,8 +29,7 @@
 #   XAI_OAUTH_CLIENT_ID  device-flow client id (default: the public client
 #                        shared with the proxy's auto-refresh - one OAuth
 #                        registration; see internal/proxy/tokenrefresh.go)
-#   GROK_LOGIN_TIMEOUT   seconds to wait for browser approval (default 600;
-#                        xAI device codes themselves expire after 30 min)
+#   GROK_LOGIN_TIMEOUT   approval-poll budget in seconds (default 600)
 #   NO_OPEN              set to any value to skip auto-opening the browser
 set -euo pipefail
 

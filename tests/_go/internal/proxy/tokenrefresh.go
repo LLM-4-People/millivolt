@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,17 +88,112 @@ func newMockTokenServer(t *testing.T, status int, resp string) *mockTokenServer 
 	return m
 }
 
-func withMockXAI(t *testing.T, m *mockTokenServer) {
+func withMockTokenEndpoint(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	oldEndpoint, oldClient := xaiTokenEndpoint, tokenHTTPClient
-	xaiTokenEndpoint = m.srv.URL
-	tokenHTTPClient = m.srv.Client()
+	xaiTokenEndpoint = srv.URL + "/oauth2/token"
+	tokenHTTPClient = srv.Client()
 	t.Cleanup(func() { xaiTokenEndpoint, tokenHTTPClient = oldEndpoint, oldClient })
+}
+
+var tokenRefreshMechanisms = []struct {
+	provider, accessField, refreshField string
+}{
+	{"x.ai", "access_token", "refresh_token"},
+	{"cursor.sh", "accessToken", "refreshToken"},
+}
+
+func tokenResponse(t *testing.T, accessField, refreshField, access, refresh string) string {
+	t.Helper()
+	fields := map[string]string{accessField: access}
+	if refresh != "" {
+		fields[refreshField] = refresh
+	}
+	body, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
+type capturedRefreshRequest struct {
+	capturedRequest
+	refreshToken string
+}
+
+// One loopback fixture owns token and inference endpoints. Even a failed
+// handback regression cannot send a request to a real provider. Atomic captures
+// let assertions inspect completed HTTP requests without handler data races.
+type tokenRefreshFixture struct {
+	proxy     *Server
+	records   *metrics.Buffer
+	baseURL   string
+	exchanges atomic.Int64
+	relays    atomic.Int64
+	lastRelay atomic.Pointer[capturedRefreshRequest]
+}
+
+func newTokenRefreshFixture(t *testing.T, provider string, status int, response string) *tokenRefreshFixture {
+	t.Helper()
+	f := &tokenRefreshFixture{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/oauth2/token" || r.URL.Path == "/auth/exchange_user_api_key" {
+			f.exchanges.Add(1)
+			w.WriteHeader(status)
+			w.Write([]byte(response))
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read fixture request: %v", err)
+		}
+		f.lastRelay.Store(&capturedRefreshRequest{
+			capturedRequest: capturedRequest{path: r.URL.Path, authHeader: r.Header.Get("Authorization"), body: string(body)},
+			refreshToken:    r.Header.Get("X-Proxy-Refresh-Token"),
+		})
+		f.relays.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/models" {
+			w.Write([]byte(`{"object":"list","data":[]}`))
+			return
+		}
+		w.Write([]byte(`{"choices":[{"message":{"content":"fixture response"}}]}`))
+	}))
+	t.Cleanup(upstream.Close)
+	withMockTokenEndpoint(t, upstream)
+	u, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.ProviderAliases = map[string]string{providerFromURL(u): provider}
+	f.records = metrics.NewBuffer(cfg.HistorySize)
+	f.proxy = New(cfg, f.records)
+	f.baseURL = upstream.URL
+	return f
+}
+
+func (f *tokenRefreshFixture) request(method, path, body, key string) *http.Request {
+	r := httptest.NewRequest(method, path, strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "Bearer "+key)
+	r.Header.Set("X-Proxy-Refresh-Token", "client-rt")
+	r.Header.Set("X-Proxy-Base-URL", f.baseURL)
+	return r
+}
+
+func (f *tokenRefreshFixture) assertNoAccounting(t *testing.T) {
+	t.Helper()
+	snap := f.records.SnapshotSince(0)
+	if len(snap.Records) != 0 || len(snap.InFlightRecords) != 0 || snap.PendingRevision != 0 ||
+		snap.Counters.TotalReq != 0 || snap.Counters.InFlight != 0 {
+		t.Errorf("refresh-only request changed finalized or live accounting: %+v", snap)
+	}
 }
 
 func TestRefreshDeviceFlowGrant(t *testing.T) {
 	m := newMockTokenServer(t, 200, `{"access_token":"fresh-access","refresh_token":"fresh-rt","expires_in":3600}`)
-	withMockXAI(t, m)
+	withMockTokenEndpoint(t, m.srv)
 	tg := &target{provider: "x.ai", baseURL: "https://api.x.ai/v1"}
 	fresh, err := refreshAccessToken(t.Context(), tg, "rt-1")
 	if err != nil {
@@ -111,9 +207,6 @@ func TestRefreshDeviceFlowGrant(t *testing.T) {
 	}
 	if m.cIDs[0] != xaiOAuthClientID {
 		t.Errorf("client_id = %q, want the grok CLI OAuth client", m.cIDs[0])
-	}
-	if !fresh.handback {
-		t.Error("x.ai refresh must be a handback mechanism (client adopts the fresh pair)")
 	}
 }
 
@@ -140,9 +233,6 @@ func TestRefreshExchangesOnTargetHost(t *testing.T) {
 	if fresh.access != "cur-fresh" || fresh.refresh != "cur-rt2" {
 		t.Errorf("fresh = %+v, want cur-fresh/cur-rt2", fresh)
 	}
-	if fresh.handback {
-		t.Error("cursor refresh must stay in place, not handback")
-	}
 	if calls != 1 || !strings.Contains(gotAuth, "Bearer cursor-rt") || strings.TrimSpace(gotBody) != "{}" {
 		t.Errorf("exchange call: n=%d auth=%q body=%q", calls, gotAuth, gotBody)
 	}
@@ -156,56 +246,74 @@ func TestRefreshUnknownProviderRejected(t *testing.T) {
 }
 
 func TestRefreshKeyIfExpiredFailOpen(t *testing.T) {
-	// 500 from the token endpoint → original key, no refresh signal.
-	m := newMockTokenServer(t, 500, `{"error":"boom"}`)
-	withMockXAI(t, m)
-	s := New(config.Default(), metrics.Noop{})
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r.Header.Set("X-Proxy-Refresh-Token", "rt-1")
-	expired := mkJWT(t, time.Now().Add(-time.Hour).Unix())
-	tg := &target{provider: "x.ai", baseURL: "https://api.x.ai/v1"}
-	got, fresh, ok := s.refreshKeyIfExpired(r, tg, expired)
-	if ok || fresh.access != "" {
-		t.Errorf("ok=%v fresh=%+v, want fail-open passthrough", ok, fresh)
-	}
-	if got != expired {
-		t.Error("original key not preserved on failed exchange")
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, tc := range []struct {
+			name, body string
+			status     int
+		}{
+			{"rejected", `{"error":"fixture failure"}`, http.StatusUnauthorized},
+			{"server failure", `{"error":"fixture failure"}`, http.StatusInternalServerError},
+			{"malformed", `{"`, http.StatusOK},
+			{"missing access", `{}`, http.StatusOK},
+			{"wrong type", `{"` + mechanism.accessField + `":42}`, http.StatusOK},
+		} {
+			t.Run(mechanism.provider+"/"+tc.name, func(t *testing.T) {
+				f := newTokenRefreshFixture(t, mechanism.provider, tc.status, tc.body)
+				expired := mkJWT(t, time.Now().Add(-time.Hour).Unix())
+				r := f.request(http.MethodPost, "/v1/chat/completions", `{"model":"fixture-model","messages":[]}`, expired)
+				w := httptest.NewRecorder()
+				f.proxy.ServeHTTP(w, r)
+				if w.Code != http.StatusOK || f.exchanges.Load() != 1 || f.relays.Load() != 1 {
+					t.Fatalf("status=%d exchanges=%d relays=%d, want 200/1/1", w.Code, f.exchanges.Load(), f.relays.Load())
+				}
+				if got := f.lastRelay.Load(); got.authHeader != "Bearer "+expired || got.refreshToken != "" {
+					t.Error("failed exchange changed the original key or leaked the refresh token")
+				}
+				if w.Header().Get("X-Proxy-Access-Token") != "" || w.Header().Get("X-Proxy-Refresh-Token") != "" {
+					t.Error("failed exchange returned refreshed credential headers")
+				}
+			})
+		}
 	}
 }
 
 func TestRefreshKeyIfExpiredGates(t *testing.T) {
-	s := New(config.Default(), metrics.Noop{})
-	expired := mkJWT(t, time.Now().Add(-time.Hour).Unix())
-	tg := &target{provider: "x.ai", baseURL: "https://api.x.ai/v1"}
-
-	// No client refresh token → untouched.
-	r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	if _, _, ok := s.refreshKeyIfExpired(r, tg, expired); ok {
-		t.Error("refreshed without X-Proxy-Refresh-Token")
-	}
-	// Valid (non-expiring) token → untouched even with a refresh token.
-	r.Header.Set("X-Proxy-Refresh-Token", "rt")
-	valid := mkJWT(t, time.Now().Add(time.Hour).Unix())
-	if _, _, ok := s.refreshKeyIfExpired(r, tg, valid); ok {
-		t.Error("refreshed a still-valid token")
-	}
-	// Plain API key → never touched.
-	if _, _, ok := s.refreshKeyIfExpired(r, tg, "xai-abc123"); ok {
-		t.Error("refreshed a non-JWT key")
-	}
-	// Unknown provider → untouched (deny by default).
-	r2 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
-	r2.Header.Set("X-Proxy-Refresh-Token", "rt")
-	other := &target{provider: "10.0.0.5:8000", baseURL: "http://10.0.0.5:8000/v1"}
-	if _, _, ok := s.refreshKeyIfExpired(r2, other, expired); ok {
-		t.Error("refreshed for a provider with no known mechanism")
-	}
-	// Disabled by config → untouched.
-	cfg := config.Default()
-	cfg.AutoTokenRefresh = false
-	sOff := New(cfg, metrics.Noop{})
-	if _, _, ok := sOff.refreshKeyIfExpired(r, tg, expired); ok {
-		t.Error("refreshed with auto_token_refresh off")
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, name := range []string{"missing refresh", "blank refresh", "valid access", "plain key", "missing key", "unknown provider", "disabled"} {
+			t.Run(mechanism.provider+"/"+name, func(t *testing.T) {
+				body := tokenResponse(t, mechanism.accessField, mechanism.refreshField, "fresh-access", "fresh-rt")
+				f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK, body)
+				key := mkJWT(t, time.Now().Add(-time.Hour).Unix())
+				r := f.request(http.MethodPost, "/v1/chat/completions", "", key)
+				tg := &target{provider: mechanism.provider, baseURL: f.baseURL}
+				switch name {
+				case "missing refresh":
+					r.Header.Del("X-Proxy-Refresh-Token")
+				case "blank refresh":
+					r.Header.Set("X-Proxy-Refresh-Token", "  ")
+				case "valid access":
+					key = mkJWT(t, time.Now().Add(time.Hour).Unix())
+				case "plain key":
+					key = "fixture-api-key"
+				case "missing key":
+					key = ""
+				case "unknown provider":
+					tg.provider = "fixture.invalid"
+				case "disabled":
+					cfg := *f.proxy.cfg()
+					cfg.AutoTokenRefresh = false
+					f.proxy.Reload(&cfg)
+				}
+				w := httptest.NewRecorder()
+				got, ok := f.proxy.resolveKey(w, r, tg, key)
+				if !ok || got != key || f.exchanges.Load() != 0 || w.Body.Len() != 0 {
+					t.Error("inapplicable refresh did not preserve the original key without an exchange or response")
+				}
+				if w.Header().Get("X-Proxy-Access-Token") != "" || w.Header().Get("X-Proxy-Refresh-Token") != "" {
+					t.Error("inapplicable refresh returned refreshed credential headers")
+				}
+			})
+		}
 	}
 }
 
@@ -241,11 +349,8 @@ func TestRefreshTokenHeaderNeverUpstream(t *testing.T) {
 	}
 }
 
-// resolveKey keeps a non-handback mechanism IN-PLACE: the fresh token is
-// returned for upstream use and the pair rides the response headers - never
-// the handback 401. (The handback decision is mechanism-owned; the caller
-// stays label-blind.)
-func TestResolveKeyCursorInPlace(t *testing.T) {
+// Every successful inference refresh stops at the shared handback boundary.
+func TestResolveKeyCursorHandback(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/auth/exchange_user_api_key" {
 			w.Write([]byte(`{"accessToken":"cur-fresh","refreshToken":"cur-rt2"}`))
@@ -261,144 +366,129 @@ func TestResolveKeyCursorInPlace(t *testing.T) {
 	tg := &target{provider: "cursor.sh", baseURL: upstream.URL}
 	rec := httptest.NewRecorder()
 	key, ok := s.resolveKey(rec, r, tg, expired)
-	if !ok || key != "cur-fresh" {
-		t.Errorf("ok=%v key=%q, want in-place fresh key", ok, key)
+	if ok || key != "" {
+		t.Errorf("ok=%v key=%q, want handback without an upstream key", ok, key)
 	}
 	if rec.Header().Get("X-Proxy-Access-Token") != "cur-fresh" ||
 		rec.Header().Get("X-Proxy-Refresh-Token") != "cur-rt2" {
-		t.Error("fresh pair headers not set on in-place refresh")
+		t.Error("refreshed credential headers not set on handback")
 	}
-	if rec.Code == http.StatusUnauthorized {
-		t.Error("handback response written for an in-place mechanism")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 handback", rec.Code)
 	}
 }
 
-// End-to-end handback through ServeHTTP: an expired JWT + the client's
-// refresh token against xAI is answered DIRECTLY with 401 + the fresh pair in
-// the response headers. The base URL is the real api.x.ai: any accidental
-// proxying would leave the test process and fail the status assertion. When
-// the provider did not rotate the refresh token, no X-Proxy-Refresh-Token
-// header is set. (Model discovery is exempt - see
-// TestModelsRefreshStaysTransparent.)
+// All inference routes stop before native translation, admission, live
+// publication or final accounting. Only the provider exchange goes upstream.
 func TestTokenHandbackReturnsFreshPairWithoutProxying(t *testing.T) {
-	cases := []struct {
-		name    string
-		method  string
-		path    string
-		body    string
-		rotated bool
-	}{
-		{"chat completions", http.MethodPost, "/v1/chat/completions", `{"model":"m","messages":[]}`, true},
-		{"no rotated refresh token", http.MethodPost, "/v1/chat/completions", `{"model":"m","messages":[]}`, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			respBody := `{"access_token":"fresh-access","refresh_token":"fresh-rt"}`
-			if !c.rotated {
-				respBody = `{"access_token":"fresh-access"}`
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, refresh := range []string{"fresh-rt", ""} {
+			for _, route := range []struct{ name, path, body, format string }{
+				{"chat", "/v1/chat/completions", `{"model":"fixture-model","messages":[]}`, ""},
+				{"stream", "/v1/chat/completions", `{"model":"fixture-model","messages":[],"stream":true}`, ""},
+				{"responses", "/v1/responses", `{"model":"fixture-model","input":"hello"}`, ""},
+				{"cursor bridge", "/v1/chat/completions", `{"model":"fixture-model","messages":[],"stream":true}`, "cursor"},
+			} {
+				t.Run(mechanism.provider+"/"+refresh+"/"+route.name, func(t *testing.T) {
+					fresh := mkJWT(t, time.Now().Add(time.Hour).Unix())
+					f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK,
+						tokenResponse(t, mechanism.accessField, mechanism.refreshField, fresh, refresh))
+					r := f.request(http.MethodPost, route.path, route.body, mkJWT(t, time.Now().Add(-time.Hour).Unix()))
+					r.Header.Set("X-Proxy-Format", route.format)
+					w := httptest.NewRecorder()
+					f.proxy.ServeHTTP(w, r)
+					if w.Code != http.StatusUnauthorized || f.exchanges.Load() != 1 || f.relays.Load() != 0 {
+						t.Fatalf("status=%d exchanges=%d relays=%d, want 401/1/0", w.Code, f.exchanges.Load(), f.relays.Load())
+					}
+					if w.Header().Get("X-Proxy-Access-Token") != fresh || w.Header().Get("X-Proxy-Refresh-Token") != refresh {
+						t.Error("handback did not return exactly the exchanged credentials")
+					}
+					var out struct {
+						Error struct {
+							Code string `json:"code"`
+							Type string `json:"type"`
+						} `json:"error"`
+					}
+					if json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Error.Code != "token_expired" || out.Error.Type != "authentication_error" {
+						t.Errorf("body = %s, want authentication_error/token_expired", w.Body.String())
+					}
+					f.assertNoAccounting(t)
+					if route.name == "chat" {
+						retry := f.request(http.MethodPost, route.path, route.body, w.Header().Get("X-Proxy-Access-Token"))
+						if refresh != "" {
+							retry.Header.Set("X-Proxy-Refresh-Token", refresh)
+						}
+						w = httptest.NewRecorder()
+						f.proxy.ServeHTTP(w, retry)
+						if w.Code != http.StatusOK || f.exchanges.Load() != 1 || f.relays.Load() != 1 {
+							t.Fatalf("adopted-key retry: status=%d exchanges=%d relays=%d, want 200/1/1", w.Code, f.exchanges.Load(), f.relays.Load())
+						}
+						got := f.lastRelay.Load()
+						if got.authHeader != "Bearer "+fresh || got.body != route.body || got.refreshToken != "" {
+							t.Error("retry did not forward the adopted access key and original body without the refresh token")
+						}
+						if len(f.records.Snapshot()) != 1 || len(f.records.PendingRecords()) != 0 {
+							t.Error("only the completed inference retry should be recorded")
+						}
+					}
+				})
 			}
-			m := newMockTokenServer(t, 200, respBody)
-			withMockXAI(t, m)
-			srv := proxyServer(t)
-			defer srv.Close()
-
-			var body io.Reader
-			if c.body != "" {
-				body = strings.NewReader(c.body)
-			}
-			req, _ := http.NewRequest(c.method, srv.URL+c.path, body)
-			if c.body != "" {
-				req.Header.Set("Content-Type", "application/json")
-			}
-			expired := mkJWT(t, time.Now().Add(-time.Hour).Unix())
-			req.Header.Set("Authorization", "Bearer "+expired)
-			req.Header.Set("X-Proxy-Refresh-Token", "client-rt")
-			req.Header.Set("X-Proxy-Base-URL", "https://api.x.ai/v1")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer resp.Body.Close()
-			raw, _ := io.ReadAll(resp.Body)
-
-			if resp.StatusCode != http.StatusUnauthorized {
-				t.Errorf("status = %d, want 401 handback", resp.StatusCode)
-			}
-			if got := resp.Header.Get("X-Proxy-Access-Token"); got != "fresh-access" {
-				t.Errorf("X-Proxy-Access-Token = %q, want fresh-access", got)
-			}
-			wantRT := ""
-			if c.rotated {
-				wantRT = "fresh-rt"
-			}
-			if got := resp.Header.Get("X-Proxy-Refresh-Token"); got != wantRT {
-				t.Errorf("X-Proxy-Refresh-Token = %q, want %q", got, wantRT)
-			}
-			var out struct {
-				Error struct {
-					Code string `json:"code"`
-					Type string `json:"type"`
-				} `json:"error"`
-			}
-			if json.Unmarshal(raw, &out) != nil || out.Error.Code != "token_expired" ||
-				out.Error.Type != "authentication_error" {
-				t.Errorf("body = %s, want an authentication_error/token_expired envelope", raw)
-			}
-			if m.calls != 1 {
-				t.Errorf("token endpoint calls = %d, want exactly one exchange", m.calls)
-			}
-		})
+		}
 	}
 }
 
-// Model discovery stays TRANSPARENT even for the handback mechanism: a models
-// fetch refreshes in place (the fresh token is what goes upstream) and the
-// response carries no handback status and no fresh-pair headers - the tooling
-// that fetches models never implements the 401+headers contract. The mock
-// upstream's IP host is aliased to the xAI label so the mechanism binds
-// without a real network hop.
+// Both public discovery aliases share the transparent refresh policy, regardless
+// of the mechanism. The OpenAI list format isolates that policy from adapters.
 func TestModelsRefreshStaysTransparent(t *testing.T) {
-	m := newMockTokenServer(t, 200, `{"access_token":"fresh-access","refresh_token":"fresh-rt"}`)
-	withMockXAI(t, m)
-	var gotAuth string
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		w.Write([]byte(`{"object":"list","data":[]}`))
-	}))
-	defer upstream.Close()
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, path := range []string{"/models", "/v1/models"} {
+			t.Run(mechanism.provider+path, func(t *testing.T) {
+				f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK,
+					tokenResponse(t, mechanism.accessField, mechanism.refreshField, "fresh-access", "fresh-rt"))
+				r := f.request(http.MethodGet, path, "", mkJWT(t, time.Now().Add(-time.Hour).Unix()))
+				w := httptest.NewRecorder()
+				f.proxy.ServeHTTP(w, r)
+				if w.Code != http.StatusOK || f.exchanges.Load() != 1 || f.relays.Load() != 1 {
+					t.Fatalf("status=%d exchanges=%d relays=%d, want 200/1/1", w.Code, f.exchanges.Load(), f.relays.Load())
+				}
+				got := f.lastRelay.Load()
+				if got.authHeader != "Bearer fresh-access" || got.path != "/v1/models" || got.refreshToken != "" {
+					t.Error("discovery did not use the fresh access token on its constructed model request")
+				}
+				if w.Header().Get("X-Proxy-Access-Token") != "" || w.Header().Get("X-Proxy-Refresh-Token") != "" {
+					t.Error("transparent discovery returned refreshed credential headers")
+				}
+				f.assertNoAccounting(t)
+			})
+		}
+	}
+}
 
-	u, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := config.Default()
-	cfg.ProviderAliases = map[string]string{providerFromURL(u): "x.ai"}
-	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
-	defer srv.Close()
-
-	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
-	expired := mkJWT(t, time.Now().Add(-time.Hour).Unix())
-	req.Header.Set("Authorization", "Bearer "+expired)
-	req.Header.Set("X-Proxy-Refresh-Token", "client-rt")
-	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("status = %d, want transparent 200 (body %s)", resp.StatusCode, raw)
-	}
-	if gotAuth != "Bearer fresh-access" {
-		t.Errorf("upstream Authorization = %q, want the fresh access token used in place", gotAuth)
-	}
-	if resp.Header.Get("X-Proxy-Access-Token") != "" || resp.Header.Get("X-Proxy-Refresh-Token") != "" {
-		t.Error("fresh-pair headers returned on a transparent models refresh")
-	}
-	if m.calls != 1 {
-		t.Errorf("token endpoint calls = %d, want exactly one exchange", m.calls)
+func TestExchangeTokenResponseSizeBoundary(t *testing.T) {
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, extra := range []int{0, 1} {
+			name := "at limit"
+			if extra != 0 {
+				name = "over limit"
+			}
+			t.Run(mechanism.provider+"/"+name, func(t *testing.T) {
+				body := tokenResponse(t, mechanism.accessField, mechanism.refreshField, "fixture-access", "")
+				body += strings.Repeat(" ", tokenRespMax-len(body)+extra)
+				f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK, body)
+				tg := &target{provider: mechanism.provider, baseURL: f.baseURL}
+				fresh, err := refreshAccessToken(t.Context(), tg, "client-rt")
+				if extra == 0 {
+					if err != nil || fresh.access != "fixture-access" {
+						t.Errorf("valid response at byte limit rejected: %v", err)
+					}
+				} else if err == nil || fresh.access != "" || fresh.refresh != "" {
+					t.Error("oversized response with a valid JSON prefix was accepted")
+				}
+				if f.exchanges.Load() != 1 || f.relays.Load() != 0 {
+					t.Error("size-boundary check must make exactly one token exchange and no inference")
+				}
+			})
+		}
 	}
 }
 
