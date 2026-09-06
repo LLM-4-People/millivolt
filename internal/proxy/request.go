@@ -481,9 +481,8 @@ func headerPresent(r *http.Request, name string) bool {
 // them can leak upstream - neither via header passthrough nor via an
 // X-Proxy-Headers injection map. ("x-proxy-provider" is not read; it is
 // stripped defensively so a client can never spoof a provider identity.
-// "x-proxy-access-token" is proxy-ISSUED - it names a response signal, never
-// an inbound one - and is stripped defensively so a stale or echoed fresh
-// token can never ride upstream.)
+// "x-proxy-access-token" is not a request routing header. It is stripped
+// defensively so a stale or echoed token can never ride upstream.)
 func isProxyControlHeader(h string) bool {
 	switch strings.ToLower(h) {
 	case "authorization", "cookie", "x-proxy-base-url", "x-proxy-auth-header",

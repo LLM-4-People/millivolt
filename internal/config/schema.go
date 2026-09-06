@@ -111,7 +111,7 @@ func Schema() []Field {
 			Help: "Cap on one debug capture (request body plus client-facing response bytes). Past the cap the rest is dropped and the capture is marked truncated.",
 			Kind: KindBytes, HotReload: true, Min: num(float64(DebugCaptureMaxBytesMin)), Max: num(float64(DebugCaptureMaxBytesMax)), Unit: "bytes"},
 		{Key: "auto_token_refresh", Category: "request", Label: "Auto token refresh",
-			Help: "Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All supported providers use inference handback: HTTP 401 with token_expired and X-Proxy-Access-Token, plus X-Proxy-Refresh-Token when returned. No inference is sent; adopt the returned credentials and retry, retaining the old refresh token if no replacement is returned. Model discovery refreshes transparently without returning token headers. Stateless: no reusable credentials are retained.",
+			Help: "Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All supported providers use inference handback: HTTP 401 with token_expired and access_token in the error body, plus refresh_token only when the exchange returns a different replacement. No inference is sent; adopt the returned credentials and retry, retaining the old refresh token if no replacement is returned. Model discovery refreshes transparently without returning tokens. Stateless: no reusable credentials are retained.",
 			Kind: KindBool, HotReload: true},
 
 		// ---- upstream ----

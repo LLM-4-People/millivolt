@@ -48,7 +48,7 @@ arbitrary text: request/response bodies, URLs, error messages, model names or
 user-supplied labels can contain sensitive data. Preview capture and Debug
 capture are opt-in, but enabling them can persist that data.
 
-Token-refresh response headers contain credentials for the client to adopt.
+Token-refresh handback responses contain credentials in the error body for the client to adopt.
 Do not publish them, browser exports, databases, backups, local config,
 login-script output or screenshots containing private history.
 

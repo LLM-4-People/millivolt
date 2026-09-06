@@ -316,28 +316,32 @@ The JWT expiry check is not signature authentication.
 
 **Grok and Cursor use the same inference handback behavior.** A successful
 exchange returns HTTP 401 with error type `authentication_error` and code
-`token_expired`, plus `X-Proxy-Access-Token` and an optional
-`X-Proxy-Refresh-Token` when returned by the exchange. No inference is sent or
-recorded for that handback. The client stores the returned access token, adopts
-any returned refresh token, and retries the original request.
+`token_expired`. The error object includes `access_token` and, when the
+exchange returned a different refresh token, `refresh_token`. The same
+values are in the error message. No inference is sent or recorded for that
+handback. The client stores the returned access token, adopts any returned
+refresh token, and retries the original request.
 
 Starting with **0.2.0**, Cursor no longer refreshes in place on inference requests.
 Clients that previously relied on that behavior must now handle the same 401
-handback as Grok. Update client handling before upgrading; a generic client that
-discards those response headers cannot complete automatic renewal. Retry only
-after adopting the fresh access token, not by blindly replaying an old key.
+handback as Grok. Starting with **0.3.1**, credentials are in that error body,
+not `X-Proxy-Access-Token` / `X-Proxy-Refresh-Token` response headers. Update
+client handling before upgrading; a generic client that only reads those
+headers cannot complete automatic renewal. Retry only after adopting the
+fresh access token, not by blindly replaying an old key.
 
 Model discovery refreshes transparently instead of requiring the handback
-workflow, but does not return updated token headers to the client.
+workflow, but does not return updated tokens to the client.
 Missing refresh tokens, unknown mechanisms, non-JWT keys or disabled
 refresh leave ordinary forwarding unchanged. Exchange failure falls back to the
 original upstream credential, allowing the provider to decide authentication.
 
 Use the [first-login helpers](#first-login-helpers) to obtain initial credentials.
-They are not proxy startup dependencies. Treat terminal output and returned token
-headers as secrets; never paste them into issues or commit them. Adopt a returned
-refresh token when present; if a successful exchange omits it, retain the existing
-refresh token rather than replacing it with an empty value.
+They are not proxy startup dependencies. Treat terminal output and returned tokens
+as secrets; never paste them into issues or commit them. Adopt a returned
+refresh token when present; if a successful exchange omits it, including when
+the provider echoed the same refresh token, retain the existing refresh token
+rather than replacing it with an empty value.
 
 The implementation lives in [tokenrefresh.go](../internal/proxy/tokenrefresh.go).
 Provider/account behavior can change; historic successful observations are not

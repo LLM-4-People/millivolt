@@ -102,11 +102,11 @@ debug_capture_ttl: 24h
 debug_capture_max_bytes: 1048576
 
 # Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All
-# supported providers use inference handback: HTTP 401 with token_expired and
-# X-Proxy-Access-Token, plus X-Proxy-Refresh-Token when returned. No inference is sent;
-# adopt the returned credentials and retry, retaining the old refresh token if no
-# replacement is returned. Model discovery refreshes transparently without returning token
-# headers. Stateless: no reusable credentials are retained.
+# supported providers use inference handback: HTTP 401 with token_expired and access_token
+# in the error body, plus refresh_token only when the exchange returns a different
+# replacement. No inference is sent; adopt the returned credentials and retry, retaining
+# the old refresh token if no replacement is returned. Model discovery refreshes
+# transparently without returning tokens. Stateless: no reusable credentials are retained.
 # Hot-reload: yes.
 #   type: bool · default true
 auto_token_refresh: true

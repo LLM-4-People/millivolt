@@ -19,12 +19,13 @@ import (
 // request in the X-Proxy-Refresh-Token routing header. When the presented
 // access token is a JWT whose `exp` has passed (or is about to), the proxy
 // exchanges that refresh token at the provider's refresh endpoint. Inference
-// always uses handback: HTTP 401 with code "token_expired", the fresh access
-// token in X-Proxy-Access-Token and X-Proxy-Refresh-Token when returned.
-// No inference is sent. The client adopts the returned credentials and retries
-// so subsequent requests do not keep re-exchanging the expired access token.
+// always uses handback: HTTP 401 with code "token_expired" and the fresh
+// access_token in the error body, plus refresh_token only when the exchange
+// returns a different replacement. No inference is sent. The client adopts
+// the returned credentials and retries so subsequent requests do not keep
+// re-exchanging the expired access token.
 // Model discovery instead uses the refreshed key transparently and returns no
-// token headers, preserving its separate constructed-list contract.
+// tokens, preserving its separate constructed-list contract.
 //
 // Everything is derived from the request itself: the decision reads the exp
 // claim out of the presented token, and the only credential involved is the
@@ -65,7 +66,8 @@ var tokenHTTPClient = &http.Client{Timeout: tokenHTTPTimeout, CheckRedirect: pre
 var xaiTokenEndpoint = "https://auth.x.ai/oauth2/token"
 
 // refreshedTokens is the outcome of a successful refresh exchange. refresh is
-// empty when the provider did not return (a new) refresh token.
+// empty when the provider omitted a refresh token or returned the same value
+// the client already sent.
 type refreshedTokens struct {
 	access  string
 	refresh string
@@ -232,6 +234,9 @@ func (s *Server) refreshKeyIfExpired(r *http.Request, t *target, key string) (st
 	if err != nil || fresh.access == "" {
 		return key, refreshedTokens{}, false
 	}
+	if strings.TrimSpace(fresh.refresh) == refreshToken {
+		fresh.refresh = ""
+	}
 	return fresh.access, fresh, true
 }
 
@@ -248,7 +253,7 @@ func (s *Server) resolveKey(w http.ResponseWriter, r *http.Request, t *target, k
 }
 
 // resolveKeyTransparent preserves model discovery's separate contract for every
-// mechanism: use the fresh token without returning token headers or handback.
+// mechanism: use the fresh token without returning tokens or handback.
 // On failed or inapplicable refresh, the original key goes upstream.
 func (s *Server) resolveKeyTransparent(r *http.Request, t *target, key string) string {
 	freshKey, _, refreshed := s.refreshKeyIfExpired(r, t, key)
@@ -264,22 +269,45 @@ const (
 	// and retry. Not user-tunable.
 	tokenHandbackType = "authentication_error"
 	tokenHandbackCode = "token_expired"
-	// tokenHandbackMsg tells the client exactly what happened and what to do.
-	tokenHandbackMsg = "access token expired or expiring: adopt X-Proxy-Access-Token and, " +
-		"when present, X-Proxy-Refresh-Token from the response headers, then retry; " +
-		"retain the existing refresh token if no replacement is returned"
 )
 
+// tokenHandbackError is the OpenAI-shaped 401 body for inference handback.
+// access_token is always present after a successful exchange; refresh_token is
+// omitted when the provider did not return a different replacement.
+type tokenHandbackError struct {
+	Message      string `json:"message"`
+	Type         string `json:"type"`
+	Code         string `json:"code"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+}
+
+// tokenHandbackMessage tells the client what happened and includes the
+// credentials to adopt. Generic clients that only surface error.message still
+// receive the new token; structured fields remain the parse path.
+func tokenHandbackMessage(fresh refreshedTokens) string {
+	msg := "access token expired or expiring: adopt access_token " + fresh.access
+	if fresh.refresh != "" {
+		msg += " and refresh_token " + fresh.refresh
+	}
+	return msg + " from this response, then retry; retain the existing refresh token if no replacement is returned"
+}
+
 // writeTokenHandback returns refreshed credentials instead of sending inference.
-// The 401/code/headers tell the client to adopt them before retrying. Client
-// retry policies are outside the proxy's control.
+// The 401/code/body tell the client to adopt them before retrying. Credentials
+// live in the error object, not response headers. Client retry policies are
+// outside the proxy's control.
 // No metrics record is written: no LLM call happened; the retried request
 // (with the swapped key) is the one that lands in the log.
 func writeTokenHandback(w http.ResponseWriter, fresh refreshedTokens) {
-	w.Header().Set("X-Proxy-Access-Token", fresh.access)
-	if fresh.refresh != "" {
-		w.Header().Set("X-Proxy-Refresh-Token", fresh.refresh)
-	}
-	http.Error(w, errJSONCode(tokenHandbackType, tokenHandbackMsg, tokenHandbackCode),
-		http.StatusUnauthorized)
+	body, _ := json.Marshal(map[string]any{
+		"error": tokenHandbackError{
+			Message:      tokenHandbackMessage(fresh),
+			Type:         tokenHandbackType,
+			Code:         tokenHandbackCode,
+			AccessToken:  fresh.access,
+			RefreshToken: fresh.refresh,
+		},
+	})
+	http.Error(w, string(body), http.StatusUnauthorized)
 }

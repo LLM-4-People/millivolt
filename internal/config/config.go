@@ -98,11 +98,12 @@ type Config struct {
 	// presents a JWT access token whose exp has passed (within a small
 	// margin) plus its own refresh token in X-Proxy-Refresh-Token, the proxy
 	// exchanges it at the provider's refresh endpoint. Every supported mechanism
-	// uses handback on inference: HTTP 401 with code "token_expired", the new
-	// X-Proxy-Access-Token and optional X-Proxy-Refresh-Token response header.
+	// uses handback on inference: HTTP 401 with code "token_expired" and the
+	// new access_token in the error body, plus refresh_token only when the
+	// exchange returns a different replacement.
 	// No inference is sent; the client adopts the credentials and retries.
 	// Model discovery is exempt and refreshes transparently without returning
-	// token headers. The proxy retains no reusable credentials. Hot-reloads.
+	// tokens. The proxy retains no reusable credentials. Hot-reloads.
 	AutoTokenRefresh bool `yaml:"auto_token_refresh" json:"auto_token_refresh"`
 
 	// ---- upstream connection pool ----

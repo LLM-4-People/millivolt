@@ -191,6 +191,32 @@ func (f *tokenRefreshFixture) assertNoAccounting(t *testing.T) {
 	}
 }
 
+func decodeTokenHandback(t *testing.T, rec *httptest.ResponseRecorder) (access, refresh string) {
+	t.Helper()
+	if rec.Header().Get("X-Proxy-Access-Token") != "" || rec.Header().Get("X-Proxy-Refresh-Token") != "" {
+		t.Error("handback returned credential headers")
+	}
+	var out struct {
+		Error tokenHandbackError `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("handback body = %s: %v", rec.Body.String(), err)
+	}
+	if out.Error.Code != tokenHandbackCode || out.Error.Type != tokenHandbackType {
+		t.Errorf("body = %s, want %s/%s", rec.Body.String(), tokenHandbackType, tokenHandbackCode)
+	}
+	if out.Error.AccessToken == "" {
+		t.Error("handback omitted access_token")
+	}
+	if out.Error.RefreshToken == "" && strings.Contains(rec.Body.String(), `"refresh_token"`) {
+		t.Error("empty refresh_token was serialized")
+	}
+	if out.Error.Message != tokenHandbackMessage(refreshedTokens{access: out.Error.AccessToken, refresh: out.Error.RefreshToken}) {
+		t.Errorf("message = %q, want credentials in the error message", out.Error.Message)
+	}
+	return out.Error.AccessToken, out.Error.RefreshToken
+}
+
 func TestRefreshDeviceFlowGrant(t *testing.T) {
 	m := newMockTokenServer(t, 200, `{"access_token":"fresh-access","refresh_token":"fresh-rt","expires_in":3600}`)
 	withMockTokenEndpoint(t, m.srv)
@@ -349,6 +375,27 @@ func TestRefreshTokenHeaderNeverUpstream(t *testing.T) {
 	}
 }
 
+func TestWriteTokenHandbackBodyNotHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		name, access, refresh string
+	}{
+		{"pair", "fresh-access", "fresh-rt"},
+		{"access only", "fresh-access", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			writeTokenHandback(w, refreshedTokens{access: tc.access, refresh: tc.refresh})
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", w.Code)
+			}
+			gotAccess, gotRefresh := decodeTokenHandback(t, w)
+			if gotAccess != tc.access || gotRefresh != tc.refresh {
+				t.Errorf("got %s/%s, want %s/%s", gotAccess, gotRefresh, tc.access, tc.refresh)
+			}
+		})
+	}
+}
+
 // Every successful inference refresh stops at the shared handback boundary.
 func TestResolveKeyCursorHandback(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,12 +416,35 @@ func TestResolveKeyCursorHandback(t *testing.T) {
 	if ok || key != "" {
 		t.Errorf("ok=%v key=%q, want handback without an upstream key", ok, key)
 	}
-	if rec.Header().Get("X-Proxy-Access-Token") != "cur-fresh" ||
-		rec.Header().Get("X-Proxy-Refresh-Token") != "cur-rt2" {
-		t.Error("refreshed credential headers not set on handback")
-	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 handback", rec.Code)
+	}
+	access, refresh := decodeTokenHandback(t, rec)
+	if access != "cur-fresh" || refresh != "cur-rt2" {
+		t.Error("handback did not return the exchanged credentials in the error body")
+	}
+}
+
+func TestTokenHandbackOmitsUnchangedRefreshToken(t *testing.T) {
+	for _, mechanism := range tokenRefreshMechanisms {
+		for _, returned := range []string{"client-rt", "  client-rt  "} {
+			t.Run(mechanism.provider+"/"+returned, func(t *testing.T) {
+				fresh := mkJWT(t, time.Now().Add(time.Hour).Unix())
+				f := newTokenRefreshFixture(t, mechanism.provider, http.StatusOK,
+					tokenResponse(t, mechanism.accessField, mechanism.refreshField, fresh, returned))
+				r := f.request(http.MethodPost, "/v1/chat/completions",
+					`{"model":"fixture-model","messages":[]}`, mkJWT(t, time.Now().Add(-time.Hour).Unix()))
+				w := httptest.NewRecorder()
+				f.proxy.ServeHTTP(w, r)
+				if w.Code != http.StatusUnauthorized || f.exchanges.Load() != 1 || f.relays.Load() != 0 {
+					t.Fatalf("status=%d exchanges=%d relays=%d, want 401/1/0", w.Code, f.exchanges.Load(), f.relays.Load())
+				}
+				gotAccess, gotRefresh := decodeTokenHandback(t, w)
+				if gotAccess != fresh || gotRefresh != "" {
+					t.Error("unchanged refresh token was returned in the handback")
+				}
+			})
+		}
 	}
 }
 
@@ -400,21 +470,13 @@ func TestTokenHandbackReturnsFreshPairWithoutProxying(t *testing.T) {
 					if w.Code != http.StatusUnauthorized || f.exchanges.Load() != 1 || f.relays.Load() != 0 {
 						t.Fatalf("status=%d exchanges=%d relays=%d, want 401/1/0", w.Code, f.exchanges.Load(), f.relays.Load())
 					}
-					if w.Header().Get("X-Proxy-Access-Token") != fresh || w.Header().Get("X-Proxy-Refresh-Token") != refresh {
+					gotAccess, gotRefresh := decodeTokenHandback(t, w)
+					if gotAccess != fresh || gotRefresh != refresh {
 						t.Error("handback did not return exactly the exchanged credentials")
-					}
-					var out struct {
-						Error struct {
-							Code string `json:"code"`
-							Type string `json:"type"`
-						} `json:"error"`
-					}
-					if json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Error.Code != "token_expired" || out.Error.Type != "authentication_error" {
-						t.Errorf("body = %s, want authentication_error/token_expired", w.Body.String())
 					}
 					f.assertNoAccounting(t)
 					if route.name == "chat" {
-						retry := f.request(http.MethodPost, route.path, route.body, w.Header().Get("X-Proxy-Access-Token"))
+						retry := f.request(http.MethodPost, route.path, route.body, gotAccess)
 						if refresh != "" {
 							retry.Header.Set("X-Proxy-Refresh-Token", refresh)
 						}

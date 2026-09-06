@@ -13,10 +13,10 @@
 # login only; renewal is the proxy's job (stateless auto-refresh): while the
 # client presents X-Proxy-Refresh-Token, the proxy exchanges it when the JWT
 # expires or is about to. Inference returns HTTP 401 (code "token_expired")
-# without an upstream send. Adopt X-Proxy-Access-Token and any returned
-# X-Proxy-Refresh-Token, retain the old refresh token when no replacement is
-# returned, then retry. Model discovery refreshes transparently without
-# returning token headers. If the refresh token is rejected upstream, run
+# without an upstream send. Adopt access_token and any returned
+# refresh_token from the error body, retain the old refresh token when no
+# replacement is returned, then retry. Model discovery refreshes transparently
+# without returning tokens. If the refresh token is rejected upstream, run
 # this login again. See docs/adapters.md#token-refresh.
 #
 # Login traffic goes to auth.x.ai directly and is unaffected by any proxy

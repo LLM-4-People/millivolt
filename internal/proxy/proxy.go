@@ -318,7 +318,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodGet && (r.URL.Path == "/v1/models" || r.URL.Path == "/models") {
 		// Model discovery keeps its separate transparent-refresh contract for
-		// every mechanism: use the refreshed key without returning token headers.
+		// every mechanism: use the refreshed key without returning tokens.
 		s.serveModels(w, r, t, extractKey(r))
 		return
 	}
