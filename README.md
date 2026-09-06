@@ -96,6 +96,8 @@ If the client is another container, its `localhost` is not the proxy: on a share
 Compose network, use the proxy service URL `http://millivolt:8080/v1` instead.
 For protected remote access, follow the
 [reverse-proxy authentication guidance](docs/reverse-proxy.md#credentials-and-access-control).
+For the optional Grok or Cursor account-login helpers, follow
+[first-login setup](docs/adapters.md#first-login-helpers) before configuring tokens.
 
 For example, with your own upstream URL, key, and supported model:
 

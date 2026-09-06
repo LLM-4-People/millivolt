@@ -13,6 +13,7 @@
 | Configure, operate, back up or restart | [Operations](operations.md) |
 | Understand code ownership and invariants | [Architecture](architecture.md) |
 | Use a native adapter or subscription-token refresh | [Adapters](adapters.md) |
+| Run the Grok or Cursor login helper and configure its tokens | [First-login helpers](adapters.md#first-login-helpers) |
 | Change code and run isolated verification | [Contributing](../CONTRIBUTING.md) |
 | Refresh the product screenshots | [Screenshot workflow](../CONTRIBUTING.md#documentation-screenshots) |
 | Assess exposure or report a vulnerability | [Security](../SECURITY.md) |

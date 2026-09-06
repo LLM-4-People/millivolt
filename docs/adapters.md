@@ -119,6 +119,143 @@ format/protocol tests. Keep protocol constants distinct from the configurable
 [compatibility profile](#bundled-compatibility-profiles); built-in defaults remain
 neutral and the example does not establish provider support.
 
+## First-login helpers
+
+[grok-login.sh](../scripts/grok-login.sh) and
+[cursor-login.sh](../scripts/cursor-login.sh) obtain initial account credentials
+through interactive browser approval. Run them on a trusted Linux host or
+workstation, not inside the minimal proxy image. Neither a running millivolt
+instance nor the provider's CLI/desktop application is required by these scripts.
+Account eligibility, permitted integrations and model access remain the provider's
+decision; successful authentication does not establish subscription entitlement
+or a free inference allowance.
+
+The scripts do not write files or update client configuration. They print secret
+credential headers to standard output, and approval links/progress to standard
+error. Keep the terminal private: do not use shell tracing (`bash -x`), CI logs,
+screenshots or shared output redirection. Review a downloaded script before
+running it. These helpers have no command-line option parser; configure them
+with the environment variables below, not `--help` or invented flags.
+
+### Prerequisites and obtaining the scripts
+
+Both need Bash, `curl`, `jq` and standard Linux command-line utilities. Cursor
+also needs `openssl` and a curl build with HTTP/2 support; check that
+`curl --version` lists `HTTP2` in Features, as described in the
+[curl HTTP/2 guide](https://everything.curl.dev/http/versions/http2.html).
+`xdg-open` is optional: without it, open
+the printed approval URL yourself, including from another browser-capable device.
+
+Source checkouts already contain both helpers under `scripts/`. Image-only
+deployments can download just the desired helper on the host, without cloning
+or rebuilding millivolt:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/LLM-4-People/millivolt/main/scripts/grok-login.sh -o grok-login.sh
+curl -fsSL https://raw.githubusercontent.com/LLM-4-People/millivolt/main/scripts/cursor-login.sh -o cursor-login.sh
+```
+
+Use a new directory so downloads do not overwrite existing files. For a pinned
+installation, replace `main` in those URLs with the reviewed commit or release
+tag. Standalone downloads use `bash ./grok-login.sh` or `bash ./cursor-login.sh`
+instead of the checkout paths below. Do not pipe a download directly into Bash.
+
+### Grok login
+
+From a source checkout:
+
+```sh
+bash scripts/grok-login.sh
+```
+
+Open the printed verification URL, check the account and approve the displayed
+device code. The helper polls for approval and prints `Authorization: Bearer`
+with the access token, `X-Proxy-Refresh-Token` when supplied by the provider, and
+`X-Proxy-Base-URL: https://api.x.ai/v1`. This is an account-login token flow, not
+creation of a pay-as-you-go `xai-` API key. It does not select a model or add a
+native-format header; the ordinary OpenAI-compatible relay is used.
+
+For SSH or a headless terminal, suppress automatic browser opening:
+
+```sh
+NO_OPEN=1 bash scripts/grok-login.sh
+```
+
+### Cursor login
+
+From a source checkout:
+
+```sh
+bash scripts/cursor-login.sh
+```
+
+Open the printed login link and approve the account sign-in. The helper creates
+a PKCE challenge, requests HTTP/2 when polling the account endpoint, and prints the access
+token, optional refresh token, upstream base URL and `X-Proxy-Format: cursor`.
+Use the printed format header to select the [Cursor bridge](#cursor-connect-bridge);
+a provider profile by itself does not enable translation.
+
+The same headless switch is supported:
+
+```sh
+NO_OPEN=1 bash scripts/cursor-login.sh
+```
+
+### Configure the client after approval
+
+Keep the client's API base pointed at **millivolt**, such as
+`http://127.0.0.1:8080/v1`, using your actual host/port or protected ingress URL.
+The helper's `X-Proxy-Base-URL` instead identifies the upstream; do not replace
+the client's millivolt URL with it.
+
+| Printed value | Client configuration |
+| --- | --- |
+| Access token after `Authorization: Bearer ` | Put only the token in an SDK's API-key field, or use the complete printed Authorization header if configuring headers directly. Do not add `Bearer` twice. |
+| `X-Proxy-Base-URL` | Add as a custom request header. |
+| `X-Proxy-Refresh-Token`, when present | Add as a custom request header if using [automatic refresh](#token-refresh); the client must retain rotated credentials returned by the proxy. |
+| `X-Proxy-Format: cursor` | Add for the Cursor helper only. |
+
+Select a model your account is authorized to use. Keep tokens in private client
+configuration or a secret store, not `proxy.example.yaml` or a Git-tracked file.
+Millivolt does not register these credentials globally. If your ingress consumes
+Authorization, follow the [separate upstream-key setup](reverse-proxy.md#credentials-and-access-control).
+
+### Helper environment overrides
+
+These affect the login process only, not server Settings or the saved client.
+Use only origins and OAuth registrations you trust: they receive login material.
+Defaults remain owned by each script.
+
+| Variable | Helper | Meaning and default |
+| --- | --- | --- |
+| `NO_OPEN` | Both | Any nonempty value suppresses `xdg-open`; unset or empty permits it. The URL is still printed. |
+| `GROK_LOGIN_TIMEOUT` | Grok | Approval-poll budget in seconds; `600`. Use a positive integer. |
+| `XAI_AUTH_BASE` | Grok | Login origin; `https://auth.x.ai`. Does not change the printed inference base. |
+| `XAI_OAUTH_CLIENT_ID` | Grok | OAuth registration; defaults to the client ID shared with the proxy's xAI refresh implementation. |
+| `CURSOR_LOGIN_TIMEOUT` | Cursor | Approval-poll budget in seconds; `300`. Use a positive integer. |
+| `CURSOR_API_BASE` | Cursor | Poll origin and printed inference base; `https://api2.cursor.sh`. |
+| `CURSOR_LOGIN_BASE` | Cursor | Browser login origin; `https://www.cursor.com`. |
+
+Timeouts are polling budgets, not strict end-to-end deadlines: a current HTTP
+operation or sleep can extend elapsed time. Changing Grok's auth origin/client
+ID does not change millivolt's xAI refresh endpoint/registration, so a custom login
+can be incompatible with renewal. Cursor refresh targets the request's base URL
+and still requires a recognized refresh mechanism. These overrides do not
+establish support for arbitrary identity providers or compatible service clones.
+
+### Login troubleshooting
+
+| Symptom | What to check |
+| --- | --- |
+| Required tool not found | Install the named dependency on the host running the helper, not in the proxy image. |
+| No browser opens | Open the printed URL manually. `NO_OPEN=1` deliberately disables automatic opening. |
+| Cursor reports unsupported HTTP/2 or keeps waiting | Check `curl --version` for HTTP2 support and inspect its diagnostics. The helper keeps polling non-200 responses until its budget expires. |
+| Approval times out, expires or is denied | Verify the account/browser approval, then rerun for a fresh login challenge. Never reuse an expired code. |
+| No refresh token is printed | The helper warns and omits that header. Millivolt cannot renew without it; obtain another login when the access token expires. |
+| Login succeeds but inference returns 401/403 | Check client headers, upstream base, account permissions and model availability. Login alone does not prove inference access. |
+| Grok repeatedly returns `token_expired` | The client must adopt the returned access token and any rotated refresh token, then retry. Repeating the old credentials does not complete handback. |
+| Refresh is rejected | Recheck provider access and perform a new interactive login. Do not publish token responses or credential headers for troubleshooting. |
+
 ## Token refresh
 
 With `auto_token_refresh` enabled, a request may supply its own
@@ -130,19 +267,20 @@ Two response behaviors are explicit:
 
 | Mechanism | Inference behavior |
 | --- | --- |
-| Handback (xAI OAuth) | Return 401 with `token_expired` and fresh `X-Proxy-Access-Token` / `X-Proxy-Refresh-Token`; no inference is sent. The client adopts both and retries. |
-| In-place (Cursor exchange) | Use the refreshed access token for this request and return the fresh pair in those response headers. |
+| Handback (xAI OAuth) | Return 401 with `token_expired` and `X-Proxy-Access-Token`, plus `X-Proxy-Refresh-Token` when returned by the exchange; no inference is sent. The client adopts the updated credentials and retries. |
+| In-place (Cursor exchange) | Use the refreshed access token for this request and return it in `X-Proxy-Access-Token`, plus `X-Proxy-Refresh-Token` when returned by the exchange. |
 
 Model discovery refreshes transparently instead of requiring the handback
-workflow. Missing refresh tokens, unknown mechanisms, non-JWT keys or disabled
+workflow, but does not return updated token headers to the client.
+Missing refresh tokens, unknown mechanisms, non-JWT keys or disabled
 refresh leave ordinary forwarding unchanged. Exchange failure falls back to the
 original upstream credential, allowing the provider to decide authentication.
 
-The optional [Cursor login](../scripts/cursor-login.sh) and
-[Grok login](../scripts/grok-login.sh) helpers are interactive first-login tools,
-not proxy startup dependencies. They print credentials and do not establish a
-secure storage location for the client. Treat terminal output and returned token
-headers as secrets; never paste them into issues or commit them.
+Use the [first-login helpers](#first-login-helpers) to obtain initial credentials.
+They are not proxy startup dependencies. Treat terminal output and returned token
+headers as secrets; never paste them into issues or commit them. Adopt a returned
+refresh token when present; if a successful exchange omits it, retain the existing
+refresh token rather than replacing it with an empty value.
 
 The implementation lives in [tokenrefresh.go](../internal/proxy/tokenrefresh.go).
 Provider/account behavior can change; historic successful observations are not
