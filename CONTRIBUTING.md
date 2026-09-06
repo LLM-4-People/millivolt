@@ -18,8 +18,8 @@ or push a completed, checked feature directly there when that is authorized.
 
 Promotion from `testing` to `main` is a separate deliberate integration after
 validation, not part of an ordinary feature push. Do not push release tags as a
-side effect of feature work. CI checks every branch; production image publishing
-remains restricted to `main` and version tags.
+side effect of feature work: CI cuts releases itself. CI checks every branch;
+production image publishing remains restricted to `main` and version tags.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -220,20 +220,34 @@ millivolt_version="$(tr -d '\r\n' < VERSION)"
 go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version"
 ```
 
-Run the shared checks before tagging. Confirm the hosted container build and
-smoke tests succeed, then check the package visibility and anonymous pull.
-Do not report a release/image as available merely because validation or a local
-build passed. Image usage and persistence limits live in
-[operations](docs/operations.md#versions-and-images).
+Publication is automatic. After the checks and both container architectures
+pass, every push to `main` that touches anything besides documentation
+(`docs/**`, `**/*.md`) cuts a release:
 
-After committing a version change and creating its exact tag, validate the
-checked-out revision, clean worktree and tag target through the shared gate:
+1. The next version is the higher of VERSION and the newest `v*` tag. If that
+   version is already tagged, the patch number increments; an untagged VERSION
+   (a manual bump or one carried by a promotion merge) ships as-is.
+2. The workflow commits the VERSION change, pushes an annotated `v<version>`
+   tag and creates the GitHub release with the commit log since the previous
+   tag as notes.
+3. It then builds and publishes the multi-arch image with `main`, `sha-*`,
+   `version` and (for non-prereleases) `latest` tags on ghcr.io.
+
+Docs-only pushes never cut a release or rebuild images. A manually pushed
+`v*` tag still ships exactly as tagged through the same pipeline. VERSION is
+recomputed from the higher of the file and the newest tag on every release, so
+a promotion merge that resolves a VERSION conflict to either side is safe.
+Manual validation of a candidate remains available:
 
 ```sh
 scripts/check.sh release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version"
 ```
 
-The gate clears inherited Git routing/configuration variables before checking
+Run the shared checks before relying on a release. Confirm the hosted container
+build and smoke tests succeed, then check the package visibility and anonymous
+pull. Do not report a release/image as available merely because validation or a
+local build passed. Image usage and persistence limits live in
+[operations](docs/operations.md#versions-and-images).The gate clears inherited Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.
 

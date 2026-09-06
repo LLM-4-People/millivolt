@@ -2,6 +2,10 @@ name: Checks and images
 
 on:
   push:
+    # Docs-only pushes never cut a release or rebuild images.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
   pull_request:
 
 permissions:
@@ -110,27 +114,92 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
       packages: write
     env:
       GOTOOLCHAIN: local
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
+          fetch-tags: true
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
+      - name: Cut the next version
+        id: cut
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # A manually pushed release tag ships exactly as tagged.
+            version="${GITHUB_REF_NAME#v}"
+            revision="${{ github.sha }}"
+          else
+            latest="$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')"
+            file_version="$(tr -d '\r\n' < VERSION)"
+            # The higher of VERSION and the newest tag owns the base: a
+            # promotion merge carrying an older VERSION self-heals instead of
+            # regressing a published release.
+            target="$(printf '%s\n%s\n' "$file_version" "$latest" | sort -V | tail -n1)"
+            if git rev-parse -q --verify "refs/tags/v$target" >/dev/null; then
+              # That version is already released and code changed since it:
+              # cut the next patch (dropping any prerelease suffix).
+              base="${target%%-*}"
+              IFS=. read -r major minor patch <<< "$base"
+              version="$major.$minor.$((patch + 1))"
+            else
+              # An untagged VERSION (manual bump or promotion) ships as-is.
+              version="$target"
+            fi
+            if [ "$version" != "$file_version" ]; then
+              printf '%s\n' "$version" > VERSION
+              git config user.name "millivolt-release-bot"
+              git config user.email "millivolt-release-bot@users.noreply.github.com"
+              git add VERSION
+              git commit -m "bump version to $version"
+            fi
+            revision="$(git rev-parse HEAD)"
+            git tag -a "v$version" -m "millivolt $version" "$revision"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:main" "v$version"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
       - name: Validate release identity
         id: release
         env:
-          REVISION: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          REVISION: ${{ steps.cut.outputs.revision }}
+          RELEASE_TAG: v${{ steps.cut.outputs.version }}
         run: |
-          args=(release -revision "$REVISION")
-          if [ -n "$RELEASE_TAG" ]; then args+=(-tag "$RELEASE_TAG"); fi
+          args=(release -revision "$REVISION" -tag "$RELEASE_TAG")
           bash scripts/check.sh "${args[@]}" >> "$GITHUB_OUTPUT"
+      - name: Create the GitHub release
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Notes come from the real commit log since the previous release
+          # tag (push-based work has no PRs for --generate-notes to list).
+          previous="$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')"
+          {
+            echo "## What's included"
+            if [ -n "$previous" ]; then
+              git log --no-decorate --format='- %h %s' "$previous..v$RELEASE_VERSION"
+            else
+              git log --no-decorate --format='- %h %s'
+            fi
+            echo
+            echo "**Image:** \`ghcr.io/${REPO}:${RELEASE_VERSION}\`"
+          } > release-notes.md
+          flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
+          if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          gh release view "v$RELEASE_VERSION" >/dev/null 2>&1 || \
+            gh release create "v$RELEASE_VERSION" "${flags[@]}"
       - name: Define image tags and labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -139,12 +208,12 @@ jobs:
           flavor: latest=false
           tags: |
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ env.RELEASE_VERSION }},enable=${{ env.RELEASE_VERSION != '' }}
             type=sha,format=long
-            type=raw,value=${{ steps.release.outputs.version }},enable=${{ github.ref_type == 'tag' }}
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && steps.release.outputs.prerelease == 'false' }}
+            type=raw,value=latest,enable=${{ env.RELEASE_VERSION != '' && !contains(env.RELEASE_VERSION, '-') }}
           labels: |
-            org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            org.opencontainers.image.revision=${{ steps.release.outputs.revision }}
+            org.opencontainers.image.version=${{ env.RELEASE_VERSION }}
+            org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}
             org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
             org.opencontainers.image.licenses=MIT
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -161,4 +230,4 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: REVISION=${{ steps.release.outputs.revision }}
+          build-args: REVISION=${{ steps.cut.outputs.revision }}
