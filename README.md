@@ -1,9 +1,26 @@
 # millivolt
 
-An OpenAI-compatible inference proxy with a built-in observability dashboard.
-Clients choose the upstream URL and credentials on each request; no endpoint or
-API-key registry is required. Optional provider mappings enrich usage, cost,
-headers, and model discovery.
+AI requests should not be a black box. When an agent feels slow, retries pile up,
+or token usage climbs, millivolt helps you see what is happening and where to
+look next. It is a self-hosted, OpenAI-compatible inference proxy that brings
+live requests and retained history from your apps and agents into one dashboard.
+Compare response speed, latency, token usage and provider-reported costs, then
+drill down by client, provider, model or conversation.
+
+Keep your choice of upstreams and credentials. Clients that support custom
+routing headers choose the upstream URL and credentials on each request, so
+there is no separate endpoint or API-key registry to maintain in the proxy.
+
+Go from observation to action in the same place: inspect retries and rate
+limits, hold new work from a busy client, adjust provider rate and concurrency
+limits, or turn on scoped debugging when you need a closer look. You get
+visibility and traffic controls together.
+
+Run it on your own infrastructure as one Go service with an embedded dashboard
+and SQLite history. The lightweight, non-root Docker image needs no separate
+database server or frontend runtime, and the project is MIT licensed. It is
+built for people who want to understand and manage their AI traffic without
+operating a separate monitoring stack.
 
 [Quickstart](#quickstart) · [What you get](#what-you-get) ·
 [Visual guide](docs/dashboard.md) · [Documentation](docs/README.md)
