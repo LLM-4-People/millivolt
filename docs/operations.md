@@ -140,10 +140,15 @@ A registry tag is usable only after its publishing workflow succeeds.
 Keep the same Compose project name to reuse its named volumes. The normal file
 names the project `millivolt`; an explicit `-p` overrides it. The deployment
 inputs are `MILLIVOLT_IMAGE` (image reference),
-`MILLIVOLT_PORT` (loopback host port), and `MILLIVOLT_STOP_GRACE_PERIOD` (container
+`MILLIVOLT_PORT` (loopback host port), `MILLIVOLT_OPERATOR_TOKEN` (the
+operator credential, forwarded into the container environment only), and
+`MILLIVOLT_STOP_GRACE_PERIOD` (container
 stop grace). Their defaults live in [compose.yaml](../compose.yaml), not server
 configuration. Supply them consistently through the environment or an ignored
 local `.env` file. `docker compose config` shows the resolved deployment.
+The image carries a Dockerfile `HEALTHCHECK` that probes the unauthenticated
+`/healthz` through the binary's `-healthcheck` mode, so `docker compose ps`
+reports health without any operator credential.
 
 ```sh
 # Start or adopt a newly pulled image while preserving volumes.
@@ -471,8 +476,9 @@ operator out of their own dashboard. The map is hard-capped at 4096 source
 IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
 response is `429` with a coarse rounded `Retry-After` and a generic body.
 
-With the variable unset the gate stays armed: the whole dashboard returns 403
-and only `/healthz` and inference respond. Setting it empty, shorter than 16
+With the variable unset or empty the gate stays armed: the whole dashboard
+returns 403
+and only `/healthz` and inference respond. A nonempty value shorter than 16
 or longer than 512 characters fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart

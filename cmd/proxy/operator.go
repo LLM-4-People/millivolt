@@ -74,11 +74,13 @@ const (
 	authMaxIPs           = 4096             // hard memory bound against spoofed source floods
 )
 
-// loadOperatorToken resolves the boot credential. Unset arms the gate with no
-// credential: every gated request is denied while the liveness probe and
-// inference keep working. Set but empty or shorter than
-// operatorTokenMinLen fails the boot loudly rather than degrading to a weaker
-// policy silently.
+// loadOperatorToken resolves the boot credential. Unset or empty arms the
+// gate with no credential (compose interpolations routinely yield empty
+// strings, so empty is treated as unset with a warning): every gated request
+// is denied while the liveness probe and inference keep working. A nonempty
+// credential shorter than operatorTokenMinLen or longer than
+// operatorTokenMaxLen fails the boot loudly rather than degrading to a
+// weaker policy silently.
 func loadOperatorToken() (string, error) {
 	value, ok := os.LookupEnv(operatorTokenEnv)
 	switch {
@@ -86,7 +88,8 @@ func loadOperatorToken() (string, error) {
 		log.Printf("operator plane disabled: %s is not set, dashboard and admin endpoints deny all requests", operatorTokenEnv)
 		return "", nil
 	case value == "":
-		return "", errors.New(operatorTokenEnv + " is set but empty; unset it or provide a credential")
+		log.Printf("operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", operatorTokenEnv)
+		return "", nil
 	case len(value) < operatorTokenMinLen:
 		return "", errors.New(operatorTokenEnv + " must be at least " + strconv.Itoa(operatorTokenMinLen) + " characters")
 	case len(value) > operatorTokenMaxLen:

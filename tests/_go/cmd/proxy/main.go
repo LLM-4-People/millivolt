@@ -368,8 +368,8 @@ func TestOperatorTokenEnv(t *testing.T) {
 		t.Errorf("unset token: value=%q err=%v, want \"\", nil", value, err)
 	}
 	t.Setenv(operatorTokenEnv, "")
-	if _, err := loadOperatorToken(); err == nil {
-		t.Error("empty token: want boot failure")
+	if value, err := loadOperatorToken(); value != "" || err != nil {
+		t.Errorf("empty token: value=%q err=%v, want \"\", nil (compose interpolations yield empty; treat as unset)", value, err)
 	}
 	t.Setenv(operatorTokenEnv, "short")
 	if _, err := loadOperatorToken(); err == nil {

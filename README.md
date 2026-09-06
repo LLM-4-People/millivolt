@@ -71,12 +71,14 @@ a new, empty deployment directory:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LLM-4-People/millivolt/main/compose.yaml -o compose.yaml
+export MILLIVOLT_OPERATOR_TOKEN='choose-a-long-random-credential'
 docker compose pull
 docker compose up -d
 docker compose logs --tail 50
 ```
 
-[compose.yaml](compose.yaml) publishes only on host loopback. Set
+[compose.yaml](compose.yaml) publishes only on host loopback and forwards
+`MILLIVOLT_OPERATOR_TOKEN` into the container. Set
 `MILLIVOLT_PORT` to an unused host port if needed. Its named volumes retain
 history and private Settings configuration when the container is replaced.
 Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
@@ -100,12 +102,16 @@ git clone https://github.com/LLM-4-People/millivolt.git
 cd millivolt
 # Create a local config only if one does not already exist.
 test -e proxy.yaml || cp proxy.example.yaml proxy.yaml
+export MILLIVOLT_OPERATOR_TOKEN='choose-a-long-random-credential'
 go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 ```
 
 ### Connect a client
 
-Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard, then set
+Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard. With
+`MILLIVOLT_OPERATOR_TOKEN` set, the sign-in page (or the dashboard's one-time
+prompt) asks for that value; with it unset, the dashboard stays denied and
+only `/healthz` and inference respond. Then set
 your OpenAI-compatible client's connection options. The host URLs below assume
 port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
 
