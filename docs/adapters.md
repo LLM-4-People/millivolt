@@ -1,9 +1,35 @@
-# Optional adapters and token refresh
+# Upstream compatibility, adapters and token refresh
 
-The normal OpenAI-compatible relay is separate from optional protocol bridges.
-Select an adapter with `X-Proxy-Format`; do not infer one from a provider label.
+The client-facing OpenAI-compatible interface is separate from the upstream
+protocol. Select an adapter with `X-Proxy-Format`; do not infer one from a
+provider label.
 See [protocol](protocol.md) for routing/auth headers and
 [operations](operations.md#known-limits) for current limitations.
+
+## Client and upstream compatibility
+
+Your client connects to millivolt using an OpenAI-compatible API. millivolt
+then relays or translates the request according to the selected upstream format:
+
+| Client → millivolt | millivolt → upstream | `X-Proxy-Format` |
+| --- | --- | --- |
+| OpenAI-compatible requests | OpenAI, xAI/Grok and other hosted or local OpenAI-compatible APIs | `openai` (default) |
+| Supported OpenAI Chat Completions | [Anthropic-compatible Messages](#anthropic-compatible-messages) | `anthropic` |
+| Supported OpenAI Chat Completions with text and tools | [Cursor agent.v1 Connect/protobuf](#cursor-connect-bridge) | `cursor` |
+
+xAI/Grok uses the ordinary OpenAI-compatible relay, not a separate native
+adapter. Other providers and local model servers can use that same path when
+they expose a compatible API; there is no fixed provider registry. Native
+translation is limited to the implemented adapters and their supported fields,
+not every OpenAI endpoint or arbitrary provider protocol. Translated responses
+and stream events are returned in OpenAI-compatible shapes.
+
+Clients must support custom routing headers or middleware that adds them.
+For native formats, supply the adapter selection and the upstream's required
+authentication, version and path headers; the
+[Anthropic example](protocol.md#url-and-auth-examples) and
+[Cursor login setup](#cursor-login) show these choices. Provider profiles enrich
+headers and metadata but do not select an adapter or grant provider access.
 
 ## Bundled compatibility profiles
 

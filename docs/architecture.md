@@ -1,6 +1,9 @@
 # Architecture and ownership
 
 millivolt is one Go HTTP service with an embedded, no-build dashboard.
+The client-facing OpenAI-compatible interface and upstream relay/translation
+are separate boundaries; the [compatibility matrix](adapters.md#client-and-upstream-compatibility)
+defines their supported combinations.
 [Contributing](../CONTRIBUTING.md) covers change and verification rules;
 [protocol](protocol.md) and [operations](operations.md) describe public behavior.
 

@@ -1,7 +1,10 @@
 # Protocol and client integration
 
-millivolt accepts OpenAI-compatible requests and routes them using per-request
-headers. It does not require an endpoint/API-key registry. Read
+The client-facing interface is OpenAI-compatible; the upstream-facing protocol
+can differ. Per-request headers select the destination, credentials and optional
+native adapter. The [compatibility matrix](adapters.md#client-and-upstream-compatibility)
+maps the default OpenAI-compatible relay and supported native translations.
+No endpoint/API-key registry is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access.
 
 ## Endpoint behavior
@@ -35,7 +38,7 @@ Routing validation and request construction live in
 | `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
 | `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. Not applied to model discovery or the Cursor bridge. |
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
-| `X-Proxy-Format` | `openai` (also the default), `anthropic`, or `cursor`. See [adapters](adapters.md). |
+| `X-Proxy-Format` | Upstream format: `openai` (default relay), `anthropic`, or `cursor`. The client-facing interface remains OpenAI-compatible; see [supported combinations](adapters.md#client-and-upstream-compatibility). |
 | `X-Proxy-Client` | Observability/client label; otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |

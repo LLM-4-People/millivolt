@@ -2,10 +2,17 @@
 
 AI requests should not be a black box. When an agent feels slow, retries pile up,
 or token usage climbs, millivolt helps you see what is happening and where to
-look next. It is a self-hosted, OpenAI-compatible inference proxy that brings
+look next. It is a self-hosted inference proxy that brings
 live requests and retained history from your apps and agents into one dashboard.
 Compare response speed, latency, token usage and provider-reported costs, then
 drill down by client, provider, model or conversation.
+
+One client interface, multiple upstream protocols. Your apps and agents talk
+to millivolt through an OpenAI-compatible API. On the provider side, millivolt
+connects to OpenAI, xAI/Grok and other hosted or local OpenAI-compatible APIs,
+with optional adapters translating supported chat and tool workflows to
+Anthropic Messages and Cursor's native Connect protocol. See
+[upstream compatibility and adapter limits](docs/adapters.md#client-and-upstream-compatibility).
 
 Keep your choice of upstreams and credentials. Clients that support custom
 routing headers choose the upstream URL and credentials on each request, so
@@ -109,6 +116,11 @@ port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
 
 The client must support custom headers, or middleware that adds them. Select a
 model supported by your upstream; millivolt does not register providers or keys.
+The settings above use the default OpenAI-compatible upstream relay, including
+for xAI/Grok. For native Anthropic Messages or Cursor Connect, keep the client's
+OpenAI-compatible interface and select the appropriate `X-Proxy-Format` adapter
+plus its required upstream headers; see the
+[compatibility guide](docs/adapters.md#client-and-upstream-compatibility).
 If the client is another container, its `localhost` is not the proxy: on a shared
 Compose network, use the proxy service URL `http://millivolt:8080/v1` instead.
 For protected remote access, follow the
@@ -265,7 +277,7 @@ requirements.
 - [Protocol and client integration](docs/protocol.md)
 - [Operations and limitations](docs/operations.md)
 - [Architecture and ownership](docs/architecture.md)
-- [Optional adapters and token refresh](docs/adapters.md)
+- [Upstream compatibility, adapters and token refresh](docs/adapters.md)
 - [Contributing and verification](CONTRIBUTING.md)
 - [Security](SECURITY.md)
 

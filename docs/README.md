@@ -10,9 +10,10 @@
 | Add NGINX or another protected ingress | [Reverse proxy](reverse-proxy.md) |
 | Choose an image or understand version identity | [Versions and images](operations.md#versions-and-images) |
 | Connect a client or declare parent conversations | [Protocol](protocol.md) |
+| Understand client-facing OpenAI compatibility and upstream protocol support | [Compatibility matrix](adapters.md#client-and-upstream-compatibility) |
 | Configure, operate, back up or restart | [Operations](operations.md) |
 | Understand code ownership and invariants | [Architecture](architecture.md) |
-| Use a native adapter or subscription-token refresh | [Adapters](adapters.md) |
+| Use a native adapter or account-token refresh | [Adapters and token refresh](adapters.md) |
 | Run the Grok or Cursor login helper and configure its tokens | [First-login helpers](adapters.md#first-login-helpers) |
 | Change code and run isolated verification | [Contributing](../CONTRIBUTING.md) |
 | Refresh the product screenshots | [Screenshot workflow](../CONTRIBUTING.md#documentation-screenshots) |
