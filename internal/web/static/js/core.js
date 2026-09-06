@@ -228,14 +228,16 @@ const fmtMoney = x => {
 // 99.996% would print as "100.0%" / "100.00%" and falsely claim a perfect rate
 // (a provider at 99.xx% cache read displayed "100%"). Floor such ratios to the
 // largest sub-100 value at this precision; only a >= b may ever show "100%".
+// A zero denominator means the rate was never measured: render '-' like the
+// other shared formatters, never a fabricated 0%.
 const pctCap = (a, b, d) => {
   let v = (a / b) * 100;
   if (a < b) v = Math.min(v, 100 - Math.pow(10, -d));
   return v.toFixed(d) + '%';
 };
-const pct = (a, b) => b ? pctCap(a, b, 1) : '0%';
+const pct = (a, b) => b ? pctCap(a, b, 1) : '-';
 // pct2 is the 2-decimal variant for per-request cache hit, where precision matters.
-const pct2 = (a, b) => b ? pctCap(a, b, 2) : '0%';
+const pct2 = (a, b) => b ? pctCap(a, b, 2) : '-';
 // vt wraps a display value in a span whose title carries the full text, so a
 // value that ellipsizes (overflow: hidden + text-overflow: ellipsis) is always
 // fully recoverable on hover. Use for any value that can exceed its container.

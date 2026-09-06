@@ -478,6 +478,29 @@ async function main() {
   check('bootstrap state-only pull repaints the band from fresh kpiAgg',
     bootstrapStateApplied && d.getElementById('kpis').textContent.includes('31'));
 
+  // ---- test 7b-2: a never-measured aggregate renders derived rate tiles as
+  // '-' through the shared pct owner, never a fabricated 0%, while counts
+  // stay honest zeros (0 requests, 0 of 0, 0 / 0 in).
+  w.fetch = (url) => {
+    const u = String(url);
+    if (u.includes('/metrics/bootstrap')) {
+      return Promise.resolve({ ok: true, json: async () => ({
+        records: [], buffer_size: 3, counters: { in_flight: 0, total_requests: 0, total_errors: 0 },
+        seq: 4, oldest_seq: 1, feed_id: 'feedB', incremental: true,
+        kpi: { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0 },
+        dash: {}, pause: {}, throttle: {},
+      }) });
+    }
+    return origBootstrap(url);
+  };
+  w.eval("fetchBootstrap('none')");
+  await sleep(20);
+  w.fetch = origBootstrap;
+  const neverMeasured = d.getElementById('kpis').textContent;
+  check('a never-measured band shows - rates and honest zero counts',
+    neverMeasured.includes('0 of 0') && neverMeasured.includes('0 / 0 in') &&
+    !neverMeasured.includes('%'));
+
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.

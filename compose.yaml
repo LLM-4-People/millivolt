@@ -3,6 +3,7 @@ name: millivolt
 services:
   millivolt:
     image: ${MILLIVOLT_IMAGE:-ghcr.io/llm-4-people/millivolt:main}
+    container_name: millivolt
     ports:
       - "127.0.0.1:${MILLIVOLT_PORT:-8080}:8080"
     environment:

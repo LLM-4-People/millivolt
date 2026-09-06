@@ -132,7 +132,7 @@ the generated example and prepared state directories onto the minimal distroless
 The [Compose quickstart](../README.md#docker-compose) downloads the image-only
 [compose.yaml](../compose.yaml). Normal deployment never builds from source.
 Local builds use the separate
-[development overlay](../CONTRIBUTING.md#container-development).
+[development Compose](../CONTRIBUTING.md#container-development).
 A registry tag is usable only after its publishing workflow succeeds.
 
 ### Compose operation
@@ -173,7 +173,7 @@ and [volume removal](https://docs.docker.com/reference/cli/docker/compose/down/)
 documentation for the underlying behavior.
 
 Do not add a build section to the deployment file. The
-[development Compose overlay](../CONTRIBUTING.md#container-development) owns
+[development Compose](../CONTRIBUTING.md#container-development) owns
 source builds, its private port and its separate project identity.
 
 The Compose service drops Linux capabilities, disallows privilege escalation,
@@ -204,6 +204,16 @@ using one, or intentionally accept the application's missing-file defaults.
 Use private directory permissions and mode `0600` for a supplied config; with
 rootless Docker or user namespaces, account for the host UID mapping. Do not
 make sensitive directories world-writable to work around ownership failures.
+
+A first launch cannot prepare its own bind-mount host directories. When a
+bind-mount target does not exist, Docker creates it as `root:root` mode `0755`,
+which the runtime UID cannot write, and startup fails with SQLite's
+`unable to open database file` error. The log names the database path, the
+directory state and the runtime UID. Pre-create the host `data/` and `config/`
+directories owned by `65532:65532` before the first start, or
+`chown -R 65532:65532` them after a failed start, then start the container
+again. Named volumes avoid this entirely: Docker seeds them from the image
+with correct ownership.
 
 Settings saves by creating a temporary file beside the config and atomically
 renaming it. A read-only mount, or a bind mount of only the config file, cannot

@@ -85,13 +85,15 @@ Fresh config volumes receive the bundled [configuration example](proxy.example.y
 including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles).
 No separate config download is needed; existing saved settings are not overwritten.
 The runtime is non-root with a read-only root filesystem. Dashboard rebuild is
-unavailable in an image.
+unavailable in an image. If you replace the named volumes with host bind
+mounts, pre-create those directories writable by UID/GID `65532:65532`; see
+[persistent state](docs/operations.md#persistent-state-and-configuration).
 
 See [container operation](docs/operations.md#containers) for image selection,
 configuration, updates, backups and shutdown, or the
 [reverse-proxy guide](docs/reverse-proxy.md) for NGINX and protected ingress.
 Stop with `docker compose stop`. Local image builds use a separate
-[development Compose overlay](CONTRIBUTING.md#container-development).
+[development Compose](CONTRIBUTING.md#container-development).
 
 ### From source
 

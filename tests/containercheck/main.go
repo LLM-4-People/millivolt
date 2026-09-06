@@ -341,12 +341,8 @@ func (d dockerCLI) checkCompose(ctx context.Context) error {
 		return strings.HasPrefix(value, "COMPOSE_") || strings.HasPrefix(value, "MILLIVOLT_")
 	})
 	var models [][]byte
-	for _, dev := range []bool{false, true} {
-		args := []string{"compose", "--env-file", os.DevNull, "--file", "compose.yaml"}
-		if dev {
-			args = append(args, "--file", "compose.dev.yaml")
-		}
-		data, err := d.command(ctx, append(args, "config", "--format", "json")...)
+	for _, file := range []string{"compose.yaml", "compose.dev.yaml"} {
+		data, err := d.command(ctx, "compose", "--env-file", os.DevNull, "--file", file, "config", "--format", "json")
 		if err != nil {
 			return err
 		}
@@ -358,8 +354,9 @@ func (d dockerCLI) checkCompose(ctx context.Context) error {
 type composeModel struct {
 	Name     string `json:"name"`
 	Services map[string]struct {
-		Image string `json:"image"`
-		Build *struct {
+		Image         string `json:"image"`
+		ContainerName string `json:"container_name"`
+		Build         *struct {
 			Context string `json:"context"`
 		} `json:"build"`
 		PullPolicy string `json:"pull_policy"`
@@ -382,9 +379,9 @@ func decodeCompose(data []byte) (composeModel, error) {
 	if err := json.Unmarshal(data, &model); err != nil {
 		return model, err
 	}
-	service, ok := model.Services["millivolt"]
-	if !ok || model.Name == "" || len(model.Services) != 1 || service.Image == "" || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Published == "" || service.Ports[0].Target != 8080 {
-		return model, errors.New("Compose must contain one named, read-only, loopback-published millivolt service")
+	service, ok := model.Services[model.Name]
+	if !ok || model.Name == "" || len(model.Services) != 1 || service.Image == "" || service.ContainerName != model.Name || !service.ReadOnly || len(service.Ports) != 1 || service.Ports[0].HostIP != "127.0.0.1" || service.Ports[0].Published == "" || service.Ports[0].Target != 8080 {
+		return model, errors.New("Compose must contain one named, read-only, loopback-published service whose name matches the project and container")
 	}
 	if len(service.Volumes) != 2 || len(model.Volumes) != 2 {
 		return model, errors.New("Compose must keep exactly two named persistence volumes")
@@ -410,7 +407,7 @@ func validateCompose(deployment, development []byte) error {
 	if err != nil {
 		return err
 	}
-	normalService, devService := normal.Services["millivolt"], dev.Services["millivolt"]
+	normalService, devService := normal.Services[normal.Name], dev.Services[dev.Name]
 	if normalService.Build != nil || devService.Build == nil || devService.Build.Context == "" || devService.PullPolicy != "build" {
 		return errors.New("only the explicit development Compose may build source")
 	}

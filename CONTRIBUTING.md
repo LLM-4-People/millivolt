@@ -115,21 +115,21 @@ remain enabled under Python `-O`; the guard suite verifies this.
 ## Container development
 
 Normal [compose.yaml](compose.yaml) only runs a published image. For a local
-source build, use [compose.dev.yaml](compose.dev.yaml) from the checkout root
-with Docker Compose 2.24.4 or newer:
+source build, use [compose.dev.yaml](compose.dev.yaml) from the checkout root.
+It is a complete Compose file, not an overlay: service, container and project
+are all `millivolt-dev`.
 
 ```sh
-docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml up -d --build
-docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml logs --tail 50
-docker compose -p millivolt-dev -f compose.yaml -f compose.dev.yaml down
+docker compose -f compose.dev.yaml up -d --build
+docker compose -f compose.dev.yaml logs --tail 50
+docker compose -f compose.dev.yaml down
 ```
 
-The explicit development project keeps its containers and named volumes separate
-from a normal deployment, including when `COMPOSE_PROJECT_NAME` is set outside
-the checkout. The overlay replaces, rather than adds to, the published port.
-Its `MILLIVOLT_DEV_PORT` and `MILLIVOLT_DEV_IMAGE` inputs are defined only there;
-it inherits runtime security and persistence from the base file. Choose an unused
-development port if `scripts/dev.sh` is already running.
+The development project keeps its containers and named volumes separate from a
+normal deployment, including when `COMPOSE_PROJECT_NAME` is set outside the
+checkout. Its `MILLIVOLT_DEV_PORT` and `MILLIVOLT_DEV_IMAGE` inputs are defined
+only there. Choose an unused development port if `scripts/dev.sh` is already
+running.
 
 Rerun the same `up --build` command after source changes. The resulting runtime
 image has no compiler or source tree, so dashboard rebuild is unavailable.

@@ -14,6 +14,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -435,6 +437,34 @@ type Store struct {
 	flushCh chan chan error
 }
 
+// cantOpenContext explains SQLITE_CANTOPEN startup failures. The bare SQLite
+// text ("unable to open database file (14)") names neither the database path
+// nor the runtime identity, which turned first-launch permission mistakes on
+// host bind mounts into guesswork. It classifies the database directory only
+// on the already failing path: missing, not writable by this process, or
+// writable with the failure coming from the file, its WAL/SHM sidecars or the
+// filesystem. Deployment remediation (Docker creates missing bind-mount host
+// directories as root) belongs to the operations documentation, not here.
+func cantOpenContext(err error, path string) error {
+	var serr *sqlite.Error
+	if !errors.As(err, &serr) || serr.Code()&0xff != sqlite3.SQLITE_CANTOPEN {
+		return err
+	}
+	dir := filepath.Dir(path)
+	var cause string
+	if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+		cause = fmt.Sprintf("directory %q does not exist", dir)
+	} else if probe, probeErr := os.CreateTemp(dir, ".millivolt-open-probe-*"); probeErr != nil {
+		cause = fmt.Sprintf("directory %q is not writable by uid %d/gid %d; create it owned by that user or chown it",
+			dir, os.Getuid(), os.Getgid())
+	} else {
+		_ = probe.Close()
+		_ = os.Remove(probe.Name())
+		cause = fmt.Sprintf("directory %q is writable, so the database file, its WAL/SHM sidecars or the filesystem rejected the open", dir)
+	}
+	return fmt.Errorf("%w: cannot open %q: %s", err, path, cause)
+}
+
 // Open opens (or creates) the SQLite database at path and starts the
 // background writer. Call Close to shut down cleanly. opts carries the
 // pipeline tunables (channel/batch sizes, flush cadence, query timeout).
@@ -455,7 +485,7 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("schema: %w", err)
+		return nil, fmt.Errorf("schema: %w", cantOpenContext(err, path))
 	}
 	if err := ensureProjectionTriggers(db); err != nil {
 		db.Close()

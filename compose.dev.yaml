@@ -1,12 +1,31 @@
-# Explicit source-build override. Requires Compose 2.24.4 or newer for !override.
-# Apply after compose.yaml; never merge the deployment's published port.
+# Explicit source-build Compose. Isolated from the published-image deployment:
+# separate project, service, container, image, port and named volumes.
 name: millivolt-dev
 
 services:
-  millivolt:
+  millivolt-dev:
     image: ${MILLIVOLT_DEV_IMAGE:-millivolt:dev}
+    container_name: millivolt-dev
     build:
       context: .
     pull_policy: build
-    ports: !override
+    ports:
       - "127.0.0.1:${MILLIVOLT_DEV_PORT:-8081}:8080"
+    environment:
+      MILLIVOLT_OPERATOR_TOKEN: ${MILLIVOLT_OPERATOR_TOKEN:-}
+    volumes:
+      - data:/data
+      - config:/config
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,noexec,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
+
+volumes:
+  data:
+  config:

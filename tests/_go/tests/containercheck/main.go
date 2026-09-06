@@ -209,10 +209,8 @@ fi
 }
 
 func TestComposeIsolationContract(t *testing.T) {
-	const normal = `{"name":"millivolt","services":{"millivolt":{"image":"released","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt_data"},"config":{"name":"millivolt_config"}}}`
-	dev := strings.NewReplacer(`"name":"millivolt"`, `"name":"millivolt-dev"`,
-		`"image":"released"`, `"image":"built","build":{"context":"/fixture"},"pull_policy":"build"`,
-		`"published":"8080"`, `"published":"8081"`, `millivolt_data`, `millivolt-dev_data`, `millivolt_config`, `millivolt-dev_config`).Replace(normal)
+	const normal = `{"name":"millivolt","services":{"millivolt":{"image":"released","container_name":"millivolt","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8080","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt_data"},"config":{"name":"millivolt_config"}}}`
+	const dev = `{"name":"millivolt-dev","services":{"millivolt-dev":{"image":"built","container_name":"millivolt-dev","build":{"context":"/fixture"},"pull_policy":"build","read_only":true,"ports":[{"host_ip":"127.0.0.1","published":"8081","target":8080}],"volumes":[{"type":"volume","source":"data","target":"/data"},{"type":"volume","source":"config","target":"/config"}]}},"volumes":{"data":{"name":"millivolt-dev_data"},"config":{"name":"millivolt-dev_config"}}}`
 	if err := validateCompose([]byte(normal), []byte(dev)); err != nil {
 		t.Fatal(err)
 	}

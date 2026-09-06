@@ -188,8 +188,10 @@ function derive(data) {
   const cacheTotal = a.cache_read_tokens || 0;
   const inTotal = a.input_tokens || 0;
   const outTotal = a.output_tokens || 0;
-  const cacheRatio = inTotal ? pct(cacheTotal, inTotal) : '0%';
-  const errRate = a.requests ? pct(a.errors || 0, a.requests) : '0%';
+  // Derived rates own their never-measured state through pct: with no
+  // measurements the shared formatter renders '-', never a fabricated 0%.
+  const cacheRatio = pct(cacheTotal, inTotal);
+  const errRate = pct(a.errors || 0, a.requests);
   const reasonTotal = a.reasoning_tokens || 0;
   const costPerReq = Number.isFinite(a.cost_per_req) ? a.cost_per_req : null;
   const costPerMtok = Number.isFinite(a.cost_per_mtok) ? a.cost_per_mtok : null;
