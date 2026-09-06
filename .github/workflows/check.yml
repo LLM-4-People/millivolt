@@ -156,10 +156,11 @@ jobs:
               # An untagged VERSION (manual bump or promotion) ships as-is.
               version="$target"
             fi
+            # Both annotated tags and possible VERSION commits need an identity.
+            git config user.name "millivolt-release-bot"
+            git config user.email "millivolt-release-bot@users.noreply.github.com"
             if [ "$version" != "$file_version" ]; then
               printf '%s\n' "$version" > VERSION
-              git config user.name "millivolt-release-bot"
-              git config user.email "millivolt-release-bot@users.noreply.github.com"
               git add VERSION
               git commit -m "bump version to $version"
             fi
