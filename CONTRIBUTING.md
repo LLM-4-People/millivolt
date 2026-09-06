@@ -65,8 +65,11 @@ modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
 checks and `scripts/check.sh go vet` or `scripts/check.sh go mod tidy` to include
 test code and dependencies. Raw `go test ./...` does not discover the relocated
 tests and can report success without running them. Re-run checks after your
-last edit. Concurrency changes need race coverage; JavaScript unit
-checks do not establish real canvas rendering, layout or browser timing.
+last edit. Do not push `testing` or `main` until the final tree has passed the
+checks CI will run for that change. Concurrency changes need race coverage.
+JavaScript unit checks do not establish real canvas rendering, layout, focus
+or viewport behavior; dashboard, header, login or CSS changes need
+`scripts/check.sh browser` against `scripts/dev.sh` as below.
 
 For changes to configuration, update the Config/default/validation/schema owners
 and regenerate the example as described in [operations](docs/operations.md).
