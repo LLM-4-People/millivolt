@@ -216,13 +216,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 		rec:        rec,
 		convos:     NewConversationTracker(cfg.ConversationIdleGap, cfg.ConversationMaxOpen),
 		cursorRuns: newCursorRunStore(cfg.CursorParkTTL),
-		scheduler: scheduler.New(scheduler.Options{
-			MaxConcurrent: cfg.MaxConcurrent,
-			MaxQueueSize:  cfg.MaxQueueSize,
-			MaxWait:       cfg.MaxQueueWait,
-			BaseBackoff:   cfg.BaseBackoff,
-			MaxBackoff:    cfg.MaxBackoff,
-		}),
+		scheduler:  scheduler.New(schedulerOptions(cfg)),
 	}
 	s.initPause()
 	s.cfgSnap.Store(cfg)
@@ -295,13 +289,7 @@ func (s *Server) Reload(cfg *config.Config) {
 		}
 	}
 	// Re-apply the live-tunable scheduler + conversation settings.
-	s.scheduler.UpdateOptions(scheduler.Options{
-		MaxConcurrent: cfg.MaxConcurrent,
-		MaxQueueSize:  cfg.MaxQueueSize,
-		MaxWait:       cfg.MaxQueueWait,
-		BaseBackoff:   cfg.BaseBackoff,
-		MaxBackoff:    cfg.MaxBackoff,
-	})
+	s.scheduler.UpdateOptions(schedulerOptions(cfg))
 	s.convos.UpdateLimits(cfg.ConversationIdleGap, cfg.ConversationMaxOpen)
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)
 }
@@ -423,7 +411,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rec.Record(rec)
 	}()
 
-	ctx := r.Context()
+	state := &stormRequestState{rec: rec}
+	ctx := context.WithValue(r.Context(), stormContextKey{}, state)
+	defer func() {
+		s.finishStormResponse(ctx, false)
+	}()
 
 	// Transparent rate-limit queueing: acquire a slot in the provider+key
 	// group (FIFO order, concurrency cap, pacing after 429). The client never
@@ -455,7 +447,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = debugTap.wrapWriter(w)
 	}
 	defer pacer.Stop()
-	queueStart := time.Now()
 	hooks := scheduler.WaiterHooks{
 		Client:    rec.Client,
 		Provider:  rec.Provider,
@@ -482,6 +473,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.publishUpdate(rec)
 		},
 	}
+	// Park storm work before per-key concurrency so an affected model does
+	// not consume slots while healthy models could run. Cursor parked resumes
+	// keep their existing stream; only its fresh-send owner takes this gate.
+	if t.format != "cursor" {
+		_, err = s.waitStormGate(ctx, hooks, true)
+		if err != nil {
+			if r.Context().Err() != nil {
+				markClientGone(rec)
+				return
+			}
+			s.writeStormQueueError(w, rec, err)
+			return
+		}
+	}
+	queueStart := time.Now()
 	release, err := s.scheduler.AcquireWith(ctx, groupKey, maxConc, hooks)
 	if err != nil {
 		if r.Context().Err() == context.Canceled {
@@ -495,7 +501,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, extra)
 		return
 	}
-	rec.QueueWaitMs = time.Since(queueStart).Milliseconds()
+	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()
 	if rec.QueueWaitMs > 0 {
 		rec.RateLimited = true
 	}
@@ -524,6 +530,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// deadline) is a real proxy-side failure: 502 upstream_unreachable.
 		if r.Context().Err() == context.Canceled {
 			markClientGone(rec)
+			return
+		}
+		if s.writeStormQueueError(w, rec, err) {
 			return
 		}
 		writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)

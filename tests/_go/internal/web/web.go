@@ -579,6 +579,9 @@ func TestDashboardBootstrapMatchesEndpoint(t *testing.T) {
 	api.Pause = func() any { return map[string]any{"paused": true} }
 	api.Throttle = func() any { return map[string]any{"limited": true} }
 	api.Debug = func() any { return map[string]any{"active": true} }
+	api.Storm = func() any {
+		return map[string]any{"enabled": true, "banner_enabled": true, "storms": []any{map[string]any{"provider": "neutral.example", "queued": 3}}}
+	}
 	api.ModelCanon = func() config.ModelCanon { return config.Default().ModelCanon() }
 	handler := Handler(api)
 	read := func(target string) map[string]any {
@@ -628,6 +631,9 @@ func TestDashboardBootstrapEscapesUntrustedText(t *testing.T) {
 	buf.Record(rec)
 	api := NewAggAPI(buf, nil, config.Default().StorageQueryTimeout)
 	api.Dash = func() any { return map[string]any{attack: attack} }
+	api.Storm = func() any {
+		return map[string]any{"storms": []any{map[string]any{"provider": attack, "model": attack}}}
+	}
 	res := httptest.NewRecorder()
 	Handler(api).ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/", nil))
 	if res.Code != http.StatusOK {
@@ -645,6 +651,10 @@ func TestDashboardBootstrapEscapesUntrustedText(t *testing.T) {
 	payload := bootstrapFromHTML(t, body)
 	if payload["records"].([]any)[0].(map[string]any)["error_msg"] != attack || payload["dash"].(map[string]any)[attack] != attack {
 		t.Fatal("HTML escaping changed the original bootstrap data")
+	}
+	storm := payload["storm"].(map[string]any)["storms"].([]any)[0].(map[string]any)
+	if storm["provider"] != attack || storm["model"] != attack {
+		t.Fatal("HTML escaping changed the original storm scope")
 	}
 }
 

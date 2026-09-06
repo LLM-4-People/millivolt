@@ -2937,11 +2937,17 @@ async function main() {
   {
     const baseRules = [{mode: 'pattern', from: '(?P<name>a)', to: '${name}x'}];
     const baseCanon = modelFixture(baseRules, {' a ': 'ax', 'server-model': 'canonical'});
+    const stormFixture = {enabled:true,banner_enabled:true,storms:[{
+      provider:'neutral.example',model:'',scope:'provider',state:'open',reason:'http_503',
+      error_percent:75,error_requests:9,failures:15,samples:20,window_ms:60000,queued:4,
+      active_models:3,affected_models:2,affected_model_percent:200/3,
+      retry_at:'2026-09-05T12:00:00Z',recovery_successes:0,recovery_required:2,
+    }]};
     let state = observerFixture({
       dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'frontend-audit', seq: 1, oldest_seq: 1,
       pending_revision: 0, incremental: false, records: [{...mkRec('audit-row'), model: ' a ', time_bucket: 'night'}],
       in_flight_records: [], counters: {in_flight: 0, total_requests: 1}, kpi: {requests: 1}, dash: {},
-      model_canon: baseCanon, storage: {enabled: true, dropped: 3},
+      model_canon: baseCanon, storage: {enabled: true, dropped: 3}, storm:stormFixture,
     });
     const streams = [], requests = [];
     let adminReply, adminCalls = 0, chartReply;
@@ -2970,6 +2976,92 @@ async function main() {
         sw.recordMatchesDim(state.records[0], 'time', 'night') && !sw.recordMatchesDim({...state.records[0], time_bucket: 'work'}, 'time', 'night'));
       check('durable storage drops are discoverable in the existing footer',
         sd.getElementById('f-state').textContent.includes('3 storage drops') && sd.getElementById('f-state').title.includes('not saved durably'));
+      const banner = sd.getElementById('storm-banner');
+      check('embedded bootstrap exposes compact actionable provider storm summaries',
+        banner && !banner.hidden && banner.getAttribute('role') === 'status' && banner.getAttribute('aria-live') === 'polite' &&
+        banner.textContent.includes('neutral.example · all models') && banner.textContent.includes('http_503') &&
+        banner.textContent.includes('75% failed attempts') && banner.textContent.includes('9 requests affected') &&
+        banner.textContent.includes('4 queued') && banner.querySelector('button[aria-haspopup="dialog"]'));
+      const incidentButton = banner.querySelector('button');
+      incidentButton.focus();
+      incidentButton.click();
+      await sleep(20);
+      const incidentDialog = sd.getElementById('storm-dialog');
+      const detail = label => [...incidentDialog.querySelectorAll('dt')].find(node => node.textContent === label)?.nextElementSibling.textContent;
+      const closeIncident = incidentDialog.querySelector('[data-operator="storm-close"]');
+      check('incident click opens shared modal with distinct requests, attempt rates and provider evidence',
+        !incidentDialog.hidden && incidentDialog.getAttribute('role') === 'dialog' &&
+        sd.activeElement === closeIncident && sd.querySelector('main').hasAttribute('inert') &&
+        detail('Requests affected') === '9' && detail('Failed upstream attempts') === '15' &&
+        detail('Sampled upstream attempts') === '20' && detail('Upstream attempt failure rate') === '75%' &&
+        detail('Queued requests') === '4' && detail('Detection window') === '1m' && detail('Error') === 'http_503' &&
+        detail('Next retry') === new sw.Date(stormFixture.storms[0].retry_at).toLocaleString() &&
+        detail('Affected active models') === '2 / 3 (66.7%)');
+      const updatedStorm = {...stormFixture,storms:[{...stormFixture.storms[0],queued:7,error_requests:10,
+        state:'half_open',recovery_successes:1,retry_at:'2026-09-05T12:00:30Z'}]};
+      sw.applyBootstrapState({...state,storm:updatedStorm});
+      check('accepted bootstrap updates the open incident while keeping close control and trigger focus identities',
+        sd.activeElement === closeIncident && incidentDialog.querySelector('[data-operator="storm-close"]') === closeIncident &&
+        banner.querySelector('button') === incidentButton && detail('Queued requests') === '7' &&
+        detail('Requests affected') === '10' && detail('Successful recovery probes') === '1 / 2' &&
+        detail('Next retry') === new sw.Date(updatedStorm.storms[0].retry_at).toLocaleString());
+      closeIncident.dispatchEvent(new sw.KeyboardEvent('keydown', {key:'Escape',bubbles:true,cancelable:true}));
+      check('incident Escape closes shared modal and restores the current incident trigger',
+        incidentDialog.hidden && sd.activeElement === incidentButton && !sd.querySelector('main').hasAttribute('inert'));
+      incidentButton.click();
+      await sleep(20);
+      sw.applyBootstrapState({...state,storm:{...stormFixture,storms:[]}});
+      check('resolved incident stays reviewable without showing stale counts or stealing focus',
+        !incidentDialog.hidden && incidentDialog.textContent.includes('no longer active') && !incidentDialog.querySelector('dl') &&
+        sd.activeElement === closeIncident);
+      closeIncident.click();
+      check('resolved incident close restores a visible dashboard control',
+        incidentDialog.hidden && sd.activeElement === sd.getElementById('btn-settings'));
+
+      const unspecifiedStorm = {...stormFixture,storms:[stormFixture.storms[0], {...stormFixture.storms[0],scope:'model',model:''}]};
+      sw.applyBootstrapState({...state,storm:unspecifiedStorm});
+      check('unspecified model incident remains distinct from the provider and does not hide valid incidents',
+        banner.querySelectorAll('button').length === 2 && banner.textContent.includes('(unspecified model)'));
+      banner.querySelectorAll('button')[1].click();
+      await sleep(20);
+      check('unspecified model details preserve exact empty-model scope', detail('Model scope') === '(unspecified model)');
+      closeIncident.click();
+
+      const modelStorm = {...stormFixture,storms:[{...stormFixture.storms[0],provider:'<img src=x onerror=alert(1)>',
+        model:'raw/model<script>fixture</script>',scope:'model',state:'half_open',reason:'transport',recovery_successes:1}]};
+      sw.applyBootstrapState({...state,storm:modelStorm});
+      check('model storm labels stay exact and inert in compact recovery summaries',
+        banner.textContent.includes('raw/model<script>fixture</script>') && !banner.querySelector('img, script') &&
+        banner.textContent.includes('Checking recovery') &&
+        !banner.textContent.includes('active models affected'));
+      banner.querySelector('button').click();
+      await sleep(20);
+      check('incident details render hostile provider/model/error values as inert text',
+        detail('Provider') === modelStorm.storms[0].provider && detail('Model scope') === modelStorm.storms[0].model &&
+        detail('Successful recovery probes') === '1 / 2' && !incidentDialog.querySelector('img, script') && !detail('Active models'));
+      const stormRow = banner.querySelector('.storm-row');
+      sw.applyBootstrapState({...state,storm:modelStorm});
+      check('unchanged storm polls retain the rendered nodes', banner.querySelector('.storm-row') === stormRow);
+      for (const storm of [{...stormFixture,enabled:false}, {...stormFixture,banner_enabled:false},
+        {...stormFixture,storms:[]}, {...stormFixture,storms:[{...stormFixture.storms[0],error_percent:NaN}]},
+        ...[{active_models:-1}, {affected_models:4}, {affected_model_percent:Infinity}, {error_requests:NaN},
+          {error_requests:16}, {error_requests:-1}, {error_requests:'9'}].map(values =>
+          ({...stormFixture,storms:[{...stormFixture.storms[0],...values}]})), undefined]) {
+        sw.applyBootstrapState({...state,storm});
+        check('disabled, recovered, missing or malformed storm state clears the banner', banner.hidden && !banner.textContent);
+      }
+      check('malformed incident updates invalidate open details without misreporting recovery',
+        !incidentDialog.hidden && incidentDialog.textContent.includes('unavailable') && !incidentDialog.querySelector('dl'));
+      closeIncident.click();
+      sw.applyBootstrapState(state);
+      const staleStormPoll = sw.fetchBootstrap('none'), freshStormPoll = sw.fetchBootstrap('none');
+      const staleStormReply = requests.shift(), freshStormReply = requests.shift();
+      freshStormReply({ok:true,json:async()=>({...state,storm:{...stormFixture,storms:[]}})});
+      await freshStormPoll;
+      staleStormReply({ok:true,json:async()=>state});
+      await staleStormPoll;
+      check('older bootstrap responses cannot restore recovered storm warnings', banner.hidden);
+      sw.applyBootstrapState(state);
 
       const event = {...mkRec('observer-new'), model: 'server-model', model_canon: {revision: baseCanon.revision, names: {'server-model': 'canonical'}}};
       emit('record', event, '2');

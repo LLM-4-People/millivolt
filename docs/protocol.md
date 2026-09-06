@@ -144,6 +144,61 @@ status succeeds. A final or retried 429 is a separate affected-request signal.
 See [metric interpretation](operations.md#dashboard-data-and-request-inspection)
 for duration, first-token latency and throughput.
 
+### Error storm protection
+
+Enable `storm_enabled` in Settings to add shared provider/model protection to
+existing admission and retry pacing. Requests wait in the proxy with the caller
+connected; this is not a client SDK queue. The proxy keeps the existing bounded
+request bytes and credentials only for the request lifetime. Queues are in
+memory, cannot survive a restart, and stop waiting when the caller cancels.
+
+Each exact recorded model name within its resolved provider has a rolling
+`storm_window`. A model qualifies when its sampled attempts meet
+`storm_min_samples` and its selected-failure percentage reaches
+`storm_error_percent`. Provider-wide protection requires **every active model**
+to qualify, as well as the aggregate sample/rate threshold. Only models receiving
+requests within that same window are active; an idle model or an unused model in
+a provider catalog cannot affect that decision. This scope combines credentials
+and clients. Dashboard model-display rewrites do not merge storm scopes.
+
+The detector samples successful upstream attempts and selected failures, counting
+absorbed retries separately. Incident details also count distinct logical
+requests with a selected failure in the window; retries move the same request's
+last-failure membership instead of adding another request. Unselected statuses,
+non-retryable HTTP account/auth rejections, recognized durable quota envelopes,
+caller cancellations and fired per-send deadlines are excluded. A selected 429
+is a storm failure sample but remains a separate rate-limit signal in dashboard
+request health. Configurable response/stream failure detection observes a 2xx
+attempt once when its relay completes, or before an existing quality re-ask.
+It never adds a replay after meaningful output or native tool execution.
+
+An open scope holds new sends until its cooldown expires, then admits one shared
+probe. Failed probes multiply the cooldown, with configurable jitter and a cap;
+valid larger upstream retry hints remain effective. Recovery needs the configured
+number of consecutive successful probes. The existing provider-plus-key queues,
+operator holds and provider Limits still apply. The HTTP relay checks storm
+readiness before acquiring key concurrency, then claims a probe only at the
+actual send boundary. Readiness never reserves a probe while waiting for a key
+slot. Native parked runs remain resumable; fresh Cursor HTTP
+handshakes use the shared native send owner and can retry before a run starts.
+
+The ordinary HTTP retry budget remains `max_retries`. Selected failures during
+an active storm may use up to `storm_max_retries` additional attempts across the
+logical request, including quality re-asks. Cursor retains its single-handshake
+behavior when protection is off and uses only the additional storm budget for
+failed fresh handshakes. Exhaustion returns the final upstream failure. Retrying
+inference can repeat upstream execution or billing even when no output arrived;
+this feature does not provide exactly-once processing. See the
+[HTTP retry constraints](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2).
+
+`storm_max_queue` bounds callers waiting at storm gates across the process;
+ordinary scheduler queues have their own limits. `storm_max_wait` bounds each
+storm wait, not total request wall time. Scope capacity and oversized scope
+identifiers also fail closed. Local storm admission rejection returns HTTP 429
+with `queue_retry_after`; a streaming connection already committed by keepalive
+comments receives an in-band error instead. Successful retries remain one
+finalized request record with its absorbed attempts and accumulated queue wait.
+
 ### Model discovery
 
 `GET /v1/models` and `GET /models` are constructed discovery services, not

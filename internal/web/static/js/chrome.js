@@ -1,3 +1,124 @@
+// Storm detection and recovery belong to the server. Accepted bootstrap
+// snapshots replace this bounded status surface and its open detail dialog.
+// Incident buttons retain their identity across updates for keyboard focus.
+let stormSnapshot = {valid: false, enabled: false, storms: []};
+let stormDialogKey = '';
+const stormIncidentKey = s => JSON.stringify([s.provider, s.scope, s.model]);
+const stormPercent = value => value.toLocaleString(undefined, {maximumFractionDigits: 1});
+function applyStormState(st) {
+  const banner = $('storm-banner');
+  if (!banner) return;
+  const valid = s => s && typeof s.provider === 'string' && s.provider.length > 0 &&
+    typeof s.model === 'string' && (s.scope === 'provider' && !s.model || s.scope === 'model') &&
+    ['open', 'half_open'].includes(s.state) && typeof s.reason === 'string' &&
+    Number.isFinite(s.error_percent) && s.error_percent >= 0 && s.error_percent <= 100 &&
+    (s.scope !== 'provider' || Number.isSafeInteger(s.active_models) && s.active_models >= 0 &&
+      Number.isSafeInteger(s.affected_models) && s.affected_models >= 0 && s.affected_models <= s.active_models &&
+      Number.isFinite(s.affected_model_percent) && s.affected_model_percent >= 0 && s.affected_model_percent <= 100) &&
+    ['error_requests', 'failures', 'samples', 'window_ms', 'queued', 'recovery_successes', 'recovery_required'].every(key =>
+      Number.isSafeInteger(s[key]) && s[key] >= 0) && s.failures <= s.samples && s.window_ms > 0 &&
+    s.error_requests <= s.failures &&
+    s.recovery_required > 0 && s.recovery_successes <= s.recovery_required &&
+    typeof s.retry_at === 'string' && Number.isFinite(Date.parse(s.retry_at));
+  const keys = new Set();
+  const accepted = typeof st?.enabled === 'boolean' && typeof st.banner_enabled === 'boolean' &&
+    Array.isArray(st.storms) && st.storms.every(s => {
+      if (!valid(s)) return false;
+      const key = stormIncidentKey(s);
+      if (keys.has(key)) return false;
+      keys.add(key);
+      return true;
+    });
+  stormSnapshot = {valid: accepted, enabled: accepted && st.enabled, storms: accepted ? st.storms : []};
+  const storms = accepted && st.enabled && st.banner_enabled ? st.storms : [];
+  const existing = new Map([...banner.children].map(row => [row.dataset.value, row]));
+  storms.forEach((s, index) => {
+    const key = stormIncidentKey(s);
+    const scope = s.provider + ' · ' + (s.scope === 'provider' ? 'all models' : s.model || '(unspecified model)');
+    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail"><span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(stormPercent(s.error_percent))}% failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span></span>`;
+    let row = existing.get(key);
+    existing.delete(key);
+    if (!row) {
+      row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'storm-row';
+      row.dataset.operator = 'storm-open';
+      row.dataset.value = key;
+      row.setAttribute('aria-haspopup', 'dialog');
+      row.setAttribute('aria-controls', 'storm-dialog');
+    }
+    if (row.stormHTML !== html) { row.innerHTML = html; row.stormHTML = html; }
+    if (banner.children[index] !== row) banner.insertBefore(row, banner.children[index] || null);
+  });
+  for (const row of existing.values()) row.remove();
+  banner.hidden = storms.length === 0;
+  renderStormDetails();
+}
+
+function openStormDetails(key) {
+  if (!stormSnapshot.enabled || !stormSnapshot.storms.some(s => stormIncidentKey(s) === key)) return;
+  let dialog = $('storm-dialog');
+  if (!dialog) {
+    dialog = document.createElement('section');
+    dialog.id = 'storm-dialog';
+    dialog.className = 'storm-dialog';
+    dialog.hidden = true;
+    dialog.tabIndex = -1;
+    dialog.setAttribute('inert', '');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'storm-dialog-title');
+    dialog.innerHTML = `<div class="storm-dialog-panel"><div class="drawer-hd"><h3 id="storm-dialog-title">Error storm details</h3><button class="btn" type="button" data-operator="storm-close" aria-label="Close error storm details">Close</button></div><div class="storm-dialog-body" id="storm-dialog-body"></div></div>`;
+    dialog.addEventListener('click', e => { if (e.target === dialog) closeStormDetails(); });
+    dialog.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeStormDetails(); }
+    });
+    document.body.appendChild(dialog);
+  }
+  closeHeaderMenus();
+  closeDimMenu();
+  stormDialogKey = key;
+  renderStormDetails();
+  openModal(dialog);
+}
+
+function closeStormDetails() {
+  const dialog = $('storm-dialog');
+  if (!dialog || dialog.hidden) return;
+  const returnTo = modalReturnFocus;
+  closeModal(dialog);
+  stormDialogKey = '';
+  if (!returnTo?.isConnected || returnTo.closest('[hidden], [inert]')) {
+    const banner = $('storm-banner');
+    (banner && !banner.hidden ? banner : $('btn-settings'))?.focus();
+  }
+}
+
+function renderStormDetails() {
+  if (!stormDialogKey || !$('storm-dialog-body')) return;
+  const incident = stormSnapshot.storms.find(s => stormIncidentKey(s) === stormDialogKey);
+  if (!stormSnapshot.valid || !stormSnapshot.enabled || !incident) {
+    const message = !stormSnapshot.valid ? 'Current incident details are unavailable.' :
+      !stormSnapshot.enabled ? 'Error storm protection is disabled.' : 'This incident is no longer active.';
+    updateSection('storm-dialog-body', `<p class="storm-resolution" role="status">${message}</p>`);
+    return;
+  }
+  const s = incident;
+  const entries = [
+    ['Provider', s.provider], ['Model scope', s.scope === 'provider' ? 'All models' : s.model || '(unspecified model)'],
+    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['Requests affected', fmt(s.error_requests)], ['Failed upstream attempts', fmt(s.failures)],
+    ['Sampled upstream attempts', fmt(s.samples)], ['Upstream attempt failure rate', stormPercent(s.error_percent) + '%'],
+    ['Detection window', fmtDur(s.window_ms)], ['Queued requests', fmt(s.queued)],
+    ['Next retry', new Date(s.retry_at).toLocaleString()],
+    ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
+  ];
+  if (s.scope === 'provider') entries.push(['Active models', fmt(s.active_models)],
+    ['Affected active models', fmt(s.affected_models) + ' / ' + fmt(s.active_models) + ' (' + stormPercent(s.affected_model_percent) + '%)']);
+  const rows = entries.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
+  updateSection('storm-dialog-body', `<dl class="storm-facts">${rows}</dl><p class="storm-explanation">Counts cover the rolling detection window. Each request with a selected failure in this window is counted once; retries count as separate upstream attempts. Recovery checks use queued requests, so the next retry may start after the scheduled time.</p>`);
+}
+
 // All operator mutations share confirmation, busy and issue-order gates.
 const operatorState = {
   pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState },
@@ -8,7 +129,8 @@ document.addEventListener('click', e => {
   const button = e.target.closest('[data-operator]');
   if (!button || button.disabled) return;
   const actions = { 'pause-edit': editPauseHold, 'pause-resume': resumePauseHold,
-    'debug-edit': editDebugSession, 'debug-stop': stopDebugSession, 'limit-edit': editLimitProvider };
+    'debug-edit': editDebugSession, 'debug-stop': stopDebugSession, 'limit-edit': editLimitProvider,
+    'storm-open': openStormDetails, 'storm-close': closeStormDetails };
   const action = actions[button.dataset.operator];
   if (action) { e.stopPropagation(); action(button.dataset.value); }
 });
@@ -173,6 +295,7 @@ const SETTINGS_CAT_REF = {
   request:      { dim: 'request' },
   upstream:     { dim: 'provider' },
   queue:        { dim: null, icon: '↻', color: 'var(--warn)' },
+  storm:        { dim: null, icon: '⚠', color: 'var(--warn)' },
   conversation: { dim: 'conversation' },
   format:       { dim: 'model' },
   storage:    { dim: 'key' },

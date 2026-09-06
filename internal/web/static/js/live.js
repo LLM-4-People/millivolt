@@ -806,6 +806,7 @@ function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   if (p.pause) applyPauseState(p.pause, revisions.pause);
   if (p.throttle) applyThrottleState(p.throttle, revisions.throttle);
   if (p.debug) applyDebugState(p.debug, revisions.debug);
+  applyStormState(p.storm);
   if (p.storage && typeof p.storage.enabled === 'boolean' && Number.isSafeInteger(p.storage.dropped) && p.storage.dropped >= 0) {
     storageState = p.storage;
     refreshFooterState();

@@ -216,6 +216,38 @@
     opacity: .45; cursor: default; color: var(--muted);
     border-color: var(--border2); background: var(--panel2); box-shadow: none;
   }
+  .storm-banner {
+    flex-shrink: 0; max-height: min(180px, 25vh); overflow-y: auto; overflow-x: hidden;
+    padding: 10px 28px; background: var(--panel); border-bottom: 1px solid var(--border2);
+    border-left: 3px solid var(--warn); font: 11px/1.5 var(--mono); scrollbar-width: thin;
+  }
+  .storm-banner[hidden] { display: none; }
+  .storm-banner:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
+  .storm-row {
+    display: block; width: 100%; border: 0; background: transparent; color: inherit;
+    text-align: left; font: inherit; cursor: pointer; padding: 5px 3px;
+  }
+  .storm-row + .storm-row { border-top: 1px solid var(--border); }
+  .storm-row:hover { background: var(--panel2); }
+  .storm-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .storm-heading, .storm-detail { display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 14px; }
+  .storm-heading strong { color: var(--text); font-weight: 600; }
+  .storm-state, .storm-reason { color: var(--warn); }
+  .storm-detail { color: var(--muted); margin-top: 2px; }
+  .storm-heading > *, .storm-detail > * { min-width: 0; overflow-wrap: anywhere; }
+  .storm-open-hint { margin-left: auto; color: var(--muted); }
+  .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.6); }
+  .storm-dialog[hidden] { display: none; }
+  .storm-dialog-panel { width: min(580px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; border: 1px solid var(--border2); background: var(--panel); }
+  .storm-dialog-body { overflow-y: auto; overscroll-behavior: contain; padding: 6px 18px 18px; font: 11px/1.5 var(--mono); }
+  .storm-facts { margin: 0; }
+  .storm-facts > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .storm-facts dt { color: var(--muted); }
+  .storm-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
+  .storm-explanation { margin: 14px 0 0; color: var(--muted); }
+  .storm-resolution { margin: 12px 0 0; color: var(--text); }
+  @media (max-width: 600px) { .storm-banner { padding: 9px 11px; font-size: 10px; } }
+
   /* Full-bleed with the header/footer rails (28px). No max-width: a cap
      centered the explorer + request log in a 1600px column while the rails
      stretched, leaving unused side gutters on a fullscreen display. Extra

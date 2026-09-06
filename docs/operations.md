@@ -69,6 +69,7 @@ Settings searches labels, keys and help across categories.
 | Request | Upload bound, allowed upstream prefixes, content preview, debug retention and token refresh. |
 | Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry hints, backoff and quality retries. |
+| Error storm protection | Enable provider/model detection, configure failure/window thresholds, recovery, queue bounds and banner visibility. |
 | Conversations | Automatic grouping idle gap and open-conversation cap. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
@@ -447,6 +448,56 @@ larger than the bucket's entire capacity can proceed while credit is positive,
 putting the bucket into debt that refill or usage settlement can repay. These
 controls permit bursts and oversized requests; they are not strict fixed-window
 provider quota enforcement.
+
+### Error storm protection
+
+Open Settings, select **Error storm protection**, and turn on **Enable
+protection**. It is opt-in in both neutral defaults and the deployment example.
+Choose the rolling window, minimum samples and failure threshold, then select
+HTTP failure statuses, transient transport failures and response/stream failures.
+Provider protection requires all models receiving requests in that same window
+to meet the thresholds individually. A single affected model is held on its own
+while other active models remain healthy. If only one model is active, that
+model can establish a provider-wide incident. Provider and model protection can
+also be enabled independently.
+
+Configure initial/maximum recovery delays, multiplier, jitter, recovery successes,
+additional retries, queue capacity, per-wait timeout and retained scope capacity
+in that category. The generated [example](../proxy.example.yaml) supplies every
+type, range and default. Existing Queue & retry limits and provider Limits still
+apply; neither `storm_max_wait` nor a per-send deadline is a total request timeout.
+Use a client timeout appropriate to the desired end-to-end wait.
+
+Each clickable banner identifies its current scope and safe failure
+category (HTTP status, transport error or response error), percentage/count of
+failed upstream attempts, detection window, queued callers and next probe or
+recovery progress. Open an incident to inspect the distinct requests that
+encountered a selected failure, failed attempts, total sampled attempts, error
+category, queue count and next retry time. Provider entries also show affected
+versus active models. Distinct request counts follow each request's latest selected failure in the
+rolling window, so repeated retries do not inflate that count. The percentage
+still describes upstream attempts. These are process-local observations, refreshed
+through the normal dashboard bootstrap/poll cadence; they are not chart history or the
+Errors chart's distinct-request percentage. Scope counts can overlap where a
+caller waits on both provider and model protection. Hide the banner independently
+without disabling protection.
+
+Changing a storm policy resets its samples/incidents and wakes waiters to
+re-evaluate the new policy. Banner visibility alone preserves detector state.
+A reset does not cancel work already sent or erase request history. Restart
+starts detection afresh, and queued requests do not persist. History Clear does
+not reset live outage protection.
+
+Storage stays outside the detector: fixed 64 time buckets retain counters per
+scope, with oldest-edge precision within approximately `storm_window / 64`.
+`storm_max_scopes` includes provider aggregates and exact provider/model scopes;
+stale unreferenced healthy scopes can be evicted, while active or referenced
+scopes remain protected. Scope identifiers over the internal 512-byte retention
+bound and exhausted scope capacity reject admission rather than silently bypass
+protection. These bounds are not a total heap ceiling: waiting callers retain
+bounded request bodies, and existing ordinary queues remain separately sized.
+The [protocol guide](protocol.md#error-storm-protection) defines retry safety,
+quota exclusions, native handshakes and client-facing failures.
 
 ### Debug and preview capture
 

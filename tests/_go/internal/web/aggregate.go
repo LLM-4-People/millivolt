@@ -1215,7 +1215,7 @@ func TestBootstrapSnapshotAndState(t *testing.T) {
 	if v, ok := p["kpi"].(map[string]any); !ok || v["requests"].(float64) != 3 {
 		t.Fatalf("kpi = %v, want global 3 requests", p["kpi"])
 	}
-	for _, key := range []string{"dash", "pause", "throttle", "debug"} {
+	for _, key := range []string{"dash", "pause", "throttle", "debug", "storm"} {
 		if _, ok := p[key]; ok {
 			t.Errorf("%s section present with no provider wired, want omitted", key)
 		}
@@ -1229,13 +1229,20 @@ func TestBootstrapSnapshotAndState(t *testing.T) {
 	agg.Pause = func() any { return map[string]any{"paused": false} }
 	agg.Throttle = func() any { return map[string]any{"active": false} }
 	agg.Debug = func() any { return map[string]any{"enabled": false} }
+	agg.Storm = func() any {
+		return map[string]any{"enabled": true, "storms": []any{map[string]any{"provider": "neutral.example", "error_percent": 75}}}
+	}
 	p2 := get(t, http.HandlerFunc(agg.HandleBootstrap), "/metrics/bootstrap")
-	for _, key := range []string{"dash", "pause", "throttle", "debug"} {
+	for _, key := range []string{"dash", "pause", "throttle", "debug", "storm"} {
 		if _, ok := p2[key]; !ok {
 			t.Errorf("%s section missing with a provider wired", key)
 		}
 	}
-	agg.Dash, agg.Pause, agg.Throttle, agg.Debug = nil, nil, nil, nil
+	storm := p2["storm"].(map[string]any)["storms"].([]any)[0].(map[string]any)
+	if storm["provider"] != "neutral.example" || storm["error_percent"] != float64(75) {
+		t.Fatalf("bootstrap changed authoritative storm state: %v", storm)
+	}
+	agg.Dash, agg.Pause, agg.Throttle, agg.Debug, agg.Storm = nil, nil, nil, nil, nil
 
 	// Cursor resume: ?since=2&feed=<own> yields only the delta.
 	p3 := get(t, http.HandlerFunc(agg.HandleBootstrap), "/metrics/bootstrap?since=2&feed="+buf.FeedID())

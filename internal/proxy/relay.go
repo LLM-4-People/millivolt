@@ -329,6 +329,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				})
 				rec.Retries++
 				s.publishUpdate(rec)
+				s.finishStormResponse(ctx, true)
 				resp.Body.Close()
 				// The re-send is a retry: its opening WaitSend honors operator
 				// holds ("a retry is a new send and waits").
@@ -336,6 +337,9 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				if err != nil {
 					if r.Context().Err() == context.Canceled {
 						markClientGone(rec)
+						return
+					}
+					if s.writeStormQueueError(w, rec, err) {
 						return
 					}
 					rec.StatusCode = http.StatusBadGateway
@@ -610,7 +614,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			end(false)
 			return nil, nil, err
 		}
-		// Stamp after WaitSend so TTFT is the winning send, not the backoff.
+		permit, err := s.waitStorm(ctx, hooks)
+		if err != nil {
+			end(false)
+			return nil, nil, err
+		}
+		// Stamp after all admission gates so waits do not burn send deadlines.
 		attemptStart := time.Now()
 		// Per-send deadline: X-Proxy-Timeout-Ms bounds this ONE send (the
 		// Do below and the returned body), anchored here - a fresh budget per
@@ -619,6 +628,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// Rebuild the upstream request (body can't be reused across retries).
 		upstream, err := s.buildUpstreamRequest(attemptCtx, r, t, key, body)
 		if err != nil {
+			permit.Cancel()
 			attemptCancel()
 			end(false)
 			return nil, nil, err
@@ -632,6 +642,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			// Caller aborted (client disconnect / Ctrl+C) or the per-send
 			// deadline fired - never retry; surface verbatim.
 			if ctx.Err() != nil || attemptErr != nil {
+				permit.Cancel()
 				end(false)
 				return nil, nil, err
 			}
@@ -639,8 +650,10 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			// transient ones (header timeout, conn reset/refused, EOF, DNS
 			// timeout) transparently; give up on permanent ones (NXDOMAIN,
 			// TLS errors) or when the retry budget is spent.
-			if !isRetryableTransportErr(err) || attempt >= maxRetries {
-				end(isRetryableTransportErr(err))
+			retryable := isRetryableTransportErr(err)
+			active := s.observeStormTransport(ctx, permit, retryable)
+			if !retryable || attempt >= maxRetries && !s.allowStormRetry(ctx, active) {
+				end(retryable)
 				return nil, nil, err
 			}
 			rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
@@ -678,6 +691,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 				resp.Body.Close()
 				typ, code, _ := metrics.ParseErrorEnvelope(errBody)
 				if isNonRetryableQuotaErr(typ, code) {
+					permit.Cancel()
 					if attempt > 0 {
 						rec.FinalAttemptAt = attemptStart
 					}
@@ -697,7 +711,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// are exhausted the last upstream response is surfaced verbatim, so
 		// the client sees the real error - retries are transparent, failures
 		// are not masked.
-		if !isRetryable(resp.StatusCode) || attempt >= maxRetries {
+		retryable := isRetryable(resp.StatusCode)
+		active := s.observeStormHTTP(ctx, permit, resp, retryable)
+		if state := stormState(ctx); state != nil && state.response == permit {
+			state.responseCtx = attemptCtx
+		}
+		if !retryable || attempt >= maxRetries && !s.allowStormRetry(ctx, active) {
 			// This is the attempt whose response reaches the client: TTFT is
 			// measured from here, so a retried request shows the successful
 			// attempt's responsiveness, not the accumulated retry delay.

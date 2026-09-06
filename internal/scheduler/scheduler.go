@@ -38,6 +38,7 @@ type Options struct {
 	// retry hint. It does not clamp a provider-supplied Retry-After /
 	// rate-limit-reset duration - those are honored as-is (see maxRetryHint).
 	MaxBackoff time.Duration
+	Storm      StormOptions
 }
 
 // Scheduler manages ordered queues per group key.
@@ -45,6 +46,7 @@ type Scheduler struct {
 	mu     sync.Mutex // guards opts and groups
 	opts   Options
 	groups map[string]*group
+	storms stormState
 
 	// policy is the operator hold set (all / new-unseen / named
 	// clients / named providers). Read via atomic pointer so drain can
@@ -68,6 +70,7 @@ type Scheduler struct {
 func New(opts Options) *Scheduler {
 	s := &Scheduler{opts: opts, groups: make(map[string]*group), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
 	s.policy.Store(&policySnap{})
+	s.storms.configure(opts.Storm)
 	return s
 }
 
@@ -86,8 +89,9 @@ func (s *Scheduler) Options() Options {
 // value anyway, so resetting here would only clobber a deliberate override.
 func (s *Scheduler) UpdateOptions(opts Options) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.opts = opts
+	s.storms.configure(opts.Storm)
+	s.mu.Unlock()
 }
 
 // group is a single FIFO queue with concurrency and pacing state.

@@ -162,6 +162,10 @@ model lists. This is not an unconditional byte-for-byte or exactly-once contract
 - Coordinate provider-plus-key concurrency and queues; retry eligible transport,
   transient 429 and server failures with provider hints and configurable backoff.
   Provider-wide concurrency, request-rate and token-rate limits are separate.
+- Opt into error storm protection: queue affected provider/model traffic with
+  exponential recovery probes and a dashboard incident banner. Provider-wide
+  protection requires elevated errors on every model active in the detection
+  window; all thresholds and retry/queue bounds are editable in Settings.
 - Discover models through the standard model-list routes, with recognized-list
   normalization, supported pagination and optional metadata enrichment.
 - Opt into Anthropic Messages translation or the Cursor Connect text/tool
@@ -209,7 +213,7 @@ independent billing or a complete compliance audit log.
 | Logs | Download all or exactly filtered finalized records as JSON. |
 | Clear | Preview and confirm a filtered deletion, or deliberately delete all retained records. Newer completions are protected by the deletion fence. |
 | Restart | On supported source deployments, rebuild and hand off after draining active work. Busy controls and progress reflect the actual restart state. |
-| Settings | Search configuration, edit typed fields/maps/rules, review restart markers and apply revision-checked changes. |
+| Settings | Configure error storm protection, search configuration, edit typed fields/maps/rules, review restart markers and apply revision-checked changes. |
 
 See the [operator workflows and API routes](docs/operations.md#operator-and-data-routes)
 before changing state. A protected listener is essential: these are operator

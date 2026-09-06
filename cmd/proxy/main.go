@@ -232,6 +232,7 @@ func main() {
 	agg.Pause = func() any { return proxySrv.PauseSnapshot() }
 	agg.Throttle = func() any { return proxySrv.ThrottleSnapshot() }
 	agg.Debug = func() any { return proxySrv.DebugSnapshot() }
+	agg.Storm = func() any { return proxySrv.StormSnapshot() }
 	// Model canonicalization rules (config.CanonicalModel semantics) ride the
 	// bootstrap so the client mirror groups identically to the server fold;
 	// read live per request so a Settings save hot-applies on the next tick.

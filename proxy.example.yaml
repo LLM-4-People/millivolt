@@ -212,6 +212,134 @@ max_backoff: 2m
 #   type: int · range 0..3 (0 = disabled) · default 1
 quality_retries: 1
 
+# ---- Error storm protection ----
+# Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy
+# changes clear observations and wake waiters. Banner visibility changes do not reset
+# protection.
+# Detect elevated upstream failure rates and queue affected sends for bounded recovery
+# probes. Opt-in; requests can still fail on cancellation, exhausted retry budgets, queue
+# limits or permanent errors. Retries can repeat upstream execution and billing.
+# Hot-reload: yes.
+#   type: bool · default false
+storm_enabled: false
+
+# Gate every model on a provider only when all active models individually meet the sample
+# and failure thresholds. Active means a request in the same detection window; idle models
+# expire.
+# Hot-reload: yes.
+#   type: bool · default true
+storm_provider_enabled: true
+
+# Gate an affected exact recorded model name within its provider. Dashboard model grouping
+# does not broaden this scope.
+# Hot-reload: yes.
+#   type: bool · default true
+storm_model_enabled: true
+
+# Show affected providers/models, safe error categories, failure percentages, queue state
+# and recovery timing at the top of the dashboard. Changing visibility does not reset
+# protection.
+# Hot-reload: yes.
+#   type: bool · default true
+storm_banner_enabled: true
+
+# Rolling time range for successful and eligible failed upstream attempts. Models with no
+# requests in this window expire from provider-wide checks.
+# Hot-reload: yes.
+#   type: duration · range 1s..1h · default 1m
+storm_window: 1m
+
+# Minimum successful or eligible failed upstream attempts in the detection window before a
+# model qualifies. Provider-wide protection requires every active model to qualify.
+# Retries count as separate attempts; this is not a distinct-request percentage.
+# Hot-reload: yes.
+#   type: int · range 1..1000000 · default 20
+storm_min_samples: 20
+
+# Minimum percentage of sampled upstream attempts with a selected failure. Applied to each
+# exact model after the minimum sample count; all active models must qualify for
+# provider-wide protection.
+# Hot-reload: yes.
+#   type: int (percent) · range 1..100 · default 50
+storm_error_percent: 50
+
+# Initial storm cooldown before a recovery probe. Cannot exceed maximum recovery delay.
+# Valid upstream Retry-After/reset hints still apply independently.
+# Hot-reload: yes.
+#   type: duration · range 1ms..1h · default 5s
+storm_initial_backoff: 5s
+
+# Cap on exponentially increased storm cooldowns. Must be at least initial recovery delay.
+# Does not shorten upstream Retry-After/reset hints.
+# Hot-reload: yes.
+#   type: duration · range 1ms..1h · default 2m
+storm_max_backoff: 2m
+
+# Multiply the storm cooldown after a failed recovery probe, up to maximum recovery delay.
+# Hot-reload: yes.
+#   type: int · range 2..10 · default 2
+storm_backoff_multiplier: 2
+
+# Random spread as a percentage of the storm cooldown to separate recovery attempts. 0
+# disables jitter.
+# Hot-reload: yes.
+#   type: int (percent) · range 0..100 (0 = no jitter) · default 20
+storm_jitter_percent: 20
+
+# Consecutive successful recovery probes required before queued traffic resumes normally.
+# Hot-reload: yes.
+#   type: int · range 1..100 · default 2
+storm_recovery_successes: 2
+
+# Maximum requests waiting for storm recovery. Excess work is rejected locally; requests
+# and their bounded bodies stay in process memory while waiting.
+# Hot-reload: yes.
+#   type: int · range 1..100000 · default 1000
+storm_max_queue: 1000
+
+# Maximum duration of each storm gate wait, not total request duration across all retries
+# and other queues. Caller cancellation may end the wait earlier.
+# Hot-reload: yes.
+#   type: duration · range 1ms..24h · default 5m
+storm_max_wait: 5m
+
+# Bound on provider and exact-model detector scopes retained in process memory. Increasing
+# it does not establish a total process memory ceiling.
+# Hot-reload: yes.
+#   type: int · range 2..100000 · default 2048
+storm_max_scopes: 2048
+
+# Additional retries beyond max_retries only while a relevant storm is active and the
+# failure matches a selected eligible transient condition. Does not replay meaningful
+# emitted upstream content. 0 keeps the ordinary retry budget.
+# Hot-reload: yes.
+#   type: int · range 0..1000 (0 = no additional retries) · default 20
+storm_max_retries: 20
+
+# Exact status strings selected for detection and additional storm retries: 429 or
+# 500..599, without duplicates. Empty disables HTTP status triggers. 429 is opt-in because
+# limits may be credential-specific; durable quota/billing 429s remain excluded.
+# Hot-reload: yes.
+#   type: list of string
+storm_status_codes:
+  - "500"
+  - "502"
+  - "503"
+  - "504"
+
+# Include transport failures already eligible for the shared retry policy. Caller
+# cancellation and permanent transport errors are excluded.
+# Hot-reload: yes.
+#   type: bool · default true
+storm_transport_errors: true
+
+# Include recorded in-band, stream and quality failures to protect future sends. Reports a
+# generic response error without retaining error bodies for the banner. Never replays
+# meaningful emitted upstream content.
+# Hot-reload: yes.
+#   type: bool · default true
+storm_stream_errors: true
+
 # ---- Conversations ----
 # How the request log groups turns into conversations.
 # A gap longer than this starts a new conversation for the same client+key. Generous so

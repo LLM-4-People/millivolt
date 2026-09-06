@@ -96,6 +96,7 @@ type AggAPI struct {
 	Pause    func() any // operator pause state (same shape as GET /admin/pause)
 	Throttle func() any // provider limit state (same shape as GET /admin/throttle)
 	Debug    func() any // operator debug sessions (same shape as GET /admin/debug)
+	Storm    func() any // current automatic error-storm protection and recovery
 	// ModelCanon serves the effective model-canonicalization rules (single
 	// owner config.CanonicalModel) for the bootstrap payload; the fold reads
 	// it via canonizer() per request. Nil = no canonicalization (raw
@@ -844,6 +845,7 @@ type bootstrapPayload struct {
 	Pause            any           `json:"pause,omitempty"`
 	Throttle         any           `json:"throttle,omitempty"`
 	Debug            any           `json:"debug,omitempty"`
+	Storm            any           `json:"storm,omitempty"`
 	Storage          storageSignal `json:"storage"`
 }
 
@@ -890,6 +892,9 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	}
 	if a.Debug != nil {
 		payload.Debug = a.Debug()
+	}
+	if a.Storm != nil {
+		payload.Storm = a.Storm()
 	}
 	return payload
 }

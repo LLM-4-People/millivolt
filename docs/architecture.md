@@ -47,6 +47,25 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
+[scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
+attempt counters, active-model evidence, cross-key provider/model gates and
+exclusive recovery permits. Provider activation requires all models with
+activity inside the same window to independently qualify. Old permits cannot
+recover newer incidents. Initial admission waits for readiness without reserving
+a probe; only the actual send boundary claims a probe after key admission.
+Policy generations reset/wake gates without mutating retained history. Each
+request carries an observation for its provider and model, moving distinct
+failed-request membership between fixed buckets across retries without retaining
+a request-ID map. No storm observation scans metrics history or waits for SQLite.
+
+[proxy/storm.go](../internal/proxy/storm.go) maps config once into scheduler
+options and bridges existing relay/native send outcomes. A 2xx permit settles
+after relay or before an existing quality re-ask, preventing double samples and
+stream replay. Safe protocol-level reason labels carry no provider error bodies.
+The banner uses the canonical bootstrap builder and browser apply/render gates,
+with no client-side event arithmetic. Storm scheduler/proxy/config regressions
+and the shared UI/browser suite cover these boundaries.
+
 Important coverage includes request metadata/parser fuzz tests,
 `BenchmarkRequestMetadata`, `BenchmarkProxyRequest`,
 `TestConcurrentStreamingAccounting`, transport lifecycle tests and scheduler

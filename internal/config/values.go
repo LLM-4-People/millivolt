@@ -33,6 +33,9 @@ func (c *Config) Apply(values map[string]any) error {
 		if f == nil {
 			return fmt.Errorf("unknown config key %q", k)
 		}
+		if f.Category == "storm" && v == nil {
+			return fmt.Errorf("%s: null is not a valid setting", k)
+		}
 		if err := c.setField(*f, v); err != nil {
 			return fmt.Errorf("%s: %w", k, err)
 		}

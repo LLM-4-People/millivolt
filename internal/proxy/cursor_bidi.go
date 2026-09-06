@@ -270,60 +270,8 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 
-	targetURL := cursorRunURL(t)
-
-	// The request body is a pipe we keep open for the whole (possibly
-	// multi-request) exchange - it must NOT be closed when this HTTP request
-	// returns, because a parked run keeps writing to it on a later request.
-	pr, pw := io.Pipe()
-	upstreamCtx, upstreamCancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, pr)
+	resp, pw, upstreamCancel, err := s.openCursorHTTP(ctx, t, key, clientMessage, groupKey, hooks, false)
 	if err != nil {
-		upstreamCancel()
-		pw.Close()
-		writeClientError(w, rec, "upstream_unreachable", err.Error(), http.StatusBadGateway)
-		return
-	}
-	// agent.v1 / Connect-RPC headers.
-	s.setCursorHeaders(req, t, key)
-
-	// Prime the body with the framed run_request BEFORE Do (the h2 transport
-	// won't send headers until it can pull the first body chunk).
-	initialFrame := providerformat.AppendConnectEnvelope(nil, clientMessage)
-	go func() { _, _ = pw.Write(initialFrame) }()
-
-	own, err := s.scheduler.WaitSend(ctx, groupKey, hooks, false, false)
-	if err != nil {
-		upstreamCancel()
-		pw.Close()
-		if r.Context().Err() == context.Canceled {
-			rec.StatusCode = metrics.StatusClientClosedRequest
-			rec.ClientDisconnected = true
-			return
-		}
-		writeClientError(w, rec, "upstream_unreachable", err.Error(), http.StatusBadGateway)
-		return
-	}
-	sendFailed := false
-	ended := false
-	endSend := func() {
-		if ended {
-			return
-		}
-		ended = true
-		s.cursorEndSend(groupKey, own, sendFailed)
-	}
-	defer endSend()
-
-	wait, cancelWait := s.cursorWaitCtx(ctx, t.timeout)
-	resp, err := doCursorUntil(s.cursorClientFor(), req, wait, upstreamCancel)
-	// Read the wait ctx's Err before cancelWait runs, so a FIRED budget is
-	// captured unmasked (cursorSendFailure keys on it).
-	waitErr := wait.Err()
-	cancelWait()
-	if err != nil {
-		upstreamCancel()
-		pw.Close()
 		// Client cancel vs genuine transport failure - same classification as
 		// the doWithRetry error path: the client's own cancellation is 499 +
 		// client-disconnected, never an upstream error. (The base request ctx
@@ -334,9 +282,10 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 			rec.ClientDisconnected = true
 			return
 		}
-		paced, msg := cursorSendFailure(err, waitErr)
-		sendFailed = paced
-		writeClientError(w, rec, "upstream_unreachable", "upstream error: "+msg, http.StatusBadGateway)
+		if s.writeStormQueueError(w, rec, err) {
+			return
+		}
+		writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)
 		return
 	}
 
@@ -349,7 +298,6 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	if resp.StatusCode >= 400 {
 		// Connect streaming is HTTP 200 + envelopes. A 4xx/5xx means the
 		// Run never started - do not drive it as a live bidi body.
-		sendFailed = cursorSendFailed(resp)
 		captureErrorFromResponse(resp, rec)
 		upstreamCancel() // tears down the h2 stream - the transport closes the REAL body (the cursor path never reaches ServeHTTP's body defer)
 		pw.Close()
@@ -367,10 +315,6 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		writeClientError(w, rec, typ, msg, resp.StatusCode)
 		return
 	}
-	// Headers landed: release the send token before the turn (and any
-	// park). A parked resume is not a new send and must not hold the gate.
-	endSend()
-
 	// Build the resumable run over the live stream. closeFn cancels the upstream
 	// request and closes the body pipe (only when the run truly ends). The
 	// heartbeat cadence comes from the live config snapshot (a reload applies
@@ -397,10 +341,104 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 				return nil, nil
 			}
 			called = true
+			s.finishStormResponse(ctx, true)
 			return s.openCursorRun(ctx, r, t, key, body, true, groupKey, hooks)
 		}
 	}
 	s.driveRun(ctx, w, run, stream, rec, rr, resumeRequest, reask)
+}
+
+// openCursorHTTP owns every fresh native send, including a quality re-ask.
+// Only an HTTP/transport rejection before Run starts may consume the request's
+// extra storm budget. Successful headers transfer the pipe/background context
+// to CursorRun; parked resumes never call this helper or replay a handshake.
+func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clientMessage []byte, groupKey string, hooks scheduler.WaiterHooks, firstSendIsRetry bool) (*http.Response, *io.PipeWriter, context.CancelFunc, error) {
+	own, failed := false, false
+	defer func() { s.cursorEndSend(groupKey, own, failed) }()
+	for attempt := 0; ; attempt++ {
+		var err error
+		own, err = s.scheduler.WaitSend(ctx, groupKey, hooks, firstSendIsRetry || attempt > 0, own)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		permit, err := s.waitStorm(ctx, hooks)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		attemptStart := time.Now()
+		state := stormState(ctx)
+		if state != nil && state.rec.Retries > 0 {
+			state.rec.FinalAttemptAt = attemptStart
+		}
+		// Each attempt has its own duplex body and cancellation. Closing both
+		// pipe ends also releases a priming writer when no transport consumed it.
+		pr, pw := io.Pipe()
+		upstreamCtx, cancel := context.WithCancel(context.Background())
+		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
+		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
+		if err != nil {
+			permit.Cancel()
+			upstreamCancel()
+			return nil, nil, nil, err
+		}
+		s.setCursorHeaders(req, t, key)
+		initialFrame := providerformat.AppendConnectEnvelope(nil, clientMessage)
+		go func() { _, _ = pw.Write(initialFrame) }()
+		wait, cancelWait := s.cursorWaitCtx(ctx, t.timeout)
+		resp, err := doCursorUntil(s.cursorClientFor(), req, wait, upstreamCancel)
+		// Capture a fired budget before cleanup masks it with cancellation.
+		waitErr := wait.Err()
+		cancelWait()
+		if err != nil {
+			upstreamCancel()
+			if resp != nil {
+				resp.Body.Close()
+			}
+			if ctx.Err() != nil || waitErr != nil {
+				permit.Cancel()
+				if waitErr != nil {
+					return nil, nil, nil, waitErr
+				}
+				return nil, nil, nil, ctx.Err()
+			}
+			retryable, msg := cursorSendFailure(err, waitErr)
+			active := s.observeStormTransport(ctx, permit, retryable)
+			if !retryable || !s.allowStormRetry(ctx, active) {
+				failed = retryable
+				return nil, nil, nil, err
+			}
+			state.rec.Attempts = append(state.rec.Attempts, metrics.RetryAttempt{ErrorType: "transport", ErrorMsg: msg, At: time.Now()})
+			state.rec.Retries++
+			s.publishUpdate(state.rec)
+			own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
+			continue
+		}
+		// Quota-envelope classification precedes storm observation. Keep the
+		// established bounded peek and re-wrap for the final error renderer.
+		stopRead := context.AfterFunc(ctx, upstreamCancel)
+		retryable := cursorSendFailed(resp)
+		active := s.observeStormHTTP(ctx, permit, resp, retryable)
+		if !retryable || !s.allowStormRetry(ctx, active) {
+			stopRead()
+			failed = retryable
+			return resp, pw, upstreamCancel, nil
+		}
+		retryAfter := parseRetryAfter(resp)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
+		resp.Body.Close()
+		stopRead()
+		upstreamCancel()
+		at := metrics.RetryAttempt{StatusCode: resp.StatusCode, RetryAfterMs: int(retryAfter.Milliseconds()), At: time.Now()}
+		at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
+		state.rec.Attempts = append(state.rec.Attempts, at)
+		state.rec.Retries++
+		state.rec.RetryAfterMs = at.RetryAfterMs
+		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			state.rec.RateLimited = true
+		}
+		s.publishUpdate(state.rec)
+		own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, retryAfter)) || own
+	}
 }
 
 func cursorRunURL(t *target) string {
@@ -462,61 +500,18 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 		return nil, err
 	}
 
-	targetURL := cursorRunURL(t)
-
-	pr, pw := io.Pipe()
-	upstreamCtx, upstreamCancel := context.WithCancel(context.Background())
-	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, targetURL, pr)
-	if err != nil {
-		upstreamCancel()
-		pw.Close()
-		return nil, err
-	}
-	s.setCursorHeaders(req, t, key)
-
-	initialFrame := providerformat.AppendConnectEnvelope(nil, clientMessage)
-	go func() { _, _ = pw.Write(initialFrame) }()
-
 	// Re-ask is a new send after the voided run already EndSend'd.
-	own, err := s.scheduler.WaitSend(ctx, groupKey, hooks, true, false)
+	resp, pw, upstreamCancel, err := s.openCursorHTTP(ctx, t, key, clientMessage, groupKey, hooks, true)
 	if err != nil {
-		upstreamCancel()
-		pw.Close()
-		return nil, err
-	}
-	sendFailed := false
-	ended := false
-	endSend := func() {
-		if ended {
-			return
-		}
-		ended = true
-		s.cursorEndSend(groupKey, own, sendFailed)
-	}
-	defer endSend()
-
-	wait, cancelWait := s.cursorWaitCtx(ctx, t.timeout)
-	resp, err := doCursorUntil(s.cursorClientFor(), req, wait, upstreamCancel)
-	// Same fired-budget rule as the initial send: read the wait ctx's Err
-	// before cancelWait so cursorSendFailure sees an unmasked deadline.
-	waitErr := wait.Err()
-	cancelWait()
-	if err != nil {
-		upstreamCancel()
-		pw.Close()
-		sendFailed, _ = cursorSendFailure(err, waitErr)
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		sendFailed = cursorSendFailed(resp)
 		detail := fmt.Sprintf("cursor run: HTTP %d", resp.StatusCode)
 		upstreamCancel()
 		pw.Close()
 		resp.Body.Close()
 		return nil, fmt.Errorf("%s", detail)
 	}
-	endSend()
-
 	run := providerformat.NewCursorRun(pw, resp.Body, blobs, func() {
 		upstreamCancel()
 		pw.Close()

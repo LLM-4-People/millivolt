@@ -9,6 +9,22 @@ non-sensitive bugs and proposals, and
 [pull requests](https://github.com/LLM-4-People/millivolt/pulls) for changes.
 Security reports belong in the private channel in [SECURITY.md](SECURITY.md).
 
+## Branch workflow
+
+New features branch from and land on `testing` first, with their documentation
+and relevant checks in the same change. Fetch the current remote branch before
+starting follow-up work. Use feature branches targeting `testing` for review,
+or push a completed, checked feature directly there when that is authorized.
+
+Promotion from `testing` to `main` is a separate deliberate integration after
+validation, not part of an ordinary feature push. Do not push release tags as a
+side effect of feature work. CI checks every branch; production image publishing
+remains restricted to `main` and version tags.
+
+`AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
+working instructions aligned with this shared guide; do not force-add private
+instruction files to publish workflow policy.
+
 ## Development dependencies
 
 Linux is supported. Version sources are:

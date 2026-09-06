@@ -13,6 +13,20 @@ The capture session blocks external requests and disables live SSE, so its
 **offline** indicator describes a static screenshot session, not service health.
 The images are not latency guarantees, capacity measurements or independent bills.
 
+## Error storm banner
+
+When enabled in Settings, error storm protection adds a live banner below the
+header. Click an incident to inspect the number of requests with selected
+errors, failed upstream attempts, error category, queued requests, next retry
+time and recovery progress. It names the affected provider or exact provider/model, shows its safe
+error category, failed upstream-attempt percentage and window, queue count and
+recovery probe state. Provider incidents require all models active in the same
+window to have elevated errors. The banner shows that active-model evidence;
+its attempt percentage differs from the Errors chart's affected-request rate.
+It clears when protection recovers and can be hidden independently in Settings.
+See [configuration and behavior](operations.md#error-storm-protection).
+The static captures below predate this optional banner.
+
 ## Timelines
 
 The KPI band remains global. Explorer filters scope the timeline and request log

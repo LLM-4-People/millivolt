@@ -145,6 +145,38 @@ type Config struct {
 	// budget is the sane ceiling; 0 disables quality handling entirely.
 	QualityRetries int `yaml:"quality_retries" json:"quality_retries"`
 
+	// Error storm protection observes eligible upstream attempts in a bounded
+	// rolling window and gates new sends by provider or exact recorded model.
+	// Policy changes reset observations and wake waiters; banner visibility
+	// changes presentation only. All fields hot-reload.
+	StormEnabled           bool          `yaml:"storm_enabled" json:"storm_enabled"`
+	StormProviderEnabled   bool          `yaml:"storm_provider_enabled" json:"storm_provider_enabled"`
+	StormModelEnabled      bool          `yaml:"storm_model_enabled" json:"storm_model_enabled"`
+	StormBannerEnabled     bool          `yaml:"storm_banner_enabled" json:"storm_banner_enabled"`
+	StormWindow            time.Duration `yaml:"storm_window" json:"storm_window"`
+	StormMinSamples        int           `yaml:"storm_min_samples" json:"storm_min_samples"`
+	StormErrorPercent      int           `yaml:"storm_error_percent" json:"storm_error_percent"`
+	StormInitialBackoff    time.Duration `yaml:"storm_initial_backoff" json:"storm_initial_backoff"`
+	StormMaxBackoff        time.Duration `yaml:"storm_max_backoff" json:"storm_max_backoff"`
+	StormBackoffMultiplier int           `yaml:"storm_backoff_multiplier" json:"storm_backoff_multiplier"`
+	StormJitterPercent     int           `yaml:"storm_jitter_percent" json:"storm_jitter_percent"`
+	StormRecoverySuccesses int           `yaml:"storm_recovery_successes" json:"storm_recovery_successes"`
+	StormMaxQueue          int           `yaml:"storm_max_queue" json:"storm_max_queue"`
+	// StormMaxWait bounds each storm gate wait, not total request duration.
+	// A caller's cancellation can end a wait earlier.
+	StormMaxWait   time.Duration `yaml:"storm_max_wait" json:"storm_max_wait"`
+	StormMaxScopes int           `yaml:"storm_max_scopes" json:"storm_max_scopes"`
+	// StormMaxRetries adds to MaxRetries only for an eligible transient
+	// failure while the request's provider or exact model storm is active.
+	StormMaxRetries int `yaml:"storm_max_retries" json:"storm_max_retries"`
+	// HTTP triggers are exact status strings. An empty list disables them;
+	// durable quota/billing 429s are excluded even when "429" is selected.
+	StormStatusCodes     []string `yaml:"storm_status_codes" json:"storm_status_codes"`
+	StormTransportErrors bool     `yaml:"storm_transport_errors" json:"storm_transport_errors"`
+	// Completed in-band/stream/quality errors inform later traffic only;
+	// meaningful emitted upstream content is never replayed for storm recovery.
+	StormStreamErrors bool `yaml:"storm_stream_errors" json:"storm_stream_errors"`
+
 	// ---- conversation grouping (dashboard request log) ----
 	// ConversationIdleGap: a gap in activity longer than this starts a new
 	// conversation for the same client+key. Generous so thinking pauses inside
@@ -346,6 +378,9 @@ func (c *Config) Clone() *Config {
 	if c.AllowedBaseURLs != nil {
 		out.AllowedBaseURLs = append([]string(nil), c.AllowedBaseURLs...)
 	}
+	if c.StormStatusCodes != nil {
+		out.StormStatusCodes = append([]string{}, c.StormStatusCodes...)
+	}
 	if c.Providers != nil {
 		out.Providers = make(map[string]ProviderOverride, len(c.Providers))
 		for k, v := range c.Providers {
@@ -433,6 +468,26 @@ func Default() *Config {
 		MaxBackoff:      2 * time.Minute,
 
 		QualityRetries: 1,
+
+		StormEnabled:           false,
+		StormProviderEnabled:   true,
+		StormModelEnabled:      true,
+		StormBannerEnabled:     true,
+		StormWindow:            time.Minute,
+		StormMinSamples:        20,
+		StormErrorPercent:      50,
+		StormInitialBackoff:    5 * time.Second,
+		StormMaxBackoff:        2 * time.Minute,
+		StormBackoffMultiplier: 2,
+		StormJitterPercent:     20,
+		StormRecoverySuccesses: 2,
+		StormMaxQueue:          1000,
+		StormMaxWait:           5 * time.Minute,
+		StormMaxScopes:         2048,
+		StormMaxRetries:        20,
+		StormStatusCodes:       []string{"500", "502", "503", "504"},
+		StormTransportErrors:   true,
+		StormStreamErrors:      true,
 
 		AutoTokenRefresh: true,
 
@@ -605,6 +660,63 @@ func (c *Config) mergeOverlay(src *Config, present map[string]any) {
 	}
 	if has("quality_retries") {
 		c.QualityRetries = src.QualityRetries
+	}
+	if has("storm_enabled") {
+		c.StormEnabled = src.StormEnabled
+	}
+	if has("storm_provider_enabled") {
+		c.StormProviderEnabled = src.StormProviderEnabled
+	}
+	if has("storm_model_enabled") {
+		c.StormModelEnabled = src.StormModelEnabled
+	}
+	if has("storm_banner_enabled") {
+		c.StormBannerEnabled = src.StormBannerEnabled
+	}
+	if has("storm_window") {
+		c.StormWindow = src.StormWindow
+	}
+	if has("storm_min_samples") {
+		c.StormMinSamples = src.StormMinSamples
+	}
+	if has("storm_error_percent") {
+		c.StormErrorPercent = src.StormErrorPercent
+	}
+	if has("storm_initial_backoff") {
+		c.StormInitialBackoff = src.StormInitialBackoff
+	}
+	if has("storm_max_backoff") {
+		c.StormMaxBackoff = src.StormMaxBackoff
+	}
+	if has("storm_backoff_multiplier") {
+		c.StormBackoffMultiplier = src.StormBackoffMultiplier
+	}
+	if has("storm_jitter_percent") {
+		c.StormJitterPercent = src.StormJitterPercent
+	}
+	if has("storm_recovery_successes") {
+		c.StormRecoverySuccesses = src.StormRecoverySuccesses
+	}
+	if has("storm_max_queue") {
+		c.StormMaxQueue = src.StormMaxQueue
+	}
+	if has("storm_max_wait") {
+		c.StormMaxWait = src.StormMaxWait
+	}
+	if has("storm_max_scopes") {
+		c.StormMaxScopes = src.StormMaxScopes
+	}
+	if has("storm_max_retries") {
+		c.StormMaxRetries = src.StormMaxRetries
+	}
+	if has("storm_status_codes") {
+		c.StormStatusCodes = src.StormStatusCodes
+	}
+	if has("storm_transport_errors") {
+		c.StormTransportErrors = src.StormTransportErrors
+	}
+	if has("storm_stream_errors") {
+		c.StormStreamErrors = src.StormStreamErrors
 	}
 	if has("conversation_idle_gap") {
 		c.ConversationIdleGap = src.ConversationIdleGap
@@ -808,6 +920,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateQueryLimits(c, nil, false); err != nil {
+		return err
+	}
+	if err := validateStorm(c, nil, false); err != nil {
 		return err
 	}
 	// durations: negatives are always invalid. 0 is meaningful where documented
@@ -1101,6 +1216,79 @@ func validateQueryLimits(c *Config, present map[string]any, overlay bool) error 
 	return nil
 }
 
+// validateStorm shares full and presence-aware validation. YAML types are
+// checked before merging because yaml.v3 accepts null scalars and coerces
+// non-string list entries into strings. Neither may silently disable a guard.
+func validateStorm(c *Config, present map[string]any, overlay bool) error {
+	if overlay {
+		for _, field := range Schema() {
+			if field.Category != "storm" || !yamlKeySet(present, field.Key) {
+				continue
+			}
+			switch field.Kind {
+			case KindBool:
+				if _, ok := present[field.Key].(bool); !ok {
+					return fmt.Errorf("%s: must be a boolean", field.Key)
+				}
+			case KindDuration:
+				if _, ok := present[field.Key].(string); !ok {
+					return fmt.Errorf("%s: must be a duration string", field.Key)
+				}
+			case KindStrings:
+				items, ok := present[field.Key].([]any)
+				if !ok {
+					return fmt.Errorf("%s: must be a list of strings", field.Key)
+				}
+				for _, item := range items {
+					if _, ok := item.(string); !ok {
+						return fmt.Errorf("%s: every item must be a string", field.Key)
+					}
+				}
+			}
+		}
+	}
+	for _, limit := range [...]struct {
+		key             string
+		value, min, max int64
+	}{
+		{"storm_window", int64(c.StormWindow), int64(time.Second), int64(time.Hour)},
+		{"storm_min_samples", int64(c.StormMinSamples), 1, 1_000_000},
+		{"storm_error_percent", int64(c.StormErrorPercent), 1, 100},
+		{"storm_initial_backoff", int64(c.StormInitialBackoff), int64(time.Millisecond), int64(time.Hour)},
+		{"storm_max_backoff", int64(c.StormMaxBackoff), int64(time.Millisecond), int64(time.Hour)},
+		{"storm_backoff_multiplier", int64(c.StormBackoffMultiplier), 2, 10},
+		{"storm_jitter_percent", int64(c.StormJitterPercent), 0, 100},
+		{"storm_recovery_successes", int64(c.StormRecoverySuccesses), 1, 100},
+		{"storm_max_queue", int64(c.StormMaxQueue), 1, 100000},
+		{"storm_max_wait", int64(c.StormMaxWait), int64(time.Millisecond), int64(24 * time.Hour)},
+		{"storm_max_scopes", int64(c.StormMaxScopes), 2, 100000},
+		{"storm_max_retries", int64(c.StormMaxRetries), 0, 1000},
+	} {
+		if overlay && !yamlKeySet(present, limit.key) {
+			continue
+		}
+		if limit.value < limit.min || limit.value > limit.max {
+			field := FieldByKey(limit.key)
+			return fmt.Errorf("%s: must be %s..%s, got %s", limit.key,
+				field.formatBound(float64(limit.min)), field.formatBound(float64(limit.max)), field.formatBound(float64(limit.value)))
+		}
+	}
+	if !overlay && c.StormInitialBackoff > c.StormMaxBackoff {
+		return fmt.Errorf("storm_initial_backoff (%s) cannot exceed storm_max_backoff (%s)", c.StormInitialBackoff, c.StormMaxBackoff)
+	}
+	seen := make(map[string]bool, len(c.StormStatusCodes))
+	for _, code := range c.StormStatusCodes {
+		if code != "429" && (len(code) != 3 || code[0] != '5' || code[1] < '0' || code[1] > '9' || code[2] < '0' || code[2] > '9') {
+			return fmt.Errorf("storm_status_codes: %q must be exactly 429 or 500..599", code)
+		}
+		if seen[code] {
+			return fmt.Errorf("storm_status_codes: duplicate %q", code)
+		}
+		seen[code] = true
+	}
+	return nil
+}
+
 // validateOverlay rejects explicitly-set values before mergeOverlay. Missing
 // fields remain absent, while written zero/sub-floor values cannot disappear.
 // Relationships depending on the merged result remain in Validate.
@@ -1122,6 +1310,9 @@ func validateOverlay(u *Config, present map[string]any) error {
 		return err
 	}
 	if err := validateQueryLimits(u, present, true); err != nil {
+		return err
+	}
+	if err := validateStorm(u, present, true); err != nil {
 		return err
 	}
 
