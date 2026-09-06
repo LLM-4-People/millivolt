@@ -76,6 +76,7 @@ function openStormDetails(key) {
     document.body.appendChild(dialog);
   }
   closeHeaderMenus();
+  closeNavMenu();
   closeDimMenu();
   stormDialogKey = key;
   renderStormDetails();
@@ -90,7 +91,7 @@ function closeStormDetails() {
   stormDialogKey = '';
   if (!returnTo?.isConnected || returnTo.closest('[hidden], [inert]')) {
     const banner = $('storm-banner');
-    (banner && !banner.hidden ? banner : $('btn-settings'))?.focus();
+    (banner && !banner.hidden ? banner : visibleHeaderControl())?.focus();
   }
 }
 
@@ -311,6 +312,12 @@ function syncHdrMenuExpanded() {
     const b = $(bid), m = $(mid);
     if (b && m) b.setAttribute('aria-expanded', m.hidden ? 'false' : 'true');
   }
+}
+
+function visibleHeaderControl() {
+  const nav = $('btn-nav');
+  if (nav && nav.getClientRects().length) return nav;
+  return $('btn-settings');
 }
 
 function closeNavMenu(restoreFocus = false) {

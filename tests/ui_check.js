@@ -3042,7 +3042,8 @@ async function main() {
         sd.activeElement === closeIncident);
       closeIncident.click();
       check('resolved incident close restores a visible dashboard control',
-        incidentDialog.hidden && sd.activeElement === sd.getElementById('btn-settings'));
+        incidentDialog.hidden && (sd.activeElement === sd.getElementById('btn-settings') ||
+          sd.activeElement === sd.getElementById('btn-nav')));
 
       const unspecifiedStorm = {...stormFixture,storms:[stormFixture.storms[0], {...stormFixture.storms[0],scope:'model',model:''}]};
       sw.applyBootstrapState({...state,storm:unspecifiedStorm});

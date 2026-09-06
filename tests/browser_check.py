@@ -250,7 +250,11 @@ async def check(base, screenshot):
                     require(await page.locator('#storm-dialog').is_visible(), 'incident resolved by unexpectedly closing focused dialog')
                     require('no longer active' in await page.locator('#storm-dialog').inner_text(), 'incident retained stale recovery counts')
                     await page.locator('#storm-dialog [data-operator="storm-close"]').click()
-                    require(await page.evaluate('document.activeElement===document.querySelector("#btn-settings") && document.querySelector("#storm-banner").hidden'), 'resolved incident did not restore visible focus')
+                    require(await page.evaluate('''() => {
+                        const el = document.activeElement;
+                        return document.querySelector('#storm-banner').hidden && el &&
+                          el.getClientRects().length > 0 && (el.id === 'btn-nav' || el.id === 'btn-settings');
+                    }'''), 'resolved incident did not restore visible focus')
                     await page.evaluate('delete window.browserStormFixture')
                     state['details'] = details
                     state['keyboard_and_live_update'] = True
