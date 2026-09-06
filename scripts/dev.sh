@@ -136,9 +136,12 @@ nohup "$BIN" -config "$CONFIG_FILE" -listen "$LISTEN" -db-path "$DBFLAG" -pid-fi
 PID=$!
 echo "$PID" > "$PID_FILE"
 
-# 6. Wait for readiness (up to ~5s), then report.
+# 6. Wait for readiness (up to ~5s), then report. /healthz is the
+#    unauthenticated liveness probe: the operator gate may deny /metrics
+#    when no MILLIVOLT_OPERATOR_TOKEN is exported, which says nothing about
+#    process readiness.
 for _ in $(seq 1 50); do
-  if curl -fsS -o /dev/null "http://${LISTEN}/metrics/bootstrap" 2>/dev/null; then
+  if curl -fsS -o /dev/null "http://${LISTEN}/healthz" 2>/dev/null; then
     echo "dev instance up at http://${LISTEN}  (pid $PID, db=${DBFLAG}, log: $LOG_FILE)"
     exit 0
   fi

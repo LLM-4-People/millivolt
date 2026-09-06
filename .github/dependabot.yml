@@ -2,21 +2,26 @@ version: 2
 updates:
   - package-ecosystem: gomod
     directory: /
+    target-branch: testing
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /
+    target-branch: testing
     schedule:
       interval: weekly
   - package-ecosystem: pip
     directory: /
+    target-branch: testing
     schedule:
       interval: weekly
   - package-ecosystem: github-actions
     directory: /
+    target-branch: testing
     schedule:
       interval: weekly
   - package-ecosystem: docker
     directory: /
+    target-branch: testing
     schedule:
       interval: weekly

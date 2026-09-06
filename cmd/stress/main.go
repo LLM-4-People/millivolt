@@ -119,6 +119,20 @@ func localClient(timeout time.Duration, transport *http.Transport) *http.Client 
 	return &http.Client{Transport: transport, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
+// operatorTransport injects the operator credential into every control-plane
+// read: the dashboard plane is gated and the tool must behave like an
+// authenticated operator. Inference traffic uses a different, plain client.
+type operatorTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t operatorTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+t.token)
+	return t.base.RoundTrip(r)
+}
+
 // Only these nonsecret settings explain the measured workload. Never emit
 // the whole effective config: provider-injected headers can hold credentials.
 func performanceSettings(effective map[string]any) map[string]any {
@@ -634,7 +648,9 @@ func run(ctx context.Context, o options) (err error) {
 	if err != nil {
 		return err
 	}
-	c := control{localClient(o.timeout, &http.Transport{}), strings.TrimRight(o.target, "/")}
+	c := control{&http.Client{Transport: operatorTransport{base: &http.Transport{}, token: o.token},
+		Timeout: o.timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		strings.TrimRight(o.target, "/")}
 	defer c.client.CloseIdleConnections()
 	cfg, pid, err := verifyDev(ctx, c, u)
 	if err != nil {

@@ -37,47 +37,48 @@ func TestLogPageRetainsTimestampTies(t *testing.T) {
 
 func TestLogPageScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
 	// This tests a row-work budget, not a wall-clock performance requirement.
-	// Keep the real SQLite and timeout paths, but let the clock advance only at
-	// synchronization points so race instrumentation/runner CPU cannot expire it.
-	synctest.Test(t, func(t *testing.T) {
-		s := testStore(t)
-		start := time.UnixMilli(1_800_000_000_000)
-		for i := range logScanMax + 7 {
-			provider := "other"
-			if i < 7 {
-				provider = "target"
-			}
-			s.Record(&metrics.Record{ID: fmt.Sprintf("row-%04d", i), Provider: provider, Start: start, StatusCode: 200})
-			if i%logScanBatch == 0 {
-				if err := s.Flush(); err != nil {
-					t.Fatal(err)
-				}
-			}
+	// The query deadline must stay a generous real one: a synthetic deadline
+	// inside a synctest bubble sprints past while the single query goroutine
+	// blocks on real SQLite file I/O on a loaded CI runner, fail-closing the
+	// page with 500. A one-hour real budget keeps the row-work assertions
+	// deterministic and can never be expired by runner CPU or disk stalls.
+	s := testStore(t)
+	start := time.UnixMilli(1_800_000_000_000)
+	for i := range logScanMax + 7 {
+		provider := "other"
+		if i < 7 {
+			provider = "target"
 		}
-		if err := s.Flush(); err != nil {
-			t.Fatal(err)
-		}
-		h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Second).HandleLogPage)
-		first := get(t, h, "/metrics/agg/log?limit=10&f=provider:target")
-		if len(first["records"].([]any)) != 0 || first["more"] != true || first["cursor_id"] != "row-0007" {
-			t.Fatalf("scope-budget cursor=%v", first)
-		}
-		second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&f=provider:target&before_ms=%.0f&before_id=%s", first["cursor_ms"], url.QueryEscape(first["cursor_id"].(string))))
-		if len(second["records"].([]any)) != 7 || second["more"] != false {
-			t.Fatalf("scope-budget continuation lost rows=%v", second)
-		}
-		for _, target := range []string{
-			"?limit=10&before_ms=1", "?limit=10&before_id=x", "?limit=10&before_ms=nope&before_id=x",
-			"?limit=10&before_ms=1&before_ms=2&before_id=x", "?limit=10&before_ms=1&before_id=x&before_id=y",
-			"?limit=10&limit=20",
-		} {
-			w := httptest.NewRecorder()
-			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/agg/log"+target, nil))
-			if w.Code != http.StatusBadRequest {
-				t.Fatalf("malformed cursor accepted: %s status=%d", target, w.Code)
+		s.Record(&metrics.Record{ID: fmt.Sprintf("row-%04d", i), Provider: provider, Start: start, StatusCode: 200})
+		if i%logScanBatch == 0 {
+			if err := s.Flush(); err != nil {
+				t.Fatal(err)
 			}
 		}
-	})
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
+	first := get(t, h, "/metrics/agg/log?limit=10&f=provider:target")
+	if len(first["records"].([]any)) != 0 || first["more"] != true || first["cursor_id"] != "row-0007" {
+		t.Fatalf("scope-budget cursor=%v", first)
+	}
+	second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&f=provider:target&before_ms=%.0f&before_id=%s", first["cursor_ms"], url.QueryEscape(first["cursor_id"].(string))))
+	if len(second["records"].([]any)) != 7 || second["more"] != false {
+		t.Fatalf("scope-budget continuation lost rows=%v", second)
+	}
+	for _, target := range []string{
+		"?limit=10&before_ms=1", "?limit=10&before_id=x", "?limit=10&before_ms=nope&before_id=x",
+		"?limit=10&before_ms=1&before_ms=2&before_id=x", "?limit=10&before_ms=1&before_id=x&before_id=y",
+		"?limit=10&limit=20",
+	} {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/agg/log"+target, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("malformed cursor accepted: %s status=%d", target, w.Code)
+		}
+	}
 }
 
 func TestLogPageFailsClosedOnCancellation(t *testing.T) {

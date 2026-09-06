@@ -57,6 +57,10 @@ jobs:
           DEV_DB: "/tmp/millivolt/millivolt-dev-ci.db"
           DEV_CONFIG: "proxy.example.yaml"
           DEV_COPY_DB: "0"
+          # The dev instance and the browser harnesses share this operator
+          # credential: the dashboard gate is fail closed, and the harnesses
+          # sign in through it for gated fixture cleanup.
+          MILLIVOLT_OPERATOR_TOKEN: "ci-browser-fixture-credential"
         run: |
           trap 'scripts/dev.sh stop' EXIT
           scripts/dev.sh up
