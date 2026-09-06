@@ -42,6 +42,11 @@ It is not complete preservation of every provider-specific field. The caller
 must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 
+Stored parameter and conversation-composition metadata describe the translated
+upstream body, not an exact copy of the original request. If the caller omits
+both output-limit fields, translation supplies `anthropic_default_max_tokens`,
+which can therefore appear in request details as a captured value.
+
 Non-streaming translation buffers the full response before committing status;
 a translation failure can therefore return a real error status. Streaming
 translation emits OpenAI-shaped events and observes original-source custom cost
@@ -84,6 +89,14 @@ Registration, expiration and close share the run-store owner; client cancellatio
 ends active work, while a legitimate parked run lives until its configured TTL,
 upstream close, capacity eviction or process restart.
 
+For each new send, the tighter of `upstream_timeout` and
+`X-Proxy-Timeout-Ms` bounds waiting for response headers. That wait deadline is
+removed after headers; it is not an overall body deadline. Resuming an existing
+parked stream does not open another send. The default path is the native Run
+RPC; an explicit `X-Proxy-Path` is appended to the base with a leading slash,
+without the HTTP relay's shared-segment deduplication. Query overrides and the
+incoming query are not used.
+
 A lost park cold-starts from provided history. The quality-retry path may re-ask
 an empty continuation; exhausted/invalid continuations surface errors rather
 than silently completing. This is not exactly-once execution, checkpoint
@@ -92,7 +105,8 @@ persistence, or a guarantee that an upstream keeps a parked stream alive.
 Output usage comes from validated native counters. Input may use checkpoint
 context occupancy or a documented estimate when unavailable; unreported cache
 and reasoning splits are not invented. Fused model spellings are decomposed by
-the existing protocol owner, not copied as raw native parameters.
+the existing protocol owner, not copied as raw native parameters. Stored model
+metadata uses the canonical base ID, not the caller's fused spelling.
 
 Model discovery uses the native unary usable-models service and returns the
 constructed OpenAI list. Context metadata is not guessed from a static price or

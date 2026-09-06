@@ -31,7 +31,7 @@ Explicit non-browser calls remain supported.
 therefore make the proxy contact destinations reachable from its host.
 `allowed_base_urls` constrains accepted URL prefixes; use trusted destinations
 and appropriate egress controls. This is not a DNS/IP isolation sandbox.
-Upstream redirects are returned without following them.
+The proxy does not follow upstream redirects.
 
 Ordinary metrics group credentials by SHA256 rather than retaining the raw key.
 Known secret and configured authentication headers are redacted in retained

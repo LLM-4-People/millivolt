@@ -56,14 +56,27 @@ func main() {
 		os.Exit(1)
 	}
 }
-func dockerCommand(ctx context.Context, env []string, args ...string) ([]byte, error) {
+
+// Docker archive streams are binary: never trim them or mix stderr into tar.
+// Text commands reuse this boundary and may combine its separate diagnostics.
+func dockerCommandIO(ctx context.Context, env []string, input io.Reader, output io.Writer, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Env = env
-	data, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(string(data)))
+	cmd.Env, cmd.Stdin, cmd.Stdout = env, input, output
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("docker %s: %w: %s", args[0], err, strings.TrimSpace(stderr.String()))
 	}
-	return bytes.TrimSpace(data), nil
+	return stderr.Bytes(), nil
+}
+
+func dockerCommand(ctx context.Context, env []string, args ...string) ([]byte, error) {
+	var stdout bytes.Buffer
+	diagnostics, err := dockerCommandIO(ctx, env, nil, &stdout, args...)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.TrimSpace(append(stdout.Bytes(), diagnostics...)), nil
 }
 
 type dockerCLI struct {
@@ -73,6 +86,39 @@ type dockerCLI struct {
 
 func (d dockerCLI) command(ctx context.Context, args ...string) ([]byte, error) {
 	return dockerCommand(ctx, d.env, append([]string{"--host", d.endpoint}, args...)...)
+}
+
+// copyVolumeArchive exercises the image-only recovery path. The caller owns
+// both stopped containers and a fresh archive directory. --archive retains the
+// numeric runtime UID/GID, including the private Settings file's mode and owner.
+func (d dockerCLI) copyVolumeArchive(ctx context.Context, source, target, volume, path string) (err error) {
+	archive, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, archive.Close()) }()
+	if _, err := dockerCommandIO(ctx, d.env, nil, archive, "--host", d.endpoint, "cp", source+":"+volume+"/.", "-"); err != nil {
+		return err
+	}
+	if _, err := archive.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	_, err = dockerCommandIO(ctx, d.env, archive, io.Discard, "--host", d.endpoint, "cp", "--archive", "-", target+":"+volume)
+	return err
+}
+
+func (d dockerCLI) stopClean(ctx context.Context, container string) error {
+	if _, err := d.command(ctx, "stop", "--time", "30", container); err != nil {
+		return err
+	}
+	state, err := d.command(ctx, "inspect", "--format", "{{.State.Status}} {{.State.ExitCode}}", container)
+	if err != nil {
+		return err
+	}
+	if string(state) != "exited 0" {
+		return fmt.Errorf("unclean container stop %s", state)
+	}
+	return nil
 }
 
 func localDaemon(ctx context.Context) (dockerCLI, error) {
@@ -139,14 +185,12 @@ func check(image string) error {
 		return err
 	}
 	name := "millivolt-smoke-" + hex.EncodeToString(token)
-	volumes := []string{name + "-data", name + "-config"}
-	var created []string
-	var container string
+	var created, containers []string
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), smokeTimeout)
 		defer cancel()
 		// Every target is a literal ID minted by this invocation, never a user path.
-		if container != "" {
+		for _, container := range containers {
 			if _, err := command(cleanup, "rm", "--force", container); err != nil {
 				fmt.Fprintln(os.Stderr, "container cleanup:", err)
 			}
@@ -157,33 +201,44 @@ func check(image string) error {
 			}
 		}
 	}()
-	for _, volume := range volumes {
-		if _, err := command(ctx, "volume", "create", volume); err != nil {
-			return err
+	create := func(name string) (string, error) {
+		volumes := []string{name + "-data", name + "-config"}
+		for _, volume := range volumes {
+			if _, err := command(ctx, "volume", "create", volume); err != nil {
+				return "", err
+			}
+			created = append(created, volume)
 		}
-		created = append(created, volume)
+		args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
+			"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
+			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
+			"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
+			"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
+			"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
+		containerID, err := command(ctx, args...)
+		if err != nil {
+			return "", err
+		}
+		if !imageID.MatchString("sha256:" + string(containerID)) {
+			return "", errors.New("Docker did not return a container ID")
+		}
+		container := string(containerID)
+		containers = append(containers, container)
+		return container, nil
 	}
-	args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
-		"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
-		"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
-		"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
-		"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
-	containerID, err := command(ctx, args...)
-	if err != nil {
-		return err
-	}
-	if !imageID.MatchString("sha256:" + string(containerID)) {
-		return errors.New("Docker did not return a container ID")
-	}
-	container = string(containerID)
 	defer func() {
 		logsContext, cancel := context.WithTimeout(context.Background(), smokeTimeout)
 		defer cancel()
-		if logs, err := command(logsContext, "logs", container); err == nil {
-			fmt.Fprintln(os.Stderr, string(logs))
+		for _, container := range containers {
+			if logs, err := command(logsContext, "logs", container); err == nil {
+				fmt.Fprintln(os.Stderr, string(logs))
+			}
 		}
 	}()
+	container, err := create(name)
+	if err != nil {
+		return err
+	}
 	if _, err := command(ctx, "start", container); err != nil {
 		return err
 	}
@@ -232,15 +287,8 @@ func check(image string) error {
 				return fmt.Errorf("committed example: %w", err)
 			}
 		}
-		if _, err := command(ctx, "stop", "--time", "30", container); err != nil {
+		if err := daemon.stopClean(ctx, container); err != nil {
 			return err
-		}
-		code, err := command(ctx, "inspect", "--format", "{{.State.ExitCode}}", container)
-		if err != nil {
-			return err
-		}
-		if string(code) != "0" {
-			return fmt.Errorf("unclean container exit %s", code)
 		}
 		if phase == "seed" {
 			if _, err := command(ctx, "start", container); err != nil {
@@ -248,7 +296,33 @@ func check(image string) error {
 			}
 		}
 	}
-	fmt.Printf("container HTTP/config/SQLite/restart smoke passed (%s)\n", runtime.GOARCH)
+	// The original stop/start/verify smoke remains above. Recovery uses another
+	// stopped container with fresh volumes, never the source volumes or a helper
+	// image, and must boot with the same saved settings and single durable row.
+	restored, err := create(name + "-restored")
+	if err != nil {
+		return err
+	}
+	archiveDir, err := os.MkdirTemp("", "millivolt-container-backup-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(archiveDir) // Only this invocation's private scratch tree.
+	for _, volume := range []string{"/data", "/config"} {
+		if err := daemon.copyVolumeArchive(ctx, container, restored, volume, filepath.Join(archiveDir, filepath.Base(volume)+".tar")); err != nil {
+			return err
+		}
+	}
+	if _, err := command(ctx, "start", restored); err != nil {
+		return err
+	}
+	if _, err := command(ctx, "exec", restored, "/containercheck", "-inside", "verify"); err != nil {
+		return fmt.Errorf("restored container: %w", err)
+	}
+	if err := daemon.stopClean(ctx, restored); err != nil {
+		return err
+	}
+	fmt.Printf("container HTTP/config/SQLite/restart/backup/restore smoke passed (%s)\n", runtime.GOARCH)
 	return nil
 }
 

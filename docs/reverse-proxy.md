@@ -25,6 +25,7 @@ Compose service. Use a maintained NGINX release with the `http2 on` directive
 2. Copy the example into your NGINX HTTP configuration. Replace its example
    hostname, certificate paths and trusted source-address allowlist. The supplied
    TEST-NET address is a placeholder; unmatched clients are denied.
+   Set `proxy_pass` to the chosen host port if `MILLIVOLT_PORT` is not 8080.
 3. Validate with `nginx -t` before reloading your existing NGINX service. Confirm
    both a trusted client and a denied client behave as intended.
 4. Use `https://your-hostname/` for the dashboard and
@@ -78,6 +79,7 @@ When NGINX itself is a container, `127.0.0.1` points back to NGINX, not millivol
 Attach it to the same private Docker network and use `http://millivolt:8080` as
 its upstream instead. Only the edge needs a publicly reachable port. Do not bind
 millivolt to loopback inside its container, which would prevent peer access.
+`MILLIVOLT_PORT` changes host publication, not this internal service port.
 
 For another ingress implementation, preserve these same boundaries: protect the
 entire origin, forward the original authority and required custom headers, allow

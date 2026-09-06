@@ -31,10 +31,10 @@ Routing validation and request construction live in
 | `X-Proxy-Key` | Upstream key; takes precedence over `Authorization`. Without it, a Bearer credential or the supplied Authorization value is used. No credential is also allowed. |
 | `X-Proxy-Auth-Header` | Key's upstream header; defaults to `Authorization`. |
 | `X-Proxy-Auth-Prefix` | Prefix before the key; defaults to `Bearer `. A present empty header selects no prefix. |
-| `X-Proxy-Path` | Replace the incoming path before joining it to the base URL. |
-| `X-Proxy-Query` | Nonempty query override; otherwise the incoming query is preserved. |
+| `X-Proxy-Path` | HTTP relay: replace the incoming path before joining it to the base URL. Cursor uses its [native path rule](adapters.md#cursor-connect-bridge); model discovery ignores this header. |
+| `X-Proxy-Query` | HTTP relay: nonempty query override; otherwise preserve the incoming query. Cursor and model discovery ignore both. |
 | `X-Proxy-Headers` | HTTP-relay header overrides as a JSON object of string arrays, e.g. `{"x-example-version":["2026-01"]}`. Not applied to model discovery or the Cursor bridge. |
-| `X-Proxy-Timeout-Ms` | Positive per-send deadline expressed in milliseconds. Each attempt gets a fresh budget for headers and body; queue/hold/backoff waits do not consume it. |
+| `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
 | `X-Proxy-Format` | `openai` (also the default), `anthropic`, or `cursor`. See [adapters](adapters.md). |
 | `X-Proxy-Client` | Observability/client label; otherwise inferred from client SDK/User-Agent metadata. |
 | `X-Proxy-Session` | Explicit conversation ID; otherwise automatic grouping applies. |
@@ -49,7 +49,9 @@ One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
 Absent headers preserve limits; `0`, `off`, `none` or `unlimited` clear them.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.
 Malformed limit values reject the request without applying any of its limit
-headers. The Limits menu shows the policy and its source.
+headers. The Limits menu shows the policy and its source. Rates use continuously
+refilled budgets, not strict fixed-window quotas; see
+[Pause and Limits](operations.md#pause-and-limits) for charging and burst behavior.
 
 Supported proxy-control headers never forward upstream. Injected names must be
 valid, unique case-insensitively, and not reserved control/hop-by-hop/Host names;
@@ -69,7 +71,8 @@ Optional provider aliases apply afterward. There is no supported
 
 ## URL and auth examples
 
-A base ending in `/v1` and request path `/v1/chat/completions` do not produce
+For the HTTP relay, a base ending in `/v1` and request path
+`/v1/chat/completions` do not produce
 `/v1/v1/chat/completions`: the join removes the shared leading segment.
 A path override still joins to the selected base. Use `X-Proxy-Query` rather
 than embedding a query in the base URL.
@@ -120,10 +123,15 @@ Queue capacity and wait limits can reject work locally; the configured
 `queue_retry_after` supplies the caller's retry hint. Operator-hold time is
 excluded from the ordinary queue-wait limit. A hold's own queue cap still applies.
 
-`upstream_timeout` limits waiting for response headers, not the streaming body.
+For the HTTP relay, `upstream_timeout` limits waiting for response headers,
+not the streaming body.
 `X-Proxy-Timeout-Ms` instead gives each upstream send a fresh deadline covering
 headers and body. Neither is a total end-to-end deadline across queueing, holds,
 retries and backoff; client cancellation is the way to stop the whole request.
+The [Cursor bridge](adapters.md#cursor-connect-bridge) instead applies the tighter
+configured/per-request timeout only until send headers arrive, without a body
+deadline on its parked run. Model discovery ignores the per-request timeout
+and uses `models_discovery_timeout` for the whole discovery operation.
 Provider Retry-After/reset hints are not clamped by the ordinary adaptive
 backoff cap. A long provider hint can therefore outlast that cap.
 
@@ -143,8 +151,13 @@ primary discovery budget/errors fail explicitly, while optional enrichment can
 fall back to the complete base list. Discovery can apply limit headers without
 consuming an inference slot. Its time/byte/page limits are configuration-owned.
 
-The proxy returns upstream redirects rather than following them. Forwarding
-also changes transport headers and may decompress an upstream gzip response;
+Discovery ignores `X-Proxy-Path`, `X-Proxy-Query` and the incoming query. HTTP
+discovery constructs `/v1/models` using the shared base join; Anthropic pagination
+constructs its own query. Cursor uses its native unary model service. A primary
+upstream non-200 response, including a redirect, becomes a 502 discovery error.
+
+The ordinary HTTP relay returns upstream redirects rather than following them.
+Forwarding also changes transport headers and may decompress an upstream gzip response;
 do not compare transport framing as a byte-identical contract.
 
 ## Main and sub-conversations

@@ -219,10 +219,110 @@ documents without starting a server.
 
 Replace the container to upgrade or adopt startup-bound settings; the dashboard
 cannot rebuild an immutable image. Keep the same volumes and back them up before
-upgrades. Container stop sends SIGTERM, which cancels unfinished requests before
+upgrades. If only a saved config file changed, ordinary `up -d` need not replace
+the container. Apply startup-bound changes explicitly:
+
+```sh
+docker compose up -d --force-recreate millivolt
+```
+
+Container stop sends SIGTERM, which cancels unfinished requests before
 draining storage. Allow enough stop grace time for the configured shutdown and
 queued writes; forced termination can prevent that drain. No stop/flush can
 recover records already dropped under storage overload.
+
+### Image-only backup and restore
+
+The supplied deployment can back up both named volumes without a source checkout,
+Python, a shell inside the image or a helper image. This is an **offline** backup:
+stop callers first, allow active work to finish, and keep the service stopped
+while copying. Run from the deployment directory with the same Compose project
+and environment used to start it. If you use `-p`, repeat that selection on every
+Compose command. Do not concurrently replace or restart the source container.
+
+The following saves the original Compose file, the pulled image's registry digest,
+and both volume archives in a new private directory. It expects the supplied
+single-service layout, `/data` and `/config`, with a saved `proxy.yaml` present.
+Privately retain any local `.env` or other deployment inputs as well.
+
+```sh
+(
+  set -eu
+  umask 077
+  backup_dir="$(mktemp -d ./millivolt-backup.XXXXXXXX)"
+  printf 'Backup directory: %s\n' "$backup_dir"
+  container_id="$(docker compose ps -q millivolt)"
+  test -n "$container_id"
+  image_id="$(docker inspect --format '{{.Image}}' "$container_id")"
+  docker image inspect --format '{{index .RepoDigests 0}}' "$image_id" > "$backup_dir/image.txt"
+  cp compose.yaml "$backup_dir/compose.yaml"
+  docker compose stop millivolt
+  test "$(docker inspect --format '{{.State.Status}} {{.State.ExitCode}}' "$container_id")" = 'exited 0'
+  docker compose cp millivolt:/data/. - > "$backup_dir/data.tar"
+  docker compose cp millivolt:/config/. - > "$backup_dir/config.tar"
+  docker compose start millivolt
+)
+```
+
+A failed stop or copy exits without automatically restarting the service; inspect
+the failure before resuming. Copy the completed backup to protected independent
+storage. The data archive includes any WAL/SHM files, not just `proxy.db`. Never
+use this file-copy procedure while SQLite is open. An archive cannot recover
+records already dropped or writes lost through forced termination.
+
+Restore into a **new project and fresh volumes**, leaving the original deployment
+and backups untouched. Enter the completed backup directory and an unused
+loopback host port when prompted. The original supplied Compose file is required:
+do not substitute resolved `docker compose config` output, custom external-volume
+names or bind mounts, which can point the new project at existing data.
+
+```sh
+(
+  set -eu
+  umask 077
+  printf 'Backup directory to restore: '
+  IFS= read -r backup_dir
+  test -s "$backup_dir/data.tar"
+  test -s "$backup_dir/config.tar"
+  MILLIVOLT_IMAGE="$(head -n 1 "$backup_dir/image.txt")"
+  case "$MILLIVOLT_IMAGE" in *@sha256:*) ;; *) exit 1 ;; esac
+  printf 'Unused loopback host port: '
+  IFS= read -r MILLIVOLT_PORT
+  case "$MILLIVOLT_PORT" in ''|*[!0-9]*) exit 1 ;; esac
+  test "$MILLIVOLT_PORT" -ge 1
+  test "$MILLIVOLT_PORT" -le 65535
+  export MILLIVOLT_IMAGE MILLIVOLT_PORT
+  restore_dir="$(mktemp -d ./millivolt-restore-XXXXXXXX)"
+  restore_project="$(basename "$restore_dir" | tr '[:upper:]' '[:lower:]')"
+  cp "$backup_dir/compose.yaml" "$restore_dir/compose.yaml"
+  restore_compose() {
+    docker compose --env-file /dev/null -p "$restore_project" -f "$restore_dir/compose.yaml" "$@"
+  }
+  existing_containers="$(docker ps -aq --filter "label=com.docker.compose.project=$restore_project")"
+  test -z "$existing_containers"
+  existing_volumes="$(docker volume ls -q --filter "name=^${restore_project}_")"
+  test -z "$existing_volumes"
+  restore_compose create millivolt
+  restore_compose cp --archive - millivolt:/data < "$backup_dir/data.tar"
+  restore_compose cp --archive - millivolt:/config < "$backup_dir/config.tar"
+  restore_compose up -d millivolt
+  restore_compose logs --tail 100 millivolt
+  printf 'Restored project: %s\nCompose directory: %s\nHost port: %s\n' "$restore_project" "$restore_dir" "$MILLIVOLT_PORT"
+)
+```
+
+Keep the tar streams intact and retain `--archive` on restore: the private config
+must remain readable/writable by runtime UID/GID `65532:65532`, with mode `0600`.
+Check Settings and retained history on the new private port before redirecting
+clients. Save the printed project name and deployment inputs for later commands;
+the example bypasses automatic `.env` loading during recovery.
+
+Docker documents [tar-stream copying](https://docs.docker.com/reference/cli/docker/container/cp/)
+and [Compose archive mode](https://docs.docker.com/reference/cli/docker/compose/cp/).
+The repository's isolated container check exercises stopped-volume backup and
+restore into fresh volumes, including settings, history and file permissions.
+Source deployments can instead use the live SQLite
+[online-backup helper](#storage-and-accounting).
 
 ## Versions and images
 
@@ -338,6 +438,16 @@ available budget and in-flight/queued state. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
+Request and token budgets start full when enabled and refill continuously at
+the configured count/window rate. Request budget is charged once per proxy
+admission, not again for each absorbed upstream retry. Token admission reserves
+an estimate from captured prompt characters divided by four plus a positive
+captured output limit, then settles against final reported usage. A reservation
+larger than the bucket's entire capacity can proceed while credit is positive,
+putting the bucket into debt that refill or usage settlement can repay. These
+controls permit bursts and oversized requests; they are not strict fixed-window
+provider quota enforcement.
+
 ### Debug and preview capture
 
 Debug selects clients, providers and/or models and starts a capture session for
@@ -433,13 +543,17 @@ inference record. Click the detail arrow or a non-link row cell to open its
 drawer; previous/next controls navigate requests without changing the scope.
 
 The drawer presents available facts in sections: request identity/status/times;
-client/runtime and provider metadata; requested model and parameters; conversation
+client/runtime and provider metadata; captured model and parameters; conversation
 turns and content-size counts; input/output/cache/reasoning tokens; performance,
 cost and finish state; tool names/calls; queue/rate-limit information; retries,
 errors and retained headers. Recognized parameters include sampling and output
 limits, stop/logprob controls, reasoning/verbosity, response format, tool choice
-and streaming flags. Missing fields are not inferred from defaults, and explicit
-zero/false parameters remain distinct from absent ones.
+and streaming flags. Explicit zero/false parameters remain distinct from absent
+ones. Ordinary HTTP relay metadata does not infer missing parameter defaults.
+Adapters differ: Anthropic metadata comes from the translated body, including
+its configured output-limit default, and Cursor stores the base model ID rather
+than its fused spelling. See [adapters](adapters.md) before treating these fields
+as an exact representation of the caller's original request.
 
 Opening ordinary details does not fetch private request content. Prompt/response
 previews appear only if captured, and Debug sidecars use their separate opt-in
@@ -517,7 +631,8 @@ Scheduler groups and some observed-identity sets also retain historical labels.
 Bounded request queues do not bound all process memory; long-running workloads
 with many unique identities need their own memory/cardinality measurements.
 
-Use the existing online backup into a new destination:
+From a source checkout with Python installed, use the existing online backup
+into a new destination:
 
 ```sh
 python3 scripts/backup_db.py proxy.db /path/to/new-backup.db
@@ -526,6 +641,8 @@ python3 scripts/backup_db.py proxy.db /path/to/new-backup.db
 The helper opens the source read-only and includes committed WAL state. Do not
 plain-copy an open database or omit its WAL. Protect backups, debug captures and
 exports as sensitive data.
+This helper backs up the database, not configuration. For image-only deployments
+and both persistent volumes, use [container backup and restore](#image-only-backup-and-restore).
 
 ## Performance and footprint
 

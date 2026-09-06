@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -256,5 +258,118 @@ func TestInstalledComposeFiles(t *testing.T) {
 	d := dockerCLI{endpoint: "unix:///millivolt-compose-config-test.sock", env: os.Environ()}
 	if err := d.checkCompose(t.Context()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDockerArchiveRoundTripKeepsBinaryBytesAndOwnershipFlag(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "docker")
+	const fixture = `#!/bin/sh
+[ "$1" = --host ] && [ "$2" = unix:///fixture.sock ] && [ "$3" = cp ] || exit 20
+if [ "$4" = source:/data/. ] && [ "$5" = - ]; then
+  printf 'export diagnostic only\n' >&2
+  cat "$FIXTURE_SOURCE"
+elif [ "$4" = --archive ] && [ "$5" = - ] && [ "$6" = restored:/data ]; then
+  printf 'restore diagnostic only\n' >&2
+  cat > "$FIXTURE_RESTORED"
+else
+  exit 21
+fi
+`
+	if err := os.WriteFile(tool, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(" \t\x00fixture binary payload\xff\x00\n\t ")
+	source, restored := filepath.Join(dir, "source"), filepath.Join(dir, "restored")
+	if err := os.WriteFile(source, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FIXTURE_SOURCE", source)
+	t.Setenv("FIXTURE_RESTORED", restored)
+	d := dockerCLI{endpoint: "unix:///fixture.sock", env: os.Environ()}
+	archive := filepath.Join(dir, "backup.tar")
+	if err := d.copyVolumeArchive(t.Context(), "source", "restored", "/data", archive); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{archive, restored} {
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, data) {
+			t.Fatalf("binary stream changed at %s: %x %v", path, got, err)
+		}
+	}
+	info, err := os.Stat(archive)
+	if err != nil || info.Mode().Perm() != 0600 {
+		t.Fatalf("archive is not private: %v %v", info, err)
+	}
+	if err := d.copyVolumeArchive(t.Context(), "source", "restored", "/data", archive); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("existing archive overwrite was not rejected: %v", err)
+	}
+	link := filepath.Join(dir, "alias.tar")
+	if err := os.Symlink(archive, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.copyVolumeArchive(t.Context(), "source", "restored", "/data", link); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("archive symlink was not rejected: %v", err)
+	}
+}
+
+func TestDockerBinaryFailureDoesNotExposeArchiveInError(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "docker")
+	const fixture = "#!/bin/sh\nprintf 'archive-secret-payload'\nprintf 'fixture command failed' >&2\nexit 17\n"
+	if err := os.WriteFile(tool, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var output bytes.Buffer
+	_, err := dockerCommandIO(t.Context(), os.Environ(), nil, &output, "cp", "source:/config/.", "-")
+	if err == nil || !strings.Contains(err.Error(), "fixture command failed") || strings.Contains(err.Error(), "archive-secret-payload") {
+		t.Fatalf("binary failure mixed streams: %v", err)
+	}
+	if output.String() != "archive-secret-payload" {
+		t.Fatalf("stdout changed: %q", output.String())
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := dockerCommandIO(ctx, os.Environ(), nil, io.Discard, "cp", "source:/config/.", "-"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled archive command started: %v", err)
+	}
+}
+
+func TestDockerTextCommandsRetainStderrLogs(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "docker")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf 'runtime log on stderr\\n' >&2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logs, err := dockerCommand(t.Context(), os.Environ(), "logs", "owned")
+	if err != nil || string(logs) != "runtime log on stderr" {
+		t.Fatalf("stderr-only container logs were lost: %s %v", logs, err)
+	}
+}
+
+func TestBackupRequiresSuccessfulStoppedState(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "docker")
+	const fixture = `#!/bin/sh
+[ "$1" = --host ] && [ "$2" = unix:///fixture.sock ] || exit 20
+case "$3" in
+  stop) [ "$4" = --time ] && [ "$5" = 30 ] && [ "$6" = owned ] || exit 21 ;;
+  inspect) printf '%s\n' "$FIXTURE_STATE" ;;
+  *) exit 22 ;;
+esac
+`
+	if err := os.WriteFile(tool, []byte(fixture), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, state := range []string{"exited 0", "running 0", "exited 137", "created 0", ""} {
+		t.Setenv("FIXTURE_STATE", state)
+		d := dockerCLI{endpoint: "unix:///fixture.sock", env: os.Environ()}
+		if err := d.stopClean(t.Context(), "owned"); (err == nil) != (state == "exited 0") {
+			t.Errorf("state %q: %v", state, err)
+		}
 	}
 }

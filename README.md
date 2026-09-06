@@ -80,7 +80,8 @@ go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 ### Connect a client
 
 Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard, then set
-your OpenAI-compatible client's connection options:
+your OpenAI-compatible client's connection options. The host URLs below assume
+port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
 
 | Client setting | Value |
 | --- | --- |

@@ -62,9 +62,12 @@ Never use an existing main instance on port 8080 for tests. Use the lifecycle
 script, with cleanup even if verification fails:
 
 ```sh
-trap 'scripts/dev.sh stop' EXIT
-scripts/dev.sh
-scripts/check.sh browser --target http://127.0.0.1:8081
+(
+  set -e
+  trap 'scripts/dev.sh stop' EXIT
+  scripts/dev.sh
+  scripts/check.sh browser --target http://127.0.0.1:8081
+)
 ```
 
 `scripts/dev.sh status` reports the private instance. The script builds first,
@@ -227,8 +230,10 @@ scripts/check.sh container --image "$millivolt_image_id"
 
 The shared container mode validates Compose defaults and owns only its
 disposable, network-isolated Docker fixture, selected by immutable image ID.
-It checks startup, HTTP, Settings and durable state across stop/start without
-publishing a host port or reusing an operator volume. It complements, rather
+It checks startup, HTTP, Settings and durable state across stop/start, then backs
+up the stopped volumes and restores into another fresh container. Recovery must
+retain settings, history and private file ownership/modes. It never publishes
+a host port or reuses an operator volume. It complements, rather
 than replaces, the host lifecycle in `scripts/dev.sh`.
 
 ## Change checklist

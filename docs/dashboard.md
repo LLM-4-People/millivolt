@@ -49,7 +49,8 @@ scale keeps large prompt/cache volumes and small outputs readable together.
 
 **Speed + latency** compares output throughput with time to first token on
 separate axes. One percentile dropdown controls both series; the legend does
-not repeat it. Missing measurements remain unavailable rather than invented.
+not repeat it. Choose p50, p95 or p99. Each statistic needs at least four valid
+samples; smaller sets and missing measurements remain unavailable.
 Period readouts use the period's samples, not an average of bucket percentiles.
 
 ![Speed and latency timeline with independent axes and percentile control](images/charts/speed-latency.png)
@@ -64,10 +65,26 @@ a zero bill, and there is no hardcoded per-model price table.
 
 ## Explorer
 
-The dimensions are Providers, Models, Clients, Conversations, Tools, Time,
-Status, Errors and Keys. A card adds an exact scope; the breadcrumb chips remove
-individual selections or return to all traffic. Multi-valued dimensions, such
-as tools and errors, can overlap rather than partition requests.
+Changing the dimension in the rail changes the grouping, not the active filters.
+Selecting a card adds or replaces that dimension's exact filter; selecting it
+again removes it. Filters from other dimensions remain active. The breadcrumb
+chips remove individual selections or return to all traffic.
+
+The gallery ignores its own dimension's filter so alternatives remain visible;
+the timeline and request log still use the complete selected scope. Multi-valued
+dimensions, such as tools and errors, can overlap rather than partition requests.
+
+| Dimension, in rail order | What it groups |
+| --- | --- |
+| Providers | Server-derived upstream identities after configured aliases. |
+| Models | Model groups produced by the configured canonicalization rules. |
+| Clients | Explicit client labels or inferred SDK/User-Agent identities. |
+| Conversations | Explicit or automatically tracked conversation IDs, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
+| Tools | Observed tool names; one request can belong to several tools. |
+| Time | Request start in the server's local timezone: weekday night 00:00-08:00, work 08:00-16:00, evening 16:00-24:00, or a single weekend group. This is separate from chart history range. |
+| Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states. |
+| Errors | Distinct observed error identities, including absorbed failures; one request can have several. HTTP 429 alone is not an error. |
+| Keys | SHA-256 hashes of upstream credentials, never raw keys. Labels show only an eight-hex-character prefix; identical short labels do not establish identical full hashes. |
 
 ### Providers
 
@@ -81,7 +98,9 @@ zero values independently. A request can contribute to both badges.
 
 Model cards group configured model variants for comparison. Selecting one scopes
 the timeline and request log together. Model grouping is configuration-owned;
-raw request spellings remain available for exact export and deletion filters.
+stored model spellings remain available for exact export and deletion filters.
+Adapters can normalize those spellings before storage; see
+[request metadata](operations.md#request-rows-and-details).
 
 ![Model explorer with pseudonymous model groups and recorded usage metrics](images/explorer/models.png)
 
