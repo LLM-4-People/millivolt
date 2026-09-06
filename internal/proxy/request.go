@@ -486,7 +486,7 @@ func headerPresent(r *http.Request, name string) bool {
 // token can never ride upstream.)
 func isProxyControlHeader(h string) bool {
 	switch strings.ToLower(h) {
-	case "authorization", "x-proxy-base-url", "x-proxy-auth-header",
+	case "authorization", "cookie", "x-proxy-base-url", "x-proxy-auth-header",
 		"x-proxy-auth-prefix", "x-proxy-path", "x-proxy-query", "x-proxy-headers",
 		"x-proxy-provider", "x-proxy-key", "x-proxy-refresh-token",
 		"x-proxy-access-token", "x-proxy-timeout-ms", "x-proxy-format",
@@ -501,9 +501,11 @@ func copyResponseHeaders(dst, src http.Header) {
 	nominated := connectionTokens(src)
 	for k, vs := range src {
 		// Drop hop-by-hop headers, Content-Length (so the client gets chunked
-		// encoding), and Content-Encoding (we decompress upstream bodies, so
-		// forwarding it would cause clients to double-decompress).
-		if isHopByHop(k) || nominated[strings.ToLower(k)] || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") {
+		// encoding), Content-Encoding (we decompress upstream bodies, so
+		// forwarding it would cause clients to double-decompress), and
+		// Set-Cookie (an upstream cookie must never enter the browser's
+		// millivolt-origin jar, where it could shadow operator-plane state).
+		if isHopByHop(k) || nominated[strings.ToLower(k)] || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Set-Cookie") {
 			continue
 		}
 		dst[k] = append([]string(nil), vs...)

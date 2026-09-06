@@ -119,6 +119,82 @@ function renderStormDetails() {
   updateSection('storm-dialog-body', `<dl class="storm-facts">${rows}</dl><p class="storm-explanation">Counts cover the rolling detection window. Each request with a selected failure in this window is counted once; retries count as separate upstream attempts. Recovery checks use queued requests, so the next retry may start after the scheduled time.</p>`);
 }
 
+// Operator credential owner for the gated plane. The server never issues or
+// returns the credential; gated calls attach it as a Bearer header and one
+// 401 opens the prompt below. sessionStorage keeps the value tab-scoped: it
+// never outlives the browser session, and it is dropped as soon as the
+// server rejects it.
+const OPERATOR_KEY = 'millivolt.operatorToken';
+let operatorCredential = '';
+try { operatorCredential = sessionStorage.getItem(OPERATOR_KEY) || ''; } catch (e) { operatorCredential = ''; }
+let operatorPrompt = null;
+
+function operatorToken() { return operatorCredential; }
+
+// One owner for gated-plane calls: attach the stored credential, and on 401
+// prompt once, remember the entered value and retry the identical request
+// exactly once. A 403 means the server has no credential configured
+// (MILLIVOLT_OPERATOR_TOKEN); prompting cannot help, so the response is
+// returned for the caller's error surface.
+async function operatorFetch(url, options = {}) {
+  const attempt = () => {
+    const headers = Object.assign({}, options.headers || {});
+    if (operatorCredential) headers['Authorization'] = 'Bearer ' + operatorCredential;
+    return fetch(url, Object.assign({}, options, { headers }));
+  };
+  let response = await attempt();
+  if (response.status !== 401) return response;
+  const token = await askOperatorToken();
+  if (!token) return response;
+  operatorCredential = token;
+  try { sessionStorage.setItem(OPERATOR_KEY, token); } catch (e) { /* storage denied: tab-only credential */ }
+  response = await attempt();
+  if (response.status === 401) {
+    operatorCredential = '';
+    try { sessionStorage.removeItem(OPERATOR_KEY); } catch (e) { /* already tab-only */ }
+  }
+  return response;
+}
+
+// Single-flight credential prompt: concurrent gated calls share one dialog
+// and one resolution. Resolves '' on cancel or dismiss.
+function askOperatorToken() {
+  if (operatorPrompt) return operatorPrompt;
+  operatorPrompt = new Promise(resolve => {
+    let dialog = $('operator-dialog');
+    if (!dialog) {
+      dialog = document.createElement('section');
+      dialog.id = 'operator-dialog';
+      dialog.className = 'operator-dialog';
+      dialog.hidden = true;
+      dialog.tabIndex = -1;
+      dialog.setAttribute('inert', '');
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.setAttribute('aria-labelledby', 'operator-dialog-title');
+      dialog.innerHTML = `<div class="operator-dialog-panel"><div class="drawer-hd"><h3 id="operator-dialog-title">Operator credential</h3><button class="btn" type="button" data-operator-auth="cancel" aria-label="Cancel credential prompt">Cancel</button></div><p class="operator-dialog-note">This millivolt instance is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value to use the dashboard. It stays in this browser tab for the session and is never sent anywhere else.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="off" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="submit">Save credential</button></div></form></div>`;
+      document.body.appendChild(dialog);
+    }
+    const input = $('operator-dialog-input');
+    const finish = value => {
+      input.value = '';
+      closeModal(dialog);
+      resolve(value);
+    };
+    dialog.onclick = e => { if (e.target === dialog) finish(''); };
+    dialog.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(''); } };
+    dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
+    $('operator-dialog-form').onsubmit = e => {
+      e.preventDefault();
+      finish(input.value.trim());
+    };
+    closeHeaderMenus();
+    closeDimMenu();
+    openModal(dialog);
+    input.focus();
+  }).finally(() => { operatorPrompt = null; });
+}
+
 // All operator mutations share confirmation, busy and issue-order gates.
 const operatorState = {
   pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState },
@@ -155,7 +231,7 @@ async function mutateOperator(kind, body, after) {
   gate.sync();
   let confirmed;
   try {
-    const response = await fetch('/admin/' + kind, {
+    const response = await operatorFetch('/admin/' + kind, {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
     });
     const st = await response.json();
@@ -388,7 +464,7 @@ function toggleSettings(e) {
 function fetchSettings(discard = false) {
   const req = ++settingsReq;
   const draft = settingsFingerprint();
-  return fetch('/admin/config')
+  return operatorFetch('/admin/config')
     .then(async r => {
       const doc = await r.json();
       if (!r.ok || !Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || 'could not load config');
@@ -1532,7 +1608,7 @@ function applySettings() {
     }
   }
   ++settingsReq;
-  return fetch('/admin/config', {
+  return operatorFetch('/admin/config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ values, revision: settingsDoc.revision }),
@@ -2493,7 +2569,7 @@ function clearFilterActive(f) {
   return f.provider || f.model || f.client || f.status_code || f.has_error || f.debug || f.before_ms;
 }
 
-// updateFilterCount POSTs /metrics/purge/count for a Clear/Logs menu and
+// updateFilterCount POSTs /admin/purge/count for a Clear/Logs menu and
 // writes the preview into elId / enables btnId. phrase(count) is the label.
 // Each menu owns its latest preview, including the exact older-than instant.
 // Empty selections invalidate it too. Actions reuse this predicate, never a
@@ -2514,7 +2590,7 @@ async function updateFilterCount(prefix, elId, btnId, phrase) {
   if (!clearFilterActive(f)) { el.textContent = ''; return; }
   el.textContent = 'counting…';
   try {
-    const res = await fetch('/metrics/purge/count', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(f) });
+    const res = await operatorFetch('/admin/purge/count', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(f) });
     const d = await res.json();
     if (_filterPreviews.get(prefix) !== preview || preview.selection !== filterSelection(prefix)) return;
     if (!res.ok || !Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || 'count unavailable');
@@ -2560,7 +2636,7 @@ async function purgeMetrics(filter) {
   try {
     const options = {method: 'POST'};
     if (filter) { options.headers = {'Content-Type': 'application/json'}; options.body = JSON.stringify(filter); }
-    const response = await fetch('/metrics/purge', options);
+    const response = await operatorFetch('/admin/purge', options);
     const result = await response.json();
     if (!response.ok || result.ok !== true) throw new Error(result.error || 'could not delete records');
     _filterPreviews.clear();
@@ -2734,7 +2810,7 @@ function setRestartStatus(text, err) {
 }
 
 function fetchRestartStatus() {
-  return fetch('/admin/restart')
+  return operatorFetch('/admin/restart')
     .then(r => r.json())
     .then(st => {
       applyRestartEvent(st);
@@ -2756,7 +2832,7 @@ function fetchRestartStatus() {
 async function watchRestart(onEvent, signal) {
   let reader;
   try {
-    const r = await fetch('/admin/restart?watch=1', {signal});
+    const r = await operatorFetch('/admin/restart?watch=1', {signal});
     if (!r.ok || !r.body || !r.body.getReader) return false;
     const dec = new TextDecoder();
     let buf = '';
@@ -2800,7 +2876,7 @@ async function restartProxy() {
     // Apply each NDJSON line as it arrives (do not wait for the stream to
     // end - that hid draining behind "building" for the whole drain).
     watchRestart(st => { if (!watcher.signal.aborted) applyRestartEvent(st); }, watcher.signal);
-    const r = await fetch('/admin/restart', { method: 'POST' });
+    const r = await operatorFetch('/admin/restart', { method: 'POST' });
     const doc = await r.json().catch(() => ({}));
     if (!r.ok) { setRestartStatus(doc.error || 'restart failed (' + r.status + ')', true); return; }
     if (restartFailed) return;
@@ -2819,7 +2895,7 @@ async function restartProxy() {
         if (restartFailed) return null;
         const poll = new AbortController();
         const timeout = setTimeout(() => poll.abort(), 5000);
-        const st = await fetch('/admin/restart', {signal: poll.signal}).then(x => x.json()).catch(() => null).finally(() => clearTimeout(timeout));
+        const st = await operatorFetch('/admin/restart', {signal: poll.signal}).then(x => x.json()).catch(() => null).finally(() => clearTimeout(timeout));
         if (restartFailed) return null;
         if (st && st.started_at && before.started_at && st.started_at !== before.started_at) {
           return st;

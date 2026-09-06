@@ -182,8 +182,8 @@ const pageOptions = {
           dim: 'provider', total: 30, error_total: 0, rail: {}, groups: [], scope: {matches: 30, errors: 0},
         })});
       }
-      if (url.includes('/metrics/purge/count')) return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
-      if (url.includes('/metrics/purge')) return Promise.resolve({ ok: true, json: async () => ({ok: true}) });
+      if (url.includes('/admin/purge/count')) return Promise.resolve({ ok: true, json: async () => ({ count: 3 }) });
+      if (url.includes('/admin/purge')) return Promise.resolve({ ok: true, json: async () => ({ok: true}) });
       // /metrics/bootstrap: the real payload carries the snapshot PLUS the
       // state surfaces (kpi, dash, pause, throttle) - mirror the shapes the
       // dedicated /admin/ endpoints serve so state-driven UI stays exercised.
@@ -968,7 +968,7 @@ async function main() {
     d.getElementById('clear-menu').hidden = false;
     let submitted, resyncs = 0;
     w.fetch = async (url, options) => {
-      if (String(url).includes('/metrics/purge')) {
+      if (String(url).includes('/admin/purge')) {
         submitted = JSON.parse(options.body);
         return {ok: false, json: async () => ({error: 'delete rejected'})};
       }
@@ -1046,7 +1046,7 @@ async function main() {
   w.fetch = (url, opts) => {
     const u = String(url);
     if (u.includes('/metrics/bootstrap')) { bootURL = u; return origPurge(url, opts); }
-    if (u.includes('/metrics/purge') && !u.includes('/count')) { purgePOST = true; }
+    if (u.includes('/admin/purge') && !u.includes('/count')) { purgePOST = true; }
     return origPurge(url, opts);
   };
   let purgePOST = false;

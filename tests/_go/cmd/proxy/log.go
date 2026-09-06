@@ -69,7 +69,7 @@ func TestLogFilterRejectsMalformedAndNullConstraints(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	for _, route := range []string{"/metrics/purge", "/metrics/purge/count"} {
+	for _, route := range []string{"/admin/purge", "/admin/purge/count"} {
 		for _, body := range []string{
 			` `, `null`, `[]`, `{"provder":"target"}`, `{"provider":"target"} {}`,
 			`{"provider":"target","Provider":"unrelated"}`, `{"status_code":-1}`,
@@ -92,7 +92,7 @@ func TestLogFilterRejectsMalformedAndNullConstraints(t *testing.T) {
 	}
 	for _, body := range []string{`{}`, `{"provider":""}`, `{"has_error":false}`} {
 		w := httptest.NewRecorder()
-		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/metrics/purge", strings.NewReader(body)))
+		mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body)))
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("empty filtered purge accepted: %s", body)
 		}
@@ -117,7 +117,7 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 			}
 			body := `{"provider":"target","conversation_id":"conversation","error_type":"upstream","after_ms":2000,"before_ms":3000}`
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/metrics/purge/count", strings.NewReader(body)))
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge/count", strings.NewReader(body)))
 			if w.Code != 200 || strings.TrimSpace(w.Body.String()) != `{"count":1}` {
 				t.Fatalf("count=%d %s", w.Code, w.Body.String())
 			}
@@ -128,14 +128,14 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 				t.Fatalf("export=%d %s err=%v", w.Code, w.Body.String(), err)
 			}
 			w = httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/metrics/purge", strings.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body))
 			req.ContentLength = -1
 			mux.ServeHTTP(w, req)
 			if w.Code != 200 || b.Len() != 2 {
 				t.Fatalf("clear=%d %s ring=%d", w.Code, w.Body.String(), b.Len())
 			}
 			w = httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/metrics/purge", nil))
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", nil))
 			if w.Code != 200 || b.Len() != 0 {
 				t.Fatalf("full clear=%d ring=%d", w.Code, b.Len())
 			}
@@ -158,7 +158,7 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/metrics/export", "/metrics/purge", "/metrics/purge/count"} {
+	for _, path := range []string{"/metrics/export", "/admin/purge", "/admin/purge/count"} {
 		method := http.MethodPost
 		if path == "/metrics/export" {
 			method = http.MethodGet
@@ -172,7 +172,7 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/metrics/purge", nil).WithContext(ctx))
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", nil).WithContext(ctx))
 	if w.Code != 500 || b.Len() != 1 {
 		t.Fatal("canceled purge changed live ring")
 	}

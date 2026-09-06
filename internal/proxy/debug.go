@@ -614,8 +614,8 @@ func (s *Server) DebugSnapshot() map[string]any {
 	return state
 }
 
-// HandleDebugCapture is GET /metrics/debug?id= - the drawer fetch for one
-// sidecar document. 404 when missing/expired. Never on the live SSE path.
+// HandleDebugCapture is GET /admin/debug/capture?id= - the drawer fetch for
+// one sidecar document. 404 when missing/expired. Never on the live SSE path.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")

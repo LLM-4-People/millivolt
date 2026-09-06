@@ -29,5 +29,8 @@ USER 65532:65532
 WORKDIR /data
 EXPOSE 8080
 STOPSIGNAL SIGTERM
+# Distroless has no shell or curl: the binary probes its own /healthz, which
+# is deliberately unauthenticated so the healthcheck carries no credential.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-healthcheck"]
 ENTRYPOINT ["/millivolt"]
 CMD ["-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db"]

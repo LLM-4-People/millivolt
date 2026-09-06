@@ -13,6 +13,9 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	if !rejectUnlessGet(w, r) {
 		return
 	}
+	// Operator-plane JSON lives behind the credential: the response carries
+	// request totals and must never be cached by a shared intermediary.
+	w.Header().Set("Cache-Control", "no-store")
 	records := buf.Snapshot()
 	agg := Aggregate(records)
 	if agg.Err != nil {

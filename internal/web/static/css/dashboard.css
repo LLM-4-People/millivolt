@@ -245,6 +245,14 @@
   .storm-facts dt { color: var(--muted); }
   .storm-facts dd { margin: 0; overflow-wrap: anywhere; color: var(--text); }
   .storm-explanation { margin: 14px 0 0; color: var(--muted); }
+  .operator-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.6); }
+  .operator-dialog[hidden] { display: none; }
+  .operator-dialog-panel { width: min(440px, 100%); border: 1px solid var(--border2); background: var(--panel); padding: 0 18px 18px; font: 11px/1.5 var(--mono); color: var(--text); }
+  .operator-dialog-panel h3 { margin: 0; }
+  .operator-dialog-note { margin: 12px 0 0; color: var(--muted); }
+  .operator-dialog input { width: 100%; box-sizing: border-box; margin: 12px 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 6px 9px; }
+  .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .operator-dialog-actions { display: flex; justify-content: flex-end; }
   .storm-resolution { margin: 12px 0 0; color: var(--text); }
   @media (max-width: 600px) { .storm-banner { padding: 9px 11px; font-size: 10px; } }
 

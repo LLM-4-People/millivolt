@@ -14,6 +14,20 @@ def require(value, message):
         raise RuntimeError(message)
 
 
+def operator_token():
+    """The gated dashboard needs the same MILLIVOLT_OPERATOR_TOKEN the target
+    instance was started with."""
+    token = os.environ.get('MILLIVOLT_OPERATOR_TOKEN', '')
+    require(token, 'MILLIVOLT_OPERATOR_TOKEN is required for the gated dashboard')
+    return token
+
+
+def operator_headers():
+    """Fixture cleanup purges through the gated operator plane, so these
+    harnesses need the operator credential as a Bearer header."""
+    return {'Authorization': 'Bearer ' + operator_token()}
+
+
 def test_layout_errors(names):
     """Keep test sources centralized and physical filenames suffix-free."""
     suffixes = ("_test.go", "_test.py", "_check.py", "_check.js", ".test.js", ".spec.js")
@@ -70,3 +84,14 @@ def source_inventory(root, probes=()):
         if files.returncode:
             raise RuntimeError("git source listing failed: " + files.stderr.strip())
         return ignored, sorted(filter(None, files.stdout.split("\0")))
+
+
+async def operator_signin(context, base):
+    """Mint the operator session cookie inside a Playwright browser context.
+
+    The dashboard page and its EventSource authenticate with the HttpOnly
+    cookie; harness requests may also send the Bearer header directly.
+    """
+    response = await context.request.post(base + '/admin/session',
+                                          form={'token': operator_token()})
+    require(response.ok, 'operator sign-in failed: ' + str(response.status))

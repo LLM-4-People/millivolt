@@ -19,7 +19,8 @@ import (
 )
 
 func TestStressTargetSafety(t *testing.T) {
-	o := options{levels: "1,8", duration: time.Second, timeout: time.Second, sample: time.Millisecond, chunks: 1, upstreams: 1, maxRSS: 128}
+	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", "fixture-token")
+	o := options{levels: "1,8", duration: time.Second, timeout: time.Second, sample: time.Millisecond, chunks: 1, upstreams: 1, maxRSS: 128, token: "fixture-token"}
 	for _, target := range []string{"", "http://127.0.0.1:8080", "http://example.com:8081", "http://0.0.0.0:8081", "http://127.0.0.1:8081/admin/restart", "http://user@127.0.0.1:8081", "http://127.0.0.1:8081?q=x"} {
 		o.target = target
 		if _, _, err := validate(o); err == nil {
@@ -122,12 +123,13 @@ func TestStressPIDFixture(t *testing.T) {
 }
 
 func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
+	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", "fixture-token")
 	for _, mode := range []string{"ramp", "request failure", "canceled", "cleanup failure", "changed database"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			o := options{levels: "1,1", duration: 20 * time.Millisecond, timeout: 2 * time.Second,
-				sample: time.Millisecond, chunks: 1, upstreams: 1, maxRSS: 2048}
+				sample: time.Millisecond, chunks: 1, upstreams: 1, maxRSS: 2048, token: "fixture-token"}
 			expected := newFixture(o).expected
 			var mu sync.Mutex
 			records := map[string]int{"unrelated-client": 1}
@@ -167,7 +169,7 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 						w.WriteHeader(http.StatusServiceUnavailable)
 					}
 					_, _ = io.WriteString(w, expected)
-				case "/metrics/purge":
+				case "/admin/purge":
 					if r.Method != http.MethodPost || r.Header.Get("Content-Type") != "application/json" {
 						t.Error("cleanup must use a JSON POST")
 					}
@@ -326,7 +328,7 @@ func TestStressCleanupWaitsForOwnedPendingOnly(t *testing.T) {
 			defer cancel()
 			calls, purges := 0, 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/metrics/purge" {
+				if r.URL.Path == "/admin/purge" {
 					purges++
 					_, _ = io.WriteString(w, `{"ok":true}`)
 					return
@@ -362,7 +364,7 @@ func TestStressCleanupWaitsForOwnedPendingOnly(t *testing.T) {
 				}
 				return nil
 			}
-			err := c.clearClients(ctx, []string{"fixture"}, time.Millisecond, verify)
+			err := c.clearClients(ctx, []string{"fixture"}, time.Millisecond, verify, "fixture-token")
 			if pending == `[{"client":"other"}]` || pending == "drained" {
 				if err != nil || purges != 1 {
 					t.Fatalf("unrelated pending blocked cleanup: %v, %d", err, purges)
@@ -370,7 +372,7 @@ func TestStressCleanupWaitsForOwnedPendingOnly(t *testing.T) {
 			} else if err == nil || purges != 0 {
 				t.Fatalf("unsafe pending state allowed cleanup: %v, %d", err, purges)
 			}
-			if err := c.clearClients(t.Context(), []string{""}, time.Millisecond, verify); err == nil {
+			if err := c.clearClients(t.Context(), []string{""}, time.Millisecond, verify, "fixture-token"); err == nil {
 				t.Error("empty client accepted")
 			}
 			wantCalls := 1

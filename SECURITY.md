@@ -2,9 +2,13 @@
 
 ## Deployment boundary
 
-millivolt is a trusted-operator tool, not a multi-user security boundary. It has
-no built-in operator authentication, authorization roles or tenant isolation.
-The upstream API key is forwarded for inference; it does not secure the
+millivolt is a trusted-operator tool, not a multi-user security boundary. It
+has no authorization roles or tenant isolation. The whole dashboard is gated
+by the shared `MILLIVOLT_OPERATOR_TOKEN` environment credential and denied
+while it is unset (see [operator access](docs/operations.md#operator-access)):
+there is one operator identity, no per-user accounts and no audit trail of
+who acted. Only the `/healthz` liveness probe and transparent inference stay
+open. The upstream API key is forwarded for inference; it does not secure the
 dashboard or administration.
 
 The supplied listen address binds all interfaces. Prefer an explicit loopback
@@ -19,11 +23,15 @@ A non-root container and a public image do not authenticate callers or make a
 publicly reachable operator listener safe. Protect persistent config/data
 volumes as sensitive state, including backups and debug captures.
 
-Browser same-origin mutation checks and framing denial are defense in depth,
-not authentication. The live metrics feed does not opt into cross-origin
-browser sharing; the dashboard uses a same-origin EventSource. This does not
+Browser same-origin mutation checks and framing denial are defense in depth
+behind the operator credential, not a substitute for it. The live metrics feed
+does not opt into cross-origin
+browser sharing; the dashboard uses a same-origin EventSource authenticated
+by the HttpOnly session cookie. This does not
 prevent direct non-browser reads or secure a publicly reachable listener.
-Explicit non-browser calls remain supported.
+Explicit non-browser calls remain supported; gated endpoints need the
+`Authorization: Bearer` credential or a session cookie minted through
+`POST /admin/session`.
 
 ## Upstream destinations and credentials
 

@@ -33,7 +33,10 @@ import (
 const (
 	smokeAddress = "http://127.0.0.1:8080" // Container loopback only, after isolation guards.
 	smokeEnv     = "MILLIVOLT_CONTAINER_SMOKE"
-	smokeRows    = 321              // Neutral persisted Settings fixture.
+	smokeRows    = 321 // Neutral persisted Settings fixture.
+	// Arms the image's operator gate for the smoke: the probe asserts the
+	// same mutation is denied without the credential and succeeds with it.
+	smokeToken   = "millivolt-container-smoke-token"
 	smokeTimeout = 45 * time.Second // Internal smoke-test deadline, not server configuration.
 )
 
@@ -211,6 +214,7 @@ func check(image string) error {
 		}
 		args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
 			"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
+			"--env", "MILLIVOLT_OPERATOR_TOKEN=" + smokeToken,
 			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
 			"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
 			"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
@@ -247,6 +251,11 @@ func check(image string) error {
 			return err
 		}
 		if phase == "seed" {
+			// The distroless image has no shell or curl: the binary probes
+			// its own unauthenticated /healthz for Docker HEALTHCHECK.
+			if _, err := command(ctx, "exec", container, "/millivolt", "-config", "/config/proxy.yaml", "-db-path", "/data/proxy.db", "-healthcheck"); err != nil {
+				return fmt.Errorf("healthcheck probe: %w", err)
+			}
 			version, err := command(ctx, "exec", container, "/millivolt", "-version")
 			if err != nil {
 				return err
@@ -493,25 +502,37 @@ func checkExampleProviders(cfg settings) error {
 	return nil
 }
 
-func request(client *http.Client, method, path string, body []byte) ([]byte, error) {
+// do sends one smoke request and returns the status with the bounded body.
+func do(client *http.Client, method, path string, body []byte, headers map[string]string) (int, []byte, error) {
 	r, err := http.NewRequest(method, smokeAddress+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	if body != nil {
 		r.Header.Set("Content-Type", "application/json")
 	}
+	for key, value := range headers {
+		r.Header.Set(key, value)
+	}
 	res, err := client.Do(r)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	defer res.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
+		return res.StatusCode, nil, err
+	}
+	return res.StatusCode, data, nil
+}
+
+func request(client *http.Client, method, path string, body []byte) ([]byte, error) {
+	status, data, err := do(client, method, path, body, nil)
+	if err != nil {
 		return nil, err
 	}
-	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s %s returned %d: %s", method, path, res.StatusCode, data)
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("%s %s returned %d: %s", method, path, status, data)
 	}
 	return data, nil
 }
@@ -522,6 +543,21 @@ func readJSON(client *http.Client, path string, out any) error {
 	}
 	return json.Unmarshal(data, out)
 }
+
+// authTransport injects the operator credential into every smoke read: the
+// dashboard plane is gated and the probe must behave like an operator
+// browser. The negative checks deliberately use a plain client instead.
+type authTransport struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (a authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+a.token)
+	return a.base.RoundTrip(r)
+}
+
 func probe(phase string) error {
 	if phase != "seed" && phase != "verify" {
 		return errors.New("unknown probe phase")
@@ -529,8 +565,21 @@ func probe(phase string) error {
 	if err := probeGuard(); err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	// The whole dashboard plane is gated: every read below rides an
+	// authenticated transport, while the negative checks use a plain client.
+	credential := os.Getenv("MILLIVOLT_OPERATOR_TOKEN")
+	if credential == "" {
+		return errors.New("probe env is missing MILLIVOLT_OPERATOR_TOKEN")
+	}
+	client := &http.Client{Timeout: 3 * time.Second,
+		Transport: authTransport{base: &http.Transport{Proxy: nil}, token: credential}}
 	defer client.CloseIdleConnections()
+	plain := &http.Client{Timeout: 3 * time.Second,
+		Transport: &http.Transport{Proxy: nil},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}
+	defer plain.CloseIdleConnections()
 	deadline := time.Now().Add(smokeTimeout)
 	var snap snapshot
 	for {
@@ -544,6 +593,55 @@ func probe(phase string) error {
 	}
 	if !snap.Storage.Enabled || snap.Storage.Dropped != 0 {
 		return errors.New("durability unavailable or dropped records")
+	}
+	// The liveness probe is the one open server route: no credential, no
+	// dashboard data. The ungated dashboard entry denies with the no-JS
+	// login page, whose handshake mints the session cookie (EventSource
+	// cannot send Authorization headers).
+	if status, _, err := do(plain, http.MethodGet, "/healthz", nil, nil); err != nil || status != http.StatusOK {
+		return fmt.Errorf("healthz probe returned %d, %v", status, err)
+	}
+	status, login, err := do(plain, http.MethodGet, "/", nil, nil)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusUnauthorized || !bytes.Contains(login, []byte(`action="/admin/session"`)) {
+		return fmt.Errorf("ungated dashboard returned %d, want the 401 login page", status)
+	}
+	session, err := http.NewRequest(http.MethodPost, smokeAddress+"/admin/session", strings.NewReader("token="+url.QueryEscape(credential)))
+	if err != nil {
+		return err
+	}
+	session.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := plain.Do(session)
+	if err != nil {
+		return err
+	}
+	cookies := res.Cookies()
+	res.Body.Close()
+	if res.StatusCode != http.StatusSeeOther || len(cookies) != 1 {
+		return fmt.Errorf("session handshake returned %d with %d cookies, want 303 + one cookie", res.StatusCode, len(cookies))
+	}
+	authed := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	defer authed.CloseIdleConnections()
+	page, err := http.NewRequest(http.MethodGet, smokeAddress+"/", nil)
+	if err != nil {
+		return err
+	}
+	for _, cookie := range cookies {
+		page.AddCookie(cookie)
+	}
+	served, err := authed.Do(page)
+	if err != nil {
+		return err
+	}
+	dash, err := io.ReadAll(io.LimitReader(served.Body, 4<<20))
+	served.Body.Close()
+	if err != nil {
+		return err
+	}
+	if served.StatusCode != http.StatusOK || !bytes.Contains(dash, []byte("<html")) {
+		return fmt.Errorf("session-cookie dashboard returned %d, want the HTML shell", served.StatusCode)
 	}
 	html, err := request(client, http.MethodGet, "/", nil)
 	if err != nil {
@@ -580,8 +678,22 @@ func probe(phase string) error {
 			return errors.New("fixture volume was not empty")
 		}
 		body, _ := json.Marshal(map[string]any{"revision": cfg.Revision, "values": map[string]any{"dash_log_rows": smokeRows}})
-		if _, err := request(client, http.MethodPost, "/admin/config", body); err != nil {
+		// The operator gate is fail closed: the image arms it from the
+		// environment, the identical mutation without the credential is
+		// denied 401, and the authorized request carries that credential.
+		status, _, err := do(plain, http.MethodPost, "/admin/config", body, nil)
+		if err != nil {
 			return err
+		}
+		if status != http.StatusUnauthorized {
+			return fmt.Errorf("ungated operator mutation returned %d, want 401", status)
+		}
+		status, _, err = do(client, http.MethodPost, "/admin/config", body, nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("authorized operator mutation returned %d, want 200", status)
 		}
 		const response = `{"id":"fixture","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}`
 		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -597,7 +709,10 @@ func probe(phase string) error {
 		r.Header.Set("X-Proxy-Base-URL", upstream.URL)
 		r.Header.Set("X-Proxy-Provider", "fixture.example")
 		r.Header.Set("X-Proxy-Client", "container-fixture")
-		res, err := client.Do(r)
+		// Transparent inference rides the unauthenticated client: the
+		// operator plane never gates the relay, and the relay never needs
+		// the operator credential.
+		res, err := plain.Do(r)
 		if err != nil {
 			return err
 		}

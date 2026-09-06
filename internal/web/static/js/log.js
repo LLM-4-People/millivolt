@@ -287,7 +287,7 @@ function fetchOlderLog() {
   const before = logCursor;
   const cursorQS = before ? '&before_ms=' + encodeURIComponent(String(before.ms)) + '&before_id=' + encodeURIComponent(before.id) : '';
   const q = 'limit=' + encodeURIComponent(String(logPageSize())) + cursorQS + (scopeQS() ? '&' + scopeQS() : '');
-  fetch('/metrics/agg/log?' + q).then(r => {
+  operatorFetch('/metrics/agg/log?' + q).then(r => {
     if (!r.ok) throw new Error('log page');
     return r.json();
   }).then(p => {
@@ -826,7 +826,7 @@ function debugHeaderRows(list) {
 function fillDrawerDebug(id) {
   const box = $('drawer-debug-body');
   if (!box) return;
-  fetch('/metrics/debug?id=' + encodeURIComponent(id))
+  operatorFetch('/admin/debug/capture?id=' + encodeURIComponent(id))
     .then(r => r.ok ? r.json() : Promise.reject())
     .then(d => {
       if (drawerId !== id) return;

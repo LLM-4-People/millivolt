@@ -137,7 +137,9 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 	})
-	mux.HandleFunc("/metrics/purge", func(w http.ResponseWriter, r *http.Request) {
+	// Destructive purge belongs in the /admin operator plane, never the
+	// open-read /metrics namespace. The operator gate owns the /admin prefix.
+	mux.HandleFunc("/admin/purge", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}
@@ -173,7 +175,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			storage.PurgeResult
 		}{true, result})
 	})
-	mux.HandleFunc("/metrics/purge/count", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/admin/purge/count", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}

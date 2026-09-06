@@ -45,10 +45,12 @@ with replaced identifiers. The guide explains its capture limitations.
 
 ## Before you run
 
-millivolt has **no operator authentication or user isolation**. Inference and
-administration share one listener. Both quickstarts restrict the host port to
-loopback; use a trusted machine or protected ingress. An upstream API key does
-not secure the dashboard. Read [Security](SECURITY.md) before network exposure.
+millivolt has **no user isolation**: one shared operator credential protects
+the whole dashboard, and inference shares the same listener. Set
+`MILLIVOLT_OPERATOR_TOKEN` before exposing the listener beyond loopback:
+with it unset the dashboard denies every request. There are no per-user
+accounts. An upstream API key does not secure the dashboard. Read
+[Security](SECURITY.md) before network exposure.
 
 Durable metrics are **best-effort**: sustained overload can drop records even
 when inference succeeds. The dashboard warns about process-local storage drops.

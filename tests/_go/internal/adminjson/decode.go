@@ -63,7 +63,7 @@ func (r failingBodyReader) Read(p []byte) (int, error) {
 
 func TestDecodeReadFailureCannotBecomeEmptyCommand(t *testing.T) {
 	for _, data := range []string{"", "{", "{}"} {
-		r := httptest.NewRequest("POST", "/metrics/purge", nil)
+		r := httptest.NewRequest("POST", "/admin/purge", nil)
 		r.Body = io.NopCloser(failingBodyReader{data: data})
 		var dst map[string]any
 		err := Decode(httptest.NewRecorder(), r, &dst)
@@ -91,7 +91,7 @@ func TestOptionalID(t *testing.T) {
 
 func TestDecodeEmptyCommand(t *testing.T) {
 	for _, body := range []io.Reader{nil, strings.NewReader("")} {
-		r := httptest.NewRequest("POST", "/metrics/purge", body)
+		r := httptest.NewRequest("POST", "/admin/purge", body)
 		r.ContentLength = -1
 		var dst map[string]any
 		if err := Decode(httptest.NewRecorder(), r, &dst); err != io.EOF {
@@ -107,7 +107,7 @@ func FuzzDecodeEmptyBoundary(f *testing.F) {
 		f.Add(raw)
 	}
 	f.Fuzz(func(t *testing.T, raw string) {
-		r := httptest.NewRequest("POST", "/metrics/purge", strings.NewReader(raw))
+		r := httptest.NewRequest("POST", "/admin/purge", strings.NewReader(raw))
 		r.ContentLength = -1
 		var dst map[string]any
 		err := Decode(httptest.NewRecorder(), r, &dst)

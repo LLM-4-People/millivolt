@@ -5,11 +5,15 @@ can differ. Per-request headers select the destination, credentials and optional
 native adapter. The [compatibility matrix](adapters.md#client-and-upstream-compatibility)
 maps the default OpenAI-compatible relay and supported native translations.
 No endpoint/API-key registry is required. Read
-[Security](../SECURITY.md): routing credentials do not authorize operator access.
+[Security](../SECURITY.md): routing credentials do not authorize operator access,
+and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
+([operator access](operations.md#operator-access)); only `/healthz` and the
+relay stay open.
 
 ## Endpoint behavior
 
-The dashboard, embedded assets, `/admin/*` actions and registered `/metrics/*`
+The dashboard, embedded assets, `/admin/*` actions, `/healthz` and registered
+`/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
 [operations](operations.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. Other paths reach the

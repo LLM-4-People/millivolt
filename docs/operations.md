@@ -1,7 +1,11 @@
 # Operations
 
 Read the [security boundary](../SECURITY.md) before exposing the listener.
-The proxy does not provide an authenticated operator plane.
+The whole embedded dashboard is protected: every dashboard, `/metrics/*` and
+`/admin/*` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential and is
+denied while it is not configured. Only the unauthenticated `/healthz`
+liveness probe and transparent inference stay open; see
+[operator access](#operator-access).
 
 ## Configuration and CLI
 
@@ -19,6 +23,7 @@ Settings against the committed example.
 | `-listen ADDRESS` | Override the configured listen address. |
 | `-db-path PATH` | Override durable storage; `none` disables it. |
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
+| `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. |
 | `-print-config` | Print neutral built-in default YAML. |
 | `-print-example-config` | Print the deployment example, including its enabled compatibility profiles. |
 | `-version` | Print JSON build identity. |
@@ -392,21 +397,26 @@ rebuild workflow; choose distinct ports and databases for separate instances.
 
 ## Operator and data routes
 
-All these endpoints share the same trust boundary. Read handlers enforce their
-supported methods; wrong-method requests must not fall through to inference.
+All these endpoints sit behind the operator credential. Read handlers enforce
+their supported methods; wrong-method requests must not fall through to
+inference. The namespace is standardized: `/metrics/*` and dashboard routes
+are the protected read plane, and `/admin/*` is the operator action plane;
+the credential gates both.
 
 | Route | Action / important contract |
 | --- | --- |
+| `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
+| `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates; POST requires provider. Supplied limits merge; `clear:true` removes policy. |
+| `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. |
+| `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
+| `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
 | `GET /metrics/export` | Download all or exactly filtered finalized records. Debug-only export can contain sensitive sidecars. |
-| `POST /metrics/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
-| `POST /metrics/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
-| `GET /metrics/debug?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
@@ -416,6 +426,64 @@ supported methods; wrong-method requests must not fall through to inference.
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
+
+### Operator access
+
+`MILLIVOLT_OPERATOR_TOKEN` is the single operator credential for the whole
+dashboard. It is read once at boot from the process environment, never from
+proxy.yaml, so it cannot leak through Settings, `-print-config`,
+`/admin/config` output, snapshots or logs.
+
+The gate is deny by default and lives in one chokepoint in front of every
+route:
+
+- Open: `GET /healthz` and transparent inference. Provider credentials ride
+  the same header name and are never inspected by the gate.
+- Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
+  and every `/admin/*` route, including unclassified future admin paths and
+  unsupported methods.
+
+Present the credential as `Authorization: Bearer <value>`. A valid Bearer
+request also mints a session cookie, because the dashboard's live feed uses
+EventSource, which cannot send Authorization headers. The cookie is HttpOnly
+(script never reads it), SameSite Strict, scoped to 12 hours, and signed with
+a per-process random key, so restarts invalidate it and it never outlives the
+process that verified it. The cookie deliberately carries no `Secure` flag:
+millivolt's listener is plain HTTP, and the documented TLS deployments
+terminate at the ingress, where the remaining loopback hop is trusted-local.
+Do not expose the listener over plaintext networks anyway. The no-JS login
+page served for unauthenticated dashboard visits exchanges the entered value
+for that cookie through `POST /admin/session`; API clients can call the same
+endpoint or simply send the Bearer header on every request. An expired cookie
+re-prompts in the dashboard or reappears as the login page on navigation.
+Unregistered `/admin/*` and `/metrics/*` paths are reserved: they answer 404
+and are never forwarded upstream.
+
+Failed authentications are throttled per source IP (RemoteAddr only;
+forwarded-header chains are never trusted, since no trusted-proxy model
+exists): after five rejected credentials the IP is locked out with a window
+that doubles from 10 seconds to a 15 minute ceiling. The throttle counts only
+presented-but-wrong credentials, so an expired-cookie dashboard polling in a
+background tab cannot lock its own operator out, and a verified credential is
+always admission: presenting the correct Bearer during a lockout clears the
+budget, because the lockout exists to rate-limit guessing, not to lock the
+operator out of their own dashboard. The map is hard-capped at 4096 source
+IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
+response is `429` with a coarse rounded `Retry-After` and a generic body.
+
+With the variable unset the gate stays armed: the whole dashboard returns 403
+and only `/healthz` and inference respond. Setting it empty, shorter than 16
+or longer than 512 characters fails the boot instead of silently weakening
+the gate. The credential is process bound: config reload does not re-read it,
+so rotating the value requires a real process restart (a supervisor restart
+or a fresh deployment; the dashboard's restart handoff inherits the parent
+environment, so it keeps the old credential by design). The dashboard asks
+for the value once per browser tab, keeps it in sessionStorage, attaches it
+to gated calls only and drops it as soon as the server rejects it.
+Non-browser callers send the header directly, for example
+`curl -H "Authorization: Bearer $MILLIVOLT_OPERATOR_TOKEN" -XPOST .../admin/purge`.
+Environment variables are readable by same-user processes through `/proc`,
+so run the proxy under a dedicated account.
 
 ### Pause and Limits
 
@@ -534,7 +602,7 @@ choose Download all. A debug-only export can include retained capture sidecars.
 
 Clear uses the same filter/count owner. Deletion requires confirmation in the
 dashboard; it does not happen when the menu opens. A selected filter makes a
-read-only `POST /metrics/purge/count` preview. Current traffic can change the
+read-only `POST /admin/purge/count` preview. Current traffic can change the
 count before the action, but the UI retains the previewed age cutoff rather
 than silently moving it. Delete everything is irreversible without a backup.
 

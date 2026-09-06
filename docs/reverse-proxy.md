@@ -1,9 +1,12 @@
 # Reverse proxy and remote access
 
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
-The proxy has no operator authentication or tenant isolation: access to its
-listener grants access to the dashboard, request history and administration,
-not just inference. Read [Security](../SECURITY.md) first.
+The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
+credential; there is no tenant isolation and no per-user identity. Only the
+unauthenticated `/healthz` probe and transparent inference stay open, so a
+load balancer can health-check the service without holding the credential.
+See [operator access](operations.md#operator-access). Read
+[Security](../SECURITY.md) first.
 
 ```mermaid
 flowchart LR
@@ -69,7 +72,12 @@ and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html)
 If you instead add HTTP Basic authentication, `Authorization` contains the ingress
 credential and cannot simultaneously contain the provider bearer key. Supply the
 provider key through `X-Proxy-Key`, and clear the consumed ingress header before
-forwarding with `proxy_set_header Authorization "";`. The same separation applies
+forwarding with `proxy_set_header Authorization "";`. The same conflict applies
+to the operator credential: a browser behind Basic auth cannot also present the
+dashboard's Bearer credential in the same header, so gated actions fail. Prefer
+an address/VPN allowlist as in the sample, or an ingress that adds its own
+credential through a different mechanism and forwards `Authorization` untouched.
+The same separation applies
 to other ingress-only credentials: do not forward them to an LLM provider. Clients
 must support your ingress authentication and the proxy's custom routing headers.
 

@@ -176,8 +176,10 @@ func TestResponseSecretsExcludedFromRetainedMetricsOnly(t *testing.T) {
 	r.Header.Set(hdrBaseURL, up.URL)
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, r)
-	if w.Header().Get("Set-Cookie") != "session=synthetic-secret" {
-		t.Fatal("capture policy changed forwarded header")
+	// An upstream cookie must never enter the browser's millivolt-origin jar,
+	// where it could shadow operator-plane state (operator gate boundary).
+	if w.Header().Get("Set-Cookie") != "" {
+		t.Fatal("upstream Set-Cookie was forwarded to the client")
 	}
 	raw, err := json.Marshal(waitForRecord(t, buf, 1)[0])
 	if err != nil {

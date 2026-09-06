@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
-from .support import require
+from .support import operator_headers, operator_signin, require
 
 DEV_DIR = Path('/tmp/millivolt')  # Reserved dev.sh namespace, never arbitrary data.
 BODY = (
@@ -121,6 +121,9 @@ async def check(base, screenshot):
                 context = await browser.new_context(viewport={'width': 1440, 'height': 1000}, service_workers='block')
                 errors = []
                 await context.route('**/*', lambda route: browser_route(route, base, errors))
+                # Sign in before the first page load: the context's cookie jar
+                # authenticates the dashboard, its fetches and its EventSource.
+                await operator_signin(context, base)
                 page = await context.new_page()
                 page.on('pageerror', lambda error: errors.append(str(error)))
                 config_response = await page.request.get(base + '/admin/config', max_redirects=0)
@@ -263,7 +266,7 @@ async def check(base, screenshot):
                 # server's purge fence handles pending asynchronous writes.
                 try:
                     if cleanup_needed:
-                        cleanup = await page.request.post(base + '/metrics/purge', max_redirects=0, data={'client': label})
+                        cleanup = await page.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
                         if not cleanup.ok:
                             raise RuntimeError('fixture cleanup failed: ' + await cleanup.text())
                 finally:

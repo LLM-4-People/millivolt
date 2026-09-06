@@ -41,6 +41,7 @@ type options struct {
 	duration, hold, timeout, sample time.Duration
 	chunks, upstreams               int
 	maxRSS                          float64
+	token                           string
 }
 
 func main() {
@@ -55,6 +56,9 @@ func main() {
 	flag.DurationVar(&o.timeout, "timeout", 10*time.Second, "per-request, accounting-drain and final fixture-cleanup timeout")
 	flag.DurationVar(&o.sample, "sample", 100*time.Millisecond, "proxy CPU/RSS/FD sampling cadence")
 	flag.Float64Var(&o.maxRSS, "max-rss-mib", 2048, "stop the ramp if sampled proxy RSS exceeds this safety budget")
+	// The final fixture cleanup purges through the gated operator plane, so
+	// the tool needs the same credential the dev instance was started with.
+	o.token = os.Getenv("MILLIVOLT_OPERATOR_TOKEN")
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -73,6 +77,9 @@ func validate(o options) (*url.URL, []int, error) {
 	port, err := strconv.Atoi(u.Port())
 	if err != nil || ip == nil || !ip.IsLoopback() || u.Scheme != "http" || port < 1024 || port > 65535 || port == 8080 || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
 		return nil, nil, errors.New("target must be an explicit http://loopback-IP:dev-port URL, never production :8080")
+	}
+	if o.token == "" {
+		return nil, nil, errors.New("MILLIVOLT_OPERATOR_TOKEN is required: the dev instance's operator credential owns fixture cleanup")
 	}
 	if o.duration <= 0 || o.hold < 0 || o.chunks < 1 || o.upstreams < 1 || o.timeout <= o.hold || o.sample <= 0 || o.maxRSS <= 0 || math.IsNaN(o.maxRSS) || math.IsInf(o.maxRSS, 0) {
 		return nil, nil, errors.New("invalid workload or safety bounds")
@@ -250,7 +257,7 @@ func verifyDev(ctx context.Context, c control, u *url.URL) (settings, int, error
 // clearClients runs only after generators have drained. Verify ownership at
 // each mutation after waiting for known pending records at the deletion fence;
 // otherwise a canceled request could finalize after its fixture was removed.
-func (c control) clearClients(ctx context.Context, tags []string, sample time.Duration, verify func(context.Context) error) error {
+func (c control) clearClients(ctx context.Context, tags []string, sample time.Duration, verify func(context.Context) error, token string) error {
 	for _, tag := range tags {
 		if tag == "" {
 			return errors.New("empty fixture client cannot be cleaned up")
@@ -304,11 +311,12 @@ func (c control) clearClients(ctx context.Context, tags []string, sample time.Du
 		if err != nil {
 			return err
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/metrics/purge", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/admin/purge", bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := c.client.Do(req)
 		if err != nil {
 			return err
@@ -651,7 +659,7 @@ func run(ctx context.Context, o options) (err error) {
 				return errors.New("dev identity changed; fixture cleanup refused")
 			}
 			return nil
-		})
+		}, o.token)
 		if cleanupErr != nil {
 			err = errors.Join(err, fmt.Errorf("cleanup incomplete for clients %v: %w", tags, cleanupErr))
 		}

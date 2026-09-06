@@ -81,10 +81,16 @@ script, with cleanup even if verification fails:
 (
   set -e
   trap 'scripts/dev.sh stop' EXIT
+  export MILLIVOLT_OPERATOR_TOKEN='dev-instance-credential'
   scripts/dev.sh
   scripts/check.sh browser --target http://127.0.0.1:8081
 )
 ```
+
+The dev instance shares your shell environment, so a local
+`MILLIVOLT_OPERATOR_TOKEN` arms its operator gate; browser and stress harnesses
+need the same value for gated fixture cleanup. An instance started without it
+serves reads only and denies every mutation.
 
 `scripts/dev.sh status` reports the private instance. The script builds first,
 then replaces only its tracked dev process; a failed build leaves it running.

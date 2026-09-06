@@ -26,7 +26,7 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import ROOT
+from .support import ROOT, operator_headers, operator_signin
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -219,6 +219,7 @@ async def capture_history(args):
         try:
             context = await browser.new_context(viewport={'width': 1440, 'height': 1000}, service_workers='block')
             await context.route('**/*', lambda route: history_route(route, base, errors))
+            await operator_signin(context, base)
             response = await context.request.get(base + '/admin/config', max_redirects=0)
             try:
                 require(response.status == 200, 'documentation configuration preflight failed')
@@ -370,6 +371,7 @@ async def check(args):
         browser = await playwright.chromium.launch()
         context = await browser.new_context(viewport={'width': 1440, 'height': 1000}, service_workers='block')
         await context.route('**/*', lambda route: guards.browser_route(route, base, results['browser_errors']))
+        await operator_signin(context, base)
         page = await context.new_page()
         page.on('pageerror', lambda error: results['browser_errors'].append(str(error)))
         try:
@@ -533,7 +535,7 @@ async def check(args):
         finally:
             try:
                 if cleanup_needed:
-                    response = await context.request.post(base + '/metrics/purge', max_redirects=0, data={'client': label})
+                    response = await context.request.post(base + '/admin/purge', max_redirects=0, data={'client': label}, headers=operator_headers())
                     try:
                         require(response.status == 200, ('scoped fixture cleanup failed', response.status, label))
                     finally:

@@ -690,6 +690,8 @@ func (rs *restarter) serveWatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rs *restarter) writeStatus(w http.ResponseWriter) {
+	// The status document describes the running process: never cacheable.
+	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rs.status())
 }
@@ -716,6 +718,7 @@ func (rs *restarter) handleRestart(w http.ResponseWriter, r *http.Request) {
 		rs.writeStatus(w)
 	default:
 		w.Header().Set("Allow", "GET, POST")
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
 		http.Error(w, `{"error":"GET or POST only"}`, http.StatusMethodNotAllowed)
 	}

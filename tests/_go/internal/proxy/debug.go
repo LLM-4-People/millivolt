@@ -377,7 +377,7 @@ func TestDebugRequestPublishedAndCaptured(t *testing.T) {
 	}
 
 	got := httptest.NewRecorder()
-	p.HandleDebugCapture(got, httptest.NewRequest(http.MethodGet, "/metrics/debug?id="+rec.ID, nil))
+	p.HandleDebugCapture(got, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+rec.ID, nil))
 	if got.Code != 200 {
 		t.Fatalf("capture status = %d body %s", got.Code, got.Body.Bytes())
 	}

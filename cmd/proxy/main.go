@@ -54,19 +54,6 @@ func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
-// Operator writes are same-origin browser actions (or explicit non-browser
-// API calls). Scope CSRF protection here, never onto transparent inference.
-func protectOperatorRequests(next http.Handler) http.Handler {
-	protected := http.NewCrossOriginProtection().Handler(next)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/admin/") || r.URL.Path == "/metrics/purge" || strings.HasPrefix(r.URL.Path, "/metrics/purge/") {
-			protected.ServeHTTP(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func main() {
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
@@ -81,7 +68,13 @@ func main() {
 	// restarts: the handoff child inherits this flag and rewrites the file
 	// with its own pid on boot.
 	pidFile := flag.String("pid-file", "", "write the process pid to this file after boot")
+	healthcheck := flag.Bool("healthcheck", false, "probe GET /healthz on the configured listen address and exit nonzero on failure (Docker HEALTHCHECK); loads config read-only")
 	flag.Parse()
+	// Boot-time globals the healthcheck and reload helpers share. Set before
+	// any mode that reads configuration.
+	liveConfigPath = *configPath
+	liveListenOverride = *listenOverride
+	liveDBOverride = *dbOverride
 	outputs := 0
 	for _, enabled := range []bool{*printVersion, *printConfig, *printExampleConfig} {
 		if enabled {
@@ -113,9 +106,10 @@ func main() {
 		}
 		return
 	}
-	liveConfigPath = *configPath
-	liveListenOverride = *listenOverride
-	liveDBOverride = *dbOverride
+	// Docker HEALTHCHECK mode: probe and exit; nothing below runs.
+	if *healthcheck {
+		os.Exit(runHealthcheck())
+	}
 
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
@@ -205,7 +199,28 @@ func main() {
 	liveBuf = buf
 	liveConfigPath = *configPath
 
+	// The operator gate's credential is process-bound (env only, re-read on
+	// restart or handoff, never on reload). Failing the boot on an invalid
+	// credential keeps deny-by-default honest - no silent weaker policy.
+	gate := newOperatorGate(mustOperatorToken())
+
 	mux := http.NewServeMux()
+	// The /admin and /metrics namespaces own no unregistered handler:
+	// reserving both the roots and the subtrees means neither the
+	// unauthenticated gate nor an authenticated request can ever forward a
+	// namespace look-alike to the upstream catch-all. Registered exact
+	// patterns (session, pause, config, agg/*, ...) keep mux precedence.
+	mux.Handle("/admin", http.NotFoundHandler())
+	mux.Handle("/admin/", http.NotFoundHandler())
+	mux.Handle("/metrics", http.NotFoundHandler())
+	mux.Handle("/metrics/", http.NotFoundHandler())
+	// The liveness probe is the one open server route besides inference:
+	// Docker HEALTHCHECK and load balancers cannot carry the operator
+	// credential. Depth (storage, feeds) stays on the gated dashboard.
+	mux.HandleFunc("/healthz", handleHealthz)
+	// The session handshake mints the operator cookie; it is exempt from the
+	// credential gate by definition and owns its own failure throttling.
+	mux.Handle("/admin/session", http.NewCrossOriginProtection().Handler(http.HandlerFunc(gate.handleAdminSession)))
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))
@@ -257,7 +272,7 @@ func main() {
 	mux.Handle("/admin/pause", http.HandlerFunc(proxySrv.HandlePause))
 	mux.Handle("/admin/throttle", http.HandlerFunc(proxySrv.HandleThrottle))
 	mux.Handle("/admin/debug", http.HandlerFunc(proxySrv.HandleDebug))
-	mux.Handle("/metrics/debug", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
+	mux.Handle("/admin/debug/capture", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))
 
 	// Config hot-reload. POST re-reads the config file and hot-applies the
 	// reloadable subset with zero dropped requests (the listener never closes).
@@ -338,7 +353,7 @@ func main() {
 	srvCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 
-	handler := protectOperatorRequests(mux)
+	handler := protectOperatorRequests(mux, gate)
 	httpSrv := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
