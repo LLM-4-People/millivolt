@@ -174,6 +174,39 @@ async def check(base, screenshot):
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
+                layout_checks = []
+                for viewport in ({'width': 1440, 'height': 1000}, {'width': 1706, 'height': 810}):
+                    await page.set_viewport_size(viewport)
+                    state = await page.evaluate('''() => {
+                        const explorer = document.querySelector('#explorer');
+                        const pair = document.querySelector('.grid-pair');
+                        const footer = document.querySelector('footer');
+                        const er = explorer.getBoundingClientRect();
+                        const pr = pair.getBoundingClientRect();
+                        const fr = footer.getBoundingClientRect();
+                        const locked = getComputedStyle(document.documentElement)
+                            .getPropertyValue('--gallery-locked').trim();
+                        const explorerMax = parseFloat(getComputedStyle(explorer).maxHeight);
+                        return {
+                            locked,
+                            pageScrollY: document.documentElement.scrollHeight > innerHeight + 1,
+                            pageScrollX: document.documentElement.scrollWidth > innerWidth + 1,
+                            explorerH: Math.round(er.height),
+                            explorerMax,
+                            pairH: Math.round(pr.height),
+                            footerBottom: Math.round(fr.bottom),
+                            inView: er.top >= 0 && pr.top >= 0 && fr.top >= 0
+                                && er.bottom <= innerHeight + 1 && pr.bottom <= innerHeight + 1
+                                && fr.bottom <= innerHeight + 1,
+                        };
+                    }''')
+                    require(state['locked'] == '1', state)
+                    require(not state['pageScrollY'] and not state['pageScrollX'], state)
+                    require(state['explorerMax'] <= 240, state)
+                    require(state['explorerH'] <= state['explorerMax'] + 1, state)
+                    require(state['pairH'] > state['explorerH'], state)
+                    require(state['inView'], state)
+                    layout_checks.append({'width': viewport['width'], 'height': viewport['height'], **state})
                 if screenshot:
                     await page.locator('.traffic-card').screenshot(path=screenshot)
                 await page.reload(wait_until='domcontentloaded')
@@ -260,7 +293,7 @@ async def check(base, screenshot):
                     state['keyboard_and_live_update'] = True
                     storm_checks.append({'width': viewport['width'], **state})
                 require(not errors, errors)
-                print(json.dumps({'canvas_checks': results, 'storm_checks': storm_checks, 'saved_view': True, 'browser_errors': errors}))
+                print(json.dumps({'canvas_checks': results, 'layout_checks': layout_checks, 'storm_checks': storm_checks, 'saved_view': True, 'browser_errors': errors}))
             except Exception:
                 if screenshot and page is not None and not page.is_closed():
                     await page.screenshot(path=screenshot)

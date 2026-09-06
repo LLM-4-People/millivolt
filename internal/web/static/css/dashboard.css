@@ -367,14 +367,11 @@
   @media (max-width: 1200px) { .grid-pair { grid-template-columns: 1fr; } }
   .grid-pair > .card { display: flex; flex-direction: column; min-height: 0; }
 
-  /* On tall/wide screens fit the whole page to the viewport: the request log
-     scrolls internally instead of pushing the page below the fold. The grid
-     tracks are minmax(0,…) so the cards can shrink; the requests table flexes
-     to fill whatever vertical space remains. The height threshold (960px) is
-     where the page genuinely fits - below it the fixed explorer (gallery +
-     rail) + KPI band already exceed the viewport, so we let the page scroll
-     naturally instead of crushing the log to nothing. */
-  @media (min-width: 1200px) and (min-height: 960px) {
+  /* Wide two-column layout fits the viewport: inner regions scroll, the page
+     does not. The explorer stays a compact middle band (about one gallery row)
+     so the timeline / request pair (usually the more important surface) takes
+     leftover height. The explorer can still shrink on short laptop windows. */
+  @media (min-width: 1200px) {
     :root { --gallery-locked: 1; }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
@@ -385,18 +382,20 @@
        it never shrinks and never grows, so it barely touches the log's space. */
     footer { flex-shrink: 0; }
     .kpis { flex-shrink: 0; }
-    /* The explorer box gets a fixed share of the viewport; the gallery fills it
-       (flex) and scrolls internally in whole rows, so cards never crush. */
-    #explorer { flex-shrink: 0; display: flex; flex-direction: column; height: 340px; }
+    #explorer {
+      flex: 0 1 240px; min-height: 0; max-height: 240px;
+      display: flex; flex-direction: column; min-width: 0;
+    }
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
     #explorer .xp-gallery { height: auto; }
-    .grid-pair { flex: 1 1 0; min-height: 0; margin-bottom: 0; }
-    .grid-pair .chart-wrap { flex: 1 1 0; min-height: 120px; height: auto; }
+    .grid-pair { flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
+    .grid-pair .chart-wrap { flex: 1 1 0; min-height: 80px; height: auto; }
     #tbl-requests { flex: 1 1 0; min-height: 0; max-height: none; }
   }
 
   /* ---- unified explorer: scope bar + dimension rail + node gallery ---- */
   #explorer { margin-bottom: 16px; }
+  @media (min-width: 1200px) { #explorer { margin-bottom: 10px; } }
   /* Scope bar: chips wrap onto at most TWO rows, then scroll vertically. A chip
      row is ~22px and the row gap is 6px, so two rows ≈ 50px - 56px leaves
      enough slack that sub-pixel rounding never triggers the scrollbar early.
