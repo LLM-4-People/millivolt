@@ -420,6 +420,15 @@ storage_query_max_bytes: 8MiB
 #   type: int · range 1..100000 · default 10000
 storage_query_max_rows: 10000
 
+# ---- Backup ----
+# Download or restore a self-checked archive of the saved config, the SQLite history, or
+# both. Restore validates the archive before it is applied.
+# Maximum size of one Settings backup download or restore upload. Larger archives are
+# refused. The archive is buffered in the process.
+# Hot-reload: yes.
+#   type: bytes · range 1MiB..4GiB · default 1GiB
+backup_max_bytes: 1GiB
+
 # ---- Dashboard ----
 # Live-view cadence and request-log window. Hot-reloads; open dashboards pick up the next
 # tick.

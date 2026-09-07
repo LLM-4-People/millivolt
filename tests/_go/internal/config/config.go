@@ -75,6 +75,7 @@ func TestDefaultHasNoZeroTunables(t *testing.T) {
 		"storage_batch":           c.StorageBatchCap > 0,
 		"storage_flush":           c.StorageFlushInterval > 0,
 		"storage_qto":             c.StorageQueryTimeout > 0,
+		"backup_max_bytes":        c.BackupMaxBytes > 0,
 		"read_header":             c.ReadHeaderTimeout > 0,
 		"idle_timeout":            c.IdleTimeout > 0,
 	}
@@ -545,6 +546,7 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"auto token refresh yes", "auto_token_refresh: yes"},
 		{"auto token refresh no", "auto_token_refresh: no"},
 		{"listen integer", "listen: 8080"},
+		{"backup too small", "backup_max_bytes: 10"},
 		{"providers null", "providers: null"},
 		{"model_rules null", "model_rules: null"},
 		{"provider alias self-map", "provider_aliases:\n  old.example: old.example"},

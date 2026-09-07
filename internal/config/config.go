@@ -220,6 +220,9 @@ type Config struct {
 	StorageQueryTimeout  time.Duration `yaml:"storage_query_timeout" json:"storage_query_timeout"`     // bounds dashboard SELECT queries
 	StorageQueryMaxBytes ByteSize      `yaml:"storage_query_max_bytes" json:"storage_query_max_bytes"` // ad-hoc SELECT JSON result budget; restart required
 	StorageQueryMaxRows  int           `yaml:"storage_query_max_rows" json:"storage_query_max_rows"`   // ad-hoc SELECT row budget; restart required
+	// BackupMaxBytes caps one Settings backup download or restore upload.
+	// The archive is buffered; this is the admit/reject ceiling, not a heap guarantee.
+	BackupMaxBytes ByteSize `yaml:"backup_max_bytes" json:"backup_max_bytes"`
 
 	// ---- HTTP server timeouts ----
 	// ReadHeaderTimeout guards against slowloris; IdleTimeout bounds keep-alive
@@ -431,6 +434,9 @@ const (
 	StorageQueryMaxBytesMax = 64 << 20
 	StorageQueryMaxRowsMin  = 1
 	StorageQueryMaxRowsMax  = 100000
+	// Settings backup archive band (Validate, overlay, Schema).
+	BackupMaxBytesMin = 1 << 20 // 1 MiB
+	BackupMaxBytesMax = 4 << 30 // 4 GiB
 )
 
 // Discovery limits bound upstream metadata work, not total Go heap usage.
@@ -527,6 +533,7 @@ func Default() *Config {
 		StorageQueryTimeout:  10 * time.Second,
 		StorageQueryMaxBytes: 8 << 20,
 		StorageQueryMaxRows:  10000,
+		BackupMaxBytes:       1 << 30,
 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -729,6 +736,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateQueryLimits(c); err != nil {
+		return err
+	}
+	if err := checkByteSize("backup_max_bytes", c.BackupMaxBytes, BackupMaxBytesMin, BackupMaxBytesMax); err != nil {
 		return err
 	}
 	if err := validateStorm(c); err != nil {
@@ -947,6 +957,13 @@ func LoadFile(path string) (*Config, error) {
 	return cfg, err
 }
 
+// LoadBytes is LoadFile for an in-memory YAML document. Used by backup
+// restore so a snapshot is admitted through the same overlay/Validate choke
+// as a file, without writing it first.
+func LoadBytes(b []byte) (*Config, []string, error) {
+	return loadYAMLBytes("backup", b)
+}
+
 // LoadFileRepair is LoadFile, then persists a cleaned document when anything
 // was dropped. Unparseable files are moved aside to path+invalidConfigSuffix
 // and replaced with Default(). Healthcheck and print-only paths must not call this.
@@ -988,6 +1005,11 @@ func loadYAMLFile(path string) (*Config, []string, error) {
 		}
 		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
+	return loadYAMLBytes(path, b)
+}
+
+func loadYAMLBytes(path string, b []byte) (*Config, []string, error) {
+	def := Default()
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	var first yaml.Node
 	if err := dec.Decode(&first); err != nil && !errors.Is(err, io.EOF) {
