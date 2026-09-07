@@ -872,7 +872,7 @@ async function main() {
       values: { backup_max_bytes: '1GiB' },
       defaults: { backup_max_bytes: '1GiB' },
       overrides: {},
-      backup: { config: true, database: true },
+      backup: { config: true, database: true, requests: 12, modified: ['backup_max_bytes'] },
     };
     w.settingsDoc = doc;
     w.fillSettingsForm(doc);
@@ -882,6 +882,9 @@ async function main() {
     check('download does not show restore merge options',
       !d.querySelector('input[name="backup-config-mode"]') && !d.querySelector('input[name="backup-database-mode"]') &&
       !d.getElementById('btn-backup-apply') && !d.getElementById('backup-include-config'));
+    check('download describes the live archive members',
+      d.querySelector('[data-backup="download"]').textContent.includes('1 setting differs from default') &&
+      d.querySelector('[data-backup="download"]').textContent.includes('12 requests'));
     const originalFetch = w.fetch;
     const origClick = w.HTMLAnchorElement.prototype.click;
     const calls = [];
@@ -903,9 +906,9 @@ async function main() {
       if (u.includes('/admin/restore')) {
         if (u.includes('inspect=1')) {
           return Promise.resolve({ ok: true, json: async () => ({
-            ok: true, inspect: true,
-            config: { present: true, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
-            database: { present: true, requests: 4, debug: 0, overlap: 1 },
+            ok: true, inspect: true, created: '2026-09-07T12:00:00Z',
+            config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+            database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
           }) });
         }
         return Promise.resolve({ ok: true, json: async () => ({ ok: true, restart_required: ['db_path'] }) });
@@ -940,6 +943,10 @@ async function main() {
       !!d.getElementById('backup-preview') &&
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
       d.getElementById('backup-preview').textContent.includes('default 1GiB'));
+    check('restore describes the archive file and members',
+      d.querySelector('[data-backup="restore"]').textContent.includes('t.mvb') &&
+      d.querySelector('[data-backup="restore"]').textContent.includes('2026-09-07') &&
+      d.querySelector('[data-backup="restore"]').textContent.includes('4 requests'));
     calls.length = 0;
     w.runBackupApply();
     await sleep(20);

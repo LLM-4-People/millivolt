@@ -368,11 +368,13 @@ backup.
 Restore validates that hash, the zstd frame, config `Validate()`, and
 `PRAGMA integrity_check` before applying anything. Decode refuses an
 uncompressed payload larger than the Schema maximum for `backup_max_bytes`,
-so a small compressed file cannot expand without bound. Picking a file first
-inspects the archive: each config key is shown as default vs modified vs the
-live file. Config **replace** writes the backup document. Config **merge**
-overlays only keys that differ from `Default()` onto the live file, so live
-custom values stay unless the backup also customized them. Database
+so a small compressed file cannot expand without bound. Download lists how
+many live settings differ from default and how many stored requests would be
+packed. Picking a file first inspects the archive: created time, size,
+request span, and each config key as default vs modified vs the live file.
+Config **replace** writes the backup document. Config **merge** overlays only
+keys that differ from `Default()` onto the live file, so live custom values
+stay unless the backup also customized them. Database
 **replace** stages a pending snapshot next to `db_path` and waits for process
 restart; Open admits the pending file only after it checks again. Database
 **merge** inserts request ids that are not already in the live store

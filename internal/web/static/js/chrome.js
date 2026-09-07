@@ -588,10 +588,20 @@ function backupMemberChecks(cfgId, dbId, canCfg, canDb) {
 function backupDownloadRowHTML(b) {
   const canCfg = !!b.config;
   const canDb = !!b.database;
+  const modified = Array.isArray(b.modified) ? b.modified : [];
+  let hints = '';
+  if (canCfg) {
+    hints += `<span class="st-hint">${modified.length ? modified.length + (modified.length === 1 ? ' setting differs from default' : ' settings differ from default') : 'all settings are the built-in default'}</span>`;
+  }
+  if (canDb) {
+    const n = Number(b.requests) || 0;
+    hints += `<span class="st-hint">${n} ${n === 1 ? 'request' : 'requests'}</span>`;
+  }
   return `<div class="st-row st-block st-backup" data-cat="backup" data-backup="download" data-label="download backup config database archive" data-help="download a self-checked archive of the saved config and sqlite history">
     <div class="st-name">Download</div>
     <div class="st-ctl">
       ${backupMemberChecks('backup-dl-config', 'backup-dl-database', canCfg, canDb)}
+      ${hints}
       <div class="st-backup-actions"><button type="button" class="btn" id="btn-backup-download">Download</button></div>
     </div>
   </div>`;
@@ -621,8 +631,33 @@ function backupRestoreRowHTML(doc, b) {
   </div>`;
 }
 
+function backupBytes(n) {
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0) return '';
+  if (n < 1024) return Math.round(n) + ' B';
+  if (n < 1024 * 1024) return Math.round(n / 1024) + ' KiB';
+  const mib = n / (1024 * 1024);
+  return (mib >= 10 ? Math.round(mib) : Math.round(mib * 10) / 10) + ' MiB';
+}
+
+function backupWhen(v) {
+  if (v == null || v === '' || v === 0) return '';
+  const d = new Date(typeof v === 'number' ? v : String(v));
+  if (Number.isNaN(d.getTime())) return '';
+  const p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function backupSpan(lo, hi) {
+  const a = backupWhen(lo), b = backupWhen(hi);
+  if (!a) return b;
+  if (!b || a === b) return a;
+  return a + ' – ' + b;
+}
+
 function backupRestoreControlsHTML(b) {
   const j = backupInspect && backupInspect.data || {};
+  const file = backupInspect && backupInspect.file || {};
   const cfg = j.config || {};
   const db = j.database || {};
   const canCfg = !!b.config && !!cfg.present;
@@ -633,9 +668,22 @@ function backupRestoreControlsHTML(b) {
   const cfgMerge = backupConfigMode === 'merge' ? ' checked' : '';
   const dbReplace = backupDatabaseMode !== 'merge' ? ' checked' : '';
   const dbMerge = backupDatabaseMode === 'merge' ? ' checked' : '';
-  let html = backupMemberChecks('backup-include-config', 'backup-include-database', canCfg, canDb);
+  const ident = [];
+  if (file.name) ident.push(String(file.name));
+  const sz = backupBytes(file.size);
+  if (sz) ident.push(sz);
+  const created = backupWhen(j.created);
+  if (created) ident.push(created);
+  let html = ident.length ? `<span class="st-hint">${escapeHtml(ident.join(' · '))}</span>` : '';
+  html += backupMemberChecks('backup-include-config', 'backup-include-database', canCfg, canDb);
   if (wantCfg) {
-    html += `<span class="st-hint">config</span>` +
+    const modified = Array.isArray(cfg.modified) ? cfg.modified.length : 0;
+    const vsLive = Array.isArray(cfg.vs_live) ? cfg.vs_live.length : 0;
+    const cfgSize = backupBytes(cfg.bytes);
+    let summary = modified ? modified + (modified === 1 ? ' setting differs from default' : ' settings differ from default') : 'all settings are the built-in default';
+    if (vsLive) summary += ' · ' + vsLive + (vsLive === 1 ? ' differs from live' : ' differ from live');
+    if (cfgSize) summary += ' · ' + cfgSize;
+    html += `<span class="st-hint">config · ${escapeHtml(summary)}</span>` +
       `<label class="st-check"><input type="radio" name="backup-config-mode" value="replace"${cfgReplace}> replace</label>` +
       `<label class="st-check"><input type="radio" name="backup-config-mode" value="merge"${cfgMerge}> merge</label>` +
       `<span class="st-hint">${backupConfigMode === 'merge' ? 'overlays settings that differ from default' : 'writes every setting from the backup'}</span>`;
@@ -645,18 +693,21 @@ function backupRestoreControlsHTML(b) {
   if (wantDb) {
     const overlap = db.overlap == null ? null : Number(db.overlap);
     const reqs = Number(db.requests) || 0;
-    let hint = backupDatabaseMode === 'merge'
-      ? 'inserts request ids that are not already stored'
-      : 'replaces the live database on restart';
+    const span = backupSpan(db.oldest_ms, db.newest_ms);
+    const dbSize = backupBytes(db.bytes);
+    let summary = reqs + (reqs === 1 ? ' request' : ' requests');
+    if (db.debug) summary += ' · ' + db.debug + ' debug';
+    if (span) summary += ' · ' + span;
+    if (dbSize) summary += ' · ' + dbSize;
     if (overlap != null) {
-      hint += backupDatabaseMode === 'merge'
-        ? ` · ${Math.max(0, reqs - overlap)} new of ${reqs}`
-        : ` · ${reqs} requests`;
+      summary += backupDatabaseMode === 'merge'
+        ? ` · ${Math.max(0, reqs - overlap)} new`
+        : ` · ${overlap} already on this store`;
     }
-    html += `<span class="st-hint">database</span>` +
+    html += `<span class="st-hint">database · ${escapeHtml(summary)}</span>` +
       `<label class="st-check"><input type="radio" name="backup-database-mode" value="replace"${dbReplace}> replace</label>` +
       `<label class="st-check"><input type="radio" name="backup-database-mode" value="merge"${dbMerge}> merge</label>` +
-      `<span class="st-hint">${escapeHtml(hint)}</span>`;
+      `<span class="st-hint">${backupDatabaseMode === 'merge' ? 'inserts request ids that are not already stored' : 'replaces the live database on restart'}</span>`;
   } else if (db.present && !b.database) {
     html += '<span class="st-hint">durable storage is disabled</span>';
   }
@@ -757,7 +808,8 @@ function runBackupDownload() {
     a.click();
     a.remove();
     URL.revokeObjectURL(a.href);
-    settingsStatus('backup downloaded', 'ok');
+    const n = backupBytes(blob.size);
+    settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
   }).catch(err => settingsStatus(String(err.message || err)))
     .finally(() => backupSetBusy(false));
 }

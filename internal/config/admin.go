@@ -77,7 +77,12 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	body["usage_fields"] = metrics.CanonicalUsageFields
 	body["model_fields"] = format.CanonicalModelFields
 	if h.Backup != nil {
-		body["backup"] = h.Backup()
+		b := h.Backup()
+		if b == nil {
+			b = map[string]any{}
+		}
+		b["modified"] = DiffKeys(file, Default())
+		body["backup"] = b
 	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(body); err != nil {

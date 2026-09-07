@@ -335,9 +335,11 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
 	}
 	var ins struct {
-		OK     bool `json:"ok"`
-		Config struct {
+		OK      bool   `json:"ok"`
+		Created string `json:"created"`
+		Config  struct {
 			Present  bool           `json:"present"`
+			Bytes    int            `json:"bytes"`
 			Modified []string       `json:"modified"`
 			Values   map[string]any `json:"values"`
 		} `json:"config"`
@@ -345,7 +347,7 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	if err := json.NewDecoder(rr.Body).Decode(&ins); err != nil {
 		t.Fatal(err)
 	}
-	if !ins.OK || !ins.Config.Present {
+	if !ins.OK || !ins.Config.Present || ins.Created == "" || ins.Config.Bytes == 0 {
 		t.Fatalf("inspect %+v", ins)
 	}
 	found := false

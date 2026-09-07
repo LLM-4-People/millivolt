@@ -23,8 +23,10 @@ func invalidSnapshot(format string, args ...any) error {
 
 // SnapshotCounts is the row inventory of a packed millivolt SQLite snapshot.
 type SnapshotCounts struct {
-	Requests int `json:"requests"`
-	Debug    int `json:"debug"`
+	Requests int   `json:"requests"`
+	Debug    int   `json:"debug"`
+	OldestMs int64 `json:"oldest_ms,omitempty"`
+	NewestMs int64 `json:"newest_ms,omitempty"`
 }
 
 // CheckDatabase admits a packed SQLite snapshot: header, integrity_check, and
@@ -72,6 +74,22 @@ func inspectSQLiteSnapshot(data []byte) (SnapshotCounts, error) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&info.Requests); err != nil {
 		return SnapshotCounts{}, err
 	}
+	hasStart, err := sqliteHasColumn(db, "started_at")
+	if err != nil {
+		return SnapshotCounts{}, err
+	}
+	if hasStart {
+		var oldest, newest sql.NullInt64
+		if err := db.QueryRow(`SELECT MIN(started_at), MAX(started_at) FROM requests`).Scan(&oldest, &newest); err != nil {
+			return SnapshotCounts{}, err
+		}
+		if oldest.Valid {
+			info.OldestMs = oldest.Int64
+		}
+		if newest.Valid {
+			info.NewestMs = newest.Int64
+		}
+	}
 	var debugTable string
 	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='request_debug'`).Scan(&debugTable); err == nil {
 		if err := db.QueryRow(`SELECT COUNT(*) FROM request_debug`).Scan(&info.Debug); err != nil {
@@ -79,4 +97,26 @@ func inspectSQLiteSnapshot(data []byte) (SnapshotCounts, error) {
 		}
 	}
 	return info, nil
+}
+
+func sqliteHasColumn(db *sql.DB, name string) (bool, error) {
+	rows, err := db.Query(`PRAGMA table_info(requests)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var col, ctype string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &col, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if col == name {
+			return true, rows.Err()
+		}
+	}
+	return false, rows.Err()
 }

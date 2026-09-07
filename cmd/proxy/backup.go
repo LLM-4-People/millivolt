@@ -308,7 +308,11 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 }
 
 func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
-	out := map[string]any{"ok": true, "inspect": true}
+	out := map[string]any{
+		"ok":      true,
+		"inspect": true,
+		"created": arch.Created.UTC().Format(time.RFC3339),
+	}
 	if len(arch.Config) > 0 {
 		cfg, skipped, err := config.LoadBytes(arch.Config)
 		if err != nil || len(skipped) > 0 {
@@ -326,6 +330,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 		}
 		out["config"] = map[string]any{
 			"present":  true,
+			"bytes":    len(arch.Config),
 			"values":   cfg.Map(),
 			"modified": config.DiffKeys(cfg, config.Default()),
 			"vs_live":  config.DiffKeys(cfg, live),
@@ -340,9 +345,12 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 			return
 		}
 		db := map[string]any{
-			"present":  true,
-			"requests": info.Requests,
-			"debug":    info.Debug,
+			"present":   true,
+			"bytes":     len(arch.Database),
+			"requests":  info.Requests,
+			"debug":     info.Debug,
+			"oldest_ms": info.OldestMs,
+			"newest_ms": info.NewestMs,
 		}
 		liveMu.Lock()
 		store := liveStore
@@ -377,10 +385,15 @@ func backupStatus() map[string]any {
 		_, err := os.Stat(storage.PendingSnapshotPath(dbPath))
 		pending = err == nil
 	}
+	var requests int64
+	if store != nil {
+		requests = store.Totals().Requests
+	}
 	return map[string]any{
 		"config":               path != "",
 		"database":             store != nil,
 		"pending_database":     pending,
 		"restart_for_database": true,
+		"requests":             requests,
 	}
 }
