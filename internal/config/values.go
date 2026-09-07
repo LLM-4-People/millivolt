@@ -64,6 +64,39 @@ func StartupBoundChanges(cur, next *Config) []string {
 	return out
 }
 
+// DiffKeys returns Schema keys whose exported values differ between a and b.
+func DiffKeys(a, b *Config) []string {
+	if a == nil || b == nil {
+		return nil
+	}
+	am, bm := a.Map(), b.Map()
+	var out []string
+	for _, f := range Schema() {
+		if !reflect.DeepEqual(am[f.Key], bm[f.Key]) {
+			out = append(out, f.Key)
+		}
+	}
+	return out
+}
+
+// OverlayNonDefault copies src keys that differ from Default() onto dst.
+// Keys still at the built-in default are left untouched on dst.
+func OverlayNonDefault(dst, src *Config) error {
+	if dst == nil || src == nil {
+		return fmt.Errorf("config is required")
+	}
+	keys := DiffKeys(src, Default())
+	if len(keys) == 0 {
+		return nil
+	}
+	sm := src.Map()
+	overlay := make(map[string]any, len(keys))
+	for _, k := range keys {
+		overlay[k] = sm[k]
+	}
+	return dst.Apply(overlay)
+}
+
 // FormatDuration renders a duration the way proxy.yaml writes it: 0s, 500ms,
 // 5s, 2m, 3h. Coarsest exact unit wins so generated YAML stays readable.
 func FormatDuration(d time.Duration) string {

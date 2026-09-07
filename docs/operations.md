@@ -366,11 +366,19 @@ decode or semantic checks, so a produced file is never a silent corrupt
 backup.
 
 Restore validates that hash, the zstd frame, config `Validate()`, and
-`PRAGMA integrity_check` before applying anything. Config restores write the
-file and hot-reload. Database restores stage a pending snapshot next to
-`db_path` and wait for process restart; Open admits the pending file only
-after it checks again. Truncated or bit-flipped files are rejected. The
-`backup_max_bytes` setting is the buffered archive ceiling.
+`PRAGMA integrity_check` before applying anything. Decode refuses an
+uncompressed payload larger than the Schema maximum for `backup_max_bytes`,
+so a small compressed file cannot expand without bound. Picking a file first
+inspects the archive: each config key is shown as default vs modified vs the
+live file. Config **replace** writes the backup document. Config **merge**
+overlays only keys that differ from `Default()` onto the live file, so live
+custom values stay unless the backup also customized them. Database
+**replace** stages a pending snapshot next to `db_path` and waits for process
+restart; Open admits the pending file only after it checks again. Database
+**merge** inserts request ids that are not already in the live store
+immediately (live rows win on conflict) and does not require a restart.
+Truncated or bit-flipped files are rejected. The `backup_max_bytes` setting
+is the buffered archive ceiling.
 
 ## Versions and images
 

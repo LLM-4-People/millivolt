@@ -879,8 +879,71 @@ async function main() {
     check('backup archive actions render in settings',
       !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
       !!d.getElementById('backup-include-config') && !!d.getElementById('backup-include-database'));
-    check('backup download and restore use the operator fetch gate',
-      String(w.runBackupDownload).includes('operatorFetch') && String(w.runBackupRestore).includes('operatorFetch'));
+    check('backup restore offers merge or replace',
+      !!d.querySelector('input[name="backup-config-mode"][value="merge"]') &&
+      !!d.querySelector('input[name="backup-config-mode"][value="replace"]') &&
+      !!d.querySelector('input[name="backup-database-mode"][value="merge"]') &&
+      !!d.querySelector('input[name="backup-database-mode"][value="replace"]'));
+    const originalFetch = w.fetch;
+    const origClick = w.HTMLAnchorElement.prototype.click;
+    const calls = [];
+    w.eval("operatorCredential = 'op-token'");
+    w.URL.createObjectURL = () => 'blob:backup';
+    w.URL.revokeObjectURL = () => {};
+    w.HTMLAnchorElement.prototype.click = function() {};
+    w.fetch = (url, opts) => {
+      const u = String(url);
+      const headers = (opts && opts.headers) || {};
+      calls.push({ u, auth: headers.Authorization || '', method: (opts && opts.method) || 'GET' });
+      if (u.includes('/admin/backup')) {
+        return Promise.resolve({
+          ok: true,
+          blob: async () => new w.Blob([new Uint8Array([1])]),
+          headers: { get: n => String(n).toLowerCase() === 'content-disposition' ? 'attachment; filename="t.mvb"' : null },
+        });
+      }
+      if (u.includes('/admin/restore')) {
+        if (u.includes('inspect=1')) {
+          return Promise.resolve({ ok: true, json: async () => ({
+            ok: true, inspect: true,
+            config: { present: true, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+            database: { present: true, requests: 4, debug: 0, overlap: 1 },
+          }) });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, restart_required: ['db_path'] }) });
+      }
+      if (u.includes('/admin/config')) {
+        return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(doc)) });
+      }
+      return originalFetch(url, opts);
+    };
+    w.runBackupDownload();
+    await sleep(20);
+    check('backup download uses the operator fetch gate',
+      calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token'));
+    calls.length = 0;
+    const input = d.getElementById('backup-file');
+    const file = new w.File(['archive'], 't.mvb', { type: 'application/octet-stream' });
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    w.runBackupRestore({ target: input });
+    await sleep(20);
+    check('backup inspect uses the operator fetch gate',
+      calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+    check('backup inspect lists modified settings vs default',
+      !!d.getElementById('backup-preview') &&
+      d.getElementById('backup-preview').textContent.includes('2GiB') &&
+      d.getElementById('backup-preview').textContent.includes('default 1GiB'));
+    calls.length = 0;
+    w.runBackupApply();
+    await sleep(20);
+    check('backup apply uses the operator fetch gate',
+      calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+    check('restore refreshes settings even when a database restart is pending',
+      calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
+    w.fetch = originalFetch;
+    w.HTMLAnchorElement.prototype.click = origClick;
+    w.eval("operatorCredential = ''");
+    w.backupInspect = null;
   }
 
 

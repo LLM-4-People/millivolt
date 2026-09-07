@@ -2,6 +2,7 @@ package backup
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,40 +13,70 @@ import (
 
 const sqliteHeader = "SQLite format 3\x00"
 
+// ErrInvalidSnapshot is a semantic reject: the bytes are not a usable
+// millivolt SQLite snapshot. Transient I/O while verifying is a different error.
+var ErrInvalidSnapshot = errors.New("invalid sqlite snapshot")
+
+func invalidSnapshot(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInvalidSnapshot, fmt.Sprintf(format, args...))
+}
+
+// SnapshotCounts is the row inventory of a packed millivolt SQLite snapshot.
+type SnapshotCounts struct {
+	Requests int `json:"requests"`
+	Debug    int `json:"debug"`
+}
+
 // CheckDatabase admits a packed SQLite snapshot: header, integrity_check, and
 // the requests table millivolt history requires.
 func CheckDatabase(data []byte) error {
-	return verifySQLiteSnapshot(data)
+	_, err := InspectDatabase(data)
+	return err
 }
 
-func verifySQLiteSnapshot(data []byte) error {
+// InspectDatabase is CheckDatabase plus request/debug row counts.
+func InspectDatabase(data []byte) (SnapshotCounts, error) {
+	return inspectSQLiteSnapshot(data)
+}
+
+func inspectSQLiteSnapshot(data []byte) (SnapshotCounts, error) {
 	if len(data) < len(sqliteHeader) || string(data[:len(sqliteHeader)]) != sqliteHeader {
-		return fmt.Errorf("not a SQLite database")
+		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
 	dir, err := os.MkdirTemp("", "millivolt-backup-db-*")
 	if err != nil {
-		return err
+		return SnapshotCounts{}, err
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "snapshot.db")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return err
+		return SnapshotCounts{}, err
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 	if err != nil {
-		return err
+		return SnapshotCounts{}, err
 	}
 	defer db.Close()
 	var check string
 	if err := db.QueryRow("PRAGMA integrity_check").Scan(&check); err != nil {
-		return err
+		return SnapshotCounts{}, invalidSnapshot("integrity_check: %v", err)
 	}
 	if !strings.EqualFold(check, "ok") {
-		return fmt.Errorf("integrity_check: %s", check)
+		return SnapshotCounts{}, invalidSnapshot("integrity_check: %s", check)
 	}
 	var name string
 	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='requests'`).Scan(&name); err != nil {
-		return fmt.Errorf("missing requests table")
+		return SnapshotCounts{}, invalidSnapshot("missing requests table")
 	}
-	return nil
+	var info SnapshotCounts
+	if err := db.QueryRow(`SELECT COUNT(*) FROM requests`).Scan(&info.Requests); err != nil {
+		return SnapshotCounts{}, err
+	}
+	var debugTable string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='request_debug'`).Scan(&debugTable); err == nil {
+		if err := db.QueryRow(`SELECT COUNT(*) FROM request_debug`).Scan(&info.Debug); err != nil {
+			return SnapshotCounts{}, err
+		}
+	}
+	return info, nil
 }

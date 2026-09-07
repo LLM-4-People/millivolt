@@ -57,7 +57,23 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodPost) {
 		return
 	}
-	wantConfig, wantDB, err := parseBackupParts(r.URL.Query())
+	q := r.URL.Query()
+	inspect, err := queryFlag(q, "inspect")
+	if err != nil {
+		logHTTPError(w, "inspect: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	wantConfig, wantDB, err := parseBackupParts(q)
+	if err != nil {
+		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	configMode, err := parseRestoreMode(q, "config_mode")
+	if err != nil {
+		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dbMode, err := parseRestoreMode(q, "database_mode")
 	if err != nil {
 		logHTTPError(w, err.Error(), http.StatusBadRequest)
 		return
@@ -79,6 +95,10 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		logHTTPError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	if inspect {
+		writeRestoreInspect(w, r, arch)
+		return
+	}
 	if wantConfig && len(arch.Config) == 0 {
 		logHTTPError(w, "archive has no config member", http.StatusBadRequest)
 		return
@@ -89,17 +109,22 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	restart := []string{}
 	if wantConfig {
-		if err := restoreConfig(arch.Config); err != nil {
+		skipped, err := restoreConfig(arch.Config, configMode)
+		if err != nil {
 			logHTTPError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		restart = append(restart, skipped...)
 	}
 	if wantDB {
-		if err := restoreDatabase(arch.Database); err != nil {
+		needRestart, err := restoreDatabase(r.Context(), arch.Database, dbMode)
+		if err != nil {
 			logHTTPError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		restart = append(restart, "db_path")
+		if needRestart {
+			restart = append(restart, "db_path")
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
@@ -137,6 +162,27 @@ func queryBool(v string) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("want 1 or 0")
+	}
+}
+
+func queryFlag(q url.Values, key string) (bool, error) {
+	if _, ok := q[key]; !ok {
+		return false, nil
+	}
+	return queryBool(q.Get(key))
+}
+
+func parseRestoreMode(q url.Values, key string) (string, error) {
+	if _, ok := q[key]; !ok {
+		return "replace", nil
+	}
+	switch strings.ToLower(strings.TrimSpace(q.Get(key))) {
+	case "", "replace":
+		return "replace", nil
+	case "merge":
+		return "merge", nil
+	default:
+		return "", fmt.Errorf("%s: want merge or replace", key)
 	}
 }
 
@@ -184,38 +230,137 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 	return a, nil
 }
 
-func restoreConfig(raw []byte) error {
-	cfg, skipped, err := config.LoadBytes(raw)
+func restoreConfig(raw []byte, mode string) ([]string, error) {
+	incoming, skipped, err := config.LoadBytes(raw)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if len(skipped) > 0 {
-		return fmt.Errorf("config backup dropped keys: %s", strings.Join(skipped, ", "))
+		return nil, fmt.Errorf("config backup dropped keys: %s", strings.Join(skipped, ", "))
 	}
-	if err := cfg.Validate(); err != nil {
-		return err
+	if err := incoming.Validate(); err != nil {
+		return nil, err
 	}
 	liveMu.Lock()
 	path := liveConfigPath
+	overrides := map[string]struct{}{}
+	if liveListenOverride != "" {
+		overrides["listen"] = struct{}{}
+	}
+	if liveDBOverride != "" {
+		overrides["db_path"] = struct{}{}
+	}
 	liveMu.Unlock()
 	if path == "" {
-		return fmt.Errorf("no config file; start with -config to restore settings")
+		return nil, fmt.Errorf("no config file; start with -config to restore settings")
 	}
-	if err := config.WriteFile(path, cfg); err != nil {
-		return err
+	cur, err := config.LoadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		cur = config.Default()
 	}
-	_, err = reloadConfig()
-	return err
+	keep := map[string]any{}
+	if len(overrides) > 0 {
+		cm := cur.Map()
+		for k := range overrides {
+			keep[k] = cm[k]
+		}
+	}
+	next := incoming.Clone()
+	if mode == "merge" {
+		if err := config.OverlayNonDefault(cur, incoming); err != nil {
+			return nil, err
+		}
+		next = cur
+	}
+	if len(keep) > 0 {
+		if err := next.Apply(keep); err != nil {
+			return nil, err
+		}
+	}
+	if err := next.Validate(); err != nil {
+		return nil, err
+	}
+	if err := config.WriteFile(path, next); err != nil {
+		return nil, err
+	}
+	return reloadConfig()
 }
 
-func restoreDatabase(raw []byte) error {
+func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool, err error) {
 	liveMu.Lock()
 	cfg := liveCfg
+	store := liveStore
 	liveMu.Unlock()
 	if cfg == nil || cfg.DBPath == "" {
-		return fmt.Errorf("durable storage is disabled")
+		return false, fmt.Errorf("durable storage is disabled")
 	}
-	return storage.StageSnapshot(cfg.DBPath, raw)
+	if mode == "merge" {
+		if store == nil {
+			return false, fmt.Errorf("durable storage is disabled")
+		}
+		_, _, err := store.MergeSnapshot(ctx, raw)
+		return false, err
+	}
+	return true, storage.StageSnapshot(cfg.DBPath, raw)
+}
+
+func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
+	out := map[string]any{"ok": true, "inspect": true}
+	if len(arch.Config) > 0 {
+		cfg, skipped, err := config.LoadBytes(arch.Config)
+		if err != nil || len(skipped) > 0 {
+			logHTTPError(w, "backup config is invalid", http.StatusBadRequest)
+			return
+		}
+		liveMu.Lock()
+		path := liveConfigPath
+		liveMu.Unlock()
+		live := config.Default()
+		if path != "" {
+			if cur, err := config.LoadFile(path); err == nil {
+				live = cur
+			}
+		}
+		out["config"] = map[string]any{
+			"present":  true,
+			"values":   cfg.Map(),
+			"modified": config.DiffKeys(cfg, config.Default()),
+			"vs_live":  config.DiffKeys(cfg, live),
+		}
+	} else {
+		out["config"] = map[string]any{"present": false}
+	}
+	if len(arch.Database) > 0 {
+		info, err := backup.InspectDatabase(arch.Database)
+		if err != nil {
+			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		db := map[string]any{
+			"present":  true,
+			"requests": info.Requests,
+			"debug":    info.Debug,
+		}
+		liveMu.Lock()
+		store := liveStore
+		liveMu.Unlock()
+		if store != nil {
+			n, err := store.SnapshotOverlap(r.Context(), arch.Database)
+			if err != nil {
+				logHTTPError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			db["overlap"] = n
+		}
+		out["database"] = db
+	} else {
+		out["database"] = map[string]any{"present": false}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 func backupStatus() map[string]any {

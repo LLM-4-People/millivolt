@@ -64,7 +64,7 @@ func Categories() []Category {
 		{ID: "conversation", Label: "Conversations", Help: "How the request log groups turns into conversations."},
 		{ID: "format", Label: "Format translation", Help: "Anthropic defaults and Cursor agent.v1 bridging."},
 		{ID: "storage", Label: "Storage", Help: "Durable SQLite write pipeline. Restart to apply."},
-		{ID: "backup", Label: "Backup", Help: "Download or restore a self-checked archive of the saved config, the SQLite history, or both. Restore validates the archive before it is applied."},
+		{ID: "backup", Label: "Backup", Help: "Download or restore a self-checked archive of the saved config, the SQLite history, or both. Restore inspects first: merge keeps live defaults and live request ids; replace writes the backup as-is."},
 		{ID: "dashboard", Label: "Dashboard", Help: "Live-view cadence and request-log window. Hot-reloads; open dashboards pick up the next tick."},
 		{ID: "models", Label: "Models", Help: "Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same model in every grouped surface. Records keep their exact spelling; hot-reloads."},
 		{ID: "providers", Label: "Providers", Help: "Optional per-provider JSON field-name maps: usage/cost response keys, the models metadata endpoint merged into /v1/models, and optional upstream wire headers. Empty = auto-detect."},

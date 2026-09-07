@@ -422,7 +422,8 @@ storage_query_max_rows: 10000
 
 # ---- Backup ----
 # Download or restore a self-checked archive of the saved config, the SQLite history, or
-# both. Restore validates the archive before it is applied.
+# both. Restore inspects first: merge keeps live defaults and live request ids; replace
+# writes the backup as-is.
 # Maximum size of one Settings backup download or restore upload. Larger archives are
 # refused. The archive is buffered in the process.
 # Hot-reload: yes.

@@ -32,6 +32,11 @@ const (
 	memberDatabase uint8 = 2
 )
 
+// payloadMax is the uncompressed decode ceiling: the Schema maximum for
+// backup_max_bytes. Tests lower it to lock LimitReader without allocating
+// that many bytes.
+var payloadMax = int64(config.BackupMaxBytesMax)
+
 // Archive is one operator backup. At least one member must be present.
 type Archive struct {
 	Created  time.Time
@@ -62,6 +67,9 @@ func Encode(a Archive) ([]byte, error) {
 	payload, err := marshalMembers(a)
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(payload)) > int64(config.BackupMaxBytesMax) {
+		return nil, fmt.Errorf("backup payload exceeds backup_max_bytes maximum")
 	}
 	sum := sha256.Sum256(payload)
 	var body bytes.Buffer
@@ -100,8 +108,17 @@ func Encode(a Archive) ([]byte, error) {
 }
 
 // Decode admits an archive only when magic, version, zstd checksum, and the
-// outer SHA-256 all match. It does not apply config or open SQLite.
+// outer SHA-256 all match. Uncompressed members cannot exceed the Schema
+// maximum for backup_max_bytes, so a small frame cannot expand without bound.
+// It does not apply config or open SQLite.
 func Decode(raw []byte) (Archive, error) {
+	return decodeLimited(raw, payloadMax)
+}
+
+func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
+	if maxPayload <= 0 {
+		return Archive{}, fmt.Errorf("backup payload limit is invalid")
+	}
 	if len(raw) < headerSize {
 		return Archive{}, fmt.Errorf("backup is truncated")
 	}
@@ -126,7 +143,7 @@ func Decode(raw []byte) (Archive, error) {
 		return Archive{}, fmt.Errorf("decompress backup: %w", err)
 	}
 	defer dec.Close()
-	payload, err := io.ReadAll(dec)
+	payload, err := readCapped(dec, maxPayload)
 	if err != nil {
 		return Archive{}, fmt.Errorf("decompress backup: %w", err)
 	}
@@ -139,6 +156,20 @@ func Decode(raw []byte) (Archive, error) {
 	}
 	a.Created = created
 	return a, nil
+}
+
+func readCapped(r io.Reader, max int64) ([]byte, error) {
+	if max <= 0 {
+		return nil, fmt.Errorf("backup payload limit is invalid")
+	}
+	payload, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(payload)) > max {
+		return nil, fmt.Errorf("backup payload exceeds maximum size")
+	}
+	return payload, nil
 }
 
 // Validate runs semantic checks: config YAML must load without dropped keys,
@@ -160,7 +191,7 @@ func Validate(a Archive) error {
 		}
 	}
 	if len(a.Database) > 0 {
-		if err := verifySQLiteSnapshot(a.Database); err != nil {
+		if err := CheckDatabase(a.Database); err != nil {
 			return fmt.Errorf("backup database: %w", err)
 		}
 	}

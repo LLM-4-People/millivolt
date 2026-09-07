@@ -2,12 +2,16 @@ package backup
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -93,6 +97,79 @@ func TestValidateRejectsInvalidMembers(t *testing.T) {
 	}
 	if err := Validate(Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
 		t.Fatal("invalid sqlite admitted")
+	}
+}
+
+func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
+	if err := CheckDatabase([]byte("not sqlite")); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("header reject: %v", err)
+	}
+	if err := CheckDatabase([]byte("SQLite format 3\x00not-a-db")); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("integrity reject: %v", err)
+	}
+	data := packedRequestsDB(t)
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", blocked)
+	err := CheckDatabase(data)
+	if err == nil {
+		t.Fatal("CheckDatabase succeeded with TMPDIR that cannot hold a temp file")
+	}
+	if errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("verify I/O reported as invalid snapshot: %v", err)
+	}
+}
+
+func TestDecodeRejectsOversizePayload(t *testing.T) {
+	const n = 100_000
+	payload := append([]byte{memberConfig}, binary.BigEndian.AppendUint64(nil, uint64(n))...)
+	payload = append(payload, bytes.Repeat([]byte("x"), n)...)
+	sum := sha256.Sum256(payload)
+	var zbuf bytes.Buffer
+	enc, err := zstd.NewWriter(&zbuf, zstd.WithEncoderCRC(true), zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte(magic), archiveVersion, flagConfig, 0, 0)
+	raw = binary.BigEndian.AppendUint64(raw, 0)
+	raw = append(raw, sum[:]...)
+	raw = append(raw, zbuf.Bytes()...)
+	old := payloadMax
+	payloadMax = 1024
+	t.Cleanup(func() { payloadMax = old })
+	if _, err := Decode(raw); err == nil {
+		t.Fatal("payload larger than the decode cap was admitted")
+	}
+	payloadMax = old
+	if _, err := Decode(raw); err != nil {
+		t.Fatalf("payload under Schema max should decode: %v", err)
+	}
+}
+
+func TestReadCappedDoesNotDrainOversizeSource(t *testing.T) {
+	src := bytes.NewReader(bytes.Repeat([]byte("y"), 8<<20))
+	if _, err := readCapped(src, 1024); err == nil {
+		t.Fatal("oversize source admitted")
+	}
+	if src.Len() == 0 {
+		t.Fatal("capped read consumed the entire oversize source")
+	}
+}
+
+func TestEncodeRefusesInvalidMembers(t *testing.T) {
+	if _, err := Encode(Archive{Config: []byte("listen: 8080\n")}); err == nil {
+		t.Fatal("Encode returned bytes for a config Validate would reject")
+	}
+	if _, err := Encode(Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
+		t.Fatal("Encode returned bytes for a database CheckDatabase would reject")
 	}
 }
 
