@@ -879,6 +879,8 @@ async function main() {
     check('backup archive actions render in settings',
       !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
       !!d.getElementById('backup-include-config') && !!d.getElementById('backup-include-database'));
+    check('backup download and restore use the operator fetch gate',
+      String(w.runBackupDownload).includes('operatorFetch') && String(w.runBackupRestore).includes('operatorFetch'));
   }
 
 

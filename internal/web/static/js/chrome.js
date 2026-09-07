@@ -592,7 +592,7 @@ function runBackupDownload() {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
   settingsStatus('building backup');
-  fetch('/admin/backup?' + q, { credentials: 'same-origin' }).then(async r => {
+  operatorFetch('/admin/backup?' + q).then(async r => {
     if (!r.ok) {
       let msg = 'backup failed';
       try { msg = (await r.json()).error || msg; } catch (e) {}
@@ -619,9 +619,8 @@ function runBackupRestore(ev) {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); input.value = ''; return; }
   settingsStatus('checking backup');
-  fetch('/admin/restore?' + q, {
+  operatorFetch('/admin/restore?' + q, {
     method: 'POST',
-    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
   }).then(async r => {
