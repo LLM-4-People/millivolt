@@ -33,10 +33,14 @@ The three output-only flags are mutually exclusive and exit without loading loca
 config, opening a database or starting runtime services.
 
 Precedence is built-in defaults, then the YAML file, then CLI overrides.
-A missing file currently loads defaults; verify the path rather than assuming
-a typo will stop startup. Existing files are strictly decoded and validated:
-unknown keys, multiple documents, invalid types/ranges and conflicting values
-fail load. CLI-overridden fields cannot be saved from Settings.
+A missing file loads defaults; verify the path rather than assuming a typo
+created a new empty overlay. On startup and reload, unknown keys, invalid
+types/ranges, conflicting overlay values and extra YAML documents are dropped
+(the built-in default stays) and the file is rewritten without them so a typo
+cannot block boot. An unparseable file is moved to `PATH.invalid` and replaced
+with the documented defaults. Settings POST still rejects those inputs.
+CLI-overridden fields cannot be saved from Settings. Healthcheck loads the
+file read-only and does not rewrite it.
 
 To regenerate the public example after changing its canonical owners:
 

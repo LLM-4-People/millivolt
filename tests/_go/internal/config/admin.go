@@ -234,8 +234,12 @@ func TestLoadFileRejectsTrailingDocuments(t *testing.T) {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadFile(path); err == nil {
-			t.Fatalf("accepted trailing document: %q", contents)
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatalf("trailing document %q: %v", contents, err)
+		}
+		if c.MaxRetries != 1 {
+			t.Fatalf("trailing document %q applied max_retries=%d, want first-document 1", contents, c.MaxRetries)
 		}
 	}
 }

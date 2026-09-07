@@ -49,8 +49,11 @@ func TestStormConfigBoundsAndSchema(t *testing.T) {
 				t.Fatalf("schema does not expose the allowed bounds: %+v", schema)
 			}
 			for _, invalid := range []string{fmt.Sprint(field.min - 1), fmt.Sprint(field.max + 1), "2.5", "2.0", "null", "true", "\"2\"", "bad"} {
-				if _, err := loadStormConfig(t, field.key+": "+invalid); err == nil {
-					t.Errorf("accepted YAML %s", invalid)
+				c, err := loadStormConfig(t, field.key+": "+invalid)
+				if err != nil {
+					t.Errorf("YAML %s: %v", invalid, err)
+				} else if !reflect.DeepEqual(c.Map()[field.key], Default().Map()[field.key]) {
+					t.Errorf("applied invalid YAML %s", invalid)
 				}
 			}
 			for _, valid := range []int64{field.min, field.max} {
@@ -82,8 +85,11 @@ func TestStormConfigBoundsAndSchema(t *testing.T) {
 				t.Fatalf("schema does not expose the duration bounds: %+v", schema)
 			}
 			for _, invalid := range []string{"0", "0s", "null", "false", "bad", FormatDuration(field.min - 1), FormatDuration(field.max + 1)} {
-				if _, err := loadStormConfig(t, field.key+": "+invalid); err == nil {
-					t.Errorf("accepted YAML %s", invalid)
+				c, err := loadStormConfig(t, field.key+": "+invalid)
+				if err != nil {
+					t.Errorf("YAML %s: %v", invalid, err)
+				} else if !reflect.DeepEqual(c.Map()[field.key], Default().Map()[field.key]) {
+					t.Errorf("applied invalid YAML %s", invalid)
 				}
 			}
 			for _, valid := range []time.Duration{field.min, field.max} {
@@ -106,11 +112,19 @@ func TestStormConfigBoundsAndSchema(t *testing.T) {
 			}
 		})
 	}
-	if _, err := loadStormConfig(t, "storm_initial_backoff: 1m\nstorm_max_backoff: 59s"); err == nil {
-		t.Error("accepted initial backoff greater than maximum")
+	c, err := loadStormConfig(t, "storm_initial_backoff: 1m\nstorm_max_backoff: 59s")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := loadStormConfig(t, "storm_max_retry: 20"); err == nil {
-		t.Error("accepted unknown storm setting")
+	if c.StormInitialBackoff == time.Minute && c.StormMaxBackoff == 59*time.Second {
+		t.Error("applied initial backoff greater than maximum")
+	}
+	c, err = loadStormConfig(t, "storm_max_retry: 20")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(c.Map(), Default().Map()) {
+		t.Error("unknown storm setting applied")
 	}
 }
 
@@ -118,8 +132,11 @@ func TestStormConfigStrictFlagsAndStatuses(t *testing.T) {
 	for _, key := range []string{"storm_enabled", "storm_provider_enabled", "storm_model_enabled", "storm_banner_enabled", "storm_transport_errors", "storm_stream_errors"} {
 		t.Run(key, func(t *testing.T) {
 			for _, invalid := range []string{"null", "yes", "no", "\"true\"", "\"false\"", "0", "[]"} {
-				if _, err := loadStormConfig(t, key+": "+invalid); err == nil {
-					t.Errorf("accepted YAML %s", invalid)
+				c, err := loadStormConfig(t, key+": "+invalid)
+				if err != nil {
+					t.Errorf("YAML %s: %v", invalid, err)
+				} else if !reflect.DeepEqual(c.Map()[key], Default().Map()[key]) {
+					t.Errorf("applied invalid YAML %s", invalid)
 				}
 			}
 			for _, valid := range []bool{false, true} {
@@ -131,8 +148,11 @@ func TestStormConfigStrictFlagsAndStatuses(t *testing.T) {
 		})
 	}
 	for _, invalid := range []string{"null", "[500]", "[true]", "[null]", "500", "\"500\"", "[\"429\", \"429\"]", "[\"499\"]", "[\"600\"]", "[\"0500\"]", "[\"5xx\"]", "[\"500 \"]", "[\" 500\"]", "[\"\"]"} {
-		if _, err := loadStormConfig(t, "storm_status_codes: "+invalid); err == nil {
-			t.Errorf("accepted status YAML %s", invalid)
+		c, err := loadStormConfig(t, "storm_status_codes: "+invalid)
+		if err != nil {
+			t.Errorf("status YAML %s: %v", invalid, err)
+		} else if !reflect.DeepEqual(c.StormStatusCodes, Default().StormStatusCodes) {
+			t.Errorf("applied invalid status YAML %s", invalid)
 		}
 	}
 	for _, valid := range []string{"[]", "[\"429\", \"500\", \"599\"]"} {

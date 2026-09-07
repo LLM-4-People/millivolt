@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -31,8 +32,11 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 		{"models_discovery_max_pages", ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
 	} {
 		for _, invalid := range []string{"-1", "0", fmt.Sprint(field.min - 1), fmt.Sprint(field.max + 1), "4096.5", "4096.0", "null", "bad"} {
-			if _, err := load(field.key + ": " + invalid); err == nil {
-				t.Errorf("accepted %s=%s", field.key, invalid)
+			got, err := load(field.key + ": " + invalid)
+			if err != nil {
+				t.Errorf("%s=%s: %v", field.key, invalid, err)
+			} else if !reflect.DeepEqual(got.Map()[field.key], defaults.Map()[field.key]) {
+				t.Errorf("applied invalid %s=%s", field.key, invalid)
 			}
 		}
 		for _, valid := range []int64{field.min, field.max} {
@@ -42,8 +46,11 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 		}
 	}
 	for _, invalid := range []string{"0", "0s", "-1s", "999ms", "5m1s", "null", "bad"} {
-		if _, err := load("models_discovery_timeout: " + invalid); err == nil {
-			t.Errorf("accepted timeout %s", invalid)
+		got, err := load("models_discovery_timeout: " + invalid)
+		if err != nil {
+			t.Errorf("timeout %s: %v", invalid, err)
+		} else if got.ModelsDiscoveryTimeout != defaults.ModelsDiscoveryTimeout {
+			t.Errorf("applied invalid timeout %s", invalid)
 		}
 	}
 	for _, valid := range []string{FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax)} {
@@ -86,7 +93,11 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 	if n != 3 {
 		t.Fatalf("schema discovery fields=%d", n)
 	}
-	if _, err := load("models_discovery_max_byte: 8192"); err == nil {
-		t.Fatal("accepted unknown discovery setting")
+	got, err = load("models_discovery_max_byte: 8192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ModelsDiscoveryMaxBytes != defaults.ModelsDiscoveryMaxBytes {
+		t.Fatal("unknown discovery setting applied")
 	}
 }

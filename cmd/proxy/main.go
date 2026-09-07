@@ -111,9 +111,12 @@ func main() {
 		os.Exit(runHealthcheck())
 	}
 
-	cfg, err := config.LoadFile(*configPath)
+	cfg, skipped, err := config.LoadFileRepair(*configPath)
 	if err != nil {
 		log.Fatalf("config: %v", err)
+	}
+	if len(skipped) > 0 {
+		log.Printf("config: dropped unknown or invalid keys from %s: %s", *configPath, strings.Join(skipped, ", "))
 	}
 	applyCLIOverrides(cfg)
 
@@ -527,9 +530,12 @@ func applyCLIOverrides(cfg *config.Config) {
 func reloadConfig() ([]string, error) {
 	liveMu.Lock()
 	defer liveMu.Unlock()
-	fresh, err := config.LoadFile(liveConfigPath)
+	fresh, dropped, err := config.LoadFileRepair(liveConfigPath)
 	if err != nil {
 		return nil, err
+	}
+	if len(dropped) > 0 {
+		log.Printf("config: dropped unknown or invalid keys from %s: %s", liveConfigPath, strings.Join(dropped, ", "))
 	}
 	applyCLIOverrides(fresh)
 	// Compute which startup-bound fields changed (these can't move on a live

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -31,8 +32,13 @@ func TestQueryLimitConfigPersistenceAndBounds(t *testing.T) {
 		{"storage_query_max_rows", StorageQueryMaxRowsMin, StorageQueryMaxRowsMax},
 	} {
 		for _, invalid := range []string{"-1", "0", fmt.Sprint(field.min - 1), fmt.Sprint(field.max + 1), "1.5", "bad"} {
-			if _, err := load(field.key + ": " + invalid); err == nil {
-				t.Errorf("accepted %s=%s", field.key, invalid)
+			got, err := load(field.key + ": " + invalid)
+			if err != nil {
+				t.Errorf("%s=%s: %v", field.key, invalid, err)
+			} else if field.key == "storage_query_max_bytes" && got.StorageQueryMaxBytes != defaults.StorageQueryMaxBytes {
+				t.Errorf("applied invalid %s=%s", field.key, invalid)
+			} else if field.key == "storage_query_max_rows" && got.StorageQueryMaxRows != defaults.StorageQueryMaxRows {
+				t.Errorf("applied invalid %s=%s", field.key, invalid)
 			}
 		}
 		for _, valid := range []int{field.min, field.max} {
@@ -66,13 +72,20 @@ func TestQueryLimitConfigPersistenceAndBounds(t *testing.T) {
 			t.Errorf("%s incorrectly hot-reloads", f.Key)
 		}
 	}
-	if _, err := load("storage_query_max_byte: 8192"); err == nil {
-		t.Fatal("unknown query setting accepted")
+	got, err = load("storage_query_max_byte: 8192")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.StorageQueryMaxBytes != defaults.StorageQueryMaxBytes {
+		t.Fatal("unknown query setting applied")
 	}
 	for _, key := range []string{"history_size", "max_conns_per_host", "max_request_bytes"} {
 		for _, raw := range []string{"1.5", "8192.5", "8192.0", "null"} {
-			if _, err := load(key + ": " + raw); err == nil {
-				t.Errorf("shared integer boundary accepted %s=%s", key, raw)
+			got, err := load(key + ": " + raw)
+			if err != nil {
+				t.Errorf("%s=%s: %v", key, raw, err)
+			} else if !reflect.DeepEqual(got.Map()[key], defaults.Map()[key]) {
+				t.Errorf("applied invalid %s=%s", key, raw)
 			}
 		}
 	}

@@ -13,6 +13,33 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
+func loadFileOK(t *testing.T, raw string) *Config {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err != nil {
+		t.Fatalf("LoadFile(%q) = %v, want a skipped overlay", raw, err)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("LoadFile(%q) produced invalid config: %v", raw, err)
+	}
+	return c
+}
+
+func assertOverlaySkipped(t *testing.T, raw, key string) {
+	t.Helper()
+	c := loadFileOK(t, raw)
+	if key == "" {
+		return
+	}
+	if !reflect.DeepEqual(c.Map()[key], Default().Map()[key]) {
+		t.Errorf("LoadFile(%q) applied %s = %v, want default %v", raw, key, c.Map()[key], Default().Map()[key])
+	}
+}
+
 // Default() must populate every tunable (no zero-valued config that code then
 // has to second-guess). This is the single-source-of-truth guarantee.
 func TestDefaultHasNoZeroTunables(t *testing.T) {
@@ -153,8 +180,9 @@ func TestUpstreamTimeoutExplicitZero(t *testing.T) {
 	if err := os.WriteFile(p, []byte("upstream_timeout: 0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFile(p); err == nil {
-		t.Fatal("upstream_timeout: 0 (bare integer) must be rejected")
+	c0 := loadFileOK(t, "upstream_timeout: 0\n")
+	if c0.UpstreamTimeout != Default().UpstreamTimeout {
+		t.Fatalf("upstream_timeout: 0 (bare integer) applied %v, want default", c0.UpstreamTimeout)
 	}
 	// Omitting the key keeps the default.
 	c2, err := LoadFile(filepath.Join(dir, "absent.yaml"))
@@ -263,9 +291,7 @@ func TestCursorDefaultContextWindowNegativeRejected(t *testing.T) {
 	if err := os.WriteFile(p, []byte("cursor_default_context_window: -1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadFile(p); err == nil {
-		t.Fatal("negative cursor_default_context_window must be rejected")
-	}
+	assertOverlaySkipped(t, "cursor_default_context_window: -1\n", "cursor_default_context_window")
 	c := Default()
 	c.CursorDefaultContextWindow = -1
 	if err := c.Validate(); err == nil {
@@ -340,35 +366,84 @@ func TestLoadFileMissing(t *testing.T) {
 	}
 }
 
-// LoadFile decodes the file STRICTLY (yaml.Decoder + KnownFields): a typo'd
-// key is a clear load error naming the key, never a silently-ignored line
-// that leaves the built-in default live. The Settings POST path was already
-// strict (unknown keys rejected); the file path must match - deny by default.
-// Regression: plain yaml.Unmarshal ignored unknown fields, so "max_retriez: 3"
-// loaded cleanly while max_retries silently kept its default.
-func TestLoadFileRejectsUnknownKey(t *testing.T) {
-	cases := []struct{ name, yaml, wantErr string }{
-		{"typo'd top-level key", "max_retriez: 3\n", "max_retriez"},
-		{"typo'd key inside providers", "providers:\n  gw.example:\n    cost_keyz: [\"a.b\"]\n", "cost_keyz"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			p := filepath.Join(t.TempDir(), "c.yaml")
-			if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			_, err := LoadFile(p)
-			if err == nil {
-				t.Fatalf("LoadFile accepted an unknown key:\n%s", tc.yaml)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error = %q, want it to name the unknown key %q", err, tc.wantErr)
-			}
-		})
+// LoadFile drops unknown keys and keeps defaults so a typo cannot block boot.
+// Settings POST still rejects unknown keys. Repair rewrites the file.
+func TestLoadFileSkipsUnknownKey(t *testing.T) {
+	assertOverlaySkipped(t, "max_retriez: 3\n", "max_retries")
+	c := loadFileOK(t, "providers:\n  gw.example:\n    cost_keyz: [\"a.b\"]\n")
+	if len(c.Providers["gw.example"].CostKeys) != 0 {
+		t.Fatalf("unknown provider field applied: %+v", c.Providers)
 	}
 
-	// The strict decode must still accept every documented key - including
-	// upstream_timeout, which is yaml:"-" on Config (probed as a duration string).
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	raw := []byte("max_retriez: 3\n")
+	if err := os.WriteFile(p, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(p); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p)
+	if err != nil || !bytes.Equal(got, raw) {
+		t.Fatal("LoadFile must not rewrite the file")
+	}
+}
+
+func TestLoadFileRepairDropsBrokenKeys(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	raw := "max_retries: 3\nmax_retriez: 9\nhistory_size: 0\n"
+	if err := os.WriteFile(p, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, skipped, err := LoadFileRepair(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxRetries != 3 || c.HistorySize != Default().HistorySize {
+		t.Fatalf("repaired config max_retries=%d history_size=%d", c.MaxRetries, c.HistorySize)
+	}
+	joined := strings.Join(skipped, ",")
+	if !strings.Contains(joined, "max_retriez") || !strings.Contains(joined, "history_size") {
+		t.Fatalf("skipped = %v", skipped)
+	}
+	body, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte("max_retriez")) || bytes.Contains(body, []byte("history_size: 0\n")) {
+		t.Fatalf("repaired file still contains dropped keys:\n%s", body)
+	}
+	if !bytes.Contains(body, []byte("max_retries: 3\n")) {
+		t.Fatalf("repaired file lost the valid override:\n%s", body)
+	}
+}
+
+func TestLoadFileRepairUnparseable(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "c.yaml")
+	raw := []byte("unknown-setting: [\n")
+	if err := os.WriteFile(p, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, skipped, err := LoadFileRepair(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(skipped) != 1 || skipped[0] != skippedUnparseable {
+		t.Fatalf("skipped = %v", skipped)
+	}
+	if !reflect.DeepEqual(c.Map(), Default().Map()) {
+		t.Fatal("unparseable repair must yield defaults")
+	}
+	preserved, err := os.ReadFile(p + ".invalid")
+	if err != nil || !bytes.Equal(preserved, raw) {
+		t.Fatalf("invalid original not preserved: %v %q", err, preserved)
+	}
+	if _, err := LoadFile(p); err != nil {
+		t.Fatalf("repaired file still unreadable: %v", err)
+	}
+}
+
+func TestLoadFileKnownKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ok.yaml")
 	if err := os.WriteFile(p, []byte("upstream_timeout: 5m\nmax_retries: 3\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -412,9 +487,9 @@ func TestProviderOverrides(t *testing.T) {
 	}
 }
 
-// LoadFile must reject out-of-range values (fail closed at the boundary), never
-// silently clamp or default them. One case per validated constraint.
-func TestValidateRejectsBadValues(t *testing.T) {
+// Invalid overlay values are skipped at LoadFile (boot must succeed). Validate
+// still rejects a Config that actually holds those values.
+func TestLoadFileSkipsInvalidValues(t *testing.T) {
 	cases := []struct {
 		name string
 		yaml string
@@ -468,24 +543,15 @@ func TestValidateRejectsBadValues(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadFile(p); err == nil {
-				t.Errorf("LoadFile(%q) = nil error, want rejection", tc.yaml)
-			}
+			loadFileOK(t, tc.yaml+"\n")
 		})
 	}
 }
 
-func TestLoadFileRejectsDurationInteger(t *testing.T) {
-	dir := t.TempDir()
-	for _, body := range []string{"shutdown_timeout: 5\n", "upstream_timeout: 5\n", "queue_retry_after: 2\n"} {
-		p := filepath.Join(dir, "c.yaml")
-		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := LoadFile(p); err == nil {
-			t.Errorf("LoadFile(%q) succeeded, want rejection", body)
-		}
-	}
+func TestLoadFileSkipsDurationInteger(t *testing.T) {
+	assertOverlaySkipped(t, "shutdown_timeout: 5\n", "shutdown_timeout")
+	assertOverlaySkipped(t, "upstream_timeout: 5\n", "upstream_timeout")
+	assertOverlaySkipped(t, "queue_retry_after: 2\n", "queue_retry_after")
 }
 
 // A valid config (and valid overrides) must load cleanly and pass validation.
@@ -641,8 +707,9 @@ func TestProviderModelsOverride(t *testing.T) {
 		if err := os.WriteFile(bp, []byte(tc.yaml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadFile(bp); err == nil {
-			t.Errorf("%s: LoadFile accepted a bad models override", tc.name)
+		c := loadFileOK(t, tc.yaml)
+		if len(c.Providers) != 0 {
+			t.Errorf("%s: invalid models override applied: %+v", tc.name, c.Providers)
 		}
 	}
 }
@@ -698,8 +765,9 @@ func TestProviderHeaders(t *testing.T) {
 		if err := os.WriteFile(bp, []byte(tc.yaml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadFile(bp); err == nil {
-			t.Errorf("%s: LoadFile accepted a bad provider header", tc.name)
+		c := loadFileOK(t, tc.yaml)
+		if len(c.Providers) != 0 {
+			t.Errorf("%s: invalid provider header applied: %+v", tc.name, c.Providers)
 		}
 	}
 }
@@ -725,12 +793,9 @@ func TestProviderCostKeysPathValidated(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := LoadFile(p)
-			if err == nil {
-				t.Fatalf("LoadFile accepted a bad cost_keys path:\n%s", tc.yaml)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			c := loadFileOK(t, tc.yaml)
+			if len(c.Providers) != 0 {
+				t.Fatalf("LoadFile applied a bad cost_keys path:\n%s", tc.yaml)
 			}
 		})
 	}
@@ -759,12 +824,9 @@ func TestProviderUsageKeysValidated(t *testing.T) {
 			if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := LoadFile(p)
-			if err == nil {
-				t.Fatalf("LoadFile accepted a bad usage_keys entry:\n%s", tc.yaml)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			c := loadFileOK(t, tc.yaml)
+			if len(c.Providers) != 0 {
+				t.Fatalf("LoadFile applied a bad usage_keys entry:\n%s", tc.yaml)
 			}
 		})
 	}
@@ -799,17 +861,22 @@ func TestValidateProvidersErrorDeterministic(t *testing.T) {
     usage_keys:
       input_tokenz: "a.b"
 `
-	p := filepath.Join(t.TempDir(), "c.yaml")
-	if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
-		t.Fatal(err)
+	c := loadFileOK(t, yaml)
+	if len(c.Providers) != 0 {
+		t.Fatal("invalid providers overlay was applied")
+	}
+	broken := Default()
+	broken.Providers = map[string]ProviderOverride{
+		"zeta.example":  {CostKeys: []string{"not a path"}},
+		"alpha.example": {UsageKeys: map[string]string{"input_tokenz": "a.b"}},
 	}
 	for i := 0; i < 200; i++ {
-		_, err := LoadFile(p)
+		err := broken.Validate()
 		if err == nil {
-			t.Fatal("LoadFile accepted two invalid providers")
+			t.Fatal("Validate accepted two invalid providers")
 		}
 		if !strings.Contains(err.Error(), "providers.alpha.example") {
-			t.Fatalf("load %d: error = %q, want the first error to always name the alphabetically-first label providers.alpha.example", i, err)
+			t.Fatalf("validate %d: error = %q, want the first error to always name the alphabetically-first label providers.alpha.example", i, err)
 		}
 	}
 }
@@ -866,12 +933,9 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 			if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			_, err := LoadFile(p)
-			if err == nil {
-				t.Fatalf("LoadFile accepted bad allowed_base_urls entry %q", tc.entry)
-			}
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error = %q, want it to contain %q", err, tc.wantErr)
+			c := loadFileOK(t, yaml)
+			if len(c.AllowedBaseURLs) != 0 {
+				t.Fatalf("LoadFile applied bad allowed_base_urls entry %q: %v", tc.entry, c.AllowedBaseURLs)
 			}
 		})
 	}
@@ -908,8 +972,9 @@ func TestProviderLabelValidated(t *testing.T) {
 		if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadFile(p); err == nil {
-			t.Errorf("LoadFile accepted an empty/whitespace provider label:\n%s", yaml)
+		c := loadFileOK(t, yaml)
+		if len(c.Providers) != 0 {
+			t.Errorf("LoadFile applied an empty/whitespace provider label:\n%s", yaml)
 		}
 	}
 

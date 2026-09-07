@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -92,17 +93,17 @@ func TestModelRulesValidated(t *testing.T) {
 		if err := os.WriteFile(p, []byte(c.yaml), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		_, err := LoadFile(p)
+		got, err := LoadFile(p)
 		if c.wantErr == "" {
 			if err != nil {
 				t.Errorf("%s: LoadFile: %v", c.name, err)
 			}
 			continue
 		}
-		if err == nil {
-			t.Errorf("%s: LoadFile accepted an invalid rule list", c.name)
-		} else if !strings.Contains(err.Error(), c.wantErr) {
-			t.Errorf("%s: error = %q, want substring %q", c.name, err.Error(), c.wantErr)
+		if err != nil {
+			t.Errorf("%s: LoadFile: %v", c.name, err)
+		} else if !reflect.DeepEqual(got.ModelRules, Default().ModelRules) {
+			t.Errorf("%s: invalid rule list applied: %+v", c.name, got.ModelRules)
 		}
 	}
 }

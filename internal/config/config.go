@@ -1117,63 +1117,149 @@ type userFile struct {
 	UpstreamTimeout *string `yaml:"upstream_timeout"`
 }
 
-// LoadFile reads the YAML config at path (may be empty) and merges it over the
-// built-in defaults. A missing file yields the defaults. The file is decoded
-// strictly (KnownFields): an unknown key - top level or inside providers: -
-// fails the load with an error naming the key, never a silently-ignored line
-// that leaves the default live (deny by default, same strictness as the
-// Settings POST path).
+const (
+	skippedExtraDocument = "(extra yaml document)"
+	skippedUnparseable   = "(unparseable yaml)"
+)
+
+// LoadFile reads the YAML config at path (may be empty) and merges recognized,
+// valid keys over the built-in defaults. A missing file yields the defaults.
+// Unknown keys, invalid types/ranges, and extra YAML documents are omitted so
+// a typo cannot block boot; Settings POST still rejects those inputs. This
+// read path does not rewrite the file.
 func LoadFile(path string) (*Config, error) {
+	cfg, _, _, err := loadYAMLFile(path)
+	return cfg, err
+}
+
+// LoadFileRepair is LoadFile, then persists a cleaned document when anything
+// was dropped. Unparseable files are moved aside to path+".invalid" and
+// replaced with Default(). Healthcheck and print-only paths must not call this.
+func LoadFileRepair(path string) (*Config, []string, error) {
+	cfg, skipped, dirty, err := loadYAMLFile(path)
+	if err != nil {
+		if path == "" || !strings.Contains(err.Error(), "parse config ") {
+			return nil, nil, err
+		}
+		invalidPath := path + ".invalid"
+		_ = os.Remove(invalidPath)
+		if rerr := os.Rename(path, invalidPath); rerr != nil {
+			return nil, nil, fmt.Errorf("repair config %s: %w", path, rerr)
+		}
+		cfg = Default()
+		if werr := WriteFile(path, cfg); werr != nil {
+			return nil, nil, fmt.Errorf("repair config %s: %w", path, werr)
+		}
+		return cfg, []string{skippedUnparseable}, nil
+	}
+	if dirty && path != "" {
+		if err := WriteFile(path, cfg); err != nil {
+			return cfg, skipped, fmt.Errorf("repair config %s: %w", path, err)
+		}
+	}
+	return cfg, skipped, nil
+}
+
+func loadYAMLFile(path string) (*Config, []string, bool, error) {
 	def := Default()
 	if path == "" {
-		return def, def.Validate()
+		return def, nil, false, def.Validate()
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return def, nil
+			return def, nil, false, nil
 		}
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, nil, false, fmt.Errorf("read config: %w", err)
 	}
-	var user userFile
 	dec := yaml.NewDecoder(bytes.NewReader(b))
-	dec.KnownFields(true)
-	if err := dec.Decode(&user); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	var first any
+	if err := dec.Decode(&first); err != nil && !errors.Is(err, io.EOF) {
+		return nil, nil, false, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	var skipped []string
+	dirty := false
 	var extra any
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("parse config %s: exactly one YAML document is required", path)
+		skipped = append(skipped, skippedExtraDocument)
+		dirty = true
 	}
-	// io.EOF = an empty (or comment-only) file: no document, so the overlay
-	// stays zero and the defaults below apply - same as yaml.Unmarshal.
-	// Track which keys are actually present in the file: mergeOverlay copies
-	// a field only when its key was written (so explicit 0 / "" / false survive)
-	// and validateOverlay rejects an out-of-range value the user actually wrote.
-	var present map[string]any
-	if err := yaml.Unmarshal(b, &present); err != nil {
-		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	present, _ := first.(map[string]any)
+	if first != nil && present == nil {
+		return nil, nil, false, fmt.Errorf("parse config %s: document must be a YAML mapping", path)
 	}
-	// upstream_timeout rode the strict decode as text; parse the duration
-	// token, then mergeOverlay copies it when present.
+	if len(present) == 0 {
+		return def, skipped, dirty, nil
+	}
+	keys := make([]string, 0, len(present))
+	for key := range present {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	cfg := def
+	for _, key := range keys {
+		if FieldByKey(key) == nil {
+			skipped = append(skipped, key)
+			dirty = true
+			continue
+		}
+		trial := cfg.Clone()
+		loose, err := overlayYAMLKey(trial, key, present[key])
+		if err != nil {
+			skipped = append(skipped, key)
+			dirty = true
+			continue
+		}
+		if err := trial.Validate(); err != nil {
+			skipped = append(skipped, key)
+			dirty = true
+			continue
+		}
+		if loose {
+			skipped = append(skipped, key+" (unknown fields)")
+			dirty = true
+		}
+		cfg = trial
+	}
+	return cfg, skipped, dirty, nil
+}
+
+func decodeUserOverlay(raw []byte, strict bool) (*userFile, error) {
+	var user userFile
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(strict)
+	if err := dec.Decode(&user); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
 	if user.UpstreamTimeout != nil {
 		d, err := parseYAMLDuration(*user.UpstreamTimeout)
 		if err != nil {
-			return nil, fmt.Errorf("parse config %s: upstream_timeout: %w", path, err)
+			return nil, err
 		}
 		user.Config.UpstreamTimeout = d
 	}
-	// Fail closed at the trust boundary: validate the user's explicit overlay
-	// before merging, so an out-of-range value is rejected with a clear error
-	// rather than silently dropped. Then validate the merged result too.
+	return &user, nil
+}
+
+func overlayYAMLKey(dst *Config, key string, value any) (loose bool, err error) {
+	raw, err := yaml.Marshal(map[string]any{key: value})
+	if err != nil {
+		return false, err
+	}
+	user, err := decodeUserOverlay(raw, true)
+	if err != nil {
+		user, err = decodeUserOverlay(raw, false)
+		if err != nil {
+			return false, err
+		}
+		loose = true
+	}
+	present := map[string]any{key: value}
 	if err := validateOverlay(&user.Config, present); err != nil {
-		return nil, fmt.Errorf("invalid config %s: %w", path, err)
+		return loose, err
 	}
-	def.mergeOverlay(&user.Config, present)
-	if err := def.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config %s: %w", path, err)
-	}
-	return def, nil
+	dst.mergeOverlay(&user.Config, present)
+	return loose, nil
 }
 
 // parseYAMLDuration accepts Go duration strings ("5m", "0s"). Settings typed
@@ -1335,6 +1421,11 @@ func validateOverlay(u *Config, present map[string]any) error {
 			}
 		}
 		if field.Kind == KindBytes && isSet(field.Key) {
+			switch present[field.Key].(type) {
+			case int, int64, uint64, string, ByteSize:
+			default:
+				return fmt.Errorf("%s: must be a byte size or integer", field.Key)
+			}
 			if _, err := parseByteSize(present[field.Key]); err != nil {
 				return fmt.Errorf("%s: %w", field.Key, err)
 			}

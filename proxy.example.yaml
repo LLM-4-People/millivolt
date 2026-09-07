@@ -2,8 +2,9 @@
 #
 # Every server setting lives here - there are NO hardcoded configurables in the
 # code. All keys are optional; omitting one uses the built-in default (shown for
-# each key below). Every value is validated for type and range on load (a bad
-# value fails startup with a clear error, never silently applied).
+# each key below). Every value is validated for type and range on load. A bad
+# or unknown key is dropped (the default stays) and removed from the file on
+# startup/reload; Settings POST still rejects it. Values are never silently applied.
 #
 # This file is generated from internal/config.Schema (the single registry the
 # dashboard Settings menu also uses). Copy proxy.example.yaml to a private
