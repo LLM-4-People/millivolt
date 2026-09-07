@@ -879,11 +879,9 @@ async function main() {
     check('backup archive actions render in settings',
       !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
       !!d.getElementById('backup-include-config') && !!d.getElementById('backup-include-database'));
-    check('backup restore offers merge or replace',
-      !!d.querySelector('input[name="backup-config-mode"][value="merge"]') &&
-      !!d.querySelector('input[name="backup-config-mode"][value="replace"]') &&
-      !!d.querySelector('input[name="backup-database-mode"][value="merge"]') &&
-      !!d.querySelector('input[name="backup-database-mode"][value="replace"]'));
+    check('download does not show restore merge options',
+      !d.querySelector('input[name="backup-config-mode"]') && !d.querySelector('input[name="backup-database-mode"]') &&
+      !d.getElementById('btn-backup-apply'));
     const originalFetch = w.fetch;
     const origClick = w.HTMLAnchorElement.prototype.click;
     const calls = [];
@@ -929,6 +927,14 @@ async function main() {
     await sleep(20);
     check('backup inspect uses the operator fetch gate',
       calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+    check('restore does not show download actions',
+      !d.getElementById('btn-backup-download') && !d.getElementById('btn-backup-restore') &&
+      !!d.getElementById('btn-backup-apply') && !!d.getElementById('btn-backup-cancel'));
+    check('backup restore offers merge or replace after inspect',
+      !!d.querySelector('input[name="backup-config-mode"][value="merge"]') &&
+      !!d.querySelector('input[name="backup-config-mode"][value="replace"]') &&
+      !!d.querySelector('input[name="backup-database-mode"][value="merge"]') &&
+      !!d.querySelector('input[name="backup-database-mode"][value="replace"]'));
     check('backup inspect lists modified settings vs default',
       !!d.getElementById('backup-preview') &&
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
