@@ -108,6 +108,104 @@ func TestSchemaCategoriesExist(t *testing.T) {
 	}
 }
 
+func TestWriteYAMLRoundTripEachSchemaKey(t *testing.T) {
+	for _, f := range Schema() {
+		t.Run(f.Key, func(t *testing.T) {
+			c := Default()
+			sample := alternateSchemaValue(t, f, c)
+			if err := c.Apply(map[string]any{f.Key: sample}); err != nil {
+				t.Fatalf("Apply %s: %v", f.Key, err)
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate %s: %v", f.Key, err)
+			}
+			if reflect.DeepEqual(c.Map()[f.Key], Default().Map()[f.Key]) {
+				t.Fatalf("sample for %s is still the default", f.Key)
+			}
+			path := filepath.Join(t.TempDir(), "c.yaml")
+			if err := WriteFile(path, c); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reflect.DeepEqual(got.Map()[f.Key], Default().Map()[f.Key]) {
+				t.Fatalf("LoadFile dropped non-default %s: %#v", f.Key, got.Map()[f.Key])
+			}
+			path2 := filepath.Join(t.TempDir(), "round.yaml")
+			if err := WriteFile(path2, got); err != nil {
+				t.Fatal(err)
+			}
+			got2, err := LoadFile(path2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Map(), got2.Map()) {
+				t.Fatalf("WriteYAML/LoadFile is not stable for %s\n got %#v\nwant %#v", f.Key, got2.Map()[f.Key], got.Map()[f.Key])
+			}
+		})
+	}
+}
+
+func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
+	t.Helper()
+	switch f.Kind {
+	case KindBool:
+		return !base.fieldValue(f.Key).(bool)
+	case KindString:
+		if f.Key == "listen" {
+			return "127.0.0.1:9999"
+		}
+		return "alt-" + base.fieldValue(f.Key).(string)
+	case KindInt:
+		n := base.fieldValue(f.Key).(int)
+		for _, cand := range []int{n + 1, n - 1} {
+			trial := base.Clone()
+			trial.fieldRV(f.Key).SetInt(int64(cand))
+			if trial.Validate() == nil {
+				return cand
+			}
+		}
+	case KindBytes:
+		n := int64(base.fieldValue(f.Key).(ByteSize))
+		for _, cand := range []int64{n + 1024, n - 1024} {
+			trial := base.Clone()
+			trial.fieldRV(f.Key).SetInt(cand)
+			if trial.Validate() == nil {
+				return FormatByteSize(cand)
+			}
+		}
+	case KindDuration:
+		d := base.fieldValue(f.Key).(time.Duration)
+		for _, cand := range []time.Duration{d + time.Second, d - time.Second, d + time.Millisecond} {
+			if cand < 0 {
+				continue
+			}
+			trial := base.Clone()
+			trial.fieldRV(f.Key).SetInt(int64(cand))
+			if trial.Validate() == nil {
+				return FormatDuration(cand)
+			}
+		}
+	case KindStrings:
+		if f.Key == "allowed_base_urls" {
+			return []any{"https://api.example.invalid"}
+		}
+		if f.Key == "storm_status_codes" {
+			return []any{"500"}
+		}
+	case KindProviders:
+		return map[string]any{"neutral.example": map[string]any{"cost_keys": []any{"usage.cost"}}}
+	case KindAliases:
+		return map[string]any{"old.example": "new.example"}
+	case KindModelRules:
+		return []any{map[string]any{"mode": "lower"}}
+	}
+	t.Fatalf("no valid non-default sample for %s (%s)", f.Key, f.Kind)
+	return nil
+}
+
 func TestWriteYAMLRoundTripDefault(t *testing.T) {
 	var buf bytes.Buffer
 	if err := WriteYAML(&buf, Default()); err != nil {
@@ -226,7 +324,7 @@ func TestHandlerGetAndPost(t *testing.T) {
 		Effective: func() *Config { return live.Clone() },
 		Overrides: map[string]string{"listen": "127.0.0.1:8081"},
 		Persist: func() ([]string, error) {
-			c, err := LoadFile(path)
+			c, _, err := LoadFileRepair(path)
 			if err != nil {
 				return nil, err
 			}

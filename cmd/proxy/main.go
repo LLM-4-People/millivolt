@@ -115,9 +115,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
-	if len(skipped) > 0 {
-		log.Printf("config: dropped unknown or invalid keys from %s: %s", *configPath, strings.Join(skipped, ", "))
-	}
+	logDroppedConfigKeys(*configPath, skipped)
 	applyCLIOverrides(cfg)
 
 	buf := metrics.NewBuffer(cfg.HistorySize)
@@ -506,13 +504,13 @@ loop:
 	}
 }
 
-// reloadConfig re-reads the config file and hot-applies the reloadable subset
-// to the running proxy with zero dropped requests. It returns the list of
-// startup-bound fields that changed (listen, storage write pipeline, Open/AggAPI
-// query timeout, HTTP server timeouts, history size): those consumers stay at
-// boot values, but the snapshot is still swapped (GET effective shows them)
-// and they are reported as restart_required. The current cfg is updated in
-// place so a second reload diffs against the latest snapshot.
+func logDroppedConfigKeys(path string, skipped []string) {
+	if len(skipped) == 0 {
+		return
+	}
+	log.Printf("config: dropped unknown or invalid keys from %s: %s", path, strings.Join(skipped, ", "))
+}
+
 func applyCLIOverrides(cfg *config.Config) {
 	if liveListenOverride != "" {
 		cfg.Listen = liveListenOverride
@@ -527,6 +525,13 @@ func applyCLIOverrides(cfg *config.Config) {
 	}
 }
 
+// reloadConfig re-reads the config file and hot-applies the reloadable subset
+// to the running proxy with zero dropped requests. It returns the list of
+// startup-bound fields that changed (listen, storage write pipeline, Open/AggAPI
+// query timeout, HTTP server timeouts, history size): those consumers stay at
+// boot values, but the snapshot is still swapped (GET effective shows them)
+// and they are reported as restart_required. The current cfg is updated in
+// place so a second reload diffs against the latest snapshot.
 func reloadConfig() ([]string, error) {
 	liveMu.Lock()
 	defer liveMu.Unlock()
@@ -534,9 +539,7 @@ func reloadConfig() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(dropped) > 0 {
-		log.Printf("config: dropped unknown or invalid keys from %s: %s", liveConfigPath, strings.Join(dropped, ", "))
-	}
+	logDroppedConfigKeys(liveConfigPath, dropped)
 	applyCLIOverrides(fresh)
 	// Compute which startup-bound fields changed (these can't move on a live
 	// process) so we can report them as restart-required. Schema().HotReload

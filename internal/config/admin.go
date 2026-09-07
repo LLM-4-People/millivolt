@@ -36,9 +36,9 @@ type Handler struct {
 	// Overrides are yaml-key → value for CLI flags that must not be written
 	// back into the file (dev instance -listen / -db-path).
 	Overrides map[string]string
-	// Persist is called AFTER a successful WriteFile to hot-apply. Typically
-	// re-reads the file (LoadFile + CLI overrides + Server.Reload). Nil is
-	// write-only (tests).
+	// Persist is called AFTER a successful WriteFile to hot-apply. Production
+	// uses LoadFileRepair + CLI overrides + Server.Reload (a clean WriteFile
+	// is a no-op repair). Nil is write-only (tests).
 	Persist func() (restartRequired []string, err error)
 }
 

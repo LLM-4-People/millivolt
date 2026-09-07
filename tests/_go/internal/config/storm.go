@@ -99,8 +99,11 @@ func TestStormConfigBoundsAndSchema(t *testing.T) {
 				} else if field.key == "storm_max_backoff" {
 					raw += "storm_initial_backoff: 1ms\n"
 				}
-				if _, err := loadStormConfig(t, raw); err != nil {
+				got, err := loadStormConfig(t, raw)
+				if err != nil {
 					t.Errorf("boundary %s: %v", valid, err)
+				} else if !reflect.DeepEqual(got.fieldValue(field.key), valid) {
+					t.Errorf("boundary %s: got %v", valid, got.fieldValue(field.key))
 				}
 			}
 			for _, invalid := range []time.Duration{field.min - 1, field.max + 1} {

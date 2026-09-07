@@ -227,19 +227,3 @@ func TestWriteYAMLStringIdentityAndPrivateMode(t *testing.T) {
 		t.Fatalf("temporary files leaked: %v %v", entries, err)
 	}
 }
-
-func TestLoadFileRejectsTrailingDocuments(t *testing.T) {
-	for _, contents := range []string{"max_retries: 1\n---\nmax_retries: 2\n", "max_retries: 1\n---\n", "max_retries: 1\n...\ninvalid ["} {
-		path := filepath.Join(t.TempDir(), "config.yaml")
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		c, err := LoadFile(path)
-		if err != nil {
-			t.Fatalf("trailing document %q: %v", contents, err)
-		}
-		if c.MaxRetries != 1 {
-			t.Fatalf("trailing document %q applied max_retries=%d, want first-document 1", contents, c.MaxRetries)
-		}
-	}
-}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strconv"
@@ -585,233 +586,29 @@ func yamlKeySet(present map[string]any, key string) bool {
 	return ok
 }
 
-// mergeOverlay copies fields whose YAML keys appear in present onto c. A
-// config file only sets the keys it overrides; omitted keys keep Default().
-// Presence is the decoded key set - not Go zero values - so an explicit 0,
-// empty string, or false survives Settings WriteYAML → LoadFile. Slices
-// replace; provider maps merge by key.
+// mergeOverlay copies Schema keys that appear in present from src onto c.
+// Omitted keys keep Default(). Maps merge by key; slices and scalars replace.
 func (c *Config) mergeOverlay(src *Config, present map[string]any) {
-	has := func(key string) bool { return yamlKeySet(present, key) }
-	if has("listen") {
-		c.Listen = src.Listen
-	}
-	if has("db_path") {
-		c.DBPath = src.DBPath
-	}
-	if has("history_size") {
-		c.HistorySize = src.HistorySize
-	}
-	if has("shutdown_timeout") {
-		c.ShutdownTimeout = src.ShutdownTimeout
-	}
-	if has("restart_drain_timeout") {
-		c.RestartDrainTimeout = src.RestartDrainTimeout
-	}
-	if has("max_request_bytes") {
-		c.MaxRequestBytes = src.MaxRequestBytes
-	}
-	if has("upstream_timeout") {
-		c.UpstreamTimeout = src.UpstreamTimeout
-	}
-	if has("models_discovery_timeout") {
-		c.ModelsDiscoveryTimeout = src.ModelsDiscoveryTimeout
-	}
-	if has("models_discovery_max_bytes") {
-		c.ModelsDiscoveryMaxBytes = src.ModelsDiscoveryMaxBytes
-	}
-	if has("models_discovery_max_pages") {
-		c.ModelsDiscoveryMaxPages = src.ModelsDiscoveryMaxPages
-	}
-	if has("allowed_base_urls") {
-		c.AllowedBaseURLs = src.AllowedBaseURLs
-	}
-	if has("capture_body_preview") {
-		c.CaptureBodyPreview = src.CaptureBodyPreview
-	}
-	if has("debug_capture_ttl") {
-		c.DebugCaptureTTL = src.DebugCaptureTTL
-	}
-	if has("debug_capture_max_bytes") {
-		c.DebugCaptureMaxBytes = src.DebugCaptureMaxBytes
-	}
-	if has("auto_token_refresh") {
-		c.AutoTokenRefresh = src.AutoTokenRefresh
-	}
-	if has("max_conns_per_host") {
-		c.MaxConnsPerHost = src.MaxConnsPerHost
-	}
-	if has("max_idle_conns") {
-		c.MaxIdleConns = src.MaxIdleConns
-	}
-	if has("max_idle_conns_per_host") {
-		c.MaxIdleConnsPerHost = src.MaxIdleConnsPerHost
-	}
-	if has("idle_conn_timeout") {
-		c.IdleConnTimeout = src.IdleConnTimeout
-	}
-	if has("max_concurrent") {
-		c.MaxConcurrent = src.MaxConcurrent
-	}
-	if has("max_queue_size") {
-		c.MaxQueueSize = src.MaxQueueSize
-	}
-	if has("max_queue_wait") {
-		c.MaxQueueWait = src.MaxQueueWait
-	}
-	if has("max_retries") {
-		c.MaxRetries = src.MaxRetries
-	}
-	if has("queue_retry_after") {
-		c.QueueRetryAfter = src.QueueRetryAfter
-	}
-	if has("base_backoff") {
-		c.BaseBackoff = src.BaseBackoff
-	}
-	if has("max_backoff") {
-		c.MaxBackoff = src.MaxBackoff
-	}
-	if has("quality_retries") {
-		c.QualityRetries = src.QualityRetries
-	}
-	if has("storm_enabled") {
-		c.StormEnabled = src.StormEnabled
-	}
-	if has("storm_provider_enabled") {
-		c.StormProviderEnabled = src.StormProviderEnabled
-	}
-	if has("storm_model_enabled") {
-		c.StormModelEnabled = src.StormModelEnabled
-	}
-	if has("storm_banner_enabled") {
-		c.StormBannerEnabled = src.StormBannerEnabled
-	}
-	if has("storm_window") {
-		c.StormWindow = src.StormWindow
-	}
-	if has("storm_min_samples") {
-		c.StormMinSamples = src.StormMinSamples
-	}
-	if has("storm_error_percent") {
-		c.StormErrorPercent = src.StormErrorPercent
-	}
-	if has("storm_initial_backoff") {
-		c.StormInitialBackoff = src.StormInitialBackoff
-	}
-	if has("storm_max_backoff") {
-		c.StormMaxBackoff = src.StormMaxBackoff
-	}
-	if has("storm_backoff_multiplier") {
-		c.StormBackoffMultiplier = src.StormBackoffMultiplier
-	}
-	if has("storm_jitter_percent") {
-		c.StormJitterPercent = src.StormJitterPercent
-	}
-	if has("storm_recovery_successes") {
-		c.StormRecoverySuccesses = src.StormRecoverySuccesses
-	}
-	if has("storm_max_queue") {
-		c.StormMaxQueue = src.StormMaxQueue
-	}
-	if has("storm_max_wait") {
-		c.StormMaxWait = src.StormMaxWait
-	}
-	if has("storm_max_scopes") {
-		c.StormMaxScopes = src.StormMaxScopes
-	}
-	if has("storm_max_retries") {
-		c.StormMaxRetries = src.StormMaxRetries
-	}
-	if has("storm_status_codes") {
-		c.StormStatusCodes = src.StormStatusCodes
-	}
-	if has("storm_transport_errors") {
-		c.StormTransportErrors = src.StormTransportErrors
-	}
-	if has("storm_stream_errors") {
-		c.StormStreamErrors = src.StormStreamErrors
-	}
-	if has("conversation_idle_gap") {
-		c.ConversationIdleGap = src.ConversationIdleGap
-	}
-	if has("conversation_max_open") {
-		c.ConversationMaxOpen = src.ConversationMaxOpen
-	}
-	if has("anthropic_default_max_tokens") {
-		c.AnthropicDefaultMaxTokens = src.AnthropicDefaultMaxTokens
-	}
-	if has("cursor_default_context_window") {
-		c.CursorDefaultContextWindow = src.CursorDefaultContextWindow
-	}
-	if has("cursor_park_ttl") {
-		c.CursorParkTTL = src.CursorParkTTL
-	}
-	if has("cursor_heartbeat_interval") {
-		c.CursorHeartbeatInterval = src.CursorHeartbeatInterval
-	}
-	if has("storage_write_chan_cap") {
-		c.StorageWriteChanCap = src.StorageWriteChanCap
-	}
-	if has("storage_batch_cap") {
-		c.StorageBatchCap = src.StorageBatchCap
-	}
-	if has("storage_flush_interval") {
-		c.StorageFlushInterval = src.StorageFlushInterval
-	}
-	if has("storage_query_timeout") {
-		c.StorageQueryTimeout = src.StorageQueryTimeout
-	}
-	if has("storage_query_max_bytes") {
-		c.StorageQueryMaxBytes = src.StorageQueryMaxBytes
-	}
-	if has("storage_query_max_rows") {
-		c.StorageQueryMaxRows = src.StorageQueryMaxRows
-	}
-	if has("read_header_timeout") {
-		c.ReadHeaderTimeout = src.ReadHeaderTimeout
-	}
-	if has("idle_timeout") {
-		c.IdleTimeout = src.IdleTimeout
-	}
-	if has("sse_keepalive_interval") {
-		c.SSEKeepaliveInterval = src.SSEKeepaliveInterval
-	}
-	if has("dash_log_rows") {
-		c.DashLogRows = src.DashLogRows
-	}
-	if has("dash_poll_interval") {
-		c.DashPollInterval = src.DashPollInterval
-	}
-	if has("dash_chart_refresh") {
-		c.DashChartRefresh = src.DashChartRefresh
-	}
-	if has("dash_explorer_stale") {
-		c.DashExplorerStale = src.DashExplorerStale
-	}
-	// Per-provider overrides merge by provider key so a file can add/override a
-	// single provider without restating the whole map.
-	if has("providers") {
-		if c.Providers == nil {
-			c.Providers = map[string]ProviderOverride{}
+	for _, f := range Schema() {
+		if !yamlKeySet(present, f.Key) {
+			continue
 		}
-		for k, v := range src.Providers {
-			c.Providers[k] = v
+		dst := c.fieldRV(f.Key)
+		from := src.fieldRV(f.Key)
+		if !dst.IsValid() || !from.IsValid() || !dst.CanSet() {
+			continue
 		}
-	}
-	// Provider aliases merge by key under the same rule (the base is Default(),
-	// whose map is nil, so a file's map always lands verbatim).
-	if has("provider_aliases") {
-		if c.ProviderAliases == nil {
-			c.ProviderAliases = map[string]string{}
+		if dst.Kind() == reflect.Map {
+			if dst.IsNil() {
+				dst.Set(reflect.MakeMap(dst.Type()))
+			}
+			iter := from.MapRange()
+			for iter.Next() {
+				dst.SetMapIndex(iter.Key(), iter.Value())
+			}
+			continue
 		}
-		for k, v := range src.ProviderAliases {
-			c.ProviderAliases[k] = v
-		}
-	}
-	// Model canonicalization rules replace the list wholesale on presence
-	// (like every other slice) - a written empty list really means "no
-	// rules" (exact grouping), not "keep the default pipeline".
-	if has("model_rules") {
-		c.ModelRules = src.ModelRules
+		dst.Set(from)
 	}
 }
 
@@ -928,13 +725,13 @@ func (c *Config) Validate() error {
 	if c.StorageWriteChanCap < 1 || c.StorageBatchCap < 1 || c.StorageBatchCap > c.StorageWriteChanCap {
 		return fmt.Errorf("storage_batch_cap (%d) must be 1..storage_write_chan_cap (%d)", c.StorageBatchCap, c.StorageWriteChanCap)
 	}
-	if err := validateModelsDiscovery(c, nil, false); err != nil {
+	if err := validateModelsDiscovery(c); err != nil {
 		return err
 	}
-	if err := validateQueryLimits(c, nil, false); err != nil {
+	if err := validateQueryLimits(c); err != nil {
 		return err
 	}
-	if err := validateStorm(c, nil, false); err != nil {
+	if err := validateStorm(c); err != nil {
 		return err
 	}
 	// durations: negatives are always invalid. 0 is meaningful where documented
@@ -1120,7 +917,25 @@ type userFile struct {
 const (
 	skippedExtraDocument = "(extra yaml document)"
 	skippedUnparseable   = "(unparseable yaml)"
+	invalidConfigSuffix  = ".invalid"
 )
+
+// configParseError is a YAML syntax/shape failure. LoadFileRepair moves the
+// original aside and writes Default(); other load errors fail closed.
+type configParseError struct {
+	Path string
+	Err  error
+}
+
+func (e *configParseError) Error() string {
+	return fmt.Sprintf("parse config %s: %s", e.Path, e.Err)
+}
+
+func (e *configParseError) Unwrap() error { return e.Err }
+
+func parseConfig(path string, err error) error {
+	return &configParseError{Path: path, Err: err}
+}
 
 // LoadFile reads the YAML config at path (may be empty) and merges recognized,
 // valid keys over the built-in defaults. A missing file yields the defaults.
@@ -1128,20 +943,21 @@ const (
 // a typo cannot block boot; Settings POST still rejects those inputs. This
 // read path does not rewrite the file.
 func LoadFile(path string) (*Config, error) {
-	cfg, _, _, err := loadYAMLFile(path)
+	cfg, _, err := loadYAMLFile(path)
 	return cfg, err
 }
 
 // LoadFileRepair is LoadFile, then persists a cleaned document when anything
-// was dropped. Unparseable files are moved aside to path+".invalid" and
-// replaced with Default(). Healthcheck and print-only paths must not call this.
+// was dropped. Unparseable files are moved aside to path+invalidConfigSuffix
+// and replaced with Default(). Healthcheck and print-only paths must not call this.
 func LoadFileRepair(path string) (*Config, []string, error) {
-	cfg, skipped, dirty, err := loadYAMLFile(path)
+	cfg, skipped, err := loadYAMLFile(path)
 	if err != nil {
-		if path == "" || !strings.Contains(err.Error(), "parse config ") {
+		var parseErr *configParseError
+		if path == "" || !errors.As(err, &parseErr) {
 			return nil, nil, err
 		}
-		invalidPath := path + ".invalid"
+		invalidPath := path + invalidConfigSuffix
 		_ = os.Remove(invalidPath)
 		if rerr := os.Rename(path, invalidPath); rerr != nil {
 			return nil, nil, fmt.Errorf("repair config %s: %w", path, rerr)
@@ -1152,7 +968,7 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		}
 		return cfg, []string{skippedUnparseable}, nil
 	}
-	if dirty && path != "" {
+	if len(skipped) > 0 && path != "" {
 		if err := WriteFile(path, cfg); err != nil {
 			return cfg, skipped, fmt.Errorf("repair config %s: %w", path, err)
 		}
@@ -1160,68 +976,159 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 	return cfg, skipped, nil
 }
 
-func loadYAMLFile(path string) (*Config, []string, bool, error) {
+func loadYAMLFile(path string) (*Config, []string, error) {
 	def := Default()
 	if path == "" {
-		return def, nil, false, def.Validate()
+		return def, nil, def.Validate()
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return def, nil, false, nil
+			return def, nil, nil
 		}
-		return nil, nil, false, fmt.Errorf("read config: %w", err)
+		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(b))
-	var first any
+	var first yaml.Node
 	if err := dec.Decode(&first); err != nil && !errors.Is(err, io.EOF) {
-		return nil, nil, false, fmt.Errorf("parse config %s: %w", path, err)
+		return nil, nil, parseConfig(path, err)
 	}
 	var skipped []string
-	dirty := false
-	var extra any
+	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		skipped = append(skipped, skippedExtraDocument)
-		dirty = true
 	}
-	present, _ := first.(map[string]any)
-	if first != nil && present == nil {
-		return nil, nil, false, fmt.Errorf("parse config %s: document must be a YAML mapping", path)
+	mapping, err := yamlDocumentMapping(&first)
+	if err != nil {
+		return nil, nil, parseConfig(path, err)
+	}
+	present, nodes, err := yamlMappingValues(mapping)
+	if err != nil {
+		return nil, nil, parseConfig(path, err)
 	}
 	if len(present) == 0 {
-		return def, skipped, dirty, nil
+		return def, skipped, nil
 	}
 	keys := make([]string, 0, len(present))
 	for key := range present {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	cfg := def
+	var accepted []string
 	for _, key := range keys {
 		if FieldByKey(key) == nil {
 			skipped = append(skipped, key)
-			dirty = true
 			continue
 		}
-		trial := cfg.Clone()
-		loose, err := overlayYAMLKey(trial, key, present[key])
+		loose, err := overlayYAMLKey(def.Clone(), key, nodes[key], present[key])
 		if err != nil {
 			skipped = append(skipped, key)
-			dirty = true
-			continue
-		}
-		if err := trial.Validate(); err != nil {
-			skipped = append(skipped, key)
-			dirty = true
 			continue
 		}
 		if loose {
 			skipped = append(skipped, key+" (unknown fields)")
-			dirty = true
 		}
-		cfg = trial
+		accepted = append(accepted, key)
 	}
-	return cfg, skipped, dirty, nil
+	cfg, dropped := keepYAMLKeys(def, present, nodes, accepted)
+	skipped = append(skipped, dropped...)
+	return cfg, skipped, nil
+}
+
+func yamlResolved(n *yaml.Node) *yaml.Node {
+	for n != nil && n.Kind == yaml.AliasNode && n.Alias != nil {
+		n = n.Alias
+	}
+	return n
+}
+
+func yamlDocumentMapping(n *yaml.Node) (*yaml.Node, error) {
+	n = yamlResolved(n)
+	if n == nil || n.Kind == 0 {
+		return nil, nil
+	}
+	if n.Kind == yaml.DocumentNode {
+		if len(n.Content) == 0 {
+			return nil, nil
+		}
+		n = yamlResolved(n.Content[0])
+	}
+	if n == nil || n.Kind == 0 || (n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null") {
+		return nil, nil
+	}
+	if n.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("document must be a YAML mapping")
+	}
+	return n, nil
+}
+
+func yamlMappingValues(n *yaml.Node) (map[string]any, map[string]*yaml.Node, error) {
+	present := map[string]any{}
+	nodes := map[string]*yaml.Node{}
+	if n == nil {
+		return present, nodes, nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		keyNode := yamlResolved(n.Content[i])
+		valNode := yamlResolved(n.Content[i+1])
+		if keyNode == nil || keyNode.Kind != yaml.ScalarNode {
+			return nil, nil, fmt.Errorf("document must be a YAML mapping")
+		}
+		key := keyNode.Value
+		var v any
+		if valNode == nil {
+			present[key] = nil
+			nodes[key] = n.Content[i+1]
+			continue
+		}
+		if err := valNode.Decode(&v); err != nil {
+			return nil, nil, err
+		}
+		present[key] = v
+		nodes[key] = valNode
+	}
+	return present, nodes, nil
+}
+
+func keepYAMLKeys(def *Config, present map[string]any, nodes map[string]*yaml.Node, accepted []string) (*Config, []string) {
+	kept := make([]string, 0, len(accepted))
+	cfg := def.Clone()
+	try := func(key string) bool {
+		trial := append(append([]string{}, kept...), key)
+		merged, err := mergeYAMLKeys(def, present, nodes, trial)
+		if err != nil {
+			return false
+		}
+		kept = trial
+		cfg = merged
+		return true
+	}
+	var deferred []string
+	for _, key := range accepted {
+		if !try(key) {
+			deferred = append(deferred, key)
+		}
+	}
+	var skipped []string
+	for _, key := range deferred {
+		if !try(key) {
+			skipped = append(skipped, key)
+		}
+	}
+	return cfg, skipped
+}
+
+func mergeYAMLKeys(base *Config, present map[string]any, nodes map[string]*yaml.Node, keys []string) (*Config, error) {
+	cfg := base.Clone()
+	for _, key := range keys {
+		if _, err := overlayYAMLKey(cfg, key, nodes[key], present[key]); err != nil {
+			return nil, err
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 func decodeUserOverlay(raw []byte, strict bool) (*userFile, error) {
@@ -1241,8 +1148,25 @@ func decodeUserOverlay(raw []byte, strict bool) (*userFile, error) {
 	return &user, nil
 }
 
-func overlayYAMLKey(dst *Config, key string, value any) (loose bool, err error) {
-	raw, err := yaml.Marshal(map[string]any{key: value})
+func overlayYAMLKey(dst *Config, key string, valueNode *yaml.Node, value any) (loose bool, err error) {
+	field := FieldByKey(key)
+	if field == nil {
+		return false, fmt.Errorf("unknown config key %q", key)
+	}
+	if err := checkYAMLType(*field, value); err != nil {
+		return false, err
+	}
+	if valueNode == nil {
+		return false, fmt.Errorf("%s: missing yaml node", key)
+	}
+	raw, err := yaml.Marshal(&yaml.Node{
+		Kind: yaml.MappingNode,
+		Tag:  "!!map",
+		Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			valueNode,
+		},
+	})
 	if err != nil {
 		return false, err
 	}
@@ -1254,11 +1178,7 @@ func overlayYAMLKey(dst *Config, key string, value any) (loose bool, err error) 
 		}
 		loose = true
 	}
-	present := map[string]any{key: value}
-	if err := validateOverlay(&user.Config, present); err != nil {
-		return loose, err
-	}
-	dst.mergeOverlay(&user.Config, present)
+	dst.mergeOverlay(&user.Config, map[string]any{key: value})
 	return loose, nil
 }
 
@@ -1284,8 +1204,8 @@ func (c *Config) RetryAfterSeconds() int {
 	return int(c.QueueRetryAfter / time.Second)
 }
 
-// validateModelsDiscovery shares full/overlay checks for one request budget.
-func validateModelsDiscovery(c *Config, present map[string]any, overlay bool) error {
+// validateModelsDiscovery checks the one-request metadata budget.
+func validateModelsDiscovery(c *Config) error {
 	for _, limit := range [...]struct {
 		key             string
 		value, min, max int64
@@ -1294,9 +1214,6 @@ func validateModelsDiscovery(c *Config, present map[string]any, overlay bool) er
 		{"models_discovery_max_bytes", int64(c.ModelsDiscoveryMaxBytes), ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
 		{"models_discovery_max_pages", int64(c.ModelsDiscoveryMaxPages), ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
 	} {
-		if overlay && !yamlKeySet(present, limit.key) {
-			continue
-		}
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "models_discovery_timeout" {
 				return fmt.Errorf("%s: must be %s..%s, got %s", limit.key, FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax), FormatDuration(c.ModelsDiscoveryTimeout))
@@ -1310,8 +1227,7 @@ func validateModelsDiscovery(c *Config, present map[string]any, overlay bool) er
 	return nil
 }
 
-// validateQueryLimits shares the range checks between full and overlay config.
-func validateQueryLimits(c *Config, present map[string]any, overlay bool) error {
+func validateQueryLimits(c *Config) error {
 	for _, limit := range [...]struct {
 		key             string
 		value, min, max int
@@ -1319,9 +1235,6 @@ func validateQueryLimits(c *Config, present map[string]any, overlay bool) error 
 		{"storage_query_max_bytes", int(c.StorageQueryMaxBytes), StorageQueryMaxBytesMin, StorageQueryMaxBytesMax},
 		{"storage_query_max_rows", c.StorageQueryMaxRows, StorageQueryMaxRowsMin, StorageQueryMaxRowsMax},
 	} {
-		if overlay && !yamlKeySet(present, limit.key) {
-			continue
-		}
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "storage_query_max_bytes" {
 				return checkByteSize(limit.key, ByteSize(limit.value), int64(limit.min), int64(limit.max))
@@ -1332,34 +1245,7 @@ func validateQueryLimits(c *Config, present map[string]any, overlay bool) error 
 	return nil
 }
 
-// validateStorm shares full and presence-aware validation. YAML types for
-// bools and string lists are checked here because yaml.v3 accepts null
-// scalars and coerces non-string list entries into strings. Duration strings
-// are owned by validateOverlay (every KindDuration key).
-func validateStorm(c *Config, present map[string]any, overlay bool) error {
-	if overlay {
-		for _, field := range Schema() {
-			if field.Category != "storm" || !yamlKeySet(present, field.Key) {
-				continue
-			}
-			switch field.Kind {
-			case KindBool:
-				if _, ok := present[field.Key].(bool); !ok {
-					return fmt.Errorf("%s: must be a boolean", field.Key)
-				}
-			case KindStrings:
-				items, ok := present[field.Key].([]any)
-				if !ok {
-					return fmt.Errorf("%s: must be a list of strings", field.Key)
-				}
-				for _, item := range items {
-					if _, ok := item.(string); !ok {
-						return fmt.Errorf("%s: every item must be a string", field.Key)
-					}
-				}
-			}
-		}
-	}
+func validateStorm(c *Config) error {
 	for _, limit := range [...]struct {
 		key             string
 		value, min, max int64
@@ -1377,16 +1263,13 @@ func validateStorm(c *Config, present map[string]any, overlay bool) error {
 		{"storm_max_scopes", int64(c.StormMaxScopes), 2, 100000},
 		{"storm_max_retries", int64(c.StormMaxRetries), 0, 1000},
 	} {
-		if overlay && !yamlKeySet(present, limit.key) {
-			continue
-		}
 		if limit.value < limit.min || limit.value > limit.max {
 			field := FieldByKey(limit.key)
 			return fmt.Errorf("%s: must be %s..%s, got %s", limit.key,
 				field.formatBound(float64(limit.min)), field.formatBound(float64(limit.max)), field.formatBound(float64(limit.value)))
 		}
 	}
-	if !overlay && c.StormInitialBackoff > c.StormMaxBackoff {
+	if c.StormInitialBackoff > c.StormMaxBackoff {
 		return fmt.Errorf("storm_initial_backoff (%s) cannot exceed storm_max_backoff (%s)", FormatDuration(c.StormInitialBackoff), FormatDuration(c.StormMaxBackoff))
 	}
 	seen := make(map[string]bool, len(c.StormStatusCodes))
@@ -1402,178 +1285,86 @@ func validateStorm(c *Config, present map[string]any, overlay bool) error {
 	return nil
 }
 
-// validateOverlay rejects explicitly-set values before mergeOverlay. Missing
-// fields remain absent, while written zero/sub-floor values cannot disappear.
-// Relationships depending on the merged result remain in Validate.
-func validateOverlay(u *Config, present map[string]any) error {
-	isSet := func(yamlKey string) bool { return yamlKeySet(present, yamlKey) }
-	// yaml.v3 otherwise truncates float scalars into integer fields. Schema
-	// is the existing type owner; never allow a written fractional value (or
-	// null) to become a different setting. KindBytes accepts a size string or
-	// integer. KindDuration must be a Go duration string: a YAML integer would
-	// decode as nanoseconds on time.Duration.
-	for _, field := range Schema() {
-		if field.Kind == KindInt && isSet(field.Key) {
-			switch present[field.Key].(type) {
-			case int, int64, uint64:
-			default:
-				return fmt.Errorf("%s: must be an integer", field.Key)
+// checkYAMLType is the YAML type gate. Ranges and cross-field rules live in
+// Validate, which keepYAMLKeys runs on the merged overlay. Schema Kind is
+// the type owner; yaml.v3 must not coerce floats, nulls, or 1.1 bool words.
+func checkYAMLType(field Field, v any) error {
+	switch field.Kind {
+	case KindInt:
+		switch v.(type) {
+		case int, int64, uint64:
+		default:
+			return fmt.Errorf("%s: must be an integer", field.Key)
+		}
+	case KindBytes:
+		switch v.(type) {
+		case int, int64, uint64, string, ByteSize:
+		default:
+			return fmt.Errorf("%s: must be a byte size or integer", field.Key)
+		}
+		if _, err := parseByteSize(v); err != nil {
+			return fmt.Errorf("%s: %w", field.Key, err)
+		}
+	case KindDuration:
+		if _, ok := v.(string); !ok {
+			return fmt.Errorf("%s: must be a duration string", field.Key)
+		}
+	case KindBool:
+		if _, ok := v.(bool); !ok {
+			return fmt.Errorf("%s: must be a boolean", field.Key)
+		}
+	case KindString:
+		if _, ok := v.(string); !ok {
+			return fmt.Errorf("%s: must be a string", field.Key)
+		}
+	case KindStrings:
+		switch items := v.(type) {
+		case []string:
+		case []any:
+			for _, item := range items {
+				if _, ok := item.(string); !ok {
+					return fmt.Errorf("%s: every item must be a string", field.Key)
+				}
+			}
+		default:
+			return fmt.Errorf("%s: must be a list of strings", field.Key)
+		}
+	case KindAliases:
+		switch m := v.(type) {
+		case map[string]string:
+		case map[string]any:
+			for _, item := range m {
+				if _, ok := item.(string); !ok {
+					return fmt.Errorf("%s: every value must be a string", field.Key)
+				}
+			}
+		default:
+			return fmt.Errorf("%s: must be a map of strings", field.Key)
+		}
+	case KindProviders:
+		m, ok := v.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s: must be a map", field.Key)
+		}
+		for _, item := range m {
+			if _, ok := item.(map[string]any); !ok {
+				return fmt.Errorf("%s: each provider must be a map", field.Key)
 			}
 		}
-		if field.Kind == KindBytes && isSet(field.Key) {
-			switch present[field.Key].(type) {
-			case int, int64, uint64, string, ByteSize:
-			default:
-				return fmt.Errorf("%s: must be a byte size or integer", field.Key)
+	case KindModelRules:
+		switch items := v.(type) {
+		case []ModelRule:
+		case []any:
+			for _, item := range items {
+				if _, ok := item.(map[string]any); !ok {
+					return fmt.Errorf("%s: every item must be a map", field.Key)
+				}
 			}
-			if _, err := parseByteSize(present[field.Key]); err != nil {
-				return fmt.Errorf("%s: %w", field.Key, err)
-			}
+		default:
+			return fmt.Errorf("%s: must be a list", field.Key)
 		}
-		if field.Kind == KindDuration && isSet(field.Key) {
-			if _, ok := present[field.Key].(string); !ok {
-				return fmt.Errorf("%s: must be a duration string", field.Key)
-			}
-		}
-	}
-	if err := validateModelsDiscovery(u, present, true); err != nil {
-		return err
-	}
-	if err := validateQueryLimits(u, present, true); err != nil {
-		return err
-	}
-	if err := validateStorm(u, present, true); err != nil {
-		return err
-	}
-
-	// Non-negative ints (0 = unlimited/omit/no-retries for the fields that allow 0).
-	nonNeg := []struct {
-		yaml string
-		v    int
-	}{
-		{"max_conns_per_host", u.MaxConnsPerHost},
-		{"max_idle_conns", u.MaxIdleConns},
-		{"max_concurrent", u.MaxConcurrent},
-		{"max_queue_size", u.MaxQueueSize},
-		{"max_retries", u.MaxRetries},
-		{"history_size", u.HistorySize},
-		{"conversation_max_open", u.ConversationMaxOpen},
-		{"anthropic_default_max_tokens", u.AnthropicDefaultMaxTokens},
-		{"cursor_default_context_window", u.CursorDefaultContextWindow},
-		{"storage_write_chan_cap", u.StorageWriteChanCap},
-		{"storage_batch_cap", u.StorageBatchCap},
-		{"dash_log_rows", u.DashLogRows},
-	}
-	for _, f := range nonNeg {
-		if f.v < 0 {
-			return fmt.Errorf("%s: must be >= 0, got %d", f.yaml, f.v)
-		}
-	}
-	if isSet("max_request_bytes") {
-		if err := checkByteSize("max_request_bytes", u.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
-			return err
-		}
-	}
-	// Positive-floor ints: a written 0 is nonsense (rejected); absent is fine
-	// (the default applies). Detect "written as 0" via key presence.
-	posFloor := []struct {
-		yaml string
-		v    int
-	}{
-		{"history_size", u.HistorySize},
-		{"conversation_max_open", u.ConversationMaxOpen},
-		{"anthropic_default_max_tokens", u.AnthropicDefaultMaxTokens},
-		{"storage_write_chan_cap", u.StorageWriteChanCap},
-		{"storage_batch_cap", u.StorageBatchCap},
-		{"dash_log_rows", u.DashLogRows},
-		{"max_idle_conns_per_host", u.MaxIdleConnsPerHost},
-	}
-	for _, f := range posFloor {
-		if isSet(f.yaml) && f.v <= 0 {
-			return fmt.Errorf("%s: must be > 0, got %d", f.yaml, f.v)
-		}
-	}
-	// A written zero/negative cursor_park_ttl is nonsense; absent keeps the default.
-	if isSet("cursor_park_ttl") && u.CursorParkTTL <= 0 {
-		return fmt.Errorf("cursor_park_ttl: must be > %s when set", FormatDuration(0))
-	}
-	// Same for a written-out-of-range heartbeat interval.
-	if isSet("cursor_heartbeat_interval") && (u.CursorHeartbeatInterval < HeartbeatIntervalMin || u.CursorHeartbeatInterval > HeartbeatIntervalMax) {
-		return fmt.Errorf("cursor_heartbeat_interval: must be %s when set", heartbeatRange())
-	}
-	if isSet("sse_keepalive_interval") && (u.SSEKeepaliveInterval < HeartbeatIntervalMin || u.SSEKeepaliveInterval > HeartbeatIntervalMax) {
-		return fmt.Errorf("sse_keepalive_interval: must be %s when set", heartbeatRange())
-	}
-	if isSet("dash_log_rows") && (u.DashLogRows < DashLogRowsMin || u.DashLogRows > DashLogRowsMax) {
-		return fmt.Errorf("dash_log_rows: must be %d..%d when set, got %d", DashLogRowsMin, DashLogRowsMax, u.DashLogRows)
-	}
-	if isSet("dash_poll_interval") && u.DashPollInterval <= 0 {
-		return fmt.Errorf("dash_poll_interval: must be > %s when set", FormatDuration(0))
-	}
-	if isSet("dash_chart_refresh") && u.DashChartRefresh <= 0 {
-		return fmt.Errorf("dash_chart_refresh: must be > %s when set", FormatDuration(0))
-	}
-	if isSet("dash_explorer_stale") && u.DashExplorerStale <= 0 {
-		return fmt.Errorf("dash_explorer_stale: must be > %s when set", FormatDuration(0))
-	}
-	// quality_retries allows an explicit 0 (meaningful: disables), so only
-	// out-of-range values are rejected.
-	if isSet("quality_retries") && (u.QualityRetries < 0 || u.QualityRetries > QualityRetriesMax) {
-		return fmt.Errorf("quality_retries: must be 0..%d when set, got %d", QualityRetriesMax, u.QualityRetries)
-	}
-	if isSet("debug_capture_ttl") && (u.DebugCaptureTTL < DebugCaptureTTLMin || u.DebugCaptureTTL > DebugCaptureTTLMax) {
-		return fmt.Errorf("debug_capture_ttl: must be %s..%s when set, got %s", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(u.DebugCaptureTTL))
-	}
-	if isSet("debug_capture_max_bytes") {
-		if err := checkByteSize("debug_capture_max_bytes", u.DebugCaptureMaxBytes, DebugCaptureMaxBytesMin, DebugCaptureMaxBytesMax); err != nil {
-			return err
-		}
-	}
-	if isSet("queue_retry_after") {
-		if err := checkQueueRetryAfter(u.QueueRetryAfter); err != nil {
-			return err
-		}
-	}
-	// Any negative duration is always invalid when written.
-	durs := []struct {
-		yaml string
-		d    time.Duration
-	}{
-		{"shutdown_timeout", u.ShutdownTimeout},
-		{"restart_drain_timeout", u.RestartDrainTimeout},
-		{"upstream_timeout", u.UpstreamTimeout},
-		{"idle_conn_timeout", u.IdleConnTimeout},
-		{"max_queue_wait", u.MaxQueueWait},
-		{"base_backoff", u.BaseBackoff},
-		{"max_backoff", u.MaxBackoff},
-		{"conversation_idle_gap", u.ConversationIdleGap},
-		{"storage_flush_interval", u.StorageFlushInterval},
-		{"storage_query_timeout", u.StorageQueryTimeout},
-		{"read_header_timeout", u.ReadHeaderTimeout},
-		{"idle_timeout", u.IdleTimeout},
-		{"debug_capture_ttl", u.DebugCaptureTTL},
-		{"queue_retry_after", u.QueueRetryAfter},
-	}
-	for _, f := range durs {
-		if f.d < 0 {
-			return fmt.Errorf("%s: duration must be >= 0, got %s", f.yaml, FormatDuration(f.d))
-		}
-	}
-	posDurWhenSet := []struct {
-		yaml string
-		d    time.Duration
-	}{
-		{"shutdown_timeout", u.ShutdownTimeout},
-		{"base_backoff", u.BaseBackoff},
-		{"max_backoff", u.MaxBackoff},
-		{"conversation_idle_gap", u.ConversationIdleGap},
-		{"storage_flush_interval", u.StorageFlushInterval},
-		{"storage_query_timeout", u.StorageQueryTimeout},
-	}
-	for _, f := range posDurWhenSet {
-		if isSet(f.yaml) && f.d <= 0 {
-			return fmt.Errorf("%s: must be > %s when set, got %s", f.yaml, FormatDuration(0), FormatDuration(f.d))
-		}
+	default:
+		return fmt.Errorf("%s: unsupported kind %q", field.Key, field.Kind)
 	}
 	return nil
 }

@@ -434,12 +434,19 @@ func TestLoadFileRepairUnparseable(t *testing.T) {
 	if !reflect.DeepEqual(c.Map(), Default().Map()) {
 		t.Fatal("unparseable repair must yield defaults")
 	}
-	preserved, err := os.ReadFile(p + ".invalid")
+	preserved, err := os.ReadFile(p + invalidConfigSuffix)
 	if err != nil || !bytes.Equal(preserved, raw) {
 		t.Fatalf("invalid original not preserved: %v %q", err, preserved)
 	}
-	if _, err := LoadFile(p); err != nil {
+	if _, err := os.Stat(p); err != nil {
+		t.Fatalf("replacement file missing: %v", err)
+	}
+	got, err := LoadFile(p)
+	if err != nil {
 		t.Fatalf("repaired file still unreadable: %v", err)
+	}
+	if !reflect.DeepEqual(got.Map(), Default().Map()) {
+		t.Fatal("replacement file is not Default()")
 	}
 }
 
@@ -533,18 +540,111 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"bad duration syntax", "upstream_timeout: notaduration"},
 		{"bad type for int", "max_retries: five"},
 		{"bad type for bool", "capture_body_preview: maybe"},
+		{"int as float", "anthropic_default_max_tokens: 4096.0"},
+		{"auto token refresh null", "auto_token_refresh: null"},
+		{"auto token refresh yes", "auto_token_refresh: yes"},
+		{"auto token refresh no", "auto_token_refresh: no"},
+		{"listen integer", "listen: 8080"},
+		{"providers null", "providers: null"},
+		{"model_rules null", "model_rules: null"},
 		{"provider alias self-map", "provider_aliases:\n  old.example: old.example"},
 		{"provider alias chain", "provider_aliases:\n  a.example: b.example\n  b.example: c.example"},
 		{"provider alias empty target", "provider_aliases:\n  old.example: \"\""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := filepath.Join(t.TempDir(), "c.yaml")
-			if err := os.WriteFile(p, []byte(tc.yaml), 0o644); err != nil {
-				t.Fatal(err)
+			body := strings.TrimSpace(tc.yaml) + "\n"
+			if strings.Contains(strings.TrimSuffix(body, "\n"), "\n") {
+				loadFileOK(t, body)
+				return
 			}
-			loadFileOK(t, tc.yaml+"\n")
+			key := strings.TrimSpace(strings.SplitN(body, ":", 2)[0])
+			assertOverlaySkipped(t, body, key)
 		})
+	}
+}
+
+func TestLoadFileKeepsRelatedKeys(t *testing.T) {
+	c := loadFileOK(t, "max_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
+	if c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("pool overlay = %d/%d, want 10/8", c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
+	}
+	c = loadFileOK(t, "base_backoff: 5m\nmax_backoff: 10m\n")
+	if c.BaseBackoff != 5*time.Minute || c.MaxBackoff != 10*time.Minute {
+		t.Fatalf("backoff overlay = %v/%v, want 5m/10m", c.BaseBackoff, c.MaxBackoff)
+	}
+	c = loadFileOK(t, "storm_initial_backoff: 1h\nstorm_max_backoff: 1h\n")
+	if c.StormInitialBackoff != time.Hour || c.StormMaxBackoff != time.Hour {
+		t.Fatalf("storm backoff overlay = %v/%v, want 1h/1h", c.StormInitialBackoff, c.StormMaxBackoff)
+	}
+	c = loadFileOK(t, "storage_write_chan_cap: 20000\nstorage_batch_cap: 10000\n")
+	if c.StorageWriteChanCap != 20000 || c.StorageBatchCap != 10000 {
+		t.Fatalf("storage overlay = %d/%d, want 20000/10000", c.StorageWriteChanCap, c.StorageBatchCap)
+	}
+	c = loadFileOK(t, "listen: 8080\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
+	if c.Listen != Default().Listen || c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("invalid listen split the pool: listen=%q pool=%d/%d", c.Listen, c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
+	}
+	c = loadFileOK(t, "max_conns_per_host: 10\nmax_idle_conns_per_host: 8\nbase_backoff: 10m\nmax_backoff: 1m\n")
+	if c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("conflicting backoff split the pool: %d/%d", c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
+	}
+	c = loadFileOK(t, "listen: 8080\nallowed_base_urls:\n  - api.openai.com\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
+	if c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("two independent invalid keys wiped the pool: %d/%d", c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
+	}
+	c = loadFileOK(t, "listen: 8080\nallowed_base_urls:\n  - api.openai.com\nbase_backoff: 5m\nmax_backoff: 10m\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
+	if c.BaseBackoff != 5*time.Minute || c.MaxBackoff != 10*time.Minute || c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("retry pass lost related keys: backoff=%v/%v pool=%d/%d", c.BaseBackoff, c.MaxBackoff, c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
+	}
+}
+
+func TestLoadFileSkipsExtraDocuments(t *testing.T) {
+	for _, contents := range []string{
+		"max_retries: 1\n---\nmax_retries: 2\n",
+		"max_retries: 1\n---\n",
+		"max_retries: 1\n...\ninvalid [",
+	} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		raw := []byte(contents)
+		if err := os.WriteFile(path, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := LoadFile(path)
+		if err != nil {
+			t.Fatalf("extra document %q: %v", contents, err)
+		}
+		if c.MaxRetries != 1 {
+			t.Fatalf("extra document %q applied max_retries=%d, want first-document 1", contents, c.MaxRetries)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(got, raw) {
+			t.Fatalf("LoadFile rewrote extra documents: %v %q", err, got)
+		}
+		repaired, skipped, err := LoadFileRepair(path)
+		if err != nil {
+			t.Fatalf("repair extra document %q: %v", contents, err)
+		}
+		if repaired.MaxRetries != 1 {
+			t.Fatalf("repair extra document %q applied max_retries=%d", contents, repaired.MaxRetries)
+		}
+		if !strings.Contains(strings.Join(skipped, ","), skippedExtraDocument) {
+			t.Fatalf("repair extra document %q skipped=%v", contents, skipped)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want bytes.Buffer
+		if err := WriteYAML(&want, repaired); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(body, want.Bytes()) {
+			t.Fatalf("repair extra document %q did not write the cleaned snapshot", contents)
+		}
+		if bytes.Contains(body, []byte("max_retries: 2\n")) {
+			t.Fatalf("repaired file kept the extra document value:\n%s", body)
+		}
 	}
 }
 
