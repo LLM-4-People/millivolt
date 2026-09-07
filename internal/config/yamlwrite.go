@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // WriteFile atomically replaces path with a complete, schema-commented YAML
@@ -80,8 +81,14 @@ func WriteYAML(w io.Writer, c *Config) error {
 	b.WriteString("#   string    plain text\n")
 	b.WriteString("#   int       integer\n")
 	b.WriteString("#   bool      true / false\n")
-	b.WriteString("#   duration  Go syntax: \"500ms\", \"30s\", \"2m\", \"1h\" (0 = disabled/unlimited\n")
-	b.WriteString("#             where the key notes it)\n")
+	b.WriteString("#   duration  magnitude plus unit: " + FormatDuration(500*time.Millisecond) + ", " +
+		FormatDuration(30*time.Second) + ", " + FormatDuration(2*time.Minute) + ", " + FormatDuration(time.Hour) +
+		" (" + FormatDuration(0) + " where the key\n")
+	b.WriteString("#             notes that zero is allowed)\n")
+	b.WriteString("#   bytes     magnitude plus unit: " + FormatByteSize(int64(Default().MaxRequestBytes)) + ", " +
+		FormatByteSize(DebugCaptureMaxBytesMin) + ", " + FormatByteSize(MaxRequestBytesMax) +
+		" (a bare integer\n")
+	b.WriteString("#             is still accepted as a count of bytes)\n")
 	b.WriteString("#   list      [item, …]   map   key: value\n")
 	b.WriteString("#\n")
 	b.WriteString("# Clients normally supply upstream URLs and credentials per request through\n")
@@ -277,11 +284,18 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 		}
 		b.WriteString(f.Key + ": " + s + "\n")
 		return nil
+	case KindBytes:
+		s, _ := v.(string)
+		if s == "" {
+			s = FormatByteSize(0)
+		}
+		b.WriteString(f.Key + ": " + s + "\n")
+		return nil
 	case KindString:
 		s, _ := v.(string)
 		b.WriteString(f.Key + ": " + yamlQuote(s) + "\n")
 		return nil
-	case KindInt, KindBytes:
+	case KindInt:
 		b.WriteString(f.Key + ": " + fmt.Sprint(v) + "\n")
 		return nil
 	default:

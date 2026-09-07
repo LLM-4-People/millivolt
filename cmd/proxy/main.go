@@ -128,7 +128,7 @@ func main() {
 			BatchCap:      cfg.StorageBatchCap,
 			FlushInterval: cfg.StorageFlushInterval,
 			QueryTimeout:  cfg.StorageQueryTimeout,
-			QueryMaxBytes: cfg.StorageQueryMaxBytes,
+			QueryMaxBytes: int(cfg.StorageQueryMaxBytes),
 			QueryMaxRows:  cfg.StorageQueryMaxRows,
 			// WriteTrackCap is an internal derivation (2x the ring), not a
 			// config knob: the written-id set must cover every record the
@@ -322,7 +322,9 @@ func main() {
 	dash := http.HandlerFunc(web.ServeDash) // immutable assets select precompressed bytes themselves
 	mux.Handle("/{$}", dashboard)
 	mux.Handle("/index.html", dashboard)
-	mux.Handle("/favicon.ico", web.Favicon())
+	for _, p := range web.BrandPaths() {
+		mux.Handle(p, web.Brand(p))
+	}
 	mux.Handle(strings.TrimSuffix(web.DashPrefix, "/"), dash)
 	mux.Handle(web.DashPrefix, dash)
 	mux.Handle("/", proxySrv)

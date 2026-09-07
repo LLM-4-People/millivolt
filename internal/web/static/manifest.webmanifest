@@ -1,0 +1,42 @@
+{
+  "id": "/",
+  "name": "millivolt",
+  "short_name": "millivolt",
+  "description": "Precision instrument on the wire",
+  "lang": "en",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#1b1826",
+  "theme_color": "#1b1826",
+  "prefer_related_applications": false,
+  "launch_handler": { "client_mode": ["focus-existing", "navigate-existing"] },
+  "categories": ["developer", "utilities"],
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

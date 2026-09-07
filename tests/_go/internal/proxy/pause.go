@@ -68,6 +68,24 @@ func TestHandlePauseGetAndPost(t *testing.T) {
 // TestPauseQueuesNewRequestsUntilUnpause is the end-to-end operator-pause
 // contract: an in-flight upstream call finishes, a request that arrives
 // while paused never hits upstream until resume.
+func TestPauseDurationKeysMatchFormatDuration(t *testing.T) {
+	for k, d := range pauseDurations {
+		if k == "" {
+			if d != 0 {
+				t.Errorf("empty pause duration = %s, want 0", d)
+			}
+			continue
+		}
+		if got := config.FormatDuration(d); got != k {
+			t.Errorf("pauseDurations[%q] FormatDuration = %q", k, got)
+		}
+	}
+	err := pauseDurationError()
+	if err == nil || !strings.Contains(err.Error(), "15m") || !strings.Contains(err.Error(), "24h") {
+		t.Fatalf("pauseDurationError = %v", err)
+	}
+}
+
 func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 	var hits atomic.Int32
 	hold := make(chan struct{})

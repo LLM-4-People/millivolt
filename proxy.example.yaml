@@ -17,8 +17,10 @@
 #   string    plain text
 #   int       integer
 #   bool      true / false
-#   duration  Go syntax: "500ms", "30s", "2m", "1h" (0 = disabled/unlimited
-#             where the key notes it)
+#   duration  magnitude plus unit: 500ms, 30s, 2m, 1h (0s where the key
+#             notes that zero is allowed)
+#   bytes     magnitude plus unit: 32MiB, 4KiB, 1GiB (a bare integer
+#             is still accepted as a count of bytes)
 #   list      [item, …]   map   key: value
 #
 # Clients normally supply upstream URLs and credentials per request through
@@ -48,24 +50,24 @@ history_size: 10000
 # draining follows separately. Must be > 0; applies at the next shutdown without
 # restarting the listener.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 5s
+#   type: duration · range > 0s · default 5s
 shutdown_timeout: 5s
 
 # How long a dashboard-triggered restart waits for in-flight streams. Expiry aborts the
 # restart and resumes accepting traffic; unfinished streams are not killed. New
 # connections queue during a successful handoff.
 # Hot-reload: yes.
-#   type: duration · range >= 0 (0 = wait indefinitely) · default 10m
+#   type: duration · range >= 0s (0s = wait indefinitely) · default 10m
 restart_drain_timeout: 10m
 
 # Slowloris guard on inbound headers. Restart required.
 # Hot-reload: NO (restart required).
-#   type: duration · range >= 0 (0 = no timeout) · default 10s
+#   type: duration · range >= 0s (0s = no timeout) · default 10s
 read_header_timeout: 10s
 
 # Keep-alive idle connections. No write timeout (it would kill SSE). Restart required.
 # Hot-reload: NO (restart required).
-#   type: duration · range >= 0 (0 = no timeout) · default 2m
+#   type: duration · range >= 0s (0s = no timeout) · default 2m
 idle_timeout: 2m
 
 # ---- Request ----
@@ -73,8 +75,8 @@ idle_timeout: 2m
 # Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected
 # with 413.
 # Hot-reload: yes.
-#   type: int (bytes) · range 1024..1GiB · default 33554432
-max_request_bytes: 33554432
+#   type: bytes · range 1KiB..1GiB · default 32MiB
+max_request_bytes: 32MiB
 
 # SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted
 # operator). Each entry must be an absolute http:// or https:// URL with a host.
@@ -98,8 +100,8 @@ debug_capture_ttl: 24h
 # Cap on one debug capture (request body plus client-facing response bytes). Past the cap
 # the rest is dropped and the capture is marked truncated.
 # Hot-reload: yes.
-#   type: int (bytes) · range 4KiB..16MiB · default 1048576
-debug_capture_max_bytes: 1048576
+#   type: bytes · range 4KiB..16MiB · default 1MiB
+debug_capture_max_bytes: 1MiB
 
 # Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All
 # supported providers use inference handback: HTTP 401 with token_expired and access_token
@@ -116,7 +118,7 @@ auto_token_refresh: true
 # How long to wait for upstream response headers. Streaming bodies are not subject to
 # this. Transient header timeouts are retried.
 # Hot-reload: yes.
-#   type: duration · range >= 0 (0 = no header cap) · default 5m
+#   type: duration · range >= 0s (0s = no header cap) · default 5m
 upstream_timeout: 5m
 
 # One upstream metadata budget for transparent key refresh, all model pages and optional
@@ -129,8 +131,8 @@ models_discovery_timeout: 30s
 # and enrichment. Primary overflow fails; optional enrichment is discarded. This is not a
 # strict heap limit.
 # Hot-reload: yes.
-#   type: int (bytes) · range 4KiB..64MiB · default 8388608
-models_discovery_max_bytes: 8388608
+#   type: bytes · range 4KiB..64MiB · default 8MiB
+models_discovery_max_bytes: 8MiB
 
 # Maximum upstream model responses per discovery, including a unary RPC and optional
 # enrichment. Limits are captured once, never reset between pages.
@@ -156,7 +158,7 @@ max_idle_conns_per_host: 512
 
 # How long an idle upstream connection is kept before closing.
 # Hot-reload: yes.
-#   type: duration · range >= 0 (0 = never expire) · default 90s
+#   type: duration · range >= 0s (0s = never expire) · default 90s
 idle_conn_timeout: 90s
 
 # How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator
@@ -177,10 +179,10 @@ max_concurrent: 0
 #   type: int · range >= 0 (0 = unlimited) · default 0
 max_queue_size: 0
 
-# How long a request may sit in the queue before 429. 0 is unlimited. Operator-hold time
+# How long a request may sit in the queue before 429. 0s is unlimited. Operator-hold time
 # is excluded.
 # Hot-reload: yes.
-#   type: duration · range >= 0 (0 = unlimited) · default 0s
+#   type: duration · range >= 0s (0s = unlimited) · default 0s
 max_queue_wait: 0s
 
 # Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s are
@@ -189,21 +191,22 @@ max_queue_wait: 0s
 #   type: int · range >= 0 (0 = no retries) · default 5
 max_retries: 5
 
-# Retry-After hint (seconds) sent when our own queue is full or the wait is exceeded.
+# Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP
+# Retry-After is integer seconds, so the value must be a whole number of seconds.
 # Hot-reload: yes.
-#   type: int (seconds) · range 0..86400 · default 2
-queue_retry_after: 2
+#   type: duration · range 0s..24h · default 2s
+queue_retry_after: 2s
 
 # Initial delay when the provider sends no retry hint. Doubles each attempt and each
 # consecutive failed request, up to max backoff. Cannot exceed max backoff. Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 1s
+#   type: duration · range > 0s · default 1s
 base_backoff: 1s
 
 # Cap on adaptive backoff. Does not clamp a provider Retry-After / rate-limit-reset (daily
 # limits are often 30–60m). Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 2m
+#   type: duration · range > 0s · default 2m
 max_backoff: 2m
 
 # Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls,
@@ -345,7 +348,7 @@ storm_stream_errors: true
 # A gap longer than this starts a new conversation for the same client+key. Generous so
 # thinking pauses inside one task don't split it. Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 30m
+#   type: duration · range > 0s · default 30m
 conversation_idle_gap: 30m
 
 # Cap on concurrently-open conversations per client+key. Oldest is evicted past it.
@@ -358,19 +361,19 @@ conversation_max_open: 64
 # Injected into translated Anthropic requests when the client sent neither max_tokens nor
 # max_completion_tokens.
 # Hot-reload: yes.
-#   type: int · range 1..1000000 · default 4096
+#   type: int (tokens) · range 1..1000000 · default 4096
 anthropic_default_max_tokens: 4096
 
-# Optional context-window hint (tokens) stamped onto every model in GET /v1/models when
+# Optional context-window hint stamped onto every model in GET /v1/models when
 # X-Proxy-Format is cursor. 0 omits the field.
 # Hot-reload: yes.
-#   type: int · range >= 0 (0 = omit (client default)) · default 0
+#   type: int (tokens) · range >= 0 (0 = omit (client default)) · default 0
 cursor_default_context_window: 0
 
 # How long a parked Cursor Run stream stays open waiting for tool results. Must be > 0.
 # Expiry closes the stream; the next continuation cold-starts.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 3h
+#   type: duration · range > 0s · default 3h
 cursor_park_ttl: 3h
 
 # How often the proxy pings a Cursor agent.v1 run (idle parked runs included). Range
@@ -394,21 +397,21 @@ storage_batch_cap: 256
 
 # Partial-batch flush cadence. Must be > 0 (a zero ticker panics). Restart required.
 # Hot-reload: NO (restart required).
-#   type: duration · range > 0 · default 500ms
+#   type: duration · range > 0s · default 500ms
 storage_flush_interval: 500ms
 
 # Bounds dashboard SELECT queries. Must be > 0. Open and AggAPI bind at start (restart
 # required); pause/throttle persist reads the live snapshot.
 # Hot-reload: NO (restart required).
-#   type: duration · range > 0 · default 10s
+#   type: duration · range > 0s · default 10s
 storage_query_timeout: 10s
 
 # Maximum JSON bytes returned by /metrics/query; also bounds SQLite string/blob values.
 # Oversized results fail with HTTP 413, never truncate. Does not cap all SQLite working
 # memory. Restart required.
 # Hot-reload: NO (restart required).
-#   type: int · range 4096..67108864 · default 8388608
-storage_query_max_bytes: 8388608
+#   type: bytes · range 4KiB..64MiB · default 8MiB
+storage_query_max_bytes: 8MiB
 
 # Maximum rows returned by /metrics/query. Oversized results fail with HTTP 413; use SQL
 # filters or LIMIT. Does not limit dashboard aggregates or exports. Restart required.
@@ -427,18 +430,18 @@ dash_log_rows: 60
 
 # KPI / pause / SSE-fallback poll cadence. Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 5s
+#   type: duration · range > 0s · default 5s
 dash_poll_interval: 5s
 
 # How often the traffic chart re-fetches server-authoritative buckets and period totals.
 # Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 15s
+#   type: duration · range > 0s · default 15s
 dash_chart_refresh: 15s
 
 # How old a cached explorer breakdown may be before it is re-fetched. Must be > 0.
 # Hot-reload: yes.
-#   type: duration · range > 0 · default 15s
+#   type: duration · range > 0s · default 15s
 dash_explorer_stale: 15s
 
 # ---- Models ----

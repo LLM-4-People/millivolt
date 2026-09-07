@@ -323,7 +323,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, rec, err := readRequest(r, s.cfg().MaxRequestBytes, s.cfg().CaptureBodyPreview)
+	body, rec, err := readRequest(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview)
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError
@@ -497,7 +497,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rec.ErrorType = "queue_full"
 		rec.ErrorMsg = err.Error()
 		extra := http.Header{}
-		extra.Set("Retry-After", strconv.Itoa(s.cfg().QueueRetryAfter))
+		extra.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
 		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, extra)
 		return
 	}

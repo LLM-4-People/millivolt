@@ -8,7 +8,7 @@ No endpoint/API-key registry is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 ([operator access](operations.md#operator-access)); only `/healthz`,
-`/favicon.ico` and the relay stay open.
+`/favicon.ico` (and the other origin-root brand/PWA files) and the relay stay open.
 
 ## Endpoint behavior
 
@@ -127,7 +127,8 @@ neither transparency nor exactly-once upstream execution is unconditional.
 The provider-plus-key group controls simultaneous upstream sends and its waiting
 queue. The separate provider-wide Limits policy combines all keys and clients.
 Queue capacity and wait limits can reject work locally; the configured
-`queue_retry_after` supplies the caller's retry hint. Operator-hold time is
+`queue_retry_after` duration (for example `2s`, never a bare integer) supplies
+the caller's retry hint. Operator-hold time is
 excluded from the ordinary queue-wait limit. A hold's own queue cap still applies.
 
 For the HTTP relay, `upstream_timeout` limits waiting for response headers,

@@ -5,6 +5,8 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/png"
 	"io"
 	"io/fs"
 	"math"
@@ -143,11 +145,43 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	Favicon().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
-	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/svg+xml" {
-		t.Fatalf("GET /favicon.ico → %d %s, want 200 image/svg+xml", rec.Code, rec.Header().Get("Content-Type"))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/x-icon" {
+		t.Fatalf("GET /favicon.ico → %d %s, want 200 image/x-icon", rec.Code, rec.Header().Get("Content-Type"))
 	}
-	if !bytes.Contains(rec.Body.Bytes(), []byte("<svg")) {
-		t.Fatal("GET /favicon.ico body is not the brand SVG")
+	if ico := rec.Body.Bytes(); len(ico) < 6 || ico[0] != 0 || ico[1] != 0 || ico[2] != 1 || ico[3] != 0 {
+		t.Fatal("GET /favicon.ico body is not an ICO")
+	}
+
+	rec = httptest.NewRecorder()
+	Brand("/favicon.svg").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.svg", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/svg+xml" || !bytes.Contains(rec.Body.Bytes(), []byte("<svg")) {
+		t.Fatalf("GET /favicon.svg → %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+
+	rec = httptest.NewRecorder()
+	Brand("/manifest.webmanifest").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/manifest+json" {
+		t.Fatalf("GET /manifest.webmanifest → %d %s", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	var manifest map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &manifest); err != nil {
+		t.Fatalf("manifest JSON: %v", err)
+	}
+	if manifest["start_url"] != "/" || manifest["display"] != "standalone" {
+		t.Fatalf("manifest missing install fields: %v", manifest)
+	}
+	assertChromiumInstallManifest(t, rec.Body.Bytes())
+
+	rec = httptest.NewRecorder()
+	Brand("/sw.js").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	if rec.Code != http.StatusOK || rec.Header().Get("Service-Worker-Allowed") != "/" {
+		t.Fatalf("GET /sw.js → %d SW-Allowed %q", rec.Code, rec.Header().Get("Service-Worker-Allowed"))
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("addEventListener('fetch'")) && !bytes.Contains(rec.Body.Bytes(), []byte(`addEventListener("fetch"`)) {
+		t.Fatal("service worker has no fetch handler")
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(dashboardVersionMarker)) {
+		t.Fatal("service worker still contains the unstamped version marker")
 	}
 
 	rec = httptest.NewRecorder()
@@ -158,6 +192,207 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	if rec.Header().Get("Allow") != staticAllow {
 		t.Fatalf("POST /favicon.ico Allow = %q, want %q", rec.Header().Get("Allow"), staticAllow)
 	}
+}
+
+// TestPWAInstallability locks Chromium/iOS install surface: HTTPS-capable
+// manifest members, 192/512 any+maskable PNGs at the declared sizes, ICO
+// magic, apple-touch 180, start_url fetch coverage without caching live HTML.
+func TestPWAInstallability(t *testing.T) {
+	rec := httptest.NewRecorder()
+	Brand("/manifest.webmanifest").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/manifest.webmanifest", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manifest → %d", rec.Code)
+	}
+	assertChromiumInstallManifest(t, rec.Body.Bytes())
+
+	for _, spec := range []struct {
+		path string
+		w, h int
+	}{
+		{"/apple-touch-icon.png", 180, 180},
+	} {
+		rec = httptest.NewRecorder()
+		Brand(spec.path).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, spec.path, nil))
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+			t.Fatalf("%s → %d %s", spec.path, rec.Code, rec.Header().Get("Content-Type"))
+		}
+		img, _, err := image.Decode(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Fatalf("%s decode: %v", spec.path, err)
+		}
+		b := img.Bounds()
+		if b.Dx() != spec.w || b.Dy() != spec.h {
+			t.Errorf("%s is %dx%d, want %dx%d", spec.path, b.Dx(), b.Dy(), spec.w, spec.h)
+		}
+	}
+
+	index := httptest.NewRecorder()
+	Handler(NewAggAPI(metrics.NewBuffer(16), nil, config.Default().StorageQueryTimeout)).ServeHTTP(
+		index, httptest.NewRequest(http.MethodGet, "/", nil))
+	html := index.Body.String()
+	for _, needle := range []string{
+		`rel="manifest" href="/manifest.webmanifest"`,
+		`rel="apple-touch-icon" href="/apple-touch-icon.png"`,
+		`name="apple-mobile-web-app-capable" content="yes"`,
+		`name="mobile-web-app-capable" content="yes"`,
+		`name="theme-color" content="#1b1826"`,
+		`viewport-fit=cover`,
+	} {
+		if !strings.Contains(html, needle) {
+			t.Errorf("index.html missing %q", needle)
+		}
+	}
+	live, err := staticFS.ReadFile("static/js/live.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(live, []byte("navigator.serviceWorker.register('/sw.js'")) {
+		t.Fatal("live.js does not register /sw.js")
+	}
+
+	rec = httptest.NewRecorder()
+	Brand("/sw.js").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	sw := rec.Body.String()
+	if rec.Header().Get("Service-Worker-Allowed") != "/" {
+		t.Fatal("sw.js must declare Service-Worker-Allowed: /")
+	}
+	if !strings.Contains(sw, "addEventListener('fetch'") {
+		t.Fatal("service worker has no fetch handler")
+	}
+	if !strings.Contains(sw, "req.mode === 'navigate'") || !strings.Contains(sw, "offlinePage") {
+		t.Fatal("service worker must cover start_url navigations without caching live HTML")
+	}
+	liveFn, ok := jsFunctionBody(sw, "livePath")
+	if !ok {
+		t.Fatal("service worker missing livePath function")
+	}
+	for _, needle := range []string{
+		"pathname === '/admin'",
+		"pathname.startsWith('/admin/')",
+		"pathname === '/metrics'",
+		"pathname.startsWith('/metrics/')",
+		"pathname === '/v1'",
+		"pathname.startsWith('/v1/')",
+	} {
+		if !strings.Contains(liveFn, needle) {
+			t.Errorf("livePath function missing %s", needle)
+		}
+	}
+	start := strings.Index(sw, "const SHELL = [")
+	end := strings.Index(sw[start+1:], "];")
+	if start < 0 || end < 0 {
+		t.Fatal("service worker missing SHELL list")
+	}
+	shell := sw[start : start+1+end]
+	if strings.Contains(shell, "'/'") || strings.Contains(shell, `"/"`) {
+		t.Fatal("service worker must not precache gated /")
+	}
+}
+
+func assertChromiumInstallManifest(t *testing.T, raw []byte) {
+	t.Helper()
+	var manifest map[string]any
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("manifest JSON: %v", err)
+	}
+	if manifest["name"] != "millivolt" || manifest["short_name"] != "millivolt" {
+		t.Fatalf("manifest name: %v", manifest)
+	}
+	if manifest["start_url"] != "/" || manifest["scope"] != "/" || manifest["id"] != "/" {
+		t.Fatalf("manifest identity: %v", manifest)
+	}
+	if manifest["display"] != "standalone" {
+		t.Fatalf("manifest display=%v", manifest["display"])
+	}
+	if v, ok := manifest["prefer_related_applications"]; ok && v != false {
+		t.Fatalf("prefer_related_applications=%v, want false or absent", v)
+	}
+	if manifest["theme_color"] != "#1b1826" || manifest["background_color"] != "#1b1826" {
+		t.Fatalf("manifest colors: %v", manifest)
+	}
+	icons, _ := manifest["icons"].([]any)
+	need := map[string]bool{
+		"192x192 any":      false,
+		"512x512 any":      false,
+		"192x192 maskable": false,
+		"512x512 maskable": false,
+	}
+	brand := map[string]bool{}
+	for _, p := range BrandPaths() {
+		brand[p] = true
+	}
+	for _, rawIcon := range icons {
+		icon, _ := rawIcon.(map[string]any)
+		src, _ := icon["src"].(string)
+		sizes, _ := icon["sizes"].(string)
+		purpose, _ := icon["purpose"].(string)
+		typ, _ := icon["type"].(string)
+		if !brand[src] {
+			t.Errorf("manifest icon src %q is not an ungated Brand path", src)
+			continue
+		}
+		if typ != "image/png" {
+			t.Errorf("icon %s type=%q, want image/png", src, typ)
+		}
+		if strings.Contains(purpose, " ") {
+			t.Errorf("icon %s purpose=%q must be a single token (any and maskable are separate files)", src, purpose)
+		}
+		var w, h int
+		if _, err := fmt.Sscanf(sizes, "%dx%d", &w, &h); err != nil || w <= 0 || h <= 0 {
+			t.Errorf("icon %s sizes=%q", src, sizes)
+			continue
+		}
+		rec := httptest.NewRecorder()
+		Brand(src).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, src, nil))
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/png" {
+			t.Errorf("Brand(%s) → %d %s", src, rec.Code, rec.Header().Get("Content-Type"))
+			continue
+		}
+		img, _, err := image.Decode(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			t.Errorf("%s decode: %v", src, err)
+			continue
+		}
+		b := img.Bounds()
+		if b.Dx() != w || b.Dy() != h {
+			t.Errorf("%s is %dx%d, want %s", src, b.Dx(), b.Dy(), sizes)
+		}
+		key := sizes + " " + purpose
+		if _, ok := need[key]; ok {
+			need[key] = true
+		}
+	}
+	for key, ok := range need {
+		if !ok {
+			t.Errorf("manifest missing %s icon", key)
+		}
+	}
+}
+
+func jsFunctionBody(src, name string) (string, bool) {
+	sig := "function " + name + "("
+	i := strings.Index(src, sig)
+	if i < 0 {
+		return "", false
+	}
+	brace := strings.Index(src[i:], "{")
+	if brace < 0 {
+		return "", false
+	}
+	start := i + brace
+	depth := 0
+	for j := start; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start : j+1], true
+			}
+		}
+	}
+	return "", false
 }
 
 // TestDashCfgSeedsMatchDefault locks the first-paint JS seeds to
@@ -334,6 +569,9 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 			return nil
 		}
 		rel := strings.TrimPrefix(p, "static/")
+		if _, brand := brandByURL["/"+rel]; brand {
+			return nil
+		}
 		if !referenced[rel] {
 			t.Errorf("embedded static/%s is not referenced from index.html", rel)
 		}
@@ -679,12 +917,19 @@ func TestDashboardBootstrapMarshalFailure(t *testing.T) {
 
 func TestLoadStaticVersion(t *testing.T) {
 	fixture := func() fstest.MapFS {
-		return fstest.MapFS{
+		files := fstest.MapFS{
 			dashboardIndexPath:   {Data: []byte(`<meta name="dashboard-version" content="__DASHBOARD_VERSION__"><script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>`)},
 			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
 			"static/css/app.css": {Data: []byte(`body{color:white}`)},
 			"static/js/app.js":   {Data: []byte(`const ready=true;`)},
 		}
+		for _, spec := range brandByURL {
+			if files[spec.file] == nil {
+				files[spec.file] = &fstest.MapFile{Data: []byte("brand")}
+			}
+		}
+		files[dashboardSWPath] = &fstest.MapFile{Data: []byte("const CACHE='millivolt-shell-__DASHBOARD_VERSION__';")}
+		return files
 	}
 	base, version := loadStatic(fixture())
 	rebuilt, rebuiltVersion := loadStatic(fixture())
@@ -710,7 +955,7 @@ func TestLoadStaticVersion(t *testing.T) {
 				t.Fatal("asset change did not update the served HTML version and ETag")
 			}
 			for p, old := range base {
-				if p != changed && p != dashboardIndexPath && old.etag != next[p].etag {
+				if p != changed && p != dashboardIndexPath && p != dashboardSWPath && old.etag != next[p].etag {
 					t.Errorf("unmodified %s lost its reusable validator", p)
 				}
 			}
@@ -740,42 +985,54 @@ type unreadableStaticFS struct{ fs.FS }
 
 func (unreadableStaticFS) ReadFile(string) ([]byte, error) { return nil, fs.ErrPermission }
 
+func completeStatic(index, sw []byte) fstest.MapFS {
+	files := fstest.MapFS{
+		dashboardIndexPath:   {Data: index},
+		dashboardFaviconPath: {Data: []byte(`<svg/>`)},
+	}
+	for _, spec := range brandByURL {
+		if files[spec.file] == nil {
+			files[spec.file] = &fstest.MapFile{Data: []byte("brand")}
+		}
+	}
+	if sw == nil {
+		sw = []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';")
+	}
+	files[dashboardSWPath] = &fstest.MapFile{Data: sw}
+	return files
+}
+
 func TestLoadStaticFailsClosed(t *testing.T) {
-	for name, fsys := range map[string]fs.FS{
-		"missing tree": fstest.MapFS{},
-		"missing index": fstest.MapFS{
-			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
-		},
-		"missing favicon": fstest.MapFS{
-			dashboardIndexPath: {Data: []byte(dashboardVersionMarker)},
-		},
-		"missing marker": fstest.MapFS{
-			dashboardIndexPath:   {Data: []byte(`<html/>`)},
-			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
-		},
-		"duplicate marker": fstest.MapFS{
-			dashboardIndexPath:   {Data: []byte(dashboardVersionMarker + dashboardVersionMarker)},
-			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
-		},
-		"missing bootstrap marker": fstest.MapFS{
-			dashboardIndexPath:   {Data: []byte(dashboardVersionMarker)},
-			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
-		},
-		"duplicate bootstrap marker": fstest.MapFS{
-			dashboardIndexPath:   {Data: []byte(dashboardVersionMarker + dashboardBootstrapMarker + dashboardBootstrapMarker)},
-			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
-		},
-		"unreadable asset": unreadableStaticFS{fstest.MapFS{
-			dashboardIndexPath: {Data: []byte(dashboardVersionMarker)},
-		}},
-	} {
-		t.Run(name, func(t *testing.T) {
+	validIndex := []byte(dashboardVersionMarker + dashboardBootstrapMarker)
+	validSW := []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';")
+	cases := []struct {
+		name, want string
+		fsys       fs.FS
+	}{
+		{"missing tree", "load dashboard assets", fstest.MapFS{}},
+		{"missing index", "missing " + dashboardIndexPath, fstest.MapFS{dashboardFaviconPath: {Data: []byte(`<svg/>`)}}},
+		{"missing favicon", "missing ", fstest.MapFS{dashboardIndexPath: {Data: validIndex}}},
+		{"missing marker", "exactly one dashboard version marker", completeStatic([]byte(`<html/>`+dashboardBootstrapMarker), validSW)},
+		{"duplicate marker", "exactly one dashboard version marker", completeStatic([]byte(dashboardVersionMarker+dashboardVersionMarker+dashboardBootstrapMarker), validSW)},
+		{"missing bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMarker), validSW)},
+		{"duplicate bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMarker+dashboardBootstrapMarker+dashboardBootstrapMarker), validSW)},
+		{"missing SW marker", "exactly one dashboard version marker", completeStatic(validIndex, []byte("const CACHE='millivolt-shell';"))},
+		{"duplicate SW marker", "exactly one dashboard version marker", completeStatic(validIndex, append(append([]byte{}, validSW...), dashboardVersionMarker...))},
+		{"unreadable asset", "load dashboard assets", unreadableStaticFS{fstest.MapFS{dashboardIndexPath: {Data: validIndex}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			defer func() {
-				if recover() == nil {
-					t.Error("invalid embedded assets returned a partial cache")
+				got := recover()
+				if got == nil {
+					t.Fatal("invalid embedded assets returned a partial cache")
+				}
+				msg := fmt.Sprint(got)
+				if !strings.Contains(msg, tc.want) {
+					t.Fatalf("panic %q, want substring %q", msg, tc.want)
 				}
 			}()
-			loadStatic(fsys)
+			loadStatic(tc.fsys)
 		})
 	}
 }

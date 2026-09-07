@@ -135,12 +135,12 @@ func TestExampleProfilesAreIsolated(t *testing.T) {
 }
 
 // upstream_timeout is the one field where 0 is meaningful (disables the cap):
-// an explicit 0 in YAML must override the non-zero default, while omitting the
-// key keeps the default.
+// an explicit 0s in YAML must override the non-zero default, while omitting the
+// key keeps the default. A bare integer is not a duration string.
 func TestUpstreamTimeoutExplicitZero(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(p, []byte("upstream_timeout: 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("upstream_timeout: 0s\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c, err := LoadFile(p)
@@ -148,7 +148,13 @@ func TestUpstreamTimeoutExplicitZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.UpstreamTimeout != 0 {
-		t.Errorf("explicit upstream_timeout: 0 = %v, want 0 (disabled)", c.UpstreamTimeout)
+		t.Errorf("explicit upstream_timeout: 0s = %v, want 0 (disabled)", c.UpstreamTimeout)
+	}
+	if err := os.WriteFile(p, []byte("upstream_timeout: 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFile(p); err == nil {
+		t.Fatal("upstream_timeout: 0 (bare integer) must be rejected")
 	}
 	// Omitting the key keeps the default.
 	c2, err := LoadFile(filepath.Join(dir, "absent.yaml"))
@@ -168,12 +174,12 @@ func TestWriteYAMLExplicitZerosSurviveLoadFile(t *testing.T) {
 	if err := cur.Apply(map[string]any{
 		"max_conns_per_host":    0,
 		"max_idle_conns":        0,
-		"idle_conn_timeout":     "0s",
+		"idle_conn_timeout":     FormatDuration(0),
 		"max_retries":           0,
-		"queue_retry_after":     0,
+		"queue_retry_after":     FormatDuration(0),
 		"quality_retries":       0,
-		"upstream_timeout":      "0s",
-		"restart_drain_timeout": "0s",
+		"upstream_timeout":      FormatDuration(0),
+		"restart_drain_timeout": FormatDuration(0),
 		"db_path":               "",
 		"capture_body_preview":  false,
 	}); err != nil {
@@ -204,7 +210,7 @@ func TestWriteYAMLExplicitZerosSurviveLoadFile(t *testing.T) {
 		t.Errorf("max_retries = %d, want 0", got.MaxRetries)
 	}
 	if got.QueueRetryAfter != 0 {
-		t.Errorf("queue_retry_after = %d, want 0", got.QueueRetryAfter)
+		t.Errorf("queue_retry_after = %v, want 0", got.QueueRetryAfter)
 	}
 	if got.QualityRetries != 0 {
 		t.Errorf("quality_retries = %d, want 0", got.QualityRetries)
@@ -230,7 +236,7 @@ func TestWriteYAMLExplicitZerosSurviveLoadFile(t *testing.T) {
 func TestLoadFilePartialZeros(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "c.yaml")
-	if err := os.WriteFile(p, []byte("max_retries: 0\nmax_conns_per_host: 0\nqueue_retry_after: 0\n"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("max_retries: 0\nmax_conns_per_host: 0\nqueue_retry_after: 0s\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c, err := LoadFile(p)
@@ -244,7 +250,7 @@ func TestLoadFilePartialZeros(t *testing.T) {
 		t.Errorf("max_conns_per_host = %d, want 0", c.MaxConnsPerHost)
 	}
 	if c.QueueRetryAfter != 0 {
-		t.Errorf("queue_retry_after = %d, want 0", c.QueueRetryAfter)
+		t.Errorf("queue_retry_after = %v, want 0", c.QueueRetryAfter)
 	}
 	if c.QualityRetries != 1 {
 		t.Errorf("absent quality_retries = %d, want default 1", c.QualityRetries)
@@ -362,8 +368,7 @@ func TestLoadFileRejectsUnknownKey(t *testing.T) {
 	}
 
 	// The strict decode must still accept every documented key - including
-	// upstream_timeout, which is yaml:"-" on Config (probed as text so a bare
-	// "0" and "5m" both parse).
+	// upstream_timeout, which is yaml:"-" on Config (probed as a duration string).
 	p := filepath.Join(t.TempDir(), "ok.yaml")
 	if err := os.WriteFile(p, []byte("upstream_timeout: 5m\nmax_retries: 3\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -430,18 +435,21 @@ func TestValidateRejectsBadValues(t *testing.T) {
 		{"shutdown_timeout zero", "shutdown_timeout: 0s"},
 		{"restart_drain_timeout negative", "restart_drain_timeout: -5s"},
 		{"negative max_retries", "max_retries: -1"},
-		{"queue_retry_after negative", "queue_retry_after: -5"},
-		{"queue_retry_after huge", "queue_retry_after: 99999"},
+		{"queue_retry_after negative", "queue_retry_after: -5s"},
+		{"queue_retry_after huge", "queue_retry_after: 25h"},
+		{"queue_retry_after fractional second", "queue_retry_after: 2500ms"},
 		{"conversation_max_open zero", "conversation_max_open: 0"},
 		{"anthropic_default_max_tokens zero", "anthropic_default_max_tokens: 0"},
-		{"cursor_heartbeat_interval zero", "cursor_heartbeat_interval: 0"},
+		{"cursor_heartbeat_interval zero", "cursor_heartbeat_interval: 0s"},
 		{"cursor_heartbeat_interval negative", "cursor_heartbeat_interval: -2s"},
 		{"cursor_heartbeat_interval huge", "cursor_heartbeat_interval: 1h"},
+		{"shutdown_timeout integer", "shutdown_timeout: 5"},
+		{"queue_retry_after integer", "queue_retry_after: 2"},
 		{"quality_retries negative", "quality_retries: -1"},
 		{"quality_retries too high", "quality_retries: 7"},
-		{"sse keepalive zero", "sse_keepalive_interval: 0"},
+		{"sse keepalive zero", "sse_keepalive_interval: 0s"},
 		{"dash_log_rows too small", "dash_log_rows: 1"},
-		{"dash_poll zero", "dash_poll_interval: 0"},
+		{"dash_poll zero", "dash_poll_interval: 0s"},
 		{"batch cap exceeds chan cap", "storage_write_chan_cap: 100\nstorage_batch_cap: 200"},
 		{"negative duration", "idle_conn_timeout: -5s"},
 		{"negative upstream_timeout", "upstream_timeout: -5s"},
@@ -467,6 +475,19 @@ func TestValidateRejectsBadValues(t *testing.T) {
 	}
 }
 
+func TestLoadFileRejectsDurationInteger(t *testing.T) {
+	dir := t.TempDir()
+	for _, body := range []string{"shutdown_timeout: 5\n", "upstream_timeout: 5\n", "queue_retry_after: 2\n"} {
+		p := filepath.Join(dir, "c.yaml")
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadFile(p); err == nil {
+			t.Errorf("LoadFile(%q) succeeded, want rejection", body)
+		}
+	}
+}
+
 // A valid config (and valid overrides) must load cleanly and pass validation.
 func TestValidateAcceptsValidValues(t *testing.T) {
 	cases := []struct {
@@ -474,13 +495,13 @@ func TestValidateAcceptsValidValues(t *testing.T) {
 		yaml string
 	}{
 		{"empty", ""},
-		{"upstream_timeout disabled", "upstream_timeout: 0"},
+		{"upstream_timeout disabled", "upstream_timeout: 0s"},
 		{"unlimited queue", "max_concurrent: 0\nmax_queue_size: 0\nmax_queue_wait: 0s"},
 		{"valid overrides", "max_retries: 10\nmax_backoff: 5m\nbase_backoff: 2s\ncapture_body_preview: true"},
 		{"cursor heartbeat tune", "cursor_heartbeat_interval: 2s"},
 		{"quality retries disabled", "quality_retries: 0"},
 		{"quality retries max", "quality_retries: 3"},
-		{"boundary values", "history_size: 1\nconversation_max_open: 1\nqueue_retry_after: 0"},
+		{"boundary values", "history_size: 1\nconversation_max_open: 1\nqueue_retry_after: 0s"},
 		{"provider alias merge", "provider_aliases:\n  old.example: new.example\n  legacy.example: new.example"},
 	}
 	for _, tc := range cases {

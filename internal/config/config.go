@@ -52,21 +52,21 @@ type Config struct {
 
 	// MaxRequestBytes caps the size of an inbound request body that the proxy
 	// will buffer to discover routing metadata. Larger bodies are rejected.
-	MaxRequestBytes int64 `yaml:"max_request_bytes" json:"max_request_bytes"`
+	MaxRequestBytes ByteSize `yaml:"max_request_bytes" json:"max_request_bytes"`
 
 	// UpstreamTimeout is the maximum time to wait for an upstream response's
 	// headers. Streaming bodies are not subject to this timeout (only header
 	// arrival), so long generations are unaffected. Zero disables the cap.
-	// yaml:"-" because a bare YAML integer (upstream_timeout: 0) would decode
-	// as 0 nanoseconds on time.Duration; LoadFile probes the scalar as text
-	// so both "0" and "5m" parse, then mergeOverlay copies it when the key is present.
+	// yaml:"-" because a YAML integer would decode as nanoseconds on
+	// time.Duration. LoadFile probes the scalar as text so duration tokens
+	// ("0s", "5m") parse, then mergeOverlay copies it when the key is present.
 	UpstreamTimeout time.Duration `yaml:"-" json:"upstream_timeout"`
 
 	// Model discovery has one aggregate upstream budget, independent of LLM
 	// header/stream timeouts. It includes pages, unary RPCs and enrichment;
 	// limits are captured once per discovery and hot-reload for new requests.
 	ModelsDiscoveryTimeout  time.Duration `yaml:"models_discovery_timeout" json:"models_discovery_timeout"`
-	ModelsDiscoveryMaxBytes int64         `yaml:"models_discovery_max_bytes" json:"models_discovery_max_bytes"`
+	ModelsDiscoveryMaxBytes ByteSize      `yaml:"models_discovery_max_bytes" json:"models_discovery_max_bytes"`
 	ModelsDiscoveryMaxPages int           `yaml:"models_discovery_max_pages" json:"models_discovery_max_pages"`
 
 	// AllowedBaseURLs is an optional allowlist of upstream base URL prefixes.
@@ -92,7 +92,7 @@ type Config struct {
 
 	// DebugCaptureMaxBytes caps one debug capture (request body + client-facing
 	// response bytes). Past the cap the rest is dropped and truncated=true.
-	DebugCaptureMaxBytes int64 `yaml:"debug_capture_max_bytes" json:"debug_capture_max_bytes"`
+	DebugCaptureMaxBytes ByteSize `yaml:"debug_capture_max_bytes" json:"debug_capture_max_bytes"`
 
 	// AutoTokenRefresh enables stateless expired-token refresh: when a client
 	// presents a JWT access token whose exp has passed (within a small
@@ -125,9 +125,10 @@ type Config struct {
 	MaxQueueSize  int           `yaml:"max_queue_size" json:"max_queue_size"` // per group; 0 = unlimited
 	MaxQueueWait  time.Duration `yaml:"max_queue_wait" json:"max_queue_wait"` // max queue wait before 429; 0 = unlimited
 	MaxRetries    int           `yaml:"max_retries" json:"max_retries"`       // max transient (429/5xx) retries
-	// QueueRetryAfter is the Retry-After hint (seconds) sent to clients when the
-	// proxy's own queue is full or the wait is exceeded.
-	QueueRetryAfter int `yaml:"queue_retry_after" json:"queue_retry_after"`
+	// QueueRetryAfter is the Retry-After hint sent to clients when the proxy's
+	// own queue is full or the wait is exceeded. HTTP Retry-After is integer
+	// seconds; RetryAfterSeconds is the single conversion for that header.
+	QueueRetryAfter time.Duration `yaml:"queue_retry_after" json:"queue_retry_after"`
 
 	// Retry backoff for transient failures (429/5xx/transport). BaseBackoff is
 	// the initial delay when the provider sends no retry hint; it doubles each
@@ -216,7 +217,7 @@ type Config struct {
 	StorageBatchCap      int           `yaml:"storage_batch_cap" json:"storage_batch_cap"`             // max records per SQLite transaction
 	StorageFlushInterval time.Duration `yaml:"storage_flush_interval" json:"storage_flush_interval"`   // partial-batch flush cadence
 	StorageQueryTimeout  time.Duration `yaml:"storage_query_timeout" json:"storage_query_timeout"`     // bounds dashboard SELECT queries
-	StorageQueryMaxBytes int           `yaml:"storage_query_max_bytes" json:"storage_query_max_bytes"` // ad-hoc SELECT JSON result budget; restart required
+	StorageQueryMaxBytes ByteSize      `yaml:"storage_query_max_bytes" json:"storage_query_max_bytes"` // ad-hoc SELECT JSON result budget; restart required
 	StorageQueryMaxRows  int           `yaml:"storage_query_max_rows" json:"storage_query_max_rows"`   // ad-hoc SELECT row budget; restart required
 
 	// ---- HTTP server timeouts ----
@@ -414,8 +415,11 @@ const (
 	DashLogRowsMax = 500
 	// QualityRetriesMax is the band for quality_retries (0 disables).
 	QualityRetriesMax = 3
-	// QueueRetryAfterMax is the Retry-After hint cap (seconds).
-	QueueRetryAfterMax = 86400
+	// QueueRetryAfterMax is the Retry-After hint cap (HTTP delta-seconds).
+	QueueRetryAfterMax = 24 * time.Hour
+	// Inbound body band (Validate, overlay, Schema).
+	MaxRequestBytesMin = 1024
+	MaxRequestBytesMax = 1 << 30
 	// Debug capture retention / size bands (Validate, overlay, Schema).
 	DebugCaptureTTLMin      = time.Hour
 	DebugCaptureTTLMax      = 7 * 24 * time.Hour
@@ -438,10 +442,17 @@ const (
 	ModelsDiscoveryMaxPagesMax = 1000
 )
 
-// HeartbeatIntervalMax is the cap for cursor_heartbeat_interval and
-// sse_keepalive_interval (Validate + overlay). TypeLine formats duration
-// Min/Max via FormatDuration (1ns..10m).
-const HeartbeatIntervalMax = 10 * time.Minute
+// HeartbeatIntervalMin/Max bound cursor_heartbeat_interval and
+// sse_keepalive_interval (Validate, overlay, Schema). TypeLine prints them
+// through FormatDuration.
+const (
+	HeartbeatIntervalMin = time.Nanosecond
+	HeartbeatIntervalMax = 10 * time.Minute
+)
+
+func heartbeatRange() string {
+	return FormatDuration(HeartbeatIntervalMin) + ".." + FormatDuration(HeartbeatIntervalMax)
+}
 
 // Default returns the built-in defaults. This is the only place defaults live.
 func Default() *Config {
@@ -464,7 +475,7 @@ func Default() *Config {
 		IdleConnTimeout:     90 * time.Second,
 
 		MaxRetries:      5,
-		QueueRetryAfter: 2,
+		QueueRetryAfter: 2 * time.Second,
 		BaseBackoff:     1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
 		MaxBackoff:      2 * time.Minute,
 
@@ -855,14 +866,14 @@ func (c *Config) Validate() error {
 	if c.HistorySize < 1 || c.HistorySize > 1_000_000 {
 		return fmt.Errorf("history_size: must be 1..1000000, got %d", c.HistorySize)
 	}
-	if c.MaxRequestBytes < 1024 || c.MaxRequestBytes > 1<<30 {
-		return fmt.Errorf("max_request_bytes: must be 1024..1GiB, got %d", c.MaxRequestBytes)
+	if err := checkByteSize("max_request_bytes", c.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
+		return err
 	}
 	if c.DebugCaptureTTL < DebugCaptureTTLMin || c.DebugCaptureTTL > DebugCaptureTTLMax {
-		return fmt.Errorf("debug_capture_ttl: must be 1h..7d, got %v", c.DebugCaptureTTL)
+		return fmt.Errorf("debug_capture_ttl: must be %s..%s, got %s", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))
 	}
-	if c.DebugCaptureMaxBytes < DebugCaptureMaxBytesMin || c.DebugCaptureMaxBytes > DebugCaptureMaxBytesMax {
-		return fmt.Errorf("debug_capture_max_bytes: must be 4KiB..16MiB, got %d", c.DebugCaptureMaxBytes)
+	if err := checkByteSize("debug_capture_max_bytes", c.DebugCaptureMaxBytes, DebugCaptureMaxBytesMin, DebugCaptureMaxBytesMax); err != nil {
+		return err
 	}
 	if c.MaxConnsPerHost < 0 || c.MaxIdleConns < 0 {
 		return fmt.Errorf("max_conns_per_host/max_idle_conns must be >= 0 (0 = unlimited)")
@@ -881,8 +892,8 @@ func (c *Config) Validate() error {
 	if c.QualityRetries < 0 || c.QualityRetries > QualityRetriesMax {
 		return fmt.Errorf("quality_retries: must be 0..%d, got %d", QualityRetriesMax, c.QualityRetries)
 	}
-	if c.QueueRetryAfter < 0 || c.QueueRetryAfter > QueueRetryAfterMax {
-		return fmt.Errorf("queue_retry_after: must be 0..%d seconds, got %d", QueueRetryAfterMax, c.QueueRetryAfter)
+	if err := checkQueueRetryAfter(c.QueueRetryAfter); err != nil {
+		return err
 	}
 	if c.ConversationMaxOpen < 1 || c.ConversationMaxOpen > 100000 {
 		return fmt.Errorf("conversation_max_open: must be 1..100000, got %d", c.ConversationMaxOpen)
@@ -894,25 +905,25 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("cursor_default_context_window: must be >= 0, got %d", c.CursorDefaultContextWindow)
 	}
 	if c.CursorParkTTL <= 0 {
-		return fmt.Errorf("cursor_park_ttl: must be > 0")
+		return fmt.Errorf("cursor_park_ttl: must be > %s", FormatDuration(0))
 	}
-	if c.CursorHeartbeatInterval <= 0 || c.CursorHeartbeatInterval > HeartbeatIntervalMax {
-		return fmt.Errorf("cursor_heartbeat_interval: must be 1ns..10m, got %v", c.CursorHeartbeatInterval)
+	if c.CursorHeartbeatInterval < HeartbeatIntervalMin || c.CursorHeartbeatInterval > HeartbeatIntervalMax {
+		return fmt.Errorf("cursor_heartbeat_interval: must be %s, got %s", heartbeatRange(), FormatDuration(c.CursorHeartbeatInterval))
 	}
-	if c.SSEKeepaliveInterval <= 0 || c.SSEKeepaliveInterval > HeartbeatIntervalMax {
-		return fmt.Errorf("sse_keepalive_interval: must be 1ns..10m, got %v", c.SSEKeepaliveInterval)
+	if c.SSEKeepaliveInterval < HeartbeatIntervalMin || c.SSEKeepaliveInterval > HeartbeatIntervalMax {
+		return fmt.Errorf("sse_keepalive_interval: must be %s, got %s", heartbeatRange(), FormatDuration(c.SSEKeepaliveInterval))
 	}
 	if c.DashLogRows < DashLogRowsMin || c.DashLogRows > DashLogRowsMax {
 		return fmt.Errorf("dash_log_rows: must be %d..%d, got %d", DashLogRowsMin, DashLogRowsMax, c.DashLogRows)
 	}
 	if c.DashPollInterval <= 0 {
-		return fmt.Errorf("dash_poll_interval: must be > 0")
+		return fmt.Errorf("dash_poll_interval: must be > %s", FormatDuration(0))
 	}
 	if c.DashChartRefresh <= 0 {
-		return fmt.Errorf("dash_chart_refresh: must be > 0")
+		return fmt.Errorf("dash_chart_refresh: must be > %s", FormatDuration(0))
 	}
 	if c.DashExplorerStale <= 0 {
-		return fmt.Errorf("dash_explorer_stale: must be > 0")
+		return fmt.Errorf("dash_explorer_stale: must be > %s", FormatDuration(0))
 	}
 	if c.StorageWriteChanCap < 1 || c.StorageBatchCap < 1 || c.StorageBatchCap > c.StorageWriteChanCap {
 		return fmt.Errorf("storage_batch_cap (%d) must be 1..storage_write_chan_cap (%d)", c.StorageBatchCap, c.StorageWriteChanCap)
@@ -945,7 +956,7 @@ func (c *Config) Validate() error {
 	}
 	for _, name := range sortedKeys(durs) {
 		if d := durs[name]; d < 0 {
-			return fmt.Errorf("%s: duration must be >= 0, got %v", name, d)
+			return fmt.Errorf("%s: duration must be >= 0, got %s", name, FormatDuration(d))
 		}
 	}
 	// 0 is not a valid setting for these: ticker/context/backoff would panic
@@ -963,13 +974,13 @@ func (c *Config) Validate() error {
 	}
 	for _, f := range posDurs {
 		if f.d <= 0 {
-			return fmt.Errorf("%s: must be > 0, got %v", f.name, f.d)
+			return fmt.Errorf("%s: must be > %s, got %s", f.name, FormatDuration(0), FormatDuration(f.d))
 		}
 	}
 	// base_backoff must not exceed max_backoff (the retry loop would clamp
 	// immediately, making the base meaningless).
 	if c.BaseBackoff > c.MaxBackoff {
-		return fmt.Errorf("base_backoff (%v) cannot exceed max_backoff (%v)", c.BaseBackoff, c.MaxBackoff)
+		return fmt.Errorf("base_backoff (%s) cannot exceed max_backoff (%s)", FormatDuration(c.BaseBackoff), FormatDuration(c.MaxBackoff))
 	}
 	// provider_aliases must be a well-formed one-hop rename map: both sides
 	// non-empty, no self-mapping, no chains. The map is applied in a single
@@ -1098,9 +1109,9 @@ func validHeaderValue(value string) bool {
 
 // userFile is LoadFile's strict decode target: every Config key plus the
 // upstream_timeout text probe. Config declares UpstreamTimeout yaml:"-"
-// (a bare YAML integer would decode as nanoseconds on time.Duration), so the
+// (a YAML integer would decode as nanoseconds on time.Duration), so the
 // probe field makes the key known to the strict decoder while LoadFile still
-// parses the scalar as text - both "0" and "5m" load.
+// parses the scalar as a duration string. Overlay rejects a bare integer.
 type userFile struct {
 	Config          `yaml:",inline"`
 	UpstreamTimeout *string `yaml:"upstream_timeout"`
@@ -1143,8 +1154,8 @@ func LoadFile(path string) (*Config, error) {
 	if err := yaml.Unmarshal(b, &present); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
-	// upstream_timeout rode the strict decode as text; parse it now so both
-	// a bare "0" and "5m" work, then mergeOverlay copies it when present.
+	// upstream_timeout rode the strict decode as text; parse the duration
+	// token, then mergeOverlay copies it when present.
 	if user.UpstreamTimeout != nil {
 		d, err := parseYAMLDuration(*user.UpstreamTimeout)
 		if err != nil {
@@ -1165,14 +1176,26 @@ func LoadFile(path string) (*Config, error) {
 	return def, nil
 }
 
-// parseYAMLDuration accepts Go duration strings ("5m", "0s") and a bare "0"
-// (Settings / Schema ZeroMeans writes 0; time.ParseDuration requires a unit).
+// parseYAMLDuration accepts Go duration strings ("5m", "0s"). Settings typed
+// zeros go through asDuration, not this YAML probe.
 func parseYAMLDuration(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "0" || s == "+0" || s == "-0" {
-		return 0, nil
+	return time.ParseDuration(strings.TrimSpace(s))
+}
+
+func checkQueueRetryAfter(d time.Duration) error {
+	if d < 0 || d > QueueRetryAfterMax || d%time.Second != 0 {
+		return fmt.Errorf("queue_retry_after: must be a whole-second duration %s..%s, got %s", FormatDuration(0), FormatDuration(QueueRetryAfterMax), FormatDuration(d))
 	}
-	return time.ParseDuration(s)
+	return nil
+}
+
+// RetryAfterSeconds is the integer-seconds Retry-After value for proxy-owned
+// 429s. HTTP Retry-After is delta-seconds; this is the only conversion.
+func (c *Config) RetryAfterSeconds() int {
+	if c == nil || c.QueueRetryAfter <= 0 {
+		return 0
+	}
+	return int(c.QueueRetryAfter / time.Second)
 }
 
 // validateModelsDiscovery shares full/overlay checks for one request budget.
@@ -1182,7 +1205,7 @@ func validateModelsDiscovery(c *Config, present map[string]any, overlay bool) er
 		value, min, max int64
 	}{
 		{"models_discovery_timeout", int64(c.ModelsDiscoveryTimeout), int64(ModelsDiscoveryTimeoutMin), int64(ModelsDiscoveryTimeoutMax)},
-		{"models_discovery_max_bytes", c.ModelsDiscoveryMaxBytes, ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
+		{"models_discovery_max_bytes", int64(c.ModelsDiscoveryMaxBytes), ModelsDiscoveryMaxBytesMin, ModelsDiscoveryMaxBytesMax},
 		{"models_discovery_max_pages", int64(c.ModelsDiscoveryMaxPages), ModelsDiscoveryMaxPagesMin, ModelsDiscoveryMaxPagesMax},
 	} {
 		if overlay && !yamlKeySet(present, limit.key) {
@@ -1190,7 +1213,10 @@ func validateModelsDiscovery(c *Config, present map[string]any, overlay bool) er
 		}
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "models_discovery_timeout" {
-				return fmt.Errorf("%s: must be %s..%s, got %s", limit.key, ModelsDiscoveryTimeoutMin, ModelsDiscoveryTimeoutMax, c.ModelsDiscoveryTimeout)
+				return fmt.Errorf("%s: must be %s..%s, got %s", limit.key, FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax), FormatDuration(c.ModelsDiscoveryTimeout))
+			}
+			if limit.key == "models_discovery_max_bytes" {
+				return checkByteSize(limit.key, ByteSize(limit.value), limit.min, limit.max)
 			}
 			return fmt.Errorf("%s: must be %d..%d, got %d", limit.key, limit.min, limit.max, limit.value)
 		}
@@ -1204,22 +1230,26 @@ func validateQueryLimits(c *Config, present map[string]any, overlay bool) error 
 		key             string
 		value, min, max int
 	}{
-		{"storage_query_max_bytes", c.StorageQueryMaxBytes, StorageQueryMaxBytesMin, StorageQueryMaxBytesMax},
+		{"storage_query_max_bytes", int(c.StorageQueryMaxBytes), StorageQueryMaxBytesMin, StorageQueryMaxBytesMax},
 		{"storage_query_max_rows", c.StorageQueryMaxRows, StorageQueryMaxRowsMin, StorageQueryMaxRowsMax},
 	} {
 		if overlay && !yamlKeySet(present, limit.key) {
 			continue
 		}
 		if limit.value < limit.min || limit.value > limit.max {
+			if limit.key == "storage_query_max_bytes" {
+				return checkByteSize(limit.key, ByteSize(limit.value), int64(limit.min), int64(limit.max))
+			}
 			return fmt.Errorf("%s: must be %d..%d, got %d", limit.key, limit.min, limit.max, limit.value)
 		}
 	}
 	return nil
 }
 
-// validateStorm shares full and presence-aware validation. YAML types are
-// checked before merging because yaml.v3 accepts null scalars and coerces
-// non-string list entries into strings. Neither may silently disable a guard.
+// validateStorm shares full and presence-aware validation. YAML types for
+// bools and string lists are checked here because yaml.v3 accepts null
+// scalars and coerces non-string list entries into strings. Duration strings
+// are owned by validateOverlay (every KindDuration key).
 func validateStorm(c *Config, present map[string]any, overlay bool) error {
 	if overlay {
 		for _, field := range Schema() {
@@ -1230,10 +1260,6 @@ func validateStorm(c *Config, present map[string]any, overlay bool) error {
 			case KindBool:
 				if _, ok := present[field.Key].(bool); !ok {
 					return fmt.Errorf("%s: must be a boolean", field.Key)
-				}
-			case KindDuration:
-				if _, ok := present[field.Key].(string); !ok {
-					return fmt.Errorf("%s: must be a duration string", field.Key)
 				}
 			case KindStrings:
 				items, ok := present[field.Key].([]any)
@@ -1275,7 +1301,7 @@ func validateStorm(c *Config, present map[string]any, overlay bool) error {
 		}
 	}
 	if !overlay && c.StormInitialBackoff > c.StormMaxBackoff {
-		return fmt.Errorf("storm_initial_backoff (%s) cannot exceed storm_max_backoff (%s)", c.StormInitialBackoff, c.StormMaxBackoff)
+		return fmt.Errorf("storm_initial_backoff (%s) cannot exceed storm_max_backoff (%s)", FormatDuration(c.StormInitialBackoff), FormatDuration(c.StormMaxBackoff))
 	}
 	seen := make(map[string]bool, len(c.StormStatusCodes))
 	for _, code := range c.StormStatusCodes {
@@ -1296,14 +1322,26 @@ func validateStorm(c *Config, present map[string]any, overlay bool) error {
 func validateOverlay(u *Config, present map[string]any) error {
 	isSet := func(yamlKey string) bool { return yamlKeySet(present, yamlKey) }
 	// yaml.v3 otherwise truncates float scalars into integer fields. Schema
-	// is the existing type owner, including byte-valued integers; never allow
-	// a written fractional value (or null) to become a different setting.
+	// is the existing type owner; never allow a written fractional value (or
+	// null) to become a different setting. KindBytes accepts a size string or
+	// integer. KindDuration must be a Go duration string: a YAML integer would
+	// decode as nanoseconds on time.Duration.
 	for _, field := range Schema() {
-		if (field.Kind == KindInt || field.Kind == KindBytes) && isSet(field.Key) {
+		if field.Kind == KindInt && isSet(field.Key) {
 			switch present[field.Key].(type) {
 			case int, int64, uint64:
 			default:
 				return fmt.Errorf("%s: must be an integer", field.Key)
+			}
+		}
+		if field.Kind == KindBytes && isSet(field.Key) {
+			if _, err := parseByteSize(present[field.Key]); err != nil {
+				return fmt.Errorf("%s: %w", field.Key, err)
+			}
+		}
+		if field.Kind == KindDuration && isSet(field.Key) {
+			if _, ok := present[field.Key].(string); !ok {
+				return fmt.Errorf("%s: must be a duration string", field.Key)
 			}
 		}
 	}
@@ -1327,7 +1365,6 @@ func validateOverlay(u *Config, present map[string]any) error {
 		{"max_concurrent", u.MaxConcurrent},
 		{"max_queue_size", u.MaxQueueSize},
 		{"max_retries", u.MaxRetries},
-		{"queue_retry_after", u.QueueRetryAfter},
 		{"history_size", u.HistorySize},
 		{"conversation_max_open", u.ConversationMaxOpen},
 		{"anthropic_default_max_tokens", u.AnthropicDefaultMaxTokens},
@@ -1341,12 +1378,10 @@ func validateOverlay(u *Config, present map[string]any) error {
 			return fmt.Errorf("%s: must be >= 0, got %d", f.yaml, f.v)
 		}
 	}
-	// int64 sizes.
-	if u.MaxRequestBytes < 0 {
-		return fmt.Errorf("max_request_bytes: must be >= 0, got %d", u.MaxRequestBytes)
-	}
-	if u.DebugCaptureMaxBytes < 0 {
-		return fmt.Errorf("debug_capture_max_bytes: must be >= 0, got %d", u.DebugCaptureMaxBytes)
+	if isSet("max_request_bytes") {
+		if err := checkByteSize("max_request_bytes", u.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
+			return err
+		}
 	}
 	// Positive-floor ints: a written 0 is nonsense (rejected); absent is fine
 	// (the default applies). Detect "written as 0" via key presence.
@@ -1369,26 +1404,26 @@ func validateOverlay(u *Config, present map[string]any) error {
 	}
 	// A written zero/negative cursor_park_ttl is nonsense; absent keeps the default.
 	if isSet("cursor_park_ttl") && u.CursorParkTTL <= 0 {
-		return fmt.Errorf("cursor_park_ttl: must be > 0 when set")
+		return fmt.Errorf("cursor_park_ttl: must be > %s when set", FormatDuration(0))
 	}
 	// Same for a written-out-of-range heartbeat interval.
-	if isSet("cursor_heartbeat_interval") && (u.CursorHeartbeatInterval <= 0 || u.CursorHeartbeatInterval > HeartbeatIntervalMax) {
-		return fmt.Errorf("cursor_heartbeat_interval: must be 1ns..10m when set")
+	if isSet("cursor_heartbeat_interval") && (u.CursorHeartbeatInterval < HeartbeatIntervalMin || u.CursorHeartbeatInterval > HeartbeatIntervalMax) {
+		return fmt.Errorf("cursor_heartbeat_interval: must be %s when set", heartbeatRange())
 	}
-	if isSet("sse_keepalive_interval") && (u.SSEKeepaliveInterval <= 0 || u.SSEKeepaliveInterval > HeartbeatIntervalMax) {
-		return fmt.Errorf("sse_keepalive_interval: must be 1ns..10m when set")
+	if isSet("sse_keepalive_interval") && (u.SSEKeepaliveInterval < HeartbeatIntervalMin || u.SSEKeepaliveInterval > HeartbeatIntervalMax) {
+		return fmt.Errorf("sse_keepalive_interval: must be %s when set", heartbeatRange())
 	}
 	if isSet("dash_log_rows") && (u.DashLogRows < DashLogRowsMin || u.DashLogRows > DashLogRowsMax) {
 		return fmt.Errorf("dash_log_rows: must be %d..%d when set, got %d", DashLogRowsMin, DashLogRowsMax, u.DashLogRows)
 	}
 	if isSet("dash_poll_interval") && u.DashPollInterval <= 0 {
-		return fmt.Errorf("dash_poll_interval: must be > 0 when set")
+		return fmt.Errorf("dash_poll_interval: must be > %s when set", FormatDuration(0))
 	}
 	if isSet("dash_chart_refresh") && u.DashChartRefresh <= 0 {
-		return fmt.Errorf("dash_chart_refresh: must be > 0 when set")
+		return fmt.Errorf("dash_chart_refresh: must be > %s when set", FormatDuration(0))
 	}
 	if isSet("dash_explorer_stale") && u.DashExplorerStale <= 0 {
-		return fmt.Errorf("dash_explorer_stale: must be > 0 when set")
+		return fmt.Errorf("dash_explorer_stale: must be > %s when set", FormatDuration(0))
 	}
 	// quality_retries allows an explicit 0 (meaningful: disables), so only
 	// out-of-range values are rejected.
@@ -1396,14 +1431,17 @@ func validateOverlay(u *Config, present map[string]any) error {
 		return fmt.Errorf("quality_retries: must be 0..%d when set, got %d", QualityRetriesMax, u.QualityRetries)
 	}
 	if isSet("debug_capture_ttl") && (u.DebugCaptureTTL < DebugCaptureTTLMin || u.DebugCaptureTTL > DebugCaptureTTLMax) {
-		return fmt.Errorf("debug_capture_ttl: must be 1h..7d when set, got %v", u.DebugCaptureTTL)
+		return fmt.Errorf("debug_capture_ttl: must be %s..%s when set, got %s", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(u.DebugCaptureTTL))
 	}
-	if isSet("debug_capture_max_bytes") && (u.DebugCaptureMaxBytes < DebugCaptureMaxBytesMin || u.DebugCaptureMaxBytes > DebugCaptureMaxBytesMax) {
-		return fmt.Errorf("debug_capture_max_bytes: must be 4KiB..16MiB when set, got %d", u.DebugCaptureMaxBytes)
+	if isSet("debug_capture_max_bytes") {
+		if err := checkByteSize("debug_capture_max_bytes", u.DebugCaptureMaxBytes, DebugCaptureMaxBytesMin, DebugCaptureMaxBytesMax); err != nil {
+			return err
+		}
 	}
-	// queue_retry_after is seconds; a huge value is nonsense.
-	if u.QueueRetryAfter > QueueRetryAfterMax {
-		return fmt.Errorf("queue_retry_after: must be <= %d seconds, got %d", QueueRetryAfterMax, u.QueueRetryAfter)
+	if isSet("queue_retry_after") {
+		if err := checkQueueRetryAfter(u.QueueRetryAfter); err != nil {
+			return err
+		}
 	}
 	// Any negative duration is always invalid when written.
 	durs := []struct {
@@ -1423,10 +1461,11 @@ func validateOverlay(u *Config, present map[string]any) error {
 		{"read_header_timeout", u.ReadHeaderTimeout},
 		{"idle_timeout", u.IdleTimeout},
 		{"debug_capture_ttl", u.DebugCaptureTTL},
+		{"queue_retry_after", u.QueueRetryAfter},
 	}
 	for _, f := range durs {
 		if f.d < 0 {
-			return fmt.Errorf("%s: duration must be >= 0, got %v", f.yaml, f.d)
+			return fmt.Errorf("%s: duration must be >= 0, got %s", f.yaml, FormatDuration(f.d))
 		}
 	}
 	posDurWhenSet := []struct {
@@ -1442,7 +1481,7 @@ func validateOverlay(u *Config, present map[string]any) error {
 	}
 	for _, f := range posDurWhenSet {
 		if isSet(f.yaml) && f.d <= 0 {
-			return fmt.Errorf("%s: must be > 0 when set, got %v", f.yaml, f.d)
+			return fmt.Errorf("%s: must be > %s when set, got %s", f.yaml, FormatDuration(0), FormatDuration(f.d))
 		}
 	}
 	return nil

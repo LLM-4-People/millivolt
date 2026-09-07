@@ -169,7 +169,7 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 	rec.ErrorType = "storm_queue_full"
 	rec.ErrorMsg = err.Error()
 	header := http.Header{}
-	header.Set("Retry-After", strconv.Itoa(s.cfg().QueueRetryAfter))
+	header.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
 	writeClientErrorHdr(w, rec, "rate_limit_error", "error storm protection: "+err.Error(), http.StatusTooManyRequests, header)
 	return true
 }

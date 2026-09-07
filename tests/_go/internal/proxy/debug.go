@@ -131,6 +131,13 @@ func TestHandleDebugGetAndPost(t *testing.T) {
 	if st["enabled"] != false {
 		t.Fatalf("GET enabled = %v, want false", st["enabled"])
 	}
+	cfg := config.Default()
+	if st["ttl"] != config.FormatDuration(cfg.DebugCaptureTTL) {
+		t.Fatalf("GET ttl = %v, want %s", st["ttl"], config.FormatDuration(cfg.DebugCaptureTTL))
+	}
+	if st["max_bytes"] != config.FormatByteSize(int64(cfg.DebugCaptureMaxBytes)) {
+		t.Fatalf("GET max_bytes = %v, want %s", st["max_bytes"], config.FormatByteSize(int64(cfg.DebugCaptureMaxBytes)))
+	}
 
 	post := httptest.NewRecorder()
 	p.HandleDebug(post, httptest.NewRequest(http.MethodPost, "/admin/debug",

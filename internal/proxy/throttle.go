@@ -302,12 +302,12 @@ func validateLimit(l scheduler.Limit) error {
 	}
 	if l.Requests > 0 {
 		if l.ReqWindow < minLimitWindow || l.ReqWindow > maxLimitWindow {
-			return fmt.Errorf("request window must be %s..%s", minLimitWindow, maxLimitWindow)
+			return fmt.Errorf("request window must be %s..%s", config.FormatDuration(minLimitWindow), config.FormatDuration(maxLimitWindow))
 		}
 	}
 	if l.Tokens > 0 {
 		if l.TokWindow < minLimitWindow || l.TokWindow > maxLimitWindow {
-			return fmt.Errorf("token window must be %s..%s", minLimitWindow, maxLimitWindow)
+			return fmt.Errorf("token window must be %s..%s", config.FormatDuration(minLimitWindow), config.FormatDuration(maxLimitWindow))
 		}
 	}
 	return nil

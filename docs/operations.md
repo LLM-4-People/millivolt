@@ -4,7 +4,8 @@ Read the [security boundary](../SECURITY.md) before exposing the listener.
 The whole embedded dashboard is protected: every dashboard, `/metrics/*` and
 `/admin/*` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential and is
 denied while it is not configured. Only the unauthenticated `/healthz`
-liveness probe, `/favicon.ico` and transparent inference stay open; see
+liveness probe, origin-root brand/PWA files (`/favicon.ico`, icons,
+`/manifest.webmanifest`, `/sw.js`) and transparent inference stay open; see
 [operator access](#operator-access).
 
 ## Configuration and CLI
@@ -67,6 +68,10 @@ types, ranges, units and hot-reload/restart behavior. `GET /admin/config` expose
 the same field/category metadata alongside saved values, neutral defaults,
 CLI overrides, the process-effective snapshot and the current revision.
 Settings searches labels, keys and help across categories.
+Durations and byte sizes use a magnitude plus unit (`2s`, `32MiB`) in YAML and
+Settings; do not write a bare number and assume seconds. A bare integer is still
+accepted as a count of bytes. Integer counts (retries, percents, tokens) stay
+unitless numbers with the unit in the schema label when it is not obvious.
 
 | Settings category | Configuration area |
 | --- | --- |
@@ -421,7 +426,10 @@ the credential gates both.
 | Route | Action / important contract |
 | --- | --- |
 | `GET /healthz` | Unauthenticated liveness probe for Docker HEALTHCHECK and load balancers. Reports process/HTTP liveness only, no storage depth. |
-| `GET /favicon.ico` | Unauthenticated brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
+| `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
+| `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
+| `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
+| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*` or `/v1`. |
 | `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
@@ -453,7 +461,8 @@ proxy.yaml, so it cannot leak through Settings, `-print-config`,
 The gate is deny by default and lives in one chokepoint in front of every
 route:
 
-- Open: `GET /healthz`, `GET /favicon.ico` and transparent inference. Provider
+- Open: `GET /healthz`, origin-root brand/PWA files (`/favicon.ico`, icons,
+  `/manifest.webmanifest`, `/sw.js`) and transparent inference. Provider
   credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
   and every `/admin/*` route, including unclassified future admin paths and
@@ -468,11 +477,12 @@ credential keeps the session. Rotating the token invalidates outstanding
 cookies. The cookie deliberately carries no `Secure` flag:
 millivolt's listener is plain HTTP, and the documented TLS deployments
 terminate at the ingress, where the remaining loopback hop is trusted-local.
-Do not expose the listener over plaintext networks anyway. The no-JS login
-page served for unauthenticated dashboard visits exchanges the entered value
-for that cookie through `POST /admin/session`; API clients can call the same
-endpoint or simply send the Bearer header on every request. An expired cookie
-re-prompts in the dashboard or reappears as the login page on navigation.
+Do not expose the listener over plaintext networks anyway. The login page
+served for unauthenticated dashboard visits exchanges the entered value for
+that cookie through `POST /admin/session` and works without JavaScript; API
+clients can call the same endpoint or simply send the Bearer header on every
+request. An expired cookie re-prompts in the dashboard or reappears as the
+login page on navigation.
 Unregistered `/admin/*` and `/metrics/*` paths are reserved: they answer 404
 and are never forwarded upstream.
 
@@ -490,7 +500,7 @@ response is `429` with a coarse rounded `Retry-After` and a generic body.
 
 With the variable unset or empty the gate stays armed: the whole dashboard
 returns 403
-and only `/healthz`, `/favicon.ico` and inference respond. A nonempty value shorter than 16
+and only `/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
 or longer than 512 characters fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart

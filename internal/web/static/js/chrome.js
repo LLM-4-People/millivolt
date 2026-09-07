@@ -345,9 +345,8 @@ function hideHdrMenu(id) {
 
 function parseGoDuration(s) {
   if (s == null || s === '') return 0;
-  if (typeof s === 'number') return s;
   s = String(s).trim();
-  if (!s || s === '0') return 0;
+  if (!s) return 0;
   const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
   let m, total = 0, any = false;
   while ((m = re.exec(s))) {
@@ -576,8 +575,7 @@ function settingsFieldHTML(f, val, def, override) {
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
-  if (f.kind === 'bytes' && val != null && val !== '') hint = `<span class="st-hint">${escapeHtml(fmtBytes(val))}</span>`;
-  else if (f.zero_means && (val === 0 || val === '0')) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
+  if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
   else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && String(val) === String(def)) {
     hint = `<span class="st-hint">default</span>`;
   } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings') {
@@ -599,7 +597,7 @@ function settingsFieldHTML(f, val, def, override) {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="aliases">${aliasesEditorHTML(val)}</div>`;
   } else if (f.kind === 'model_rules') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="model_rules">${modelRulesEditorHTML(val)}</div>`;
-  } else if (f.kind === 'int' || f.kind === 'bytes') {
+  } else if (f.kind === 'int') {
     const min = f.min != null ? ` min="${f.min}"` : '';
     const max = f.max != null ? ` max="${f.max}"` : '';
     control = `<div class="st-ctl-line"><input type="number" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${dis}>${unit}</div>`;
@@ -610,15 +608,6 @@ function settingsFieldHTML(f, val, def, override) {
   const ttl = escapeHtml((f.help || '') + (f.help && f.key ? ' · ' : '') + (f.key || ''));
   const hot = f.hot_reload ? '1' : '0';
   return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}"><div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div><div class="st-ctl">${control}${hint}</div></div>`;
-}
-
-function fmtBytes(n) {
-  n = Number(n);
-  if (!Number.isFinite(n)) return '';
-  if (n >= 1073741824 && n % 1073741824 === 0) return (n / 1073741824) + ' GiB';
-  if (n >= 1048576 && n % 1048576 === 0) return (n / 1048576) + ' MiB';
-  if (n >= 1024 && n % 1024 === 0) return (n / 1024) + ' KiB';
-  return n + ' B';
 }
 
 // ---- providers editor ----
@@ -1690,7 +1679,7 @@ function applyDebugState(st, revision = operatorState.debug.revision) {
     known_models: Array.isArray(st.known_models) ? st.known_models : [],
     until: st.until || null,
     ttl: st.ttl || '',
-    max_bytes: typeof st.max_bytes === 'number' ? st.max_bytes : 0,
+    max_bytes: st.max_bytes == null || st.max_bytes === '' ? '' : String(st.max_bytes),
   };
   refreshFooterState();
   const menu = $('debug-menu');
@@ -2007,14 +1996,7 @@ function fillPauseControls() {
   fillSelectPairs($('pf-dur'), PAUSE_DURS, pauseMenuDuration());
 }
 
-const DEBUG_DURS = [
-  ['', 'I stop'],
-  ['15m', '15 min'],
-  ['1h', '1 hour'],
-  ['6h', '6 hours'],
-  ['12h', '12 hours'],
-  ['24h', '24 hours'],
-];
+const DEBUG_DURS = [['', 'I stop']].concat(PAUSE_DURS.slice(1));
 
 function toggleDebugMenu(e) {
   e.stopPropagation();
@@ -2528,7 +2510,7 @@ document.addEventListener('click', e => {
 // set (shared by the Clear and Logs menus - same options, same values).
 const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
-const FILTER_AGES = [['', '-'], ['3600000', '1 hour'], ['86400000', '1 day'], ['604800000', '1 week']];
+const FILTER_AGES = [['', '-'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']];
 
 function populateFilterMenu(prefix) {
   const recs = lastData?.records || [];
@@ -2582,7 +2564,7 @@ function populateFilterMenu(prefix) {
 // filterFromUI reads a menu (by id prefix: cf = clear, lf = logs) into a
 // filter object matching the backend PurgeFilter JSON shape.
 function filterFromUI(prefix, now = Date.now()) {
-  const age = +($(prefix+'-age').value || 0);
+  const age = parseGoDuration($(prefix+'-age').value);
   return {
     provider: $(prefix+'-provider').value || '',
     model: $(prefix+'-model').value || '',

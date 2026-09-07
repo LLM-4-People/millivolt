@@ -46,6 +46,9 @@ type Field struct {
 	Max       *float64 `json:"max,omitempty"`
 	ZeroMeans string   `json:"zero_means,omitempty"`
 	Unit      string   `json:"unit,omitempty"`
+	// ZeroToken is the formatted zero for duration/bytes fields, filled by
+	// Schema from FormatDuration/FormatByteSize so Settings does not hardcode 0s/0B.
+	ZeroToken string `json:"zero_token,omitempty"`
 }
 
 func num(v float64) *float64 { return &v }
@@ -70,7 +73,7 @@ func Categories() []Category {
 // Schema is the single registry of every user-tunable. Adding a Config field
 // requires an entry here; TestSchemaCoversConfigFields fails if they drift.
 func Schema() []Field {
-	return []Field{
+	return withZeroTokens([]Field{
 		// ---- server ----
 		{Key: "listen", Category: "server", Label: "Listen address",
 			Help: "Host:port the HTTP server binds. Restart required.",
@@ -97,7 +100,7 @@ func Schema() []Field {
 		// ---- request ----
 		{Key: "max_request_bytes", Category: "request", Label: "Max request bytes",
 			Help: "Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected with 413.",
-			Kind: KindBytes, HotReload: true, Min: num(1024), Max: num(1 << 30), Unit: "bytes"},
+			Kind: KindBytes, HotReload: true, Min: num(MaxRequestBytesMin), Max: num(MaxRequestBytesMax)},
 		{Key: "allowed_base_urls", Category: "request", Label: "Allowed base URLs",
 			Help: "SSRF allowlist of upstream base-URL prefixes. Empty allows any target (single trusted operator). Each entry must be an absolute http:// or https:// URL with a host.",
 			Kind: KindStrings, HotReload: true},
@@ -109,7 +112,7 @@ func Schema() []Field {
 			Kind: KindDuration, HotReload: true, Min: num(float64(DebugCaptureTTLMin)), Max: num(float64(DebugCaptureTTLMax))},
 		{Key: "debug_capture_max_bytes", Category: "request", Label: "Debug capture max bytes",
 			Help: "Cap on one debug capture (request body plus client-facing response bytes). Past the cap the rest is dropped and the capture is marked truncated.",
-			Kind: KindBytes, HotReload: true, Min: num(float64(DebugCaptureMaxBytesMin)), Max: num(float64(DebugCaptureMaxBytesMax)), Unit: "bytes"},
+			Kind: KindBytes, HotReload: true, Min: num(float64(DebugCaptureMaxBytesMin)), Max: num(float64(DebugCaptureMaxBytesMax))},
 		{Key: "auto_token_refresh", Category: "request", Label: "Auto token refresh",
 			Help: "Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All supported providers use inference handback: HTTP 401 with token_expired and access_token in the error body, plus refresh_token only when the exchange returns a different replacement. No inference is sent; adopt the returned credentials and retry, retaining the old refresh token if no replacement is returned. Model discovery refreshes transparently without returning tokens. Stateless: no reusable credentials are retained.",
 			Kind: KindBool, HotReload: true},
@@ -123,7 +126,7 @@ func Schema() []Field {
 			Kind: KindDuration, HotReload: true, Min: num(float64(ModelsDiscoveryTimeoutMin)), Max: num(float64(ModelsDiscoveryTimeoutMax))},
 		{Key: "models_discovery_max_bytes", Category: "upstream", Label: "Model discovery bytes",
 			Help: "Aggregate response bytes read after transport decoding across model pages, unary RPCs and enrichment. Primary overflow fails; optional enrichment is discarded. This is not a strict heap limit.",
-			Kind: KindBytes, HotReload: true, Min: num(ModelsDiscoveryMaxBytesMin), Max: num(ModelsDiscoveryMaxBytesMax), Unit: "bytes"},
+			Kind: KindBytes, HotReload: true, Min: num(ModelsDiscoveryMaxBytesMin), Max: num(ModelsDiscoveryMaxBytesMax)},
 		{Key: "models_discovery_max_pages", Category: "upstream", Label: "Model discovery pages",
 			Help: "Maximum upstream model responses per discovery, including a unary RPC and optional enrichment. Limits are captured once, never reset between pages.",
 			Kind: KindInt, HotReload: true, Min: num(ModelsDiscoveryMaxPagesMin), Max: num(ModelsDiscoveryMaxPagesMax)},
@@ -140,8 +143,8 @@ func Schema() []Field {
 			Help: "How long an idle upstream connection is kept before closing.",
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "never expire"},
 		{Key: "sse_keepalive_interval", Category: "upstream", Label: "SSE keepalive interval",
-			Help: "How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator hold, TTFB, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.",
-			Kind: KindDuration, HotReload: true, Min: num(1), Max: num(float64(HeartbeatIntervalMax))},
+			Help: "How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator hold, TTFB, mid-stream gaps). Range " + heartbeatRange() + ". Applies to streams started after reload.",
+			Kind: KindDuration, HotReload: true, Min: num(float64(HeartbeatIntervalMin)), Max: num(float64(HeartbeatIntervalMax))},
 
 		// ---- queue ----
 		{Key: "max_concurrent", Category: "queue", Label: "Max concurrent",
@@ -151,14 +154,14 @@ func Schema() []Field {
 			Help: "Queued waiters per group. 0 is unlimited.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_queue_wait", Category: "queue", Label: "Max queue wait",
-			Help: "How long a request may sit in the queue before 429. 0 is unlimited. Operator-hold time is excluded.",
+			Help: "How long a request may sit in the queue before 429. " + FormatDuration(0) + " is unlimited. Operator-hold time is excluded.",
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_retries", Category: "queue", Label: "Max retries",
 			Help: "Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s are never retried.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "no retries"},
 		{Key: "queue_retry_after", Category: "queue", Label: "Queue Retry-After",
-			Help: "Retry-After hint (seconds) sent when our own queue is full or the wait is exceeded.",
-			Kind: KindInt, HotReload: true, Min: num(0), Max: num(QueueRetryAfterMax), Unit: "seconds"},
+			Help: "Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP Retry-After is integer seconds, so the value must be a whole number of seconds.",
+			Kind: KindDuration, HotReload: true, Min: num(0), Max: num(float64(QueueRetryAfterMax))},
 		{Key: "base_backoff", Category: "queue", Label: "Base backoff",
 			Help: "Initial delay when the provider sends no retry hint. Doubles each attempt and each consecutive failed request, up to max backoff. Cannot exceed max backoff. Must be > 0.",
 			Kind: KindDuration, HotReload: true},
@@ -239,16 +242,16 @@ func Schema() []Field {
 		// ---- format ----
 		{Key: "anthropic_default_max_tokens", Category: "format", Label: "Anthropic default max tokens",
 			Help: "Injected into translated Anthropic requests when the client sent neither max_tokens nor max_completion_tokens.",
-			Kind: KindInt, HotReload: true, Min: num(1), Max: num(1_000_000)},
+			Kind: KindInt, HotReload: true, Min: num(1), Max: num(1_000_000), Unit: "tokens"},
 		{Key: "cursor_default_context_window", Category: "format", Label: "Cursor default context window",
-			Help: "Optional context-window hint (tokens) stamped onto every model in GET /v1/models when X-Proxy-Format is cursor. 0 omits the field.",
-			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "omit (client default)"},
+			Help: "Optional context-window hint stamped onto every model in GET /v1/models when X-Proxy-Format is cursor. 0 omits the field.",
+			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "omit (client default)", Unit: "tokens"},
 		{Key: "cursor_park_ttl", Category: "format", Label: "Cursor park TTL",
 			Help: "How long a parked Cursor Run stream stays open waiting for tool results. Must be > 0. Expiry closes the stream; the next continuation cold-starts.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "cursor_heartbeat_interval", Category: "format", Label: "Cursor heartbeat",
-			Help: "How often the proxy pings a Cursor agent.v1 run (idle parked runs included). Range 1ns..10m. Applies to runs created after reload.",
-			Kind: KindDuration, HotReload: true, Min: num(1), Max: num(float64(HeartbeatIntervalMax))},
+			Help: "How often the proxy pings a Cursor agent.v1 run (idle parked runs included). Range " + heartbeatRange() + ". Applies to runs created after reload.",
+			Kind: KindDuration, HotReload: true, Min: num(float64(HeartbeatIntervalMin)), Max: num(float64(HeartbeatIntervalMax))},
 
 		// ---- storage ----
 		{Key: "storage_write_chan_cap", Category: "storage", Label: "Write channel cap",
@@ -265,7 +268,7 @@ func Schema() []Field {
 			Kind: KindDuration, HotReload: false},
 		{Key: "storage_query_max_bytes", Category: "storage", Label: "Query result bytes",
 			Help: "Maximum JSON bytes returned by /metrics/query; also bounds SQLite string/blob values. Oversized results fail with HTTP 413, never truncate. Does not cap all SQLite working memory. Restart required.",
-			Kind: KindInt, HotReload: false, Min: num(StorageQueryMaxBytesMin), Max: num(StorageQueryMaxBytesMax)},
+			Kind: KindBytes, HotReload: false, Min: num(StorageQueryMaxBytesMin), Max: num(StorageQueryMaxBytesMax)},
 		{Key: "storage_query_max_rows", Category: "storage", Label: "Query result rows",
 			Help: "Maximum rows returned by /metrics/query. Oversized results fail with HTTP 413; use SQL filters or LIMIT. Does not limit dashboard aggregates or exports. Restart required.",
 			Kind: KindInt, HotReload: false, Min: num(StorageQueryMaxRowsMin), Max: num(StorageQueryMaxRowsMax)},
@@ -295,7 +298,19 @@ func Schema() []Field {
 		{Key: "model_rules", Category: "models", Label: "Model grouping rules",
 			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
+	})
+}
+
+func withZeroTokens(fields []Field) []Field {
+	for i := range fields {
+		switch fields[i].Kind {
+		case KindDuration:
+			fields[i].ZeroToken = FormatDuration(0)
+		case KindBytes:
+			fields[i].ZeroToken = FormatByteSize(0)
+		}
 	}
+	return fields
 }
 
 // FieldByKey returns the schema entry for a yaml key, or nil.
@@ -320,7 +335,7 @@ func (f Field) TypeLine(def any) string {
 	case KindInt:
 		b.WriteString("int")
 	case KindBytes:
-		b.WriteString("int (bytes)")
+		b.WriteString("bytes")
 	case KindBool:
 		b.WriteString("bool")
 	case KindDuration:
@@ -336,8 +351,7 @@ func (f Field) TypeLine(def any) string {
 	default:
 		b.WriteString(string(f.Kind))
 	}
-	// KindBytes already writes "int (bytes)"; only KindInt appends Unit
-	// (queue_retry_after → "int (seconds)").
+	// KindBytes already writes "bytes"; KindInt appends Unit (tokens, percent).
 	if f.Kind == KindInt && f.Unit != "" {
 		b.WriteString(" (" + f.Unit + ")")
 	}
@@ -352,15 +366,19 @@ func (f Field) TypeLine(def any) string {
 			b.WriteString("<= " + f.formatBound(*f.Max))
 		}
 		if f.ZeroMeans != "" {
+			zero := "0"
+			if f.ZeroToken != "" {
+				zero = f.ZeroToken
+			}
 			if f.Min != nil || f.Max != nil {
-				b.WriteString(" (0 = " + f.ZeroMeans + ")")
+				b.WriteString(" (" + zero + " = " + f.ZeroMeans + ")")
 			} else {
-				b.WriteString("0 = " + f.ZeroMeans)
+				b.WriteString(zero + " = " + f.ZeroMeans)
 			}
 		}
 	}
 	if f.Kind == KindDuration && f.Min == nil && f.Max == nil && f.ZeroMeans == "" {
-		b.WriteString(" · range > 0")
+		b.WriteString(" · range > " + FormatDuration(0))
 	}
 	switch {
 	case f.Kind == KindModelRules:
@@ -371,37 +389,39 @@ func (f Field) TypeLine(def any) string {
 		}
 	case def != nil && f.Kind != KindProviders && f.Kind != KindAliases && f.Kind != KindStrings:
 		b.WriteString(" · default ")
-		b.WriteString(fmt.Sprint(def))
+		b.WriteString(typeLineDefault(f, def))
 	}
 	return b.String()
 }
 
+func typeLineDefault(f Field, def any) string {
+	switch f.Kind {
+	case KindDuration:
+		if d, ok := def.(time.Duration); ok {
+			return FormatDuration(d)
+		}
+	case KindBytes:
+		switch n := def.(type) {
+		case ByteSize:
+			return FormatByteSize(int64(n))
+		case int64:
+			return FormatByteSize(n)
+		case int:
+			return FormatByteSize(int64(n))
+		}
+	}
+	return fmt.Sprint(def)
+}
+
 // formatBound is TypeLine's range-bound printer: durations via FormatDuration
-// (1ns, 10m) so Min/Max never leak as raw nanoseconds; KindBytes as exact
-// binary units (GiB/MiB/KiB, same spirit as chrome.js fmtBytes) so a 1GiB
-// max is not printed as 1073741824.
+// and byte sizes via FormatByteSize so Min/Max never leak as nanoseconds or
+// raw byte counts.
 func (f Field) formatBound(v float64) string {
 	if f.Kind == KindDuration {
-		d := time.Duration(v)
-		if d == 0 {
-			return "0"
-		}
-		return FormatDuration(d)
+		return FormatDuration(time.Duration(v))
 	}
 	if f.Kind == KindBytes {
-		n := int64(v)
-		// n != 0: 0 is divisible by every unit and must not print as 0GiB.
-		if n != 0 {
-			switch {
-			case n%(1<<30) == 0:
-				return trimNum(float64(n/(1<<30))) + "GiB"
-			case n%(1<<20) == 0:
-				return trimNum(float64(n/(1<<20))) + "MiB"
-			case n > 1<<10 && n%(1<<10) == 0: // 1024 stays 1024 (range 1024..1GiB)
-				return trimNum(float64(n/(1<<10))) + "KiB"
-			}
-		}
-		return trimNum(v)
+		return FormatByteSize(int64(v))
 	}
 	return trimNum(v)
 }

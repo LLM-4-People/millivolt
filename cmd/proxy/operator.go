@@ -24,8 +24,9 @@ import (
 // gated route set below: dashboard HTML/assets, every /metrics/* surface and
 // every /admin/* action require the operator credential. Open surfaces are
 // the /healthz liveness probe (Docker healthchecks and load balancers cannot
-// carry the credential), /favicon.ico (browsers fetch it without
-// Authorization, and it carries no dashboard data), and transparent
+// carry the credential), origin-root brand/PWA files (/favicon.ico,
+// /favicon.svg, icons, /manifest.webmanifest, /sw.js; browsers fetch them
+// without Authorization and they carry no dashboard data), and transparent
 // inference (the mux catch-all; provider credentials ride the same header
 // name and are never inspected). The gate is this file's middleware, the
 // single lowest chokepoint every request passes through (main wraps the whole
@@ -154,7 +155,7 @@ func (g *operatorGate) valid(presented string) bool {
 // gatedPath reports whether the request belongs to the dashboard/operator
 // plane. The exact namespace roots are gated too: /admin, /metrics and /dash
 // are millivolt-owned, so a look-alike path can never reach the inference
-// catch-all. Everything else (registered /healthz, /favicon.ico and the
+// catch-all. Everything else (registered /healthz, brand/PWA files and the
 // catch-all) passes untouched.
 func gatedPath(path string) bool {
 	return path == "/" || path == "/index.html" ||
@@ -425,8 +426,9 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 // handleAdminSession is POST /admin/session: the one open operator-plane
 // route, because it is the handshake that mints the session cookie. It
 // accepts the credential as a Bearer header (API clients) or as the single
-// "token" form field (the no-JS login page), throttles wrong candidates like
-// every other gated request, and never reveals which of the two was wrong.
+// "token" form field (the login page works without JavaScript), throttles
+// wrong candidates like every other gated request, and never reveals which
+// of the two was wrong.
 func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -503,14 +505,25 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 }
 
 // loginPageHTML is the whole pre-auth surface: self-contained (the gated
-// /dash assets are unreachable by design), no script, and it only ever
-// forwards the entered value to POST /admin/session.
+// /dash assets are unreachable by design). The form works without JavaScript
+// and only forwards the entered value to POST /admin/session. A tiny optional
+// script registers the ungated service worker so the sign-in page is
+// installable before a session cookie exists.
 const loginPageHTML = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="robots" content="noindex">
+<meta name="theme-color" content="#1b1826">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="millivolt">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
 <title>millivolt operator sign-in</title>
 <style>
 * { box-sizing: border-box; }
@@ -571,6 +584,11 @@ button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
 <input type="password" name="token" autocomplete="current-password" autofocus aria-label="Operator token" required>
 <button type="submit">Sign in</button>
 </form>
+<script>
+if (window.isSecureContext && navigator.serviceWorker) {
+  navigator.serviceWorker.register('/sw.js', {scope: '/', updateViaCache: 'none'}).catch(function () {});
+}
+</script>
 </body>
 </html>
 `

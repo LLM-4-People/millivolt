@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 )
 
@@ -477,7 +478,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 			}
 			wait, ok := pauseDurations[dur]
 			if !ok {
-				return prev, errors.New("duration must be 15m, 1h, 6h, 12h, 24h, or empty")
+				return prev, pauseDurationError()
 			}
 			clients := sanitizeNameList(body.Clients)
 			providers := sanitizeNameList(body.Providers)
@@ -601,8 +602,8 @@ func (s *Server) DebugSnapshot() map[string]any {
 		"known_providers": nullSlice(s.knownProviders()),
 		"known_models":    nullSlice(knownModels),
 		"until":           until,
-		"ttl":             s.cfg().DebugCaptureTTL.String(),
-		"max_bytes":       s.cfg().DebugCaptureMaxBytes,
+		"ttl":             config.FormatDuration(s.cfg().DebugCaptureTTL),
+		"max_bytes":       config.FormatByteSize(int64(s.cfg().DebugCaptureMaxBytes)),
 	}
 	if s.ModelObserver != nil {
 		names := append([]string(nil), knownModels...)

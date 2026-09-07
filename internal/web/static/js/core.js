@@ -96,7 +96,7 @@ let streamLive = false;
 let pauseState = { paused: false, clients: [], providers: [], holds: [], known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0 };
 let pauseEditID = '';
 let throttleState = { throttles: [], known_providers: [], active: false };
-let debugState = { enabled: false, sessions: [], known_clients: [], known_providers: [], known_models: [], until: null, ttl: '', max_bytes: 0 };
+let debugState = { enabled: false, sessions: [], known_clients: [], known_providers: [], known_models: [], until: null, ttl: '', max_bytes: '' };
 let debugEditID = '';
 // Filter state: only status remains a dropdown filter (client/provider/model/
 // conversation/error are explorer dimensions now). Persisted across reloads.

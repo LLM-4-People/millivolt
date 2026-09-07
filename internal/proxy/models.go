@@ -47,7 +47,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	ctx, cancel := context.WithTimeout(r.Context(), cfg.ModelsDiscoveryTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
-	d := &modelsDiscovery{ctx: ctx, bytesLeft: cfg.ModelsDiscoveryMaxBytes, pagesLeft: cfg.ModelsDiscoveryMaxPages}
+	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages}
 	key = s.resolveKeyTransparent(r, t, key)
 	switch t.format {
 	case "cursor":

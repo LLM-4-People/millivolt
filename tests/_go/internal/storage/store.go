@@ -29,7 +29,7 @@ var testOpts = func() Options {
 		BatchCap:      d.StorageBatchCap,
 		FlushInterval: d.StorageFlushInterval,
 		QueryTimeout:  d.StorageQueryTimeout,
-		QueryMaxBytes: d.StorageQueryMaxBytes,
+		QueryMaxBytes: int(d.StorageQueryMaxBytes),
 		QueryMaxRows:  d.StorageQueryMaxRows,
 	}
 }()

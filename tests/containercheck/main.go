@@ -593,19 +593,28 @@ func probe(phase string) error {
 	}
 	// The liveness probe and brand favicon are open server routes: no
 	// credential, no dashboard data. The ungated dashboard entry denies
-	// with the no-JS login page, whose handshake mints the session cookie
+	// with the login page, whose handshake mints the session cookie
 	// (EventSource cannot send Authorization headers).
 	if status, _, err := do(plain, http.MethodGet, "/healthz", nil, nil); err != nil || status != http.StatusOK {
 		return fmt.Errorf("healthz probe returned %d, %v", status, err)
 	}
-	if status, body, err := do(plain, http.MethodGet, "/favicon.ico", nil, nil); err != nil || status != http.StatusOK || !bytes.Contains(body, []byte("<svg")) {
+	if status, body, err := do(plain, http.MethodGet, "/favicon.ico", nil, nil); err != nil || status != http.StatusOK || len(body) < 4 || body[0] != 0 || body[1] != 0 || body[2] != 1 || body[3] != 0 {
 		return fmt.Errorf("ungated favicon returned %d, %v", status, err)
+	}
+	if status, body, err := do(plain, http.MethodGet, "/manifest.webmanifest", nil, nil); err != nil || status != http.StatusOK || !bytes.Contains(body, []byte(`"start_url"`)) {
+		return fmt.Errorf("ungated manifest returned %d, %v", status, err)
+	}
+	if status, body, err := do(plain, http.MethodGet, "/sw.js", nil, nil); err != nil || status != http.StatusOK || !bytes.Contains(body, []byte("addEventListener('fetch'")) {
+		return fmt.Errorf("ungated service worker returned %d, %v", status, err)
+	}
+	if status, body, err := do(plain, http.MethodGet, "/icon-192.png", nil, nil); err != nil || status != http.StatusOK || len(body) < 8 || string(body[:8]) != "\x89PNG\r\n\x1a\n" {
+		return fmt.Errorf("ungated icon-192 returned %d, %v", status, err)
 	}
 	status, login, err := do(plain, http.MethodGet, "/", nil, nil)
 	if err != nil {
 		return err
 	}
-	if status != http.StatusUnauthorized || !bytes.Contains(login, []byte(`action="/admin/session"`)) {
+	if status != http.StatusUnauthorized || !bytes.Contains(login, []byte(`action="/admin/session"`)) || !bytes.Contains(login, []byte(`rel="manifest"`)) {
 		return fmt.Errorf("ungated dashboard returned %d, want the 401 login page", status)
 	}
 	session, err := http.NewRequest(http.MethodPost, smokeAddress+"/admin/session", strings.NewReader("token="+url.QueryEscape(credential)))

@@ -19,8 +19,9 @@
     /* Header/footer instrument rails sit one step darker than --panel. */
     --rail: #100e0b;
     /* Header rail height + the feathered tick strip that hangs below it.
-       Sheets/drawers/menus offset from these so the rail never covers them. */
-    --rail-h: 56px;
+       Sheets/drawers/menus offset from these so the rail never covers them.
+       56px content plus iOS standalone safe-area (0 on desktop). */
+    --rail-h: calc(56px + env(safe-area-inset-top, 0px));
     --rail-tick: 8px;
     --hdr-btn: 32px;
     /* Graduated-scale tick color (the shell's signature motif). */
@@ -59,7 +60,7 @@
     -webkit-font-smoothing: antialiased;
   }
   header {
-    height: var(--rail-h); padding: 0 28px;
+    height: var(--rail-h); padding: env(safe-area-inset-top, 0px) max(28px, env(safe-area-inset-right, 0px)) 0 max(28px, env(safe-area-inset-left, 0px));
     display: flex; align-items: center; gap: 14px;
     position: sticky; top: 0; z-index: 80; flex-shrink: 0;
     /* Opaque instrument rail (no frosted-glass blur - the anti-SaaS move). The
@@ -1073,7 +1074,8 @@
      farm. Mirrors the header's graduated tick scale along its top edge. */
   footer {
     position: relative; display: flex; align-items: center; gap: 16px;
-    padding: 6px 28px; font-size: 11px; font-family: var(--mono);
+    padding: 6px max(28px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(28px, env(safe-area-inset-left, 0px));
+    font-size: 11px; font-family: var(--mono);
     color: var(--muted);     background: var(--rail);
     border-top: 1px solid var(--border2);
     box-shadow: 0 -10px 24px rgba(0,0,0,.28);
@@ -1101,7 +1103,7 @@
     section.card, #explorer { margin-bottom: 14px; }
     .card { padding: 12px 12px; }
     .xp-body { gap: 10px; }
-    footer { flex-wrap: wrap; gap: 4px 12px; padding: 6px 10px; row-gap: 4px; }
+    footer { flex-wrap: wrap; gap: 4px 12px; padding: 6px max(10px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(10px, env(safe-area-inset-left, 0px)); row-gap: 4px; }
     footer .f-right { margin-left: 0; width: 100%; justify-content: space-between; gap: 8px; }
     footer .f-right .f-cell:first-child { display: none; } /* drop the brand tagline */
     footer .f-right .f-sep { display: none; }

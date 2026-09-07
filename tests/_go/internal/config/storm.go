@@ -81,13 +81,13 @@ func TestStormConfigBoundsAndSchema(t *testing.T) {
 			if schema == nil || schema.Category != "storm" || schema.Kind != KindDuration || !schema.HotReload || schema.Min == nil || schema.Max == nil || *schema.Min != float64(field.min) || *schema.Max != float64(field.max) {
 				t.Fatalf("schema does not expose the duration bounds: %+v", schema)
 			}
-			for _, invalid := range []string{"0", "0s", "null", "false", "bad", (field.min - 1).String(), (field.max + 1).String()} {
+			for _, invalid := range []string{"0", "0s", "null", "false", "bad", FormatDuration(field.min - 1), FormatDuration(field.max + 1)} {
 				if _, err := loadStormConfig(t, field.key+": "+invalid); err == nil {
 					t.Errorf("accepted YAML %s", invalid)
 				}
 			}
 			for _, valid := range []time.Duration{field.min, field.max} {
-				raw := fmt.Sprintf("%s: %s\n", field.key, valid)
+				raw := fmt.Sprintf("%s: %s\n", field.key, FormatDuration(valid))
 				if field.key == "storm_initial_backoff" {
 					raw += "storm_max_backoff: 1h\n"
 				} else if field.key == "storm_max_backoff" {

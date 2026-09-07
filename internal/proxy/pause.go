@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -89,13 +90,27 @@ func (p *pauseBool) UnmarshalJSON(raw []byte) error {
 }
 
 // pauseDurations is the allowlist (deny by default). Empty = until resume.
+// Keys are FormatDuration of the values (except "" for 0).
 var pauseDurations = map[string]time.Duration{
-	"":    0,
-	"15m": 15 * time.Minute,
-	"1h":  time.Hour,
-	"6h":  6 * time.Hour,
-	"12h": 12 * time.Hour,
-	"24h": 24 * time.Hour,
+	"":                                      0,
+	config.FormatDuration(15 * time.Minute): 15 * time.Minute,
+	config.FormatDuration(time.Hour):        time.Hour,
+	config.FormatDuration(6 * time.Hour):    6 * time.Hour,
+	config.FormatDuration(12 * time.Hour):   12 * time.Hour,
+	config.FormatDuration(24 * time.Hour):   24 * time.Hour,
+}
+
+func pauseDurationError() error {
+	keys := make([]string, 0, len(pauseDurations))
+	for k := range pauseDurations {
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return pauseDurations[keys[i]] < pauseDurations[keys[j]]
+	})
+	return fmt.Errorf("duration must be %s, or empty", strings.Join(keys, ", "))
 }
 
 type pauseRuntime struct {
@@ -380,7 +395,7 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			}
 			wait, ok := pauseDurations[dur]
 			if !ok {
-				return prev, fmt.Errorf("duration must be 15m, 1h, 6h, 12h, 24h, or empty")
+				return prev, pauseDurationError()
 			}
 			if body.MaxQueued != nil && *body.MaxQueued < 0 {
 				return prev, fmt.Errorf("max_queued must be >= 0")

@@ -11,7 +11,8 @@ import (
 )
 
 // Map exports every schema field as a JSON-friendly value: durations are Go
-// duration strings ("5s", "2m"), never nanoseconds. This is what GET
+// duration strings ("5s", "2m") and byte sizes are magnitude-plus-unit strings
+// ("32MiB", "4KiB"), never nanoseconds or raw byte counts. This is what GET
 // /admin/config returns and what the dashboard round-trips through POST.
 func (c *Config) Map() map[string]any {
 	out := make(map[string]any, len(Schema()))
@@ -101,6 +102,17 @@ func exportValue(f Field, v any) any {
 			return FormatDuration(d)
 		}
 		return FormatDuration(0)
+	case KindBytes:
+		switch n := v.(type) {
+		case ByteSize:
+			return FormatByteSize(int64(n))
+		case int64:
+			return FormatByteSize(n)
+		case int:
+			return FormatByteSize(int64(n))
+		default:
+			return FormatByteSize(0)
+		}
 	case KindStrings:
 		ss, _ := v.([]string)
 		out := make([]string, len(ss))
@@ -180,7 +192,7 @@ func (c *Config) setField(f Field, v any) error {
 		}
 		rv.SetInt(int64(n))
 	case KindBytes:
-		n, err := asInt64(v)
+		n, err := parseByteSize(v)
 		if err != nil {
 			return err
 		}
@@ -292,12 +304,15 @@ func asDuration(v any) (time.Duration, error) {
 		return t, nil
 	case string:
 		s := strings.TrimSpace(t)
-		if s == "" || s == "0" {
+		// Settings text fields may submit a typed 0; YAML overlay still requires 0s.
+		if s == "" || s == "0" || s == FormatDuration(0) {
 			return 0, nil
 		}
 		d, err := time.ParseDuration(s)
 		if err != nil {
-			return 0, fmt.Errorf("want duration (e.g. 500ms, 5s, 2m, 1h)")
+			return 0, fmt.Errorf("want duration (e.g. %s, %s, %s, %s)",
+				FormatDuration(500*time.Millisecond), FormatDuration(5*time.Second),
+				FormatDuration(2*time.Minute), FormatDuration(time.Hour))
 		}
 		return d, nil
 	default:

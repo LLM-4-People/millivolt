@@ -821,3 +821,6 @@ function bootDashboard() {
 
 watchGallery(); // self-correcting gallery sizing from the very first paint
 bootDashboard();
+if (window.isSecureContext && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => {});
+}

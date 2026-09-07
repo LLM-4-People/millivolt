@@ -42,7 +42,7 @@ func TestQueryLimitConfigPersistenceAndBounds(t *testing.T) {
 		}
 		c := Default()
 		if field.key == "storage_query_max_bytes" {
-			c.StorageQueryMaxBytes = field.max + 1
+			c.StorageQueryMaxBytes = ByteSize(field.max + 1)
 		} else {
 			c.StorageQueryMaxRows = field.max + 1
 		}

@@ -113,7 +113,7 @@ go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard. With
 `MILLIVOLT_OPERATOR_TOKEN` set, the sign-in page (or the dashboard's one-time
 prompt) asks for that value; with it unset, the dashboard stays denied and
-only `/healthz`, `/favicon.ico` and inference respond. Then set
+only `/healthz`, brand/PWA files and inference respond. Then set
 your OpenAI-compatible client's connection options. The host URLs below assume
 port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
 

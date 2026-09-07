@@ -160,7 +160,7 @@ func TestApplyDurationAndList(t *testing.T) {
 	err := c.Apply(map[string]any{
 		"base_backoff":      "250ms",
 		"allowed_base_urls": []any{"https://api.alpha.example", "http://10.0.0.5:8000"},
-		"max_request_bytes": float64(2 << 20),
+		"max_request_bytes": "2MiB",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -324,15 +324,63 @@ func TestMapEmptySlicesAreJSONArrays(t *testing.T) {
 }
 
 func TestMapDurationsAreStrings(t *testing.T) {
-	m := Default().Map()
-	if m["base_backoff"] != "1s" {
-		t.Errorf("base_backoff = %v, want 1s", m["base_backoff"])
+	d := Default()
+	m := d.Map()
+	for _, f := range Schema() {
+		if f.Kind != KindDuration {
+			continue
+		}
+		got, ok := m[f.Key].(string)
+		if !ok {
+			t.Errorf("%s Map type = %T, want string", f.Key, m[f.Key])
+			continue
+		}
+		want := FormatDuration(d.fieldValue(f.Key).(time.Duration))
+		if got != want {
+			t.Errorf("%s = %q, want %q", f.Key, got, want)
+		}
 	}
-	if m["max_backoff"] != "2m" {
-		t.Errorf("max_backoff = %v, want 2m", m["max_backoff"])
+}
+
+func TestMapByteSizesAreStrings(t *testing.T) {
+	d := Default()
+	m := d.Map()
+	for _, f := range Schema() {
+		if f.Kind != KindBytes {
+			continue
+		}
+		got, ok := m[f.Key].(string)
+		if !ok {
+			t.Errorf("%s Map type = %T, want string", f.Key, m[f.Key])
+			continue
+		}
+		n, err := parseByteSize(d.fieldValue(f.Key))
+		if err != nil {
+			t.Fatalf("%s fieldValue: %v", f.Key, err)
+		}
+		want := FormatByteSize(n)
+		if got != want {
+			t.Errorf("%s = %q, want %q", f.Key, got, want)
+		}
 	}
-	if m["storage_flush_interval"] != "500ms" {
-		t.Errorf("storage_flush_interval = %v", m["storage_flush_interval"])
+}
+
+func TestSchemaZeroTokenMatchesFormatters(t *testing.T) {
+	for _, f := range Schema() {
+		switch f.Kind {
+		case KindDuration:
+			if f.ZeroToken != FormatDuration(0) {
+				t.Errorf("%s zero_token = %q, want %q", f.Key, f.ZeroToken, FormatDuration(0))
+			}
+		case KindBytes:
+			if f.ZeroToken != FormatByteSize(0) {
+				t.Errorf("%s zero_token = %q, want %q", f.Key, f.ZeroToken, FormatByteSize(0))
+			}
+		default:
+			if f.ZeroToken != "" {
+				t.Errorf("%s zero_token = %q, want empty", f.Key, f.ZeroToken)
+			}
+		}
 	}
 }
 
@@ -343,8 +391,11 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Fatal("shutdown_timeout missing from Schema")
 	}
 	line := st.TypeLine(d.ShutdownTimeout)
-	if !strings.Contains(line, "duration") || !strings.Contains(line, "range > 0") {
-		t.Errorf("shutdown_timeout TypeLine = %q, want duration and range > 0", line)
+	if !strings.Contains(line, "duration") || !strings.Contains(line, "range > "+FormatDuration(0)) {
+		t.Errorf("shutdown_timeout TypeLine = %q, want duration and range > %s", line, FormatDuration(0))
+	}
+	if !strings.Contains(line, "default "+FormatDuration(d.ShutdownTimeout)) {
+		t.Errorf("shutdown_timeout TypeLine = %q, want default %s", line, FormatDuration(d.ShutdownTimeout))
 	}
 
 	hb := FieldByKey("cursor_heartbeat_interval")
@@ -352,8 +403,8 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Fatal("cursor_heartbeat_interval missing from Schema")
 	}
 	hline := hb.TypeLine(d.CursorHeartbeatInterval)
-	if !strings.Contains(hline, "1ns") || !strings.Contains(hline, "10m") {
-		t.Errorf("cursor_heartbeat_interval TypeLine = %q, want 1ns and 10m", hline)
+	if !strings.Contains(hline, heartbeatRange()) {
+		t.Errorf("cursor_heartbeat_interval TypeLine = %q, want %s", hline, heartbeatRange())
 	}
 
 	idle := FieldByKey("idle_timeout")
@@ -361,8 +412,8 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Fatal("idle_timeout missing from Schema")
 	}
 	iline := idle.TypeLine(d.IdleTimeout)
-	if !strings.Contains(iline, "0 = no timeout") {
-		t.Errorf("idle_timeout TypeLine = %q, want 0 = no timeout", iline)
+	if !strings.Contains(iline, FormatDuration(0)+" = no timeout") {
+		t.Errorf("idle_timeout TypeLine = %q, want %s = no timeout", iline, FormatDuration(0))
 	}
 
 	mi := FieldByKey("max_idle_conns_per_host")
@@ -382,11 +433,14 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Fatal("max_request_bytes missing from Schema")
 	}
 	bline := mb.TypeLine(d.MaxRequestBytes)
-	if !strings.Contains(bline, "1GiB") || !strings.Contains(bline, "bytes") {
-		t.Errorf("max_request_bytes TypeLine = %q, want 1GiB and bytes", bline)
+	if !strings.Contains(bline, FormatByteSize(MaxRequestBytesMax)) || !strings.Contains(bline, "bytes") {
+		t.Errorf("max_request_bytes TypeLine = %q, want %s and bytes", bline, FormatByteSize(MaxRequestBytesMax))
 	}
-	if !strings.Contains(bline, "1024..1GiB") {
-		t.Errorf("max_request_bytes TypeLine = %q, want range 1024..1GiB", bline)
+	if !strings.Contains(bline, FormatByteSize(MaxRequestBytesMin)+".."+FormatByteSize(MaxRequestBytesMax)) {
+		t.Errorf("max_request_bytes TypeLine = %q, want range %s..%s", bline, FormatByteSize(MaxRequestBytesMin), FormatByteSize(MaxRequestBytesMax))
+	}
+	if !strings.Contains(bline, "default "+FormatByteSize(int64(d.MaxRequestBytes))) {
+		t.Errorf("max_request_bytes TypeLine = %q, want default %s", bline, FormatByteSize(int64(d.MaxRequestBytes)))
 	}
 
 	qr := FieldByKey("queue_retry_after")
@@ -394,7 +448,10 @@ func TestTypeLineDurationRange(t *testing.T) {
 		t.Fatal("queue_retry_after missing from Schema")
 	}
 	qline := qr.TypeLine(d.QueueRetryAfter)
-	if !strings.Contains(qline, "seconds") {
-		t.Errorf("queue_retry_after TypeLine = %q, want seconds", qline)
+	if !strings.Contains(qline, "duration") || !strings.Contains(qline, FormatDuration(QueueRetryAfterMax)) {
+		t.Errorf("queue_retry_after TypeLine = %q, want duration %s..%s", qline, FormatDuration(0), FormatDuration(QueueRetryAfterMax))
+	}
+	if strings.Contains(qline, "seconds") {
+		t.Errorf("queue_retry_after TypeLine = %q, must not use integer seconds", qline)
 	}
 }

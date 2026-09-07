@@ -18,7 +18,7 @@ import (
 )
 
 // TestOperatorPlaneBoundary is the deny-by-default regression for the whole
-// dashboard gate: only /healthz, /favicon.ico and the inference catch-all
+// dashboard gate: only /healthz, brand/PWA files and the inference catch-all
 // pass without the credential, every dashboard/metrics/admin route needs it
 // (Bearer or the session cookie the gate mints), the unauthenticated HTML
 // entrypoint gets the login page, same-origin mutation checks stay armed
@@ -31,14 +31,19 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		requests := []*http.Request{
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/healthz", nil),
-			httptest.NewRequest(http.MethodGet, "http://proxy.example/favicon.ico", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/v1/chat/completions", nil),
 			httptest.NewRequest(http.MethodGet, "http://proxy.example/v1/models", nil),
 			httptest.NewRequest(http.MethodPost, "http://proxy.example/anything/else/for/upstream", nil),
 		}
+		for _, p := range web.BrandPaths() {
+			if gatedPath(p) {
+				t.Errorf("brand path %s is gated", p)
+			}
+			requests = append(requests, httptest.NewRequest(http.MethodGet, "http://proxy.example"+p, nil))
+		}
 		// A provider credential rides the same header name; the gate must
 		// never consume or reject it outside the operator plane.
-		requests[1].Header.Set("Authorization", "Bearer provider-key")
+		requests[0].Header.Set("Authorization", "Bearer provider-key")
 		for _, r := range requests {
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -147,6 +152,19 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		}
 		if !strings.Contains(w.Body.String(), "box-sizing: border-box") {
 			t.Error("login page must box-size the card so padding cannot overflow the viewport")
+		}
+		body := w.Body.String()
+		for _, needle := range []string{
+			`rel="manifest" href="/manifest.webmanifest"`,
+			`rel="apple-touch-icon" href="/apple-touch-icon.png"`,
+			`name="apple-mobile-web-app-capable" content="yes"`,
+			`name="theme-color" content="#1b1826"`,
+			`navigator.serviceWorker.register('/sw.js'`,
+			`action="/admin/session"`,
+		} {
+			if !strings.Contains(body, needle) {
+				t.Errorf("login page missing %q", needle)
+			}
 		}
 		if got := w.Header().Get("Cache-Control"); got != "no-store" {
 			t.Errorf("login page cache-control=%q want no-store", got)

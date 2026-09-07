@@ -3,7 +3,8 @@
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
 credential; there is no tenant isolation and no per-user identity. Only the
-unauthenticated `/healthz` probe, `/favicon.ico` and transparent inference
+unauthenticated `/healthz` probe, origin-root brand/PWA files (`/favicon.ico`,
+icons, `/manifest.webmanifest`, `/sw.js`) and transparent inference
 stay open, so a load balancer can health-check the service without holding
 the credential.
 See [operator access](operations.md#operator-access). Read
@@ -24,14 +25,26 @@ millivolt at the origin root, with NGINX on the same host as the loopback-publis
 Compose service. Use a maintained NGINX release with the `http2 on` directive
 (introduced in 1.25.1), not the deprecated `listen ... http2` syntax.
 
+The sample splits two prefix locations because they do not share an access
+model. `location /v1` is the OpenAI-compatible inference base: preserve provider
+`Authorization` and routing headers, and allowlist API clients. `location /`
+is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`,
+`/healthz`, `/favicon.ico` and the other brand/PWA files): allowlist operators, and keep `Host` plus the
+session cookie so Settings origin checks and the live feed work. Shared
+streaming proxy settings live on the `server` so both SSE paths stay
+unbuffered. Prefix `/v1` wins over `/` for `/v1/chat/completions` and
+`/v1/models`; `GET /models` without that prefix follows `location /` unless
+you add an exact `/models` block with the inference rules.
+
 1. Start the normal [Compose deployment](../README.md#docker-compose), retaining
    its loopback-only host port.
 2. Copy the example into your NGINX HTTP configuration. Replace its example
-   hostname, certificate paths and trusted source-address allowlist. The supplied
-   TEST-NET address is a placeholder; unmatched clients are denied.
+   hostname, certificate paths and the two TEST-NET allowlists. The supplied
+   address is a placeholder; unmatched clients are denied. The lists may differ
+   when operators and API clients are not the same sources.
    Set `proxy_pass` to the chosen host port if `MILLIVOLT_PORT` is not 8080.
 3. Validate with `nginx -t` before reloading your existing NGINX service. Confirm
-   both a trusted client and a denied client behave as intended.
+   a trusted client and a denied client on both `/` and `/v1`.
 4. Use `https://your-hostname/` for the dashboard and
    `https://your-hostname/v1` as the client API base. Keep sending the actual
    upstream base/key as described in the [client setup](../README.md#connect-a-client).
@@ -62,25 +75,28 @@ These behaviors follow the official [proxy module](https://nginx.org/en/docs/htt
 
 ## Credentials and access control
 
-The sample uses a trusted IP/VPN allowlist across **all paths**, preserving
-provider `Authorization` unchanged. Replace the placeholder only with addresses
-you intend to trust as operators. If another load balancer is in front of NGINX,
-do not trust arbitrary forwarded client-address headers; configure that trusted
-proxy boundary deliberately. TLS encrypts traffic but does not authorize callers.
+The sample uses a trusted IP/VPN allowlist on each location, preserving
+provider `Authorization` on `/v1` and the operator Bearer or session cookie on
+`/`. Replace each placeholder with the addresses you intend to trust for that
+plane. If another load balancer is in front of NGINX, do not trust arbitrary
+forwarded client-address headers; configure that trusted proxy boundary
+deliberately. TLS encrypts traffic but does not authorize callers.
 See NGINX's [access module](https://nginx.org/en/docs/http/ngx_http_access_module.html)
 and [TLS configuration](https://nginx.org/en/docs/http/ngx_http_ssl_module.html).
 
-If you instead add HTTP Basic authentication, `Authorization` contains the ingress
-credential and cannot simultaneously contain the provider bearer key. Supply the
-provider key through `X-Proxy-Key`, and clear the consumed ingress header before
-forwarding with `proxy_set_header Authorization "";`. The same conflict applies
-to the operator credential: a browser behind Basic auth cannot also present the
-dashboard's Bearer credential in the same header, so gated actions fail. Prefer
-an address/VPN allowlist as in the sample, or an ingress that adds its own
-credential through a different mechanism and forwards `Authorization` untouched.
-The same separation applies
-to other ingress-only credentials: do not forward them to an LLM provider. Clients
-must support your ingress authentication and the proxy's custom routing headers.
+If you instead add HTTP Basic authentication on `/v1`, `Authorization` contains
+the ingress credential and cannot simultaneously contain the provider bearer
+key. Supply the provider key through `X-Proxy-Key`, and clear the consumed
+ingress header before forwarding with `proxy_set_header Authorization "";`.
+The same conflict applies on `/`: a browser behind Basic auth cannot also
+present the dashboard's Bearer credential in the same header, so gated actions
+fail. Prefer an address/VPN allowlist as in the sample, or an ingress that
+adds its own credential through a different mechanism and forwards
+`Authorization` untouched. Do not put Basic auth on `/v1` to "protect
+inference" while leaving `/` on Bearer: that still overwrites the provider key.
+The same separation applies to other ingress-only credentials: do not forward
+them to an LLM provider. Clients must support your ingress authentication and
+the proxy's custom routing headers.
 
 ## Container networking and other ingress servers
 
@@ -91,7 +107,8 @@ millivolt to loopback inside its container, which would prevent peer access.
 `MILLIVOLT_PORT` changes host publication, not this internal service port.
 
 For another ingress implementation, preserve these same boundaries: protect the
-entire origin, forward the original authority and required custom headers, allow
-streaming without response buffering, avoid automatic inference retries, and
-choose upload/idle limits deliberately. Subpath hosting is not the supplied
-deployment: dashboard assets and routes expect the origin root.
+origin, keep inference and the operator plane as separate access rules, forward
+the original authority and required custom headers, allow streaming without
+response buffering, avoid automatic inference retries, and choose upload/idle
+limits deliberately. Subpath hosting is not the supplied deployment: dashboard
+assets and routes expect the origin root.

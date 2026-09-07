@@ -46,7 +46,7 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 			t.Errorf("accepted timeout %s", invalid)
 		}
 	}
-	for _, valid := range []string{ModelsDiscoveryTimeoutMin.String(), ModelsDiscoveryTimeoutMax.String()} {
+	for _, valid := range []string{FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax)} {
 		if _, err := load("models_discovery_timeout: " + valid); err != nil {
 			t.Errorf("timeout boundary %s: %v", valid, err)
 		}

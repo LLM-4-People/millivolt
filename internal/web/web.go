@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -40,9 +41,28 @@ const dashboardVersionMarker = "__DASHBOARD_VERSION__"
 const dashboardBootstrapMarker = "__DASHBOARD_BOOTSTRAP__"
 
 const (
-	dashboardIndexPath   = "static/index.html"
-	dashboardFaviconPath = "static/favicon.svg"
+	dashboardIndexPath    = "static/index.html"
+	dashboardFaviconPath  = "static/favicon.svg"
+	dashboardFaviconIco   = "static/favicon.ico"
+	dashboardManifestPath = "static/manifest.webmanifest"
+	dashboardSWPath       = "static/sw.js"
 )
+
+// brandByURL is the ungated origin-root brand/PWA surface: icons, manifest
+// and service worker. Exact mux paths so they never reach the LLM catch-all.
+var brandByURL = map[string]struct {
+	file, ctype string
+}{
+	"/favicon.ico":           {dashboardFaviconIco, "image/x-icon"},
+	"/favicon.svg":           {dashboardFaviconPath, "image/svg+xml"},
+	"/apple-touch-icon.png":  {"static/apple-touch-icon.png", "image/png"},
+	"/icon-192.png":          {"static/icon-192.png", "image/png"},
+	"/icon-512.png":          {"static/icon-512.png", "image/png"},
+	"/icon-192-maskable.png": {"static/icon-192-maskable.png", "image/png"},
+	"/icon-512-maskable.png": {"static/icon-512-maskable.png", "image/png"},
+	"/manifest.webmanifest":  {dashboardManifestPath, "application/manifest+json"},
+	"/sw.js":                 {dashboardSWPath, "text/javascript; charset=utf-8"},
+}
 
 // dashTypes is the allowlisted extension → Content-Type map. Anything else
 // under DashPrefix is rejected (deny by default). FileServer is not used:
@@ -105,9 +125,14 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 	if err != nil {
 		panic(fmt.Errorf("load dashboard assets: %w", err))
 	}
-	for _, p := range []string{dashboardIndexPath, dashboardFaviconPath} {
+	for _, p := range []string{dashboardIndexPath, dashboardFaviconPath, dashboardFaviconIco, dashboardManifestPath, dashboardSWPath} {
 		if cache[p] == nil {
 			panic("load dashboard assets: missing " + p)
+		}
+	}
+	for _, spec := range brandByURL {
+		if cache[spec.file] == nil {
+			panic("load dashboard assets: missing " + spec.file)
 		}
 	}
 	index := string(cache[dashboardIndexPath].body)
@@ -117,8 +142,13 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 	if strings.Count(index, dashboardBootstrapMarker) != 1 {
 		panic("load dashboard assets: index must contain exactly one dashboard bootstrap marker")
 	}
+	sw := string(cache[dashboardSWPath].body)
+	if strings.Count(sw, dashboardVersionMarker) != 1 {
+		panic("load dashboard assets: service worker must contain exactly one dashboard version marker")
+	}
 	version := etagHex([]byte(identity.String()))
 	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.Replace(index, dashboardVersionMarker, version, 1)))
+	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)))
 	return cache, version
 }
 
@@ -233,19 +263,39 @@ func Handler(agg *AggAPI) http.Handler {
 	})
 }
 
-// Favicon serves the brand mark as an SVG favicon, so a browser's automatic
-// /favicon.ico request never falls through to the LLM proxy (which would 400).
-// The route is ungated: browsers fetch it without Authorization and it
-// carries no dashboard data. no-cache plus ETag still forces revalidation
-// after a rebuild.
-func Favicon() http.Handler {
+// BrandPaths is the origin-root PWA/brand surface registered on the mux so
+// those URLs never fall through to inference.
+func BrandPaths() []string {
+	out := make([]string, 0, len(brandByURL))
+	for p := range brandByURL {
+		out = append(out, p)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Brand serves one ungated origin-root brand/PWA asset. Browsers fetch these
+// without Authorization; they carry no dashboard data. no-cache plus ETag
+// still forces revalidation after a rebuild.
+func Brand(urlPath string) http.Handler {
+	spec, ok := brandByURL[urlPath]
+	if !ok {
+		panic("unknown brand path " + urlPath)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnlessGetHead(w, r) {
 			return
 		}
-		writeStaticCached(w, r, "image/svg+xml", "no-cache", staticCache[dashboardFaviconPath])
+		if urlPath == "/sw.js" {
+			w.Header().Set("Service-Worker-Allowed", "/")
+		}
+		writeStaticCached(w, r, spec.ctype, "no-cache", staticCache[spec.file])
 	})
 }
+
+// Favicon is Brand("/favicon.ico"): a real ICO so automatic /favicon.ico
+// fetches (and reverse proxies that sniff image types) are not given SVG.
+func Favicon() http.Handler { return Brand("/favicon.ico") }
 
 // ServeDash is the single choke point for dashboard CSS/JS. It serves only
 // allowlisted extensions from the precomputed cache (avoiding per-request

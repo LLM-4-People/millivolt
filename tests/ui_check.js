@@ -166,7 +166,7 @@ const pageOptions = {
         return restartState.statusGate ? restartState.statusGate.then(() => response) : Promise.resolve(response);
       }
       if (u.includes('/admin/pause')) return Promise.resolve({ json: async () => ({ ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 }) });
-      if (u.includes('/admin/debug')) return Promise.resolve({ json: async () => ({ ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: 1048576 }) });
+      if (u.includes('/admin/debug')) return Promise.resolve({ json: async () => ({ ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' }) });
       if (u.includes('/admin/throttle')) return Promise.resolve({ json: async () => ({ ok: true, throttles: [], known_providers: ['p'], active: false }) });
       if (u.includes('/admin/config')) { cfgFetches++; return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(cfgDoc)) }); }
       if (u.includes('/metrics/agg/log')) {
@@ -207,7 +207,7 @@ const pageOptions = {
           dash: {},
           pause: { ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], until: null, queued: 0, default_max_queued: 0 },
           throttle: { ok: true, throttles: [], known_providers: ['p'], active: false },
-          debug: { ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: 1048576 },
+          debug: { ok: true, enabled: false, sessions: [], known_clients: ['c'], known_providers: ['epsilon.example', 'p'], known_models: ['m'], until: null, ttl: '24h', max_bytes: '1MiB' },
         }) });
       }
       const fp = fullPayload;
@@ -979,8 +979,19 @@ async function main() {
     check('an old count cannot overwrite an empty selection or re-enable delete',
       d.getElementById('btn-clear-filtered').disabled && d.getElementById('clear-count').textContent === '');
 
-    d.getElementById('cf-age').value = '3600000';
-    d.getElementById('lf-age').value = '3600000';
+    check('Logs/Clear age options use duration tokens',
+      ['cf', 'lf'].every(prefix => {
+        const el = d.getElementById(prefix + '-age');
+        return !!el.querySelector('option[value="1h"]') &&
+          !!el.querySelector('option[value="24h"]') &&
+          !!el.querySelector('option[value="168h"]') &&
+          !el.querySelector('option[value="3600000"]') &&
+          !el.querySelector('option[value="86400000"]') &&
+          !el.querySelector('option[value="604800000"]') &&
+          !el.querySelector('option[value="7d"]');
+      }));
+    d.getElementById('cf-age').value = '1h';
+    d.getElementById('lf-age').value = '1h';
     const pendingCounts = [];
     w.fetch = () => new Promise(resolve => pendingCounts.push(resolve));
     const clearCount = w.updateClearCount(), logsCount = w.updateLogsCount();
