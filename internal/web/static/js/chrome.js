@@ -562,7 +562,7 @@ function fillSettingsForm(doc) {
   updateSettingsActions();
 }
 
-function backupIncludeOn(id, enabled) {
+function backupCheckOn(id, enabled) {
   if (!enabled) return false;
   const el = $(id);
   return el ? el.checked : true;
@@ -570,78 +570,118 @@ function backupIncludeOn(id, enabled) {
 
 function settingsBackupHTML(doc) {
   const b = doc.backup || {};
+  const restoring = !!(backupInspect && backupInspect.data);
+  let html = '';
+  if (!restoring) html += backupDownloadRowHTML(b);
+  html += backupRestoreRowHTML(doc, b);
+  html += backupDiffRowsHTML(doc);
+  return html;
+}
+
+function backupMemberChecks(cfgId, dbId, canCfg, canDb) {
+  const cfgOn = backupCheckOn(cfgId, canCfg);
+  const dbOn = backupCheckOn(dbId, canDb);
+  return `<label class="st-check"><input type="checkbox" id="${cfgId}"${canCfg ? '' : ' disabled'}${cfgOn ? ' checked' : ''}> config</label>` +
+    `<label class="st-check"><input type="checkbox" id="${dbId}"${canDb ? '' : ' disabled'}${dbOn ? ' checked' : ''}> database</label>`;
+}
+
+function backupDownloadRowHTML(b) {
   const canCfg = !!b.config;
   const canDb = !!b.database;
-  const restoring = !!(backupInspect && backupInspect.data);
-  const cfgOn = backupIncludeOn('backup-include-config', canCfg);
-  const dbOn = backupIncludeOn('backup-include-database', canDb);
-  const pending = b.pending_database
-    ? '<span class="st-hint">database restore is staged; restart to apply</span>'
-    : '';
-  const members =
-    `<label class="st-check"><input type="checkbox" id="backup-include-config"${canCfg ? '' : ' disabled'}${cfgOn ? ' checked' : ''}> config</label>` +
-    `<label class="st-check"><input type="checkbox" id="backup-include-database"${canDb ? '' : ' disabled'}${dbOn ? ' checked' : ''}> database</label>`;
-  const file = `<input type="file" id="backup-file" accept=".mvb,application/octet-stream" hidden>`;
-  let extra;
-  if (restoring) {
-    extra = backupRestoreControlsHTML() + backupPreviewHTML(doc) +
-      `<div class="st-backup-actions">` +
-      `<button type="button" class="btn btn-accent" id="btn-backup-apply">Apply</button>` +
-      `<button type="button" class="btn" id="btn-backup-cancel">Cancel</button></div>` + file;
-  } else {
-    extra =
-      `<div class="st-backup-actions">` +
-      `<button type="button" class="btn" id="btn-backup-download">Download</button>` +
-      `<button type="button" class="btn" id="btn-backup-restore">Restore</button></div>` +
-      file +
-      `<span class="st-hint">restore validates the archive before it is applied.</span>`;
-  }
-  return `<div class="st-row st-block st-backup" data-cat="backup" data-label="backup download restore config database archive merge replace" data-help="download or restore a self-checked archive of the saved config and sqlite history">
-    <div class="st-name">Archive</div>
-    <div class="st-ctl">${members}${pending}${extra}</div>
+  return `<div class="st-row st-block st-backup" data-cat="backup" data-backup="download" data-label="download backup config database archive" data-help="download a self-checked archive of the saved config and sqlite history">
+    <div class="st-name">Download</div>
+    <div class="st-ctl">
+      ${backupMemberChecks('backup-dl-config', 'backup-dl-database', canCfg, canDb)}
+      <div class="st-backup-actions"><button type="button" class="btn" id="btn-backup-download">Download</button></div>
+    </div>
   </div>`;
 }
 
-function backupRestoreControlsHTML() {
+function backupRestoreRowHTML(doc, b) {
+  const restoring = !!(backupInspect && backupInspect.data);
+  const pending = b.pending_database
+    ? '<span class="st-hint">database restore is staged; restart to apply</span>'
+    : '';
+  const file = `<input type="file" id="backup-file" accept=".mvb,application/octet-stream" hidden>`;
+  let ctl;
+  if (restoring) {
+    ctl = pending + backupRestoreControlsHTML(b) +
+      `<div class="st-backup-actions">` +
+      `<button type="button" class="btn" id="btn-backup-cancel">Cancel</button>` +
+      `<button type="button" class="btn btn-accent" id="btn-backup-apply">Apply</button></div>` + file;
+  } else {
+    ctl = pending +
+      `<div class="st-backup-actions"><button type="button" class="btn" id="btn-backup-restore">Restore</button></div>` +
+      file +
+      `<span class="st-hint">validates the archive before it is applied.</span>`;
+  }
+  return `<div class="st-row st-block st-backup" data-cat="backup" data-backup="restore" data-label="restore backup config database archive merge replace" data-help="restore a self-checked archive of the saved config and sqlite history">
+    <div class="st-name">Restore</div>
+    <div class="st-ctl">${ctl}</div>
+  </div>`;
+}
+
+function backupRestoreControlsHTML(b) {
   const j = backupInspect && backupInspect.data || {};
   const cfg = j.config || {};
   const db = j.database || {};
-  const wantCfg = backupWantConfig();
-  const wantDb = backupWantDatabase();
+  const canCfg = !!b.config && !!cfg.present;
+  const canDb = !!b.database && !!db.present;
+  const wantCfg = backupCheckOn('backup-include-config', canCfg);
+  const wantDb = backupCheckOn('backup-include-database', canDb);
   const cfgReplace = backupConfigMode !== 'merge' ? ' checked' : '';
   const cfgMerge = backupConfigMode === 'merge' ? ' checked' : '';
   const dbReplace = backupDatabaseMode !== 'merge' ? ' checked' : '';
   const dbMerge = backupDatabaseMode === 'merge' ? ' checked' : '';
-  let html = '';
-  if (wantCfg && cfg.present) {
+  let html = backupMemberChecks('backup-include-config', 'backup-include-database', canCfg, canDb);
+  if (wantCfg) {
     html += `<span class="st-hint">config</span>` +
-      `<label class="st-check"><input type="radio" name="backup-config-mode" value="replace"${cfgReplace}> replace all</label>` +
-      `<label class="st-check"><input type="radio" name="backup-config-mode" value="merge"${cfgMerge}> merge modified</label>`;
+      `<label class="st-check"><input type="radio" name="backup-config-mode" value="replace"${cfgReplace}> replace</label>` +
+      `<label class="st-check"><input type="radio" name="backup-config-mode" value="merge"${cfgMerge}> merge</label>` +
+      `<span class="st-hint">${backupConfigMode === 'merge' ? 'overlays settings that differ from default' : 'writes every setting from the backup'}</span>`;
+  } else if (cfg.present && !b.config) {
+    html += '<span class="st-hint">start with -config to restore settings</span>';
   }
-  if (wantDb && db.present) {
+  if (wantDb) {
+    const overlap = db.overlap == null ? null : Number(db.overlap);
+    const reqs = Number(db.requests) || 0;
+    let hint = backupDatabaseMode === 'merge'
+      ? 'inserts request ids that are not already stored'
+      : 'replaces the live database on restart';
+    if (overlap != null) {
+      hint += backupDatabaseMode === 'merge'
+        ? ` · ${Math.max(0, reqs - overlap)} new of ${reqs}`
+        : ` · ${reqs} requests`;
+    }
     html += `<span class="st-hint">database</span>` +
-      `<label class="st-check"><input type="radio" name="backup-database-mode" value="replace"${dbReplace}> replace (restart)</label>` +
-      `<label class="st-check"><input type="radio" name="backup-database-mode" value="merge"${dbMerge}> merge new ids</label>`;
+      `<label class="st-check"><input type="radio" name="backup-database-mode" value="replace"${dbReplace}> replace</label>` +
+      `<label class="st-check"><input type="radio" name="backup-database-mode" value="merge"${dbMerge}> merge</label>` +
+      `<span class="st-hint">${escapeHtml(hint)}</span>`;
+  } else if (db.present && !b.database) {
+    html += '<span class="st-hint">durable storage is disabled</span>';
   }
   return html;
 }
 
 function backupWantConfig() {
-  return !!($('backup-include-config') && $('backup-include-config').checked);
+  return backupCheckOn('backup-include-config', true);
 }
 
 function backupWantDatabase() {
-  return !!($('backup-include-database') && $('backup-include-database').checked);
+  return backupCheckOn('backup-include-database', true);
 }
 
 function backupQuery(forRestore = false) {
   const q = new URLSearchParams();
-  if (backupWantConfig()) q.set('config', '1');
-  if (backupWantDatabase()) q.set('database', '1');
   if (forRestore) {
+    if (backupWantConfig()) q.set('config', '1');
+    if (backupWantDatabase()) q.set('database', '1');
     if (backupWantConfig()) q.set('config_mode', backupConfigMode === 'merge' ? 'merge' : 'replace');
     if (backupWantDatabase()) q.set('database_mode', backupDatabaseMode === 'merge' ? 'merge' : 'replace');
+    return q;
   }
+  if (backupCheckOn('backup-dl-config', true)) q.set('config', '1');
+  if (backupCheckOn('backup-dl-database', true)) q.set('database', '1');
   return q;
 }
 
@@ -657,54 +697,49 @@ function backupScalar(v) {
   return String(v);
 }
 
-function backupPreviewHTML(doc) {
-  if (!backupInspect || !backupInspect.data) return '';
-  const j = backupInspect.data;
+function backupDiffRowsHTML(doc) {
+  if (!backupInspect || !backupInspect.data || !backupWantConfig()) return '';
+  const cfg = backupInspect.data.config || {};
+  if (!cfg.present) return '';
+  const modified = Array.isArray(cfg.modified) ? cfg.modified : [];
+  if (!modified.length) {
+    return `<div class="st-row st-backup" data-cat="backup" data-backup="diff" data-label="restore config default" id="backup-preview"><div class="st-name">Settings</div><div class="st-ctl"><span class="st-hint">every setting in this backup is still the built-in default</span></div></div>`;
+  }
   const fields = (doc && doc.fields) || (settingsDoc && settingsDoc.fields) || [];
   const byKey = {};
   for (const f of fields) byKey[f.key] = f;
   const defaults = (doc && doc.defaults) || (settingsDoc && settingsDoc.defaults) || {};
   const live = (doc && doc.values) || (settingsDoc && settingsDoc.values) || {};
-  const cfg = j.config || {};
-  const db = j.database || {};
-  const wantCfg = backupWantConfig();
-  const wantDb = backupWantDatabase();
-  let body = '';
-  if (wantCfg && cfg.present) {
-    const modified = Array.isArray(cfg.modified) ? cfg.modified : [];
-    const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
-    const values = cfg.values || {};
-    if (!modified.length) {
-      body += '<span class="st-hint">every setting in this backup is still the built-in default</span>';
-    } else {
-      for (const key of modified) {
-        const label = (byKey[key] && byKey[key].label) || key;
-        let hint = 'default ' + backupScalar(defaults[key]);
-        hint += vsLive.has(key) ? ' · live ' + backupScalar(live[key]) : ' · same as live';
-        body += `<div class="st-live-row"><span class="k">${escapeHtml(label)}</span><span class="v" title="${escapeHtml(backupScalar(values[key]))}">${escapeHtml(backupScalar(values[key]))}</span></div>` +
-          `<span class="st-hint">${escapeHtml(hint)}</span>`;
-      }
-    }
-  } else if (wantCfg) {
-    body += '<span class="st-hint">archive has no config member</span>';
+  const values = cfg.values || {};
+  const vsLive = new Set(Array.isArray(cfg.vs_live) ? cfg.vs_live : []);
+  return modified.map((key, i) => {
+    const label = (byKey[key] && byKey[key].label) || key;
+    const val = backupScalar(values[key]);
+    let hint = 'default ' + backupScalar(defaults[key]);
+    hint += vsLive.has(key) ? ' · live ' + backupScalar(live[key]) : ' · same as live';
+    const id = i === 0 ? ' id="backup-preview"' : '';
+    return `<div class="st-row" data-cat="backup" data-backup="diff" data-key="${escapeHtml(key)}" data-label="${escapeHtml(label)} restore"${id}>
+      <div class="st-name">${escapeHtml(label)}</div>
+      <div class="st-ctl"><div class="st-ctl-line">${escapeHtml(val)}</div><span class="st-hint">${escapeHtml(hint)}</span></div>
+    </div>`;
+  }).join('');
+}
+
+function backupSetBusy(on) {
+  for (const id of ['btn-backup-download', 'btn-backup-restore', 'btn-backup-apply', 'btn-backup-cancel']) {
+    const b = $(id);
+    if (!b) continue;
+    if (on) b.dataset.busy = '1'; else delete b.dataset.busy;
+    if (id === 'btn-backup-apply' && !on) b.disabled = !backupWantConfig() && !backupWantDatabase();
+    else b.disabled = !!on;
   }
-  if (wantDb && db.present) {
-    const overlap = db.overlap == null ? null : Number(db.overlap);
-    const reqs = Number(db.requests) || 0;
-    let extra = reqs + ' requests';
-    if (overlap != null) extra += ' · ' + overlap + ' already on this store';
-    if (backupDatabaseMode === 'merge' && overlap != null) extra += ' · merge would add ' + Math.max(0, reqs - overlap);
-    else extra += ' · replace waits for restart';
-    body += `<span class="st-hint">database · ${escapeHtml(extra)}</span>`;
-  } else if (wantDb) {
-    body += '<span class="st-hint">archive has no database member</span>';
-  }
-  return body ? `<div id="backup-preview">${body}</div>` : '';
 }
 
 function runBackupDownload() {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
+  if ($('btn-backup-download')?.dataset.busy) return;
+  backupSetBusy(true);
   settingsStatus('building backup');
   operatorFetch('/admin/backup?' + q).then(async r => {
     if (!r.ok) {
@@ -723,18 +758,18 @@ function runBackupDownload() {
     a.remove();
     URL.revokeObjectURL(a.href);
     settingsStatus('backup downloaded', 'ok');
-  }).catch(err => settingsStatus(String(err.message || err)));
+  }).catch(err => settingsStatus(String(err.message || err)))
+    .finally(() => backupSetBusy(false));
 }
 
 function runBackupRestore(ev) {
   const input = ev && ev.target && ev.target.files ? ev.target : $('backup-file');
   const file = input && input.files && input.files[0];
   if (!file) return;
-  const q = backupQuery(true);
-  if (!q.get('config') && !q.get('database')) { settingsStatus('select config, database, or both'); input.value = ''; return; }
-  q.set('inspect', '1');
+  if ($('btn-backup-restore')?.dataset.busy) return;
+  backupSetBusy(true);
   settingsStatus('checking backup');
-  operatorFetch('/admin/restore?' + q, {
+  operatorFetch('/admin/restore?inspect=1', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
@@ -743,27 +778,31 @@ function runBackupRestore(ev) {
     if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = { file, data: j };
     paintBackupPane();
-    settingsStatus('archive checked — review then apply', 'ok');
+    settingsStatus('review then apply', 'ok');
   }).catch(err => settingsStatus(String(err.message || err)))
-    .finally(() => { if (input) input.value = ''; });
+    .finally(() => {
+      if (input) input.value = '';
+      if (!backupInspect) backupSetBusy(false);
+    });
 }
 
 function paintBackupPane() {
-  const row = document.querySelector('.st-backup');
-  if (!row || !settingsDoc) return;
-  const wrap = document.createElement('div');
-  wrap.innerHTML = settingsBackupHTML(settingsDoc);
-  const next = wrap.firstElementChild;
-  if (!next) return;
-  row.replaceWith(next);
+  const box = $('settings-fields');
+  if (!box || !settingsDoc) return;
+  box.querySelectorAll('[data-backup]').forEach(el => el.remove());
+  box.insertAdjacentHTML('beforeend', settingsBackupHTML(settingsDoc));
   const backupFile = $('backup-file');
   if (backupFile) backupFile.addEventListener('change', runBackupRestore);
+  backupSetBusy(false);
+  showSettingsCat();
 }
 
 function runBackupApply() {
   if (!backupInspect || !backupInspect.file) return;
   const q = backupQuery(true);
   if (!q.get('config') && !q.get('database')) { settingsStatus('select config, database, or both'); return; }
+  if ($('btn-backup-apply')?.dataset.busy) return;
+  backupSetBusy(true);
   settingsStatus('restoring');
   operatorFetch('/admin/restore?' + q, {
     method: 'POST',
@@ -778,7 +817,7 @@ function runBackupApply() {
       : '';
     settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
     return fetchSettings(true);
-  }).catch(err => settingsStatus(String(err.message || err)));
+  }).catch(err => { backupSetBusy(false); settingsStatus(String(err.message || err)); });
 }
 
 function runBackupCancel() {
@@ -1619,7 +1658,7 @@ function wireSettingsDelegation() {
   if (!box || box.dataset.provWired) return;
   box.dataset.provWired = '1';
   const dirty = e => {
-    if (e.target.closest && e.target.closest('.st-backup')) return;
+    if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]'))) return;
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   };
   box.addEventListener('input', e => {
@@ -1630,16 +1669,17 @@ function wireSettingsDelegation() {
       validateModelRulesDraft(wrap);
       mrPreview(wrap);
     }
-    if (e.target.closest && e.target.closest('.st-backup')) return;
+    if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]'))) return;
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   });
   box.addEventListener('change', e => {
-    if (e.target.closest && e.target.closest('.st-backup')) {
+    if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
       if (e.target.name === 'backup-config-mode') backupConfigMode = e.target.value;
       if (e.target.name === 'backup-database-mode') backupDatabaseMode = e.target.value;
       paintBackupPane();
       return;
     }
+    if (e.target.closest && e.target.closest('[data-backup="download"]')) return;
     if (e.target.matches('.sp-ufield, .sp-mfield')) syncMappingPicker(e.target.closest('.prov-sec'), e.target.matches('.sp-ufield') ? 'usage' : 'model');
     if (e.target.classList && (e.target.classList.contains('sp-upath') || e.target.classList.contains('sp-cost-in') || e.target.classList.contains('sp-label') || e.target.classList.contains('sp-mkey') || e.target.classList.contains('sp-mpath') || e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval'))) {
       const v = String(e.target.value || '').trim();

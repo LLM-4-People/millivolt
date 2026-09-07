@@ -878,10 +878,10 @@ async function main() {
     w.fillSettingsForm(doc);
     check('backup archive actions render in settings',
       !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
-      !!d.getElementById('backup-include-config') && !!d.getElementById('backup-include-database'));
+      !!d.getElementById('backup-dl-config') && !!d.getElementById('backup-dl-database'));
     check('download does not show restore merge options',
       !d.querySelector('input[name="backup-config-mode"]') && !d.querySelector('input[name="backup-database-mode"]') &&
-      !d.getElementById('btn-backup-apply'));
+      !d.getElementById('btn-backup-apply') && !d.getElementById('backup-include-config'));
     const originalFetch = w.fetch;
     const origClick = w.HTMLAnchorElement.prototype.click;
     const calls = [];
@@ -929,6 +929,7 @@ async function main() {
       calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
     check('restore does not show download actions',
       !d.getElementById('btn-backup-download') && !d.getElementById('btn-backup-restore') &&
+      !d.getElementById('backup-dl-config') &&
       !!d.getElementById('btn-backup-apply') && !!d.getElementById('btn-backup-cancel'));
     check('backup restore offers merge or replace after inspect',
       !!d.querySelector('input[name="backup-config-mode"][value="merge"]') &&
