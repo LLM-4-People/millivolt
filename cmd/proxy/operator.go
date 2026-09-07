@@ -170,10 +170,14 @@ func gatedPath(path string) bool {
 func bearerToken(r *http.Request) (string, bool) {
 	const prefix = "bearer "
 	header := r.Header.Get("Authorization")
-	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) || len(header) > 512 {
+	if len(header) <= len(prefix) || !strings.EqualFold(header[:len(prefix)], prefix) {
 		return "", false
 	}
-	return header[len(prefix):], true
+	token := header[len(prefix):]
+	if token == "" || len(token) > operatorTokenMaxLen {
+		return "", false
+	}
+	return token, true
 }
 
 // sessionMAC signs the cookie's expiry instant and per-mint nonce. The key

@@ -424,6 +424,13 @@ func TestOperatorTokenEnv(t *testing.T) {
 	if err != nil || value != credential {
 		t.Errorf("valid token: value=%q err=%v, want %q, nil", value, err, credential)
 	}
+	maxTok := strings.Repeat("x", operatorTokenMaxLen)
+	req := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+	req.Header.Set("Authorization", "Bearer "+maxTok)
+	got, ok := bearerToken(req)
+	if !ok || got != maxTok {
+		t.Fatalf("max-length Bearer token: ok=%v len=%d, want accepted", ok, len(got))
+	}
 }
 
 // livePayload decodes the bootstrap/SSE payload wrapper for snapshot
