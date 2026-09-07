@@ -352,7 +352,25 @@ and [Compose archive mode](https://docs.docker.com/reference/cli/docker/compose/
 The repository's isolated container check exercises stopped-volume backup and
 restore into fresh volumes, including settings, history and file permissions.
 Source deployments can instead use the live SQLite
-[online-backup helper](#storage-and-accounting).
+[online-backup helper](#storage-and-accounting) or the Settings archive
+described next.
+
+### Settings backup and restore
+
+The dashboard Settings Backup category downloads and restores a self-checked
+`.mvb` archive. Choose config, database, or both. The archive is a packed
+SQLite snapshot (`VACUUM INTO`, so free pages are not copied) and/or the
+schema YAML, then zstd-compressed with a content checksum and an outer SHA-256
+of the uncompressed payload. The process refuses to emit bytes that fail
+decode or semantic checks, so a produced file is never a silent corrupt
+backup.
+
+Restore validates that hash, the zstd frame, config `Validate()`, and
+`PRAGMA integrity_check` before applying anything. Config restores write the
+file and hot-reload. Database restores stage a pending snapshot next to
+`db_path` and wait for process restart; Open admits the pending file only
+after it checks again. Truncated or bit-flipped files are rejected. The
+`backup_max_bytes` setting is the buffered archive ceiling.
 
 ## Versions and images
 
@@ -792,8 +810,11 @@ python3 scripts/backup_db.py proxy.db /path/to/new-backup.db
 The helper opens the source read-only and includes committed WAL state. Do not
 plain-copy an open database or omit its WAL. Protect backups, debug captures and
 exports as sensitive data.
-This helper backs up the database, not configuration. For image-only deployments
-and both persistent volumes, use [container backup and restore](#image-only-backup-and-restore).
+This helper backs up the database, not configuration. Operators can also
+download a self-checked config and/or database archive from
+[Settings backup and restore](#settings-backup-and-restore). For image-only
+deployments and both persistent volumes, use
+[container backup and restore](#image-only-backup-and-restore).
 
 ## Performance and footprint
 

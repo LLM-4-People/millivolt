@@ -400,6 +400,7 @@ const SETTINGS_CAT_REF = {
   conversation: { dim: 'conversation' },
   format:       { dim: 'model' },
   storage:    { dim: 'key' },
+  backup:     { dim: null, icon: '⬇', color: 'var(--accent)' },
   dashboard:  { dim: 'time' },
   models:     { dim: 'model' },
   providers:  { dim: 'provider' },
@@ -543,7 +544,9 @@ function fillSettingsForm(doc) {
       : `<span class="ent" style="--ent:${vis.color}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb">${escapeHtml(c.label)}</span></span>`;
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
-  box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('');
+  box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('') + settingsBackupHTML(doc);
+  const backupFile = $('backup-file');
+  if (backupFile) backupFile.addEventListener('change', runBackupRestore);
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
   // rule count - the same pass the delegated events run on every edit.
@@ -553,6 +556,84 @@ function fillSettingsForm(doc) {
   settingsSnap = settingsFingerprint();
   showSettingsCat();
   updateSettingsActions();
+}
+
+function settingsBackupHTML(doc) {
+  const b = doc.backup || {};
+  const canCfg = !!b.config;
+  const canDb = !!b.database;
+  const pending = b.pending_database
+    ? '<span class="st-hint">database restore is staged; restart to apply</span>'
+    : '';
+  return `<div class="st-row st-block st-backup" data-cat="backup" data-label="backup download restore config database archive" data-help="download or restore a self-checked archive of the saved config and sqlite history">
+    <div class="st-name">Archive</div>
+    <div class="st-ctl">
+      <label class="st-check"><input type="checkbox" id="backup-include-config"${canCfg ? ' checked' : ' disabled'}> config</label>
+      <label class="st-check"><input type="checkbox" id="backup-include-database"${canDb ? ' checked' : ' disabled'}> database</label>
+      ${pending}
+      <div class="st-backup-actions">
+        <button type="button" class="btn" id="btn-backup-download">Download</button>
+        <button type="button" class="btn" id="btn-backup-restore">Restore</button>
+        <input type="file" id="backup-file" accept=".mvb,application/octet-stream" hidden>
+      </div>
+      <span class="st-hint">restore validates the archive before it is applied. a database restore waits for restart.</span>
+    </div>
+  </div>`;
+}
+
+function backupQuery() {
+  const q = new URLSearchParams();
+  if ($('backup-include-config') && $('backup-include-config').checked) q.set('config', '1');
+  if ($('backup-include-database') && $('backup-include-database').checked) q.set('database', '1');
+  return q;
+}
+
+function runBackupDownload() {
+  const q = backupQuery();
+  if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
+  settingsStatus('building backup');
+  fetch('/admin/backup?' + q, { credentials: 'same-origin' }).then(async r => {
+    if (!r.ok) {
+      let msg = 'backup failed';
+      try { msg = (await r.json()).error || msg; } catch (e) {}
+      throw new Error(msg);
+    }
+    const blob = await r.blob();
+    const dispo = r.headers.get('Content-Disposition') || '';
+    const m = /filename="([^"]+)"/.exec(dispo);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = (m && m[1]) || 'millivolt-backup.mvb';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(a.href);
+    settingsStatus('backup downloaded', 'ok');
+  }).catch(err => settingsStatus(String(err.message || err)));
+}
+
+function runBackupRestore(ev) {
+  const input = ev && ev.target && ev.target.files ? ev.target : $('backup-file');
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  const q = backupQuery();
+  if (![...q.keys()].length) { settingsStatus('select config, database, or both'); input.value = ''; return; }
+  settingsStatus('checking backup');
+  fetch('/admin/restore?' + q, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: file,
+  }).then(async r => {
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || 'restore failed');
+    const restart = Array.isArray(j.restart_required) && j.restart_required.length
+      ? 'restart needed for: ' + j.restart_required.join(', ')
+      : '';
+    settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
+    if (!restart) return fetchSettings(true);
+  }).catch(err => settingsStatus(String(err.message || err)))
+    .finally(() => { input.value = ''; });
 }
 
 function fillSettingsLive(doc) {
@@ -1386,7 +1467,10 @@ function wireSettingsDelegation() {
   const box = $('settings-fields');
   if (!box || box.dataset.provWired) return;
   box.dataset.provWired = '1';
-  const dirty = e => { if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty(); };
+  const dirty = e => {
+    if (e.target.closest && e.target.closest('.st-backup')) return;
+    if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
+  };
   box.addEventListener('input', e => {
     if (e.target.closest && e.target.closest('.mr-wrap')) {
       const wrap = e.target.closest('.mr-wrap');
@@ -1395,6 +1479,7 @@ function wireSettingsDelegation() {
       validateModelRulesDraft(wrap);
       mrPreview(wrap);
     }
+    if (e.target.closest && e.target.closest('.st-backup')) return;
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   });
   box.addEventListener('change', e => {
@@ -1429,7 +1514,11 @@ function wireSettingsDelegation() {
     else if (e.target.classList.contains('mr-new-from') || e.target.classList.contains('mr-new-to')) { e.preventDefault(); addModelRuleRow(e.target.closest('.mr-add')); }
     else if (e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval')) { e.preventDefault(); addHeaderRow(e.target.closest('.prov-sec')); }
   });
-  box.addEventListener('click', providersEditorClick);
+  box.addEventListener('click', e => {
+    if (e.target && e.target.id === 'btn-backup-download') { runBackupDownload(); return; }
+    if (e.target && e.target.id === 'btn-backup-restore') { const f = $('backup-file'); if (f) f.click(); return; }
+    providersEditorClick(e);
+  });
   // Clicks outside the add-menu close it (the menu lives in the sheet, but
   // the veil/other panels are outside #settings-fields).
   document.addEventListener('click', e => {

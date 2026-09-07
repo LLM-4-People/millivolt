@@ -40,6 +40,9 @@ type Handler struct {
 	// uses LoadFileRepair + CLI overrides + Server.Reload (a clean WriteFile
 	// is a no-op repair). Nil is write-only (tests).
 	Persist func() (restartRequired []string, err error)
+	// Backup reports whether Settings can download/restore config and
+	// database. Nil omits the object (tests).
+	Backup func() map[string]any
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,6 +76,9 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	body["path"] = h.Path
 	body["usage_fields"] = metrics.CanonicalUsageFields
 	body["model_fields"] = format.CanonicalModelFields
+	if h.Backup != nil {
+		body["backup"] = h.Backup()
+	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(body); err != nil {
 		return

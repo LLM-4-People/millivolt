@@ -469,6 +469,9 @@ func cantOpenContext(err error, path string) error {
 // background writer. Call Close to shut down cleanly. opts carries the
 // pipeline tunables (channel/batch sizes, flush cadence, query timeout).
 func Open(path string, opts Options) (*Store, error) {
+	if err := admitPendingSnapshot(path); err != nil {
+		return nil, fmt.Errorf("pending snapshot: %w", err)
+	}
 	// Pragmas ride the DSN so every pooled connection gets them: modernc
 	// applies each _pragma at connection open (busy_timeout sorted ahead of
 	// the rest), so a replacement connection can never silently lose one -

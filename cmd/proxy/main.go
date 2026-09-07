@@ -298,7 +298,9 @@ func main() {
 		},
 		Overrides: ov,
 		Persist:   reloadConfig,
+		Backup:    backupStatus,
 	})
+	registerBackupRoutes(mux)
 
 	mux.HandleFunc("/admin/reload", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {

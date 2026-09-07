@@ -864,6 +864,22 @@ async function main() {
   check('settings button exists', !!d.getElementById('btn-settings') && !!d.getElementById('settings-sheet'));
   check('settings sheet has category rail and live snapshot', !!d.getElementById('settings-rail') && !!d.getElementById('settings-live'));
   check('settings close matches drawer', (d.getElementById('btn-settings-close') || {}).textContent.includes('esc'));
+  {
+    const doc = {
+      writable: true,
+      fields: [{ key: 'backup_max_bytes', category: 'backup', label: 'Backup size cap', kind: 'bytes', help: 'cap', hot_reload: true }],
+      categories: [{ id: 'backup', label: 'Backup', help: 'archives' }],
+      values: { backup_max_bytes: '1GiB' },
+      defaults: { backup_max_bytes: '1GiB' },
+      overrides: {},
+      backup: { config: true, database: true },
+    };
+    w.settingsDoc = doc;
+    w.fillSettingsForm(doc);
+    check('backup archive actions render in settings',
+      !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
+      !!d.getElementById('backup-include-config') && !!d.getElementById('backup-include-database'));
+  }
 
 
   w.applyModelCanon(modelFixture(), true);
