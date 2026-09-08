@@ -657,7 +657,7 @@ function backupSpan(lo, hi) {
   const a = backupWhen(lo), b = backupWhen(hi);
   if (!a) return b;
   if (!b || a === b) return a;
-  return a + ' – ' + b;
+  return a + ' - ' + b;
 }
 
 function backupRestoreControlsHTML(b) {
@@ -746,7 +746,7 @@ function backupQuery(forRestore = false) {
 }
 
 function backupScalar(v) {
-  if (v == null) return '—';
+  if (v == null) return '-';
   if (typeof v === 'boolean' || typeof v === 'number') return String(v);
   if (typeof v === 'string') return v;
   if (Array.isArray(v)) return v.length ? v.length + ' items' : '[]';
