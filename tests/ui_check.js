@@ -978,18 +978,25 @@ async function main() {
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
       d.getElementById('backup-preview').textContent.includes('default 1GiB') &&
       d.getElementById('backup-preview').textContent.includes('live 1GiB'));
-    check('restore describes the archive file and members',
-      d.querySelector('[data-backup="restore"]').textContent.includes('t.mvb') &&
-      d.querySelector('[data-backup="restore"]').textContent.includes('2026-09-07') &&
-      d.querySelector('[data-backup="restore"]').textContent.includes('4 requests') &&
-      d.querySelector('[data-backup="restore"]').textContent.includes('2026-08-16') &&
-      d.querySelector('[data-backup="restore"]').textContent.includes('already on this store'));
+    check('archive facts sit apart from restore options',
+      d.querySelector('[data-backup="archive"]') &&
+      d.querySelector('[data-backup="archive"]').textContent.includes('t.mvb') &&
+      d.querySelector('[data-backup="archive"]').textContent.includes('2026-09-07') &&
+      d.querySelector('[data-backup="archive"]').textContent.includes('4 requests') &&
+      d.querySelector('[data-backup="archive"]').textContent.includes('2026-08-16') &&
+      d.querySelector('[data-backup="archive"]').textContent.includes('already on this store') &&
+      !d.querySelector('[data-backup="restore"]').textContent.includes('4 requests') &&
+      !d.querySelector('[data-backup="restore"]').textContent.includes('already on this store') &&
+      !d.querySelector('[data-backup="restore"]').textContent.includes('2GiB'));
     const cfgBox = d.getElementById('backup-include-config');
     cfgBox.checked = false;
     cfgBox.dispatchEvent(new w.Event('change', { bubbles: true }));
-    check('unchecking config survives the restore pane rebuild',
+    check('unchecking config keeps archive facts and setting rows',
       d.getElementById('backup-include-config') && !d.getElementById('backup-include-config').checked &&
-      !d.querySelector('input[name="backup-config-mode"]'));
+      !d.querySelector('input[name="backup-config-mode"]') &&
+      d.querySelector('[data-backup="archive"]') &&
+      d.getElementById('backup-preview') &&
+      d.getElementById('backup-preview').textContent.includes('2GiB'));
     calls.length = 0;
     w.runBackupApply();
     await sleep(20);
