@@ -390,8 +390,7 @@ let settingsCat = '';
 let settingsSnap = '';
 let settingsQ = '';
 let settingsReq = 0; // newest settings request owns state; saves invalidate older GETs
-let backupConfigMode = 'replace';
-let backupDatabaseMode = 'replace';
+let backupMode = 'replace';
 let backupIncludeConfig = true;
 let backupIncludeDatabase = true;
 let backupInspect = null; // {file, data} after a validated inspect, before apply
@@ -715,30 +714,23 @@ function backupRestoreOptionsHTML(b) {
   const canDb = !!b.database && !!db.present;
   const wantCfg = backupCheckOn('backup-include-config', canCfg);
   const wantDb = backupCheckOn('backup-include-database', canDb);
-  const cfgReplace = backupConfigMode !== 'merge' ? ' checked' : '';
-  const cfgMerge = backupConfigMode === 'merge' ? ' checked' : '';
-  const dbReplace = backupDatabaseMode !== 'merge' ? ' checked' : '';
-  const dbMerge = backupDatabaseMode === 'merge' ? ' checked' : '';
+  const merge = backupMode === 'merge';
   let html = '';
   if (cfg.present) {
     html += backupMemberCheck('backup-include-config', 'config', canCfg);
-    if (wantCfg) {
-      html += `<label class="st-check"><input type="radio" name="backup-config-mode" value="replace"${cfgReplace}> replace</label>` +
-        `<label class="st-check"><input type="radio" name="backup-config-mode" value="merge"${cfgMerge}> merge</label>` +
-        `<span class="st-hint">${backupConfigMode === 'merge' ? 'overlays keys that differ from default' : 'writes every key from the backup'}</span>`;
-    } else if (!canCfg) {
-      html += '<span class="st-hint">start with -config to restore settings</span>';
-    }
+    if (!canCfg) html += '<span class="st-hint">start with -config to restore settings</span>';
   }
   if (db.present) {
     html += backupMemberCheck('backup-include-database', 'database', canDb);
-    if (wantDb) {
-      html += `<label class="st-check"><input type="radio" name="backup-database-mode" value="replace"${dbReplace}> replace</label>` +
-        `<label class="st-check"><input type="radio" name="backup-database-mode" value="merge"${dbMerge}> merge</label>` +
-        `<span class="st-hint">${backupDatabaseMode === 'merge' ? 'inserts request ids that are not already stored' : 'replaces the live database on restart'}</span>`;
-    } else if (!canDb) {
-      html += '<span class="st-hint">durable storage is disabled</span>';
-    }
+    if (!canDb) html += '<span class="st-hint">durable storage is disabled</span>';
+  }
+  if (wantCfg || wantDb) {
+    html += `<label class="st-check"><input type="radio" name="backup-mode" value="replace"${merge ? '' : ' checked'}> replace</label>` +
+      `<label class="st-check"><input type="radio" name="backup-mode" value="merge"${merge ? ' checked' : ''}> merge</label>`;
+    const hints = [];
+    if (wantCfg) hints.push(merge ? 'overlays keys that differ from default' : 'writes every key from the backup');
+    if (wantDb) hints.push(merge ? 'inserts request ids that are not already stored' : 'replaces the live database on restart');
+    html += `<span class="st-hint">${escapeHtml(hints.join('. '))}.</span>`;
   }
   return html;
 }
@@ -760,8 +752,9 @@ function backupQuery(forRestore = false) {
   if (forRestore) {
     if (backupWantConfig()) q.set('config', '1');
     if (backupWantDatabase()) q.set('database', '1');
-    if (backupWantConfig()) q.set('config_mode', backupConfigMode === 'merge' ? 'merge' : 'replace');
-    if (backupWantDatabase()) q.set('database_mode', backupDatabaseMode === 'merge' ? 'merge' : 'replace');
+    const mode = backupMode === 'merge' ? 'merge' : 'replace';
+    if (backupWantConfig()) q.set('config_mode', mode);
+    if (backupWantDatabase()) q.set('database_mode', mode);
     return q;
   }
   if (backupCheckOn('backup-dl-config', true)) q.set('config', '1');
@@ -819,7 +812,7 @@ function backupSetBusy(on) {
     else b.disabled = backupBusy;
   }
   if (backupBusy) {
-    document.querySelectorAll('#backup-include-config, #backup-include-database, input[name="backup-config-mode"], input[name="backup-database-mode"]').forEach(el => {
+    document.querySelectorAll('#backup-include-config, #backup-include-database, input[name="backup-mode"]').forEach(el => {
       el.disabled = true;
     });
   }
@@ -1793,8 +1786,7 @@ function wireSettingsDelegation() {
       if (backupBusy) return;
       if (e.target.id === 'backup-include-config') backupIncludeConfig = e.target.checked;
       if (e.target.id === 'backup-include-database') backupIncludeDatabase = e.target.checked;
-      if (e.target.name === 'backup-config-mode') backupConfigMode = e.target.value;
-      if (e.target.name === 'backup-database-mode') backupDatabaseMode = e.target.value;
+      if (e.target.name === 'backup-mode') backupMode = e.target.value;
       paintBackupPane();
       return;
     }

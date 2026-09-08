@@ -880,6 +880,7 @@ async function main() {
       !!d.getElementById('btn-backup-download') && !!d.getElementById('btn-backup-restore') &&
       !!d.getElementById('backup-dl-config') && !!d.getElementById('backup-dl-database'));
     check('download does not show restore merge options',
+      !d.querySelector('input[name="backup-mode"]') &&
       !d.querySelector('input[name="backup-config-mode"]') && !d.querySelector('input[name="backup-database-mode"]') &&
       !d.getElementById('btn-backup-apply') && !d.getElementById('backup-include-config'));
     check('download describes the live archive members',
@@ -968,11 +969,11 @@ async function main() {
       !d.getElementById('btn-backup-download') && !d.getElementById('btn-backup-restore') &&
       !d.getElementById('backup-dl-config') &&
       !!d.getElementById('btn-backup-apply') && !!d.getElementById('btn-backup-cancel'));
-    check('backup restore offers merge or replace after inspect',
-      !!d.querySelector('input[name="backup-config-mode"][value="merge"]') &&
-      !!d.querySelector('input[name="backup-config-mode"][value="replace"]') &&
-      !!d.querySelector('input[name="backup-database-mode"][value="merge"]') &&
-      !!d.querySelector('input[name="backup-database-mode"][value="replace"]'));
+    check('backup restore offers one merge or replace after inspect',
+      !!d.querySelector('input[name="backup-mode"][value="merge"]') &&
+      !!d.querySelector('input[name="backup-mode"][value="replace"]') &&
+      !d.querySelector('input[name="backup-config-mode"]') &&
+      !d.querySelector('input[name="backup-database-mode"]'));
     check('backup inspect lists modified settings vs default',
       !!d.getElementById('backup-preview') &&
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
@@ -993,7 +994,7 @@ async function main() {
     cfgBox.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('unchecking config keeps archive facts and setting rows',
       d.getElementById('backup-include-config') && !d.getElementById('backup-include-config').checked &&
-      !d.querySelector('input[name="backup-config-mode"]') &&
+      !!d.querySelector('input[name="backup-mode"]') &&
       d.querySelector('[data-backup="archive"]') &&
       d.getElementById('backup-preview') &&
       d.getElementById('backup-preview').textContent.includes('2GiB'));
@@ -1008,7 +1009,7 @@ async function main() {
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
-    w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupBusy = false; backupReq = 0;");
+    w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupMode = 'replace'; backupBusy = false; backupReq = 0;");
   }
 
 
