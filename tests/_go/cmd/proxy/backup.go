@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 
@@ -341,6 +342,7 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 			Present  bool           `json:"present"`
 			Bytes    int            `json:"bytes"`
 			Modified []string       `json:"modified"`
+			VsLive   []string       `json:"vs_live"`
 			Values   map[string]any `json:"values"`
 		} `json:"config"`
 	}
@@ -359,6 +361,16 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	if !found {
 		t.Fatalf("modified = %v, want capture_body_preview", ins.Config.Modified)
 	}
+	if ins.Config.Values["capture_body_preview"] != true {
+		t.Fatalf("values = %#v, want capture_body_preview true", ins.Config.Values)
+	}
+	vsLive := map[string]bool{}
+	for _, k := range ins.Config.VsLive {
+		vsLive[k] = true
+	}
+	if !vsLive["capture_body_preview"] || !vsLive["max_retries"] {
+		t.Fatalf("vs_live = %v, want capture_body_preview and max_retries", ins.Config.VsLive)
+	}
 	req = httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&config_mode=merge", bytes.NewReader(raw))
 	rr = httptest.NewRecorder()
 	mux.ServeHTTP(rr, req)
@@ -374,6 +386,93 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	}
 	if !got.CaptureBodyPreview {
 		t.Fatal("merge did not apply modified capture_body_preview")
+	}
+}
+
+func TestRestoreInspectDatabase(t *testing.T) {
+	oldCfg, oldStore := liveCfg, liveStore
+	t.Cleanup(func() { liveCfg, liveStore = oldCfg, oldStore })
+	dir := t.TempDir()
+	opts := storage.Options{
+		WriteChanCap:  8,
+		BatchCap:      4,
+		FlushInterval: config.Default().StorageFlushInterval,
+		QueryTimeout:  config.Default().StorageQueryTimeout,
+		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
+		QueryMaxRows:  config.Default().StorageQueryMaxRows,
+	}
+	livePath := filepath.Join(dir, "live.db")
+	live, err := storage.Open(livePath, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { live.Close() })
+	oldAt := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
+	newAt := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200, Start: oldAt})
+	live.Record(&metrics.Record{ID: "live-only", Provider: "live.example", Model: "n", StatusCode: 200, Start: oldAt})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	src, err := storage.Open(filepath.Join(dir, "src.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "shared", Provider: "backup.example", Model: "n", StatusCode: 200, Start: oldAt})
+	src.Record(&metrics.Record{ID: "backup-only", Provider: "backup.example", Model: "n", StatusCode: 200, Start: newAt})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	raw, err := backup.Encode(backup.Archive{Created: created, Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = livePath
+	liveStore = live
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(raw))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
+	}
+	var ins struct {
+		OK       bool   `json:"ok"`
+		Created  string `json:"created"`
+		Database struct {
+			Present  bool  `json:"present"`
+			Bytes    int   `json:"bytes"`
+			Requests int   `json:"requests"`
+			OldestMs int64 `json:"oldest_ms"`
+			NewestMs int64 `json:"newest_ms"`
+			Overlap  int64 `json:"overlap"`
+		} `json:"database"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&ins); err != nil {
+		t.Fatal(err)
+	}
+	if !ins.OK || !ins.Database.Present || ins.Database.Bytes == 0 {
+		t.Fatalf("inspect %+v", ins)
+	}
+	if ins.Created != created.UTC().Format(time.RFC3339) {
+		t.Fatalf("created = %q", ins.Created)
+	}
+	if ins.Database.Requests != 2 || ins.Database.Overlap != 1 {
+		t.Fatalf("requests=%d overlap=%d", ins.Database.Requests, ins.Database.Overlap)
+	}
+	if live.Totals().Requests != 2 {
+		t.Fatalf("live totals = %d, overlap must be the id intersection not the live count", live.Totals().Requests)
+	}
+	if ins.Database.OldestMs != oldAt.UnixMilli() || ins.Database.NewestMs != newAt.UnixMilli() {
+		t.Fatalf("span oldest=%d newest=%d", ins.Database.OldestMs, ins.Database.NewestMs)
 	}
 }
 
@@ -395,7 +494,8 @@ func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { live.Close() })
-	live.Record(&metrics.Record{ID: "live-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
 	if err := live.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +504,8 @@ func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src.Record(&metrics.Record{ID: "backup-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	src.Record(&metrics.Record{ID: "shared", Provider: "backup.example", Model: "n", StatusCode: 200})
+	src.Record(&metrics.Record{ID: "backup-row", Provider: "backup.example", Model: "n", StatusCode: 200})
 	if err := src.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -445,11 +546,14 @@ func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids := map[string]bool{}
+	byID := map[string]*metrics.Record{}
 	for _, r := range got {
-		ids[r.ID] = true
+		byID[r.ID] = r
 	}
-	if !ids["live-row"] || !ids["backup-row"] {
+	if byID["shared"] == nil || byID["shared"].Provider != "live.example" {
+		t.Fatalf("live row lost on conflict: %#v", byID["shared"])
+	}
+	if byID["live-row"] == nil || byID["backup-row"] == nil {
 		t.Fatalf("merged rows = %#v", got)
 	}
 }
