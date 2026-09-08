@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,5 +165,110 @@ func blockRemove(t *testing.T, path string) {
 	}
 	if err := os.WriteFile(filepath.Join(path, "blocker"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestMergeSnapshotKeepsLiveRows(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	live.Record(&metrics.Record{ID: "live-only", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	src := openTestStore(t)
+	src.Record(&metrics.Record{ID: "shared", Provider: "backup.example", Model: "n", StatusCode: 200})
+	src.Record(&metrics.Record{ID: "backup-only", Provider: "backup.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted != 1 || skipped != 1 {
+		t.Fatalf("inserted=%d skipped=%d", inserted, skipped)
+	}
+	if _, err := live.db.Exec("DETACH DATABASE backup_merge"); err == nil {
+		t.Fatal("backup_merge still attached after MergeSnapshot")
+	}
+	got, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]*metrics.Record{}
+	for _, r := range got {
+		byID[r.ID] = r
+	}
+	if byID["shared"] == nil || byID["shared"].Provider != "live.example" {
+		t.Fatalf("live row lost on conflict: %#v", byID["shared"])
+	}
+	if byID["live-only"] == nil || byID["backup-only"] == nil {
+		t.Fatalf("merged rows = %#v", got)
+	}
+	if live.Totals().Requests != 3 {
+		t.Fatalf("totals after merge = %d, want 3", live.Totals().Requests)
+	}
+}
+
+func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data := packedSnapshot(t, "from-backup")
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.db")
+	if err := os.WriteFile(src, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE request_debug; CREATE TABLE request_debug (foo TEXT); INSERT INTO request_debug(foo) VALUES ('x')`); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(dir, "broken.db")
+	if _, err := db.Exec("VACUUM INTO ?", broken); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	brokenData, err := os.ReadFile(broken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = live.MergeSnapshot(t.Context(), brokenData)
+	if err == nil {
+		t.Fatal("merge succeeded with incompatible request_debug")
+	}
+	if live.Totals().Requests != 2 {
+		t.Fatalf("totals after failed debug merge = %d, want 2 (requests already inserted)", live.Totals().Requests)
+	}
+}
+
+func TestSnapshotOverlapDetaches(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	n, err := live.SnapshotOverlap(t.Context(), packedSnapshot(t, "shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("overlap = %d, want 1", n)
+	}
+	n, err = live.SnapshotOverlap(t.Context(), packedSnapshot(t, "other"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("second overlap = %d, want 0 (leftover attach would fail this call)", n)
 	}
 }

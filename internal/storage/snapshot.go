@@ -143,7 +143,7 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_inspect", src); err != nil {
 		return 0, err
 	}
-	defer conn.ExecContext(ctx, "DETACH DATABASE backup_inspect")
+	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_inspect") }()
 	var n int64
 	err = conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_inspect.requests WHERE id IN (SELECT id FROM requests)`).Scan(&n)
 	return n, err
@@ -172,31 +172,52 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	if err := os.WriteFile(src, data, 0o600); err != nil {
 		return 0, 0, err
 	}
-	if _, err := s.db.ExecContext(ctx, "ATTACH DATABASE ? AS backup_merge", src); err != nil {
+	// Hold the single writer connection for ATTACH through installTotals so
+	// insertBatch cannot account() a concurrent commit against pre-merge
+	// aggregates the way purge installs totals on the writer goroutine.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
 		return 0, 0, err
 	}
-	defer s.db.ExecContext(ctx, "DETACH DATABASE backup_merge")
-	n, err := mergeAttachedTable(ctx, s.db, "requests")
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_merge", src); err != nil {
+		return 0, 0, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_merge") }()
+	n, err := mergeAttachedTable(ctx, conn, "requests")
 	if err != nil {
 		return 0, 0, err
 	}
 	inserted = n
-	if _, err := mergeAttachedTable(ctx, s.db, "request_debug"); err != nil {
-		return inserted, 0, err
-	}
 	skipped = int64(info.Requests) - inserted
 	if skipped < 0 {
 		skipped = 0
 	}
-	tctx, cancel := s.withQueryTimeout(ctx)
+	var debugErr error
+	if _, err := mergeAttachedTable(ctx, conn, "request_debug"); err != nil {
+		debugErr = err
+	}
+	tctx, cancel := s.withQueryTimeout(context.Background())
 	defer cancel()
 	if err := s.computeTotals(tctx); err != nil {
-		log.Printf("storage: totals after backup merge: %v", err)
+		if debugErr != nil {
+			return inserted, skipped, fmt.Errorf("%w; totals after backup merge: %v", debugErr, err)
+		}
+		return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
+	}
+	if debugErr != nil {
+		return inserted, skipped, debugErr
 	}
 	return inserted, skipped, nil
 }
 
-func mergeAttachedTable(ctx context.Context, db *sql.DB, table string) (int64, error) {
+type mergeConn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func mergeAttachedTable(ctx context.Context, db mergeConn, table string) (int64, error) {
 	if table != "requests" && table != "request_debug" {
 		return 0, fmt.Errorf("unknown merge table")
 	}
@@ -208,11 +229,11 @@ func mergeAttachedTable(ctx context.Context, db *sql.DB, table string) (int64, e
 		}
 		return 0, err
 	}
-	live, err := columnSet(db, table)
+	live, err := pragmaTableInfo(ctx, db, "", table)
 	if err != nil {
 		return 0, err
 	}
-	incoming, err := attachedColumnSet(db, "backup_merge", table)
+	incoming, err := pragmaTableInfo(ctx, db, "backup_merge", table)
 	if err != nil {
 		return 0, err
 	}
@@ -230,14 +251,18 @@ func mergeAttachedTable(ctx context.Context, db *sql.DB, table string) (int64, e
 	return n, nil
 }
 
-func attachedColumnSet(db *sql.DB, schema, table string) (map[string]struct{}, error) {
-	if schema != "backup_merge" && schema != "backup_inspect" {
+func pragmaTableInfo(ctx context.Context, db mergeConn, schema, table string) (map[string]struct{}, error) {
+	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
 		return nil, fmt.Errorf("unknown backup schema")
 	}
 	if table != "requests" && table != "request_debug" {
 		return nil, fmt.Errorf("unknown merge table")
 	}
-	rows, err := db.Query("PRAGMA " + schema + ".table_info(" + table + ")")
+	q := "PRAGMA table_info(" + table + ")"
+	if schema != "" {
+		q = "PRAGMA " + schema + ".table_info(" + table + ")"
+	}
+	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, err
 	}
