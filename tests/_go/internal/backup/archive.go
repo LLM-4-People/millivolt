@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -161,6 +162,16 @@ func TestReadCappedDoesNotDrainOversizeSource(t *testing.T) {
 	}
 	if src.Len() == 0 {
 		t.Fatal("capped read consumed the entire oversize source")
+	}
+}
+
+func TestZstdStreamHidesByter(t *testing.T) {
+	var r io.Reader = zstdStream{bytes.NewReader(nil)}
+	if _, ok := r.(interface{ Bytes() []byte }); ok {
+		t.Fatal("zstd stream reader exposes Bytes; klauspost would DecodeAll before the cap")
+	}
+	if _, ok := r.(interface{ Len() int }); ok {
+		t.Fatal("zstd stream reader exposes Len; klauspost would DecodeAll before the cap")
 	}
 }
 

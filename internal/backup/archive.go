@@ -30,7 +30,20 @@ const (
 
 	memberConfig   uint8 = 1
 	memberDatabase uint8 = 2
+
+	// decoderWindow is klauspost's default encoder window (8 MiB). Decode
+	// adds it to the uncompressed cap for WithDecoderMaxMemory so a
+	// streaming decode can hold that window without DecodeAll expanding a
+	// small frame past payloadMax.
+	decoderWindow = 8 << 20
 )
+
+// zstdStream is an io.Reader that does not implement Bytes or Len, so
+// klauspost cannot DecodeAll a compressed body under 128KiB into an
+// unbounded buffer before readCapped runs.
+type zstdStream struct{ r io.Reader }
+
+func (s zstdStream) Read(p []byte) (int, error) { return s.r.Read(p) }
 
 // payloadMax is the uncompressed decode ceiling: the Schema maximum for
 // backup_max_bytes. Tests lower it to lock LimitReader without allocating
@@ -138,7 +151,11 @@ func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
 	created := time.Unix(int64(binary.BigEndian.Uint64(raw[8:16])), 0).UTC()
 	var want [sha256.Size]byte
 	copy(want[:], raw[16:headerSize])
-	dec, err := zstd.NewReader(bytes.NewReader(raw[headerSize:]), zstd.WithDecoderConcurrency(1))
+	maxMem := uint64(maxPayload) + decoderWindow
+	dec, err := zstd.NewReader(zstdStream{bytes.NewReader(raw[headerSize:])},
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(maxMem),
+	)
 	if err != nil {
 		return Archive{}, fmt.Errorf("decompress backup: %w", err)
 	}
