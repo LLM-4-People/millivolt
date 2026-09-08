@@ -65,11 +65,25 @@ modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
 checks and `scripts/check.sh go vet` or `scripts/check.sh go mod tidy` to include
 test code and dependencies. Raw `go test ./...` does not discover the relocated
 tests and can report success without running them. Re-run checks after your
-last edit. Do not push `testing` or `main` until the final tree has passed the
-checks CI will run for that change. Concurrency changes need race coverage.
-JavaScript unit checks do not establish real canvas rendering, layout, focus
-or viewport behavior; dashboard, header, login or CSS changes need
-`scripts/check.sh browser` against `scripts/dev.sh` as below.
+last edit. Concurrency changes need race coverage. JavaScript unit checks do
+not establish real canvas rendering, layout, focus or viewport behavior.
+
+### Push gate
+
+Do not push `testing` or `main` until the exact commit you will push has
+passed the same `checks` job CI runs. A request to push is not a waiver.
+Package-scoped `go test` and `npm test` during development are not sufficient.
+CI's source-and-unit step is the default core suite:
+
+```sh
+scripts/check.sh
+```
+
+CI always runs isolated browser fixtures as well (desktop and mobile). Use
+`scripts/dev.sh` plus `scripts/check.sh browser` as below, with
+`MILLIVOLT_OPERATOR_TOKEN` set. Re-run both after the last commit. A red
+GitHub check after a push means the gate was skipped or stale: fix, re-run,
+and push only a passing tree.
 
 For changes to configuration, update the Config/default/validation/schema owners
 and regenerate the example as described in [operations](docs/operations.md).
