@@ -923,10 +923,44 @@ async function main() {
     check('backup download uses the operator fetch gate',
       calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token'));
     calls.length = 0;
+    const inspectPayload = {
+      ok: true, inspect: true, created: '2026-09-07T12:00:00Z',
+      config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
+      database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
+    };
+    let releaseInspect;
+    w.fetch = (url, opts) => {
+      const u = String(url);
+      const headers = (opts && opts.headers) || {};
+      calls.push({ u, auth: headers.Authorization || '', method: (opts && opts.method) || 'GET' });
+      if (u.includes('/admin/restore')) {
+        if (u.includes('inspect=1')) {
+          return new Promise(resolve => {
+            releaseInspect = () => resolve({ ok: true, json: async () => inspectPayload });
+          });
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ ok: true, restart_required: ['db_path'] }) });
+      }
+      if (u.includes('/admin/config')) {
+        return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(doc)) });
+      }
+      return originalFetch(url, opts);
+    };
     const input = d.getElementById('backup-file');
     const file = new w.File(['archive'], 't.mvb', { type: 'application/octet-stream' });
     Object.defineProperty(input, 'files', { configurable: true, value: [file] });
-    w.runBackupRestore({ target: input });
+    input.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await sleep(0);
+    check('inspect holds the busy gate until the archive is reviewed',
+      d.getElementById('btn-backup-download')?.dataset.busy === '1' &&
+      d.getElementById('btn-backup-restore')?.dataset.busy === '1' &&
+      !d.getElementById('btn-backup-apply'));
+    w.fillSettingsForm(doc);
+    check('settings refresh during inspect keeps the busy gate',
+      d.getElementById('btn-backup-download')?.dataset.busy === '1' &&
+      d.getElementById('btn-backup-restore')?.dataset.busy === '1' &&
+      !d.getElementById('btn-backup-apply'));
+    releaseInspect();
     await sleep(20);
     check('backup inspect uses the operator fetch gate',
       calls.some(c => c.u.includes('/admin/restore') && c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
@@ -942,22 +976,32 @@ async function main() {
     check('backup inspect lists modified settings vs default',
       !!d.getElementById('backup-preview') &&
       d.getElementById('backup-preview').textContent.includes('2GiB') &&
-      d.getElementById('backup-preview').textContent.includes('default 1GiB'));
+      d.getElementById('backup-preview').textContent.includes('default 1GiB') &&
+      d.getElementById('backup-preview').textContent.includes('live 1GiB'));
     check('restore describes the archive file and members',
       d.querySelector('[data-backup="restore"]').textContent.includes('t.mvb') &&
       d.querySelector('[data-backup="restore"]').textContent.includes('2026-09-07') &&
-      d.querySelector('[data-backup="restore"]').textContent.includes('4 requests'));
+      d.querySelector('[data-backup="restore"]').textContent.includes('4 requests') &&
+      d.querySelector('[data-backup="restore"]').textContent.includes('2026-08-16') &&
+      d.querySelector('[data-backup="restore"]').textContent.includes('already on this store'));
+    const cfgBox = d.getElementById('backup-include-config');
+    cfgBox.checked = false;
+    cfgBox.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('unchecking config survives the restore pane rebuild',
+      d.getElementById('backup-include-config') && !d.getElementById('backup-include-config').checked &&
+      !d.querySelector('input[name="backup-config-mode"]'));
     calls.length = 0;
     w.runBackupApply();
     await sleep(20);
     check('backup apply uses the operator fetch gate',
       calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.auth === 'Bearer op-token'));
+    check('apply omits an unchecked config member',
+      calls.some(c => c.u.includes('/admin/restore') && !c.u.includes('inspect=1') && c.u.includes('database=1') && !c.u.includes('config=1')));
     check('restore refreshes settings even when a database restart is pending',
       calls.some(c => c.u.includes('/admin/config') && c.method === 'GET'));
     w.fetch = originalFetch;
     w.HTMLAnchorElement.prototype.click = origClick;
-    w.eval("operatorCredential = ''");
-    w.backupInspect = null;
+    w.eval("operatorCredential = ''; backupInspect = null; backupIncludeConfig = true; backupIncludeDatabase = true; backupBusy = false; backupReq = 0;");
   }
 
 

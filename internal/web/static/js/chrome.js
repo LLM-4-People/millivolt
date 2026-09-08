@@ -392,7 +392,11 @@ let settingsQ = '';
 let settingsReq = 0; // newest settings request owns state; saves invalidate older GETs
 let backupConfigMode = 'replace';
 let backupDatabaseMode = 'replace';
+let backupIncludeConfig = true;
+let backupIncludeDatabase = true;
 let backupInspect = null; // {file, data} after a validated inspect, before apply
+let backupBusy = false;
+let backupReq = 0; // newest backup fetch owns state; cancel invalidates older ones
 
 const SETTINGS_CAT_REF = {
   server:       { dim: 'status' },
@@ -549,8 +553,7 @@ function fillSettingsForm(doc) {
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
   box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('') + settingsBackupHTML(doc);
-  const backupFile = $('backup-file');
-  if (backupFile) backupFile.addEventListener('change', runBackupRestore);
+  wireBackupPane();
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
   // rule count - the same pass the delegated events run on every edit.
@@ -564,6 +567,8 @@ function fillSettingsForm(doc) {
 
 function backupCheckOn(id, enabled) {
   if (!enabled) return false;
+  if (id === 'backup-include-config') return backupIncludeConfig;
+  if (id === 'backup-include-database') return backupIncludeDatabase;
   const el = $(id);
   return el ? el.checked : true;
 }
@@ -715,11 +720,15 @@ function backupRestoreControlsHTML(b) {
 }
 
 function backupWantConfig() {
-  return backupCheckOn('backup-include-config', true);
+  const b = (settingsDoc && settingsDoc.backup) || {};
+  const cfg = (backupInspect && backupInspect.data && backupInspect.data.config) || {};
+  return backupCheckOn('backup-include-config', !!(b.config && cfg.present));
 }
 
 function backupWantDatabase() {
-  return backupCheckOn('backup-include-database', true);
+  const b = (settingsDoc && settingsDoc.backup) || {};
+  const db = (backupInspect && backupInspect.data && backupInspect.data.database) || {};
+  return backupCheckOn('backup-include-database', !!(b.database && db.present));
 }
 
 function backupQuery(forRestore = false) {
@@ -777,19 +786,31 @@ function backupDiffRowsHTML(doc) {
 }
 
 function backupSetBusy(on) {
+  backupBusy = !!on;
   for (const id of ['btn-backup-download', 'btn-backup-restore', 'btn-backup-apply', 'btn-backup-cancel']) {
     const b = $(id);
     if (!b) continue;
-    if (on) b.dataset.busy = '1'; else delete b.dataset.busy;
-    if (id === 'btn-backup-apply' && !on) b.disabled = !backupWantConfig() && !backupWantDatabase();
-    else b.disabled = !!on;
+    if (backupBusy) b.dataset.busy = '1'; else delete b.dataset.busy;
+    if (id === 'btn-backup-apply' && !backupBusy) b.disabled = !backupWantConfig() && !backupWantDatabase();
+    else b.disabled = backupBusy;
   }
+  if (backupBusy) {
+    document.querySelectorAll('#backup-include-config, #backup-include-database, input[name="backup-config-mode"], input[name="backup-database-mode"]').forEach(el => {
+      el.disabled = true;
+    });
+  }
+}
+
+function wireBackupPane() {
+  const backupFile = $('backup-file');
+  if (backupFile) backupFile.addEventListener('change', runBackupRestore);
+  backupSetBusy(backupBusy);
 }
 
 function runBackupDownload() {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
-  if ($('btn-backup-download')?.dataset.busy) return;
+  if (backupBusy) return;
   backupSetBusy(true);
   settingsStatus('building backup');
   operatorFetch('/admin/backup?' + q).then(async r => {
@@ -818,7 +839,8 @@ function runBackupRestore(ev) {
   const input = ev && ev.target && ev.target.files ? ev.target : $('backup-file');
   const file = input && input.files && input.files[0];
   if (!file) return;
-  if ($('btn-backup-restore')?.dataset.busy) return;
+  if (backupBusy) return;
+  const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('checking backup');
   operatorFetch('/admin/restore?inspect=1', {
@@ -826,16 +848,22 @@ function runBackupRestore(ev) {
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
   }).then(async r => {
+    if (req !== backupReq) return;
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = { file, data: j };
+    backupIncludeConfig = true;
+    backupIncludeDatabase = true;
+    backupSetBusy(false);
     paintBackupPane();
     settingsStatus('review then apply', 'ok');
-  }).catch(err => settingsStatus(String(err.message || err)))
-    .finally(() => {
-      if (input) input.value = '';
-      if (!backupInspect) backupSetBusy(false);
-    });
+  }).catch(err => {
+    if (req !== backupReq) return;
+    settingsStatus(String(err.message || err));
+  }).finally(() => {
+    if (input) input.value = '';
+    if (req === backupReq && !backupInspect) backupSetBusy(false);
+  });
 }
 
 function paintBackupPane() {
@@ -843,9 +871,7 @@ function paintBackupPane() {
   if (!box || !settingsDoc) return;
   box.querySelectorAll('[data-backup]').forEach(el => el.remove());
   box.insertAdjacentHTML('beforeend', settingsBackupHTML(settingsDoc));
-  const backupFile = $('backup-file');
-  if (backupFile) backupFile.addEventListener('change', runBackupRestore);
-  backupSetBusy(false);
+  wireBackupPane();
   showSettingsCat();
 }
 
@@ -853,7 +879,8 @@ function runBackupApply() {
   if (!backupInspect || !backupInspect.file) return;
   const q = backupQuery(true);
   if (!q.get('config') && !q.get('database')) { settingsStatus('select config, database, or both'); return; }
-  if ($('btn-backup-apply')?.dataset.busy) return;
+  if (backupBusy) return;
+  const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('restoring');
   operatorFetch('/admin/restore?' + q, {
@@ -861,19 +888,31 @@ function runBackupApply() {
     headers: { 'Content-Type': 'application/octet-stream' },
     body: backupInspect.file,
   }).then(async r => {
+    if (req !== backupReq) return;
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = null;
+    backupSetBusy(false);
     const restart = Array.isArray(j.restart_required) && j.restart_required.length
       ? 'restart needed for: ' + j.restart_required.join(', ')
       : '';
     settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
     return fetchSettings(true);
-  }).catch(err => { backupSetBusy(false); settingsStatus(String(err.message || err)); });
+  }).catch(err => {
+    if (req !== backupReq) return;
+    backupSetBusy(false);
+    paintBackupPane();
+    settingsStatus(String(err.message || err));
+  });
 }
 
 function runBackupCancel() {
+  if (backupBusy && backupInspect) return;
+  backupReq++;
   backupInspect = null;
+  backupIncludeConfig = true;
+  backupIncludeDatabase = true;
+  backupSetBusy(false);
   paintBackupPane();
   settingsStatus('');
 }
@@ -1726,6 +1765,10 @@ function wireSettingsDelegation() {
   });
   box.addEventListener('change', e => {
     if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
+      if (e.target.id === 'backup-file') return;
+      if (backupBusy) return;
+      if (e.target.id === 'backup-include-config') backupIncludeConfig = e.target.checked;
+      if (e.target.id === 'backup-include-database') backupIncludeDatabase = e.target.checked;
       if (e.target.name === 'backup-config-mode') backupConfigMode = e.target.value;
       if (e.target.name === 'backup-database-mode') backupDatabaseMode = e.target.value;
       paintBackupPane();
