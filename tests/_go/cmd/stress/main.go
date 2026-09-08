@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -122,6 +123,22 @@ func TestStressPIDFixture(t *testing.T) {
 	}
 }
 
+func waitPIDFixture(t *testing.T, pid int, pidFile string) {
+	t.Helper()
+	want := "-pid-file\x00" + pidFile + "\x00"
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		args, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		if err == nil && strings.Contains(string(args), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pid fixture %d cmdline not ready: %v %q", pid, err, args)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", "fixture-token")
 	for _, mode := range []string{"ramp", "request failure", "canceled", "cleanup failure", "changed database"} {
@@ -230,6 +247,7 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 				}
 			}()
 			pid = proc.Process.Pid
+			waitPIDFixture(t, pid, base+".pid")
 			cfg = settings{Path: base + ".yaml", Overrides: map[string]string{"listen": u.Host, "db_path": "none"}, Effective: map[string]any{"db_path": ""}}
 			err = run(ctx, o)
 			mu.Lock()
