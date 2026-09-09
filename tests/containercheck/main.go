@@ -215,10 +215,12 @@ func check(image string) error {
 		args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
 			"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
 			"--env", "MILLIVOLT_OPERATOR_TOKEN=" + smokeToken,
-			// /tmp is deliberately far smaller than a database snapshot: operator
-			// backup and restore must stage next to db_path on the data volume,
-			// never on tmpfs (the 16m deployment default stays meaningful).
-			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64k",
+			// /tmp is deliberately far smaller than a packed millivolt snapshot
+			// (~60KiB for one flushed row): operator backup and restore must
+			// stage next to db_path on the data volume, never on tmpfs (the 16m
+			// deployment default stays meaningful). 32k cannot hold that file;
+			// 64k still can, so a /tmp CheckDatabase regression would pass.
+			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32k",
 			"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
 			"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
 			"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
@@ -739,7 +741,7 @@ func probe(phase string) error {
 		// The Settings database archive rides this fixture: download packs a
 		// VACUUM INTO snapshot and restore inspects the upload, both staging
 		// database-sized transient files next to db_path on the data volume.
-		// The 64k tmpfs cannot hold them, so a /tmp staging path fails here.
+		// The 32k tmpfs cannot hold them, so a /tmp staging path fails here.
 		archive, err := request(client, http.MethodGet, "/admin/backup?database=1", nil)
 		if err != nil {
 			return err

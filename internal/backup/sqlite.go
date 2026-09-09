@@ -44,6 +44,15 @@ func InspectDatabase(stageDir string, data []byte) (SnapshotCounts, error) {
 	return inspectSQLiteSnapshot(stageDir, data)
 }
 
+// CheckDatabaseFile admits an already-staged packed snapshot at path
+// without copying it. Snapshot's VACUUM dest and a pending .incoming file
+// already occupy one packed-snapshot of space on the live database volume;
+// writing a second copy for integrity_check would need two.
+func CheckDatabaseFile(path string) error {
+	_, err := inspectSQLiteFile(path)
+	return err
+}
+
 func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error) {
 	if stageDir == "" {
 		return SnapshotCounts{}, fmt.Errorf("snapshot staging directory is required")
@@ -59,6 +68,26 @@ func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error)
 	path := filepath.Join(dir, "snapshot.db")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return SnapshotCounts{}, err
+	}
+	return inspectSQLiteFile(path)
+}
+
+func inspectSQLiteFile(path string) (SnapshotCounts, error) {
+	if path == "" {
+		return SnapshotCounts{}, fmt.Errorf("snapshot path is required")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return SnapshotCounts{}, err
+	}
+	hdr := make([]byte, len(sqliteHeader))
+	n, readErr := f.Read(hdr)
+	_ = f.Close()
+	if n == 0 && readErr != nil {
+		return SnapshotCounts{}, readErr
+	}
+	if n < len(sqliteHeader) || string(hdr[:len(sqliteHeader)]) != sqliteHeader {
+		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
 	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
 	if err != nil {

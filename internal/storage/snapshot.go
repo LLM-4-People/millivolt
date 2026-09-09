@@ -51,14 +51,12 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
 		return nil, fmt.Errorf("vacuum snapshot: %w", err)
 	}
-	data, err := os.ReadFile(dest)
-	if err != nil {
-		return nil, err
-	}
-	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
+	// Integrity-check the VACUUM dest in place. CheckDatabase would
+	// WriteFile a second packed copy while dest still exists.
+	if err := backup.CheckDatabaseFile(dest); err != nil {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
-	return data, nil
+	return os.ReadFile(dest)
 }
 
 // StageSnapshot writes an integrity-checked SQLite snapshot that Open will
@@ -91,14 +89,10 @@ func StageSnapshot(path string, data []byte) error {
 
 func admitPendingSnapshot(path string) error {
 	incoming := path + pendingSnapshotSuffix
-	data, err := os.ReadFile(incoming)
-	if err != nil {
+	if err := backup.CheckDatabaseFile(incoming); err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
-	}
-	if err := backup.CheckDatabase(filepath.Dir(path), data); err != nil {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return fmt.Errorf("pending snapshot: %w", err)
 		}

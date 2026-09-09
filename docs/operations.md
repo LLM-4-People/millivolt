@@ -383,10 +383,13 @@ Truncated or bit-flipped files are rejected. The `backup_max_bytes` setting
 is the buffered archive ceiling.
 
 Both directions stage database-sized transient files (the `VACUUM INTO`
-snapshot, integrity-check staging, and merge/overlap attachments) in the live
-database's own directory, so capacity follows the data volume: keep roughly
-one packed-snapshot size of free space there during backup and restore. A
-container's `/tmp` is a small tmpfs by design and never caps backup size.
+snapshot, integrity-check of an in-memory upload, and merge/overlap
+attachments) in the live database's own directory, so capacity follows the
+data volume: keep roughly one packed-snapshot size of free space there during
+backup and restore. A packed file already on that volume (VACUUM dest, pending
+`.incoming`) is integrity-checked in place so a second copy is not written
+beside it. A container's `/tmp` is a small tmpfs by design and never caps
+backup size.
 
 ## Versions and images
 

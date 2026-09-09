@@ -128,6 +128,39 @@ func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
 	}
 }
 
+func TestCheckDatabaseFileInspectsInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot.db")
+	if err := os.WriteFile(path, packedRequestsDB(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDatabaseFile(path); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), "millivolt-backup-db-") {
+			t.Fatalf("CheckDatabaseFile staged a copy: %s", e.Name())
+		}
+	}
+	if err := CheckDatabaseFile(""); err == nil || errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("CheckDatabaseFile accepted an empty path: %v", err)
+	}
+	if err := CheckDatabaseFile(filepath.Join(dir, "missing.db")); err == nil || errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("CheckDatabaseFile missing file: %v", err)
+	}
+	bad := filepath.Join(dir, "bad.db")
+	if err := os.WriteFile(bad, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDatabaseFile(bad); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("garbage file: %v", err)
+	}
+}
+
 func TestDatabaseInspectionRequiresStagingDirectory(t *testing.T) {
 	data := packedRequestsDB(t)
 	if err := CheckDatabase("", data); err == nil || errors.Is(err, ErrInvalidSnapshot) {
