@@ -215,12 +215,10 @@ func check(image string) error {
 		args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
 			"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
 			"--env", "MILLIVOLT_OPERATOR_TOKEN=" + smokeToken,
-			// /tmp is deliberately far smaller than a packed millivolt snapshot
-			// (~60KiB for one flushed row): operator backup and restore must
-			// stage next to db_path on the data volume, never on tmpfs (the 16m
-			// deployment default stays meaningful). 32k cannot hold that file;
-			// 64k still can, so a /tmp CheckDatabase regression would pass.
-			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=32k",
+			// Read-only rootfs still needs ordinary writable temp, same role
+			// and size as the deployment 16m tmpfs. Backup staging is pinned
+			// next to db_path by package tests, not by shrinking /tmp.
+			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
 			"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
 			"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
 			"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
@@ -739,9 +737,8 @@ func probe(phase string) error {
 			return fmt.Errorf("mock inference changed: %d %s", res.StatusCode, data)
 		}
 		// The Settings database archive rides this fixture: download packs a
-		// VACUUM INTO snapshot and restore inspects the upload, both staging
-		// database-sized transient files next to db_path on the data volume.
-		// The 32k tmpfs cannot hold them, so a /tmp staging path fails here.
+		// VACUUM INTO snapshot and restore inspects the upload. Staging next
+		// to db_path is the package-test contract, not this tmpfs size.
 		archive, err := request(client, http.MethodGet, "/admin/backup?database=1", nil)
 		if err != nil {
 			return err

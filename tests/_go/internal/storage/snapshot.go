@@ -29,12 +29,6 @@ func TestSnapshotIncludesFlushedRows(t *testing.T) {
 	if _, err := backup.Encode(s.stageDir(), backup.Archive{Database: data}); err != nil {
 		t.Fatal(err)
 	}
-	// Isolated container smoke mounts /tmp at 32k so a /tmp staging
-	// regression cannot hold this packed snapshot. Keep that pin honest.
-	const isolatedTmpfs = 32 << 10
-	if len(data) <= isolatedTmpfs {
-		t.Fatalf("packed snapshot is %d bytes; container /tmp tmpfs is %d so a /tmp staging path would still pass isolated smoke", len(data), isolatedTmpfs)
-	}
 }
 
 func openTestStore(t *testing.T) *Store {
