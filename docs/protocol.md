@@ -140,8 +140,10 @@ The [Cursor bridge](adapters.md#cursor-connect-bridge) instead applies the tight
 configured/per-request timeout only until send headers arrive, without a body
 deadline on its parked run. Model discovery ignores the per-request timeout
 and uses `models_discovery_timeout` for the whole discovery operation.
-Provider Retry-After/reset hints are not clamped by the ordinary adaptive
-backoff cap. A long provider hint can therefore outlast that cap.
+Provider Retry-After/reset hints are a floor on the wait, not a replacement
+for adaptive exponential backoff. A long hint is not clamped by the ordinary
+adaptive cap and can therefore outlast it. A short hint does not reset the
+doubling, so a 1s "retry shortly" cannot re-hammer a struggling upstream.
 
 A finalized request retains its absorbed attempts and final outcome in one
 record. Recovered upstream failures can count as errors even when the final

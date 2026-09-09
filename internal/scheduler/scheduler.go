@@ -31,12 +31,13 @@ type Options struct {
 	// MaxWait is the maximum time a request may wait in the queue before being
 	// rejected with an error. 0 means unlimited.
 	MaxWait time.Duration
-	// BaseBackoff is the initial backoff when a rate-limit response carries no
-	// retry hint.
+	// BaseBackoff is the initial adaptive delay. It doubles each attempt
+	// whether or not the provider sent a retry hint.
 	BaseBackoff time.Duration
-	// MaxBackoff caps adaptive exponential backoff when the provider sends no
-	// retry hint. It does not clamp a provider-supplied Retry-After /
-	// rate-limit-reset duration - those are honored as-is (see maxRetryHint).
+	// MaxBackoff caps adaptive exponential backoff. It does not clamp a
+	// provider-supplied Retry-After / rate-limit-reset duration - a long
+	// hint is still waited in full (see maxRetryHint). A short hint is a
+	// floor on the wait, not a replacement for this cap's doubling.
 	MaxBackoff time.Duration
 	Storm      StormOptions
 }
@@ -101,7 +102,7 @@ type group struct {
 	maxConcurrent  int
 	inFlight       int
 	nextAllowedAt  time.Time     // do not send before this time (after rate limit)
-	backoff        time.Duration // attempt-level (BackoffFor, no hint)
+	backoff        time.Duration // attempt-level (BackoffFor; grows even with a hint)
 	requestBackoff time.Duration // consecutive failed requests (FailSend)
 	tripped        bool          // a request is retrying; siblings must WaitSend
 	probing        bool          // the retrying request holds the send token
@@ -431,8 +432,8 @@ func (s *Scheduler) EndSend(key string, keepSerial bool) {
 }
 
 // backoffMultiplier is the exponential factor for both attempt-level
-// (BackoffFor, no hint) and request-level (FailSend) backoff. "Double"
-// is the algorithm, with a fixed jitter band rather than an operator setting.
+// (BackoffFor) and request-level (FailSend) backoff. "Double" is the
+// algorithm, with a fixed jitter band rather than an operator setting.
 const (
 	backoffMultiplier   = 2
 	backoffJitterSpread = 0.5  // width of the jitter band
@@ -807,12 +808,17 @@ func (g *group) removeWaiter(w *waiter) {
 // minutes and can run until UTC midnight (~24h). This is a safety guardrail
 // only - a hostile or buggy upstream (Retry-After: 99999999) must not stall
 // the request and the whole provider+key group forever. It is independent of
-// MaxBackoff, which caps adaptive exponential backoff when there is NO hint.
+// MaxBackoff, which caps adaptive exponential backoff. A long hint may
+// outlast that cap; a short hint never replaces it.
 const maxRetryHint = 24 * time.Hour
 
-// Backoff computes the pacing delay for a rate-limited group, preferring
-// explicit provider hints (Retry-After, x-ratelimit-reset) over exponential
-// backoff. It also updates the group's adaptive backoff state.
+// BackoffFor computes the pacing delay after a retryable failure. Adaptive
+// exponential backoff always grows (base_backoff, cap max_backoff). A
+// provider Retry-After / rate-limit-reset is a floor: the wait is the
+// longer of the hint and the grown adaptive delay, so a 1s "retry shortly"
+// cannot reset the doubling and re-hammer the upstream, while a 35m daily
+// limit is still waited in full. Pathological hints are clamped to
+// maxRetryHint. Jitter applies to the adaptive delay only.
 func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Duration {
 	s.mu.Lock()
 	g := s.groupForLocked(key, 0, false)
@@ -820,22 +826,17 @@ func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Durati
 	s.mu.Unlock()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if retryAfter > 0 {
-		g.backoff = 0 // explicit hint resets adaptive backoff
-		// Honor the provider hint. MaxBackoff must not shrink a legitimate
-		// daily-limit Retry-After (often 30–60m) down to the adaptive cap
-		// (default 2m) - that just re-hammers the provider. Bound only
-		// pathological values so a buggy upstream cannot stall the group
-		// forever.
-		if retryAfter > maxRetryHint {
-			retryAfter = maxRetryHint
-		}
-		return retryAfter
-	}
 	g.backoff = growBackoff(g.backoff, opts.BaseBackoff, opts.MaxBackoff)
 	// Jitter: 0.75x–1.25x to avoid thundering herd. Do not write
 	// nextAllowedAt here - only Trip/SetRateLimit trip the group.
-	return jitterBackoff(g.backoff)
+	adaptive := jitterBackoff(g.backoff)
+	if retryAfter > maxRetryHint {
+		retryAfter = maxRetryHint
+	}
+	if retryAfter > adaptive {
+		return retryAfter
+	}
+	return adaptive
 }
 
 // ResetBackoff clears the adaptive backoff after a success.

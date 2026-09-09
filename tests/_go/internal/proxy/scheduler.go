@@ -163,6 +163,54 @@ func TestRetryAfterNotClampedToMaxBackoff(t *testing.T) {
 	}
 }
 
+// TestShortRetryAfterDoesNotResetAttemptBackoff is the 503 Retry-After: 1s
+// case: HTTP Retry-After is integer seconds, so a "retry shortly" 503 often
+// carries a 1s hint on every attempt. That hint is a floor, not a reset -
+// adaptive doubling still grows. A 10ms reset header with 80ms base would
+// finish in ~30ms if the hint replaced exponential; grown waits are ~80+160+320.
+func TestShortRetryAfterDoesNotResetAttemptBackoff(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("X-Ratelimit-Reset-Requests", "10ms")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":{"type":"upstream_error","code":"upstream_error","message":"Hosted inference is temporarily unavailable. Please retry shortly."}}`))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.MaxRetries = 3
+	cfg.BaseBackoff = 80 * time.Millisecond
+	cfg.MaxBackoff = 400 * time.Millisecond
+	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	elapsed := time.Since(start)
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 after exhausting retries", resp.StatusCode)
+	}
+	if got := calls.Load(); got != 4 {
+		t.Fatalf("upstream hits = %d, want 4 (1 initial + 3 retries)", got)
+	}
+	// Jitter floor 0.75×: 60+120+240ms = 420ms. Stay under that so a slow
+	// host still fails the old 10ms×3 path (~30ms) without flaking.
+	if elapsed < 300*time.Millisecond {
+		t.Fatalf("retried in %v; short retry hint reset exponential (want ~80+160+320ms)", elapsed)
+	}
+}
+
 func TestTransparent5xxRetry(t *testing.T) {
 	// Upstream fails with 502 twice, then succeeds. The client must see ONLY
 	// the final 200 - the 5xx errors are absorbed transparently.

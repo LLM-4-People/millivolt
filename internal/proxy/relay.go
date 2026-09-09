@@ -566,8 +566,9 @@ func withSendTimeout(ctx context.Context, timeout time.Duration) (context.Contex
 // doWithRetry executes the upstream request, transparently absorbing transient
 // failures: 429 and any 5xx are retried with backoff while the client has not
 // yet received any bytes, so the client only ever sees the final outcome. It
-// parses provider retry hints (Retry-After, x-ratelimit-reset). Any retry
-// (429, 5xx, transport) trips the provider+key group: that request owns the
+// parses provider retry hints (Retry-After, x-ratelimit-reset) as a floor on
+// the wait; adaptive exponential backoff still grows. Any retry (429, 5xx,
+// transport) trips the provider+key group: that request owns the
 // next send. After success or exhaust, exactly one sibling is the probe; a
 // clean first-attempt success restores full concurrency, another retry keeps
 // it at one-at-a-time. Exhausted retryable failures double a request-level

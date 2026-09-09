@@ -118,8 +118,9 @@ type Config struct {
 	// ---- queueing / rate-limit handling ----
 	// The proxy transparently queues requests when a provider returns 429, and
 	// transparently retries 429 and any 5xx (transient upstream errors) with
-	// backoff - honoring Retry-After / rate-limit reset headers - so clients
-	// never see a transient failure. A 429 carrying a durable quota/billing
+	// exponential backoff - Retry-After / rate-limit reset headers are a
+	// floor, not a replacement - so clients never see a transient failure.
+	// A 429 carrying a durable quota/billing
 	// error (insufficient_quota/credits, spend limits) is never retried: it is
 	// surfaced immediately (waiting cannot clear it).
 	MaxConcurrent int           `yaml:"max_concurrent" json:"max_concurrent"` // per provider+key; 0 = unlimited
@@ -132,10 +133,12 @@ type Config struct {
 	QueueRetryAfter time.Duration `yaml:"queue_retry_after" json:"queue_retry_after"`
 
 	// Retry backoff for transient failures (429/5xx/transport). BaseBackoff is
-	// the initial delay when the provider sends no retry hint; it doubles each
-	// attempt and each consecutive failed request, up to MaxBackoff.
-	// MaxBackoff does not clamp a provider-supplied Retry-After /
-	// rate-limit-reset (daily limits are often 30–60m). Generous defaults:
+	// the initial adaptive delay; it doubles each attempt and each consecutive
+	// failed request, up to MaxBackoff. A provider Retry-After / rate-limit-reset
+	// is a floor: never retry sooner than the hint, but a short hint (HTTP
+	// Retry-After is integer seconds, so 1s is common on 503 "retry shortly")
+	// does not reset or replace the doubling. MaxBackoff does not clamp a
+	// long provider hint (daily limits are often 30–60m). Generous defaults:
 	// these are upstream-recovery pauses, and too-short backoff just
 	// re-hammers a struggling provider.
 	BaseBackoff time.Duration `yaml:"base_backoff" json:"base_backoff"`

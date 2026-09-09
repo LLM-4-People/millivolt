@@ -294,22 +294,54 @@ func TestAdaptiveBackoff(t *testing.T) {
 	if d2 < 150*time.Millisecond || d2 > 250*time.Millisecond {
 		t.Errorf("second backoff = %v, want ~200ms", d2)
 	}
-	// Explicit hint is honored in full - MaxBackoff must not shrink it.
-	// Daily rate-limit Retry-After values are routinely tens of minutes;
-	// clamping them to the adaptive cap (here 1s) is the bug this pins.
+	// Explicit long hint is a floor, unclamped by MaxBackoff. Adaptive has
+	// grown to 400ms; 3s wins. Daily rate-limit Retry-After values are
+	// routinely tens of minutes; clamping them to the adaptive cap (here 1s)
+	// is the bug this pins.
 	d3 := s.BackoffFor("k", 3*time.Second)
 	if d3 != 3*time.Second {
 		t.Errorf("explicit hint = %v, want 3s (unclamped by MaxBackoff)", d3)
 	}
+	if got := s.Backoff("k"); got != 400*time.Millisecond {
+		t.Errorf("stored adaptive after long hint = %v, want 400ms (hint must not reset doubling)", got)
+	}
+	// Short hint is a floor, not a reset: adaptive grows to 800ms, so the
+	// wait is the jittered adaptive (~600-1000ms), not 500ms.
 	d3b := s.BackoffFor("k", 500*time.Millisecond)
-	if d3b != 500*time.Millisecond {
-		t.Errorf("small explicit hint = %v, want 500ms (unclamped)", d3b)
+	if d3b < 600*time.Millisecond || d3b > 1000*time.Millisecond {
+		t.Errorf("short hint = %v, want ~800ms adaptive (hint is a floor, not a reset)", d3b)
+	}
+	if got := s.Backoff("k"); got != 800*time.Millisecond {
+		t.Errorf("stored adaptive after short hint = %v, want 800ms (must keep growing)", got)
 	}
 	// After reset, backoff goes back to base.
 	s.ResetBackoff("k")
 	d4 := s.BackoffFor("k", 0)
 	if d4 < 75*time.Millisecond || d4 > 125*time.Millisecond {
 		t.Errorf("post-reset backoff = %v, want ~100ms", d4)
+	}
+}
+
+// TestBackoffForShortHintKeepsGrowing is the 503 Retry-After: 1s case: a
+// short provider hint must not replace exponential backoff. Consecutive 50ms
+// hints still double 100→200→400→800.
+func TestBackoffForShortHintKeepsGrowing(t *testing.T) {
+	s := New(Options{BaseBackoff: 100 * time.Millisecond, MaxBackoff: 2 * time.Second})
+	const hint = 50 * time.Millisecond
+	want := []time.Duration{
+		100 * time.Millisecond,
+		200 * time.Millisecond,
+		400 * time.Millisecond,
+		800 * time.Millisecond,
+	}
+	for i, w := range want {
+		d := s.BackoffFor("k", hint)
+		if d < w*3/4 || d > w*5/4 {
+			t.Fatalf("attempt %d delay %v, want ~%v (max(hint, adaptive))", i+1, d, w)
+		}
+		if got := s.Backoff("k"); got != w {
+			t.Fatalf("attempt %d stored adaptive %v, want %v (short hint must not reset)", i+1, got, w)
+		}
 	}
 }
 

@@ -164,7 +164,7 @@ func Schema() []Field {
 			Help: "Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP Retry-After is integer seconds, so the value must be a whole number of seconds.",
 			Kind: KindDuration, HotReload: true, Min: num(0), Max: num(float64(QueueRetryAfterMax))},
 		{Key: "base_backoff", Category: "queue", Label: "Base backoff",
-			Help: "Initial delay when the provider sends no retry hint. Doubles each attempt and each consecutive failed request, up to max backoff. Cannot exceed max backoff. Must be > 0.",
+			Help: "Initial adaptive delay. Doubles each attempt and each consecutive failed request, up to max backoff. A provider Retry-After/reset is a floor (never retry sooner) and does not reset this doubling. Cannot exceed max backoff. Must be > 0.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "max_backoff", Category: "queue", Label: "Max backoff",
 			Help: "Cap on adaptive backoff. Does not clamp a provider Retry-After / rate-limit-reset (daily limits are often 30–60m). Must be > 0.",
