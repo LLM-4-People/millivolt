@@ -1350,6 +1350,16 @@ async function main() {
   }
   check('unknown money stays unknown', w.eval('fmtMoney(null) === "-" && fmtMoney(NaN) === "-" && fmtMoney(Infinity) === "-"'));
   check('request log uses cents', w.reqRow({ ...mkRec('cents'), cost: 0.25 }).includes('25¢'));
+  check('absent ttft is a placeholder, not 0ms', (() => {
+    const row = w.reqRow({ ...mkRec('no-ttft'), ttft_ms: 0 });
+    const detail = w.formatDetail({ ...mkRec('no-ttft'), ttft_ms: 0 });
+    return w.eval('fmtTTFT(0) === "-" && fmtTTFT(null) === "-" && fmtTTFT(100) === "100ms"') &&
+      /<td>100ms<\/td>/.test(w.reqRow(mkRec('has-ttft'))) &&
+      /<td>-<\/td>/.test(row) &&
+      !/<td>0ms<\/td>/.test(row) &&
+      detail.includes('<span class="k">ttft</span><span class="v">-</span>') &&
+      !detail.includes('>0ms<');
+  })());
   check('explorer cost uses cents with a unit-neutral per-token label',
     w.kpiBlend({cost_per_mtok: 0.025}).includes('2.5¢') && !w.kpiBlend({cost_per_mtok: 0.025}).includes('$/Mtok'));
   const BUCKET_MS = 120000;
@@ -1517,6 +1527,7 @@ async function main() {
   check('fractional duration formatter preserves zero, signs, and scale boundaries', w.eval(`
     fmtDur(0) === '0ms' && fmtDur(-0.5) === '-0.5ms' && fmtDur(0.00001) !== '0ms' && fmtDur(999.9999) === '1s'
   `));
+  check('ttft formatter treats 0 as absent', w.eval('fmtTTFT(0) === "-" && fmtTTFT(undefined) === "-" && fmtTTFT(1) === "1ms"'));
 
   // Both period totals follow the one percentile control, not bucket means
   // and not a second always-p50 baseline. Names never repeat the dropdown.

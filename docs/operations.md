@@ -749,7 +749,8 @@ sensitive; do not publish request drawers from private history without review.
 
 Request duration starts after upload and includes metadata work, queue/hold/retry
 waits and response handling. First-token latency uses the final upstream attempt's
-start when recorded, not accumulated retry delay. Overall throughput divides
+start when recorded, not accumulated retry delay. A request that produced no token
+has no TTFT: the log shows a placeholder, not 0 ms, and aggregates skip it. Overall throughput divides
 output tokens by the full request duration; chart speed can use the measured
 generation window when overall throughput is unavailable. These are different
 measurements, not interchangeable claims about provider speed.

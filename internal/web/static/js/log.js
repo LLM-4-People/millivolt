@@ -460,7 +460,7 @@ function reqRow(r, sepLabel) {
     <td style="color:var(--muted)">${new Date(r.start).toLocaleTimeString()}</td>
     <td>${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
-    <td>${fmtDur(r.ttft_ms)}</td>
+    <td>${fmtTTFT(r.ttft_ms)}</td>
     <td>${r.overall_tps ? r.overall_tps.toFixed(1) : '-'}</td>
     <td>${fmt(r.usage?.input_tokens)}/${fmt(r.usage?.output_tokens)}</td>
     <td style="color:${cacheTok ? 'var(--accent2)' : 'var(--muted)'}" title="${cacheTok ? fmt(cacheTok) + ' cached tokens' : ''}">${cachePct != null ? cachePct : '-'}</td>
@@ -693,7 +693,7 @@ function formatDetail(r) {
   ]));
 
   S.push(sec('Performance', [
-    kv('ttft', r.ttft_ms != null ? fmtDur(r.ttft_ms) : ''),
+    kv('ttft', fmtTTFT(r.ttft_ms)),
     kv('tps', r.overall_tps ? r.overall_tps.toFixed(1) + ' tok/s' : ''),
     kv('first token', fmtT(r.first_token_at)),
     kv('last token', fmtT(r.last_token_at)),
@@ -848,7 +848,7 @@ function fillDrawerDebug(id) {
       bits.push(sec('Timing', [
         debugKV('start', escapeHtml(timing.start)),
         debugKV('duration', timing.duration_ms != null ? fmtDur(timing.duration_ms) : ''),
-        debugKV('ttft', timing.ttft_ms != null ? fmtDur(timing.ttft_ms) : ''),
+        debugKV('ttft', fmtTTFT(timing.ttft_ms)),
         debugKV('queue wait', timing.queue_wait_ms ? fmtDur(timing.queue_wait_ms) : ''),
       ]));
       bits.push(sec('Request', [
