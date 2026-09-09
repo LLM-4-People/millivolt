@@ -23,10 +23,10 @@ func TestSnapshotIncludesFlushedRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backup.CheckDatabase(data); err != nil {
+	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.Encode(backup.Archive{Database: data}); err != nil {
+	if _, err := backup.Encode(s.stageDir(), backup.Archive{Database: data}); err != nil {
 		t.Fatal(err)
 	}
 }

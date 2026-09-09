@@ -24,6 +24,14 @@ func PendingSnapshotPath(path string) string {
 	return path + pendingSnapshotSuffix
 }
 
+// stageDir is where database-sized transient files are staged: the live
+// database's own volume, which is contractually sized to hold the database
+// and a packed copy of it. A generic /tmp is a small tmpfs in hardened
+// deployments and must never cap the backup contract (backup_max_bytes).
+func (s *Store) stageDir() string {
+	return filepath.Dir(s.path)
+}
+
 // Snapshot returns a packed, integrity-checked copy of the live database,
 // including committed WAL pages. VACUUM INTO is the compact consistent
 // snapshot (no free pages); it is not a file copy of an open DB.
@@ -34,9 +42,9 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	if err := s.Flush(); err != nil {
 		return nil, fmt.Errorf("flush before backup: %w", err)
 	}
-	dir, err := os.MkdirTemp("", "millivolt-snapshot-*")
+	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-snapshot-*")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	dest := filepath.Join(dir, "snapshot.db")
@@ -47,7 +55,7 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := backup.CheckDatabase(data); err != nil {
+	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
 	return data, nil
@@ -59,7 +67,7 @@ func StageSnapshot(path string, data []byte) error {
 	if path == "" {
 		return fmt.Errorf("database path is empty")
 	}
-	if err := backup.CheckDatabase(data); err != nil {
+	if err := backup.CheckDatabase(filepath.Dir(path), data); err != nil {
 		return err
 	}
 	incoming := path + pendingSnapshotSuffix
@@ -90,7 +98,7 @@ func admitPendingSnapshot(path string) error {
 		}
 		return err
 	}
-	if err := backup.CheckDatabase(data); err != nil {
+	if err := backup.CheckDatabase(filepath.Dir(path), data); err != nil {
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
 			return fmt.Errorf("pending snapshot: %w", err)
 		}
@@ -121,12 +129,12 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 	if s == nil {
 		return 0, fmt.Errorf("storage is disabled")
 	}
-	if err := backup.CheckDatabase(data); err != nil {
+	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
 		return 0, err
 	}
-	dir, err := os.MkdirTemp("", "millivolt-overlap-*")
+	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-overlap-*")
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	src := filepath.Join(dir, "snap.db")
@@ -156,16 +164,16 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	if s == nil {
 		return 0, 0, fmt.Errorf("storage is disabled")
 	}
-	info, err := backup.InspectDatabase(data)
+	info, err := backup.InspectDatabase(s.stageDir(), data)
 	if err != nil {
 		return 0, 0, err
 	}
 	if err := s.Flush(); err != nil {
 		return 0, 0, fmt.Errorf("flush before merge: %w", err)
 	}
-	dir, err := os.MkdirTemp("", "millivolt-merge-*")
+	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-merge-*")
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	src := filepath.Join(dir, "snap.db")

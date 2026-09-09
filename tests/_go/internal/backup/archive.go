@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,8 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	db := packedRequestsDB(t)
-	raw, err := Encode(Archive{Created: time.Unix(1_700_000_000, 0).UTC(), Config: yaml.Bytes(), Database: db})
+	stage := t.TempDir()
+	raw, err := Encode(stage, Archive{Created: time.Unix(1_700_000_000, 0).UTC(), Config: yaml.Bytes(), Database: db})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +34,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Validate(got); err != nil {
+	if err := Validate(stage, got); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(got.Config, yaml.Bytes()) || !bytes.Equal(got.Database, db) {
@@ -48,7 +50,7 @@ func TestEncodeConfigOnlyAndDatabaseOnly(t *testing.T) {
 	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
 		t.Fatal(err)
 	}
-	cfgRaw, err := Encode(Archive{Config: yaml.Bytes()})
+	cfgRaw, err := Encode("", Archive{Config: yaml.Bytes()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +58,7 @@ func TestEncodeConfigOnlyAndDatabaseOnly(t *testing.T) {
 	if err != nil || len(got.Database) != 0 || !bytes.Equal(got.Config, yaml.Bytes()) {
 		t.Fatalf("config-only: %v len(db)=%d", err, len(got.Database))
 	}
-	dbRaw, err := Encode(Archive{Database: packedRequestsDB(t)})
+	dbRaw, err := Encode(t.TempDir(), Archive{Database: packedRequestsDB(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +73,7 @@ func TestDecodeRejectsCorruption(t *testing.T) {
 	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := Encode(Archive{Config: yaml.Bytes()})
+	raw, err := Encode("", Archive{Config: yaml.Bytes()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,25 +89,26 @@ func TestDecodeRejectsCorruption(t *testing.T) {
 	if _, err := Decode([]byte("not a backup")); err == nil {
 		t.Fatal("garbage accepted")
 	}
-	if _, err := Encode(Archive{}); err == nil {
+	if _, err := Encode("", Archive{}); err == nil {
 		t.Fatal("empty archive encoded")
 	}
 }
 
 func TestValidateRejectsInvalidMembers(t *testing.T) {
-	if err := Validate(Archive{Config: []byte("listen: 8080\n")}); err == nil {
+	if err := Validate("", Archive{Config: []byte("listen: 8080\n")}); err == nil {
 		t.Fatal("invalid config admitted")
 	}
-	if err := Validate(Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
+	if err := Validate(t.TempDir(), Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
 		t.Fatal("invalid sqlite admitted")
 	}
 }
 
 func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
-	if err := CheckDatabase([]byte("not sqlite")); !errors.Is(err, ErrInvalidSnapshot) {
+	stage := t.TempDir()
+	if err := CheckDatabase(stage, []byte("not sqlite")); !errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("header reject: %v", err)
 	}
-	if err := CheckDatabase([]byte("SQLite format 3\x00not-a-db")); !errors.Is(err, ErrInvalidSnapshot) {
+	if err := CheckDatabase(stage, []byte("SQLite format 3\x00not-a-db")); !errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("integrity reject: %v", err)
 	}
 	data := packedRequestsDB(t)
@@ -113,13 +116,35 @@ func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", blocked)
-	err := CheckDatabase(data)
+	err := CheckDatabase(blocked, data)
 	if err == nil {
-		t.Fatal("CheckDatabase succeeded with TMPDIR that cannot hold a temp file")
+		t.Fatal("CheckDatabase succeeded with a staging directory that cannot hold a temp file")
 	}
 	if errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("verify I/O reported as invalid snapshot: %v", err)
+	}
+	if !strings.Contains(err.Error(), blocked) {
+		t.Fatalf("error %q should name the staging directory", err)
+	}
+}
+
+func TestDatabaseInspectionRequiresStagingDirectory(t *testing.T) {
+	data := packedRequestsDB(t)
+	if err := CheckDatabase("", data); err == nil || errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("CheckDatabase accepted an empty staging directory: %v", err)
+	}
+	if _, err := InspectDatabase("", data); err == nil {
+		t.Fatal("InspectDatabase accepted an empty staging directory")
+	}
+	if err := Validate("", Archive{Database: data}); err == nil {
+		t.Fatal("Validate accepted a database member without a staging directory")
+	}
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate("", Archive{Config: yaml.Bytes()}); err != nil {
+		t.Fatalf("config-only archive must not need a staging directory: %v", err)
 	}
 }
 
@@ -176,10 +201,10 @@ func TestZstdStreamHidesByter(t *testing.T) {
 }
 
 func TestEncodeRefusesInvalidMembers(t *testing.T) {
-	if _, err := Encode(Archive{Config: []byte("listen: 8080\n")}); err == nil {
+	if _, err := Encode("", Archive{Config: []byte("listen: 8080\n")}); err == nil {
 		t.Fatal("Encode returned bytes for a config Validate would reject")
 	}
-	if _, err := Encode(Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
+	if _, err := Encode(t.TempDir(), Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
 		t.Fatal("Encode returned bytes for a database CheckDatabase would reject")
 	}
 }

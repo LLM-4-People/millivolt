@@ -388,6 +388,9 @@ func (t *Totals) Add(r *metrics.Record) {
 
 // Store is a durable SQLite-backed store. It is safe for concurrent use.
 type Store struct {
+	// path is the live database file. Its directory owns the capacity for
+	// database-sized transient staging (backup/restore); see stageDir.
+	path       string
 	db         *sql.DB // writer pool: single connection, serialized
 	rdb        *sql.DB // read pool: serves dashboard queries without starving the writer
 	ch         chan queuedRecord
@@ -514,6 +517,7 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 
 	s := &Store{
+		path:       path,
 		db:         db,
 		rdb:        rdb,
 		ch:         make(chan queuedRecord, opts.WriteChanCap),

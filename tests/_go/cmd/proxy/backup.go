@@ -53,7 +53,7 @@ func TestBackupRestoreConfigRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := backup.Validate(arch); err != nil {
+	if err := backup.Validate("", arch); err != nil {
 		t.Fatal(err)
 	}
 	if len(arch.Database) != 0 || len(arch.Config) == 0 {
@@ -122,7 +122,7 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fixture must decode: %v", err)
 	}
-	if err := backup.Validate(decoded); err == nil {
+	if err := backup.Validate(dir, decoded); err == nil {
 		t.Fatal("fixture must fail Validate")
 	}
 	liveCfg = config.Default()
@@ -167,7 +167,7 @@ func TestRestoreStagesDatabaseFromEncodedArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := backup.Encode(backup.Archive{Database: data})
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	if err := config.WriteYAML(&yaml, bak); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := backup.Encode(backup.Archive{Config: yaml.Bytes()})
+	raw, err := backup.Encode("", backup.Archive{Config: yaml.Bytes()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestRestoreInspectDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	created := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	raw, err := backup.Encode(backup.Archive{Created: created, Database: data})
+	raw, err := backup.Encode(dir, backup.Archive{Created: created, Database: data})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := backup.Encode(backup.Archive{Database: data})
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
 	if err != nil {
 		t.Fatal(err)
 	}

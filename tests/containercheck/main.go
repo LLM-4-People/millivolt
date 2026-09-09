@@ -215,7 +215,10 @@ func check(image string) error {
 		args := []string{"create", "--pull", "never", "--name", name, "--network", "none", "--read-only", "--cap-drop", "ALL",
 			"--security-opt", "no-new-privileges", "--env", smokeEnv + "=1",
 			"--env", "MILLIVOLT_OPERATOR_TOKEN=" + smokeToken,
-			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=16m",
+			// /tmp is deliberately far smaller than a database snapshot: operator
+			// backup and restore must stage next to db_path on the data volume,
+			// never on tmpfs (the 16m deployment default stays meaningful).
+			"--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=64k",
 			"--mount", "type=volume,source=" + volumes[0] + ",target=/data",
 			"--mount", "type=volume,source=" + volumes[1] + ",target=/config",
 			"--mount", "type=bind,source=" + executable + ",target=/containercheck,readonly", image}
@@ -732,6 +735,31 @@ func probe(phase string) error {
 		}
 		if res.StatusCode != 200 || string(data) != response {
 			return fmt.Errorf("mock inference changed: %d %s", res.StatusCode, data)
+		}
+		// The Settings database archive rides this fixture: download packs a
+		// VACUUM INTO snapshot and restore inspects the upload, both staging
+		// database-sized transient files next to db_path on the data volume.
+		// The 64k tmpfs cannot hold them, so a /tmp staging path fails here.
+		archive, err := request(client, http.MethodGet, "/admin/backup?database=1", nil)
+		if err != nil {
+			return err
+		}
+		status, body, err = do(client, http.MethodPost, "/admin/restore?database=1", archive, nil)
+		if err != nil {
+			return err
+		}
+		if status != http.StatusOK {
+			return fmt.Errorf("settings database restore returned %d: %s", status, body)
+		}
+		var staged struct {
+			OK              bool     `json:"ok"`
+			RestartRequired []string `json:"restart_required"`
+		}
+		if err := json.Unmarshal(body, &staged); err != nil {
+			return err
+		}
+		if !staged.OK || len(staged.RestartRequired) != 1 || staged.RestartRequired[0] != "db_path" {
+			return fmt.Errorf("settings database restore json: %+v", staged)
 		}
 	}
 	if err := readJSON(client, "/admin/config", &cfg); err != nil {

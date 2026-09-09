@@ -30,24 +30,30 @@ type SnapshotCounts struct {
 }
 
 // CheckDatabase admits a packed SQLite snapshot: header, integrity_check, and
-// the requests table millivolt history requires.
-func CheckDatabase(data []byte) error {
-	_, err := InspectDatabase(data)
+// the requests table millivolt history requires. stageDir must be the
+// directory that owns the live database: inspection stages a database-sized
+// transient file there, so capacity follows the database volume instead of a
+// generic /tmp that hardened deployments size as a small tmpfs.
+func CheckDatabase(stageDir string, data []byte) error {
+	_, err := InspectDatabase(stageDir, data)
 	return err
 }
 
 // InspectDatabase is CheckDatabase plus request/debug row counts.
-func InspectDatabase(data []byte) (SnapshotCounts, error) {
-	return inspectSQLiteSnapshot(data)
+func InspectDatabase(stageDir string, data []byte) (SnapshotCounts, error) {
+	return inspectSQLiteSnapshot(stageDir, data)
 }
 
-func inspectSQLiteSnapshot(data []byte) (SnapshotCounts, error) {
+func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error) {
+	if stageDir == "" {
+		return SnapshotCounts{}, fmt.Errorf("snapshot staging directory is required")
+	}
 	if len(data) < len(sqliteHeader) || string(data[:len(sqliteHeader)]) != sqliteHeader {
 		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
-	dir, err := os.MkdirTemp("", "millivolt-backup-db-*")
+	dir, err := os.MkdirTemp(stageDir, "millivolt-backup-db-*")
 	if err != nil {
-		return SnapshotCounts{}, err
+		return SnapshotCounts{}, fmt.Errorf("stage snapshot in %s: %w", stageDir, err)
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "snapshot.db")

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,7 +37,19 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		logHTTPError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	raw, err := backup.Encode(arch)
+	// A database member is staged for the self-check: capacity must follow
+	// the database volume, not a generic /tmp sized independently of
+	// backup_max_bytes.
+	stageDir := ""
+	if wantDB {
+		dir, err := dbStageDir()
+		if err != nil {
+			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		stageDir = dir
+	}
+	raw, err := backup.Encode(stageDir, arch)
 	if err != nil {
 		logHTTPError(w, "backup failed", http.StatusInternalServerError)
 		return
@@ -91,12 +104,23 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		logHTTPError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := backup.Validate(arch); err != nil {
+	// Inspect and validation stage a database member next to the live
+	// database; a config-only archive never touches the database volume.
+	stageDir := ""
+	if len(arch.Database) > 0 {
+		dir, err := dbStageDir()
+		if err != nil {
+			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		stageDir = dir
+	}
+	if err := backup.Validate(stageDir, arch); err != nil {
 		logHTTPError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if inspect {
-		writeRestoreInspect(w, r, arch)
+		writeRestoreInspect(w, r, arch, stageDir)
 		return
 	}
 	if wantConfig && len(arch.Config) == 0 {
@@ -193,6 +217,20 @@ func backupCap() int64 {
 		return int64(config.Default().BackupMaxBytes)
 	}
 	return int64(liveCfg.BackupMaxBytes)
+}
+
+// dbStageDir is where transient SQLite snapshot files are staged for operator
+// backup and restore: the live database's own volume, contractually sized to
+// hold the database and a packed copy of it. A generic /tmp is a small tmpfs
+// in hardened deployments and must not cap the backup contract.
+func dbStageDir() (string, error) {
+	liveMu.Lock()
+	cfg := liveCfg
+	liveMu.Unlock()
+	if cfg == nil || cfg.DBPath == "" {
+		return "", fmt.Errorf("durable storage is disabled")
+	}
+	return filepath.Dir(cfg.DBPath), nil
 }
 
 func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, error) {
@@ -307,7 +345,7 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 	return true, storage.StageSnapshot(cfg.DBPath, raw)
 }
 
-func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
+func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive, stageDir string) {
 	out := map[string]any{
 		"ok":      true,
 		"inspect": true,
@@ -339,7 +377,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 		out["config"] = map[string]any{"present": false}
 	}
 	if len(arch.Database) > 0 {
-		info, err := backup.InspectDatabase(arch.Database)
+		info, err := backup.InspectDatabase(stageDir, arch.Database)
 		if err != nil {
 			logHTTPError(w, err.Error(), http.StatusBadRequest)
 			return

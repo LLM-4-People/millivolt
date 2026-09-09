@@ -68,9 +68,11 @@ func (a Archive) flags() byte {
 	return f
 }
 
-// Encode writes a self-checked archive. The returned bytes have already
+// Encode writes a self-checked archive. stageDir is the directory used to
+// stage a database member for the self-check (the live database's volume; it
+// is ignored for a config-only archive). The returned bytes have already
 // round-tripped through Decode and Validate.
-func Encode(a Archive) ([]byte, error) {
+func Encode(stageDir string, a Archive) ([]byte, error) {
 	if a.flags() == 0 {
 		return nil, fmt.Errorf("backup must include config, database, or both")
 	}
@@ -111,7 +113,7 @@ func Encode(a Archive) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("backup self-check: %w", err)
 	}
-	if err := Validate(got); err != nil {
+	if err := Validate(stageDir, got); err != nil {
 		return nil, fmt.Errorf("backup self-check: %w", err)
 	}
 	if !bytes.Equal(got.Config, a.Config) || !bytes.Equal(got.Database, a.Database) {
@@ -190,8 +192,11 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 }
 
 // Validate runs semantic checks: config YAML must load without dropped keys,
-// and a database member must be a packed SQLite snapshot with a requests table.
-func Validate(a Archive) error {
+// and a database member must be a packed SQLite snapshot with a requests
+// table. stageDir is the directory used to stage a database member for
+// inspection (the live database's volume); it is required when the archive
+// carries a database member and ignored otherwise.
+func Validate(stageDir string, a Archive) error {
 	if a.flags() == 0 {
 		return fmt.Errorf("backup must include config, database, or both")
 	}
@@ -208,7 +213,7 @@ func Validate(a Archive) error {
 		}
 	}
 	if len(a.Database) > 0 {
-		if err := CheckDatabase(a.Database); err != nil {
+		if err := CheckDatabase(stageDir, a.Database); err != nil {
 			return fmt.Errorf("backup database: %w", err)
 		}
 	}
