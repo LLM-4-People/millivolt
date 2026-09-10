@@ -448,8 +448,13 @@ function applyDashValues(v) {
   }
   // Re-arm only on an actual cadence change - the 5s tick calls this with an
   // unchanged config, and clearing/setting the interval every tick would
-  // starve it (a tick younger than the interval never fires).
-  if (typeof armDashboardTicks === 'function' && cadence() !== before) armDashboardTicks();
+  // starve it (a tick younger than the interval never fires). Payloads can
+  // still land while hidden (an in-flight resume fetch, the SSE reset path),
+  // and the visibilitychange handler only runs on transitions, so a cadence
+  // change must not re-arm a tick the hide transition stopped. A combined
+  // cadence+toggle-off payload still ends stopped via the branch below.
+  if (typeof armDashboardTicks === 'function' && cadence() !== before &&
+      (!document.hidden || dashCfg.background_refresh)) armDashboardTicks();
   // A hot-reloaded toggle-off must release the background hold and stop the
   // tick even while the tab is hidden (the visibilitychange handler only
   // runs on the transition).

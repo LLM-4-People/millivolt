@@ -3712,6 +3712,29 @@ async function main() {
       check('a grant landing after release self-releases instead of holding while visible',
         w.__lockRequests.length === 5 && w.__lockRequests[4].released === true &&
         w.eval('_bgLockRelease === null'));
+
+      // A cadence change in a payload that lands while hidden with
+      // background refresh off must not re-arm the tick: payload paths stay
+      // live while hidden (an in-flight resume fetch, the SSE reset path),
+      // and the visibilitychange handler only runs on transitions.
+      w.applyDashValues({dash_background_refresh: false});
+      setHidden(true);
+      w.applyDashValues({dash_poll_interval: '7s'});
+      check('a cadence change while hidden with background refresh off does not re-arm the tick',
+        w.eval('_dashTickTimer === null') && w.__lockRequests.length === 5);
+      // Symmetric activation: the flag flipped on while already hidden (an
+      // out-of-band config change) arms the tick and takes the hold with no
+      // visibilitychange transition.
+      w.applyDashValues({dash_background_refresh: true});
+      await sleep(5); // the lock stub grants in a microtask
+      check('a hot-reloaded toggle-on while hidden takes the lock and arms the tick',
+        w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 6 &&
+        w.eval('_bgLockRelease !== null'));
+      // With the opt-in on, the same cadence change re-arms at the new
+      // cadence.
+      w.applyDashValues({dash_poll_interval: '11s'});
+      check('a cadence change while hidden with background refresh on keeps the tick armed',
+        w.eval('_dashTickTimer !== null'));
     } finally {w.close();}
   }
 
