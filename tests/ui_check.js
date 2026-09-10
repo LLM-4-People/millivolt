@@ -3517,9 +3517,12 @@ async function main() {
 
       // A stored credential rejected while a request is in flight: the silent
       // retry must drop it (other callers must not keep burning the server's
-      // wrong-credential throttle with it) and the next prompt says so.
+      // wrong-credential throttle with it) and the next prompt says so. The
+      // request itself still presents the phase-1 credential; the wrong one is
+      // stored while it pends, so it is the silent retry that presents (and
+      // gets rejected for) the wrong value.
       bootGate = [];
-      const stale = w.operatorFetch('/metrics/bootstrap'); // in flight with no credential
+      const stale = w.operatorFetch('/metrics/bootstrap'); // in flight presenting the phase-1 credential
       await sleep(5);
       w.eval('storeOperatorCredential("op-token-wrong")'); // stored while pending
       bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
