@@ -3531,6 +3531,25 @@ async function main() {
       check('cancel after a rejected silent retry returns the 401 with nothing stored',
         (await stale).status === 401 && w.eval('operatorCredential') === '' && w.eval('operatorRejected === false'));
 
+      // A silent retry whose 401 lands after a NEWER credential was stored
+      // (another caller's successful unlock) must wipe only the token it
+      // presented - a 401 indicts the presented value, never the current one.
+      bootGate = [];
+      const raced = w.operatorFetch('/metrics/bootstrap'); // in flight with no credential
+      await sleep(5);
+      w.eval('storeOperatorCredential("op-token-wrong")'); // the silent retry will present this
+      bootGate = [];                                       // gate the silent retry itself
+      bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      await sleep(5);
+      w.eval('storeOperatorCredential("op-token-correct")'); // a newer unlock lands while it flies
+      bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      await sleep(5);
+      check('a late rejection does not wipe a newer stored credential',
+        w.eval('operatorCredential') === 'op-token-correct' && !d.getElementById('operator-dialog').hidden);
+      d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+      check('cancel keeps the newer credential',
+        (await raced).status === 401 && w.eval('operatorCredential') === 'op-token-correct');
+
       // A rejected entry is visible on the next prompt instead of a silent
       // re-ask that reads as "nothing happened".
       w.eval('storeOperatorCredential("")');
@@ -3623,13 +3642,15 @@ async function main() {
       check('returning to view releases the lock and re-arms the tick',
         w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer !== null') &&
         w.__lockRequests[0].released === true);
-      // Hot-reloaded toggle-off releases the hold even while still hidden.
+      // Hot-reloaded toggle-off releases the hold and stops the tick even
+      // while still hidden.
       setHidden(true);
       await sleep(5);
       w.applyDashValues({dash_background_refresh: false});
       await sleep(5); // the stub marks released on promise settlement
-      check('a hot-reloaded toggle-off releases the background lock while hidden',
-        w.__lockRequests.length === 2 && w.__lockRequests[1].released === true && w.eval('_bgLockRelease === null'));
+      check('a hot-reloaded toggle-off releases the lock and the tick while hidden',
+        w.__lockRequests.length === 2 && w.__lockRequests[1].released === true &&
+        w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer === null'));
 
       // A grant landing for a superseded hold (hide/show cycled while the
       // grant was pending) must self-release, not steal the live claim.
@@ -3648,6 +3669,15 @@ async function main() {
       check('the live claim releases on return to view',
         w.eval('_bgLockRelease === null') && w.__lockRequests[3].released === true &&
         w.eval('_dashTickTimer !== null'));
+
+      // A grant landing after its hold was released (no newer hold taken)
+      // must self-release too: it must never hold the lock while visible.
+      setHidden(true);   // request #5, grant pending
+      setHidden(false);  // release with no live claim: still invalidates the pending grant
+      await sleep(5);
+      check('a grant landing after release self-releases instead of holding while visible',
+        w.__lockRequests.length === 5 && w.__lockRequests[4].released === true &&
+        w.eval('_bgLockRelease === null'));
     } finally {w.close();}
   }
 

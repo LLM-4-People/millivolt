@@ -409,7 +409,9 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 	}
 	intField := func(key string) int {
 		t.Helper()
-		m := regexp.MustCompile(key + `:\s*(\d+)`).FindSubmatch(block[1])
+		// Word-boundary anchored like boolField: a longer key ending in this
+		// one (dash_poll_ms vs poll_ms) must not shadow it.
+		m := regexp.MustCompile(`\b` + key + `\s*:\s*(\d+)`).FindSubmatch(block[1])
 		if m == nil {
 			t.Fatalf("dashCfg.%s missing", key)
 		}

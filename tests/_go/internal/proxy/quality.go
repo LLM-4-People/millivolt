@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -309,8 +310,9 @@ func streamRequest(t *testing.T, srv *httptest.Server, upstream *httptest.Server
 // TestStreamVoidReplacedWithInBandError: a stream that ends cleanly but
 // produced nothing has its TERMINAL FINISH CHUNK replaced by an in-band error
 // (the error must arrive instead of the finish chunk - SDKs end the stream at
-// the finish chunk and ignore anything after it). No transparent retry on the
-// streaming path: bytes (role chunk) already reached the client.
+// the finish chunk and ignore anything after it). Not retried because this is
+// a COMPLETED stream (the terminal marker was seen - empty_completion), not a
+// truncation: only truncated streams are re-sent.
 func TestStreamVoidReplacedWithInBandError(t *testing.T) {
 	upstream := streamUpstream(t,
 		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
@@ -564,6 +566,70 @@ func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
 	recs := waitForRecord(t, buf, 1)
 	if !recs[0].IsError() || recs[0].ErrorType != "overloaded_error" || recs[0].ErrorCode == metrics.CodeTruncated {
 		t.Fatalf("record must carry the provider's envelope: %+v", recs[0])
+	}
+}
+
+// TestStreamRetryTransportFailureSurfacesInBand: a re-send that fails at the
+// transport level after the first attempt relayed bytes must answer the
+// committed socket IN-BAND, never with a raw HTTP error body after
+// event-stream bytes - even when the client never asked for streaming and the
+// socket carries no pacer (the case writeClientError cannot see). A relayed
+// socket and a never-written one are distinguished by actual relay activity,
+// not by the client's stream flag.
+func TestStreamRetryTransportFailureSurfacesInBand(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200)
+			w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+			return
+		}
+		// The re-send dies at the transport level: accept the connection
+		// and close it without a response.
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	cfg := config.Default()
+	cfg.MaxRetries = 0 // the transport failure must surface immediately, not after the retry ladder
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	// A NON-streaming request whose upstream answered event-stream: the same
+	// committed-socket corner with no pacer on the client writer.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(body), "data: {\"error\"") {
+		t.Fatalf("relayed socket must get the in-band error envelope, got: %q", string(body))
+	}
+	if !strings.Contains(string(body), `"type":"upstream_unreachable"`) {
+		t.Fatalf("in-band envelope must carry the unreachable type: %q", string(body))
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (one absorbed truncation + failed re-send)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if !recs[0].IsError() || recs[0].ErrorType != "upstream_unreachable" || recs[0].StatusCode != http.StatusBadGateway {
+		t.Fatalf("record must flag the failed re-send: %+v", recs[0])
 	}
 }
 

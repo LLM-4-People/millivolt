@@ -634,10 +634,20 @@ function dashHoldBackgroundLock() {
   })).catch(() => { if (gen === _bgLockGen) _bgLockRelease = null; });
 }
 function dashReleaseBackgroundLock() {
+  // Bump the generation even with no live claim: a grant may still be
+  // pending for a released hold (or a hot-reloaded toggle-off), and the late
+  // callback must self-release instead of claiming while visible.
+  ++_bgLockGen;
   if (!_bgLockRelease) return;
   const release = _bgLockRelease;
   _bgLockRelease = null;
   release();
+}
+// dashStopDashboardTick tears the 5s poll down outside a visibility
+// transition: the hot-reloaded toggle-off path (applyDashValues) uses it so a
+// hidden tab stops polling the moment the flag turns off.
+function dashStopDashboardTick() {
+  if (_dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
 }
 function _armClock() {
   if (_clockTimer) return;

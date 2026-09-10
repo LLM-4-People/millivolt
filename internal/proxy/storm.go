@@ -162,15 +162,29 @@ func (s *Server) allowStormRetry(ctx context.Context, active bool) bool {
 	return true
 }
 
-func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record, err error) bool {
+// stormQueueErrorRecord stamps the record for a storm-queue rejection and
+// returns the in-band error envelope. It is the single owner of the
+// envelope's type and message: writeStormQueueError writes it as an HTTP
+// error (pre-commit sockets), while relay failure paths on an already
+// relayed socket emit it in-band via emitErrorSSE. ok=false when err is not
+// a storm-queue rejection.
+func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg string, ok bool) {
 	if !errors.Is(err, scheduler.ErrStormQueueFull) && !errors.Is(err, scheduler.ErrStormMaxWait) && !errors.Is(err, scheduler.ErrStormCapacity) {
-		return false
+		return "", "", false
 	}
 	rec.ErrorType = "storm_queue_full"
 	rec.ErrorMsg = err.Error()
+	return "rate_limit_error", "error storm protection: " + err.Error(), true
+}
+
+func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record, err error) bool {
+	typ, msg, ok := s.stormQueueErrorRecord(rec, err)
+	if !ok {
+		return false
+	}
 	header := http.Header{}
 	header.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
-	writeClientErrorHdr(w, rec, "rate_limit_error", "error storm protection: "+err.Error(), http.StatusTooManyRequests, header)
+	writeClientErrorHdr(w, rec, typ, msg, http.StatusTooManyRequests, header)
 	return true
 }
 

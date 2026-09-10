@@ -136,8 +136,6 @@ let operatorCredentialEpoch = 0;
 let operatorRejected = false;
 let operatorPrompt = null;
 
-function operatorToken() { return operatorCredential; }
-
 function storeOperatorCredential(value) {
   operatorCredential = value;
   ++operatorCredentialEpoch;
@@ -170,13 +168,17 @@ async function operatorFetch(url, options = {}) {
   // request burns the server's throttle), flag the notice, and fall through
   // to the prompt.
   if (operatorCredential && operatorCredentialEpoch !== epoch) {
+    const presentedEpoch = operatorCredentialEpoch;
     response = await attempt();
     if (response.status !== 401) {
-      operatorRejected = false; // the stored credential is valid again: any pending rejection notice is stale
+      if (response.ok) operatorRejected = false; // an accepted response clears any racing rejection notice
       return response;
     }
     operatorRejected = true;
-    storeOperatorCredential('');
+    // Wipe only the credential this retry presented: a newer one may have
+    // been stored (another caller's successful unlock) while it was in
+    // flight, and a 401 indicts the presented value, never the current one.
+    if (operatorCredentialEpoch === presentedEpoch) storeOperatorCredential('');
   }
   const token = await askOperatorToken();
   if (!token) return response;
@@ -185,7 +187,7 @@ async function operatorFetch(url, options = {}) {
   if (response.status === 401) {
     operatorRejected = true;
     storeOperatorCredential('');
-  } else {
+  } else if (response.ok) {
     operatorRejected = false; // a successful unlock clears any racing rejection notice
   }
   return response;
@@ -444,10 +446,12 @@ function applyDashValues(v) {
   // unchanged config, and clearing/setting the interval every tick would
   // starve it (a tick younger than the interval never fires).
   if (typeof armDashboardTicks === 'function' && cadence() !== before) armDashboardTicks();
-  // A hot-reloaded toggle-off must release the background hold even while the
-  // tab is hidden (the visibilitychange handler only runs on the transition).
-  if (wasBackgroundRefresh && !dashCfg.background_refresh && typeof dashReleaseBackgroundLock === 'function') {
-    dashReleaseBackgroundLock();
+  // A hot-reloaded toggle-off must release the background hold and stop the
+  // tick even while the tab is hidden (the visibilitychange handler only
+  // runs on the transition).
+  if (wasBackgroundRefresh && !dashCfg.background_refresh) {
+    if (typeof dashReleaseBackgroundLock === 'function') dashReleaseBackgroundLock();
+    if (document.hidden && typeof dashStopDashboardTick === 'function') dashStopDashboardTick();
   }
   // Symmetric activation: a flag flipped on while already hidden (only
   // reachable via an out-of-band config PUT) must arm the tick and take the
