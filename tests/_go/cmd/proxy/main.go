@@ -272,11 +272,22 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "That token was rejected") {
 			t.Errorf("clean login page must not carry the rejection notice: status=%d", w.Code)
 		}
-		// The login page itself is inert without a credential: 401.
+		// The login page itself is inert without a credential: 401. A form
+		// post with no token field is a clean page too - the rejection
+		// notice is about a presented token, and none was.
 		w = httptest.NewRecorder()
 		h(w, httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session", nil))
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("empty session post: status=%d want=401", w.Code)
+		}
+		w = httptest.NewRecorder()
+		emptyForm := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session",
+			strings.NewReader(""))
+		emptyForm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		h(w, emptyForm)
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) ||
+			strings.Contains(w.Body.String(), "That token was rejected") {
+			t.Errorf("empty form post: status=%d want=401 clean login page", w.Code)
 		}
 	})
 }

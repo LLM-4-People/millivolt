@@ -162,13 +162,16 @@ func (s *Server) allowStormRetry(ctx context.Context, active bool) bool {
 	return true
 }
 
-// stormQueueErrorRecord stamps the record for a storm-queue rejection - the
-// decided HTTP status (429) with it, so every emission path records the same
-// class the client received - and returns the in-band error envelope. It is
-// the single owner of the envelope's type and message: writeStormQueueError
-// writes it as an HTTP error (pre-commit sockets), while relay failure paths
-// on an already committed socket emit it in-band via emitErrorSSE. ok=false
-// when err is not a storm-queue rejection.
+// stormQueueErrorRecord stamps the record for a storm-queue rejection with
+// the decided HTTP status (429 - the status the proxy sent, or would have
+// sent on a committed socket) and returns the in-band error envelope. The 429
+// classifies the record as rate-limited (HasRateLimit true, IsError false -
+// metrics short-circuits on 429 before the error type: 429 alone is not an
+// error), the same class as the request plane's queue-full rejection.
+// stormQueueErrorRecord is the single owner of the envelope's type and
+// message: writeStormQueueError writes it as an HTTP error (pre-commit
+// sockets), while relay failure paths on an already committed socket emit it
+// in-band via emitErrorSSE. ok=false when err is not a storm-queue rejection.
 func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg string, ok bool) {
 	if !errors.Is(err, scheduler.ErrStormQueueFull) && !errors.Is(err, scheduler.ErrStormMaxWait) && !errors.Is(err, scheduler.ErrStormCapacity) {
 		return "", "", false

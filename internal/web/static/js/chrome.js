@@ -243,7 +243,9 @@ function askOperatorToken() {
     dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
     $('operator-dialog-form').onsubmit = e => {
       e.preventDefault();
-      finish(input.value.trim());
+      // Verbatim, like every other presentation path (bearerToken and the
+      // login form never trim): a credential with edge whitespace is valid.
+      finish(input.value);
     };
     closeHeaderMenus();
     closeNavMenu();

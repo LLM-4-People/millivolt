@@ -3550,6 +3550,40 @@ async function main() {
       check('cancel keeps the newer credential',
         (await raced).status === 401 && w.eval('operatorCredential') === 'op-token-correct');
 
+      // The post-prompt wipe is value-guarded too: a retry presenting an
+      // older token must not wipe a newer one stored while it flew.
+      w.eval('storeOperatorCredential("")');
+      const gen = w.operatorFetch('/metrics/bootstrap'); // 401 -> dialog
+      await sleep(5);
+      bootGate = [];                                     // gate the upcoming post-prompt retry
+      submitDialog('op-token-wrong');                    // stores W, dispatches the retry
+      await sleep(5);
+      w.eval('storeOperatorCredential("op-token-correct")'); // a newer generation's unlock
+      bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      await sleep(5);
+      check('a rejected post-prompt retry does not wipe a newer stored credential',
+        w.eval('operatorCredential') === 'op-token-correct' && w.eval('operatorRejected === true'));
+      check('the raced post-prompt caller returns its 401', (await gen).status === 401);
+
+      // The dialog presents the entered value VERBATIM (the server never
+      // trims credentials): edge whitespace must reach the wire untouched.
+      w.eval('storeOperatorCredential("")');
+      const padded = ' padded-token ';
+      const paddedCall = w.operatorFetch('/metrics/bootstrap'); // 401 (no credential) -> dialog
+      await sleep(5);
+      const savedPadFetch = w.fetch;
+      w.fetch = (url, options) => {
+        const auth = options && options.headers ? (options.headers.Authorization || '') : '';
+        calls.push({url: String(url), auth});
+        if (auth === 'Bearer ' + padded) return Promise.resolve({ok: true, status: 200, json: async () => ({})});
+        return Promise.resolve({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      };
+      submitDialog(padded);
+      check('the dialog presents the token verbatim without trimming',
+        (await paddedCall).status === 200 && w.eval('operatorCredential') === padded &&
+        calls.some(c => c.auth === 'Bearer ' + padded));
+      w.fetch = savedPadFetch;
+
       // A rejected entry is visible on the next prompt instead of a silent
       // re-ask that reads as "nothing happened".
       w.eval('storeOperatorCredential("")');

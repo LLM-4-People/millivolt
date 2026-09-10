@@ -130,6 +130,60 @@ func TestStormQueueTimeoutAndCancellation(t *testing.T) {
 	}
 }
 
+// TestStormQueueRejectionOnQualityResendRecordsDecidedStatus: the quality
+// loop's storm rejection - the one path where the absorbed attempt's 200 used
+// to masquerade as the final record status while the wire carried a real 429 -
+// records the decided 429: rate-limit class (HasRateLimit true, IsError false,
+// 429 alone is not an error), identical to every other storm-queue rejection.
+func TestStormQueueRejectionOnQualityResendRecordsDecidedStatus(t *testing.T) {
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(503) // trips the storm on request 1's single send
+			return
+		}
+		// A degenerate 200: absorbed by the quality loop, which then
+		// re-sends into the active storm.
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{}}]}`)
+	}))
+	defer up.Close()
+
+	cfg := stormTestConfig()
+	cfg.MaxRetries = 0      // request 1 surfaces its 503 without any retry
+	cfg.StormMaxRetries = 0 // no storm-budget retry either: the 503 surfaces, the storm stays tripped
+	cfg.QualityRetries = 1
+	// Request 2's first send waits one backoff (15ms <= 20ms max) and passes;
+	// the absorb's quality-failure observation doubles the backoff (30ms), so
+	// the QUALITY RE-SEND's wait is the one that exceeds the max wait.
+	cfg.StormInitialBackoff = 15 * time.Millisecond
+	cfg.StormMaxWait = 20 * time.Millisecond
+	buf := metrics.NewBuffer(10)
+	s := New(cfg, buf)
+
+	// Request 1 trips the storm (503) and surfaces it.
+	w := stormRequest(t, s, up.URL, "model-a", "key-a")
+	if w.Code != 503 || calls.Load() != 1 {
+		t.Fatalf("storm trip request: status=%d calls=%d", w.Code, calls.Load())
+	}
+	// Request 2: degenerate 200 absorbed, re-send rejected by the storm queue.
+	// The upstream serves the degenerate 200 on call 2; the re-send never
+	// reaches it.
+	w = stormRequest(t, s, up.URL, "model-a", "key-a")
+	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatalf("quality re-send must be rejected with 429: status=%d body=%s", w.Code, w.Body.String())
+	}
+	rows := buf.Snapshot()
+	if len(rows) != 2 {
+		t.Fatalf("expected two finalized records: %+v", rows)
+	}
+	rej := rows[1]
+	if rej.StatusCode != 429 || rej.ErrorType != "storm_queue_full" ||
+		!rej.HasRateLimit() || rej.IsError() || rej.Retries != 1 || len(rej.Attempts) != 1 {
+		t.Fatalf("quality-loop storm rejection must record the decided 429: %+v", rej)
+	}
+}
+
 func TestStormIsolatesAffectedModelAcrossKeys(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

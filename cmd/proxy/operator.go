@@ -488,20 +488,29 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if presented {
-		g.limiter.failure(ip, time.Now())
-	}
+	// The lockout check precedes failure counting, matching the gate: the
+	// request that crosses the threshold still gets its own denial shape,
+	// and only the NEXT one is locked out.
 	if locked, retryIn := g.limiter.locked(ip, time.Now()); locked {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
 		http.Error(w, `{"error":"too many rejected credentials; try again later"}`, http.StatusTooManyRequests)
 		return
 	}
+	if presented {
+		g.limiter.failure(ip, time.Now())
+	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	if form {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(loginPageRejectedHTML))
+		if presented {
+			_, _ = w.Write([]byte(loginPageRejectedHTML))
+		} else {
+			// Nothing was presented: the rejection notice would be about a
+			// token that never existed. The clean page just asks again.
+			_, _ = w.Write([]byte(loginPageHTML))
+		}
 		return
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
