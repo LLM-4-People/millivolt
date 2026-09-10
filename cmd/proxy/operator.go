@@ -257,7 +257,8 @@ func clientIP(r *http.Request) string {
 }
 
 // locked reports whether the IP is currently locked out and for how long
-// (rounded up, so the coarse Retry-After never understates the window).
+// (rounded up to whole seconds, so the coarse Retry-After never
+// understates the window).
 func (l *authLimiter) locked(ip string, now time.Time) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -265,7 +266,11 @@ func (l *authLimiter) locked(ip string, now time.Time) (bool, time.Duration) {
 	if !ok || !now.Before(state.lockedUntil) {
 		return false, 0
 	}
-	return true, state.lockedUntil.Sub(now).Round(time.Second)
+	remaining := state.lockedUntil.Sub(now)
+	if r := remaining % time.Second; r != 0 {
+		remaining += time.Second - r
+	}
+	return true, remaining
 }
 
 // failure records one rejected credential and returns the new lockout, if
