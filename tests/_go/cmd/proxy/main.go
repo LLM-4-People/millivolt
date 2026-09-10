@@ -381,6 +381,23 @@ func TestOperatorLockout(t *testing.T) {
 	}
 }
 
+// TestOperatorLockoutRetryAfterNeverUnderstates pins the ceiling shape of
+// the lockout window: 750ms into a fresh 10s lockout leaves 9.25s, and
+// nearest-second rounding would report 9s, letting a client honoring
+// Retry-After retry 250ms before the lockout expires. The window must round
+// up to the full 10s.
+func TestOperatorLockoutRetryAfterNeverUnderstates(t *testing.T) {
+	gate := newOperatorGate("operator-fixture-credential")
+	now := time.Now()
+	for i := 0; i < authFailureThreshold; i++ {
+		gate.limiter.failure("192.0.2.10", now)
+	}
+	locked, retryIn := gate.limiter.locked("192.0.2.10", now.Add(750*time.Millisecond))
+	if !locked || retryIn != authLockoutBase {
+		t.Fatalf("locked=%v retryIn=%v want the full %s (rounded up, never nearest)", locked, retryIn, authLockoutBase)
+	}
+}
+
 // TestOperatorLockoutHoldsAtCap proves a distributed flood cannot erase a
 // live lockout: at the map cap, eviction sacrifices unlocked entries first
 // and only then the oldest lockout, while tracked IPs never trigger
