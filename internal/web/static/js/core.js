@@ -8,6 +8,7 @@ const dashCfg = {
   poll_ms: 5000,
   chart_ms: 15000,
   explorer_stale_ms: 15000,
+  background_refresh: false,
 };
 // Live-log window: starts at dashCfg.log_rows (cheap first paint) and grows
 // when the user scrolls near the bottom. logArchive holds durable pages absent

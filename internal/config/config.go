@@ -257,6 +257,13 @@ type Config struct {
 	// DashExplorerStale is how old a cached explorer breakdown may be before
 	// the dashboard re-fetches it. Hot-reloads.
 	DashExplorerStale time.Duration `yaml:"dash_explorer_stale" json:"dash_explorer_stale"`
+	// DashBackgroundRefresh stops the dashboard's own teardown while its tab
+	// is hidden: the poll keeps running at the browser's throttled background
+	// cadence (about one wake per minute on Chromium) and a Web Lock - the
+	// documented Chromium freeze exemption - keeps the SSE feed from being
+	// frozen. Android and iOS still suspend background pages at the OS level;
+	// the flag cannot and does not override that. Hot-reloads.
+	DashBackgroundRefresh bool `yaml:"dash_background_refresh" json:"dash_background_refresh"`
 
 	// Providers, keyed by an X-Proxy-* base-URL-derived provider label, hold
 	// optional per-provider overrides for how to read usage/cost/cache fields
@@ -549,6 +556,8 @@ func Default() *Config {
 		DashPollInterval:  5 * time.Second,
 		DashChartRefresh:  15 * time.Second,
 		DashExplorerStale: 15 * time.Second,
+
+		DashBackgroundRefresh: false,
 	}
 }
 

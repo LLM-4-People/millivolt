@@ -606,8 +606,27 @@ let _resizeRaf = 0;
 // stop them, wasting CPU + server round-trips). On return: re-arm + flush
 // any state that changed while hidden, and scheduleRenderLive's rAF flag
 // ensures the pending pipeline runs immediately.
+//
+// dashCfg.background_refresh opts out of the teardown (dash_background_refresh):
+// the tick keeps running at the browser's throttled background cadence, so the
+// poll keeps re-minting the session cookie and the data stays near-current for
+// a reopened tab. A Web Lock is held while hidden - Chromium documents held
+// locks as a freezing exemption, so the SSE feed survives Energy-Saver
+// freezing. Android and iOS still suspend at the OS level regardless.
 let _clockTimer = null;
 let _wasHidden = false;
+let _bgLockRelease = null;
+function dashHoldBackgroundLock() {
+  if (!dashCfg.background_refresh || _bgLockRelease) return;
+  if (!navigator.locks || typeof navigator.locks.request !== 'function') return;
+  navigator.locks.request('millivolt-background-refresh', () => new Promise(resolve => { _bgLockRelease = resolve; })).catch(() => { _bgLockRelease = null; });
+}
+function dashReleaseBackgroundLock() {
+  if (!_bgLockRelease) return;
+  const release = _bgLockRelease;
+  _bgLockRelease = null;
+  release();
+}
 function _armClock() {
   if (_clockTimer) return;
   _clockTimer = setInterval(() => {
@@ -624,11 +643,13 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     _wasHidden = true;
     clearInterval(_clockTimer); _clockTimer = null;
-    if (_dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
+    if (!dashCfg.background_refresh && _dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
+    dashHoldBackgroundLock();
   } else if (_wasHidden) {
     _wasHidden = false;
     _armClock();
     armDashboardTicks();
+    dashReleaseBackgroundLock();
     // Flush any state that changed while hidden (SSE may have delivered
     // new records while the aggregate payloads aged).
     fetchBootstrap('resume');

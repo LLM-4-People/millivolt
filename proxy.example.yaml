@@ -457,6 +457,15 @@ dash_chart_refresh: 15s
 #   type: duration · range > 0s · default 15s
 dash_explorer_stale: 15s
 
+# Keep the dashboard current while its tab is hidden: the poll runs at the browser's
+# throttled background cadence (about one wake per minute on Chromium) and a Web Lock
+# keeps the SSE feed from being frozen. Desktop Chromium only; Android and iOS still
+# suspend background pages at the OS level. Off keeps the current pause-while-hidden
+# behavior.
+# Hot-reload: yes.
+#   type: bool · default false
+dash_background_refresh: false
+
 # ---- Models ----
 # Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same
 # model in every grouped surface. Records keep their exact spelling; hot-reloads.

@@ -3547,6 +3547,69 @@ async function main() {
     } finally {w.close();}
   }
 
+  // ---- dash_background_refresh: the default pauses the tick while hidden;
+  // the opt-in keeps it running at the browser's throttled cadence and holds
+  // the documented Chromium freeze-exemption Web Lock until visible again ----
+  {
+    const bgState = observerFixture({
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-bg', seq: 1, oldest_seq: 1,
+      pending_revision: 0, incremental: false, records: [], in_flight_records: [],
+      counters: {in_flight: 0, total_requests: 0}, kpi: {requests: 0}, dash: {},
+      model_canon: modelFixture(), storm: {enabled: false, banner_enabled: false, storms: []},
+      storage: {enabled: true, dropped: 0},
+    });
+    const isolated = dashboardDOM(assembleHTML(bgState), {...pageOptions, beforeParse(win) {
+      pageOptions.beforeParse(win);
+      win.EventSource = function(url) {
+        return {url, handlers: {}, readyState: 1, addEventListener() {}, close() {this.readyState = 2;}};
+      };
+      win.__lockRequests = [];
+      win.Object.defineProperty(win.navigator, 'locks', {configurable: true, value: {
+        request(name, cb) {
+          win.__lockRequests.push({name, released: false});
+          const entry = win.__lockRequests[win.__lockRequests.length - 1];
+          // The real lock releases when the callback's promise settles.
+          return Promise.resolve().then(() => cb({release() { entry.released = true; }})).then(() => { entry.released = true; });
+        },
+      }});
+    }});
+    const w = isolated.window, d = w.document;
+    const setHidden = hidden => {
+      w.Object.defineProperty(d, 'hidden', {configurable: true, get: () => hidden});
+      d.dispatchEvent(new w.Event('visibilitychange'));
+    };
+    try {
+      await sleep(30);
+      w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
+      w.fetch = () => new Promise(() => {}); // ticks stay pending; only state is asserted
+      w.eval('armDashboardTicks()');
+      // Default off: hidden tears the tick down and never locks.
+      setHidden(true);
+      check('default hidden pauses the tick without any lock',
+        w.eval('_dashTickTimer === null') && w.__lockRequests.length === 0);
+      setHidden(false);
+      w.eval('armDashboardTicks()');
+      // Opt-in: hidden keeps the tick and holds the freeze-exemption lock.
+      w.applyDashValues({dash_background_refresh: true});
+      setHidden(true);
+      await sleep(5); // the lock stub grants in a microtask
+      check('background refresh keeps the tick running while hidden and holds the lock',
+        w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 1 && w.eval('_bgLockRelease !== null'));
+      setHidden(false);
+      await sleep(5);
+      check('returning to view releases the lock and re-arms the tick',
+        w.eval('_bgLockRelease === null') && w.eval('_dashTickTimer !== null') &&
+        w.__lockRequests[0].released === true);
+      // Hot-reloaded toggle-off releases the hold even while still hidden.
+      setHidden(true);
+      await sleep(5);
+      w.applyDashValues({dash_background_refresh: false});
+      await sleep(5); // the stub marks released on promise settlement
+      check('a hot-reloaded toggle-off releases the background lock while hidden',
+        w.__lockRequests.length === 2 && w.__lockRequests[1].released === true && w.eval('_bgLockRelease === null'));
+    } finally {w.close();}
+  }
+
   console.log(failures.length ? '\nFAILURES: ' + failures.join(' | ') : '\nALL UI CHECKS PASSED');
   process.exit(failures.length ? 1 : 0);
 }

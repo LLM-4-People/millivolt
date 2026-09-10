@@ -405,8 +405,10 @@ function applyDashValues(v) {
   // core.js seeds are first-paint only (TestDashCfgSeedsMatchDefault).
   const cadence = () => `${dashCfg.poll_ms}|${dashCfg.chart_ms}|${dashCfg.explorer_stale_ms}`;
   const before = cadence();
+  const wasBackgroundRefresh = dashCfg.background_refresh;
   if (v.history_size != null) dashCfg.history_size = +v.history_size;
   if (v.dash_log_rows != null) dashCfg.log_rows = +v.dash_log_rows;
+  if (v.dash_background_refresh != null) dashCfg.background_refresh = !!v.dash_background_refresh;
   // parseGoDuration returns 0 for garbage; a 0ms interval would tight-loop.
   // Fail closed (keep the first-paint seed). Validate already rejects 0.
   if (v.dash_poll_interval != null) {
@@ -425,6 +427,11 @@ function applyDashValues(v) {
   // unchanged config, and clearing/setting the interval every tick would
   // starve it (a tick younger than the interval never fires).
   if (typeof armDashboardTicks === 'function' && cadence() !== before) armDashboardTicks();
+  // A hot-reloaded toggle-off must release the background hold even while the
+  // tab is hidden (the visibilitychange handler only runs on the transition).
+  if (wasBackgroundRefresh && !dashCfg.background_refresh && typeof dashReleaseBackgroundLock === 'function') {
+    dashReleaseBackgroundLock();
+  }
 }
 
 let settingsCat = '';

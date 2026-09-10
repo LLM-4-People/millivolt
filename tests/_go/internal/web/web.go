@@ -419,6 +419,14 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 		}
 		return n
 	}
+	boolField := func(key string) bool {
+		t.Helper()
+		m := regexp.MustCompile(key + `:\s*(true|false)`).FindSubmatch(block[1])
+		if m == nil {
+			t.Fatalf("dashCfg.%s missing", key)
+		}
+		return string(m[1]) == "true"
+	}
 	d := config.Default()
 	want := map[string]int{
 		"history_size":      d.HistorySize,
@@ -431,6 +439,9 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 		if got := intField(key); got != w {
 			t.Errorf("dashCfg.%s = %d, want Default %d", key, got, w)
 		}
+	}
+	if got := boolField("background_refresh"); got != d.DashBackgroundRefresh {
+		t.Errorf("dashCfg.background_refresh = %v, want Default %v", got, d.DashBackgroundRefresh)
 	}
 }
 

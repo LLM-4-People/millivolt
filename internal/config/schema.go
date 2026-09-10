@@ -290,6 +290,9 @@ func Schema() []Field {
 		{Key: "dash_explorer_stale", Category: "dashboard", Label: "Explorer stale after",
 			Help: "How old a cached explorer breakdown may be before it is re-fetched. Must be > 0.",
 			Kind: KindDuration, HotReload: true},
+		{Key: "dash_background_refresh", Category: "dashboard", Label: "Background refresh",
+			Help: "Keep the dashboard current while its tab is hidden: the poll runs at the browser's throttled background cadence (about one wake per minute on Chromium) and a Web Lock keeps the SSE feed from being frozen. Desktop Chromium only; Android and iOS still suspend background pages at the OS level. Off keeps the current pause-while-hidden behavior.",
+			Kind: KindBool, HotReload: true},
 
 		// ---- providers ----
 		{Key: "providers", Category: "providers", Label: "Provider field maps",
