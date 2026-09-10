@@ -3470,6 +3470,7 @@ async function main() {
       w.eval('storeOperatorCredential("")');
       const calls = [];
       let chartGate = null, chartPending = null; // gate exactly one chart request (the slow scan)
+      let bootGate = null, bootPending = null;   // gate exactly one bootstrap request (in-flight credential race)
       w.fetch = (url, options) => {
         const auth = options && options.headers ? (options.headers.Authorization || '') : '';
         calls.push({url: String(url), auth});
@@ -3477,6 +3478,12 @@ async function main() {
           chartPending = [];
           chartGate = null;
           const gate = chartPending;
+          return new Promise(resolve => gate.push(resolve));
+        }
+        if (String(url).includes('/metrics/bootstrap') && bootGate) {
+          bootPending = [];
+          bootGate = null;
+          const gate = bootPending;
           return new Promise(resolve => gate.push(resolve));
         }
         if (auth === 'Bearer op-token-correct') return Promise.resolve({ok: true, status: 200, json: async () => ({})});
@@ -3507,6 +3514,22 @@ async function main() {
       check('a late 401 after unlock retries silently without a second dialog',
         chartResult.status === 200 && chartCalls.length === 2 && chartCalls[1].auth === 'Bearer op-token-correct' &&
         d.getElementById('operator-dialog').hidden && w.eval('operatorPrompt === null'));
+
+      // A stored credential rejected while a request is in flight: the silent
+      // retry must drop it (other callers must not keep burning the server's
+      // wrong-credential throttle with it) and the next prompt says so.
+      bootGate = [];
+      const stale = w.operatorFetch('/metrics/bootstrap'); // in flight with no credential
+      await sleep(5);
+      w.eval('storeOperatorCredential("op-token-wrong")'); // stored while pending
+      bootPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      await sleep(5);
+      check('a rejected silent retry drops the stored credential and shows the notice',
+        w.eval('operatorCredential') === '' && !d.getElementById('operator-dialog').hidden &&
+        d.querySelector('.operator-dialog-note').textContent.includes('rejected that token'));
+      d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+      check('cancel after a rejected silent retry returns the 401 with nothing stored',
+        (await stale).status === 401 && w.eval('operatorCredential') === '' && w.eval('operatorRejected === false'));
 
       // A rejected entry is visible on the next prompt instead of a silent
       // re-ask that reads as "nothing happened".
@@ -3607,6 +3630,24 @@ async function main() {
       await sleep(5); // the stub marks released on promise settlement
       check('a hot-reloaded toggle-off releases the background lock while hidden',
         w.__lockRequests.length === 2 && w.__lockRequests[1].released === true && w.eval('_bgLockRelease === null'));
+
+      // A grant landing for a superseded hold (hide/show cycled while the
+      // grant was pending) must self-release, not steal the live claim.
+      setHidden(false);
+      await sleep(5);
+      w.applyDashValues({dash_background_refresh: true}); // visible: no auto-activation
+      setHidden(true);   // request #3, grant pending
+      setHidden(false);  // release: no live claim yet, no-op
+      setHidden(true);   // request #4
+      await sleep(5);    // both grants land
+      check('a grant for a superseded hold self-releases without stealing the live claim',
+        w.__lockRequests.length === 4 && w.__lockRequests[2].released === true &&
+        w.__lockRequests[3].released === false && w.eval('_bgLockRelease !== null'));
+      setHidden(false);
+      await sleep(5);
+      check('the live claim releases on return to view',
+        w.eval('_bgLockRelease === null') && w.__lockRequests[3].released === true &&
+        w.eval('_dashTickTimer !== null'));
     } finally {w.close();}
   }
 

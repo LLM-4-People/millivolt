@@ -441,6 +441,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		defer nextCancel()
 		defer next.Body.Close()
 		rec.StatusCode = resp.StatusCode
+		rec.FinalAttemptAt = time.Now()
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
@@ -458,7 +459,6 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			}
 			return
 		}
-		rec.FinalAttemptAt = time.Now()
 	}
 }
 

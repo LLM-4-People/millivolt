@@ -615,11 +615,23 @@ let _resizeRaf = 0;
 // freezing. Android and iOS still suspend at the OS level regardless.
 let _clockTimer = null;
 let _wasHidden = false;
+let _bgLockGen = 0;
 let _bgLockRelease = null;
+// Per-document lock name: the lock is a per-document freeze-exemption marker,
+// not mutual exclusion, so two dashboard tabs must never contend for one
+// grant (a shared name would exempt only one tab and strand the other's
+// request).
+const _bgLockName = 'millivolt-background-refresh-' + Math.random().toString(36).slice(2);
 function dashHoldBackgroundLock() {
   if (!dashCfg.background_refresh || _bgLockRelease) return;
   if (!navigator.locks || typeof navigator.locks.request !== 'function') return;
-  navigator.locks.request('millivolt-background-refresh', () => new Promise(resolve => { _bgLockRelease = resolve; })).catch(() => { _bgLockRelease = null; });
+  const gen = ++_bgLockGen;
+  navigator.locks.request(_bgLockName, () => new Promise(resolve => {
+    // A grant landing for a superseded hold (hide/show cycled while the
+    // grant was pending) self-releases instead of claiming the live hold.
+    if (gen !== _bgLockGen) { resolve(); return; }
+    _bgLockRelease = resolve;
+  })).catch(() => { if (gen === _bgLockGen) _bgLockRelease = null; });
 }
 function dashReleaseBackgroundLock() {
   if (!_bgLockRelease) return;

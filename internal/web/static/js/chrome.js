@@ -165,12 +165,18 @@ async function operatorFetch(url, options = {}) {
   // call's unlock, whose own retried response already validated it) is
   // reused silently: a slow chart/explorer/log scan whose 401 lands after
   // the dialog was answered must not open it again. If this retry is also
-  // rejected the credential was wrong or rotated after all - flag the
-  // notice and fall through to the prompt.
+  // rejected the credential was wrong or rotated after all - drop it so
+  // other in-flight callers stop retrying with it (each presented-but-wrong
+  // request burns the server's throttle), flag the notice, and fall through
+  // to the prompt.
   if (operatorCredential && operatorCredentialEpoch !== epoch) {
     response = await attempt();
-    if (response.status !== 401) return response;
+    if (response.status !== 401) {
+      operatorRejected = false; // the stored credential is valid again: any pending rejection notice is stale
+      return response;
+    }
     operatorRejected = true;
+    storeOperatorCredential('');
   }
   const token = await askOperatorToken();
   if (!token) return response;
@@ -179,6 +185,8 @@ async function operatorFetch(url, options = {}) {
   if (response.status === 401) {
     operatorRejected = true;
     storeOperatorCredential('');
+  } else {
+    operatorRejected = false; // a successful unlock clears any racing rejection notice
   }
   return response;
 }
@@ -213,11 +221,20 @@ function askOperatorToken() {
       note.textContent = 'This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.';
       note.removeAttribute('data-err');
     }
+    // The dialog owns its promise. If anything else closes it (another modal
+    // opening calls closeModal directly and resolves nothing), resolve '' -
+    // a pending prompt nobody owns would deadlock every future prompt.
+    let settled = false;
+    const observer = new MutationObserver(() => { if (dialog.hidden) finish(''); });
     const finish = value => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
       input.value = '';
       closeModal(dialog);
       resolve(value);
     };
+    observer.observe(dialog, { attributes: true, attributeFilter: ['hidden'] });
     dialog.onclick = e => { if (e.target === dialog) finish(''); };
     dialog.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(''); } };
     dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
@@ -431,6 +448,13 @@ function applyDashValues(v) {
   // tab is hidden (the visibilitychange handler only runs on the transition).
   if (wasBackgroundRefresh && !dashCfg.background_refresh && typeof dashReleaseBackgroundLock === 'function') {
     dashReleaseBackgroundLock();
+  }
+  // Symmetric activation: a flag flipped on while already hidden (only
+  // reachable via an out-of-band config PUT) must arm the tick and take the
+  // hold now - no visibilitychange fires until the next transition.
+  if (!wasBackgroundRefresh && dashCfg.background_refresh && document.hidden && typeof dashHoldBackgroundLock === 'function') {
+    dashHoldBackgroundLock();
+    if (typeof armDashboardTicks === 'function') armDashboardTicks();
   }
 }
 
