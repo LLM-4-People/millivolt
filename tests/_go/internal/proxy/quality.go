@@ -38,11 +38,17 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
+		// Each attempt carries its own request id: the record must describe
+		// the attempt whose body the client received (captureUpstreamHeaders
+		// re-captures after every successful re-send).
 		if n == 1 {
+			w.Header().Set("X-Request-Id", "req-first")
+			w.WriteHeader(200)
 			w.Write([]byte(voidBody))
 			return
 		}
+		w.Header().Set("X-Request-Id", "req-second")
+		w.WriteHeader(200)
 		w.Write([]byte(realBody))
 	}))
 	defer upstream.Close()
@@ -84,6 +90,9 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	}
 	if rec.FinishReason != "stop" || !rec.HadAnswerContent {
 		t.Fatalf("final record should reflect the healthy body: finish=%q content=%v", rec.FinishReason, rec.HadAnswerContent)
+	}
+	if rec.ProviderRequestID != "req-second" {
+		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
 	}
 }
 
@@ -421,13 +430,16 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
 		if calls.Add(1) == 1 {
+			w.Header().Set("X-Request-Id", "req-first")
+			w.WriteHeader(200)
 			// Truncation before any generation content: role chunk, clean EOF.
 			w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
 			w.(http.Flusher).Flush()
 			return
 		}
+		w.Header().Set("X-Request-Id", "req-second")
+		w.WriteHeader(200)
 		w.Write([]byte(
 			"data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
 				"data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
@@ -464,6 +476,141 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 	}
 	if rec.FinishReason != "stop" || !rec.HadAnswerContent {
 		t.Fatalf("final record must reflect the fresh stream: finish=%q content=%v", rec.FinishReason, rec.HadAnswerContent)
+	}
+	if rec.ProviderRequestID != "req-second" {
+		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
+	}
+}
+
+// TestStreamRetryUpstreamErrorSurfacesCaptured: a re-send that returns a real
+// upstream error (>= 400) surfaces it in-band (nothing content-bearing was
+// relayed), and the record describes THAT attempt: the provider request id,
+// error type/message and rate-limit class all come from the re-send, not the
+// absorbed first attempt.
+func TestStreamRetryUpstreamErrorSurfacesCaptured(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			// Truncated-empty stream: absorbed by the quality loop.
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("X-Request-Id", "req-first")
+			w.WriteHeader(200)
+			w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+			w.(http.Flusher).Flush()
+			return
+		}
+		// Re-send rejected by the provider with a real error.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-Id", "req-second")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"error":{"type":"rate_limit_error","message":"slow down"}}`))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	cfg := config.Default()
+	cfg.MaxRetries = 0 // the re-send's 429 surfaces instead of retrying
+	cfg.QualityRetries = 1
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != 200 {
+		t.Fatalf("stream status = %d, want 200 (error must be in-band)", status)
+	}
+	if !strings.Contains(got, `data: {"error"`) || !strings.Contains(got, "slow down") {
+		t.Fatalf("re-send error must surface in-band: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (truncated absorbed + erroring re-send)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.StatusCode != 429 || !rec.HasRateLimit() || rec.IsError() {
+		t.Fatalf("record must classify as rate-limited, not error: %+v", rec)
+	}
+	if rec.ErrorType != "rate_limit_error" || !strings.Contains(rec.ErrorMsg, "slow down") {
+		t.Fatalf("record must capture the re-send's error body: %+v", rec)
+	}
+	if rec.ProviderRequestID != "req-second" {
+		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].StatusCode != 200 {
+		t.Fatalf("absorbed attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestStreamRetryStormRejectionSurfacesInBand: a streaming re-send rejected by
+// the storm queue (ErrStormMaxWait) surfaces the storm rejection in-band, and
+// the record carries the decided status (429, rate-limit class) with the
+// absorbed attempt preserved, identical to the non-streaming twin.
+func TestStreamRetryStormRejectionSurfacesInBand(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(503) // trips the storm on request 1's single send
+			return
+		}
+		// A truncated-empty stream: absorbed by the quality loop, which
+		// then re-sends into the active storm.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := stormTestConfig()
+	cfg.MaxRetries = 0      // request 1 surfaces its 503 without any retry
+	cfg.StormMaxRetries = 0 // no storm-budget retry either: the 503 surfaces, the storm stays tripped
+	cfg.QualityRetries = 1
+	// Request 2's first send waits one backoff (15ms <= 20ms max) and passes;
+	// the absorb's quality-failure observation doubles the backoff (30ms), so
+	// the QUALITY RE-SEND's wait is the one that exceeds the max wait.
+	cfg.StormMaxWait = 20 * time.Millisecond
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	// Request 1 trips the storm (503) and surfaces it.
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 503 || calls.Load() != 1 {
+		t.Fatalf("storm trip request: status=%d calls=%d", resp.StatusCode, calls.Load())
+	}
+
+	// Request 2 (streaming): truncated-empty absorbed, re-send rejected by
+	// the storm queue. The upstream serves the truncated stream on call 2;
+	// the re-send never reaches it.
+	status, got := streamRequest(t, srv, upstream)
+	if status != 200 {
+		t.Fatalf("stream status = %d, want 200 (rejection must be in-band)", status)
+	}
+	if !strings.Contains(got, `data: {"error"`) || !strings.Contains(got, "error storm protection") {
+		t.Fatalf("storm rejection must surface in-band: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (truncated absorbed; re-send never sent)", n)
+	}
+	recs := waitForRecord(t, buf, 2)
+	rej := recs[1]
+	if rej.StatusCode != 429 || rej.ErrorType != "storm_queue_full" ||
+		!rej.HasRateLimit() || rej.IsError() || rej.Retries != 1 || len(rej.Attempts) != 1 ||
+		rej.Attempts[0].StatusCode != 200 {
+		t.Fatalf("streaming storm rejection must record the decided 429 with the absorbed attempt: %+v", rej)
 	}
 }
 

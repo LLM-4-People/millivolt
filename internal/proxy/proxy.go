@@ -552,29 +552,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		captureErrorFromResponse(resp, rec)
 	}
 
-	// Capture upstream response headers for the audit view.
-	rec.ResponseHeaders = captureHeaders(resp.Header, t.authHeader)
-
-	// Provider-side metadata: request id, server, processing time, actual model.
-	rec.ProviderRequestID = firstNonEmpty(
-		resp.Header.Get("X-Request-Id"),
-		resp.Header.Get("X-Openai-Request-Id"),
-		resp.Header.Get("X-Api-Request-Id"),
-		resp.Header.Get("Request-Id"),
-	)
-	rec.ProviderServer = resp.Header.Get("Server")
-	// Provider processing time (OpenAI- and Anthropic-style header names).
-	headerIntInto(resp.Header, &rec.ProcessingMs, "X-Openai-Processing-Ms", "anthropic-processing-ms")
-	// Provider-reported model (some providers echo the actual model).
-	if v := resp.Header.Get("X-Model"); v != "" {
-		rec.ProviderModel = v
-	}
-
-	// Rate-limit headers (common across OpenAI-compatible providers).
-	headerIntInto(resp.Header, &rec.RateLimitRemaining,
-		"X-Ratelimit-Remaining-Requests", "anthropic-ratelimit-requests-remaining")
-	headerIntInto(resp.Header, &rec.RateLimitLimit,
-		"X-Ratelimit-Limit-Requests", "anthropic-ratelimit-requests-limit")
+	// Capture upstream response headers for the audit view; the quality loops
+	// re-capture after every successful re-send (captureUpstreamHeaders is the
+	// single owner of this metadata).
+	captureUpstreamHeaders(resp, rec, t.authHeader)
 
 	if stream || isEventStream(resp.Header.Get("Content-Type")) {
 		// Streaming: the status line is committed immediately (the client is

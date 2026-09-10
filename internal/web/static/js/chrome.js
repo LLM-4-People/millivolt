@@ -218,7 +218,8 @@ function askOperatorToken() {
     const note = dialog.querySelector('.operator-dialog-note');
     if (operatorRejected) {
       operatorRejected = false;
-      note.textContent = 'The server rejected that token. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
+      // Same lead sentence as the server login page's rejection notice.
+      note.textContent = 'That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
       note.setAttribute('data-err', '');
     } else {
       note.textContent = 'This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.';

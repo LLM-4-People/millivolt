@@ -359,6 +359,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				if resp.StatusCode >= 400 {
 					captureErrorFromResponse(resp, rec)
 				}
+				captureUpstreamHeaders(resp, rec, t.authHeader)
 				rec.FinalAttemptAt = time.Now()
 				continue
 			}
@@ -452,6 +453,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		defer next.Body.Close()
 		rec.StatusCode = resp.StatusCode
 		rec.FinalAttemptAt = time.Now()
+		captureUpstreamHeaders(resp, rec, t.authHeader)
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
 			// capture the detail and surface it in-band (the first-attempt
@@ -596,6 +598,35 @@ func parseErrorBody(b []byte) (typ, code, msg string) {
 	// Unparseable (e.g. an oversized body truncated mid-token): keep a
 	// bounded raw prefix so the error is still classifiable.
 	return "provider_error", "", metrics.TruncatePreview(string(b))
+}
+
+// captureUpstreamHeaders refreshes the record's upstream header metadata -
+// the redacted audit headers, provider request id/server/processing time and
+// echoed model, and rate-limit state - from the given response. ServeHTTP
+// captures for the first response; the quality loops re-capture after every
+// successful re-send so the record describes the attempt whose body the
+// client actually received.
+func captureUpstreamHeaders(resp *http.Response, rec *metrics.Record, authHeader string) {
+	rec.ResponseHeaders = captureHeaders(resp.Header, authHeader)
+	// Provider-side metadata: request id, server, processing time, actual model.
+	rec.ProviderRequestID = firstNonEmpty(
+		resp.Header.Get("X-Request-Id"),
+		resp.Header.Get("X-Openai-Request-Id"),
+		resp.Header.Get("X-Api-Request-Id"),
+		resp.Header.Get("Request-Id"),
+	)
+	rec.ProviderServer = resp.Header.Get("Server")
+	// Provider processing time (OpenAI- and Anthropic-style header names).
+	headerIntInto(resp.Header, &rec.ProcessingMs, "X-Openai-Processing-Ms", "anthropic-processing-ms")
+	// Provider-reported model (some providers echo the actual model).
+	if v := resp.Header.Get("X-Model"); v != "" {
+		rec.ProviderModel = v
+	}
+	// Rate-limit headers (common across OpenAI-compatible providers).
+	headerIntInto(resp.Header, &rec.RateLimitRemaining,
+		"X-Ratelimit-Remaining-Requests", "anthropic-ratelimit-requests-remaining")
+	headerIntInto(resp.Header, &rec.RateLimitLimit,
+		"X-Ratelimit-Limit-Requests", "anthropic-ratelimit-requests-limit")
 }
 
 // captureErrorFromResponse reads a bounded portion of an error response body

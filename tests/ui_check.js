@@ -3526,7 +3526,7 @@ async function main() {
       await sleep(5);
       check('a rejected silent retry drops the stored credential and shows the notice',
         w.eval('operatorCredential') === '' && !d.getElementById('operator-dialog').hidden &&
-        d.querySelector('.operator-dialog-note').textContent.includes('rejected that token'));
+        d.querySelector('.operator-dialog-note').textContent.includes('token was rejected'));
       d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
       check('cancel after a rejected silent retry returns the 401 with nothing stored',
         (await stale).status === 401 && w.eval('operatorCredential') === '' && w.eval('operatorRejected === false'));
@@ -3598,7 +3598,7 @@ async function main() {
       const note = d.querySelector('.operator-dialog-note');
       check('the re-prompt after a rejection shows the failure notice',
         !d.getElementById('operator-dialog').hidden && note.hasAttribute('data-err') &&
-        note.textContent.includes('rejected that token'));
+        note.textContent.includes('token was rejected'));
       submitDialog('op-token-correct');
       check('the corrected entry unlocks', (await retry).status === 200);
       w.eval('storeOperatorCredential("")');

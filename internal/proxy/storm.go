@@ -165,9 +165,10 @@ func (s *Server) allowStormRetry(ctx context.Context, active bool) bool {
 // stormQueueErrorRecord stamps the record for a storm-queue rejection with
 // the decided HTTP status (429 - the status the proxy sent, or would have
 // sent on a committed socket) and returns the in-band error envelope. The 429
-// classifies the record as rate-limited (HasRateLimit true, IsError false -
-// metrics short-circuits on 429 before the error type: 429 alone is not an
-// error), the same class as the request plane's queue-full rejection.
+// classifies the record as rate-limited (HasRateLimit true; IsError false
+// because metrics short-circuits on 429 before the error type - 429 alone is
+// not an error - unless an absorbed attempt was a genuine 5xx, which metrics
+// still honors), the same class as the request plane's queue-full rejection.
 // stormQueueErrorRecord is the single owner of the envelope's type and
 // message: writeStormQueueError writes it as an HTTP error (pre-commit
 // sockets), while relay failure paths on an already committed socket emit it
