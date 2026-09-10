@@ -102,3 +102,54 @@ func TestAnalyzerOutcomeCodes(t *testing.T) {
 		})
 	}
 }
+
+// TestAnalyzerRetryableTruncation gates the proxy-side re-send of a truncated
+// stream: only a chatlike stream truncated before ANY content-bearing chunk
+// (content, reasoning, tool call) and without a provider in-band error is
+// safe to re-send - anything already on the wire must stay client-retryable.
+func TestAnalyzerRetryableTruncation(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"role-only truncation is retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+		}, true},
+		{"empty chatlike stream is retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{}}]}`,
+		}, true},
+		{"relayed content is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half "}}]}`,
+		}, false},
+		{"relayed reasoning is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning":"hmm"}}]}`,
+		}, false},
+		{"relayed tool call is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+		}, false},
+		{"provider in-band error is not retryable", []string{
+			`data: {"error":{"message":"overloaded","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"trailing multi-line error is not retryable", []string{
+			`data: {"error":`,
+			`data: {"message":"died","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"seen terminator is not a truncation", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: [DONE]`,
+		}, false},
+		{"non-chatlike stream stays out", []string{
+			`data: {"event":"custom","payload":42}`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.RetryableTruncation(); got != c.want {
+				t.Fatalf("RetryableTruncation = %v, want %v", got, c.want)
+			}
+		})
+	}
+}

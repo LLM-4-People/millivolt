@@ -211,8 +211,9 @@ base_backoff: 1s
 #   type: duration · range > 0s · default 2m
 max_backoff: 2m
 
-# Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls,
-# truncated stream) and Cursor's empty-resume re-ask. 0 disables.
+# Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a
+# truncated stream that relayed no content yet, and Cursor's empty-resume re-ask. 0
+# disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 quality_retries: 1

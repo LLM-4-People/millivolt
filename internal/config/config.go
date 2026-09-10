@@ -145,10 +145,12 @@ type Config struct {
 	MaxBackoff  time.Duration `yaml:"max_backoff" json:"max_backoff"`
 
 	// QualityRetries bounds the transparent re-attempts of a degenerate 200
-	// (an empty completion, tool_calls with zero tool calls, or a truncated
-	// stream): the non-streaming pre-write retry and the cursor one-shot
-	// fresh-user re-ask. Each re-attempt re-sends the full request, so a small
-	// budget is the sane ceiling; 0 disables quality handling entirely.
+	// (an empty completion or tool_calls with zero tool calls), a truncated
+	// stream that relayed no generation content, and the cursor one-shot
+	// fresh-user re-ask: the non-streaming pre-write retry, the streaming
+	// re-send on the committed SSE connection, and the cursor re-ask. Each
+	// re-attempt re-sends the full request, so a small budget is the sane
+	// ceiling; 0 disables quality handling entirely.
 	QualityRetries int `yaml:"quality_retries" json:"quality_retries"`
 
 	// Error storm protection observes eligible upstream attempts in a bounded

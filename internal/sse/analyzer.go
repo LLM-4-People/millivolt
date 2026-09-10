@@ -489,6 +489,25 @@ func (a *Analyzer) OutcomeCode() string {
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen, !a.firstTokenAt.IsZero(), a.toolCalls, a.chatlike)
 }
 
+// RetryableTruncation reports whether the finished stream is a truncation
+// (metrics.CodeTruncated) the proxy may transparently re-send: a chatlike
+// stream that hit clean EOF without any terminal marker while the client had
+// received NO content-bearing chunk (no content, reasoning, or tool call) and
+// no provider in-band error. The trailing event is flushed first so a final
+// multi-line error frame that never saw its blank-line boundary is still
+// caught. Anything the client already saw - generation content or the
+// provider's own error - makes a re-send duplicate visible bytes and stays
+// client-side. Client-disconnect gating is the caller's (it owns the record).
+// When this reports true the terminal region was never opened (holding
+// requires a seen terminator), so no withheld bytes are pending.
+func (a *Analyzer) RetryableTruncation() bool {
+	if !a.chatlike || a.terminatorSeen {
+		return false
+	}
+	a.flushEvent()
+	return a.firstTokenAt.IsZero() && a.errType == ""
+}
+
 // extractPreview extracts a bounded prefix (metrics.PreviewMaxBytes) of the
 // first content delta's text, decoding just the content field with a
 // lightweight parse. Called only when CapturePreview is enabled.

@@ -82,7 +82,7 @@ func TestRegressionSplitTerminalUsage(t *testing.T) {
 	p := New(config.Default(), nil)
 	rec := new(metrics.Record)
 	w := httptest.NewRecorder()
-	p.streamBody(context.Background(), w, &wire, rec)
+	p.streamBody(context.Background(), w, &wire, rec, false)
 	if rec.Usage.InputTokens != 100 || rec.Usage.OutputTokens != 50 || rec.Cost != 0.02 {
 		t.Fatalf("fragmented terminal usage: input=%d output=%d cost=%g finish=%q body=%q", rec.Usage.InputTokens, rec.Usage.OutputTokens, rec.Cost, rec.FinishReason, w.Body.String())
 	}

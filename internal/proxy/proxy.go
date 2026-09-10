@@ -612,7 +612,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		s.streamBody(ctx, w, resp.Body, rec)
+		s.streamBodyWithRetry(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 		return
 	}
 

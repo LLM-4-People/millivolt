@@ -376,11 +376,17 @@ func TestStreamToolCallsWithoutCallsReplaced(t *testing.T) {
 // TestStreamTruncatedAppendsInBandError: a stream that dies at clean EOF
 // without any terminator gets an in-band truncated error appended after the
 // already-relayed bytes (content can't be un-relayed - the error tells the
-// client the answer is incomplete).
+// client the answer is incomplete). Content-bearing truncation is NEVER
+// proxy-retried: the client already saw generation bytes.
 func TestStreamTruncatedAppendsInBandError(t *testing.T) {
-	upstream := streamUpstream(t,
-		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"half \"}}]}\n\n",
-	)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"half \"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+	}))
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(100)
@@ -394,9 +400,170 @@ func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
 		t.Fatalf("in-band truncated error missing: %s", got)
 	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (content-bearing truncation is never re-sent)", n)
+	}
 	recs := waitForRecord(t, buf, 1)
 	if recs[0].ErrorCode != metrics.CodeTruncated {
 		t.Fatalf("record error code = %q", recs[0].ErrorCode)
+	}
+}
+
+// TestStreamTruncatedEmptyRetried: the streaming twin of the non-streaming
+// quality retry. A stream that dies truncated BEFORE any content-bearing
+// chunk (content, reasoning, tool call) reached the client is transparently
+// re-sent on the same committed SSE connection; the client sees one complete
+// fresh stream, the record stays a success, and the absorbed attempt is
+// logged like every other retry.
+func TestStreamTruncatedEmptyRetried(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			// Truncation before any generation content: role chunk, clean EOF.
+			w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Write([]byte(
+			"data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+				"data: {\"id\":\"2\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n" +
+				"data: {\"id\":\"2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+				"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"content":"hello"`) || !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("client must see the complete fresh stream: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("recovered request must not surface the truncation error: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (truncated absorbed + retry)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() {
+		t.Fatalf("recovered request must not be an error: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 ||
+		rec.Attempts[0].ErrorCode != metrics.CodeTruncated || rec.Attempts[0].StatusCode != 200 {
+		t.Fatalf("absorbed attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+	if rec.FinishReason != "stop" || !rec.HadAnswerContent {
+		t.Fatalf("final record must reflect the fresh stream: finish=%q content=%v", rec.FinishReason, rec.HadAnswerContent)
+	}
+}
+
+// TestStreamTruncatedRetryExhaustedSurfacesInBand: with the quality budget
+// spent, the truncated stream surfaces the in-band error envelope exactly as
+// before (nothing content-bearing was relayed, so the error chunk + [DONE]
+// still end the stream cleanly for the client).
+func TestStreamTruncatedRetryExhaustedSurfacesInBand(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(1)
+		w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(newConfigWithQuality(1), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("in-band truncated error missing after exhausted budget: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (one absorbed retry + final failure)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() || rec.ErrorCode != metrics.CodeTruncated || rec.ErrorType != "upstream_error" {
+		t.Fatalf("record must flag the final truncation: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("absorbed attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestStreamTruncatedZeroBudgetKeepsLegacyBehavior: quality_retries=0
+// disables the streaming re-send entirely - the truncation surfaces in-band
+// after the single attempt, exactly as before this retry existed.
+func TestStreamTruncatedZeroBudgetKeepsLegacyBehavior(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(1)
+		w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(newConfigWithQuality(0), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("in-band truncated error missing: %s", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (zero budget disables the re-send)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if !recs[0].IsError() || recs[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("record must flag the truncation: %+v", recs[0])
+	}
+}
+
+// TestStreamProviderErrorOnEmptyStreamNotRetried: a provider-sent in-band
+// error on a 200 stream is the provider's own failure statement - even with
+// no content relayed it is never stacked on or re-sent (the error chunk is
+// already on the wire; the record carries the provider's envelope).
+func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(1)
+		w.Write([]byte("data: {\"error\":{\"message\":\"overloaded\",\"type\":\"overloaded_error\",\"code\":\"overloaded\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"type":"overloaded_error"`) {
+		t.Fatalf("provider error must relay verbatim: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("proxy must not stack its own error on the provider's: %s", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (provider error is never re-sent)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if !recs[0].IsError() || recs[0].ErrorType != "overloaded_error" || recs[0].ErrorCode == metrics.CodeTruncated {
+		t.Fatalf("record must carry the provider's envelope: %+v", recs[0])
 	}
 }
 

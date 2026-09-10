@@ -120,7 +120,10 @@ SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTT
 200 before the final upstream outcome, so a subsequent failure must be signaled
 in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
-neither transparency nor exactly-once upstream execution is unconditional.
+a stream truncated before any generation content was relayed is re-sent on the
+same committed connection, while a truncation after relayed content surfaces
+the in-band error for the client to retry; neither transparency nor
+exactly-once upstream execution is unconditional.
 
 ### Scheduling and timing
 

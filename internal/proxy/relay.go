@@ -383,6 +383,85 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 	}
 }
 
+// streamBodyWithRetry relays a streaming response and transparently re-sends
+// the SAME request when the stream ends truncated (metrics.CodeTruncated)
+// before any content-bearing chunk reached the client - the streaming twin of
+// serveNonStreaming's degenerate-200 retry, on the same quality_retries
+// budget. The failed attempt leaves the client only empty/role/keepalive
+// frames (every OpenAI SDK treats those as no-ops), so the fresh stream
+// appends cleanly to the committed SSE connection; the idle pacer keeps the
+// socket alive during the re-send's queue/hold/backoff waits. The absorbed
+// attempt is logged like every other (Retries/Attempts) while a retry that
+// eventually succeeds stays a success record; a final truncation surfaces the
+// in-band error envelope exactly as before. Non-200 responses and send
+// failures after the status was committed are signaled in-band (the same
+// committed-SSE contract as the first-attempt path) - never as a JSON HTTP
+// error on an event-stream socket. Format-translated streams (and Cursor's
+// bidirectional bridge) keep their own signaling and are not re-sent here.
+func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter, resp *http.Response, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) {
+	maxQuality := s.cfg().QualityRetries
+	for qualityAttempt := 0; ; qualityAttempt++ {
+		if !s.streamBody(ctx, w, resp.Body, rec, qualityAttempt < maxQuality) {
+			return
+		}
+		// Absorb the truncated attempt and retry the SAME request: nothing
+		// content-bearing reached the client, so this is a safe re-send.
+		rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
+			StatusCode: resp.StatusCode,
+			ErrorType:  "upstream_error",
+			ErrorCode:  metrics.CodeTruncated,
+			ErrorMsg:   metrics.DegenerateMessage(metrics.CodeTruncated),
+			At:         time.Now(),
+		})
+		rec.Retries++
+		s.publishUpdate(rec)
+		s.finishStormResponse(ctx, true)
+		resp.Body.Close()
+		// The re-send is a retry: its opening WaitSend honors operator
+		// holds ("a retry is a new send and waits").
+		next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
+		if err != nil {
+			if r.Context().Err() == context.Canceled {
+				markClientGone(rec)
+				return
+			}
+			if s.writeStormQueueError(w, rec, err) {
+				return
+			}
+			rec.StatusCode = http.StatusBadGateway
+			rec.ErrorType = "upstream_unreachable"
+			rec.ErrorMsg = transportErrText(err)
+			writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)
+			return
+		}
+		// ServeHTTP's defer still binds the FIRST body (and its per-send
+		// cancel). Own this attempt's body + cancel; LIFO closes the body,
+		// then cancels the send deadline.
+		resp = next
+		defer nextCancel()
+		defer next.Body.Close()
+		rec.StatusCode = resp.StatusCode
+		if resp.StatusCode >= 400 {
+			// A non-200 retry cannot change the committed status line:
+			// capture the detail and surface it in-band (the first-attempt
+			// committed-SSE contract), never as raw JSON on the stream.
+			captureErrorFromResponse(resp, rec)
+			typ, msg := rec.ErrorType, rec.ErrorMsg
+			if typ == "" {
+				typ = "api_error"
+			}
+			if msg == "" {
+				msg = "upstream HTTP " + strconv.Itoa(resp.StatusCode)
+			}
+			if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
+				markClientGone(rec)
+			}
+			return
+		}
+		rec.FinalAttemptAt = time.Now()
+	}
+}
+
 // extractUsageBytes parses the response body: token usage (auto-detecting
 // OpenAI/Anthropic key names, with per-provider overrides), model, request id,
 // tool calls, finish_reason, and - only when preview is enabled - a bounded
@@ -983,13 +1062,22 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 // no degenerate stream has a large "terminal" region), and every non-held
 // byte is written through immediately, so the hot path only ever reserves
 // one event's worth of bytes.
-func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record) {
+//
+// When allowTruncationRetry is true and the stream ends truncated at clean
+// EOF before any content-bearing chunk was relayed (Analyzer.
+// RetryableTruncation), nothing is emitted and the function returns true:
+// the caller owns the transparent re-send and the attempt bookkeeping. With
+// the budget spent (false), the clean-EOF truncation surfaces the in-band
+// error exactly as before. The returned retryable=true is only ever reported
+// in that empty-truncation state - never after content, reasoning, tool
+// calls, an in-band error, or a read error.
+func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry bool) (retryable bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
 			markStreamErr(ctx, rec, err, "stream_read_error")
 		}
-		return
+		return false
 	}
 	var (
 		a       sse.Analyzer
@@ -1080,7 +1168,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// completion forever).
 					if sse.TerminalLine(line) {
 						if !finishHold() {
-							return
+							return false
 						}
 					}
 				case !prev && a.Terminated():
@@ -1090,11 +1178,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
 					if !writeOut() {
-						return
+						return false
 					}
 					if sse.TerminalLine(line) {
 						if !finishHold() {
-							return
+							return false
 						}
 					}
 				default:
@@ -1112,7 +1200,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					lineBuf.Reset()
 					if _, werr := w.Write(hold); werr != nil {
 						markClientGone(rec)
-						return
+						return false
 					}
 					flusher.Flush()
 					hold = hold[:0]
@@ -1131,7 +1219,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				lineBuf.Reset()
 			}
 			if !writeOut() {
-				return
+				return false
 			}
 		}
 		if err != nil {
@@ -1156,25 +1244,37 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if holding {
 					if _, werr := w.Write(hold); werr != nil {
 						markClientGone(rec)
-						return
+						return false
 					}
 					hold = hold[:0]
 				}
 				if !writeOut() {
-					return
+					return false
 				}
 				a.Fill(rec)
-				return
+				return false
 			}
 			// Clean EOF: resolve the hold (truncation is decided here - a
 			// stream without any terminal marker). A trailing partial line
 			// released into out is written before any substituted chunk by
 			// finishHold's writeOut-first ordering.
+			//
+			// Proxy-side truncation retry: when allowed and the stream died
+			// truncated before ANY content-bearing chunk was relayed, hand the
+			// re-send to the caller instead of emitting. The failed attempt
+			// left the client only role/keepalive frames (a trailing partial
+			// line, if any, is equally empty - content here would have marked
+			// the analyzer), so the fresh stream appends cleanly; the record
+			// is filled by the succeeding attempt alone. No truncation can
+			// coexist with an open hold: holding implies a seen terminator.
+			if allowTruncationRetry && a.RetryableTruncation() && !rec.ClientDisconnected {
+				return true
+			}
 			if !finishHold() {
-				return
+				return false
 			}
 			a.Fill(rec)
-			return
+			return false
 		}
 	}
 }

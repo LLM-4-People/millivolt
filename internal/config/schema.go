@@ -170,7 +170,7 @@ func Schema() []Field {
 			Help: "Cap on adaptive backoff. Does not clamp a provider Retry-After / rate-limit-reset (daily limits are often 30–60m). Must be > 0.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "quality_retries", Category: "queue", Label: "Quality retries",
-			Help: "Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls, truncated stream) and Cursor's empty-resume re-ask. 0 disables.",
+			Help: "Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a truncated stream that relayed no content yet, and Cursor's empty-resume re-ask. 0 disables.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(QualityRetriesMax), ZeroMeans: "disabled"},
 
 		// ---- storm ----
