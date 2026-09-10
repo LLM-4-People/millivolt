@@ -105,10 +105,20 @@ func TestStormQueueTimeoutAndCancellation(t *testing.T) {
 	cfg.StormInitialBackoff = time.Second
 	cfg.StormMaxBackoff = time.Second
 	cfg.StormMaxWait = 20 * time.Millisecond
-	s := New(cfg, nil)
+	buf := metrics.NewBuffer(10)
+	s := New(cfg, buf)
 	w := stormRequest(t, s, up.URL, "model-a", "key-a")
 	if w.Code != 429 || calls.Load() != 1 || w.Header().Get("Retry-After") == "" {
 		t.Fatalf("expected local bounded-queue rejection after one upstream send: %d calls=%d body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+	// The rejection record carries the DECIDED status (429 - the status the
+	// proxy sent, or would have sent on a committed socket), never the
+	// absorbed attempt's status: all storm-queue rejections must classify
+	// identically (rate-limit class) across every emission path.
+	rows := buf.Snapshot()
+	if len(rows) != 1 || rows[0].StatusCode != 429 || rows[0].ErrorType != "storm_queue_full" ||
+		!rows[0].HasRateLimit() || !rows[0].IsError() {
+		t.Fatalf("storm rejection record must carry the decided 429: %+v", rows)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -428,9 +429,8 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			}
 			// The status line is committed (applyUpstream ran before this
 			// loop): the failure goes in-band on the SSE socket, and the
-			// record carries the real error status.
+			// record carries the real error status (stamped by the owner).
 			if typ, msg, ok := s.stormQueueErrorRecord(rec, err); ok {
-				rec.StatusCode = http.StatusTooManyRequests
 				if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
 					markClientGone(rec)
 				}
@@ -462,7 +462,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				typ = "api_error"
 			}
 			if msg == "" {
-				msg = "upstream HTTP " + strconv.Itoa(resp.StatusCode)
+				msg = fmt.Sprintf("upstream HTTP %d", resp.StatusCode)
 			}
 			if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
 				markClientGone(rec)
