@@ -3733,10 +3733,12 @@ async function main() {
       check('a hot-reloaded toggle-on while hidden takes the lock and arms the tick',
         w.eval('_dashTickTimer !== null') && w.__lockRequests.length === 6 &&
         w.eval('_bgLockRelease !== null'));
-      // With the opt-in on, the same cadence change re-arms at the new
-      // cadence.
+      // With the opt-in on, the same cadence change re-arms the tick. Stop
+      // it first so a non-null timer proves the flag-on arm ran: phase 2's
+      // activation arm would otherwise satisfy this vacuously.
+      w.eval('dashStopDashboardTick()');
       w.applyDashValues({dash_poll_interval: '11s'});
-      check('a cadence change while hidden with background refresh on keeps the tick armed',
+      check('a cadence change while hidden with background refresh on re-arms the tick',
         w.eval('_dashTickTimer !== null'));
     } finally {w.close();}
   }
