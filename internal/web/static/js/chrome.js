@@ -128,9 +128,24 @@ function renderStormDetails() {
 const OPERATOR_KEY = 'millivolt.operatorToken';
 let operatorCredential = '';
 try { operatorCredential = sessionStorage.getItem(OPERATOR_KEY) || ''; } catch (e) { operatorCredential = ''; }
+// Bumped on every stored/cleared credential so an in-flight request can tell
+// that another call's unlock landed while it was waiting for its response.
+let operatorCredentialEpoch = 0;
+// Set when the server rejected the presented credential: the next prompt
+// says so instead of silently asking the same question again.
+let operatorRejected = false;
 let operatorPrompt = null;
 
 function operatorToken() { return operatorCredential; }
+
+function storeOperatorCredential(value) {
+  operatorCredential = value;
+  ++operatorCredentialEpoch;
+  try {
+    if (value) sessionStorage.setItem(OPERATOR_KEY, value);
+    else sessionStorage.removeItem(OPERATOR_KEY);
+  } catch (e) { /* storage denied: tab-only credential */ }
+}
 
 // One owner for gated-plane calls: attach the stored credential, and on 401
 // prompt once, remember the entered value and retry the identical request
@@ -143,22 +158,34 @@ async function operatorFetch(url, options = {}) {
     if (operatorCredential) headers['Authorization'] = 'Bearer ' + operatorCredential;
     return fetch(url, Object.assign({}, options, { headers }));
   };
+  const epoch = operatorCredentialEpoch;
   let response = await attempt();
   if (response.status !== 401) return response;
+  // A credential stored while this attempt was in flight (another gated
+  // call's unlock, whose own retried response already validated it) is
+  // reused silently: a slow chart/explorer/log scan whose 401 lands after
+  // the dialog was answered must not open it again. If this retry is also
+  // rejected the credential was wrong or rotated after all - flag the
+  // notice and fall through to the prompt.
+  if (operatorCredential && operatorCredentialEpoch !== epoch) {
+    response = await attempt();
+    if (response.status !== 401) return response;
+    operatorRejected = true;
+  }
   const token = await askOperatorToken();
   if (!token) return response;
-  operatorCredential = token;
-  try { sessionStorage.setItem(OPERATOR_KEY, token); } catch (e) { /* storage denied: tab-only credential */ }
+  storeOperatorCredential(token);
   response = await attempt();
   if (response.status === 401) {
-    operatorCredential = '';
-    try { sessionStorage.removeItem(OPERATOR_KEY); } catch (e) { /* already tab-only */ }
+    operatorRejected = true;
+    storeOperatorCredential('');
   }
   return response;
 }
 
 // Single-flight credential prompt: concurrent gated calls share one dialog
-// and one resolution. Resolves '' on cancel or dismiss.
+// and one resolution. Resolves '' on cancel or dismiss. A prompt after a
+// rejected attempt says so instead of repeating the intro line.
 function askOperatorToken() {
   if (operatorPrompt) return operatorPrompt;
   operatorPrompt = new Promise(resolve => {
@@ -177,6 +204,15 @@ function askOperatorToken() {
       document.body.appendChild(dialog);
     }
     const input = $('operator-dialog-input');
+    const note = dialog.querySelector('.operator-dialog-note');
+    if (operatorRejected) {
+      operatorRejected = false;
+      note.textContent = 'The server rejected that token. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
+      note.setAttribute('data-err', '');
+    } else {
+      note.textContent = 'This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.';
+      note.removeAttribute('data-err');
+    }
     const finish = value => {
       input.value = '';
       closeModal(dialog);
@@ -195,6 +231,11 @@ function askOperatorToken() {
     openModal(dialog);
     input.focus();
   }).finally(() => { operatorPrompt = null; });
+  // The creating caller must await the same promise it opened: without this
+  // return it resumed immediately with undefined and abandoned its 401 - the
+  // answered dialog stored nothing and retried nothing, and the next gated
+  // call asked all over again (the double sign-in after an idle period).
+  return operatorPrompt;
 }
 
 // All operator mutations share confirmation, busy and issue-order gates.

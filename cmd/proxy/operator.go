@@ -501,7 +501,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	if form {
 		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(loginPageHTML))
+		_, _ = w.Write([]byte(loginPageRejectedHTML))
 		return
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
@@ -568,6 +568,7 @@ button {
 }
 button:hover { background: #7aa0ff; border-color: #7aa0ff; }
 button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
+.notice { color: #e8a35c; margin: 0 0 10px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -596,6 +597,16 @@ if (window.isSecureContext && navigator.serviceWorker) {
 </body>
 </html>
 `
+
+// loginPageRejectedHTML is the same page with a visible rejection notice,
+// served when a form POST carried a wrong credential. The identical silent
+// re-serve read as "nothing happened" and had the operator sign in twice
+// without ever seeing why. Never carried on a first paint: the unauthenticated
+// page cannot reveal that any attempt happened.
+var loginPageRejectedHTML = strings.Replace(loginPageHTML,
+	`<p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>`,
+	`<p class="notice" role="alert">That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.</p>
+<p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>`, 1)
 
 // handleHealthz is GET /healthz: the unauthenticated liveness probe for
 // Docker HEALTHCHECK and load balancers. It reports only that the process is

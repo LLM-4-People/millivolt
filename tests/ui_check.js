@@ -3441,6 +3441,112 @@ async function main() {
     } finally {sw.close();}
   }
 
+  // ---- operator unlock: one answered dialog covers every in-flight 401
+  // (a slow scan whose 401 lands after the unlock must not ask again), and a
+  // rejected token says so instead of silently asking the same question ----
+  {
+    const authState = observerFixture({
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-auth', seq: 1, oldest_seq: 1,
+      pending_revision: 0, incremental: false, records: [], in_flight_records: [],
+      counters: {in_flight: 0, total_requests: 0}, kpi: {requests: 0}, dash: {},
+      model_canon: modelFixture(), storm: {enabled: false, banner_enabled: false, storms: []},
+      storage: {enabled: true, dropped: 0},
+    });
+    const isolated = dashboardDOM(assembleHTML(authState), {...pageOptions, beforeParse(win) {
+      pageOptions.beforeParse(win);
+      win.EventSource = function(url) {
+        return {url, handlers: {}, readyState: 1, addEventListener() {}, close() {this.readyState = 2;}};
+      };
+    }});
+    const w = isolated.window, d = w.document;
+    const submitDialog = value => {
+      d.getElementById('operator-dialog-input').value = value;
+      d.getElementById('operator-dialog-form').dispatchEvent(new w.Event('submit', {cancelable: true}));
+    };
+    try {
+      await sleep(30);
+      // Freeze the page's own timers so only test-driven calls hit fetch.
+      w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearInterval(_clockTimer); _clockTimer = null;');
+      w.eval('storeOperatorCredential("")');
+      const calls = [];
+      let chartGate = null, chartPending = null; // gate exactly one chart request (the slow scan)
+      w.fetch = (url, options) => {
+        const auth = options && options.headers ? (options.headers.Authorization || '') : '';
+        calls.push({url: String(url), auth});
+        if (String(url).includes('/metrics/agg/chart') && chartGate) {
+          chartPending = [];
+          chartGate = null;
+          const gate = chartPending;
+          return new Promise(resolve => gate.push(resolve));
+        }
+        if (auth === 'Bearer op-token-correct') return Promise.resolve({ok: true, status: 200, json: async () => ({})});
+        return Promise.resolve({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      };
+      let modalOpens = 0;
+      const realOpenModal = w.openModal;
+      w.openModal = el => { if (el.id === 'operator-dialog') modalOpens++; return realOpenModal(el); };
+
+      // The unlock: bootstrap's 401 opens the dialog; the chart scan stays in
+      // flight and its 401 lands only after the credential was stored.
+      const boot = w.operatorFetch('/metrics/bootstrap');
+      await sleep(5);
+      chartGate = [];
+      const chart = w.operatorFetch('/metrics/agg/chart?window=60m');
+      await sleep(5);
+      check('a 401 opens the operator dialog once',
+        !d.getElementById('operator-dialog').hidden && modalOpens === 1 && w.eval('operatorPrompt !== null'));
+      submitDialog('op-token-correct');
+      const bootResult = await boot;
+      check('unlock retries the original request with the stored credential',
+        bootResult.status === 200 && calls.some(c => c.url.includes('/metrics/bootstrap') && c.auth === 'Bearer op-token-correct'));
+      check('the dialog closed after unlock',
+        d.getElementById('operator-dialog').hidden && w.eval('operatorPrompt === null'));
+      chartPending.shift()({ok: false, status: 401, json: async () => ({error: 'operator token required'})});
+      const chartResult = await chart;
+      const chartCalls = calls.filter(c => c.url.includes('/metrics/agg/chart'));
+      check('a late 401 after unlock retries silently without a second dialog',
+        chartResult.status === 200 && chartCalls.length === 2 && chartCalls[1].auth === 'Bearer op-token-correct' &&
+        d.getElementById('operator-dialog').hidden && w.eval('operatorPrompt === null'));
+
+      // A rejected entry is visible on the next prompt instead of a silent
+      // re-ask that reads as "nothing happened".
+      w.eval('storeOperatorCredential("")');
+      const wrong = w.operatorFetch('/metrics/bootstrap');
+      await sleep(5);
+      submitDialog('op-token-wrong');
+      const wrongResult = await wrong;
+      check('a wrong entry clears the credential and returns the 401',
+        wrongResult.status === 401 && w.eval('operatorCredential') === '');
+      const retry = w.operatorFetch('/metrics/bootstrap');
+      await sleep(5);
+      const note = d.querySelector('.operator-dialog-note');
+      check('the re-prompt after a rejection shows the failure notice',
+        !d.getElementById('operator-dialog').hidden && note.hasAttribute('data-err') &&
+        note.textContent.includes('rejected that token'));
+      submitDialog('op-token-correct');
+      check('the corrected entry unlocks', (await retry).status === 200);
+      w.eval('storeOperatorCredential("")');
+      const fresh = w.operatorFetch('/metrics/bootstrap');
+      await sleep(5);
+      check('a fresh prompt drops the rejection notice',
+        !note.hasAttribute('data-err') && note.textContent.includes('This dashboard is protected'));
+      d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+      check('cancel returns the original 401 without storing anything',
+        (await fresh).status === 401 && w.eval('operatorCredential') === '');
+
+      // Concurrent gated calls share one dialog and one entry.
+      const opensBefore = modalOpens;
+      const a = w.operatorFetch('/metrics/bootstrap');
+      const b = w.operatorFetch('/admin/pause');
+      await sleep(5);
+      check('concurrent 401s share one dialog and one entry',
+        !d.getElementById('operator-dialog').hidden && modalOpens === opensBefore + 1);
+      submitDialog('op-token-correct');
+      check('one entry resolves every joined caller with the credential',
+        (await a).status === 200 && (await b).status === 200 && modalOpens === opensBefore + 1);
+    } finally {w.close();}
+  }
+
   console.log(failures.length ? '\nFAILURES: ' + failures.join(' | ') : '\nALL UI CHECKS PASSED');
   process.exit(failures.length ? 1 : 0);
 }

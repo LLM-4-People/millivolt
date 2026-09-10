@@ -249,7 +249,9 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		if len(w.Result().Cookies()) != 1 {
 			t.Errorf("form session: cookies=%d want 1", len(w.Result().Cookies()))
 		}
-		// Wrong credential: form gets the page back, API gets JSON.
+		// Wrong credential: form gets the page back with a visible rejection
+		// notice (a silent re-serve reads as "nothing happened" and had the
+		// operator sign in twice without ever seeing why), API gets JSON.
 		w = httptest.NewRecorder()
 		bad := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session",
 			strings.NewReader("token=wrong-credential"))
@@ -257,6 +259,18 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h(w, bad)
 		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) {
 			t.Errorf("wrong form credential: status=%d want=401 login page", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), `role="alert"`) ||
+			!strings.Contains(w.Body.String(), "That token was rejected") {
+			t.Error("rejected form sign-in must show the rejection notice")
+		}
+		// A first paint (GET /) never carries the notice: the unauthenticated
+		// page cannot reveal that any attempt happened.
+		plain := protectOperatorRequests(next, gate)
+		w = httptest.NewRecorder()
+		plain.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
+		if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "That token was rejected") {
+			t.Errorf("clean login page must not carry the rejection notice: status=%d", w.Code)
 		}
 		// The login page itself is inert without a credential: 401.
 		w = httptest.NewRecorder()
