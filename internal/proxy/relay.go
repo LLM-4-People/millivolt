@@ -383,21 +383,6 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 	}
 }
 
-// relayWriter accounts whether the relay wrote any body byte, so a failure
-// after the first attempt can tell a committed socket (answer in-band) from a
-// never-written one (a real HTTP error status is still possible).
-type relayWriter struct {
-	http.ResponseWriter
-	wrote bool
-}
-
-func (rw *relayWriter) Write(p []byte) (int, error) {
-	rw.wrote = true
-	return rw.ResponseWriter.Write(p)
-}
-
-func (rw *relayWriter) Flush() { rw.ResponseWriter.(http.Flusher).Flush() }
-
 // streamBodyWithRetry relays a streaming response and transparently re-sends
 // the SAME request when the stream ends truncated (metrics.CodeTruncated)
 // before any content-bearing chunk reached the client - the streaming twin of
@@ -408,16 +393,16 @@ func (rw *relayWriter) Flush() { rw.ResponseWriter.(http.Flusher).Flush() }
 // socket alive during the re-send's queue/hold/backoff waits. The absorbed
 // attempt is logged like every other (Retries/Attempts) while a retry that
 // eventually succeeds stays a success record; a final truncation surfaces the
-// in-band error envelope exactly as before. Re-send failures answer a relayed
-// socket in-band and a never-written one with a real HTTP error status, so no
-// JSON error ever lands after relayed event-stream bytes. Format-translated
-// streams (and Cursor's bidirectional bridge) keep their own signaling and
-// are not re-sent here.
+// in-band error envelope exactly as before. Re-send failures are answered
+// in-band: applyUpstream has already committed the status line before this
+// function runs (even for clients that never asked for streaming), so no JSON
+// error can land after relayed event-stream bytes, and the record carries the
+// real error status. Format-translated streams (and Cursor's bidirectional
+// bridge) keep their own signaling and are not re-sent here.
 func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter, resp *http.Response, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) {
-	rw := &relayWriter{ResponseWriter: w}
 	maxQuality := s.cfg().QualityRetries
 	for qualityAttempt := 0; ; qualityAttempt++ {
-		if !s.streamBody(ctx, rw, resp.Body, rec, qualityAttempt < maxQuality) {
+		if !s.streamBody(ctx, w, resp.Body, rec, qualityAttempt < maxQuality) {
 			return
 		}
 		// Absorb the truncated attempt and retry the SAME request: nothing
@@ -441,28 +426,21 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				markClientGone(rec)
 				return
 			}
-			// The first attempt relayed bytes: answer in-band. Only a
-			// byte-less relay may still take a real HTTP error status.
+			// The status line is committed (applyUpstream ran before this
+			// loop): the failure goes in-band on the SSE socket, and the
+			// record carries the real error status.
 			if typ, msg, ok := s.stormQueueErrorRecord(rec, err); ok {
 				rec.StatusCode = http.StatusTooManyRequests
-				if rw.wrote {
-					if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
-						markClientGone(rec)
-					}
-				} else {
-					s.writeStormQueueError(w, rec, err)
+				if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
+					markClientGone(rec)
 				}
 				return
 			}
 			rec.StatusCode = http.StatusBadGateway
 			rec.ErrorType = "upstream_unreachable"
 			rec.ErrorMsg = transportErrText(err)
-			if rw.wrote {
-				if werr := emitErrorSSE(w, rec.ID, "upstream_unreachable", rec.ErrorMsg); werr != nil {
-					markClientGone(rec)
-				}
-			} else {
-				writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)
+			if werr := emitErrorSSE(w, rec.ID, "upstream_unreachable", rec.ErrorMsg); werr != nil {
+				markClientGone(rec)
 			}
 			return
 		}

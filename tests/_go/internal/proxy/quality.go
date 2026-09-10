@@ -570,12 +570,10 @@ func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
 }
 
 // TestStreamRetryTransportFailureSurfacesInBand: a re-send that fails at the
-// transport level after the first attempt relayed bytes must answer the
-// committed socket IN-BAND, never with a raw HTTP error body after
-// event-stream bytes - even when the client never asked for streaming and the
-// socket carries no pacer (the case writeClientError cannot see). A relayed
-// socket and a never-written one are distinguished by actual relay activity,
-// not by the client's stream flag.
+// transport level must answer the committed socket IN-BAND, never with a raw
+// HTTP error body after event-stream bytes - including the corner where the
+// client never asked for streaming and the writer carries no pacer (the
+// status line was already committed by applyUpstream before the retry loop).
 func TestStreamRetryTransportFailureSurfacesInBand(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

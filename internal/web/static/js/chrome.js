@@ -168,17 +168,16 @@ async function operatorFetch(url, options = {}) {
   // request burns the server's throttle), flag the notice, and fall through
   // to the prompt.
   if (operatorCredential && operatorCredentialEpoch !== epoch) {
-    const presentedEpoch = operatorCredentialEpoch;
+    const presented = operatorCredential;
     response = await attempt();
     if (response.status !== 401) {
       if (response.ok) operatorRejected = false; // an accepted response clears any racing rejection notice
       return response;
     }
     operatorRejected = true;
-    // Wipe only the credential this retry presented: a newer one may have
-    // been stored (another caller's successful unlock) while it was in
-    // flight, and a 401 indicts the presented value, never the current one.
-    if (operatorCredentialEpoch === presentedEpoch) storeOperatorCredential('');
+    // Wipe only the credential this retry presented: a 401 indicts the
+    // presented value, never whatever a newer unlock stored meanwhile.
+    if (operatorCredential === presented) storeOperatorCredential('');
   }
   const token = await askOperatorToken();
   if (!token) return response;
@@ -186,7 +185,9 @@ async function operatorFetch(url, options = {}) {
   response = await attempt();
   if (response.status === 401) {
     operatorRejected = true;
-    storeOperatorCredential('');
+    // Same value guard: a later prompt generation may have stored a
+    // different token while this retry was in flight.
+    if (operatorCredential === token) storeOperatorCredential('');
   } else if (response.ok) {
     operatorRejected = false; // a successful unlock clears any racing rejection notice
   }
