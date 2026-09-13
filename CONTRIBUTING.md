@@ -129,6 +129,30 @@ They disable SSE and test bootstrap/poll rendering, not uninterrupted live-feed
 delivery. They remove only their synthetic client records. Their assertions must
 remain enabled under Python `-O`; the guard suite verifies this.
 
+### Live Chrome DevTools verification
+
+Frontend changes are additionally verified in a visible Chrome window through
+Chrome DevTools - headful, never headless. Sign in with the dev operator token,
+drive the real fixture traffic and the actual controls, and check console
+output, element geometry, the accessibility tree and screen flow in the
+rendered page. Narrow fixture data passes the harnesses but can hide
+distribution problems (wide values, wrapping, density); the live session is
+where those surface. Keep the dev instance and the window open while you look;
+stop the instance with `scripts/dev.sh stop` when done.
+
+Fixture traffic for these sessions has its own lifecycle owner, never a paid
+provider and never the main instance on `:8080`:
+
+```sh
+scripts/dev-traffic.sh         # bursts of neutral loopback traffic at the dev instance
+scripts/dev-traffic.sh status
+scripts/dev-traffic.sh stop
+```
+
+Bursts land about a minute apart so one-minute chart buckets gain a bucket
+per burst; each run includes recovered 429s (rate-limited, not errors) and one
+final 400 so both health surfaces carry data.
+
 ## Container development
 
 Normal [compose.yaml](compose.yaml) only runs a published image. For a local
