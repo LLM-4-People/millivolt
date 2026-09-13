@@ -157,7 +157,9 @@ func extractPID(s string) string {
 // The stale instance's exit path is SIGTERM → HTTP drain bounded by its own
 // shutdown_timeout → synchronous store Close (write-channel drain plus final
 // flush), so the kill grace must exceed both bounds or the SIGKILL lands
-// mid-shutdown.
+// mid-shutdown. The stale instance's own boot-time value is unknowable; the
+// caller's fresh, hot-reloadable shutdown_timeout is the best available
+// estimate of it, and the margin covers the drain.
 //
 // Note: the port matchers (fuser/lsof/ss) match the port NUMBER only, ignoring
 // the listen address's host component, so a same-binary instance bound to a

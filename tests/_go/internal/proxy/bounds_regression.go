@@ -8,6 +8,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 // TestParseRetryAfterClamped pins the hostile-hint contract of
@@ -62,6 +65,14 @@ func TestParseRetryAfterClamped(t *testing.T) {
 // Anthropic translator), so one bound rejects both spellings - including a
 // both-fields body whose max_completion_tokens the translator would have
 // carried into the translated re-decode past a max_tokens-only check.
+// The adversarial rows pin the split-decode bypass: a decoy type error in
+// a field the strict parameter decode rejects (n as a string) leaves the
+// original record's ReqMaxTokens nil (parseLLMRequest's split-decode early
+// return), while the Anthropic translator's struct ignores the unknown
+// field and still copies the hostile cap into the translated body, which
+// re-decodes through parseLLMRequest into a fresh record. Before the
+// second check, that fresh record reached estimateTokens and the upstream
+// with no bound re-applied, and every row below returned 200.
 func TestMaxRequestOutputTokensBound(t *testing.T) {
 	var calls atomic.Int32
 	var upstreamBody string
@@ -101,6 +112,11 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 		{`{"model":"m","max_tokens":1000001}`, ""},
 		{`{"model":"m","max_completion_tokens":1000001}`, ""},
 		{`{"model":"m","max_tokens":1000000,"max_completion_tokens":1000001}`, "anthropic"},
+		// Split-decode bypass shape: the decoy "n":"x" type error suppresses
+		// the original record's ReqMaxTokens while the Anthropic translator
+		// tolerates it and carries the hostile cap into the re-decoded body.
+		{`{"model":"m","max_tokens":2000000000,"n":"x"}`, "anthropic"},
+		{`{"model":"m","max_completion_tokens":9999999999999,"n":"x"}`, "anthropic"},
 	} {
 		status, respBody := post(tc.payload, tc.format)
 		if status != http.StatusBadRequest {
@@ -121,5 +137,41 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 	}
 	if upstreamBody != payload {
 		t.Errorf("in-range body mutated:\n got %q\nwant %q", upstreamBody, payload)
+	}
+}
+
+// TestAnthropicDefaultMaxTokensCeilingMatchesProxyBound pins the documented
+// mirror between internal/config's anthropic_default_max_tokens validation
+// ceiling and maxRequestOutputTokens (the request.go constant's comment
+// claims they are the same ceiling). The load-bearing direction: the
+// Anthropic translator injects the configured default into translated
+// bodies, which re-decode into a fresh record the proxy bound checks, so a
+// config ceiling above maxRequestOutputTokens would let a validated setting
+// produce requests the trust boundary then rejects. The equality is asserted
+// through the validation seam (config.Default plus Validate), the same path
+// every config load and save goes through.
+func TestAnthropicDefaultMaxTokensCeilingMatchesProxyBound(t *testing.T) {
+	cfg := config.Default()
+	cfg.AnthropicDefaultMaxTokens = maxRequestOutputTokens
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("anthropic_default_max_tokens = %d must validate: %v", maxRequestOutputTokens, err)
+	}
+	cfg.AnthropicDefaultMaxTokens = maxRequestOutputTokens + 1
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("anthropic_default_max_tokens = %d validates above the proxy bound (%d)",
+			cfg.AnthropicDefaultMaxTokens, maxRequestOutputTokens)
+	}
+}
+
+// TestMaxLimitWindowMirrorsSchedulerRetryHint pins the throttle.go comment
+// that maxLimitWindow is the same ceiling as scheduler.MaxRetryHint (a
+// daily quota window). Both bounds are deliberately in their owning
+// packages (the proxy caps header/UI-supplied limits, the scheduler clamps
+// Retry-After hints), so this in-package test is the one place that can
+// pin their equality; silent drift of either constant must fail here.
+func TestMaxLimitWindowMirrorsSchedulerRetryHint(t *testing.T) {
+	if maxLimitWindow != scheduler.MaxRetryHint {
+		t.Fatalf("maxLimitWindow = %v, want scheduler.MaxRetryHint (%v)",
+			maxLimitWindow, scheduler.MaxRetryHint)
 	}
 }

@@ -282,26 +282,7 @@ func main() {
 	// query timeout, HTTP server timeouts, history_size) stay at their boot
 	// consumers; reload still swaps the snapshot and reports them as
 	// restart_required (GET /admin/config effective shows the new values).
-	ov := map[string]string{}
-	if liveListenOverride != "" {
-		ov["listen"] = liveListenOverride
-	}
-	if liveDBOverride != "" {
-		ov["db_path"] = liveDBOverride
-	}
-	mux.Handle("/admin/config", &config.Handler{
-		Path:    liveConfigPath,
-		Startup: bootCfg,
-		Effective: func() *config.Config {
-			liveMu.Lock()
-			defer liveMu.Unlock()
-			return liveCfg.Clone()
-		},
-		Overrides:    ov,
-		Persist:      reloadConfig,
-		Backup:       backupStatus,
-		ReloadStatus: lastReloadDoc,
-	})
+	mux.Handle("/admin/config", adminConfigHandler())
 	registerBackupRoutes(mux)
 
 	mux.HandleFunc("/admin/reload", func(w http.ResponseWriter, r *http.Request) {
@@ -353,6 +334,9 @@ func main() {
 		// drain bounded by its ShutdownTimeout → synchronous store Close
 		// (write-channel drain plus final flush), so the kill grace must
 		// exceed both; the margin covers the Close drain no config bounds.
+		// The stale instance's own boot-time value is unknowable; this
+		// fresh config's hot-reloadable ShutdownTimeout is the best
+		// available estimate of it, and the margin covers the drain.
 		grace := cfg.ShutdownTimeout + sigtermCloseDrainMargin
 		ln, err = claimPort(cfg.Listen, grace)
 		if err != nil {
@@ -524,7 +508,8 @@ func logDroppedConfigKeys(path string, skipped []string) {
 // application: the boot-time dropped-keys scan or a reload through
 // reloadConfig (the single choke point for SIGHUP, POST /admin/reload,
 // config saves and backup restores). The log lines remain the history; this
-// is the structured view the dashboard reads via /admin/config.
+// is the structured view /admin/config will serve for the dashboard's
+// planned last_reload section (no frontend consumer yet).
 var reloadStatus = struct {
 	mu              sync.Mutex
 	at              time.Time
@@ -569,6 +554,32 @@ func lastReloadDoc() any {
 		"dropped_keys":     dropped,
 		"restart_required": restart,
 		"at":               reloadStatus.at.UnixMilli(),
+	}
+}
+
+// adminConfigHandler wires the /admin/config handler. Boot and the reload
+// status tests share this one constructor so the ReloadStatus wiring
+// cannot silently drift out of main.
+func adminConfigHandler() *config.Handler {
+	ov := map[string]string{}
+	if liveListenOverride != "" {
+		ov["listen"] = liveListenOverride
+	}
+	if liveDBOverride != "" {
+		ov["db_path"] = liveDBOverride
+	}
+	return &config.Handler{
+		Path:    liveConfigPath,
+		Startup: bootCfg,
+		Effective: func() *config.Config {
+			liveMu.Lock()
+			defer liveMu.Unlock()
+			return liveCfg.Clone()
+		},
+		Overrides:    ov,
+		Persist:      reloadConfig,
+		Backup:       backupStatus,
+		ReloadStatus: lastReloadDoc,
 	}
 }
 

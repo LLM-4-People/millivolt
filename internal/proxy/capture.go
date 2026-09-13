@@ -95,7 +95,10 @@ func redactHeaderName(name, authHeader string) bool {
 	// OpenAI x-ratelimit-* and Anthropic anthropic-ratelimit-* families
 	// carry token-budget counters, not credentials, and the client queue
 	// control headers x-proxy-limit-requests/-concurrency/-tokens are not
-	// secrets. Every other token-bearing name stays redacted.
+	// secrets. Every other token-bearing name stays redacted. The ratelimit
+	// exemptions are prefix-wide, so a token-named header under them (e.g.
+	// x-ratelimit-token) is retained; accepted residual, since the upstream
+	// already holds the credential and any header name can carry data.
 	if strings.Contains(n, "token") &&
 		!strings.HasPrefix(n, "x-ratelimit") &&
 		!strings.HasPrefix(n, "anthropic-ratelimit") &&

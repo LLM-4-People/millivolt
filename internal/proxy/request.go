@@ -734,6 +734,14 @@ func requestNumberNeedsDecode(raw []byte) bool {
 // attacker-chosen amount.
 const maxRequestOutputTokens = 1_000_000
 
+// hostileTokenCap reports whether a decoded token cap exceeds the
+// maxRequestOutputTokens bound. Both ServeHTTP checks share it: the check
+// on the original body's decode and the check on the fresh record a
+// translated body re-decodes into.
+func hostileTokenCap(v *int) bool {
+	return v != nil && *v > maxRequestOutputTokens
+}
+
 type requestRouting struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`

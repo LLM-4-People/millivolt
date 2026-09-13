@@ -45,8 +45,9 @@ type Handler struct {
 	Backup func() map[string]any
 	// ReloadStatus reports the outcome of the most recent configuration
 	// application (the boot dropped-keys scan or a reload) for the
-	// dashboard's last_reload section. Nil omits the section; a nil
-	// return omits it too (tests).
+	// dashboard's planned last_reload section; no frontend consumer
+	// exists yet. Nil omits the section; a nil return omits it too
+	// (tests).
 	ReloadStatus func() any
 }
 

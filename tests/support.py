@@ -205,21 +205,24 @@ RETIRED_TOKENS = (
 
 def _retired_token_pattern(token):
     """Compile one retired token into its matcher: case folded, word-boundary
-    anchored at both ends. The token's own explicit separators (- and space)
-    require one [\s_-]+ character; camelCase hump boundaries allow those
-    separators or none ([\s_-]*), so inOutRatio, IN_OUT_RATIO and in out
-    ratio all match while ordinary prose does not. The final word tolerates
-    a plural s."""
+    anchored at both ends. Every word boundary - an explicit separator (- or
+    space) in the token or a camelCase hump - accepts any mix of space, -,
+    _ and / separators or none at all ([\\s_/-]*), so spark-row, sparkRow,
+    sparkrow, inOutRatio, IN_OUT_RATIO, in out ratio and in/out ratio all
+    match while ordinary prose does not. Squished forms (sparkrow,
+    tentiles) matching is deliberate: retired vocabulary is stale in
+    any near spelling a dashboard source could carry. The final word
+    tolerates a plural s."""
     parts = []
     for i, word in enumerate(re.split(r'[-\s]+', token)):
         humps = re.findall(r'[A-Z]?[a-z]+|[A-Z]+', word)
         if ''.join(humps).lower() != word.lower():
             raise ValueError("retired token has unsupported characters: " + token)
         if i:
-            parts.append(r'[\s_-]+')
+            parts.append(r'[\s_/-]*')
         for j, hump in enumerate(humps):
             if j:
-                parts.append(r'[\s_-]*')
+                parts.append(r'[\s_/-]*')
             parts.append(hump)
     last = parts.pop()
     if last.endswith('s'):
@@ -262,7 +265,18 @@ def _template_comment_spans(text):
     """Return (start, end) spans of template-literal BODIES (excluding
     ${...} expressions) using a minimal JS lexer: comments, strings, regex
     literals and nested templates are tracked so quotes, backticks and
-    braces inside them never desynchronize the walk."""
+    braces inside them never desynchronize the walk.
+
+    Two misread classes are accepted as theoretical residuals. A
+    statement-position regex after a closing ')' or ']' (e.g.
+    "if (x) /re/.test(s)") is classified as division, so a quote inside the
+    regex opens a phantom string; the string skipper bails at the first
+    unescaped newline (a real string literal never spans lines), so that
+    desync is bounded to the regex's own source line. A backtick inside
+    such a regex opens a phantom template instead, and template bodies
+    legitimately span lines, so that desync extends to the next backtick in
+    the file. Both require regex-in-statement-position-after-a-closing-
+    token, a shape no real dashboard code uses."""
     spans = []
     length = len(text)
     # Previous significant token as [kind, value]; kind is 'punct',
@@ -278,6 +292,8 @@ def _template_comment_spans(text):
                 continue
             if char == quote:
                 return position + 1
+            if char == '\n':
+                return position  # a real string literal never spans lines
             position += 1
         return position
 
@@ -364,6 +380,20 @@ def _template_comment_spans(text):
                 prev[0], prev[1] = 'punct', '/'
                 position += 1
                 continue
+            if char in '+-' and text.startswith(char * 2, position):
+                # '++' / '--': postfix when the previous significant token
+                # ends an expression (identifier, number, ')', ']', or a
+                # string/regex/template close), so the following '/' is
+                # division. Any other previous token (start of statement,
+                # operator, keyword, ';', braces, '(', ',', '=') means
+                # prefix, where the regex rules stand.
+                if prev[0] == 'id' or (prev[0] == 'punct'
+                                       and prev[1] in (')', ']', 'str', 'regex', '`')):
+                    prev[0], prev[1] = 'id', ''
+                else:
+                    prev[0], prev[1] = 'punct', char
+                position += 2
+                continue
             if expression and char == '}':
                 depth -= 1
                 prev[0], prev[1] = 'punct', '}'
@@ -395,7 +425,10 @@ def js_template_comment_errors(pairs):
     render as visible text. This tokenizes templates (including nested
     ${...} expressions) and flags a line comment or a block-comment opener
     at a body line start. A rendered URL like //cdn.example/x still flags:
-    suspicious either way."""
+    suspicious either way. So does a body fragment that starts with //
+    right after a ${...} interpolation on the same source line (rendered
+    markup following the expression): the same accepted class, suspicious
+    either way."""
     errors = []
     for name, text in pairs:
         if not name.startswith('internal/web/static/js/'):
@@ -411,36 +444,40 @@ def js_template_comment_errors(pairs):
     return errors
 
 
+SPARK_HEIGHT_JS = 'internal/web/static/js/chart.js'
+SPARK_HEIGHT_CSS = 'internal/web/static/css/dashboard.css'
+
+
 def spark_height_mirror_errors(pairs):
     """chart.js plots each tile's sparkline into an SVG sized by
     CHART_SPARK_H while dashboard.css boxes .chart-total .spark with a px
     height. The two sites must stay equal or the plotted extent no longer
     matches the visible strip."""
     errors = []
-    js = [text for name, text in pairs if name == 'internal/web/static/js/chart.js']
-    css = [text for name, text in pairs if name == 'internal/web/static/css/dashboard.css']
+    js = [text for name, text in pairs if name == SPARK_HEIGHT_JS]
+    css = [text for name, text in pairs if name == SPARK_HEIGHT_CSS]
     height = None
     if js:
         match = re.search(r'\bCHART_SPARK_H\s*=\s*(\d+)', js[0])
         if match:
             height = int(match.group(1))
         else:
-            errors.append('internal/web/static/js/chart.js: CHART_SPARK_H declaration not found')
+            errors.append(SPARK_HEIGHT_JS + ': CHART_SPARK_H declaration not found')
     else:
-        errors.append('internal/web/static/js/chart.js: not in the static corpus')
+        errors.append(SPARK_HEIGHT_JS + ': not in the static corpus')
     rule = None
     if css:
         match = re.search(r'\.chart-total\s+\.spark\s*\{[^}]*\bheight:\s*(\d+)px', css[0])
         if match:
             rule = int(match.group(1))
         else:
-            errors.append('internal/web/static/css/dashboard.css: .chart-total .spark height not found')
+            errors.append(SPARK_HEIGHT_CSS + ': .chart-total .spark height not found')
     else:
-        errors.append('internal/web/static/css/dashboard.css: not in the static corpus')
+        errors.append(SPARK_HEIGHT_CSS + ': not in the static corpus')
     if height is not None and rule is not None and height != rule:
-        errors.append('internal/web/static/js/chart.js: CHART_SPARK_H=' + str(height)
+        errors.append(SPARK_HEIGHT_JS + ': CHART_SPARK_H=' + str(height)
                       + ' no longer mirrors the .chart-total .spark height=' + str(rule)
-                      + 'px in internal/web/static/css/dashboard.css')
+                      + 'px in ' + SPARK_HEIGHT_CSS)
     return errors
 
 

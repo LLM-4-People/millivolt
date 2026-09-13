@@ -17,24 +17,11 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
-	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 func TestBackupRestoreConfigRoundTrip(t *testing.T) {
-	oldCfg, oldBoot, oldProxy, oldBuf, oldStore := liveCfg, bootCfg, liveProxy, liveBuf, liveStore
-	oldPath, oldListen, oldDB := liveConfigPath, liveListenOverride, liveDBOverride
-	t.Cleanup(func() {
-		liveCfg, bootCfg, liveProxy, liveBuf, liveStore = oldCfg, oldBoot, oldProxy, oldBuf, oldStore
-		liveConfigPath, liveListenOverride, liveDBOverride = oldPath, oldListen, oldDB
-	})
-	liveCfg = config.Default()
-	bootCfg = liveCfg.Clone()
-	liveBuf = metrics.NewBuffer(liveCfg.HistorySize)
-	liveProxy = proxy.New(liveCfg, liveBuf)
-	liveStore = nil
-	liveListenOverride, liveDBOverride = "", ""
-	liveConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	liveReloadFixture(t)
 	start := liveCfg.Clone()
 	start.MaxRetries = 9
 	if err := config.WriteFile(liveConfigPath, start); err != nil {
@@ -296,19 +283,7 @@ func TestStageSnapshotIsAdmittedOnOpen(t *testing.T) {
 }
 
 func TestRestoreInspectAndConfigMerge(t *testing.T) {
-	oldCfg, oldBoot, oldProxy, oldBuf, oldStore := liveCfg, bootCfg, liveProxy, liveBuf, liveStore
-	oldPath, oldListen, oldDB := liveConfigPath, liveListenOverride, liveDBOverride
-	t.Cleanup(func() {
-		liveCfg, bootCfg, liveProxy, liveBuf, liveStore = oldCfg, oldBoot, oldProxy, oldBuf, oldStore
-		liveConfigPath, liveListenOverride, liveDBOverride = oldPath, oldListen, oldDB
-	})
-	liveCfg = config.Default()
-	bootCfg = liveCfg.Clone()
-	liveBuf = metrics.NewBuffer(liveCfg.HistorySize)
-	liveProxy = proxy.New(liveCfg, liveBuf)
-	liveStore = nil
-	liveListenOverride, liveDBOverride = "", ""
-	liveConfigPath = filepath.Join(t.TempDir(), "config.yaml")
+	liveReloadFixture(t)
 	live := config.Default()
 	live.MaxRetries = 9
 	if err := config.WriteFile(liveConfigPath, live); err != nil {

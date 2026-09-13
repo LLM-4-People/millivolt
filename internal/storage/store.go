@@ -876,11 +876,9 @@ func readTotals(ctx context.Context, db interface {
 			&in, &out, &cacheR, &reason, &answer, &tools, &cost, &ttft, &dur, &overall, &gen); err != nil {
 			return Totals{}, err
 		}
-		var atts []metrics.RetryAttempt
-		if n := len(attemptsJSON); n > 0 && string(attemptsJSON) != "null" {
-			if err := json.Unmarshal(attemptsJSON, &atts); err != nil {
-				log.Printf("storage: totals: decode attempts: %v", err)
-			}
+		atts, err := DecodeAttemptsColumn(attemptsJSON)
+		if err != nil {
+			log.Printf("storage: totals: decode attempts: %v", err)
 		}
 		r := metrics.Record{StatusCode: int(status), ErrorType: errorType, Attempts: atts,
 			TTFTMs: ttft, OverallTPS: overall, DecodeTPS: gen,

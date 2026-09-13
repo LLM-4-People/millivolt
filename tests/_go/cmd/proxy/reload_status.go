@@ -45,13 +45,9 @@ func TestAdminConfigReportsLastReload(t *testing.T) {
 	if err := os.WriteFile(liveConfigPath, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := &config.Handler{
-		Path:      liveConfigPath,
-		Startup:   bootCfg,
-		Effective: func() *config.Config { return liveCfg.Clone() },
-		// Same wiring as main.go's /admin/config handler.
-		ReloadStatus: lastReloadDoc,
-	}
+	// The shared constructor is the same wiring main serves /admin/config
+	// with, so a dropped ReloadStatus field fails here too.
+	h := adminConfigHandler()
 	if _, err := reloadConfig(); err != nil {
 		t.Fatal(err)
 	}

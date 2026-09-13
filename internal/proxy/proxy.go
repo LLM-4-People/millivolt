@@ -341,7 +341,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ReqMaxTokens, so one bound covers every spelling. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
-	if rec.ReqMaxTokens != nil && *rec.ReqMaxTokens > maxRequestOutputTokens {
+	if hostileTokenCap(rec.ReqMaxTokens) {
 		http.Error(w, errJSON("invalid_request_error",
 			fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
 		return
@@ -368,6 +368,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// while routing keeps the client's original model and stream choice.
 		rec = &metrics.Record{Start: rec.Start}
 		parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview)
+		// Re-apply the token-cap bound at this second trust boundary before
+		// anything consumes the fresh record. A decoy type error can keep the
+		// original decode's ReqMaxTokens nil (the split-decode early return)
+		// while the translator still carries the hostile cap into the
+		// translated body, so the first check alone does not cover this path.
+		if hostileTokenCap(rec.ReqMaxTokens) {
+			http.Error(w, errJSON("invalid_request_error",
+				fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Cursor clients send FUSED display model ids (thinking level + tier baked

@@ -154,13 +154,14 @@ class RepositoryChecks(unittest.TestCase):
             "internal/web/static/js/app.js: retired token 'spark-row' "
             "(the per-half spark rows became one multi-line sparkline per tile)"])
         # Retired vocabulary flags in every spelling the audit found: case
-        # folded, -, _ and space separators, camel humps with no separator,
-        # and plurals.
+        # folded, -, _, / and space separators, camel humps, squished
+        # forms, and plurals.
         gap_variants = (
             "the Spark-Row layout", "the SPARK_ROW layout", "the spark rows layout",
             "the TileFmt layout", "the TILE_FMT layout",
             "the InOutRatio layout", "the in_out_ratio layout",
             "the ChartStackPaths layout", "the Ten tiles layout", "the TEN-TILE layout",
+            "the sparkRow layout", "the tenTiles layout", "the in/out ratio layout",
         )
         for variant in gap_variants:
             with self.subTest(variant=variant):
@@ -179,6 +180,7 @@ class RepositoryChecks(unittest.TestCase):
             "the tile format helper lives on", "tilefmtx",
             "input/output ratio commentary", "attentiveness",
             "stacked paths of the chart", "the tennis court",
+            "in outage ratio",
         )
         for negative in negatives:
             with self.subTest(negative=negative):
@@ -216,6 +218,21 @@ class RepositoryChecks(unittest.TestCase):
              [flagged.format(2)]),
             # division context: the slash after an identifier is not a regex
             ('const mib = n / (1024 * 1024);\nconst t = `ok\n// stray\n`;\n',
+             [flagged.format(3)]),
+            # postfix ++ before a division: the + must not classify the
+            # following / as a regex, whose phantom scan swallowed the
+            # template's opening backtick and hid the comment
+            ('const t = `x${a++ / 2}y\n// stray\n`;\n',
+             [flagged.format(2)]),
+            # same postfix shape in statement position, template on the
+            # same source line
+            ('const x = a++ / 2; const t = `ok\n// stray\n`;\n',
+             [flagged.format(2)]),
+            # the string skipper's newline bail bounds the worst desync: a
+            # statement-position regex after ')' misreads as division and
+            # its quote opens a phantom string, but the bail stops the
+            # swallow at the line end so the next template still tracks
+            ('if (c) /["]/.test(s);\nconst t = `ok\n// stray\n`;\n',
              [flagged.format(3)]),
             # a character class carrying {, } and " inside an expression
             ('const t = `x${/[{}"]/.source.length}y\n// stray\n`;\n',
