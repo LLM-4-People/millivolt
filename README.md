@@ -199,8 +199,9 @@ editable configuration, not a guarantee of provider access or protocol coverage.
   session/parent headers for main/sub-conversation relationships. Missing or
   conflicting ancestry remains unresolved instead of being guessed.
 - Compare all six timelines: Overview, Traffic, Tokens, Speed + latency, Errors
-  and Cost. Overview combines request and token volumes, the blended total,
-  spend, errors and percentile-gated speed/latency readouts in one window;
+  and Cost. Overview composes requests, in/out/cached tokens with their shares
+  and in:out balance, the blended total, spend, errors and rate-limited (429)
+  requests, plus 95th-percentile speed and latency sparklines in one window;
   choose windows from minutes through All time, toggle individual series, and
   select one percentile for both speed and first-token latency.
 - Inspect provider-reported input/output, cache and reasoning usage. Costs below

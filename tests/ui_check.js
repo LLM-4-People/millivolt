@@ -105,7 +105,7 @@ let chartPayload = {
   ttft_p: [null, null, null], tps_p: [null, null, null],
   buckets: Array.from({ length: Math.ceil((chartNow - chartFrom) / chartStep) }, (_, i) => ({
     t: chartFrom + i * chartStep,
-    req: 0, err: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
+    req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
     ttft: [null, null, null], tps: [null, null, null],
   })),
 };
@@ -1388,7 +1388,7 @@ async function main() {
     ttft_p: [null, null, null], tps_p: [null, null, null],
     buckets: Array.from({ length: 30 }, (_, i) => ({
       t: CHART_FROM + i * BUCKET_MS,
-      req: 0, err: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
+      req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
       ttft: [null, null, null], tps: [null, null, null],
     })),
   });
@@ -1647,7 +1647,7 @@ async function main() {
     chartView.hidden = {};
   `);
   const pct50Want = {
-    overview: ['inTok', 'outTok', 'err', 'req', 'cache', 'blended', 'cost'],
+    overview: ['inTok', 'outTok', 'err', 'rl', 'req', 'cache', 'blended', 'cost'],
     traffic: ['req', 'err'],
     tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
@@ -1746,8 +1746,8 @@ async function main() {
   for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency', 'overview']) {
     w.eval(`chartView.preset = '${preset}'`);
     w.renderChart();
-    check(`percentile control is ${['latency', 'overview'].includes(preset) ? 'visible' : 'hidden'} for ${preset}`,
-      d.getElementById('chart-pct').hidden === !['latency', 'overview'].includes(preset));
+    check(`percentile control is ${preset === 'latency' ? 'visible' : 'hidden'} for ${preset}`,
+      d.getElementById('chart-pct').hidden === (preset !== 'latency'));
   }
 
   // Axis callbacks survive setData changing between timestamp and compacted
@@ -1913,44 +1913,48 @@ async function main() {
   }
 
   // ---- test 11h: Overview preset - the at-a-glance composition ----
-  // In/out/error bars share the compressed left scale; requests and the
-  // cached subset trace it as lines, blended (in+out) traces the bars'
-  // envelope, and cost stays a line on its own right axis. The totals strip
-  // carries every period total with measured shares, and the
-  // percentile-gated speed/latency tiles render per-bucket sparklines from
-  // suppressed-tolerant sparse series.
+  // In/out/error bars share the compressed left scale; the rate-limit (429)
+  // count, requests and the cached subset trace it as lines, blended (in+out)
+  // traces the bars' envelope, and cost stays a line on its own right axis.
+  // The totals strip carries every period total with measured shares (and the
+  // in:out ratio under blended), plus p95-pinned speed/latency tiles with
+  // per-bucket sparklines - no percentile selector or visible pXX label.
   w.eval(`
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
     chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5];
-    chartAgg.buckets[3].req = 10; chartAgg.buckets[3].err = 2; chartAgg.buckets[3].cost = 1.25;
+    chartAgg.buckets[3].req = 10; chartAgg.buckets[3].err = 2; chartAgg.buckets[3].rl = 1; chartAgg.buckets[3].cost = 1.25;
     chartAgg.buckets[3].in = 100; chartAgg.buckets[3].out = 40; chartAgg.buckets[3].cache = 60;
     chartAgg.buckets[5].req = 4; chartAgg.buckets[5].err = 1; chartAgg.buckets[5].cost = 0.5;
     chartAgg.buckets[5].in = 50; chartAgg.buckets[5].out = 10; chartAgg.buckets[5].cache = 0;
     chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100, 200, 300];
     chartAgg.buckets[3].ttft = [5, 10, 15]; chartAgg.buckets[3].tps = [50, 60, 70];
   `);
-  check('overview plan: composition bars + riding req/cache/blended lines + right-axis cost line',
+  check('overview plan: composition bars + riding rl/req/cache/blended lines + right-axis cost line',
     w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.bar ? "bar" : "line") + "@" + m.scale).join("|")') ===
-      'inTok=bar@y|outTok=bar@y|err=bar@y|req=line@y|cache=line@y|blended=line@y|cost=line@yr');
+      'inTok=bar@y|outTok=bar@y|err=bar@y|rl=line@y|req=line@y|cache=line@y|blended=line@y|cost=line@yr');
   const dataOv = w.eval('chartData()');
   check('overview compacts empty buckets and keeps a stable column per row',
-    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 8);
+    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 9);
+  check('rate-limit line reads the server bucket count',
+    dataOv[4][0] === 1 && dataOv[4][1] === 0);
   check('blended derives in+out per bucket',
-    dataOv[6][0] === 140 && dataOv[6][1] === 60);
+    dataOv[7][0] === 140 && dataOv[7][1] === 60);
   check('overview cost line reads the server bucket on the right axis',
-    dataOv[7][0] === 1.25 && dataOv[7][1] === 0.5);
+    dataOv[8][0] === 1.25 && dataOv[8][1] === 0.5);
   const totalsOv = w.eval('chartTotals()');
   check('overview totals carry every headline metric for the period',
     totalsOv.includes('requests</span> 14') && totalsOv.includes('blended</span> 200') &&
-    totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3'));
-  check('overview totals annotate measured shares, never fabricated ones',
+    totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
+    totalsOv.includes('rate limited</span> 1'));
+  check('overview totals annotate measured shares and the in:out ratio, never fabricated ones',
     totalsOv.includes('75.0%') && totalsOv.includes('25.0%') && totalsOv.includes('40.0% of in') &&
-    totalsOv.includes('21.4%'));
-  check('overview totals gate the speed/latency tiles on the one percentile control',
+    totalsOv.includes('21.4%') && totalsOv.includes('7.1%') &&
+    totalsOv.includes('in:out 3 : 1'));
+  check('overview timing tiles pin the server p95 without a visible pXX label',
     totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
     totalsOv.includes('220ms') && !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
-    !/p(?:50|95|99)/.test(totalsOv));
+    !/p(?:50|95|99)/.test(totalsOv) && totalsOv.includes('95th percentile over the viewed period.'));
   check('overview totals render one sparse-tolerant sparkline per metric tile',
     totalsOv.split('<svg class="spark"').length === 3 &&
     (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 2 &&
@@ -1958,26 +1962,25 @@ async function main() {
   check('speed tile formatter stays placeholder-safe without a unit sub-row',
     w.eval('chartSpec("tps").tileFmt(null)') === '-' &&
     w.eval('chartSpec("tps").tileFmt(202.75)') === '202.75<span class="chart-sub">tok/s</span>');
-  check('percentile dropdown re-gates the overview tiles without touching the plot', (() => {
+  check('the percentile dropdown never re-gates the overview timing tiles', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
     w.setChartPct('99');
     const t99 = w.eval('chartTotals()');
     w.setChartPct('95');
-    return t50.includes('110ms') && t50.includes('101.25') &&
-      t99.includes('330ms') && t99.includes('303.5') &&
-      w.eval('chartPlan().meta.length') === 7;
+    return t50.includes('220ms') && t50.includes('202.75') && t99.includes('220ms') &&
+      w.eval('chartPlan().meta.length') === 8;
   })());
-  w.eval("chartView.hidden = { overview: ['req'] }");
+  w.eval("chartView.hidden = { overview: ['rl'] }");
   const dataOvH = w.eval('chartData()');
   const optsOvH = w.eval('upOpts(600, 180)');
   check('overview hidden toggle keeps a stable all-null line column',
-    dataOvH.length === 8 && dataOvH[4].every(v => v === null) && dataOvH[6][0] === 140);
+    dataOvH.length === 9 && dataOvH[4].every(v => v === null) && dataOvH[7][0] === 140);
   check('hidden lines never leave an isolated point behind',
     optsOvH.series[4].points.filter?.({ data: dataOvH }, 4) === null);
-  w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['blended', 'bogus']}})); loadChartView();`);
+  w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['blended', 'rl', 'bogus']}})); loadChartView();`);
   check('saved overview selection validates hidden ids against the preset rows',
-    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "blended"'));
+    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "blended,rl"'));
   w.eval("chartView.hidden = {}; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
 
   // ---- test 12: restart menu + rebuild-and-restart poll ----

@@ -38,15 +38,18 @@ values and time interval. Counts, sums and percentiles come from the server.
 ### Overview
 
 **Overview** is the at-a-glance composition: input and output token bars share
-the compressed left scale with error bars, requests and the cached share trace
-that scale as lines, the blended total (input plus output) traces the bars'
-envelope, and reported spend stays on its own right axis. The totals strip
-carries every headline metric for the period - requests, blended, input,
-output and cached tokens with their measured shares, spend, errors with the
-affected-request rate - plus the percentile-gated speed and latency readouts,
-each with a per-bucket sparkline so the evolution of both timing metrics stays
-visible. One percentile dropdown controls those readouts. This preset has no
-static capture yet; the gallery images below predate it.
+the compressed left scale with error bars, while the rate-limited (HTTP 429)
+count, requests and the cached share trace that scale as lines, the blended
+total (input plus output) traces the bars' envelope, and reported spend stays
+on its own right axis. A rate limit is not an error: both health counts are
+distinct affected requests. The totals strip carries every headline metric for
+the period - requests, blended with the in:out balance, input, output and
+cached tokens with their measured shares, spend, errors with the
+affected-request rate, rate-limited requests with their share - plus the
+speed and latency readouts, each pinned to the 95th percentile with a
+per-bucket sparkline so the evolution of both timing metrics stays visible.
+Only the time-range control applies here. This preset has no static capture
+yet; the gallery images below predate it.
 
 ### Traffic
 

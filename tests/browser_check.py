@@ -27,11 +27,27 @@ BODY = (
     b'"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.001}}\n\n'
     b'data: [DONE]\n\n'
 )
+# A provider-style 429 body for throttle-marked fixture requests: the upstream
+# alternates 429→200 per marked body, so each one recovers on its first retry
+# (an absorbed attempt). That exercises the chart's rate-limit fold with the
+# health invariant: rate-limited requests are distinct from errors.
+BODY_429 = b'{"error":{"message":"rate limited","type":"rate_limit_error","code":429}}'
 
 
 class Upstream(BaseHTTPRequestHandler):
+    _throttle_hits = {}
+
     def do_POST(self):
-        self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+        if b'throttle' in body:
+            hits = Upstream._throttle_hits[body] = Upstream._throttle_hits.get(body, 0) + 1
+            if hits % 2 == 1:
+                self.send_response(429)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(BODY_429)))
+                self.end_headers()
+                self.wfile.write(BODY_429)
+                return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.send_header('Content-Length', str(len(BODY)))
@@ -140,8 +156,21 @@ async def check(base, screenshot):
                     }, max_redirects=0, data={'model': 'fixture-model', 'stream': True,
                              'messages': [{'role': 'user', 'content': 'fixture'}]})
                     require(response.ok and await response.body() == BODY, 'fixture response changed')
+                for i in range(2):
+                    # Recovered 429s: absorbed retry attempts, final 200 - rate
+                    # limited but never errors (the chart folds them into rl).
+                    response = await page.request.post(base + '/v1/chat/completions', headers={
+                        'X-Proxy-Base-URL': f'http://127.0.0.1:{upstream.server_port}',
+                        'X-Proxy-Key': 'local-fixture-only', 'X-Proxy-Client': label,
+                    }, max_redirects=0, data={'model': 'fixture-model', 'stream': True,
+                             'messages': [{'role': 'user', 'content': 'throttle ' + str(i)}]})
+                    require(response.ok and await response.body() == BODY, 'throttle fixture recovery changed')
                 await page.goto(base + '/#client=' + label, wait_until='domcontentloaded')
                 await page.wait_for_function('chartAgg && explorerAgg && lastData')
+                # Stash the untouched full chart payload: later canvas checks
+                # rewrite chartAgg with trimmed buckets, but the Overview
+                # period-total assertions need every request-bearing bucket.
+                await page.evaluate('window.__fullChart = chartAgg')
                 await page.select_option('#chart-preset', 'latency')
                 await page.wait_for_function('_up && chartAgg.tps_p.some(v => v != null)')
                 results = []
@@ -174,21 +203,28 @@ async def check(base, screenshot):
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
-                # Overview preset: in/out token bars + the req, cached, blended
-                # and cost lines all render on the real canvas, and the dense
-                # nine-tile totals strip (with sparkline tiles) stays inside the
-                # card at both desktop and mobile widths.
+                # Overview preset: in/out token bars + the rl, req, cached,
+                # blended and cost lines all render on the real canvas, and
+                # the dense ten-tile totals strip (with sparkline tiles) stays
+                # inside the card at both desktop and mobile widths. The
+                # recovered-429 fixture proves the health invariant end to
+                # end: rate limited = 2 while errors stay 0, no percentile
+                # selector, no visible pXX label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
                     state = await page.evaluate('''async () => {
-                        const bucket = chartAgg.buckets.find(b => b.req > 0 && b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite));
-                        if (!bucket) throw new Error('fixture has no percentile-bearing bucket');
-                        chartAgg = {...chartAgg, buckets:[bucket], from_ms:bucket.t, now_ms:bucket.t+chartAgg.bucket_ms};
+                        const full = window.__fullChart;
+                        const rlTotal = full.buckets.reduce((s,b)=>s+b.rl,0);
+                        const errTotal = full.buckets.reduce((s,b)=>s+b.err,0);
+                        if (rlTotal < 1) throw new Error('fixture produced no rate-limited requests');
+                        // Every request-bearing bucket keeps the period
+                        // honest across calendar-minute boundaries.
+                        chartAgg = {...full, buckets: full.buckets.filter(b => b.req > 0)};
                         renderChart();
                         await new Promise(requestAnimationFrame);
                         const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
-                        let inTok=0, outTok=0, req=0, blended=0, cost=0;
+                        let inTok=0, outTok=0, req=0, blended=0, cost=0, rl=0;
                         for (let i=0;i<pixels.length;i+=4) {
                             if (!pixels[i+3]) continue;
                             const [r,g,b] = [pixels[i],pixels[i+1],pixels[i+2]];
@@ -196,11 +232,14 @@ async def check(base, screenshot):
                             if (g>r*1.3 && b<g*0.8) outTok++;         // tokens out bar (#2fd186)
                             if (b>r*1.3 && b>g*1.3 && g>r) req++;     // requests line (#5b8cff)
                             if (g>r*1.3 && b>g*0.8 && b<g*1.1) blended++; // blended line (#38d5c0)
-                            if (r>b*1.3 && r>g) cost++;                // cost line (#f4c14d)
+                            if (r>b*1.3 && r>g && r<g*1.4) cost++;    // cost line (#f4c14d)
+                            if (r>b*1.3 && r>g*1.5) rl++;             // rate-limit line (#ff9346)
                         }
                         const card=document.querySelector('.traffic-card');
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
-                        return {inTok,outTok,req,blended,cost,overflow,
+                        const totals=document.getElementById('chart-totals').textContent;
+                        return {inTok,outTok,req,blended,cost,rl,overflow,rlTotal,errTotal,
+                                errors0:/errors\\s*0/.test(totals), rateLimited2:/rate limited\\s*2/.test(totals),
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
@@ -208,10 +247,13 @@ async def check(base, screenshot):
                     }''')
                     require(state['inTok'] and state['outTok'], state)
                     require(state['req'] and state['blended'] and state['cost'], state)
+                    require(state['rl'], state)
+                    require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
+                    require(state['errors0'] and state['rateLimited2'], state)
                     require(not state['overflow'], state)
-                    require(state['tiles'] == 9, state)
+                    require(state['tiles'] == 10, state)
                     require(state['sparks'] == 2, state)
-                    require(not state['pctHidden'], state)
+                    require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
                 # Restore the saved-view expectations the reload check pins.

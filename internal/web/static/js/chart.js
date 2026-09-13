@@ -40,6 +40,10 @@ const CHART_POINT_RING_WIDTH = 1;
 // tile width, so a spark always fits its cell. Decorative like the explorer
 // sparks; the tile value carries the number.
 const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
+// The Overview tiles pin the server's p95 ([p50, p95, p99] index 1): the
+// preset keeps only the time-range control, no percentile selector, and no
+// visible pXX label anywhere - the tile tooltip carries the semantics.
+const CHART_TILE_PCT_IDX = 1;
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -114,6 +118,8 @@ function asinhTickLadder(tmax) {
 const CHART_SERIES = [
   { id: 'req',     label: 'requests',   color: 'accent',  fmt: fmt,      bar: true },
   { id: 'err',     label: 'errors',     color: 'err',     fmt: fmt,      bar: true },
+  { id: 'rl',      label: 'rate limited', color: 'rl',    fmt: fmt,
+    title: 'Requests with final or retried HTTP 429; each request counted once. A rate limit is not an error.' },
   { id: 'inTok',   label: 'tokens in',  color: 'accent2', fmt: fmt,      bar: true },
   { id: 'outTok',  label: 'tokens out', color: 'ok',      fmt: fmt,      bar: true },
   { id: 'blended', label: 'blended',    color: 'cyan',    fmt: fmt,
@@ -144,17 +150,16 @@ const CHART_SERIES = [
 const CHART_PRESETS = [
   {
     // Overview: the at-a-glance composition. In/out token bars share the
-    // compressed left scale with the error bars; requests ride that same
-    // scale as a line (a count accompanying tokens, keeping three bars
-    // readable), the cached share traces input as its dashed subset line and
-    // the blended total (in+out) traces the bars' envelope. Spend stays on
-    // its own right axis - money never shares a count scale. The totals
-    // strip carries the percentile-gated speed/latency readouts with
-    // per-bucket sparklines; pctiles marks that the percentile select drives
-    // those tiles even though no metric series plots here.
-    id: 'overview', label: 'Overview', pctiles: true,
+    // compressed left scale with the error bars; requests, the cached share
+    // and the rate-limit (429) count trace that same scale as lines (counts
+    // accompanying tokens, keeping three bars readable), and the blended
+    // total (in+out) traces the bars' envelope. Spend stays on its own right
+    // axis - money never shares a count scale. The totals strip carries
+    // every headline metric plus the p95-gated speed/latency readouts with
+    // per-bucket sparklines; only the time-range control applies here.
+    id: 'overview', label: 'Overview',
     left: { scale: 'y', fmt: fmt, label: 'Requests + tokens' }, right: { scale: 'yr', fmt: fmtMoney, label: 'Spend (USD)' },
-    series: [['inTok', 'y'], ['outTok', 'y'], ['err', 'y'], ['req', 'y', 'line'], ['cache', 'y'], ['blended', 'y'], ['cost', 'yr', 'line']],
+    series: [['inTok', 'y'], ['outTok', 'y'], ['err', 'y'], ['rl', 'y'], ['req', 'y', 'line'], ['cache', 'y'], ['blended', 'y'], ['cost', 'yr', 'line']],
   },
   {
     id: 'traffic', label: 'Traffic',
@@ -230,6 +235,7 @@ function chartBucketVal(s, b) {
   switch (s.id) {
     case 'req': return b.req;
     case 'err': return b.err;
+    case 'rl': return b.rl;
     case 'inTok': return b.in;
     case 'outTok': return b.out;
     case 'blended': return b.in + b.out;
@@ -565,10 +571,11 @@ function upOpts(w, h) {
 // average of bucket percentiles.
 function chartTotals() {
   if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return '';
-  let req = 0, err = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
+  let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
   chartAgg.buckets.forEach((b, i) => {
     req += b.req;
     err += b.err;
+    rl += (b.rl || 0);
     tin += b.in;
     tout += b.out;
     tcache += (b.cache || 0);
@@ -616,19 +623,21 @@ function chartTotals() {
     case 'overview': {
       const tot = tin + tout;
       parts.push(seriesSpan(chartSpec('req'), req));
-      parts.push(seriesSpan(chartSpec('blended'), tot));
+      parts.push(seriesSpan(chartSpec('blended'), tot, tout ? `<span class="chart-sub">in:out ${inOutRatio(tin, tout)}</span>` : ''));
       parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot)));
       parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
       parts.push(seriesSpan(chartSpec('cost'), cost));
       parts.push(seriesSpan(chartSpec('err'), err, rate != null ? `<span class="chart-sub">${fmtPct(rate)}</span>` : ''));
-      // Percentile-gated tile per metric: the period-wide percentile the
-      // server computed, plus the per-bucket evolution as a sparkline (the
-      // same selected percentile, suppressed buckets stay absent).
+      parts.push(seriesSpan(chartSpec('rl'), rl, req ? `<span class="chart-sub">${fmtPct((rl / req) * 100)}</span>` : ''));
+      // Timing tiles pin the server's p95 for the period, plus the per-bucket
+      // p95 evolution as a sparkline (suppressed buckets stay absent). No
+      // percentile selector on this preset: the tooltip carries the choice.
       for (const id of ['ttft', 'tps']) {
         const s = chartSpec(id);
-        const spark = sparklineSVG(chartAgg.buckets.map(b => b[s.metric]?.[pctIdx()] ?? null), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
-        parts.push(seriesSpan(s, chartAgg[s.metric + '_p']?.[pctIdx()] ?? null, spark, s.tileFmt));
+        const spark = sparklineSVG(chartAgg.buckets.map(b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
+        const tile = { ...s, title: (s.title ? s.title + ' ' : '') + '95th percentile over the viewed period.' };
+        parts.push(seriesSpan(tile, chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null, spark, s.tileFmt));
       }
       break;
     }
@@ -645,7 +654,7 @@ function chartTotals() {
 
 function chartChromeSync() {
   const preset = activePreset();
-  $('chart-pct').hidden = !(preset.pctiles || preset.series.some(([id]) => chartSpec(id).metric));
+  $('chart-pct').hidden = !preset.series.some(([id]) => chartSpec(id).metric);
   const compressed = preset.left.scale === 'y'
     ? ' <span class="chart-scale" title="The scale compresses large values so smaller values remain visible. Compare the labeled values, not bar-height ratios.">· compressed scale</span>' : '';
   updateSection('chart-axes', `<span>${preset.left.label}${compressed}</span><span>${preset.right?.label || ''}</span>`);

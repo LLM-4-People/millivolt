@@ -714,13 +714,15 @@ Tools and error occurrences can have multiple memberships per request, while
 error/429 health badges count distinct affected requests.
 
 The [visual guide](dashboard.md) covers every timeline and its controls. Overview
-composes requests, input/output/cached tokens, the blended total, spend, errors
-and the percentile-gated speed/latency readouts in one window; Traffic
+composes requests, input/output/cached tokens, the blended total with its in:out
+balance, spend, errors, rate-limited (429) requests and 95th-percentile
+speed/latency readouts in one window; Traffic
 compares requests/errors; Tokens separates available input/output/reasoning/cache
 usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
 uses independent throughput/TTFT axes; Errors compares
 error count/rate; Cost places reported USD spend beside request volume. One
-percentile selection controls the timing series. Period percentiles are computed
+percentile selection controls the timing series (the Overview pins the 95th
+percentile and keeps only the time-range control). Period percentiles are computed
 from period samples, not averages of bucket percentiles. Insufficient samples
 remain unavailable. All time means the available retained history, not deleted,
 dropped or never-observed requests.

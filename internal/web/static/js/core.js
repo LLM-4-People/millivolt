@@ -75,7 +75,7 @@ let storageState = null; // accepted bootstrap signal; never locally incremented
 // Canvas colors resolve from :root tokens (chart series + grid). Entity
 // colors live in ENTITY_TYPES - never a second palette here.
 const COLORS = {};
-['accent', 'accent2', 'err', 'cyan', 'ok', 'warn', 'muted', 'border2'].forEach(k => {
+['accent', 'accent2', 'err', 'cyan', 'ok', 'warn', 'rl', 'muted', 'border2'].forEach(k => {
   COLORS[k] = getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
 });
 // Faint warm gridline (translucent panel border) for chart axes.

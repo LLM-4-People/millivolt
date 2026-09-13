@@ -16,6 +16,11 @@
     --ok: #2fd186;
     --warn: #f4c14d;
     --err: #f05d5d;
+    /* Rate-limited (HTTP 429) throttle tone: one owner for the chart's
+       rate-limit series and the explorer's ×429 badge. Distinct from --err
+       (a rate limit is not an error) and --warn (the chart's cost/rate axis
+       color); line-vs-bar marks and tooltips keep them separable. */
+    --rl: #ff9346;
     /* Header/footer instrument rails sit one step darker than --panel. */
     --rail: #100e0b;
     /* Header rail height + the feathered tick strip that hangs below it.
@@ -508,7 +513,7 @@
   .xp-node-foot .spark { min-width: 0; flex-shrink: 1; }
   .xp-node-signals { font-family: var(--mono); font-size: 10px; white-space: nowrap; flex-shrink: 0; text-align: right; color: var(--muted); }
   .xp-node-err { color: var(--err); }
-  .xp-node-rate { color: var(--warn); }
+  .xp-node-rate { color: var(--rl); }
   .xp-conversation-node { min-width: 0; display: flex; flex-direction: column; gap: 4px; scroll-snap-align: start; }
   .xp-conversation-node > .xp-node { width: 100%; flex: 1; }
   .xp-conversation-role { color: var(--muted); font-size: 9px; flex-shrink: 0; }
