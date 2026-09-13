@@ -172,34 +172,59 @@ async def check(base, screenshot):
                 # period-total assertions need every request-bearing bucket.
                 await page.evaluate('window.__fullChart = chartAgg')
                 await page.select_option('#chart-preset', 'latency')
-                await page.wait_for_function('_up && chartAgg.tps_p.some(v => v != null)')
+                await page.wait_for_function('chartAgg && chartAgg.tps_p.some(v => v != null)')
                 results = []
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
                     for pct in ('50', '95', '99'):
                         await page.select_option('#chart-pct', pct)
-                        # Use one actual server bucket to pin the singleton
-                        # case independently of a calendar-minute boundary.
+                        # Sparse gate first: one measured bucket (the old
+                        # singleton case) must paint the waiting blank, never
+                        # a stranded lone point. Then a five-bucket measured
+                        # window - built from one actual server bucket so the
+                        # case stays independent of calendar-minute
+                        # boundaries - paints both lines across the plot.
                         state = await page.evaluate('''async () => {
                             const bucket = chartAgg.buckets.find(b => b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite));
                             if (!bucket) throw new Error('fixture has no percentile-bearing bucket');
-                            chartAgg = {...chartAgg, buckets:[bucket], from_ms:bucket.t, now_ms:bucket.t+chartAgg.bucket_ms};
+                            const bm = chartAgg.bucket_ms;
+                            chartAgg = {...chartAgg, buckets:[bucket], from_ms:bucket.t, now_ms:bucket.t+bm};
+                            renderChart();
+                            await new Promise(requestAnimationFrame);
+                            const sparseBlank = !_up && !!document.querySelector('#chart-traffic canvas.chart-blank');
+                            // Layout-shift guard: the blank and the mounted
+                            // plot must own the exact same reserved space.
+                            const box = document.getElementById('chart-traffic');
+                            const pair = document.querySelector('.grid-pair');
+                            const sparseH = Math.round(box.getBoundingClientRect().height) + '/' + Math.round(pair.getBoundingClientRect().height);
+                            const five = Array.from({length:5}, (_, k) => ({...bucket,
+                                t: bucket.t + k*bm,
+                                tps: bucket.tps.map(v => v * (1 + k/10)),
+                                ttft: bucket.ttft.map(v => v + k)}));
+                            chartAgg = {...chartAgg, buckets:five, from_ms:bucket.t, now_ms:bucket.t+5*bm};
                             renderChart();
                             // uPlot commits setData in a microtask; inspect
                             // the accepted frame, not its previous canvas.
                             await new Promise(requestAnimationFrame);
+                            const mountedH = Math.round(box.getBoundingClientRect().height) + '/' + Math.round(pair.getBoundingClientRect().height);
                             const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
                             let speed=0, latency=0;
                             for (let i=0;i<pixels.length;i+=4) {
                                 if (!pixels[i+3]) continue;
-                                if (pixels[i+1]>pixels[i]*1.3 && pixels[i+1]>pixels[i+2]*1.1) speed++;
+                                // cyan speed line: green dominant over blue
+                                // (kept loose for thin antialiased strokes at
+                                // low DPR); blue latency line: blue dominant.
+                                if (pixels[i+1]>pixels[i]*1.3 && pixels[i+1]>pixels[i+2]) speed++;
                                 if (pixels[i+2]>pixels[i]*1.3 && pixels[i+2]>pixels[i+1]*1.1) latency++;
                             }
                             const card=document.querySelector('.traffic-card');
                             const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
-                            return {speed,latency,overflow, legend:document.querySelector('#traffic-legend').textContent};
+                            return {sparseBlank, sparseH, mountedH, points:_up.data[0].length, speed, latency, overflow,
+                                    legend:document.querySelector('#traffic-legend').textContent};
                         }''')
-                        require(state['speed'] and state['latency'], state)
+                        require(state['sparseBlank'], state)
+                        require(state['sparseH'] == state['mountedH'], state)
+                        require(state['points'] == 5 and state['speed'] and state['latency'], state)
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
@@ -208,6 +233,9 @@ async def check(base, screenshot):
                 # timeline (no gap points, no dead space). The kept set must
                 # equal the both-measured buckets exactly, every plotted point
                 # carries both lines, and the axes note reports the omission.
+                # Read the columns, not the mounted plot: sparse windows stay
+                # behind the sparse gate, and the data contract holds either
+                # way.
                 state = await page.evaluate('''async () => {
                     const full = window.__fullChart;
                     const idx = ['50','95','99'].indexOf(document.getElementById('chart-pct').value);
@@ -215,9 +243,9 @@ async def check(base, screenshot):
                     chartAgg = {...full};
                     renderChart();
                     await new Promise(requestAnimationFrame);
-                    const u = _up;
-                    const kept = u ? u.data[0].length : -1;
-                    const bothFinite = u ? u.data[0].every((x, i) => Number.isFinite(u.data[1][i]) && Number.isFinite(u.data[2][i])) : false;
+                    const d = chartData();
+                    const kept = d ? d[0].length : 0;
+                    const bothFinite = d ? d[0].every((x, i) => Number.isFinite(d[1][i]) && Number.isFinite(d[2][i])) : false;
                     const dropped = full.buckets.length - measured.length;
                     return {kept, want: measured.length, bothFinite, dropped,
                             note: document.getElementById('chart-context').textContent};
@@ -242,11 +270,22 @@ async def check(base, screenshot):
                         const rlTotal = full.buckets.reduce((s,b)=>s+b.rl,0);
                         const errTotal = full.buckets.reduce((s,b)=>s+b.err,0);
                         if (rlTotal < 1) throw new Error('fixture produced no rate-limited requests');
-                        // Every request-bearing bucket keeps the period
-                        // honest across calendar-minute boundaries.
-                        chartAgg = {...full, buckets: full.buckets.filter(b => b.req > 0)};
+                        // Every request-bearing bucket keeps the period honest
+                        // across calendar-minute boundaries. Filler buckets
+                        // pad sparse windows past the sparse gate: they carry
+                        // traffic but no errors or rate limits, so the
+                        // fixture's health totals stay exact.
+                        const real = full.buckets.filter(b => b.req > 0);
+                        const bm = full.bucket_ms;
+                        const last = real[real.length - 1];
+                        const pad = [];
+                        for (let k = 1; real.length + pad.length < 4; k++)
+                            pad.push({t: last.t + k*bm, req: 1, err: 0, rl: 0, in: 3, out: 2, cache: 0, reason: 0, cost: 0.01,
+                                      ttft: [null,null,null], tps: [null,null,null]});
+                        chartAgg = {...full, buckets: real.concat(pad)};
                         renderChart();
                         await new Promise(requestAnimationFrame);
+                        const points = _up ? _up.data[0].length : 0;
                         const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
                         let inTok=0, outTok=0, req=0, cost=0, rl=0;
                         for (let i=0;i<pixels.length;i+=4) {
@@ -261,13 +300,14 @@ async def check(base, screenshot):
                         const card=document.querySelector('.traffic-card');
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
                         const totals=document.getElementById('chart-totals').textContent;
-                        return {inTok,outTok,req,cost,rl,overflow,rlTotal,errTotal,
+                        return {points,inTok,outTok,req,cost,rl,overflow,rlTotal,errTotal,
                                 errors0:/errors\\s*0/.test(totals), rateLimited2:/rate limited\\s*2/.test(totals),
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
                                 legend:document.querySelector('#traffic-legend').textContent};
                     }''')
+                    require(state['points'] >= 4, state)
                     require(state['inTok'] and state['outTok'], state)
                     require(state['req'] and state['cost'] and state['rl'], state)
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)

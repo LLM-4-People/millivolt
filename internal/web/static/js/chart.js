@@ -46,6 +46,11 @@ const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
 // constant, so the wire triple and the tooltip cannot drift apart.
 const CHART_TILE_PCT = 95;
 const CHART_TILE_PCT_IDX = CHART_PCTS.indexOf(CHART_TILE_PCT);
+// A sparse window cannot fill the plot width honestly: one to three plotted
+// buckets strand a lone bar or a short line in dead space on both sides.
+// The big chart waits for a fourth point and paints the blank meanwhile -
+// the totals tiles and their sparklines still carry the story.
+const CHART_MIN_POINTS = 4;
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -808,18 +813,20 @@ function renderChart() {
   const canMeasure = typeof uPlot !== 'undefined' && chartAgg?.buckets?.length;
   const w = canMeasure ? Math.round(box.clientWidth) : 0;
   const h = canMeasure ? Math.round(box.clientHeight) : 0;
-  const canRender = canMeasure && data && !chartIsEmpty() && w >= 80 && h >= 40;
+  const points = data ? data[0].length : 0;
+  const canRender = canMeasure && data && !chartIsEmpty() && points >= CHART_MIN_POINTS && w >= 80 && h >= 40;
   if (!canRender) {
     if (_up) { _up.destroy(); _up = null; _upKey = ''; }
     if (canMeasure && w >= 80 && h >= 40) {
       const { ctx } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
-      // Traffic that the active preset cannot measure (a requireAll preset
-      // whose buckets all lack a measurement) deserves its own message -
-      // 'no traffic yet' would be false.
-      const msg = data || chartIsEmpty()
-        ? 'no traffic yet'
-        : `no ${activePreset().label.toLowerCase()} samples yet`;
+      // Three honest blanks, in priority order: no traffic at all, traffic
+      // the preset cannot measure, or a window too sparse to fill the plot
+      // width. 'no traffic yet' would be false for the last two.
+      let msg;
+      if (chartIsEmpty()) msg = 'no traffic yet';
+      else if (!data) msg = `no ${activePreset().label.toLowerCase()} samples yet`;
+      else msg = 'not enough data points yet';
       drawBlank(ctx, msg);
     }
     return;

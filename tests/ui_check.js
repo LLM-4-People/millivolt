@@ -1419,6 +1419,7 @@ async function main() {
       chartAgg.buckets[0].req = 1;
       renderChart();
       const data = reads === 4 && _up === null;
+      chartAgg.buckets[1].req = 1; chartAgg.buckets[2].req = 1; chartAgg.buckets[3].req = 1;
       let draws = 0;
       measuredWidth = 640; measuredHeight = 210;
       _up = {width: 640, height: 210, setData() { draws++; }};
@@ -1920,10 +1921,25 @@ async function main() {
     w.renderChart();
     check('latency preset stays blank on zero traffic (compaction and empty gate agree)',
       w.eval('chartData()') === null && !box.querySelector('div.uplot') && w.eval('_up') === null);
-    // honest-data rule intact: SOME traffic must still plot
+    // honest-data rule intact: SOME traffic must still plot - but a sparse
+    // window cannot fill the plot width, so the mount gate holds until the
+    // fourth populated bucket. The blank names the sparseness, not the
+    // traffic.
     w.eval("chartView.preset = 'cost'; chartAgg.buckets[7].req = 1");
     w.renderChart();
-    check('sparse traffic un-blanks and mounts the plot (gaps stay honest)',
+    check('a single populated bucket paints the sparse blank, not a stranded bar',
+      w.eval('chartData() !== null && chartData()[0].length === 1') &&
+      !box.querySelector('div.uplot') && w.eval('_up') === null &&
+      w.eval('window.__blankMsgs').at(-1) === 'not enough data points yet');
+    w.eval("chartAgg.buckets[5].req = 1; chartAgg.buckets[6].req = 1");
+    w.renderChart();
+    check('three populated buckets stay behind the sparse gate',
+      w.eval('chartData()[0].length === 3') &&
+      !box.querySelector('div.uplot') && w.eval('window.__blankMsgs').at(-1) === 'not enough data points yet');
+    w.eval("chartAgg.buckets[8].req = 1");
+    w.renderChart();
+    check('the fourth populated bucket un-blanks and mounts the plot',
+      w.eval('chartData()[0].length === 4') &&
       !!box.querySelector('div.uplot') && w.eval('_up') !== null);
     // traffic without timing samples: compaction empties the latency window
     // while traffic exists, so the blank names the preset, not the traffic

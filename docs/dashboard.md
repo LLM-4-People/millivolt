@@ -34,6 +34,9 @@ together. The time-range dropdown runs from 15 minutes through one year and
 **All time**. It changes chart history, not the global KPI band.
 Legend controls show or hide individual series; hover a bucket for its precise
 values and time interval. Counts, sums and percentiles come from the server.
+A window with fewer than four plotted points paints a waiting message instead
+of the chart: one to three buckets cannot fill the plot width, and the totals
+strip with its sparklines still tells the story until a fourth point arrives.
 
 ### Overview
 
