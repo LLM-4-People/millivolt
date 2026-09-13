@@ -36,7 +36,7 @@ type Options struct {
 	BaseBackoff time.Duration
 	// MaxBackoff caps adaptive exponential backoff. It does not clamp a
 	// provider-supplied Retry-After / rate-limit-reset duration - a long
-	// hint is still waited in full (see maxRetryHint). A short hint is a
+	// hint is still waited in full (see MaxRetryHint). A short hint is a
 	// floor on the wait, not a replacement for this cap's doubling.
 	MaxBackoff time.Duration
 	Storm      StormOptions
@@ -803,14 +803,16 @@ func (g *group) removeWaiter(w *waiter) {
 	g.drain()
 }
 
-// maxRetryHint is the ceiling on a provider-supplied Retry-After /
+// MaxRetryHint is the ceiling on a provider-supplied Retry-After /
 // rate-limit-reset duration. Daily quota windows routinely last tens of
 // minutes and can run until UTC midnight (~24h). This is a safety guardrail
 // only - a hostile or buggy upstream (Retry-After: 99999999) must not stall
 // the request and the whole provider+key group forever. It is independent of
 // MaxBackoff, which caps adaptive exponential backoff. A long hint may
-// outlast that cap; a short hint never replaces it.
-const maxRetryHint = 24 * time.Hour
+// outlast that cap; a short hint never replaces it. The proxy's
+// parseRetryAfter bounds every stored hint to this ceiling, so a wrapped or
+// non-finite upstream value can never reach record fields or the scheduler.
+const MaxRetryHint = 24 * time.Hour
 
 // BackoffFor computes the pacing delay after a retryable failure. Adaptive
 // exponential backoff always grows (base_backoff, cap max_backoff). A
@@ -818,7 +820,7 @@ const maxRetryHint = 24 * time.Hour
 // longer of the hint and the grown adaptive delay, so a 1s "retry shortly"
 // cannot reset the doubling and re-hammer the upstream, while a 35m daily
 // limit is still waited in full. Pathological hints are clamped to
-// maxRetryHint. Jitter applies to the adaptive delay only.
+// MaxRetryHint. Jitter applies to the adaptive delay only.
 func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Duration {
 	s.mu.Lock()
 	g := s.groupForLocked(key, 0, false)
@@ -830,8 +832,8 @@ func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Durati
 	// Jitter: 0.75x–1.25x to avoid thundering herd. Do not write
 	// nextAllowedAt here - only Trip/SetRateLimit trip the group.
 	adaptive := jitterBackoff(g.backoff)
-	if retryAfter > maxRetryHint {
-		retryAfter = maxRetryHint
+	if retryAfter > MaxRetryHint {
+		retryAfter = MaxRetryHint
 	}
 	if retryAfter > adaptive {
 		return retryAfter

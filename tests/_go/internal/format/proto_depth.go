@@ -13,18 +13,59 @@ func nestValueList(inner []byte) []byte {
 	return append(appendVarint([]byte{0x32}, uint64(len(list))), list...)    // Value.list_value = list
 }
 
-// deepValueFrame builds a Value nested `levels` list_value wrappers deep
-// around a string_value("deep"), then wraps it as a map<string, bytes(Value)>
-// entry (field 1 key, field 2 value) exactly like the mcp_args wire.
-func deepValueFrame(t *testing.T, levels int) []byte {
+// nestValueStruct wraps value bytes as one more google.protobuf.Value
+// struct_value level: Value{struct_value: Struct{fields: {"k": inner}}}, so
+// the wire form is field 5 (struct_value) containing a Struct whose single
+// field-1 map entry carries key "k" (field 1) and the inner Value (field 2).
+// Each wrapper adds one recursion level, exactly like nestValueList.
+func nestValueStruct(inner []byte) []byte {
+	entry := append(appendVarint([]byte{0x0a}, uint64(len("k"))), 'k') // map entry field 1 = "k"
+	entry = append(entry, 0x12)                                        // map entry field 2 = inner Value
+	entry = appendVarint(entry, uint64(len(inner)))
+	entry = append(entry, inner...)
+	strct := append(appendVarint([]byte{0x0a}, uint64(len(entry))), entry...) // Struct.fields = entry
+	return append(appendVarint([]byte{0x2a}, uint64(len(strct))), strct...)   // Value.struct_value = Struct
+}
+
+// deepValueNested builds the raw Value bytes of a `levels`-deep frame
+// around string_value("deep"), one wrapper hop per level.
+func deepValueNested(t *testing.T, levels int, wrap func([]byte) []byte) []byte {
 	t.Helper()
 	value := []byte{0x1a, 0x04, 'd', 'e', 'e', 'p'} // Value.string_value = "deep"
 	for i := 0; i < levels; i++ {
-		value = nestValueList(value)
+		value = wrap(value)
 	}
+	return value
+}
+
+// mapValueEntry wraps Value bytes as a map<string, bytes(Value)> entry
+// (field 1 key "arg", field 2 value) exactly like the mcp_args wire.
+func mapValueEntry(value []byte) []byte {
 	entry := append([]byte{0x0a, 0x03, 'a', 'r', 'g'}, 0x12) // field 1 = "arg"
 	entry = appendVarint(entry, uint64(len(value)))
 	return append(entry, value...) // field 2 = Value bytes
+}
+
+// deepValueFrame builds a Value nested `levels` list_value wrappers deep
+// around a string_value("deep"), then wraps it as a map<string, bytes(Value)>
+// entry exactly like the mcp_args wire.
+func deepValueFrame(t *testing.T, levels int) []byte {
+	t.Helper()
+	return mapValueEntry(deepValueFrameRaw(t, levels))
+}
+
+// deepValueFrameRaw is the raw Value bytes of a `levels`-deep list_value
+// frame (without the map-entry wrapper), for the direct decodeProtoValue door.
+func deepValueFrameRaw(t *testing.T, levels int) []byte {
+	t.Helper()
+	return deepValueNested(t, levels, nestValueList)
+}
+
+// deepStructFrame is deepValueFrame with struct_value wrapper hops, so the
+// struct door counts against the same depth budget as the list door.
+func deepStructFrame(t *testing.T, levels int) []byte {
+	t.Helper()
+	return mapValueEntry(deepValueNested(t, levels, nestValueStruct))
 }
 
 // TestProtoValueDepthBound pins the fail-closed depth bound on the
@@ -59,15 +100,45 @@ func TestProtoValueDepthBound(t *testing.T) {
 	if _, ok := decodeProtoValue(deepValueFrameRaw(t, 400), 0); ok {
 		t.Fatal("decodeProtoValue must reject a too-deep frame")
 	}
+	// The exact gate boundary: the deepest Value sits at depth == wrapper
+	// levels and the gate is depth > protoValueMaxDepth, so exactly 128
+	// wrapper levels decode and 129 fail closed. The pair is hardcoded so
+	// silent drift of the constant fails here instead of moving with it.
+	if protoValueMaxDepth != 128 {
+		t.Fatalf("protoValueMaxDepth = %d; the pinned gate is 128 decode / 129 fail closed", protoValueMaxDepth)
+	}
+	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 128)); !ok {
+		t.Fatal("a 128-level Value frame failed to decode; exactly 128 must pass the gate")
+	}
+	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 129)); ok {
+		t.Fatal("a 129-level Value frame decoded; 129 (protoValueMaxDepth+1) must fail closed")
+	}
+	// struct_value hops count against the same budget.
+	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 128)); !ok {
+		t.Fatal("a 128-level struct frame failed to decode; struct hops share the 128 budget")
+	}
+	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 129)); ok {
+		t.Fatal("a 129-level struct frame decoded; struct hops must fail closed at 129")
+	}
 }
 
-// deepValueFrameRaw is the raw Value bytes of a `levels`-deep frame (without
-// the map-entry wrapper), for the direct decodeProtoValue door.
-func deepValueFrameRaw(t *testing.T, levels int) []byte {
-	t.Helper()
-	value := []byte{0x1a, 0x04, 'd', 'e', 'e', 'p'}
-	for i := 0; i < levels; i++ {
-		value = nestValueList(value)
+// TestProtoStructValueDoor covers the struct_value door (decodeProtoValue
+// case 5), which had no test coverage anywhere: one struct level around
+// string_value("deep") decodes through the mcp_args entry door to
+// map[string]any{"k": "deep"}.
+func TestProtoStructValueDoor(t *testing.T) {
+	k, v, ok := decodeStringValueMapEntry(deepStructFrame(t, 1))
+	if !ok {
+		t.Fatal("a struct_value frame failed to decode")
 	}
-	return value
+	if k != "arg" {
+		t.Errorf("key = %q, want \"arg\"", k)
+	}
+	m, isMap := v.(map[string]any)
+	if !isMap {
+		t.Fatalf("struct_value decoded to %T, want map[string]any", v)
+	}
+	if got := m["k"]; got != "deep" {
+		t.Errorf("struct_value[\"k\"] = %#v, want \"deep\"", got)
+	}
 }

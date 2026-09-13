@@ -583,11 +583,11 @@ func TestPolicyUntilExpiredDoesNotHold(t *testing.T) {
 }
 
 // TestBackoffForCapsPathologicalHint pins the safety guardrail: a hostile
-// Retry-After of years is clamped to maxRetryHint so the group cannot stall
+// Retry-After of years is clamped to MaxRetryHint so the group cannot stall
 // forever. This is independent of MaxBackoff.
 func TestBackoffForCapsPathologicalHint(t *testing.T) {
 	s := New(Options{MaxBackoff: 2 * time.Minute})
-	if d := s.BackoffFor("k", 99999999*time.Second); d != maxRetryHint {
-		t.Errorf("pathological hint = %v, want maxRetryHint %v", d, maxRetryHint)
+	if d := s.BackoffFor("k", 99999999*time.Second); d != MaxRetryHint {
+		t.Errorf("pathological hint = %v, want MaxRetryHint %v", d, MaxRetryHint)
 	}
 }

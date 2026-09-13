@@ -725,6 +725,15 @@ func requestNumberNeedsDecode(raw []byte) bool {
 	return false
 }
 
+// maxRequestOutputTokens bounds a client-supplied max_tokens /
+// max_completion_tokens at the trust boundary. Mainstream model output caps
+// top out around 128k tokens; anything beyond 1,000,000 (the same ceiling
+// internal/config validates for anthropic_default_max_tokens) is hostile or
+// malformed. Unbounded values would let one request wrap the Acquire-time
+// token estimate negative or debit a provider token bucket by the full
+// attacker-chosen amount.
+const maxRequestOutputTokens = 1_000_000
+
 type requestRouting struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
@@ -793,10 +802,14 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 		}
 	}
 	rec.Model, rec.Stream = req.Model, req.Stream
-	if req.MaxTokens != nil {
-		rec.ReqMaxTokens = req.MaxTokens
-	} else if req.MaxCompTokens != nil {
+	// Prefer max_completion_tokens, matching the Anthropic translator's
+	// pick: the translated body re-decodes through this same merge, so the
+	// trust-boundary check in ServeHTTP must see the one field a translated
+	// body can actually carry upstream.
+	if req.MaxCompTokens != nil {
 		rec.ReqMaxTokens = req.MaxCompTokens
+	} else if req.MaxTokens != nil {
+		rec.ReqMaxTokens = req.MaxTokens
 	}
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP

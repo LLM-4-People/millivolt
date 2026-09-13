@@ -549,7 +549,7 @@ type AggResult struct {
 	TotalOutput int64              `json:"total_output_tokens"`
 	TotalCache  int64              `json:"total_cache_read"`
 	ErrorCount  int                `json:"error_count"`
-	ToolCalls   int                `json:"tool_calls"`
+	ToolCalls   int64              `json:"tool_calls"`
 }
 
 // Aggregate computes lightweight aggregates over the given snapshot. Results
@@ -576,7 +576,10 @@ func Aggregate(records []*Record) *AggResult {
 		for _, term := range [...]struct {
 			dst   *int64
 			value int64
-		}{{&a.TotalInput, r.Usage.InputTokens}, {&a.TotalOutput, r.Usage.OutputTokens}, {&a.TotalCache, r.Usage.CacheReadTokens}} {
+		}{
+			{&a.TotalInput, r.Usage.InputTokens}, {&a.TotalOutput, r.Usage.OutputTokens},
+			{&a.TotalCache, r.Usage.CacheReadTokens}, {&a.ToolCalls, int64(r.ToolCalls)},
+		} {
 			var err error
 			*term.dst, err = SumCounts(*term.dst, term.value)
 			if err != nil {
@@ -586,7 +589,6 @@ func Aggregate(records []*Record) *AggResult {
 		if r.IsError() {
 			a.ErrorCount++
 		}
-		a.ToolCalls += r.ToolCalls
 	}
 	return a
 }

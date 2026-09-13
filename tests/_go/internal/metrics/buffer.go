@@ -2,6 +2,8 @@ package metrics
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -99,6 +101,31 @@ func TestAggregate(t *testing.T) {
 	}
 	if agg.ByStatus[500] != 1 {
 		t.Errorf("ByStatus[500] = %d", agg.ByStatus[500])
+	}
+}
+
+// Regression: Aggregate's ToolCalls sum was the repo's only unchecked tool
+// total (storage.Totals and the web explorer fold already route through
+// SumCounts), so a negative or overflowing record value silently corrupted
+// llm_proxy_tool_calls_total - a negative summed to a partial total and an
+// overflow wrapped to MinInt64, both with nil Err. The term must fail closed
+// exactly like the neighboring token sums: Err is ErrMetricRange and the
+// stored total is never a wrapped or partially-summed value.
+func TestAggregateToolCallsChecked(t *testing.T) {
+	a := Aggregate([]*Record{{StatusCode: 200, ToolCalls: 2}, {StatusCode: 200, ToolCalls: -1}})
+	if a.Err == nil || !errors.Is(a.Err, ErrMetricRange) {
+		t.Fatalf("negative ToolCalls: Aggregate.Err = %v, want ErrMetricRange", a.Err)
+	}
+	if a.ToolCalls != 0 {
+		t.Errorf("negative ToolCalls: ToolCalls = %d, want the fail-closed 0", a.ToolCalls)
+	}
+
+	a = Aggregate([]*Record{{StatusCode: 200, ToolCalls: math.MaxInt64}, {StatusCode: 200, ToolCalls: 1}})
+	if a.Err == nil || !errors.Is(a.Err, ErrMetricRange) {
+		t.Fatalf("overflowing ToolCalls: Aggregate.Err = %v, want ErrMetricRange", a.Err)
+	}
+	if a.ToolCalls != 0 {
+		t.Errorf("overflowing ToolCalls: ToolCalls = %d, want the fail-closed 0", a.ToolCalls)
 	}
 }
 

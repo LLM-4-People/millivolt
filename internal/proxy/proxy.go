@@ -333,6 +333,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errJSON("invalid_request_error", err.Error()), status)
 		return
 	}
+	// Deny a hostile token cap at the trust boundary: the decoded value
+	// feeds the Acquire-time token estimate with no further range check, so
+	// an unbounded cap could wrap the estimate negative (skipping the
+	// reservation) or debit the provider token bucket by the attacker-chosen
+	// amount. max_tokens and max_completion_tokens both decode into
+	// ReqMaxTokens, so one bound covers every spelling. Only the top end:
+	// zero/negative values cannot reach the overflow arithmetic and some
+	// backends treat 0/-1 as unlimited.
+	if rec.ReqMaxTokens != nil && *rec.ReqMaxTokens > maxRequestOutputTokens {
+		http.Error(w, errJSON("invalid_request_error",
+			fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+		return
+	}
 	stream, model := rec.Stream, rec.Model
 
 	key, ok := s.resolveKey(w, r, t, extractKey(r))

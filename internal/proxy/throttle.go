@@ -30,7 +30,7 @@ const (
 // Safety guardrails on a header/UI-supplied cap. Not user-tunable: they
 // bound a hostile or typo'd value so it cannot stall the provider forever
 // or overflow the token bucket. Window is 1s..24h (same ceiling as
-// maxRetryHint - a daily quota window).
+// scheduler.MaxRetryHint - a daily quota window).
 const (
 	maxLimitConcurrency = 100_000
 	maxLimitRequests    = 1_000_000_000

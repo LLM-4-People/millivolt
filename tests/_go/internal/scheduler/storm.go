@@ -190,7 +190,7 @@ func TestStormBackoffRetryHintAndStaleSuccess(t *testing.T) {
 	stormDue(s)
 	stormPermit(t, s, "provider.test", "a").Observe(true, "HTTP 503", 10*24*time.Hour)
 	remaining := time.Until(s.StormSnapshot()[0].RetryAt)
-	if remaining > maxRetryHint || remaining < maxRetryHint-time.Second {
+	if remaining > MaxRetryHint || remaining < MaxRetryHint-time.Second {
 		t.Fatalf("retry hint was shrunk or unbounded: %v", remaining)
 	}
 }

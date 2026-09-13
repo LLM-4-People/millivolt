@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -953,13 +954,25 @@ func transportErrText(err error) string {
 // parseRetryAfter extracts a delay from provider retry hints. Checks
 // Retry-After (seconds or HTTP-date), then OpenAI's x-ratelimit-reset-requests
 // (e.g. "2s" or a duration string), then anthropic-ratelimit-reset-requests.
+// Every path is bounded to [0, scheduler.MaxRetryHint]: the stored hint lands
+// in the record's RetryAfterMs and feeds BackoffFor, whose pathological-hint
+// clamp only catches positives - an overflow-wrapped negative or an
+// implementation-defined non-finite float conversion must never get stored.
 func parseRetryAfter(resp *http.Response) time.Duration {
 	if v := resp.Header.Get("Retry-After"); v != "" {
 		if secs, err := strconv.Atoi(v); err == nil {
-			return time.Duration(secs) * time.Second
+			switch {
+			case secs <= 0:
+				return 0
+			case secs > int(scheduler.MaxRetryHint/time.Second):
+				return scheduler.MaxRetryHint
+			default:
+				// Within the ceiling the seconds product can no longer wrap.
+				return time.Duration(secs) * time.Second
+			}
 		}
 		if ts, err := http.ParseTime(v); err == nil {
-			return time.Until(ts)
+			return clampRetryHint(time.Until(ts))
 		}
 	}
 	for _, h := range []string{
@@ -970,14 +983,40 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	} {
 		if v := resp.Header.Get(h); v != "" {
 			if d, err := time.ParseDuration(v); err == nil {
-				return d
+				return clampRetryHint(d)
 			}
-			if secs, err := strconv.ParseFloat(v, 64); err == nil {
-				return time.Duration(secs * float64(time.Second))
+			// NaN and +/-Inf are malformed like any parse failure: fall
+			// through to the next candidate. A finite value is range-checked
+			// before the float-to-Duration conversion so it can never be
+			// out of range.
+			if secs, err := strconv.ParseFloat(v, 64); err == nil &&
+				!math.IsNaN(secs) && !math.IsInf(secs, 0) {
+				switch {
+				case secs <= 0:
+					return 0
+				case secs > scheduler.MaxRetryHint.Seconds():
+					return scheduler.MaxRetryHint
+				default:
+					return time.Duration(secs * float64(time.Second))
+				}
 			}
 		}
 	}
 	return 0
+}
+
+// clampRetryHint floors a parsed retry hint into [0, scheduler.MaxRetryHint]:
+// a negative (past HTTP-date or negative duration) means "retry now", and a
+// value above the ceiling is pathological.
+func clampRetryHint(d time.Duration) time.Duration {
+	switch {
+	case d <= 0:
+		return 0
+	case d > scheduler.MaxRetryHint:
+		return scheduler.MaxRetryHint
+	default:
+		return d
+	}
 }
 
 // transformResponse relays a format-translated upstream response, translating
