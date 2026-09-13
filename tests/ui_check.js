@@ -1478,8 +1478,9 @@ async function main() {
   check('hiding a line series passes all-null columns', dataErr3[2].every(v => v === null) && dataErr3[1][0] === 3);
   w.eval('chartView.hidden = {}');
 
-  // tokens preset: 3 bars + the cache line, in declaration order (buckets 3
-  // and 7 still carry traffic from the traffic sub-test → 3 compacted slots)
+  // tokens preset: 3 bars + the cache line + the cache-hit % line on the
+  // pinned pct right axis, in declaration order (buckets 3 and 7 still
+  // carry traffic from the traffic sub-test → compacted slots)
   w.eval(`
     chartView.preset = 'tokens'; chartView.hidden = {};
     chartAgg.buckets[4].req = 1;
@@ -1487,10 +1488,21 @@ async function main() {
   `);
   const dataTok = w.eval('chartData()');
   const tokSlot = w.eval('_vis.indexOf(4)');
-  check('token slots plot in/out/reason/cache', dataTok.length === 5 && tokSlot >= 0 && dataTok[1][tokSlot] === 100 && dataTok[2][tokSlot] === 40 && dataTok[3][tokSlot] === 10 && dataTok[4][tokSlot] === 60);
+  check('token slots plot in/out/reason/cache', dataTok.length === 6 && tokSlot >= 0 && dataTok[1][tokSlot] === 100 && dataTok[2][tokSlot] === 40 && dataTok[3][tokSlot] === 10 && dataTok[4][tokSlot] === 60);
+  check('cache hit derives pct-of-input per bucket and stays unmeasured at zero input',
+    dataTok[5][tokSlot] === 60 && dataTok[5][0] === null);
+  const tokTotals = w.eval('chartTotals()');
+  check('tokens totals carry shares, cache pct of input and the in:out ratio',
+    tokTotals.includes('71.4%') && tokTotals.includes('28.6%') &&
+    tokTotals.includes('60.0% of in') && tokTotals.includes('in:out</span> 2.5 : 1'));
+  check('tokens preset pins the cache-hit line to a 0-100 right axis', w.eval(`(() => {
+    const opts = upOpts(600, 180);
+    return opts.axes.length === 3 && opts.axes[2].scale === 'pct' && opts.axes[2].side === 1 &&
+      opts.series[5].scale === 'pct' && opts.series[5].label === 'cache hit';
+  })()`));
   w.eval("chartView.hidden = { tokens: ['outTok'] }");
   const dataTok2 = w.eval('chartData()');
-  check('hiding a token series nulls its column, count stable', dataTok2.length === 5 && dataTok2[2].every(v => v === null) && dataTok2[1][tokSlot] === 100 && dataTok2[3][tokSlot] === 10 && dataTok2[4][tokSlot] === 60);
+  check('hiding a token series nulls its column, count stable', dataTok2.length === 6 && dataTok2[2].every(v => v === null) && dataTok2[1][tokSlot] === 100 && dataTok2[3][tokSlot] === 10 && dataTok2[4][tokSlot] === 60);
   w.eval('chartView.hidden = {}');
 
   // Speed + latency: one selected percentile per metric + server sparse gate (no
@@ -1636,7 +1648,7 @@ async function main() {
   `);
   const pct50Want = {
     traffic: ['req', 'err'],
-    tokens: ['inTok', 'outTok', 'reason', 'cache'],
+    tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
     cost: ['cost', 'req'],
     latency: ['tps', 'ttft'],

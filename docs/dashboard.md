@@ -56,6 +56,9 @@ an error. A recovered failure can still contribute an error signal.
 **Tokens** compares input, output, reasoning and cached usage. The upstream's
 reported fields determine which splits are available. The compressed vertical
 scale keeps large prompt/cache volumes and small outputs readable together.
+A cache-hit line on a separate percentage axis tracks cached prompt tokens as
+a share of input per bucket. The totals strip adds each side's share of the
+blended total, the cache share of input, and the in:out ratio.
 
 ![Token timeline with input, output, reasoning and cached usage](images/charts/tokens.png)
 

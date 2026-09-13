@@ -715,7 +715,8 @@ error/429 health badges count distinct affected requests.
 
 The [visual guide](dashboard.md) covers every timeline and its controls. Traffic
 compares requests/errors; Tokens separates available input/output/reasoning/cache
-usage; Speed + latency uses independent throughput/TTFT axes; Errors compares
+usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
+uses independent throughput/TTFT axes; Errors compares
 error count/rate; Cost places reported USD spend beside request volume. One
 percentile selection controls the timing series. Period percentiles are computed
 from period samples, not averages of bucket percentiles. Insufficient samples

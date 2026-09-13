@@ -8,7 +8,7 @@
 // Rendering follows the aggregated-bucket convention: per-bucket sums
 // (requests/errors/tokens/cost) render as bars (discrete sums, not smooth
 // data), speed and latency render as lines at the selected percentile,
-// and the error rate renders as a % line on
+// and percentage rates (error rate, cache hit) render as % lines on
 // a pinned 0–100 right axis - never a % series on a count scale.
 // CHART_WINDOWS / CHART_PCTS are the single owners of the chart window and
 // percentile selects (values are strings matching the <select> values;
@@ -115,6 +115,8 @@ const CHART_SERIES = [
   { id: 'cost',    label: 'cost',       color: 'warn',    fmt: fmtMoney, bar: true },
   { id: 'cache',   label: 'cached',     color: 'muted',   fmt: fmt,      dash: [3, 3] },
   { id: 'errRate', label: 'error rate', color: 'warn',    fmt: fmtPct },
+  { id: 'cachePct', label: 'cache hit', color: 'warn',   fmt: fmtPct,
+    title: 'Cached prompt tokens as a share of input tokens, per bucket.' },
   { id: 'tps',  metric: 'tps',      label: 'speed',   color: 'ok',     fmt: fmtTPS,
     title: 'Output tokens per second over wall time; decode-window speed when overall throughput is unavailable.' },
   { id: 'ttft', metric: 'ttft', label: 'latency', color: 'accent', fmt: fmtDur,
@@ -136,8 +138,8 @@ const CHART_PRESETS = [
   },
   {
     id: 'tokens', label: 'Tokens',
-    left: { scale: 'y', fmt: fmt, label: 'Tokens' }, right: null,
-    series: [['inTok', 'y'], ['outTok', 'y'], ['reason', 'y'], ['cache', 'y']],
+    left: { scale: 'y', fmt: fmt, label: 'Tokens' }, right: { scale: 'pct', fmt: fmtPct, label: 'Cache hit' },
+    series: [['inTok', 'y'], ['outTok', 'y'], ['reason', 'y'], ['cache', 'y'], ['cachePct', 'pct']],
   },
   {
     id: 'latency', label: 'Speed + latency',
@@ -209,6 +211,7 @@ function chartBucketVal(s, b) {
     case 'reason': return b.reason;
     case 'cost': return b.cost;
     case 'errRate': return b.req ? (b.err / b.req) * 100 : null;
+    case 'cachePct': return b.in ? (b.cache / b.in) * 100 : null;
     default: return s.metric ? (b[s.metric]?.[pctIdx()] ?? null) : null;
   }
 }
@@ -548,7 +551,17 @@ function chartTotals() {
   });
   const rate = req ? (err / req) * 100 : null;
   const span = (label, val) => `<span class="chart-total"><span class="tl">${label}</span> ${val}</span>`;
-  const seriesSpan = (s, val) => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${s.fmt(val)}</span>`;
+  const seriesSpan = (s, val, sub = '') => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${s.fmt(val)}${sub}</span>`;
+  // pctSub renders a measured part-to-whole share as a small muted suffix
+  // ('60.0% of in'). An unmeasured ratio (zero denominator) renders no
+  // suffix, never a fabricated 0%.
+  const pctSub = (a, b, of) => {
+    const p = pct(a, b);
+    return p === '-' ? '' : `<span class="chart-sub">${p}${of ? ' ' + of : ''}</span>`;
+  };
+  // inOutRatio renders the token balance as input per output ('2.5 : 1').
+  // An unmeasured denominator renders '-', never a fabricated ratio.
+  const inOutRatio = (tin, tout) => tout ? (Math.round((tin / tout) * 100) / 100) + ' : 1' : '-';
   const p = activePreset();
   const parts = [];
   switch (p.id) {
@@ -557,12 +570,15 @@ function chartTotals() {
       parts.push(seriesSpan(chartSpec('err'), err));
       if (rate != null) parts.push(span('rate', fmtPct(rate)));
       break;
-    case 'tokens':
-      parts.push(seriesSpan(chartSpec('inTok'), tin));
-      parts.push(seriesSpan(chartSpec('outTok'), tout));
+    case 'tokens': {
+      const tot = tin + tout;
+      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot)));
+      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
       parts.push(seriesSpan(chartSpec('reason'), treason));
-      parts.push(seriesSpan(chartSpec('cache'), tcache));
+      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
+      parts.push(span('in:out', inOutRatio(tin, tout)));
       break;
+    }
     case 'errors':
       parts.push(seriesSpan(chartSpec('err'), err));
       if (rate != null) parts.push(span('rate', fmtPct(rate)));

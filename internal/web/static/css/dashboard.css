@@ -902,6 +902,7 @@
   }
   .chart-total { display: flex; flex-direction: column; gap: 3px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
+  .chart-totals .chart-sub { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
