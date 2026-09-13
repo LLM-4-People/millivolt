@@ -208,7 +208,12 @@ func shortID(id string) string {
 }
 
 func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *http.Request, t *target, key, rawModel string, body []byte, stream bool, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) {
-	s.logCursorRequestShape(r, body)
+	// Shape logging is debug-session-only (beginDebugTap set rec.Debug on
+	// the same request): it fires per request, so an ungated log would
+	// scale log volume with traffic.
+	if rec.Debug {
+		s.logCursorRequestShape(r, body)
+	}
 	rr := cursorTurnRender{est: estimateInputTokens(body), includeUsage: requestIncludesUsage(body), model: rec.Model, scope: s.cursorScopeFor(t, key, rawModel, rec.Client)}
 	// Does this request carry tool results that match a parked run? If so,
 	// resume that stream instead of opening a new one.

@@ -175,7 +175,8 @@ sse_keepalive_interval: 15s
 #   type: int · range >= 0 (0 = unlimited) · default 0
 max_concurrent: 0
 
-# Queued waiters per group. 0 is unlimited.
+# Queued waiters per group. 0 is unlimited. It also feeds the default queue cap of a new
+# pause hold.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 0
 max_queue_size: 0

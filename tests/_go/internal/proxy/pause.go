@@ -543,8 +543,19 @@ func TestHandlePauseTwoNonOverlappingAndResumeOne(t *testing.T) {
 }
 
 func TestHandlePauseDefaultMaxQueued(t *testing.T) {
+	// MaxConcurrent is a per-group concurrency cap, not a queue cap: it
+	// must not feed the hold's default queue capacity.
+	d2 := config.Default()
+	d2.MaxConcurrent = 7
+	p2 := New(d2, metrics.Noop{})
+	rr2 := httptest.NewRecorder()
+	p2.HandlePause(rr2, httptest.NewRequest(http.MethodPost, "/admin/pause",
+		strings.NewReader(`{"paused":true,"clients":["c"]}`)))
+	if st := pauseJSON(t, rr2); st["default_max_queued"] != float64(0) {
+		t.Fatalf("default_max_queued = %v, want 0: MaxConcurrent must not feed the hold default", st["default_max_queued"])
+	}
 	d := config.Default()
-	d.MaxConcurrent = 4
+	d.MaxQueueSize = 4
 	p := New(d, metrics.Noop{})
 	rr := httptest.NewRecorder()
 	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
@@ -559,7 +570,7 @@ func TestHandlePauseDefaultMaxQueued(t *testing.T) {
 		t.Fatalf("max_queued = %v, want 4", h["max_queued"])
 	}
 	if st["default_max_queued"] != float64(4) {
-		t.Fatalf("default_max_queued = %v", st["default_max_queued"])
+		t.Fatalf("default_max_queued = %v, want 4", st["default_max_queued"])
 	}
 }
 

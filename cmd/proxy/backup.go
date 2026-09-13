@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -51,7 +52,8 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, err := backup.Encode(stageDir, arch)
 	if err != nil {
-		logHTTPError(w, "backup failed", http.StatusInternalServerError)
+		log.Printf("backup: encode failed: %v", err)
+		logHTTPError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if int64(len(raw)) > backupCap() {

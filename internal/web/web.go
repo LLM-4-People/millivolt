@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"path"
 	"slices"
@@ -252,6 +253,7 @@ func Handler(agg *AggAPI) http.Handler {
 		// An inert application/json script is parsed by the existing JS boot.
 		payload, err := json.Marshal(agg.bootstrap(agg.buf.SnapshotSince(0)))
 		if err != nil {
+			log.Printf("dashboard: encode bootstrap: %v", err)
 			http.Error(w, "dashboard state unavailable", http.StatusInternalServerError)
 			return
 		}

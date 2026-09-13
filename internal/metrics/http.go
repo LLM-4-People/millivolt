@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -104,6 +105,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	snapshot := b.SnapshotRequest(r)
 	snap, err := json.Marshal(ObserveSnapshot(snapshot, b.observerModels(true, snapshot.Records, snapshot.InFlightRecords)))
 	if err != nil {
+		log.Printf("metrics: encode snapshot: %v", err)
 		http.Error(w, `{"error":"serialize"}`, http.StatusInternalServerError)
 		return
 	}

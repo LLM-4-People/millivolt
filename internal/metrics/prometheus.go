@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -19,6 +20,7 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	records := buf.Snapshot()
 	agg := Aggregate(records)
 	if agg.Err != nil {
+		log.Printf("metrics: aggregate: %v", agg.Err)
 		http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
 		return
 	}
@@ -76,6 +78,7 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 			var err error
 			sum, err = SumCounts(sum, v)
 			if err != nil {
+				log.Printf("metrics: ttft sum: %v", err)
 				http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
 				return
 			}

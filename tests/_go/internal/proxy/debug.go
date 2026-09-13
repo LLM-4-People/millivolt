@@ -410,4 +410,26 @@ func TestRedactHeaderName(t *testing.T) {
 	if redactHeaderName("Content-Type", "") || redactHeaderName("X-Request-Id", "") {
 		t.Fatal("non-secret headers must not redact")
 	}
+	// Rate-limit accounting headers carry "tokens" in the name but no
+	// credential; both provider families must pass, plus the client
+	// queue-limit control header.
+	for _, name := range []string{
+		"x-ratelimit-remaining-tokens", "x-ratelimit-reset-tokens",
+		"anthropic-ratelimit-tokens-limit", "anthropic-ratelimit-tokens-remaining",
+		"anthropic-ratelimit-tokens-reset", "x-proxy-limit-tokens",
+	} {
+		if redactHeaderName(name, "") {
+			t.Errorf("%s must not redact", name)
+		}
+	}
+	// Deny by default stays: credential-bearing proxy controls and any
+	// unknown token-bearing header remain redacted.
+	for _, name := range []string{
+		"x-proxy-refresh-token", "x-proxy-access-token", "x-proxy-key",
+		"x-proxy-headers", "x-session-token",
+	} {
+		if !redactHeaderName(name, "") {
+			t.Errorf("%s must redact", name)
+		}
+	}
 }

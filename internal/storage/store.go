@@ -1142,15 +1142,15 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 			log.Printf("storage: parse response headers for %s: %v", r.ID, err)
 		}
 	}
-	if toolNames != "" {
-		if err := json.Unmarshal([]byte(toolNames), &r.ToolNames); err != nil {
-			log.Printf("storage: parse tool names for %s: %v", r.ID, err)
-		}
+	if names, err := DecodeToolNamesColumn([]byte(toolNames)); err != nil {
+		log.Printf("storage: parse tool names for %s: %v", r.ID, err)
+	} else {
+		r.ToolNames = names
 	}
-	if attemptsJSON != "" {
-		if err := json.Unmarshal([]byte(attemptsJSON), &r.Attempts); err != nil {
-			log.Printf("storage: parse attempts for %s: %v", r.ID, err)
-		}
+	if attempts, err := DecodeAttemptsColumn([]byte(attemptsJSON)); err != nil {
+		log.Printf("storage: parse attempts for %s: %v", r.ID, err)
+	} else {
+		r.Attempts = attempts
 	}
 	r.RateLimited = rateLimited
 	r.Debug = debugFlag != 0
@@ -1164,6 +1164,34 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 		}
 	}
 	return &r, nil
+}
+
+// DecodeAttemptsColumn decodes the stored attempts JSON column. Empty and
+// "null" are the canonical no-attempts spellings and yield nil with no
+// error; any other unmarshal failure is column corruption the caller logs
+// per record.
+func DecodeAttemptsColumn(raw []byte) ([]metrics.RetryAttempt, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var attempts []metrics.RetryAttempt
+	if err := json.Unmarshal(raw, &attempts); err != nil {
+		return nil, err
+	}
+	return attempts, nil
+}
+
+// DecodeToolNamesColumn decodes the stored tool_names JSON column with the
+// same empty/"null" contract as DecodeAttemptsColumn.
+func DecodeToolNamesColumn(raw []byte) ([]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var names []string
+	if err := json.Unmarshal(raw, &names); err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 func marshalClientMeta(m metrics.ClientMeta) string {
@@ -1942,6 +1970,9 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.Query(r.Context(), q)
 	if err != nil {
+		// The verbatim body serves the operator's browser (operator-gated
+		// path); the server-side log is the durable record of the cause.
+		log.Printf("storage: query failed: %v", err)
 		status := http.StatusInternalServerError
 		if errors.Is(err, ErrQueryLimit) {
 			status = http.StatusRequestEntityTooLarge
@@ -1951,6 +1982,7 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	data, err := json.Marshal(rows)
 	if err != nil {
+		log.Printf("storage: query failed: %v", err)
 		fail(http.StatusInternalServerError, err.Error())
 		return
 	}

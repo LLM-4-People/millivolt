@@ -314,11 +314,14 @@ func (s *Server) knownProviders() []string {
 	return out
 }
 
+// defaultPauseCap is the default MaxQueued of a new hold: how many matching
+// waiters the hold parks before Acquire refuses. The semantically matching
+// setting is the per-group queue cap, not the per-group concurrency cap.
 func (s *Server) defaultPauseCap() int {
 	if s == nil {
 		return 0
 	}
-	return s.cfg().MaxConcurrent
+	return s.cfg().MaxQueueSize
 }
 
 // SetPaused parks every client (true) or clears the hold (false).

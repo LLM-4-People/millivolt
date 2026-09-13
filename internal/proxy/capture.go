@@ -91,7 +91,15 @@ func redactHeaderName(name, authHeader string) bool {
 	if strings.Contains(n, "secret") {
 		return true
 	}
-	if strings.Contains(n, "token") && !strings.HasPrefix(n, "x-ratelimit") {
+	// "token" deny-by-default with explicit accounting exemptions: the
+	// OpenAI x-ratelimit-* and Anthropic anthropic-ratelimit-* families
+	// carry token-budget counters, not credentials, and the client queue
+	// control headers x-proxy-limit-requests/-concurrency/-tokens are not
+	// secrets. Every other token-bearing name stays redacted.
+	if strings.Contains(n, "token") &&
+		!strings.HasPrefix(n, "x-ratelimit") &&
+		!strings.HasPrefix(n, "anthropic-ratelimit") &&
+		n != "x-proxy-limit-tokens" {
 		return true
 	}
 	return strings.Contains(n, "key") && strings.Contains(n, "api")
@@ -243,10 +251,6 @@ func (s *Server) finishDebugTap(tap *debugTap, rec *metrics.Record) {
 			"body":    tap.respBody.body(),
 		},
 		"attempts": rec.Attempts,
-		"redaction": []string{
-			"Authorization", "X-Api-Key", "Cookie", "Set-Cookie",
-			"X-Proxy-Refresh-Token", "X-Proxy-Access-Token",
-		},
 	}
 	raw, err := json.Marshal(doc)
 	if err != nil {

@@ -126,11 +126,11 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		}
 		ew := &exportWriter{ResponseWriter: w}
 		if _, err := store.ExportWhere(r.Context(), f, ew); err != nil {
+			log.Printf("metrics export failed: %v", err)
 			if !ew.started {
 				w.Header().Del("Content-Disposition")
-				logHTTPError(w, "export failed", http.StatusInternalServerError)
+				logHTTPError(w, err.Error(), http.StatusInternalServerError)
 			} else {
-				log.Printf("metrics export failed: %v", err)
 				// Do not complete a successful 200 download after a read failure.
 				// net/http aborts the connection/stream without a panic stack.
 				panic(http.ErrAbortHandler)
@@ -166,7 +166,8 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 		if err != nil {
-			logHTTPError(w, "purge failed", http.StatusInternalServerError)
+			log.Printf("purge failed: %v", err)
+			logHTTPError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -195,7 +196,8 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 		if err != nil {
-			logHTTPError(w, "count failed", http.StatusInternalServerError)
+			log.Printf("count failed: %v", err)
+			logHTTPError(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

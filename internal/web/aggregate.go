@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -327,13 +328,15 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	} else if gen > 0 {
 		c.tps = gen
 	}
-	var atts []metrics.RetryAttempt
-	if len(attemptsJSON) > 0 && string(attemptsJSON) != "null" {
-		_ = json.Unmarshal(attemptsJSON, &atts)
+	atts, attErr := storage.DecodeAttemptsColumn(attemptsJSON)
+	if attErr != nil {
+		log.Printf("aggregate: parse attempts for %s: %v", c.id, attErr)
 	}
-	if len(toolNamesJSON) > 0 && string(toolNamesJSON) != "null" {
-		_ = json.Unmarshal(toolNamesJSON, &c.toolsL)
+	toolsL, toolErr := storage.DecodeToolNamesColumn(toolNamesJSON)
+	if toolErr != nil {
+		log.Printf("aggregate: parse tool names for %s: %v", c.id, toolErr)
 	}
+	c.toolsL = toolsL
 	r := metrics.Record{
 		StatusCode: c.status, ErrorType: errType, ErrorCode: errCode, ErrorMsg: errMsg,
 		Attempts: atts, Start: time.UnixMilli(c.start),
@@ -796,6 +799,7 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := a.chart(ctx, winMin, fs, statusCode, time.Now().UnixMilli())
 	if err != nil {
+		log.Printf("agg chart: %v", err)
 		http.Error(w, `{"error":"aggregate failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -1538,6 +1542,7 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 
 	payload, err := a.explorer(ctx, dim, allFS, statusCode)
 	if err != nil {
+		log.Printf("agg explorer: %v", err)
 		http.Error(w, `{"error":"aggregate failed"}`, http.StatusInternalServerError)
 		return
 	}
@@ -1598,6 +1603,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	data, err := json.Marshal(v)
 	if err != nil {
+		log.Printf("agg encode: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{"error":"aggregate cannot be represented"}`))
 		return
@@ -1669,6 +1675,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			}
 			rows, err := a.store.QueryBefore(ctx, cursor, batch)
 			if err != nil {
+				log.Printf("agg log page: %v", err)
 				http.Error(w, `{"error":"log page failed"}`, http.StatusInternalServerError)
 				return
 			}

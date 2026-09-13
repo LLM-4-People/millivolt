@@ -116,6 +116,7 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	logDroppedConfigKeys(*configPath, skipped)
+	recordReloadStatus(true, "", skipped, nil)
 	applyCLIOverrides(cfg)
 
 	buf := metrics.NewBuffer(cfg.HistorySize)
@@ -296,9 +297,10 @@ func main() {
 			defer liveMu.Unlock()
 			return liveCfg.Clone()
 		},
-		Overrides: ov,
-		Persist:   reloadConfig,
-		Backup:    backupStatus,
+		Overrides:    ov,
+		Persist:      reloadConfig,
+		Backup:       backupStatus,
+		ReloadStatus: lastReloadDoc,
 	})
 	registerBackupRoutes(mux)
 
@@ -347,7 +349,12 @@ func main() {
 	if inherited, ok := inheritedListener(); ok {
 		ln = inherited
 	} else {
-		ln, err = claimPort(cfg.Listen)
+		// The stale same-binary instance's exit path is SIGTERM → HTTP
+		// drain bounded by its ShutdownTimeout → synchronous store Close
+		// (write-channel drain plus final flush), so the kill grace must
+		// exceed both; the margin covers the Close drain no config bounds.
+		grace := cfg.ShutdownTimeout + sigtermCloseDrainMargin
+		ln, err = claimPort(cfg.Listen, grace)
 		if err != nil {
 			log.Fatalf("serve: %v", err)
 		}
@@ -513,6 +520,58 @@ func logDroppedConfigKeys(path string, skipped []string) {
 	log.Printf("config: dropped unknown or invalid keys from %s: %s", path, strings.Join(skipped, ", "))
 }
 
+// reloadStatus carries the outcome of the most recent configuration
+// application: the boot-time dropped-keys scan or a reload through
+// reloadConfig (the single choke point for SIGHUP, POST /admin/reload,
+// config saves and backup restores). The log lines remain the history; this
+// is the structured view the dashboard reads via /admin/config.
+var reloadStatus = struct {
+	mu              sync.Mutex
+	at              time.Time
+	ok              bool
+	err             string
+	droppedKeys     []string
+	restartRequired []string
+}{}
+
+// recordReloadStatus stores one application outcome. dropped and restart are
+// copied; nil normalizes to the empty JSON array at read time.
+func recordReloadStatus(ok bool, errMsg string, dropped, restart []string) {
+	reloadStatus.mu.Lock()
+	defer reloadStatus.mu.Unlock()
+	reloadStatus.at = time.Now()
+	reloadStatus.ok = ok
+	reloadStatus.err = errMsg
+	reloadStatus.droppedKeys = append([]string(nil), dropped...)
+	reloadStatus.restartRequired = append([]string(nil), restart...)
+}
+
+// lastReloadDoc renders the /admin/config last_reload section. It returns
+// nil before the first application so the section is omitted, matching the
+// other nil-guarded callback sections.
+func lastReloadDoc() any {
+	reloadStatus.mu.Lock()
+	defer reloadStatus.mu.Unlock()
+	if reloadStatus.at.IsZero() {
+		return nil
+	}
+	dropped := reloadStatus.droppedKeys
+	if dropped == nil {
+		dropped = []string{}
+	}
+	restart := reloadStatus.restartRequired
+	if restart == nil {
+		restart = []string{}
+	}
+	return map[string]any{
+		"ok":               reloadStatus.ok,
+		"error":            reloadStatus.err,
+		"dropped_keys":     dropped,
+		"restart_required": restart,
+		"at":               reloadStatus.at.UnixMilli(),
+	}
+}
+
 func applyCLIOverrides(cfg *config.Config) {
 	if liveListenOverride != "" {
 		cfg.Listen = liveListenOverride
@@ -539,6 +598,7 @@ func reloadConfig() ([]string, error) {
 	defer liveMu.Unlock()
 	fresh, dropped, err := config.LoadFileRepair(liveConfigPath)
 	if err != nil {
+		recordReloadStatus(false, err.Error(), nil, nil)
 		return nil, err
 	}
 	logDroppedConfigKeys(liveConfigPath, dropped)
@@ -554,7 +614,9 @@ func reloadConfig() ([]string, error) {
 	// age out or the process restarts; new requests re-key immediately.
 	if liveStore != nil && !maps.Equal(liveCfg.ProviderAliases, fresh.ProviderAliases) {
 		if _, err := liveStore.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
-			return nil, fmt.Errorf("provider_aliases: %w", err)
+			err = fmt.Errorf("provider_aliases: %w", err)
+			recordReloadStatus(false, err.Error(), dropped, nil)
+			return nil, err
 		}
 	}
 	// Hot-apply the reloadable subset. The proxy swaps its config snapshot and
@@ -569,6 +631,7 @@ func reloadConfig() ([]string, error) {
 	// Keep the shared cfg in sync so the next reload diffs against the latest.
 	cloned := fresh.Clone()
 	*liveCfg = *cloned
+	recordReloadStatus(true, "", dropped, skipped)
 	return skipped, nil
 }
 

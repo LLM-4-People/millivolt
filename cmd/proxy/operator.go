@@ -61,6 +61,9 @@ const (
 	// Bounds the pre-auth login form's body phase: bytes are capped by
 	// MaxBytesReader, this caps the time. Internal guardrail, not tunable.
 	sessionBodyReadTimeout = 10 * time.Second
+	// Byte cap for the pre-auth login form's body (the single "token"
+	// field). Internal guardrail, not tunable.
+	sessionFormBodyMax = 4096
 )
 
 // Failed-authentication throttle (per source IP, RemoteAddr only: XFF-style
@@ -364,12 +367,18 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		http.Error(w, `{"error":"`+message+`"}`, code)
 	}
 	mint := func(w http.ResponseWriter) {
-		if cookie, err := gate.mintSessionCookie(); err == nil {
-			// The cookie rides on every authenticated response: force
-			// no-store so no cache retains a Set-Cookie body.
-			w.Header().Set("Cache-Control", "no-store")
-			http.SetCookie(w, cookie)
+		cookie, err := gate.mintSessionCookie()
+		if err != nil {
+			// Log-only: the cookie is a convenience re-mint beside an
+			// already-authenticated response; a side-effect failure must
+			// not convert a working request into a 500.
+			log.Printf("operator gate: mint session cookie: %v", err)
+			return
 		}
+		// The cookie rides on every authenticated response: force
+		// no-store so no cache retains a Set-Cookie body.
+		w.Header().Set("Cache-Control", "no-store")
+		http.SetCookie(w, cookie)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The session handshake is the one /admin route that must stay
@@ -469,7 +478,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 			http.Error(w, `{"error":"unsupported connection"}`, http.StatusInternalServerError)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 4096)
+		r.Body = http.MaxBytesReader(w, r.Body, sessionFormBodyMax)
 		if err := r.ParseForm(); err != nil {
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, `{"error":"invalid form body"}`, http.StatusBadRequest)
@@ -483,9 +492,17 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 	if presented && g.valid(credential) {
 		g.limiter.success(ip)
 		w.Header().Set("Cache-Control", "no-store")
-		if cookie, err := g.mintSessionCookie(); err == nil {
-			http.SetCookie(w, cookie)
+		cookie, err := g.mintSessionCookie()
+		if err != nil {
+			// The handshake's whole purpose is the cookie: without it the
+			// 303/204 would loop the operator back to the login page with
+			// no explanation. The only source is crypto/rand, which cannot
+			// fail on this toolchain; this is contract hygiene.
+			log.Printf("operator session: mint cookie: %v", err)
+			http.Error(w, `{"error":"session unavailable"}`, http.StatusInternalServerError)
+			return
 		}
+		http.SetCookie(w, cookie)
 		if form {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return

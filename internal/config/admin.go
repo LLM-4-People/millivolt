@@ -43,6 +43,11 @@ type Handler struct {
 	// Backup reports whether Settings can download/restore config and
 	// database. Nil omits the object (tests).
 	Backup func() map[string]any
+	// ReloadStatus reports the outcome of the most recent configuration
+	// application (the boot dropped-keys scan or a reload) for the
+	// dashboard's last_reload section. Nil omits the section; a nil
+	// return omits it too (tests).
+	ReloadStatus func() any
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +88,11 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 		}
 		b["modified"] = DiffKeys(file, Default())
 		body["backup"] = b
+	}
+	if h.ReloadStatus != nil {
+		if s := h.ReloadStatus(); s != nil {
+			body["last_reload"] = s
+		}
 	}
 	enc := json.NewEncoder(w)
 	if err := enc.Encode(body); err != nil {
@@ -147,6 +157,11 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 	result := h.state(file)
 	result["ok"] = reloadErr == nil
 	result["saved"] = true
+	if h.ReloadStatus != nil {
+		if s := h.ReloadStatus(); s != nil {
+			result["last_reload"] = s
+		}
+	}
 	if reloadErr != nil {
 		result["error"] = "settings saved, but reload failed: " + reloadErr.Error()
 		w.WriteHeader(http.StatusInternalServerError)

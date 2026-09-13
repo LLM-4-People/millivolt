@@ -152,7 +152,7 @@ func Schema() []Field {
 			Help: "In-flight sends per provider+key. 0 is unlimited.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_queue_size", Category: "queue", Label: "Max queue size",
-			Help: "Queued waiters per group. 0 is unlimited.",
+			Help: "Queued waiters per group. 0 is unlimited. It also feeds the default queue cap of a new pause hold.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_queue_wait", Category: "queue", Label: "Max queue wait",
 			Help: "How long a request may sit in the queue before 429. " + FormatDuration(0) + " is unlimited. Operator-hold time is excluded.",
