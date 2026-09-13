@@ -683,13 +683,28 @@ function upOpts(w, h) {
   };
 }
 
+// Placeholder strip for the no-data state: the active preset's tile skeleton
+// at full tile height, so the first payload swaps text and the card below the
+// strip never moves. Tile COUNTS must match the data-filled strip per preset
+// (what wraps is rows, not labels) - ui_check pins the equality.
+function chartTotalsSkeleton() {
+  const p = activePreset();
+  const ph = (label, cls = '') =>
+    `<span class="chart-total${cls ? ' ' + cls : ''}"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
+  if (p.id === 'overview') {
+    return ['requests', 'tokens in/out', 'cached', 'cost', 'errors', 'latency', 'speed'].map(l => ph(l)).join('  ');
+  }
+  return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
+    + (p.id === 'traffic' ? '  ' + ph('rate') : '');
+}
+
 // chartTotals renders the viewed period's totals (server buckets,
 // always all series - hiding is a visual declutter, the totals stay
 // honest) as the strip at the top of the graph card. Speed/latency totals are
 // period-wide percentiles the server computes (tps_p / ttft_p), never an
 // average of bucket percentiles.
 function chartTotals() {
-  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return '';
+  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton();
   let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
   chartAgg.buckets.forEach((b, i) => {
     req += b.req;
@@ -712,11 +727,17 @@ function chartTotals() {
     const p = pct(a, b);
     return p === '-' ? '' : `<span class="chart-sub">${p}${of ? ' ' + of : ''}</span>`;
   };
-  // inOutRatio renders the token balance as input per output, bounded for a
-  // totals tile by the shared compact formatter (at most seven characters
-  // whatever the distribution). An unmeasured denominator renders '-',
-  // never a fabricated ratio.
-  const inOutRatio = (tin, tout) => tout ? fmt(tin / tout) : '-';
+  // inOutShare renders the token balance as the input share of the blended
+  // volume. A percentage is bounded and reads identically in every locale;
+  // the old ratio formatter emitted comma decimals ('2,664') that read like
+  // a count. Zero denominator renders no sub-row, never a fabricated share.
+  const inOutShare = (tin, tout) => pctSub(tin, tin + tout, 'in');
+  // tokenPair renders the in/out pair as ONE line: the halves in the stacked
+  // bar's colors (input purple, output green) over a thin separator, no
+  // spaces - the KPI band's duo format, so the pair fits the narrowest
+  // tile. It must stay a single wrapped element: bare sibling spans become
+  // one flex line each and stack the pair vertically.
+  const tokenPair = (tin, tout) => `<span class="val-pair"><span class="v-in">${fmt(tin)}</span><span class="pair-sep">/</span><span class="v-out">${fmt(tout)}</span></span>`;
   const p = activePreset();
   const parts = [];
   switch (p.id) {
@@ -731,10 +752,7 @@ function chartTotals() {
       parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
       parts.push(seriesSpan(chartSpec('reason'), treason));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
-      // The balance reads as ratio AND the raw pair: one number alone
-      // cannot be checked against what actually flowed.
-      parts.push(span('in:out', inOutRatio(tin, tout),
-        `<span class="chart-sub">${fmt(tin)} / ${fmt(tout)}</span>`));
+      parts.push(span('in:out', tokenPair(tin, tout), inOutShare(tin, tout)));
       break;
     }
     case 'errors':
@@ -756,17 +774,16 @@ function chartTotals() {
       // shows, cost-reporting requests only.
       const tot = tin + tout;
       const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
-      const bal = inOutRatio(tin, tout);
       // The in/out pair mirrors the stacked bar's colors - input purple,
-      // output green - so the tile and the bar read as one story. The spark
-      // carries the blended volume in the total's tone.
+      // output green - so the tile and the bar read as one story, with the
+      // input share as the balance. The spark carries the blended volume in
+      // the total's tone.
       const tokens = { ...chartSpec('inTok'), label: 'tokens in/out', color: 'cyan',
-        title: 'Input and output tokens as an in / out pair, with the in:out balance underneath.' };
-      const pairVal = `<span class="v-in">${fmt(tin)}</span><span class="pair-sep"> / </span><span class="v-out">${fmt(tout)}</span>`;
+        title: 'Input and output tokens as an in / out pair, with the input share of the blended volume underneath.' };
       parts.push(seriesSpan(chartSpec('req'), req,
         `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(chartSpec('req'), b => b.req)));
-      parts.push(seriesSpan(tokens, pairVal,
-        (bal === '-' ? '' : `<span class="chart-sub">in:out ${bal}</span>`) + spark(tokens, b => b.in + b.out), v => v));
+      parts.push(seriesSpan(tokens, tokenPair(tin, tout),
+        inOutShare(tin, tout) + spark(tokens, b => b.in + b.out), v => v));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in') + spark(chartSpec('cache'), b => b.cache)));
       parts.push(seriesSpan(chartSpec('cost'), cost,
         (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(chartSpec('cost'), b => b.cost)));

@@ -48,8 +48,8 @@ compressed scale as lines (a rate limit is not an error: both health counts
 are distinct affected requests), and reported spend stays on its own right
 axis. The totals strip is uniform and compact: every headline metric reads its
 period value first - requests with the blended token volume, tokens as the
-in/out pair (the halves colored like the stacked bar's segments) with the
-in:out balance, cached tokens with their share of input, spend with the
+in/out pair on one line (the halves colored like the stacked bar's segments)
+with the input share, cached tokens with their share of input, spend with the
 server's blended per-Mtok price (the same figure the KPI band shows,
 cost-reporting requests only), errors with the rate-limited count - followed
 by its own per-bucket evolution sparkline, so the evolution of every metric
@@ -80,9 +80,10 @@ reported fields determine which splits are available. The compressed vertical
 scale keeps large prompt/cache volumes and small outputs readable together.
 A cache-hit line on a separate percentage axis tracks cached prompt tokens as
 a share of input per bucket. The totals strip adds each side's share of the
-blended total, the cache share of input, and the in:out balance - the ratio
-with the raw input/output pair riding underneath, so one number can always be
-checked against what actually flowed.
+blended total, the cache share of input, and the in:out tile: the raw pair
+(one line, halves in the stacked bar's colors) with the input share riding
+underneath - a percentage reads the same in every locale, where a small
+comma-decimal ratio looked like a count.
 
 ![Token timeline with input, output, reasoning and cached usage](images/charts/tokens.png)
 

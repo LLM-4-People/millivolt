@@ -923,12 +923,14 @@
      bottom-pinned whatever the tile carries. */
   .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
-  /* Merged in/out pair: the halves mirror the stacked bar's segment colors
-     (input purple, output green) over a muted separator - tile and bar read
-     as one story. */
+  /* Merged in/out pair: one wrapped line whose halves mirror the stacked
+     bar's segment colors (input purple, output green) over a thin muted
+     separator - tile and bar read as one story, and the pair fits the
+     narrowest tile like the KPI band's duo. */
+  .chart-totals .val-pair { white-space: nowrap; }
   .chart-totals .v-in { color: var(--accent2); }
   .chart-totals .v-out { color: var(--ok); }
-  .chart-totals .pair-sep { color: var(--muted); }
+  .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
   /* Measured shares ride under the value on their own row (block breaks the
      inline run), so a long suffix can never push a narrow tile sideways. */
   .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }

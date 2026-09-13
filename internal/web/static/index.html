@@ -251,7 +251,20 @@
 <section id="storm-banner" class="storm-banner" hidden role="status" aria-live="polite" aria-label="Error storm protection" tabindex="0"></section>
 
 <main>
-  <div class="kpis" id="kpis"></div>
+  <!-- Static KPI skeleton: full-height placeholders from the first paint,
+       so the first payload only swaps text and nothing below the band
+       moves. The live renderer replaces this innerHTML wholesale. -->
+  <div class="kpis" id="kpis">
+    <div class="kpi"><h2>Requests</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>In-flight</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi k-cost"><h2>Total cost</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Tokens in/out</h2><div class="val val-duo">-<span class="unit">/</span>-</div><div class="sub2">-</div></div>
+    <div class="kpi k-cache"><h2>Cache hit</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Avg TTFT</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Avg TPS</h2><div class="val">-</div><div class="sub2">-</div></div>
+    <div class="kpi"><h2>Error rate</h2><div class="val">-</div><div class="sub2">-</div></div>
+  </div>
 
   <!-- The explorer is the central organizing surface. Traffic, footer, and
        request log react to its scope; the KPI band stays global. -->

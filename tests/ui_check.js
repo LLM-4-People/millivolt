@@ -1460,6 +1460,33 @@ async function main() {
   const totalsHtml = w.eval('chartTotals()');
   check('totals strip shows period requests + errors + rate', totalsHtml.includes('requests</span> 19') && totalsHtml.includes('errors</span> 4') && totalsHtml.includes('21.1%'));
 
+  // No-data placeholder strip: the preset's tile skeleton at full height, so
+  // the first payload swaps text without moving anything below. Tile counts
+  // must equal the data-filled strip (what wraps is rows) and the merged
+  // overview labels must not drift from the data case.
+  {
+    const savedAgg = w.eval('JSON.stringify(chartAgg)');
+    const counts = {};
+    for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency', 'overview']) {
+      w.eval(`chartView.preset = '${preset}'`);
+      const filled = (w.eval('chartTotals()').match(/class="chart-total/g) || []).length;
+      w.eval('chartAgg = null');
+      const skel = w.eval('chartTotals()');
+      const skelCount = (skel.match(/class="chart-total/g) || []).length;
+      w.eval('chartAgg = ' + savedAgg + ';');
+      counts[preset] = { filled, skel: skelCount };
+    }
+    check('every preset skeleton matches its data-filled tile count',
+      Object.values(counts).every(c => c.filled === c.skel) && JSON.stringify(counts));
+    check('overview skeleton lists the merged tile labels without drift',
+      w.eval(`(() => { chartView.preset = 'overview'; chartAgg = null;
+        const s = chartTotals(); chartAgg = ${savedAgg};
+        return ['requests','tokens in/out','cached','cost','errors','latency','speed']
+          .every(l => s.includes('tl">' + l + '</span> -'));
+      })()`));
+    w.eval("chartView.preset = 'traffic'");
+  }
+
   // errors preset: err count + rate recomputed from the merged pair
   w.eval("chartView.preset = 'errors'");
   const dataErr = w.eval('chartData()');
@@ -1493,9 +1520,11 @@ async function main() {
   check('cache hit derives pct-of-input per bucket and stays unmeasured at zero input',
     dataTok[5][tokSlot] === 60 && dataTok[5][0] === null);
   const tokTotals = w.eval('chartTotals()');
-  check('tokens totals carry shares, cache pct of input and the in:out balance',
+  check('tokens totals carry shares, cache pct of input and the pair with its share',
     tokTotals.includes('71.4%') && tokTotals.includes('28.6%') &&
-    tokTotals.includes('60.0% of in') && tokTotals.includes('in:out</span> 2.5'));
+    tokTotals.includes('60.0% of in') &&
+    tokTotals.includes('in:out</span> <span class="val-pair"><span class="v-in">100</span><span class="pair-sep">/</span><span class="v-out">40</span>') &&
+    tokTotals.includes('<span class="chart-sub">71.4% in</span>'));
   check('tokens preset pins the cache-hit line to a 0-100 right axis', w.eval(`(() => {
     const opts = upOpts(600, 180);
     return opts.axes.length === 3 && opts.axes[2].scale === 'pct' && opts.axes[2].side === 1 &&
@@ -1993,23 +2022,24 @@ async function main() {
     totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
     totalsOv.includes('<span class="chart-sub">1 rate limited</span>') &&
     !totalsOv.includes('blended</span>'));
-  check('merged token tile reads as the bar-colored in/out pair with its balance',
-    totalsOv.includes('tokens in/out</span> <span class="v-in">150</span><span class="pair-sep"> / </span><span class="v-out">50</span>') &&
-    totalsOv.includes('<span class="chart-sub">in:out 3</span>') &&
-    !totalsOv.includes('75.0%') && !totalsOv.includes('25.0%'));
+  check('merged token tile reads as the bar-colored one-line pair with its share',
+    totalsOv.includes('tokens in/out</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span>') &&
+    totalsOv.includes('<span class="chart-sub">75.0% in</span>') &&
+    !totalsOv.includes('in:out '));
   check('overview totals annotate the cache share and the server blended price',
     totalsOv.includes('40.0% of in') &&
     totalsOv.includes('$12.5 /Mtok') &&
     !totalsOv.includes('/ req'));
-  check('the in:out balance stays tile-bounded and shows the raw pair', (() => {
+  check('the pair stays tile-bounded and its share never fakes 100%', (() => {
     const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
     w.eval('chartView.preset = "tokens"; chartAgg.buckets[3].in = 1000000; chartAgg.buckets[3].out = 3;');
     const wide = w.eval('chartTotals()');
     w.eval('chartAgg.buckets[3] = JSON.parse(' + JSON.stringify(saved) + '); chartView.preset = "overview";');
-    // period tin = 1000050, tout = 13 → ratio 76926.92… → compact '76.93K'
-    // with the raw pair riding underneath: both numbers, never one alone.
-    return wide.includes('in:out</span> 76.93K') && !wide.includes('76926') &&
-      wide.includes('<span class="chart-sub">1M / 13</span>');
+    // period tin = 1000050, tout = 13: the pair compact-bounds each half
+    // ('1M/13') and the share caps below 100% - pctCap never rounds a
+    // strictly-sub-100 ratio up to a false '100.0%'.
+    return wide.includes('<span class="v-in">1M</span><span class="pair-sep">/</span><span class="v-out">13</span>') &&
+      !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% in</span>');
   })());
   check('every overview tile carries its own evolution sparkline',
     totalsOv.split('<svg class="spark"').length === 8 &&
