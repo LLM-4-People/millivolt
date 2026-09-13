@@ -650,6 +650,43 @@ func TestStaticETagRevalidation(t *testing.T) {
 	}
 }
 
+// TestStaticFreshnessContract pins the cache-busting story end to end:
+// every /dash asset revalidates on each load (no-cache + ETag - never a
+// long max-age without a content-hashed URL), and the served service
+// worker stamps a content-identity cache name so a rebuild rotates the
+// offline shell. A served marker, or a caching directive that lets online
+// clients keep stale bytes, is exactly the staleness bug class this guards.
+func TestStaticFreshnessContract(t *testing.T) {
+	for _, rel := range []string{"js/chart.js", "css/dashboard.css", "vendor/uplot.js"} {
+		rec := httptest.NewRecorder()
+		ServeDash(rec, httptest.NewRequest(http.MethodGet, DashPrefix+rel, nil))
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s: Cache-Control = %q, want no-cache (revalidate every load)", rel, cc)
+		}
+		if rec.Header().Get("ETag") == "" {
+			t.Fatalf("%s: missing ETag to revalidate against", rel)
+		}
+	}
+	rec := httptest.NewRecorder()
+	Brand("/sw.js").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, dashboardVersionMarker) {
+		t.Fatal("served sw.js still contains the unstamped __DASHBOARD_VERSION__ marker")
+	}
+	if !strings.Contains(body, "millivolt-shell-") {
+		t.Fatal("served sw.js does not name its shell cache")
+	}
+	version := strings.TrimPrefix(strings.SplitN(strings.SplitN(body, "millivolt-shell-", 2)[1], "'", 2)[0], "millivolt-shell-")
+	if len(version) < 8 {
+		t.Fatalf("served sw.js cache version = %q, want a content identity hash", version)
+	}
+	// The stamped cache identity must equal the process's dashboard version
+	// (the single source of truth loadStatic computes from every asset).
+	if version != dashboardVersion {
+		t.Fatalf("sw.js cache identity %q != dashboardVersion %q", version, dashboardVersion)
+	}
+}
+
 func TestServeDashRepresentations(t *testing.T) {
 	for _, rel := range []string{"css/dashboard.css", "vendor/uplot.js"} {
 		t.Run(rel, func(t *testing.T) {
