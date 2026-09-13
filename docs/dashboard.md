@@ -40,22 +40,20 @@ strip with its sparklines still tells the story until a fourth point arrives.
 
 ### Overview
 
-**Overview** is the at-a-glance composition. One stacked bar per bucket carries
-the whole token volume - input below, output on top - so the bar's height is
-the blended total and its color split reads the in/out balance at a glance.
-Requests, errors and the rate-limited (HTTP 429) count trace the same
-compressed scale as lines (a rate limit is not an error: both health counts
-are distinct affected requests), and reported spend stays on its own right
-axis. The totals strip is uniform and compact: every headline metric reads its
-period value first - requests with the blended token volume, tokens as the
-in/out pair on one line (the halves colored like the stacked bar's segments)
-with the input share, cached tokens with their share of input, spend with the
+**Overview** is the summary: it carries no plot at all. The tiles are the
+whole surface and they take the card - every headline metric reads its period
+value first, then its measured companion fact, then its per-bucket evolution
+sparkline: requests with the blended token volume, tokens as the in/out pair
+on one line (the halves colored like the preset's bar segments) with the
+input share, cached tokens with their share of input, spend with the
 server's blended per-Mtok price (the same figure the KPI band shows,
-cost-reporting requests only), errors with the rate-limited count - followed
-by its own per-bucket evolution sparkline, so the evolution of every metric
-is visible without hovering. The speed and latency tiles pin the 95th
-percentile. Only the time-range control applies here. This preset has no
-static capture yet; the gallery images below predate it.
+cost-reporting requests only), the health pair (errors in the error red /
+rate-limited requests in the 429 tone, over the request denominator), and
+the p95 speed and latency. Click a tile to hide it - it keeps its cell as a
+label-only stub so the strip never rewraps - and click again to restore;
+the selection persists per browser like every chart view. Only the
+time-range control applies. This preset has no static capture yet; the
+gallery images below predate it.
 
 ### Traffic
 
@@ -81,7 +79,7 @@ scale keeps large prompt/cache volumes and small outputs readable together.
 A cache-hit line on a separate percentage axis tracks cached prompt tokens as
 a share of input per bucket. The totals strip adds each side's share of the
 blended total, the cache share of input, and the in:out tile: the raw pair
-(one line, halves in the stacked bar's colors) with the input share riding
+(one line, halves in the token bars' colors) with the input share riding
 underneath - a percentage reads the same in every locale, where a small
 comma-decimal ratio looked like a count.
 

@@ -1481,7 +1481,7 @@ async function main() {
     check('overview skeleton lists the merged tile labels without drift',
       w.eval(`(() => { chartView.preset = 'overview'; chartAgg = null;
         const s = chartTotals(); chartAgg = ${savedAgg};
-        return ['requests','tokens in/out','cached','cost','errors','latency','speed']
+        return ['requests','tokens in/out','cached','cost','errors / 429','latency','speed']
           .every(l => s.includes('tl">' + l + '</span> -'));
       })()`));
     w.eval("chartView.preset = 'traffic'");
@@ -1697,7 +1697,7 @@ async function main() {
     chartView.hidden = {};
   `);
   const pct50Want = {
-    overview: ['inTok', 'outTok', 'err', 'rl', 'req', 'cost'],
+    overview: [],
     traffic: ['req', 'err'],
     tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
@@ -1984,14 +1984,13 @@ async function main() {
     delete box.clientHeight;
   }
 
-  // ---- test 11h: Overview preset - the at-a-glance composition ----
-  // One stacked bar per bucket carries the token volume (input below, output
-  // on top - the bar height IS the blended total), while requests, errors and
-  // the rate-limit (429) count trace the same compressed scale as lines and
-  // cost stays a line on its own right axis. The totals strip is uniform:
-  // every tile reads value first, then its measured share (where one
-  // exists), then its per-bucket evolution sparkline; timing tiles pin the
-  // server p95 - no percentile selector or visible pXX label.
+  // ---- test 11h: Overview preset - the summary, metrics-only ----
+  // No plot: the tiles ARE the surface and take the card. Every tile reads
+  // value first, then its measured companion fact, then its per-bucket
+  // evolution sparkline; timing tiles pin the server p95 - no percentile
+  // selector or visible pXX label. Tiles follow the legend's toggle
+  // contract: click hides (a label-only stub keeps the grid cell), the
+  // choice persists in dash.chart, unknown ids drop on load.
   w.eval(`
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
@@ -2004,24 +2003,25 @@ async function main() {
     chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100, 200, 300];
     chartAgg.buckets[3].ttft = [5, 10, 15]; chartAgg.buckets[3].tps = [50, 60, 70];
   `);
-  check('overview plan: stacked token bar + rl/req/err lines + right-axis cost line',
-    w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.stack ? "stack" : m.bar ? "bar" : "line") + "@" + m.scale).join("|")') ===
-      'inTok=stack@y|outTok=stack@y|err=line@y|rl=line@y|req=line@y|cost=line@yr');
-  const dataOv = w.eval('chartData()');
-  check('overview compacts empty buckets and keeps a stable column per row',
-    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 7);
-  check('stack columns are cumulative: the top segment carries the blended total',
-    dataOv[1][0] === 100 && dataOv[2][0] === 140 && dataOv[2][1] === 60);
-  check('health and traffic lines read the server buckets',
-    dataOv[3][0] === 2 && dataOv[4][0] === 1 && dataOv[5][0] === 10 &&
-    dataOv[6][0] === 1.25 && dataOv[6][1] === 0.5);
+  check('the summary has no plotted rows and renders no data columns',
+    w.eval('chartPlan().meta.length') === 0 && w.eval('chartData()') === null &&
+    w.eval('_vis') === null && w.eval('_compacted') === false);
+  w.renderChart();
+  check('the summary card carries tiles-only and never mounts a plot or blank canvas',
+    d.querySelector('.traffic-card').classList.contains('tiles-only') &&
+    w.eval('_up') === null && !d.querySelector('#chart-traffic canvas.chart-blank') &&
+    d.getElementById('chart-pct').hidden &&
+    d.getElementById('chart-axes').textContent === '');
   const totalsOv = w.eval('chartTotals()');
   check('overview totals carry every headline metric for the period',
     totalsOv.includes('requests</span> 14') &&
     totalsOv.includes('<span class="chart-sub">200 tokens</span>') &&
-    totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
-    totalsOv.includes('<span class="chart-sub">1 rate limited</span>') &&
+    totalsOv.includes('cost</span> $1.75') &&
+    totalsOv.includes('<span class="chart-sub">of 14 requests</span>') &&
     !totalsOv.includes('blended</span>'));
+  check('the health pair reads errors/429 in the chart line colors over the denominator',
+    totalsOv.includes('errors / 429</span> <span class="val-pair"><span class="v-err">3</span><span class="pair-sep">/</span><span class="v-rl">1</span>') &&
+    !totalsOv.includes('rate limited</span>'));
   check('merged token tile reads as the bar-colored one-line pair with its share',
     totalsOv.includes('tokens in/out</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span>') &&
     totalsOv.includes('<span class="chart-sub">75.0% in</span>') &&
@@ -2041,9 +2041,10 @@ async function main() {
     return wide.includes('<span class="v-in">1M</span><span class="pair-sep">/</span><span class="v-out">13</span>') &&
       !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% in</span>');
   })());
-  check('every overview tile carries its own evolution sparkline',
+  check('every summary tile is a toggle and carries its evolution sparkline',
     totalsOv.split('<svg class="spark"').length === 8 &&
       (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 7 &&
+      (totalsOv.match(/data-tile="/g) || []).length === 7 &&
       !totalsOv.includes('NaN'));
   check('overview timing tiles pin the server p95 without a visible pXX label',
     totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
@@ -2052,58 +2053,34 @@ async function main() {
   check('speed tile formatter stays placeholder-safe without a unit sub-row',
     w.eval('chartSpec("tps").tileFmt(null)') === '-' &&
     w.eval('chartSpec("tps").tileFmt(202.75)') === '202.75<span class="chart-sub">tok/s</span>');
-  check('hover reads stack SEGMENT values, never the running total', w.eval(`(() => {
-    chartData();
-    upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 0, left: 100}, bbox: {width: 640}});
-    return [...document.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join();
-  })()`) === 'tokens in100,tokens out40,errors2,rate limited1,requests10,cost$1.25');
-  check('stack builder returns the {stroke, fill} object uPlot paints - never a bare Path2D', w.eval(`(() => {
-    class Path2DStub {
-      constructor() { this.ops = []; }
-      moveTo() { this.ops.push(1); } lineTo() { this.ops.push(1); }
-      arcTo() { this.ops.push(1); } rect() { this.ops.push(1); }
-      closePath() { this.ops.push(1); }
-    }
-    const real = window.Path2D; window.Path2D = Path2DStub;
-    try {
-      const data = chartData();
-      const builder = chartStackPaths();
-      const fakeU = { data, valToPos: (v, s, c) => {
-        if (!c) throw new Error('builder must request canvas coordinates');
-        return s === 'x' ? v * 100 : 200 - v / 10;
-      } };
-      const bottom = builder(fakeU, 1);   // tokens in: square bands
-      const top = builder(fakeU, 2);       // tokens out: rounded-top band over input
-      const shapes = upOpts(600, 180).series;
-      return bottom && bottom.stroke instanceof Path2DStub && bottom.fill === bottom.stroke &&
-        bottom.stroke.ops.length === 2 && top.stroke.ops.length > bottom.stroke.ops.length &&
-        typeof shapes[1].paths === 'function' && typeof shapes[2].paths === 'function' &&
-        shapes[3].paths === undefined && shapes[6].paths === undefined;
-    } finally { window.Path2D = real; }
-  })()`));
-  check('the percentile dropdown never re-gates the overview timing tiles', (() => {
+  check('the percentile dropdown never re-gates the summary timing tiles', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
     w.setChartPct('99');
     w.eval('chartTotals()');
     w.setChartPct('95');
     return t50.includes('220ms') && t50.includes('202.75') &&
-      w.eval('chartPlan().meta.length') === 6;
+      w.eval('chartPlan().meta.length') === 0;
   })());
-  w.eval("chartView.hidden = { overview: ['inTok'] }");
-  const dataOvH = w.eval('chartData()');
-  const optsOvH = w.eval('upOpts(600, 180)');
-  check('hiding a stack segment re-stacks the survivor from the baseline',
-    dataOvH.length === 7 && dataOvH[1].every(v => v === null) && dataOvH[2][0] === 40 && dataOvH[2][1] === 10);
-  check('hidden lines never leave an isolated point behind',
-    optsOvH.series[4].points.filter?.({ data: dataOvH }, 4) === null);
-  w.eval("chartView.hidden = { overview: ['rl'] }");
-  const dataOvH2 = w.eval('chartData()');
-  check('a hidden line keeps its all-null column without disturbing the stack',
-    dataOvH2.length === 7 && dataOvH2[4].every(v => v === null) && dataOvH2[2][0] === 140);
-  w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['blended', 'rl', 'bogus']}})); loadChartView();`);
-  check('saved overview selection validates hidden ids against the preset rows',
-    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "rl"'));
+  // Tile toggling: the legend's contract over tile ids. A hidden tile keeps
+  // its grid cell as a label-only stub, so the strip never rewraps.
+  w.eval('toggleSummaryTile("tokens")');
+  const totalsHidden = w.eval('chartTotals()');
+  check('hiding a tile leaves a label-only stub and never drops the cell',
+    (totalsHidden.match(/class="chart-total/g) || []).length === 7 &&
+    totalsHidden.includes('class="chart-total off" role="button" tabindex="0" data-tile="tokens" aria-pressed="false"') &&
+    !totalsHidden.includes('75.0% in') && w.eval('chartView.hidden.overview.join()') === 'tokens');
+  check('toggle round-trips and unknown tile ids never enter hidden state', (() => {
+    w.eval('toggleSummaryTile("bogus")');
+    const kept = w.eval('chartView.hidden.overview.join()') === 'tokens';
+    w.eval('toggleSummaryTile("tokens")');
+    const restored = w.eval('chartTotals()').includes('75.0% in') &&
+      w.eval('(chartView.hidden.overview || []).length') === 0;
+    return kept && restored;
+  })());
+  w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['cost', 'bogus', 'inTok']}})); loadChartView();`);
+  check('saved summary selection validates hidden ids against the tile list',
+    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "cost"'));
   w.eval("chartView.hidden = {}; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
 
   // ---- test 12: restart menu + rebuild-and-restart poll ----

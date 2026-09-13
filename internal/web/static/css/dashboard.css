@@ -923,13 +923,31 @@
      bottom-pinned whatever the tile carries. */
   .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
-  /* Merged in/out pair: one wrapped line whose halves mirror the stacked
-     bar's segment colors (input purple, output green) over a thin muted
-     separator - tile and bar read as one story, and the pair fits the
-     narrowest tile like the KPI band's duo. */
+  /* The summary preset: no plot, the tiles ARE the surface. They take the
+     card - rows share the freed height - and the axes/legend rows vanish.
+     A hidden tile keeps its grid cell as a label-only stub, so toggling a
+     metric never rewraps the strip or shifts anything. */
+  .traffic-card.tiles-only .chart-wrap,
+  .traffic-card.tiles-only .chart-axes,
+  .traffic-card.tiles-only #traffic-legend { display: none; }
+  .traffic-card.tiles-only .chart-totals {
+    flex: 1 1 0; min-height: 0; grid-auto-rows: 1fr;
+    margin-bottom: 10px; padding-bottom: 6px;
+  }
+  .chart-total[role="button"] { cursor: pointer; }
+  .chart-total.off { min-height: 0; align-self: start; opacity: .5; }
+  .chart-total[role="button"]:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  /* Merged in/out pair: one wrapped line whose halves mirror the token
+     bars' colors (input purple, output green) over a thin muted separator -
+     tile and bars read as one story, and the pair fits the narrowest tile
+     like the KPI band's duo. */
   .chart-totals .val-pair { white-space: nowrap; }
   .chart-totals .v-in { color: var(--accent2); }
   .chart-totals .v-out { color: var(--ok); }
+  /* Health pair: errors in the chart's error red, rate-limited requests in
+     the 429 tone - the same two colors as the health lines below. */
+  .chart-totals .v-err { color: var(--err); }
+  .chart-totals .v-rl { color: var(--rl); }
   .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
   /* Measured shares ride under the value on their own row (block breaks the
      inline run), so a long suffix can never push a narrow tile sideways. */

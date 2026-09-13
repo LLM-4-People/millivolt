@@ -254,63 +254,42 @@ async def check(base, screenshot):
                 require(state['want'] >= 1, state)
                 if state['dropped']:
                     require('unmeasured intervals omitted' in state['note'], state)
-                # Overview preset: the stacked token bar (input below, output
-                # on top; bar height = blended total) plus the rl, req and err
-                # lines all render on the real canvas, and the uniform
-                # seven-tile totals strip (every tile with its evolution
-                # sparkline) stays inside the card at both desktop and mobile
-                # widths. The recovered-429 fixture proves the health
-                # invariant end to end: the merged errors tile reads '2 rate limited'
-                # while errors stay 0, no percentile selector, no visible pXX
-                # label.
+                # Overview preset: the summary is metrics-only. No plot
+                # ever mounts (no uPlot, no blank canvas) and the card
+                # carries tiles-only so the tiles take the space. The
+                # recovered-429 fixture proves the health invariant end to
+                # end: the health pair reads 0 errors / 2 rate limited in the
+                # chart's two health colors. Tiles toggle like legend
+                # buttons: click hides a tile to a label-only stub (grid cell
+                # kept), persists in dash.chart, and a reload restores the
+                # selection. No percentile selector, no visible pXX label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
-                    state = await page.evaluate('''async () => {
+                    state = await page.evaluate("""async () => {
                         const full = window.__fullChart;
                         const rlTotal = full.buckets.reduce((s,b)=>s+b.rl,0);
                         const errTotal = full.buckets.reduce((s,b)=>s+b.err,0);
                         if (rlTotal < 1) throw new Error('fixture produced no rate-limited requests');
-                        // Every request-bearing bucket keeps the period honest
-                        // across calendar-minute boundaries. Filler buckets
-                        // pad sparse windows past the sparse gate: they carry
-                        // traffic but no errors or rate limits, so the
-                        // fixture's health totals stay exact.
-                        const real = full.buckets.filter(b => b.req > 0);
-                        const bm = full.bucket_ms;
-                        const last = real[real.length - 1];
-                        const pad = [];
-                        for (let k = 1; real.length + pad.length < 4; k++)
-                            pad.push({t: last.t + k*bm, req: 1, err: 0, rl: 0, in: 3, out: 2, cache: 0, reason: 0, cost: 0.01,
-                                      ttft: [null,null,null], tps: [null,null,null]});
-                        chartAgg = {...full, buckets: real.concat(pad)};
+                        chartAgg = {...full};
                         renderChart();
                         await new Promise(requestAnimationFrame);
-                        const points = _up ? _up.data[0].length : 0;
-                        const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
-                        let inTok=0, outTok=0, req=0, cost=0, rl=0;
-                        for (let i=0;i<pixels.length;i+=4) {
-                            if (!pixels[i+3]) continue;
-                            const [r,g,b] = [pixels[i],pixels[i+1],pixels[i+2]];
-                            if (b>r*1.3 && b>g*1.2 && r>g) inTok++;   // tokens in stack segment (#9a6bff)
-                            if (g>r*1.3 && b<g*0.8) outTok++;         // tokens out stack segment (#2fd186)
-                            if (b>r*1.3 && b>g*1.3 && g>r) req++;     // requests line (#5b8cff)
-                            if (r>b*1.3 && r>g && r<g*1.4) cost++;    // cost line (#f4c14d)
-                            if (r>b*1.3 && r>g*1.5) rl++;             // rate-limit line (#ff9346)
-                        }
                         const card=document.querySelector('.traffic-card');
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
-                        const totals=document.getElementById('chart-totals').textContent;
-                        return {points,inTok,outTok,req,cost,rl,overflow,rlTotal,errTotal,
-                                errors0:/errors\\s*0/.test(totals), rateLimited2:/2\\s*rate limited/.test(totals),
+                        const errV=document.querySelector('#chart-totals .v-err');
+                        const rlV=document.querySelector('#chart-totals .v-rl');
+                        return {tilesOnly: card.classList.contains('tiles-only'),
+                                plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
+                                wrapHidden: getComputedStyle(document.getElementById('chart-traffic')).display === 'none',
+                                overflow, rlTotal, errTotal,
+                                errors0:errV && errV.textContent === '0',
+                                rateLimited2:rlV && rlV.textContent === '2',
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
                                 legend:document.querySelector('#traffic-legend').textContent};
-                    }''')
-                    require(state['points'] >= 4, state)
-                    require(state['inTok'] and state['outTok'], state)
-                    require(state['req'] and state['cost'] and state['rl'], state)
+                    }""")
+                    require(state['tilesOnly'] and not state['plot'] and not state['blank'] and state['wrapHidden'], state)
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
                     require(state['errors0'] and state['rateLimited2'], state)
                     require(not state['overflow'], state)
@@ -318,6 +297,22 @@ async def check(base, screenshot):
                     require(state['sparks'] == 7, state)
                     require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
+                    # Tile toggle contract on the real DOM: click hides the
+                    # tile to a label-only stub, the grid cell count is
+                    # stable, and the choice persists in dash.chart.
+                    toggle = await page.evaluate("""async () => {
+                        const before = document.querySelectorAll('#chart-totals .chart-total').length;
+                        document.querySelector('[data-tile="tokens"]').click();
+                        await new Promise(requestAnimationFrame);
+                        const stub = document.querySelector('[data-tile="tokens"]');
+                        const after = document.querySelectorAll('#chart-totals .chart-total').length;
+                        const saved = JSON.parse(localStorage.getItem('dash.chart') || '{}');
+                        return {before, after, off: stub.classList.contains('off'),
+                                pressed: stub.getAttribute('aria-pressed') === 'false',
+                                persisted: (saved.hidden && saved.hidden.overview || []).join() === 'tokens'};
+                    }""")
+                    require(toggle['before'] == toggle['after'] == 7 and toggle['off'] and toggle['pressed'] and toggle['persisted'], toggle)
+                    await page.evaluate('document.querySelector("[data-tile=\'tokens\']").click()')
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
                 # Restore the saved-view expectations the reload check pins.
                 await page.select_option('#chart-preset', 'latency')

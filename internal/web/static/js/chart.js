@@ -154,18 +154,14 @@ const CHART_SERIES = [
 // accompanying money, never a second sum stacking the bars scale).
 const CHART_PRESETS = [
   {
-    // Overview: the at-a-glance composition. One stacked bar per bucket
-    // carries the whole token volume - input segment below, output segment on
-    // top, so the bar's height IS the blended total and its split reads at a
-    // glance (no separate in/out bars, no redundant total line). Over it,
-    // requests and the two health counts (errors, rate-limited 429s - distinct
-    // affected requests) trace the same compressed scale as lines, and spend
-    // stays on its own right axis: money never shares a count scale. The
-    // totals strip carries every headline metric, each tile with its own
-    // per-bucket evolution sparkline; only the time-range control applies.
-    id: 'overview', label: 'Overview',
-    left: { scale: 'y', fmt: fmt, label: 'Requests + tokens' }, right: { scale: 'yr', fmt: fmtMoney, label: 'Spend (USD)' },
-    series: [['inTok', 'y', 'stack'], ['outTok', 'y', 'stack'], ['err', 'y', 'line'], ['rl', 'y'], ['req', 'y', 'line'], ['cost', 'yr', 'line']],
+    // Overview is the summary: it carries NO plot. The tiles ARE the
+    // surface, and they take the whole card. Tile ids drive selection,
+    // persistence and validation exactly like series ids do for plotted
+    // presets: clicking a tile hides it (a label-only stub keeps the grid
+    // cell, so toggling never rewraps or shifts anything), the choice
+    // persists in dash.chart, and unknown ids drop on load.
+    id: 'overview', label: 'Overview', tilesOnly: true,
+    tiles: ['req', 'tokens', 'cache', 'cost', 'health', 'ttft', 'tps'],
   },
   {
     id: 'traffic', label: 'Traffic',
@@ -202,9 +198,8 @@ function chartSpec(id) {
   return CHART_SERIES.find(s => s.id === id);
 }
 // chartRowBar resolves a preset row's renderer: an optional third tuple
-// element ('bar' | 'line' | 'stack') overrides the registry flag for that row
-// alone - CHART_SERIES stays the default owner and the override narrows per
-// preset. 'stack' renders as one segment of the preset's stacked bar.
+// element ('bar' | 'line') overrides the registry flag for that row alone -
+// CHART_SERIES stays the default owner and the override narrows per preset.
 const chartRowBar = (id, rend) => (rend ? rend === 'bar' : !!chartSpec(id).bar);
 
 // Hidden series are per-preset: { presetId: [series ids] }.
@@ -223,8 +218,12 @@ function loadChartView() {
     if (CHART_PRESETS.some(pr => pr.id === saved.preset)) chartView.preset = saved.preset;
     if (saved.hidden && !Array.isArray(saved.hidden)) {
       for (const pr of CHART_PRESETS) {
+        // Hidden ids validate against the preset's selectable surface: tile
+        // ids for the summary, series ids for plotted presets. Anything
+        // else drops (deny by default).
+        const valid = pr.tilesOnly ? pr.tiles : pr.series.map(([seriesId]) => seriesId);
         const ids = Array.isArray(saved.hidden[pr.id])
-          ? saved.hidden[pr.id].filter(id => pr.series.some(([seriesId]) => seriesId === id))
+          ? saved.hidden[pr.id].filter(id => valid.includes(id))
           : [];
         if (ids.length) chartView.hidden[pr.id] = ids;
       }
@@ -261,20 +260,24 @@ function chartBucketVal(s, b) {
 // chartPlan computes the active preset's full render plan: uPlot series
 // metadata in plot order, the legend rows, and the hidden flags. Every
 // preset row carries its resolved renderer (registry flag or per-row
-// override → m.bar / m.stack); grouped-bar sizing runs over the visible bar
+// override → m.bar); grouped-bar sizing runs over the visible bar
 // series only, so hiding one re-centers the rest. Hidden series keep their
 // column (all-null) - a toggle must be a pure setData with a stable column
 // count or the plot keeps its stale frame.
 let _plan = null;
 function chartPlan() {
   const preset = activePreset();
+  // A tiles-only preset has no plotted rows: the plan is the preset alone
+  // (chartData renders nothing, the legend is empty, the summary tiles read
+  // chartAgg directly).
+  if (preset.tilesOnly) return { preset, meta: [] };
   const hiddenId = id => (chartView.hidden[preset.id] || []).includes(id);
   const rows = preset.series;
   const nBars = rows.filter(([id, , rend]) => chartRowBar(id, rend) && !hiddenId(id)).length;
   let barK = 0;
   const meta = rows.map(([id, scale, rend]) => {
     const s = chartSpec(id);
-    const m = { spec: s, scale, stack: rend === 'stack', bar: chartRowBar(id, rend), hidden: hiddenId(id) };
+    const m = { spec: s, scale, bar: chartRowBar(id, rend), hidden: hiddenId(id) };
     // barK counts visible bar rows only - a hidden bar draws nothing and
     // must not consume a slot, or the surviving bars drift off-center.
     if (m.bar && !m.hidden) {
@@ -298,13 +301,16 @@ function chartPlan() {
 // wastes width - each surviving point keeps its true time for ticks/hover
 // via _vis). Hidden rows still count toward requireAll: the bucket contract
 // is what the preset measures, not what is momentarily shown.
-// Stacked rows carry CUMULATIVE columns over the visible stack segments in
-// row order (segment value = column minus the previous visible stack
-// column), so hiding a segment re-stacks the survivors without double
-// counting.
 let _vis = null, _compacted = false;
 function chartData() {
   _plan = chartPlan();
+  if (_plan.preset.tilesOnly) {
+    // No plotted rows: also clear any compaction state a previous preset
+    // left behind, so the module never carries stale geometry.
+    _vis = null;
+    _compacted = false;
+    return null; // the summary plots nothing
+  }
   if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return null;
   const bm = chartAgg.bucket_ms || 0;
   let idxs = null;
@@ -321,21 +327,12 @@ function chartData() {
   _compacted = !!idxs;
   const src = idxs || chartAgg.buckets.map((_, i) => i);
   const data = [src.map((pi, k) => (idxs ? k + 0.5 : chartAgg.buckets[pi].t + bm / 2))];
-  let stackPrev = null;
   for (const m of _plan.meta) {
     if (m.hidden) {
       data.push(src.map(() => null));
       continue;
     }
-    const raw = src.map(pi => chartBucketVal(m.spec, chartAgg.buckets[pi]));
-    if (m.stack) {
-      const col = raw.map((v, k) => (stackPrev ? stackPrev[k] + (v ?? 0) : v));
-      data.push(col);
-      stackPrev = col;
-    } else {
-      data.push(raw);
-      stackPrev = null;
-    }
+    data.push(src.map(pi => chartBucketVal(m.spec, chartAgg.buckets[pi])));
   }
   return data;
 }
@@ -435,75 +432,6 @@ function chartBarPaths() {
   });
 }
 
-// Stacked bars (Overview): every stack segment draws one band of a single
-// bar per bucket - [previous visible stack column, own cumulative column] -
-// so the bar's height is the stack total and its color split carries the
-// composition. The shared x extent spans the whole (pixel-capped) group
-// width; only the topmost visible segment rounds its top corners, matching
-// the grouped bars. Hidden segments draw nothing and are excluded from the
-// cumulative columns, so a toggle re-stacks the survivors.
-function chartStackPaths() {
-  return (u, si) => {
-    const m = _plan.meta[si - 1];
-    if (m.hidden) return null;
-    let prev = null, topmost = true;
-    for (let k = si; k < _plan.meta.length; k++) {
-      if (_plan.meta[k].stack && !_plan.meta[k].hidden) { topmost = false; break; }
-    }
-    for (let k = si - 2; k >= 0; k--) {
-      if (_plan.meta[k].stack && !_plan.meta[k].hidden) { prev = u.data[k + 1]; break; }
-    }
-    const xs = u.data[0], ys = u.data[si];
-    const step = _compacted ? 1 : chartAgg.bucket_ms;
-    // Canvas flag: valToPos without it returns CSS pixels relative to the
-    // plot area, but the painter fills in device pixels offset by the plot
-    // bbox - paths built both ways land clipped or squashed. This is what
-    // uPlot's orient() passes internally.
-    const v2x = v => u.valToPos(v, 'x', true);
-    const v2y = v => u.valToPos(v, 'y', true);
-    // Slot width measured from an in-domain pair: x is either slot indices
-    // (compacted) or epoch milliseconds, so valToPos(0) would measure from
-    // the 1970 epoch in the millisecond mode and clamp to the plot edge -
-    // a zero-width bar. The first bucket center ± its own step is always
-    // inside the range in both modes.
-    const slotPx = Math.abs(v2x(xs[0] + step) - v2x(xs[0]));
-    // fill the slot fraction like every bar preset: no pixel cap, or sparse
-    // windows would strand narrow bars in empty space
-    const width = slotPx * CHART_GROUP_WIDTH;
-    const path = new Path2D();
-    let drawn = 0;
-    for (let i = 0; i < xs.length; i++) {
-      const high = ys[i];
-      if (high == null) continue;
-      const low = prev ? (prev[i] ?? 0) : 0;
-      if (!(high > low)) continue; // zero-height band draws nothing
-      const x0 = v2x(xs[i]) - width / 2;
-      const x1 = x0 + width;
-      const y0 = v2y(high);
-      const y1 = v2y(low);
-      drawn++;
-      if (topmost) {
-        const r = Math.min(4, width / 2, y1 - y0);
-        path.moveTo(x0, y1);
-        path.lineTo(x0, y0 + r);
-        path.arcTo(x0, y0, x0 + r, y0, r);
-        path.lineTo(x1 - r, y0);
-        path.arcTo(x1, y0, x1, y0 + r, r);
-        path.lineTo(x1, y1);
-        path.closePath();
-      } else {
-        path.rect(x0, y0, width, y1 - y0);
-      }
-    }
-    // uPlot's painter consumes an {stroke, fill, ...} object - a bare
-    // Path2D return silently paints nothing (the shape mirrors what the
-    // built-in builders return). Width 0 keeps these pure fills; an empty
-    // band set returns null so uPlot skips the series cleanly.
-    if (!drawn) return null;
-    return { stroke: path, fill: path, clip: null, band: null, gaps: null, flags: 1 };
-  };
-}
-
 // A connected segment already draws a line. Mark only isolated samples,
 // including zeros and the ends of sparse series, without bridging gaps.
 // uPlot calls this against current setData columns; hidden series are null.
@@ -577,9 +505,7 @@ function upOpts(w, h) {
         for (let si = 0; si < _plan.meta.length; si++) {
           const m = _plan.meta[si];
           if (m.hidden) continue;
-          // stacked rows plot cumulative columns; the readout owns the
-          // segment value (input / output), never the running total
-          const v = m.stack ? chartBucketVal(m.spec, bucket) : u.data[si + 1][i];
+          const v = u.data[si + 1][i];
           if (v == null) continue;
           parts.push(`<div class="chart-hover-row"><span style="color:${COLORS[m.spec.color]}">${m.spec.label}</span><span>${m.spec.fmt(v)}</span></div>`);
         }
@@ -635,20 +561,6 @@ function upOpts(w, h) {
       {},
       ..._plan.meta.map(m => {
         const s = m.spec;
-        if (m.stack) {
-          // one segment of the preset's stacked bar: fill only (no stroke),
-          // band drawn by chartStackPaths from the previous visible stack
-          // column to its own cumulative column.
-          return {
-            label: s.label,
-            fill: hexA(COLORS[s.color], 0.8),
-            width: 0,
-            paths: chartStackPaths(),
-            scale: m.scale || preset.left.scale,
-            points: { show: false },
-            value: (u, v) => (v == null ? '-' : s.fmt(v)),
-          };
-        }
         if (m.bar) {
           // per-bucket sum → bar on the shared arcsinh scale; width 0 keeps
           // pure fills (no stroke). bars-preset series carry their grouped
@@ -692,7 +604,7 @@ function chartTotalsSkeleton() {
   const ph = (label, cls = '') =>
     `<span class="chart-total${cls ? ' ' + cls : ''}"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
-    return ['requests', 'tokens in/out', 'cached', 'cost', 'errors', 'latency', 'speed'].map(l => ph(l)).join('  ');
+    return ['requests', 'tokens in/out', 'cached', 'cost', 'errors / 429', 'latency', 'speed'].map(l => ph(l)).join('  ');
   }
   return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
     + (p.id === 'traffic' ? '  ' + ph('rate') : '');
@@ -732,8 +644,8 @@ function chartTotals() {
   // the old ratio formatter emitted comma decimals ('2,664') that read like
   // a count. Zero denominator renders no sub-row, never a fabricated share.
   const inOutShare = (tin, tout) => pctSub(tin, tin + tout, 'in');
-  // tokenPair renders the in/out pair as ONE line: the halves in the stacked
-  // bar's colors (input purple, output green) over a thin separator, no
+  // tokenPair renders the in/out pair as ONE line: the halves in the token
+  // bars' colors (input purple, output green) over a thin separator, no
   // spaces - the KPI band's duo format, so the pair fits the narrowest
   // tile. It must stay a single wrapped element: bare sibling spans become
   // one flex line each and stack the pair vertically.
@@ -764,39 +676,52 @@ function chartTotals() {
       parts.push(span('requests', fmt(req)));
       break;
     case 'overview': {
-      // Uniform tiles: every metric reads value first, then its measured
-      // companion fact, then its per-bucket evolution sparkline - the
-      // evolution of every listed metric is visible in the strip itself.
-      // Merged tiles keep the strip compact: requests carries the blended
-      // token volume, tokens carries the in/out pair with its balance,
-      // errors carries the rate-limited count, and cost carries the
-      // server's blended per-Mtok price - the SAME figure the KPI band
-      // shows, cost-reporting requests only.
+      // The summary is metrics-only: every tile reads value first, then its
+      // measured companion fact, then its per-bucket evolution sparkline.
+      // Merged tiles keep the story compact: requests carries the blended
+      // token volume, tokens carries the in/out pair with its share, the
+      // health tile carries both health counts in the chart's health
+      // colors, and cost carries the server's blended per-Mtok price - the
+      // SAME figure the KPI band shows, cost-reporting requests only.
+      // Tiles follow the legend's toggle contract: role=button +
+      // aria-pressed + data-tile, the choice persists in dash.chart, and a
+      // hidden tile keeps its grid cell as a label-only stub so toggling
+      // never rewraps or shifts anything.
+      const hid = chartView.hidden.overview || [];
+      const tile = (id, label, title, color, body) => {
+        const attrs = `role="button" tabindex="0" data-tile="${id}" aria-pressed="${!hid.includes(id)}" title="${escapeHtml((hid.includes(id) ? 'Show ' : 'Hide ') + label + '. ' + title)}"`;
+        return hid.includes(id)
+          ? `<span class="chart-total off" ${attrs}><span class="tl">${label}</span></span>`
+          : `<span class="chart-total" style="color:${COLORS[color]}" ${attrs}><span class="tl">${label}</span> ${body}</span>`;
+      };
       const tot = tin + tout;
       const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
-      // The in/out pair mirrors the stacked bar's colors - input purple,
-      // output green - so the tile and the bar read as one story, with the
-      // input share as the balance. The spark carries the blended volume in
-      // the total's tone.
-      const tokens = { ...chartSpec('inTok'), label: 'tokens in/out', color: 'cyan',
+      const reqSpec = chartSpec('req');
+      parts.push(tile('req', reqSpec.label, reqSpec.title || '', reqSpec.color,
+        fmt(req) + `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(reqSpec, b => b.req)));
+      const tokens = { ...chartSpec('inTok'), label: 'tokens in/out',
         title: 'Input and output tokens as an in / out pair, with the input share of the blended volume underneath.' };
-      parts.push(seriesSpan(chartSpec('req'), req,
-        `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(chartSpec('req'), b => b.req)));
-      parts.push(seriesSpan(tokens, tokenPair(tin, tout),
-        inOutShare(tin, tout) + spark(tokens, b => b.in + b.out), v => v));
-      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in') + spark(chartSpec('cache'), b => b.cache)));
-      parts.push(seriesSpan(chartSpec('cost'), cost,
-        (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(chartSpec('cost'), b => b.cost)));
-      parts.push(seriesSpan(chartSpec('err'), err,
-        `<span class="chart-sub">${rl} rate limited</span>` + spark(chartSpec('err'), b => b.err)));
+      parts.push(tile('tokens', tokens.label, tokens.title, 'cyan',
+        tokenPair(tin, tout) + inOutShare(tin, tout) + spark(tokens, b => b.in + b.out)));
+      const cacheSpec = chartSpec('cache');
+      parts.push(tile('cache', cacheSpec.label, cacheSpec.title || '', cacheSpec.color,
+        fmt(tcache) + pctSub(tcache, tin, 'of in') + spark(cacheSpec, b => b.cache)));
+      const costSpec = chartSpec('cost');
+      parts.push(tile('cost', costSpec.label, costSpec.title || '', costSpec.color,
+        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(costSpec, b => b.cost)));
+      const health = { label: 'errors / 429',
+        title: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.' };
+      parts.push(tile('health', health.label, health.title, 'err',
+        `<span class="val-pair"><span class="v-err">${fmt(err)}</span><span class="pair-sep">/</span><span class="v-rl">${fmt(rl)}</span></span>` +
+        (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') + spark(chartSpec('err'), b => b.err)));
       // Timing tiles pin the server's p95 for the period, with the same
       // per-bucket p95 sparkline (suppressed buckets stay absent). No
       // percentile selector on this preset: the tooltip carries the choice.
       for (const id of ['ttft', 'tps']) {
         const s = chartSpec(id);
-        const tile = { ...s, title: (s.title ? s.title + ' ' : '') + '95th percentile over the viewed period.' };
-        parts.push(seriesSpan(tile, chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null,
-          spark(s, b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null), s.tileFmt));
+        parts.push(tile(id, s.label, (s.title ? s.title + ' ' : '') + '95th percentile over the viewed period.', s.color,
+          (s.tileFmt || s.fmt)(chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null) +
+          spark(s, b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null)));
       }
       break;
     }
@@ -813,6 +738,15 @@ function chartTotals() {
 
 function chartChromeSync() {
   const preset = activePreset();
+  if (preset.tilesOnly) {
+    // The summary has no axes and no percentile control: the tiles carry
+    // the p95 choices themselves.
+    $('chart-pct').hidden = true;
+    updateSection('chart-axes', '');
+    const context = chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' : 'Waiting for traffic';
+    updateSection('chart-context', context);
+    return;
+  }
   $('chart-pct').hidden = !preset.series.some(([id]) => chartSpec(id).metric);
   const compressed = preset.left.scale === 'y'
     ? ' <span class="chart-scale" title="The scale compresses large values so smaller values remain visible. Compare the labeled values, not bar-height ratios.">· compressed scale</span>' : '';
@@ -832,6 +766,19 @@ function renderChart() {
   chartLegendSync();
   const strip = $('chart-totals');
   if (strip) updateSection('chart-totals', chartTotals());
+  // The summary is metrics-only: the tiles ARE the surface and take the
+  // card (the CSS class swaps the layout); no plot ever mounts and no
+  // blank canvas paints - the skeleton tiles own the no-data state.
+  const preset = activePreset();
+  const card = box.closest('.traffic-card');
+  if (card) card.classList.toggle('tiles-only', !!preset.tilesOnly);
+  if (preset.tilesOnly) {
+    // Tear down whatever the previous preset left: a mounted plot would
+    // linger hidden, and a stale blank canvas would outlive its state.
+    if (_up) { _up.destroy(); _up = null; _upKey = ''; }
+    for (const c of box.querySelectorAll('canvas.chart-blank')) c.remove();
+    return;
+  }
   // Boot has no chart payload yet. Sync its controls without forcing layout
   // of the just-written KPI/log DOM for a canvas that cannot draw anything.
   // A real zero-traffic payload still measures and paints the blank state.
@@ -878,7 +825,7 @@ function chartLegendSync() {
   const l = $('traffic-legend');
   if (!l || !_plan) return;
   const html = _plan.meta.map(({ spec, bar, stack, hidden }) => {
-    const mark = (bar || stack) ? 'bar' : spec.dash ? 'dashed' : 'line';
+    const mark = bar ? 'bar' : spec.dash ? 'dashed' : 'line';
     const title = (hidden ? 'Show' : 'Hide') + ' ' + spec.label + (spec.title ? '. ' + spec.title : '');
     return `<button type="button" class="leg-item${hidden ? ' off' : ''}" data-series="${spec.id}" aria-pressed="${!hidden}" title="${escapeHtml(title)}" style="--sw:${COLORS[spec.color]}"><span class="swatch ${mark}" aria-hidden="true"></span>${spec.label}</button>`;
   }).join('');
@@ -887,10 +834,22 @@ function chartLegendSync() {
 
 function toggleChartSeries(id) {
   const preset = activePreset();
-  if (!preset.series.some(([seriesId]) => seriesId === id)) return;
+  if (!preset.series || !preset.series.some(([seriesId]) => seriesId === id)) return;
   const cur = chartView.hidden[preset.id] || [];
   chartView.hidden[preset.id] = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
   storage.set('dash.chart', JSON.stringify(chartView)); // persist across reloads
+  renderChart();
+}
+
+// toggleSummaryTile flips one summary tile - the same contract as a legend
+// toggle, over tile ids: validated against the preset's tile list, persisted
+// in dash.chart, re-rendered in place.
+function toggleSummaryTile(id) {
+  const preset = activePreset();
+  if (!preset.tilesOnly || !preset.tiles.includes(id)) return;
+  const cur = chartView.hidden.overview || [];
+  chartView.hidden.overview = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
+  storage.set('dash.chart', JSON.stringify(chartView));
   renderChart();
 }
 
