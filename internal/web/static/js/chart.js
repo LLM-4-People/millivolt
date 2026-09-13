@@ -136,10 +136,6 @@ const CHART_SERIES = [
   { id: 'cachePct', label: 'cache hit', color: 'warn',   fmt: fmtPct,
     title: 'Cached prompt tokens as a share of input tokens, per bucket.' },
   { id: 'tps',  metric: 'tps',      label: 'speed',   color: 'ok',     fmt: fmtTPS,
-    // Dense totals tiles (Overview's ten-tile strip) cannot fit ' tok/s'
-    // beside the value; tileFmt renders the number with the unit as a muted
-    // sub-row instead. Wide two-tile presets keep fmtTPS.
-    tileFmt: v => fmt(v) + (v == null ? '' : '<span class="chart-sub">tok/s</span>'),
     title: 'Output tokens per second over wall time; decode-window speed when overall throughput is unavailable.' },
   { id: 'ttft', metric: 'ttft', label: 'latency', color: 'accent', fmt: fmtDur,
     title: 'Time to first token, including reasoning or answer content.' },
@@ -161,7 +157,7 @@ const CHART_PRESETS = [
     // cell, so toggling never rewraps or shifts anything), the choice
     // persists in dash.chart, and unknown ids drop on load.
     id: 'overview', label: 'Overview', tilesOnly: true,
-    tiles: ['req', 'tokens', 'cache', 'cost', 'health', 'ttft', 'tps'],
+    tiles: ['req', 'tokens', 'cost', 'health', 'timing'],
   },
   {
     id: 'traffic', label: 'Traffic',
@@ -604,7 +600,7 @@ function chartTotalsSkeleton() {
   const ph = (label, cls = '') =>
     `<span class="chart-total${cls ? ' ' + cls : ''}"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
-    return ['requests', 'tokens in/out', 'cached', 'cost', 'errors / 429', 'latency', 'speed'].map(l => ph(l)).join('  ');
+    return ['requests / tokens', 'tokens in/out/cached', 'cost', 'errors / 429', 'avg latency / speed'].map(l => ph(l)).join('  ');
   }
   return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
     + (p.id === 'traffic' ? '  ' + ph('rate') : '');
@@ -612,9 +608,10 @@ function chartTotalsSkeleton() {
 
 // chartTotals renders the viewed period's totals (server buckets,
 // always all series - hiding is a visual declutter, the totals stay
-// honest) as the strip at the top of the graph card. Speed/latency totals are
-// period-wide percentiles the server computes (tps_p / ttft_p), never an
-// average of bucket percentiles.
+// honest) as the strip at the top of the graph card. Speed/latency totals
+// are period-wide server figures (plotted presets: tps_p / ttft_p
+// percentiles; the summary's timing tile: ttft_stat / tps_stat averages
+// with sample ranges), never an average of bucket percentiles.
 function chartTotals() {
   if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton();
   let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
@@ -679,10 +676,11 @@ function chartTotals() {
       // The summary is metrics-only: every tile reads value first, then its
       // measured companion fact, then its per-bucket evolution sparkline.
       // Merged tiles keep the story compact: requests carries the blended
-      // token volume, tokens carries the in/out pair with its share, the
-      // health tile carries both health counts in the chart's health
-      // colors, and cost carries the server's blended per-Mtok price - the
-      // SAME figure the KPI band shows, cost-reporting requests only.
+      // token volume as its second half, tokens carries the in/out/cached
+      // triple with both shares, the health tile carries both health counts
+      // in the chart's health colors, and cost carries the server's blended
+      // per-Mtok price - the SAME figure the KPI band shows,
+      // cost-reporting requests only.
       // Tiles follow the legend's toggle contract: role=button +
       // aria-pressed + data-tile, the choice persists in dash.chart, and a
       // hidden tile keeps its grid cell as a label-only stub so toggling
@@ -695,34 +693,63 @@ function chartTotals() {
           : `<span class="chart-total" style="color:${COLORS[color]}" ${attrs}><span class="tl">${label}</span> ${body}</span>`;
       };
       const tot = tin + tout;
-      const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
-      const reqSpec = chartSpec('req');
-      parts.push(tile('req', reqSpec.label, reqSpec.title || '', reqSpec.color,
-        fmt(req) + `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(reqSpec, b => b.req)));
-      const tokens = { ...chartSpec('inTok'), label: 'tokens in/out',
-        title: 'Input and output tokens as an in / out pair, with the input share of the blended volume underneath.' };
-      parts.push(tile('tokens', tokens.label, tokens.title, 'cyan',
-        tokenPair(tin, tout) + inOutShare(tin, tout) + spark(tokens, b => b.in + b.out)));
-      const cacheSpec = chartSpec('cache');
-      parts.push(tile('cache', cacheSpec.label, cacheSpec.title || '', cacheSpec.color,
-        fmt(tcache) + pctSub(tcache, tin, 'of in') + spark(cacheSpec, b => b.cache)));
+      // Tile sparks are mini charts: one sparkline per tile, one line per
+      // metric half in exactly that half's color, each line scaled to its
+      // own series (halves measure different units). Only traffic-bearing
+      // buckets enter the spark - the same empty-bucket removal the plots
+      // apply - so ladder padding never squeezes the data into a corner.
+      const kept = chartAgg.buckets.filter(b => b.req > 0);
+      const spark = specs => sparklineMulti(specs.map(([color, pick]) => ({ vals: kept.map(pick), color: COLORS[color] })), CHART_SPARK_W, CHART_SPARK_H);
+      parts.push(tile('req', 'requests / tokens',
+        'Request count over the blended token volume (input plus output), as a pair.',
+        'accent',
+        `<span class="val-pair"><span class="v-req">${fmt(req)}</span><span class="pair-sep">/</span><span class="v-tok">${fmt(tot)}</span></span>` +
+        spark([['accent', b => b.req], ['cyan', b => b.in + b.out]])));
+      // One share row for the tokens triple: the input share of the blended
+      // volume and the cached share of input, both through pct (pctCap
+      // owner) so a sub-100 ratio can never round to a false 100%.
+      const share = (a, b, of) => (pct(a, b) === '-' ? null : `${pct(a, b)} ${of}`);
+      const shares = [share(tin, tot, 'in'), share(tcache, tin, 'of in')].filter(Boolean).join(' · ');
+      parts.push(tile('tokens', 'tokens in/out/cached',
+        'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
+        'cyan',
+        `<span class="val-pair"><span class="v-in">${fmt(tin)}</span><span class="pair-sep">/</span><span class="v-out">${fmt(tout)}</span><span class="pair-sep">/</span><span class="v-cache">${fmt(tcache)}</span></span>` +
+        (shares ? `<span class="chart-sub">${shares}</span>` : '') +
+        spark([['accent2', b => b.in], ['ok', b => b.out], ['muted', b => b.cache]])));
       const costSpec = chartSpec('cost');
       parts.push(tile('cost', costSpec.label, costSpec.title || '', costSpec.color,
-        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(costSpec, b => b.cost)));
+        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark([['warn', b => b.cost]])));
       const health = { label: 'errors / 429',
         title: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.' };
       parts.push(tile('health', health.label, health.title, 'err',
         `<span class="val-pair"><span class="v-err">${fmt(err)}</span><span class="pair-sep">/</span><span class="v-rl">${fmt(rl)}</span></span>` +
-        (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') + spark(chartSpec('err'), b => b.err)));
-      // Timing tiles pin the server's p95 for the period, with the same
-      // per-bucket p95 sparkline (suppressed buckets stay absent). No
-      // percentile selector on this preset: the tooltip carries the choice.
-      for (const id of ['ttft', 'tps']) {
-        const s = chartSpec(id);
-        parts.push(tile(id, s.label, (s.title ? s.title + ' ' : '') + '95th percentile over the viewed period.', s.color,
-          (s.tileFmt || s.fmt)(chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null) +
-          spark(s, b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null)));
-      }
+        (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
+        spark([['err', b => b.err], ['rl', b => b.rl || 0]])));
+      // The timing tile merges latency and speed into one story with both
+      // halves in the latency preset's plot colors. The value is the PERIOD
+      // AVERAGE over every captured sample (server-computed, never an
+      // average of bucket percentiles), each metric's low-high sample
+      // range underneath, and the per-bucket p95 pair as its spark lines.
+      const ts = chartAgg.ttft_stat, ps = chartAgg.tps_stat;
+      // Range bounds render as integers: a locale comma decimal ('46,853'
+      // for 46.85) reads as a count - the same ambiguity that replaced the
+      // old in:out ratio with a bounded share. A shared trailing unit is
+      // stated once ('31-32ms', never '31ms-32ms'); bounds on different
+      // scales keep both units ('900ms-2.50s').
+      const unitOf = v => (String(v).match(/[a-zA-Z%]+$/) || [''])[0];
+      const range = (m, fmtFn, unit) => {
+        if (!m) return '';
+        const lo = fmtFn(m[1]), hi = fmtFn(m[2]);
+        const shared = unitOf(lo) === unitOf(hi) && unitOf(lo) !== '';
+        return `${shared ? String(lo).slice(0, -unitOf(lo).length) : lo}-${hi}${unit}`;
+      };
+      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
+      parts.push(tile('timing', 'avg latency / speed',
+        'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket 95th percentiles.',
+        'accent',
+        `<span class="val-pair"><span class="v-ttft">${ts ? fmtDur(ts[0]) : '-'}</span><span class="pair-sep">/</span><span class="v-tps">${ps ? fmt(ps[0]) : '-'}</span></span>` +
+        (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
+        spark([['accent', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['ok', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
       break;
     }
     case 'latency': {
@@ -739,15 +766,15 @@ function chartTotals() {
 function chartChromeSync() {
   const preset = activePreset();
   if (preset.tilesOnly) {
-    // The summary has no axes and no percentile control: the tiles carry
-    // the p95 choices themselves.
+    // The summary has no axes, no percentile control and no cadence note:
+    // the tiles carry the choices themselves and take the freed space.
     $('chart-pct').hidden = true;
     updateSection('chart-axes', '');
-    const context = chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' : 'Waiting for traffic';
-    updateSection('chart-context', context);
+    $('chart-context').hidden = true;
     return;
   }
   $('chart-pct').hidden = !preset.series.some(([id]) => chartSpec(id).metric);
+  $('chart-context').hidden = false;
   const compressed = preset.left.scale === 'y'
     ? ' <span class="chart-scale" title="The scale compresses large values so smaller values remain visible. Compare the labeled values, not bar-height ratios.">· compressed scale</span>' : '';
   updateSection('chart-axes', `<span>${preset.left.label}${compressed}</span><span>${preset.right?.label || ''}</span>`);

@@ -255,14 +255,21 @@ async def check(base, screenshot):
                 if state['dropped']:
                     require('unmeasured intervals omitted' in state['note'], state)
                 # Overview preset: the summary is metrics-only. No plot
-                # ever mounts (no uPlot, no blank canvas) and the card
-                # carries tiles-only so the tiles take the space. The
-                # recovered-429 fixture proves the health invariant end to
-                # end: the health pair reads 0 errors / 2 rate limited in the
-                # chart's two health colors. Tiles toggle like legend
-                # buttons: click hides a tile to a label-only stub (grid cell
-                # kept), persists in dash.chart, and a reload restores the
-                # selection. No percentile selector, no visible pXX label.
+                # ever mounts (no uPlot, no blank canvas), the card carries
+                # tiles-only, and the bucket-cadence context row is hidden.
+                # The recovered-429 fixture proves the health invariant end
+                # to end: the health pair reads 0 errors / 2 rate limited in
+                # the chart's two health colors, the requests/tokens pair and
+                # the in/out/cached triple render their colored halves, and
+                # the merged timing tile reads the server's period averages
+                # (v-ttft / v-tps halves). Each tile carries ONE sparkline
+                # with one self-scaled line per metric half in the half's
+                # color, spanning only traffic-bearing buckets - the same
+                # empty-bucket removal the plots apply. Tiles toggle like
+                # legend buttons: click hides a tile to a label-only stub
+                # (grid cell kept), persists in dash.chart, and a reload
+                # restores the selection. No percentile selector, no visible
+                # pXX label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
@@ -278,23 +285,39 @@ async def check(base, screenshot):
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
                         const errV=document.querySelector('#chart-totals .v-err');
                         const rlV=document.querySelector('#chart-totals .v-rl');
+                        const ttftV=document.querySelector('#chart-totals .v-ttft');
+                        const tpsV=document.querySelector('#chart-totals .v-tps');
+                        const reqPair=document.querySelector('#chart-totals .v-req') && document.querySelector('#chart-totals .v-tok');
+                        const cacheThird=document.querySelector('#chart-totals .v-cache');
+                        const kept = full.buckets.filter(b => b.req > 0).length;
+                        const reqPath = document.querySelector('[data-tile="req"] svg.spark path');
+                        const sparkCmds = reqPath ? (reqPath.getAttribute('d').match(/[ML]/g) || []).length : 0;
                         return {tilesOnly: card.classList.contains('tiles-only'),
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
                                 wrapHidden: getComputedStyle(document.getElementById('chart-traffic')).display === 'none',
                                 overflow, rlTotal, errTotal,
                                 errors0:errV && errV.textContent === '0',
                                 rateLimited2:rlV && rlV.textContent === '2',
+                                reqTokensPair:!!reqPair,
+                                cacheThird:!!cacheThird && !!document.querySelector('[data-tile="tokens"] .v-cache'),
+                                timingPair:!!ttftV && !!tpsV && ttftV.textContent !== '-' && tpsV.textContent !== '-',
+                                kept, sparkCmds,
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
+                                contextHidden:document.getElementById('chart-context').hidden,
                                 legend:document.querySelector('#traffic-legend').textContent};
                     }""")
                     require(state['tilesOnly'] and not state['plot'] and not state['blank'] and state['wrapHidden'], state)
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
                     require(state['errors0'] and state['rateLimited2'], state)
+                    require(state['reqTokensPair'] and state['cacheThird'], state)
+                    require(state['timingPair'], state)
+                    require(state['contextHidden'], state)
+                    require(state['sparks'] == 5, state)
+                    require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
-                    require(state['tiles'] == 7, state)
-                    require(state['sparks'] == 7, state)
+                    require(state['tiles'] == 5, state)
                     require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     # Tile toggle contract on the real DOM: click hides the
@@ -311,7 +334,7 @@ async def check(base, screenshot):
                                 pressed: stub.getAttribute('aria-pressed') === 'false',
                                 persisted: (saved.hidden && saved.hidden.overview || []).join() === 'tokens'};
                     }""")
-                    require(toggle['before'] == toggle['after'] == 7 and toggle['off'] and toggle['pressed'] and toggle['persisted'], toggle)
+                    require(toggle['before'] == toggle['after'] == 5 and toggle['off'] and toggle['pressed'] and toggle['persisted'], toggle)
                     await page.evaluate('document.querySelector("[data-tile=\'tokens\']").click()')
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
                 # Restore the saved-view expectations the reload check pins.

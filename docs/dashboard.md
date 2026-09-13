@@ -42,18 +42,24 @@ strip with its sparklines still tells the story until a fourth point arrives.
 
 **Overview** is the summary: it carries no plot at all. The tiles are the
 whole surface and they take the card - every headline metric reads its period
-value first, then its measured companion fact, then its per-bucket evolution
-sparkline: requests with the blended token volume, tokens as the in/out pair
-on one line (the halves colored like the preset's bar segments) with the
-input share, cached tokens with their share of input, spend with the
+value first, then its measured companion fact, then its evolution sparklines:
+requests / tokens (the request count over the blended token volume), tokens
+in/out/cached (one in / out / cached triple, with the input share of the
+blended volume and the cached share of input underneath), spend with the
 server's blended per-Mtok price (the same figure the KPI band shows,
 cost-reporting requests only), the health pair (errors in the error red /
 rate-limited requests in the 429 tone, over the request denominator), and
-the p95 speed and latency. Click a tile to hide it - it keeps its cell as a
-label-only stub so the strip never rewraps - and click again to restore;
-the selection persists per browser like every chart view. Only the
-time-range control applies. This preset has no static capture yet; the
-gallery images below predate it.
+the merged timing tile: average latency / average speed over every measured
+request in the period (server-computed from the same samples the percentiles
+rank, never an average of bucket percentiles), each metric's low-high sample
+range underneath. Each tile carries one sparkline; combined tiles draw one
+self-scaled line per metric half in exactly the half's color. Sparks span
+only traffic-bearing buckets - the same empty-bucket removal the plots
+apply - so window padding never squeezes the data into a corner. Click a
+tile to hide it - it keeps its cell as a label-only stub so the strip never
+rewraps - and click again to restore; the selection persists per browser
+like every chart view. Only the time-range control applies. This preset has
+no static capture yet; the gallery images below predate it.
 
 ### Traffic
 

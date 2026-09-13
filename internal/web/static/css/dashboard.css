@@ -375,9 +375,12 @@
   .grid-pair > .card { display: flex; flex-direction: column; min-height: 0; }
 
   /* Wide two-column layout fits the viewport: inner regions scroll, the page
-     does not. The explorer stays a compact middle band (about one gallery row)
-     so the timeline / request pair (usually the more important surface) takes
-     leftover height. The explorer can still shrink on short laptop windows. */
+     does not. The explorer stays a compact middle band sized to fit ONE full
+     gallery row without vertical scrolling (one row plus the scope bar and
+     the card's padding needs ~232px, so the 240px basis covers it with
+     slack), while the timeline / request pair takes the leftover height. On
+     genuinely short windows the band yields through flex-shrink (shrinking
+     the gallery into internal scrolling) rather than clipping a row. */
   @media (min-width: 1200px) {
     :root { --gallery-locked: 1; }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
@@ -397,14 +400,9 @@
     #explorer .xp-gallery { height: auto; }
     .grid-pair { flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
     /* The plot is the card's purpose: it keeps a readable floor even when
-     the totals strip wraps to two rows, and never collapses to a sliver. */
+       the totals strip wraps to two rows, and never collapses to a sliver. */
     .grid-pair .chart-wrap { flex: 1 1 0; min-height: 120px; height: auto; }
     #tbl-requests { flex: 1 1 0; min-height: 0; max-height: none; }
-    /* Short laptop windows: the explorer band yields first so the timeline
-     pair keeps its plot floor. The band scrolls internally, never clips. */
-    @media (max-height: 900px) {
-      #explorer { flex-basis: 190px; max-height: 190px; }
-    }
   }
 
   /* ---- unified explorer: scope bar + dimension rail + node gallery ---- */
@@ -924,19 +922,46 @@
   .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
   /* The summary preset: no plot, the tiles ARE the surface. They take the
-     card - rows share the freed height - and the axes/legend rows vanish.
-     A hidden tile keeps its grid cell as a label-only stub, so toggling a
-     metric never rewraps the strip or shifts anything. */
+     card and read as one clickable card each, with the explorer category
+     tile's exact card language - panel surface, 1px border, rounded
+     corners, and the same hover lift (brighter border, translateY(-1px),
+     soft drop shadow) so every clickable tile in the dashboard reacts
+     identically. A persistent corner toggle glyph (× hides, + restores)
+     accents on hover; content spreads vertically: label top, metric
+     center, spark bottom. Tracks floor at 160px so tiles run WIDER than
+     tall. A hidden tile keeps its grid cell as a dimmed dashed stub, so
+     toggling a metric never rewraps the strip or shifts anything. */
   .traffic-card.tiles-only .chart-wrap,
   .traffic-card.tiles-only .chart-axes,
   .traffic-card.tiles-only #traffic-legend { display: none; }
   .traffic-card.tiles-only .chart-totals {
     flex: 1 1 0; min-height: 0; grid-auto-rows: 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     margin-bottom: 10px; padding-bottom: 6px;
   }
+  .traffic-card.tiles-only .chart-total {
+    position: relative;
+    justify-content: space-between; gap: 6px; padding: 10px 12px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 11px;
+    transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease;
+  }
+  .traffic-card.tiles-only .chart-total::after {
+    content: '×';
+    position: absolute; top: 5px; right: 9px;
+    color: var(--muted); font-size: 12px; font-weight: 650; line-height: 1;
+    opacity: .4;
+  }
+  .traffic-card.tiles-only .chart-total.off {
+    justify-content: flex-start; opacity: .55;
+    border-style: dashed; border-color: var(--border2);
+  }
+  .traffic-card.tiles-only .chart-total.off::after { content: '+'; }
   .chart-total[role="button"] { cursor: pointer; }
-  .chart-total.off { min-height: 0; align-self: start; opacity: .5; }
-  .chart-total[role="button"]:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  .chart-total[role="button"]:hover { border-color: var(--border2); transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.26); }
+  .chart-total[role="button"]:hover::after,
+  .chart-total[role="button"]:focus-visible::after { opacity: 1; color: var(--accent); }
+  .chart-total[role="button"]:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .chart-total.off { min-height: 0; align-self: start; }
   /* Merged in/out pair: one wrapped line whose halves mirror the token
      bars' colors (input purple, output green) over a thin muted separator -
      tile and bars read as one story, and the pair fits the narrowest tile
@@ -944,22 +969,36 @@
   .chart-totals .val-pair { white-space: nowrap; }
   .chart-totals .v-in { color: var(--accent2); }
   .chart-totals .v-out { color: var(--ok); }
-  /* Health pair: errors in the chart's error red, rate-limited requests in
-     the 429 tone - the same two colors as the health lines below. */
-  .chart-totals .v-err { color: var(--err); }
-  .chart-totals .v-rl { color: var(--rl); }
-  .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
-  /* Measured shares ride under the value on their own row (block breaks the
-     inline run), so a long suffix can never push a narrow tile sideways. */
-  .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
-  /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
-     the tile bottom, so the sparks align across the row whatever sub-rows a
-     tile carries. The strip stays compact: ten tiles must never out-grow
-     the plot below them. */
-  .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 3px; }
+   /* Requests pair: request count in the requests plot's accent, the blended
+      token volume in the token story's cyan. */
+   .chart-totals .v-req { color: var(--accent); }
+   .chart-totals .v-tok { color: var(--cyan); }
+   /* Tokens triple: the in/out halves in the token bars' colors, cached
+      tokens in the cache line's muted tone - the third plot color of the
+      tokens preset. */
+   .chart-totals .v-cache { color: var(--muted); }
+   /* Health pair: errors in the chart's error red, rate-limited requests in
+      the 429 tone - the same two colors as the health lines below. */
+   .chart-totals .v-err { color: var(--err); }
+   .chart-totals .v-rl { color: var(--rl); }
+   /* Timing pair: latency in the latency plot's accent, speed in its green -
+      the same two colors as the latency preset's lines, so the tile halves
+      and the duo sparks below them read as one story. */
+   .chart-totals .v-ttft { color: var(--accent); }
+   .chart-totals .v-tps { color: var(--ok); }
+   .chart-totals .pair-sep { color: var(--muted); padding: 0 1px; }
+   /* Measured shares ride under the value on their own row (block breaks the
+      inline run), so a long suffix can never push a narrow tile sideways. */
+   .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+   /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
+      the tile bottom, so the sparks align across the row whatever sub-rows a
+      tile carries. The strip stays compact: ten tiles must never out-grow
+      the plot below them. */
+   .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
+  .chart-context[hidden] { display: none; }
   /* A readable, complete bucket readout on the opposite side of the pointer. */
   #chart-hover {
     position: absolute; top: 8px; right: 8px; z-index: 3;

@@ -103,6 +103,7 @@ const chartFrom = chartNow - 3600000 - ((chartNow - 3600000) % chartStep);
 let chartPayload = {
   now_ms: chartNow, from_ms: chartFrom, bucket_ms: chartStep,
   ttft_p: [null, null, null], tps_p: [null, null, null],
+  ttft_stat: null, tps_stat: null,
   buckets: Array.from({ length: Math.ceil((chartNow - chartFrom) / chartStep) }, (_, i) => ({
     t: chartFrom + i * chartStep,
     req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
@@ -1481,7 +1482,7 @@ async function main() {
     check('overview skeleton lists the merged tile labels without drift',
       w.eval(`(() => { chartView.preset = 'overview'; chartAgg = null;
         const s = chartTotals(); chartAgg = ${savedAgg};
-        return ['requests','tokens in/out','cached','cost','errors / 429','latency','speed']
+        return ['requests / tokens','tokens in/out/cached','cost','errors / 429','avg latency / speed']
           .every(l => s.includes('tl">' + l + '</span> -'));
       })()`));
     w.eval("chartView.preset = 'traffic'");
@@ -1987,7 +1988,8 @@ async function main() {
   // ---- test 11h: Overview preset - the summary, metrics-only ----
   // No plot: the tiles ARE the surface and take the card. Every tile reads
   // value first, then its measured companion fact, then its per-bucket
-  // evolution sparkline; timing tiles pin the server p95 - no percentile
+  // evolution sparkline; the merged timing tile carries the server's period
+  // averages with each metric's low-high sample range - no percentile
   // selector or visible pXX label. Tiles follow the legend's toggle
   // contract: click hides (a label-only stub keeps the grid cell), the
   // choice persists in dash.chart, unknown ids drop on load.
@@ -1995,6 +1997,7 @@ async function main() {
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
     chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5];
+    chartAgg.ttft_stat = [220, 10, 330]; chartAgg.tps_stat = [202.75, 50, 300];
     chartAgg.cost_per_mtok = 12.5;
     chartAgg.buckets[3].req = 10; chartAgg.buckets[3].err = 2; chartAgg.buckets[3].rl = 1; chartAgg.buckets[3].cost = 1.25;
     chartAgg.buckets[3].in = 100; chartAgg.buckets[3].out = 40; chartAgg.buckets[3].cache = 60;
@@ -2014,20 +2017,19 @@ async function main() {
     d.getElementById('chart-axes').textContent === '');
   const totalsOv = w.eval('chartTotals()');
   check('overview totals carry every headline metric for the period',
-    totalsOv.includes('requests</span> 14') &&
-    totalsOv.includes('<span class="chart-sub">200 tokens</span>') &&
-    totalsOv.includes('cost</span> $1.75') &&
-    totalsOv.includes('<span class="chart-sub">of 14 requests</span>') &&
-    !totalsOv.includes('blended</span>'));
+    totalsOv.includes('requests / tokens</span> <span class="val-pair"><span class="v-req">14</span><span class="pair-sep">/</span><span class="v-tok">200</span>') &&
+      !totalsOv.includes('200 tokens') &&
+      totalsOv.includes('cost</span> $1.75') &&
+      totalsOv.includes('<span class="chart-sub">of 14 requests</span>') &&
+      !totalsOv.includes('blended</span>'));
   check('the health pair reads errors/429 in the chart line colors over the denominator',
     totalsOv.includes('errors / 429</span> <span class="val-pair"><span class="v-err">3</span><span class="pair-sep">/</span><span class="v-rl">1</span>') &&
     !totalsOv.includes('rate limited</span>'));
-  check('merged token tile reads as the bar-colored one-line pair with its share',
-    totalsOv.includes('tokens in/out</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span>') &&
-    totalsOv.includes('<span class="chart-sub">75.0% in</span>') &&
-    !totalsOv.includes('in:out '));
-  check('overview totals annotate the cache share and the server blended price',
-    totalsOv.includes('40.0% of in') &&
+  check('the tokens triple reads in/out/cached in the plot colors with one share row',
+    totalsOv.includes('tokens in/out/cached</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span><span class="pair-sep">/</span><span class="v-cache">60</span>') &&
+      totalsOv.includes('<span class="chart-sub">75.0% in · 40.0% of in</span>') &&
+      !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile="cache"'));
+  check('overview totals annotate the server blended price',
     totalsOv.includes('$12.5 /Mtok') &&
     !totalsOv.includes('/ req'));
   check('the pair stays tile-bounded and its share never fakes 100%', (() => {
@@ -2041,19 +2043,32 @@ async function main() {
     return wide.includes('<span class="v-in">1M</span><span class="pair-sep">/</span><span class="v-out">13</span>') &&
       !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% in</span>');
   })());
-  check('every summary tile is a toggle and carries its evolution sparkline',
-    totalsOv.split('<svg class="spark"').length === 8 &&
-      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 7 &&
-      (totalsOv.match(/data-tile="/g) || []).length === 7 &&
+  check('every summary tile is a toggle and carries one multi-line spark',
+    totalsOv.split('<svg class="spark"').length === 6 &&
+      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 5 &&
+      !totalsOv.includes('spark-row') &&
+      (totalsOv.match(/data-tile="/g) || []).length === 5 &&
       !totalsOv.includes('NaN'));
-  check('overview timing tiles pin the server p95 without a visible pXX label',
-    totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
-    totalsOv.includes('220ms') && !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
-    !/p(?:50|95|99)/.test(totalsOv) && totalsOv.includes('95th percentile over the viewed period.'));
-  check('speed tile formatter stays placeholder-safe without a unit sub-row',
-    w.eval('chartSpec("tps").tileFmt(null)') === '-' &&
-    w.eval('chartSpec("tps").tileFmt(202.75)') === '202.75<span class="chart-sub">tok/s</span>');
-  check('the percentile dropdown never re-gates the summary timing tiles', (() => {
+  check('tile sparks span kept buckets only, one self-scaled line per half', (() => {
+    // The fixture carries traffic in exactly two buckets (3 and 5), so each
+    // spark line over the kept buckets has one M + one L command; the raw
+    // ladder would draw ~30. The requests tile draws two lines (requests +
+    // token volume) in the pair halves' colors.
+    const seg = totalsOv.slice(totalsOv.indexOf('data-tile="req"'), totalsOv.indexOf('data-tile="tokens"'));
+    const kept = w.eval('chartAgg.buckets.filter(b => b.req > 0).length');
+    const paths = (seg.match(/<path /g) || []).length;
+    const cmds = (seg.match(/[ML](?=[0-9])/g) || []).length;
+    return kept === 2 && paths === 2 && cmds === kept * paths;
+  })());
+  check('the summary hides the bucket-cadence context row',
+    d.getElementById('chart-context').hidden &&
+      w.eval('chartView.preset') === 'overview');
+  check('the merged timing tile reads avg latency / speed with sample ranges',
+    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">202.75</span>') &&
+      totalsOv.includes('<span class="chart-sub">10-330ms · 50-300/s</span>') &&
+      !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
+      !/p(?:50|95|99)/.test(totalsOv) && !totalsOv.includes('tok/s'));
+  check('the percentile dropdown never re-gates the summary timing tile', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
     w.setChartPct('99');
@@ -2067,7 +2082,7 @@ async function main() {
   w.eval('toggleSummaryTile("tokens")');
   const totalsHidden = w.eval('chartTotals()');
   check('hiding a tile leaves a label-only stub and never drops the cell',
-    (totalsHidden.match(/class="chart-total/g) || []).length === 7 &&
+    (totalsHidden.match(/class="chart-total/g) || []).length === 5 &&
     totalsHidden.includes('class="chart-total off" role="button" tabindex="0" data-tile="tokens" aria-pressed="false"') &&
     !totalsHidden.includes('75.0% in') && w.eval('chartView.hidden.overview.join()') === 'tokens');
   check('toggle round-trips and unknown tile ids never enter hidden state', (() => {

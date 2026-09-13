@@ -183,20 +183,39 @@ function hideClientTip() {
 //   their original index (an absent measurement keeps its honest x position
 //   instead of compressing its neighbors); fewer than two finite samples
 //   render an empty spark, never a fabricated line.
+// sparkPath builds one sparse-tolerant, self-normalized line path over the
+// series' index space: nulls leave real gaps (x still advances per data
+// slot), values scale to their own finite min/max, and fewer than two
+// finite points render no line at all.
+function sparkPath(data, w, h) {
+  const pts = [];
+  const n = data ? data.length : 0;
+  for (let i = 0; i < n; i++) if (Number.isFinite(data[i])) pts.push([i, data[i]]);
+  if (pts.length < 2) return '';
+  let min = Infinity, max = -Infinity;
+  for (const [, v] of pts) { if (v < min) min = v; if (v > max) max = v; }
+  if (min === max) max = min + 1; // guard divide-by-zero on a flat series
+  const dx = w / (n - 1);
+  return pts.map(([i, v], k) => `${k ? 'L' : 'M'}${(i * dx).toFixed(1)} ${(h - ((v - min) / (max - min)) * h).toFixed(1)}`).join('');
+}
+
+// sparklineMulti draws several independently-scaled colored lines in ONE
+// spark frame: the summary tiles' mini charts, one line per metric half in
+// that half's color. Per-line normalization keeps halves with different
+// units or magnitudes (ms vs tok/s, requests vs tokens) all readable - a
+// shared scale would flatten every smaller series into the baseline. Lines
+// only, no area washes: two or three overlapping fills read as mud.
+function sparklineMulti(specs, w, h) {
+  const lines = specs.map(s => {
+    const d = sparkPath(s.vals, w, h);
+    return d ? `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>` : '';
+  }).filter(Boolean);
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${lines.join('')}</svg>`;
+}
+
 function sparklineSVG(series, errs, w, h, color) {
   if (!color) color = 'var(--accent)';
-  const path = (data) => {
-    const pts = [];
-    const n = data ? data.length : 0;
-    for (let i = 0; i < n; i++) if (Number.isFinite(data[i])) pts.push([i, data[i]]);
-    if (pts.length < 2) return '';
-    let min = Infinity, max = -Infinity;
-    for (const [, v] of pts) { if (v < min) min = v; if (v > max) max = v; }
-    if (min === max) max = min + 1; // guard divide-by-zero on a flat series
-    const dx = w / (n - 1);
-    return pts.map(([i, v], k) => `${k ? 'L' : 'M'}${(i * dx).toFixed(1)} ${(h - ((v - min) / (max - min)) * h).toFixed(1)}`).join('');
-  };
-  const line = path(series);
+  const line = sparkPath(series, w, h);
   if (!line) {
     return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg>`;
   }
@@ -206,7 +225,7 @@ function sparklineSVG(series, errs, w, h, color) {
   // joined "22" and "0.0" into "220.0", emitting invalid path data (Chrome
   // logged "<path> attribute d: Expected number" for every sparkline).
   const area = `${line}L${w} ${h}L0 ${h}Z`;
-  const errPath = (errs && errs.some(e => e > 0)) ? path(errs) : '';
+  const errPath = (errs && errs.some(e => e > 0)) ? sparkPath(errs, w, h) : '';
   const errLine = errPath ? `<path d="${errPath}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
   return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">` +
     `<path d="${area}" fill="${color}" opacity="0.13"/>` +
