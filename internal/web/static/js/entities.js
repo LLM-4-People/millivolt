@@ -67,7 +67,7 @@ function entityBadge(dim, id, label, rec) {
     if (origin && !_faviconBroken.has(origin)) {
       // favicon + a hidden type-icon fallback shown by the delegated favicon
       // error handler (faviconErr reveals the next sibling on load failure).
-      icon = `<img class="favicon ent-fav" data-origin="${escapeHtml(origin)}" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(origin)}&sz=32" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="ent-ic ent-fav-fb" aria-hidden="true" style="display:none">${t.icon}</span>`;
+      icon = `<img class="favicon ent-fav" data-origin="${escapeHtml(origin)}" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(origin)}&sz=32" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="ent-ic" aria-hidden="true" style="display:none">${t.icon}</span>`;
     }
   }
   return `<span class="ent" style="--ent:${t.color}"${ttl}${extra}>${icon}<span class="ent-lb">${escapeHtml(disp)}</span></span>`;
@@ -199,6 +199,16 @@ function sparkPath(data, w, h) {
   return pts.map(([i, v], k) => `${k ? 'L' : 'M'}${(i * dx).toFixed(1)} ${(h - ((v - min) / (max - min)) * h).toFixed(1)}`).join('');
 }
 
+// sparkFrame is the single owner of the decorative spark <svg> frame: the
+// fixed attribute set (size, viewBox, non-uniform stretch, a11y) around the
+// paths. One builder keeps every emission site byte-identical.
+const sparkFrame = (w, h, body) =>
+  `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${body}</svg>`;
+// sparkLine is the one line-path builder: every spark line shares the same
+// stroke vocabulary (1.4px, rounded joins and caps, no fill).
+const sparkLine = (d, color) =>
+  `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>`;
+
 // sparklineMulti draws several independently-scaled colored lines in ONE
 // spark frame: the summary tiles' mini charts, one line per metric half in
 // that half's color. Per-line normalization keeps halves with different
@@ -208,16 +218,16 @@ function sparkPath(data, w, h) {
 function sparklineMulti(specs, w, h) {
   const lines = specs.map(s => {
     const d = sparkPath(s.vals, w, h);
-    return d ? `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>` : '';
+    return d ? sparkLine(d, s.color) : '';
   }).filter(Boolean);
-  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">${lines.join('')}</svg>`;
+  return sparkFrame(w, h, lines.join(''));
 }
 
 function sparklineSVG(series, errs, w, h, color) {
   if (!color) color = 'var(--accent)';
   const line = sparkPath(series, w, h);
   if (!line) {
-    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg>`;
+    return sparkFrame(w, h, '');
   }
   // Close the polygon from the first point (line already starts with M at (0, y0)):
   // baseline right edge → bottom edge → implicit close up the left side. Never
@@ -227,20 +237,19 @@ function sparklineSVG(series, errs, w, h, color) {
   const area = `${line}L${w} ${h}L0 ${h}Z`;
   const errPath = (errs && errs.some(e => e > 0)) ? sparkPath(errs, w, h) : '';
   const errLine = errPath ? `<path d="${errPath}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
-  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">` +
-    `<path d="${area}" fill="${color}" opacity="0.13"/>` +
-    `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>` +
-    errLine + `</svg>`;
+  return sparkFrame(w, h, `<path d="${area}" fill="${color}" opacity="0.13"/>` + sparkLine(line, color) + errLine);
 }
 
 // shareBar renders a part-to-whole proportion bar + % for a value against a
 // total - the meaningful secondary encoding for a dimension (its slice of the
 // whole), where a sparkline would be meaningless (every value shares the same
 // scope's shape). Bar carries the shape, the % carries the value (WCAG: never
-// color/length alone). fraction is 0..1.
+// color/length alone). fraction is 0..1. The % flows through pct (the pctCap
+// owner): a strictly-sub-1 fraction can never round up to a false "100%",
+// and a full fraction is a true 100.
 function shareBar(fraction, color) {
   const p = Math.max(0, Math.min(1, fraction || 0));
-  const pctTxt = (p * 100).toFixed(p < 0.1 ? 1 : 0) + '%';
+  const pctTxt = pct(p, 1);
   return `<span class="share" title="${pctTxt} of total"><span class="share-bar"><span class="share-fill" style="width:${(p*100).toFixed(1)}%;background:${color}"></span></span><span class="share-pct">${pctTxt}</span></span>`;
 }
 

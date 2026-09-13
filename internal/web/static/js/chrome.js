@@ -1117,7 +1117,7 @@ function usageRowHTML(field, path, fields) {
 
 function modelRowHTML(field, path, fields) {
   const opts = settingsFieldOptions(fields, field);
-  return `<div class="prov-urow m-row"><select class="sp-mfield" aria-label="canonical model field">${opts}</select><span class="prov-arrow" aria-hidden="true">→</span><input class="sp-mkey" value="${escapeHtml(path == null ? '' : String(path))}" placeholder="path inside the enrichment entry" aria-label="model metadata path"><button type="button" class="prov-x" data-prov-mrow-rm aria-label="remove mapping">✕</button></div>`;
+  return `<div class="prov-urow"><select class="sp-mfield" aria-label="canonical model field">${opts}</select><span class="prov-arrow" aria-hidden="true">→</span><input class="sp-mkey" value="${escapeHtml(path == null ? '' : String(path))}" placeholder="path inside the enrichment entry" aria-label="model metadata path"><button type="button" class="prov-x" data-prov-mrow-rm aria-label="remove mapping">✕</button></div>`;
 }
 
 function settingsFieldOptions(fields, selected) {
@@ -1661,10 +1661,13 @@ function syncProvMenuList(row) {
   list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" aria-hidden="true">☁</span>${escapeHtml(p)}</button>`).join('');
 }
 
+// INPUT_FLASH_MS is the invalid-input red flash: long enough to register,
+// short enough that a repeated denial re-flashes.
+const INPUT_FLASH_MS = 1200;
 function flashBadInput(el) {
   if (!el) return;
   el.classList.add('prov-bad');
-  setTimeout(() => el.classList.remove('prov-bad'), 1200);
+  setTimeout(() => el.classList.remove('prov-bad'), INPUT_FLASH_MS);
 }
 
 function addCostKey(sec) {
@@ -2517,10 +2520,11 @@ function debugNameTaken(kind, name) {
 // raw known-models list reads as duplicates. The checklist therefore groups
 // spelling variants for display using the canonicalization rules from config
 // (canonicalModel in explorer.js - observer-authored name lookup;
-// rules editable in Settings). A debug session still stores
-// and matches the exact raw spellings (Record.Model is the match key);
-// checking a group selects every variant of it, and editing a session re-checks
-// the group holding any of its raw models.
+// rules editable in Settings). A debug session stores the exact raw
+// spellings, but the server never raw-matches them: debug.go's modelIn folds
+// both the session's models and each request's model through the cursor
+// base name. Checking a group selects every variant of it, and editing a
+// session re-checks the group holding any of its raw models.
 let dbgModelGroups = [];
 // dbgGroupedModels: raw (deduped, sorted) names → ordered [group] objects
 // {key, display, variants}; a group's display name is its shortest variant
@@ -2694,7 +2698,12 @@ function debugMatchesRecord(h, r) {
 function editDebugForRecord(r) {
   const holds = liveDebugSessions();
   if (!holds.length || !r) return;
-  const h = holds.find(x => debugMatchesRecord(x, r)) || (r.debug_session_id && holds.find(x => x.id === r.debug_session_id));
+  // The record's stamped debug_session_id is the authoritative match: the
+  // server captured that request under that session. The raw-scope heuristic
+  // (debugMatchesRecord) is only a labeled fallback for a record the stamp
+  // does not reach.
+  const stamped = r.debug_session_id && holds.find(x => x.id === r.debug_session_id);
+  const h = stamped || holds.find(x => debugMatchesRecord(x, r));
   if (!h) return;
   closeHeaderMenus('debug-menu');
   const m = $('debug-menu');
@@ -2952,7 +2961,7 @@ function refreshFooterState() {
 
 function doFilter() {
   filters.status = $('f-status').value;
-  storage.set('dash.filters', JSON.stringify(filters)); // persist across reloads
+  storage.set(FILTERS_STORAGE_KEY, JSON.stringify(filters)); // persist across reloads
   renderAll(lastData);
   fetchChart();      // chart is scoped to status + explorer filters
   // The shared request gate cancels an obsolete scan immediately and
@@ -3265,6 +3274,26 @@ const RESTART_STEPS = [
   { rank: 3, label: 'start the new process' },
 ];
 
+// The poll fallback's budget and cadence. The deadline must cover the whole
+// remaining choreography or the fallback gives up while the server is still
+// draining: the server bounds the build (restartBuildTimeout, 5 minutes) and
+// the child's ready wait (restartReadyTimeout, 30 seconds) on its side, and
+// the status document carries the drain bound as drain_timeout_ms (the
+// configured restart_drain_timeout; 0 = the server waits indefinitely).
+// RESTART_DRAIN_FALLBACK_MS mirrors the server-side default drain timeout
+// (internal/config Default: RestartDrainTimeout, 10 minutes) for documents
+// that omit the bound or report an unbounded drain.
+const RESTART_BUILD_BUDGET_MS = 300000;
+const RESTART_READY_BUDGET_MS = 30000;
+const RESTART_DRAIN_FALLBACK_MS = 600000;
+// Poll cadence while the choreography runs; each poll is raced against the
+// hang bound because drain-phase polls sit unanswered in the inherited
+// socket's backlog.
+const RESTART_POLL_INTERVAL_MS = 750;
+const RESTART_POLL_HANG_MS = 5000;
+// How long the success notice stays up before the menu closes.
+const RESTART_DONE_MS = 2500;
+
 // renderRestartSteps paints the step list from a status document
 // {rank, phase, drain_elapsed_ms, drain_timeout_ms, error}. Steps below rank
 // are done, the ranked one is active (with the live drain timer), the rest
@@ -3378,14 +3407,17 @@ async function restartProxy() {
     // Poll in parallel with the watch: streaming drives the step list live
     // (including drain); polls detect the fresh process via started_at and
     // are the fallback when the client cannot stream. Drain polls hang, so
-    // each is raced against 5s.
-    const deadline = Date.now() + 300000;
+    // each is raced against the hang bound. The deadline derives from the
+    // status document's drain_timeout_ms plus the server's own build and
+    // ready budgets, so a long drain never reads as a timeout.
+    const drainMs = Number(doc.drain_timeout_ms) > 0 ? Number(doc.drain_timeout_ms) : RESTART_DRAIN_FALLBACK_MS;
+    const deadline = Date.now() + RESTART_BUILD_BUDGET_MS + drainMs + RESTART_READY_BUDGET_MS;
     const pollDone = (async () => {
       while (Date.now() < deadline) {
-        await new Promise(res => setTimeout(res, 750));
+        await new Promise(res => setTimeout(res, RESTART_POLL_INTERVAL_MS));
         if (restartFailed) return null;
         const poll = new AbortController();
-        const timeout = setTimeout(() => poll.abort(), 5000);
+        const timeout = setTimeout(() => poll.abort(), RESTART_POLL_HANG_MS);
         const st = await operatorFetch('/admin/restart', {signal: poll.signal}).then(x => x.json()).catch(() => null).finally(() => clearTimeout(timeout));
         if (restartFailed) return null;
         if (st && st.started_at && before.started_at && st.started_at !== before.started_at) {
@@ -3404,7 +3436,7 @@ async function restartProxy() {
       // SSE normally detects the new feed first. If it is disconnected,
       // check fresh assets/state immediately through the same bootstrap gate.
       if (feedId === beforeFeed) fetchBootstrap('resume');
-      setTimeout(() => { hideHdrMenu('restart-menu'); setRestartStatus(''); const ol = $('restart-steps'); if (ol) { ol.hidden = true; ol.innerHTML = ''; } }, 2500);
+      setTimeout(() => { hideHdrMenu('restart-menu'); setRestartStatus(''); const ol = $('restart-steps'); if (ol) { ol.hidden = true; ol.innerHTML = ''; } }, RESTART_DONE_MS);
       return;
     }
     setRestartStatus('restart did not complete in time', true);

@@ -23,6 +23,7 @@ let logCursor = null; // exact durable (started_at, id) keyset, independent of r
 // new one (a stale page would paint rows the new scope excludes).
 let logFetchGen = 0;
 const logNearPx = 96; // load-more slack (a few row heights), not a tunable
+const logNearSlackPx = 8; // fill-test tolerance: sub-pixel rounding never reads as scrollable room
 let settingsDoc = null;
 
 // One focus/visibility owner for the two modal surfaces. Closed dialogs are
@@ -78,11 +79,15 @@ const COLORS = {};
 ['accent', 'accent2', 'err', 'cyan', 'ok', 'warn', 'rl', 'muted', 'border2'].forEach(k => {
   COLORS[k] = getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
 });
+// hexA blends a #rrggbb color into an rgba() string (chart bar fills and the
+// gridline below). A value that is not exact 6-digit hex returns unchanged -
+// a malformed CSS var must never become 'rgba(NaN,NaN,NaN,...)'.
+function hexA(hex, a) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  return m ? `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})` : hex;
+}
 // Faint warm gridline (translucent panel border) for chart axes.
-COLORS.grid = (() => {
-  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(COLORS.border2);
-  return m ? `rgba(${parseInt(m[1],16)},${parseInt(m[2],16)},${parseInt(m[3],16)},.5)` : COLORS.border2;
-})();
+COLORS.grid = hexA(COLORS.border2, 0.5);
 
 // localStorage throws in privacy mode - keep the dashboard alive regardless.
 const storage = {
@@ -99,10 +104,13 @@ let pauseEditID = '';
 let throttleState = { throttles: [], known_providers: [], active: false };
 let debugState = { enabled: false, sessions: [], known_clients: [], known_providers: [], known_models: [], until: null, ttl: '', max_bytes: '' };
 let debugEditID = '';
+// localStorage key for the persisted status filter. One owner: the write
+// path in chrome.js (doFilter) references the same constant.
+const FILTERS_STORAGE_KEY = 'dash.filters';
 // Filter state: only status remains a dropdown filter (client/provider/model/
 // conversation/error are explorer dimensions now). Persisted across reloads.
 let filters = (() => {
-  try { return { status: '', ...JSON.parse(storage.get('dash.filters') || '{}') }; }
+  try { return { status: '', ...JSON.parse(storage.get(FILTERS_STORAGE_KEY) || '{}') }; }
   catch (e) { return { status: '' }; }
 })();
 let drawerId = null; // id of the record currently shown in the detail drawer

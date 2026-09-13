@@ -111,6 +111,9 @@ function explorerWantsLiveStatus() {
   if (st.activeDim === 'status') return true;
   return st.filters.some(f => f.dim === 'status' && LIVE_STATUS_FILTERS[f.id]);
 }
+// Live-status explorer refresh cadence: coalesce a burst of lifecycle
+// events into one server refetch instead of one per event.
+const EXPLORER_LIVE_REFRESH_MS = 250;
 let _xpLiveTimer = null;
 function scheduleExplorerLiveRefresh() {
   if (!explorerWantsLiveStatus()) return;
@@ -118,7 +121,7 @@ function scheduleExplorerLiveRefresh() {
   _xpLiveTimer = setTimeout(() => {
     _xpLiveTimer = null;
     fetchExplorer('refresh');
-  }, 250);
+  }, EXPLORER_LIVE_REFRESH_MS);
 }
 
 // ---------- main render ----------
@@ -495,13 +498,14 @@ function upsertPendingRec(rec, pendingRevision) {
   return recs;
 }
 
-// Explorer rebuilds are debounced during live-event bursts so the gallery
-// cards don't jitter on every single request; navigation/full renders still
-// rebuild it immediately.
+// Explorer rebuild debounce during live-event bursts: the gallery cards must
+// not jitter on every single request. Navigation/full renders still rebuild
+// immediately.
+const EXPLORER_RENDER_DEBOUNCE_MS = 600;
 let _explorerTimer = null;
 function scheduleExplorerRender() {
   if (_explorerTimer) return;
-  _explorerTimer = setTimeout(() => { _explorerTimer = null; renderExplorer(); }, 600);
+  _explorerTimer = setTimeout(() => { _explorerTimer = null; renderExplorer(); }, EXPLORER_RENDER_DEBOUNCE_MS);
 }
 
 // startStream opens the SSE feed. since/feed seed the initial snapshot's
@@ -649,6 +653,9 @@ function dashReleaseBackgroundLock() {
 function dashStopDashboardTick() {
   if (_dashTickTimer) { clearInterval(_dashTickTimer); _dashTickTimer = null; }
 }
+// Footer clock cadence: the weekday+time stamp reads second-accurate, and
+// the same tick re-checks hold/debug expiry for the footer state line.
+const FOOTER_CLOCK_MS = 1000;
 function _armClock() {
   if (_clockTimer) return;
   _clockTimer = setInterval(() => {
@@ -658,7 +665,7 @@ function _armClock() {
       fc.textContent = now.toLocaleDateString(undefined, { weekday: 'long' }) + ' ' + now.toLocaleTimeString();
     }
     if (pauseActive() || (pauseState.holds || []).length || debugActive() || (debugState.sessions || []).length) refreshFooterState();
-  }, 1000);
+  }, FOOTER_CLOCK_MS);
 }
 _armClock();
 document.addEventListener('visibilitychange', () => {

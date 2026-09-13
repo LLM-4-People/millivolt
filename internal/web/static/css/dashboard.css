@@ -794,6 +794,11 @@
   .mr-ex-out { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mr-ex.ch .mr-ex-out { color: var(--accent); }
   .mr-ex-n { font-size: 9px; }
+  /* The rules editor's muted bits: the preview's empty placeholder (toggled
+     per keystroke), the rule count and the example-table metadata. Every
+     emission site lives inside .mr-wrap, so the token scopes here and the
+     toggle in mrPreview actually changes the text color. */
+  .mr-wrap .muted { color: var(--muted); }
   .prov-add-u { display: grid; grid-template-columns: minmax(130px, 190px) 14px 1fr; gap: 6px; }
   .prov-add-u .prov-addbtn { grid-column: 3; justify-self: start; }
   /* Models enrichment: same row grammar as the usage map (one visual system
@@ -902,11 +907,11 @@
   .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: none; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
 
   .chart-wrap { position: relative; height: 210px; width: 100%; }
-  /* Period totals strip pinned above the plot: the VIEWED window's sums
-     (server buckets + live overlay), always visible regardless of hover.
-     An auto-fit grid fills one even row while the tiles fit (empty tracks
-     collapse, so sparse presets stretch like before); dense presets like
-     Overview wrap into further rows of the same tile width instead of
+  /* Period totals strip pinned above the plot: the VIEWED window's
+     server-computed bucket sums, always visible regardless of hover. An
+     auto-fit grid fills one even row while the tiles fit (empty tracks
+     collapse, so sparse presets stretch like before); denser plotted
+     presets wrap into further rows of the same tile width instead of
      crushing or overflowing. The 84px floor fits every bounded tile value
      (compact K/M/B money and counts stay ≤ 8 monospace characters). */
   .chart-totals {
@@ -1203,8 +1208,7 @@
     .xp-body { gap: 10px; }
     footer { flex-wrap: wrap; gap: 4px 12px; padding: 6px max(10px, env(safe-area-inset-right, 0px)) max(6px, env(safe-area-inset-bottom, 0px)) max(10px, env(safe-area-inset-left, 0px)); row-gap: 4px; }
     footer .f-right { margin-left: 0; width: 100%; justify-content: space-between; gap: 8px; }
-    footer .f-right .f-cell:first-child { display: none; } /* drop the brand tagline */
-    footer .f-right .f-sep { display: none; }
+    footer .f-right .f-cell:first-child { display: none; } /* hide the footer clock on the narrowest viewport */
   }
   footer .f-live { color: var(--ok); }
   footer .f-live.paused { color: var(--muted); }

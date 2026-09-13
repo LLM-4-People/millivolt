@@ -343,12 +343,19 @@ function sizeGallery() {
   requestAnimationFrame(() => applyGallerySize(gal));
 }
 
+// XP_GALLERY_MIN_H is the scrolling-page gallery floor: never show less
+// than about two full rows of node cards. Card height is content-driven
+// (no fixed CSS height), so a computed two-row estimate from a nominal card
+// height could never reliably win; this fixed floor is itself the two-row
+// guarantee.
+const XP_GALLERY_MIN_H = 340;
+
 function applyGallerySize(gal) {
   if (getComputedStyle(document.documentElement).getPropertyValue('--gallery-locked').trim() === '1') {
     if (gal.style.height !== '') gal.style.height = ''; // locked: CSS flex fills the box
     return;
   }
-  const cap = Math.max(2 * 118 + 10, 340); // never below two full rows
+  const cap = XP_GALLERY_MIN_H;
   const want = Math.min(gal.scrollHeight, cap) + 'px';
   if (gal.style.height !== want) gal.style.height = want; // no-op if unchanged (avoids RO loop)
 }
@@ -476,12 +483,13 @@ function xpNodeCard(st, e, payload) {
   ].filter(Boolean).join('<span aria-hidden="true"> · </span>');
   const headN = dim === 'error' ? (e.err_events || 0) : e.n;
   const headUnit = dim === 'error' ? 'err' : 'req';
-  let shareFrac, shareLabel;
+  // Share of the dimension's whole. A zero denominator means the share was
+  // never measured: no share row at all, never a fabricated 0%.
+  let shareFrac = null, shareLabel = '';
   if (dim === 'error') {
-    shareFrac = payload.error_total ? headN / payload.error_total : 0;
-    shareLabel = 'of errors';
-  } else {
-    shareFrac = payload.total ? e.n / payload.total : 0;
+    if (payload.error_total) { shareFrac = headN / payload.error_total; shareLabel = 'of errors'; }
+  } else if (payload.total) {
+    shareFrac = e.n / payload.total;
     shareLabel = 'of requests';
   }
   const selected = st.filters.some(f => f.dim === dim && f.id === key);
@@ -497,7 +505,7 @@ function xpNodeCard(st, e, payload) {
   const roleBadge = dim === 'conversation' ? `<small class="xp-conversation-role" title="${escapeHtml(roleTitle)}">${role}</small>` : '';
   const card = `<button type="button" class="xp-node${selected ? ' selected' : ''}" style="--ent:${entityType(dim).color}" data-xp-key="${escapeHtml(key)}" aria-pressed="${selected}"${clientAttr}${nodeTitle}>
     <span class="xp-node-hd">${entityBadge(dim, key)}${roleBadge}<span class="xp-node-n">${fmt(headN)}<small>${headUnit}</small></span></span>
-    <span class="xp-node-share" title="${shareLabel}">${shareBar(shareFrac, entityType(dim).color)}</span>
+    ${shareFrac != null ? `<span class="xp-node-share" title="${shareLabel}">${shareBar(shareFrac, entityType(dim).color)}</span>` : ''}
     <span class="xp-node-kpis">${kpis}</span>
     <span class="xp-node-foot">${sparklineSVG(e.spark || [], e.spark_err || [], SPARK_W, SPARK_H, entityType(dim).color)}${signals ? `<span class="xp-node-signals">${signals}</span>` : ''}</span>
   </button>`;

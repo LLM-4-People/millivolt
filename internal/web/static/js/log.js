@@ -256,7 +256,7 @@ function logNearBottom() {
   // look like "doesn't fill the viewport" and dump the whole history.
   if (c.clientHeight <= 0) return false;
   const room = c.scrollHeight - c.scrollTop - c.clientHeight;
-  if (c.scrollHeight <= c.clientHeight + 8) return true;
+  if (c.scrollHeight <= c.clientHeight + logNearSlackPx) return true;
   return room <= logNearPx;
 }
 
@@ -729,7 +729,7 @@ function formatDetail(r) {
       const pill = isTransport
         ? `<span class="pill err">transport</span>`
         : `<span class="pill ${a.status_code >= 500 ? 'err' : 'warn'}">${a.status_code}</span>`;
-      const when = a.at ? new Date(a.at).toLocaleTimeString() + '.' + String(new Date(a.at).getMilliseconds()).padStart(3,'0') : '';
+      const when = fmtT(a.at);
       // Type, code and message are distinct fields - show each on its own so a
       // code is never conflated with a message (a 502 is not always the same).
       // Skip the type text when it merely repeats the transport pill (a transport

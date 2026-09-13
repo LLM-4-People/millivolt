@@ -347,6 +347,25 @@ async function main() {
         !card.querySelector('.xp-node-kpis').textContent.includes('errors'));
     }
     for(const dim of ['status','key']) check(`${dim} retains its error-rate KPI`,renderCard(dim).querySelector('.xp-node-kpis').textContent.includes('err rate'));
+    // shareBar: the % flows through the pct/pctCap owner, so a
+    // strictly-sub-1 fraction can never round up to a false '100%' and a
+    // full fraction is a true 100. An unmeasured share (zero denominator)
+    // renders no share row at all, never a fabricated 0%.
+    check('shareBar never rounds a sub-100 share to a false 100%',
+      w.shareBar(0.9998, '#56B4E9').includes('99.9% of total') &&
+        !w.shareBar(0.9998, '#56B4E9').includes('100% of total') &&
+        w.shareBar(1, '#56B4E9').includes('100.0% of total'));
+    check('an unmeasured share renders no fabricated 0% row', (() => {
+      const measured = renderCard('provider');
+      const zero = d.createElement('div');
+      zero.innerHTML = w.xpNodeCard({activeDim:'provider',filters:[]}, {...entity, n: 3}, {total: 0, error_total: 0});
+      const zeroErr = d.createElement('div');
+      zeroErr.innerHTML = w.xpNodeCard({activeDim:'error',filters:[]}, {...entity, err_events: 2}, {total: 0, error_total: 0});
+      return !!measured.querySelector('.xp-node-share') &&
+        measured.querySelector('.xp-node-share').title === 'of requests' &&
+        !zero.querySelector('.xp-node-share') && !zero.textContent.includes('0%') &&
+        !zeroErr.querySelector('.xp-node-share') && !zeroErr.textContent.includes('0%');
+    })());
     // sparklineSVG: sparse series (null = unmeasured bucket, e.g. suppressed
     // percentile triples) keep honest x positions; fewer than two finite
     // samples render an empty spark, never a fabricated or NaN path.
@@ -625,8 +644,9 @@ async function main() {
   ]));
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
   // Debug model checklist: spelling variants of the same model must render as
-  // ONE checkbox (grouped display; the session still matches raw spellings),
-  // and the models box must share the clients/providers structure - nesting
+  // ONE checkbox (grouped display; a session stores the raw spellings and the
+  // server matches them canonically through the cursor base name), and the
+  // models box must share the clients/providers structure - nesting
   // it under .clear-opts used to stack the checkbox ABOVE the label (the
   // .clear-opts label rule out-specifies .pause-check).
   const dfm = d.getElementById('df-models');
@@ -654,8 +674,9 @@ async function main() {
   // a live preview) served in every bootstrap's model_canon.rules section
   // and applied everywhere models are GROUPED - the explorer model
   // dimension/scope (recordMatchesDim), the debug checklist, and the
-  // Clear/Logs model optgroups. Records, the log leaf, debug session
-  // matching, and purge/export keep the exact stored spelling.
+  // Clear/Logs model optgroups. Records, the log leaf, and purge/export keep
+  // the exact stored spelling; the server's debug-session matching folds
+  // both sides through the cursor base name (debug.go modelIn).
   check('canonicalModel mirrors config.ApplyModelRules (default pipeline)',
     canonCases.every(([raw, want]) => w.canonicalModel(raw) === want));
   w.applyModelCanon(modelFixture([{mode: 'exact', from: 'deepseek-v4-pro-0813', to: 'deepseek-v4-pro'}].concat(DEF_RULES), {...canonNames, 'deepseek-v4-pro-0813': 'deepseek-v4-pro'}), true);
@@ -2059,6 +2080,23 @@ async function main() {
     const paths = (seg.match(/<path /g) || []).length;
     const cmds = (seg.match(/[ML](?=[0-9])/g) || []).length;
     return kept === 2 && paths === 2 && cmds === kept * paths;
+  })());
+  // Contract: TILE_HALVES is the one owner of the half-class -> spark-color
+  // pairing. Every registry entry must actually wire its class (tilePair)
+  // to its palette key (tileSpark), and the rendered summary must never
+  // emit a half class the registry does not know - the class and its spark
+  // color cannot drift apart silently.
+  check('every tile half class pairs with its spark color through the one registry', (() => {
+    const halves = w.eval('TILE_HALVES');
+    const wired = Object.entries(halves).every(([cls, color]) => {
+      const pair = w.eval(`tilePair([['${cls}', 7]])`);
+      const sparkHtml = w.eval(`tileSpark([1, 2], [['${cls}', v => v]])`);
+      return pair.includes(`<span class="${cls}">7</span>`) &&
+        sparkHtml.includes(`stroke="${w.eval(`COLORS[${JSON.stringify(color)}]`)}"`);
+    });
+    const emitted = [...totalsOv.matchAll(/class="(v-[a-z]+)"/g)].map(m => m[1]);
+    return Object.keys(halves).length === 9 && wired &&
+      emitted.length === 9 && emitted.every(cls => halves[cls]);
   })());
   check('the summary hides the bucket-cadence context row',
     d.getElementById('chart-context').hidden &&

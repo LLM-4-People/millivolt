@@ -36,16 +36,28 @@ const CHART_POINT_SIZE = 4; // isolated line samples need a visible mark
 const CHART_POINT_RING_WIDTH = 1;
 // Totals-strip sparklines: the per-bucket evolution carried under EVERY
 // tile value (uniform rhythm; decorative like the explorer sparks - the tile
-// value carries the number, the spark carries the shape). 72px fits the
-// totals grid's 84px minimum tile.
+// value carries the number, the spark carries the shape). The emitted width
+// only sizes the viewBox: each spark stretches with its tile (CSS
+// width:100%), whose tracks floor at 160px in the tiles-only summary grid.
 const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
-// The Overview tiles pin the server's p95: the preset keeps only the
-// time-range control, no percentile selector, and no visible pXX label
-// anywhere - the tile tooltip carries the semantics. The index derives from
-// the CHART_PCTS owner, and the ordinal text derives from the same
-// constant, so the wire triple and the tooltip cannot drift apart.
+// CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
+// timing tile's value is the server's period average (ttft_stat / tps_stat),
+// never this percentile - it reaches the tile solely as the per-bucket spark
+// lines. The preset keeps only the time-range control, no percentile
+// selector and no visible pXX label anywhere; the tooltip's ordinal text
+// derives from this constant, and its index into the server's [p50, p95,
+// p99] wire triple derives from the CHART_PCTS owner, so the sparks and the
+// tooltip cannot drift apart.
 const CHART_TILE_PCT = 95;
 const CHART_TILE_PCT_IDX = CHART_PCTS.indexOf(CHART_TILE_PCT);
+// pctOrdinal names a percentile ordinally ('50th', '95th', '99th') for the
+// timing tile's tooltip, from CHART_TILE_PCT - the text can never claim a
+// percentile the spark lines do not draw.
+const pctOrdinal = p => {
+  const suffixes = ['th', 'st', 'nd', 'rd'];
+  const v = p % 100;
+  return p + (suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]);
+};
 // A sparse window cannot fill the plot width honestly: one to three plotted
 // buckets strand a lone bar or a short line in dead space on both sides.
 // The big chart waits for a fourth point and paints the blank meanwhile -
@@ -56,11 +68,6 @@ const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', d
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 const CHART_DAY_MS = 86400000;
 
-// hexA blends a #rrggbb CSS var into an rgba() string (bar fills).
-function hexA(hex, a) {
-  const n = parseInt(hex.slice(1), 16);
-  return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
-}
 // fmtPct keeps % axis ticks and legend values human (≤1 decimal, no float spew).
 const fmtPct = v => (Math.round(v * 10) / 10) + '%';
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
@@ -201,6 +208,11 @@ const chartRowBar = (id, rend) => (rend ? rend === 'bar' : !!chartSpec(id).bar);
 // Hidden series are per-preset: { presetId: [series ids] }.
 // An old flat array (previous shape) is discarded - fresh default.
 let chartView = { window: CHART_WINDOWS[0][0], pct: 95, preset: 'traffic', hidden: {} };
+// saveChartView is the one persistence path for the chart view (preset,
+// window, percentile, hidden sets): every validated change goes through it.
+function saveChartView() {
+  storage.set('dash.chart', JSON.stringify(chartView));
+}
 // loadChartView applies the persisted dash.chart payload onto chartView.
 // Deny by default: each field lands only when its saved shape validates
 // (window/pct/preset against their owner lists, hidden per-preset), so a
@@ -591,14 +603,51 @@ function upOpts(w, h) {
   };
 }
 
+// shareText renders a measured part-to-whole share ('60.0% of in') or null
+// when the ratio was never measured (zero denominator) - one owner for the
+// summary's combined share row and the plotted presets' share sub-rows, so
+// every surface renders the same measured-share-or-nothing semantics.
+const shareText = (a, b, of) => {
+  const p = pct(a, b);
+  return p === '-' ? null : p + (of ? ' ' + of : '');
+};
+// TILE_HALVES pairs every summary-tile metric half's CSS class (dashboard.css
+// owns the class styling) with the palette key that colors the half's spark
+// line. tilePair emits the half spans and tileSpark emits the spark lines,
+// both from this one registry, so a half's class and its spark color cannot
+// drift apart; the ui_check contract test pins the pairing.
+const TILE_HALVES = {
+  'v-req': 'accent',
+  'v-tok': 'cyan',
+  'v-in': 'accent2',
+  'v-out': 'ok',
+  'v-cache': 'muted',
+  'v-err': 'err',
+  'v-rl': 'rl',
+  'v-ttft': 'accent',
+  'v-tps': 'ok',
+};
+// tilePair renders the halves as ONE wrapped line over thin separators, no
+// spaces - the KPI band's duo format, so the pair fits the narrowest tile.
+// It must stay a single wrapped element: bare sibling spans become one flex
+// line each and stack the pair vertically.
+const tilePair = entries =>
+  `<span class="val-pair">${entries.map(([cls, v]) => `<span class="${cls}">${v}</span>`).join('<span class="pair-sep">/</span>')}</span>`;
+// sparkLines draws the summary sparks' shared wiring: one self-scaled line
+// per [palette key, bucket pick] over the traffic-bearing buckets.
+const sparkLines = (kept, specs) =>
+  sparklineMulti(specs.map(([color, pick]) => ({ vals: kept.map(pick), color: COLORS[color] })), CHART_SPARK_W, CHART_SPARK_H);
+// tileSpark routes each half's spark line through its registered palette key.
+const tileSpark = (kept, halves) => sparkLines(kept, halves.map(([cls, pick]) => [TILE_HALVES[cls], pick]));
+
 // Placeholder strip for the no-data state: the active preset's tile skeleton
 // at full tile height, so the first payload swaps text and the card below the
 // strip never moves. Tile COUNTS must match the data-filled strip per preset
 // (what wraps is rows, not labels) - ui_check pins the equality.
 function chartTotalsSkeleton() {
   const p = activePreset();
-  const ph = (label, cls = '') =>
-    `<span class="chart-total${cls ? ' ' + cls : ''}"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
+  const ph = label =>
+    `<span class="chart-total"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
     return ['requests / tokens', 'tokens in/out/cached', 'cost', 'errors / 429', 'avg latency / speed'].map(l => ph(l)).join('  ');
   }
@@ -628,25 +677,22 @@ function chartTotals() {
   // Tile percentages flow through pct (the pctCap owner): a strictly-sub-100
   // ratio can never round up to a false "100%".
   const span = (label, val, sub = '') => `<span class="chart-total"><span class="tl">${label}</span> ${val}${sub}</span>`;
-  const seriesSpan = (s, val, sub = '', fmtFn) => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${(fmtFn || s.fmt)(val)}${sub}</span>`;
+  const seriesSpan = (s, val, sub = '') => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${s.fmt(val)}${sub}</span>`;
   // pctSub renders a measured part-to-whole share as a small muted sub-row
   // ('60.0% of in') under the value. An unmeasured ratio (zero denominator)
   // renders no sub-row, never a fabricated 0%.
   const pctSub = (a, b, of) => {
-    const p = pct(a, b);
-    return p === '-' ? '' : `<span class="chart-sub">${p}${of ? ' ' + of : ''}</span>`;
+    const t = shareText(a, b, of);
+    return t == null ? '' : `<span class="chart-sub">${t}</span>`;
   };
   // inOutShare renders the token balance as the input share of the blended
   // volume. A percentage is bounded and reads identically in every locale;
   // the old ratio formatter emitted comma decimals ('2,664') that read like
   // a count. Zero denominator renders no sub-row, never a fabricated share.
   const inOutShare = (tin, tout) => pctSub(tin, tin + tout, 'in');
-  // tokenPair renders the in/out pair as ONE line: the halves in the token
-  // bars' colors (input purple, output green) over a thin separator, no
-  // spaces - the KPI band's duo format, so the pair fits the narrowest
-  // tile. It must stay a single wrapped element: bare sibling spans become
-  // one flex line each and stack the pair vertically.
-  const tokenPair = (tin, tout) => `<span class="val-pair"><span class="v-in">${fmt(tin)}</span><span class="pair-sep">/</span><span class="v-out">${fmt(tout)}</span></span>`;
+  // tokenPair renders the in/out pair in the token bars' colors (input
+  // purple, output green) through the shared tilePair owner.
+  const tokenPair = (tin, tout) => tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)]]);
   const p = activePreset();
   const parts = [];
   switch (p.id) {
@@ -694,42 +740,42 @@ function chartTotals() {
       };
       const tot = tin + tout;
       // Tile sparks are mini charts: one sparkline per tile, one line per
-      // metric half in exactly that half's color, each line scaled to its
-      // own series (halves measure different units). Only traffic-bearing
+      // metric half in exactly that half's color (TILE_HALVES pairs each
+      // half class with its palette key), each line scaled to its own
+      // series (halves measure different units). Only traffic-bearing
       // buckets enter the spark - the same empty-bucket removal the plots
       // apply - so ladder padding never squeezes the data into a corner.
       const kept = chartAgg.buckets.filter(b => b.req > 0);
-      const spark = specs => sparklineMulti(specs.map(([color, pick]) => ({ vals: kept.map(pick), color: COLORS[color] })), CHART_SPARK_W, CHART_SPARK_H);
       parts.push(tile('req', 'requests / tokens',
         'Request count over the blended token volume (input plus output), as a pair.',
         'accent',
-        `<span class="val-pair"><span class="v-req">${fmt(req)}</span><span class="pair-sep">/</span><span class="v-tok">${fmt(tot)}</span></span>` +
-        spark([['accent', b => b.req], ['cyan', b => b.in + b.out]])));
+        tilePair([['v-req', fmt(req)], ['v-tok', fmt(tot)]]) +
+        tileSpark(kept, [['v-req', b => b.req], ['v-tok', b => b.in + b.out]])));
       // One share row for the tokens triple: the input share of the blended
-      // volume and the cached share of input, both through pct (pctCap
-      // owner) so a sub-100 ratio can never round to a false 100%.
-      const share = (a, b, of) => (pct(a, b) === '-' ? null : `${pct(a, b)} ${of}`);
-      const shares = [share(tin, tot, 'in'), share(tcache, tin, 'of in')].filter(Boolean).join(' · ');
+      // volume and the cached share of input, both through the shareText
+      // owner (pct/pctCap) so a sub-100 ratio can never round to a false 100%.
+      const shares = [shareText(tin, tot, 'in'), shareText(tcache, tin, 'of in')].filter(Boolean).join(' · ');
       parts.push(tile('tokens', 'tokens in/out/cached',
         'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
         'cyan',
-        `<span class="val-pair"><span class="v-in">${fmt(tin)}</span><span class="pair-sep">/</span><span class="v-out">${fmt(tout)}</span><span class="pair-sep">/</span><span class="v-cache">${fmt(tcache)}</span></span>` +
+        tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)], ['v-cache', fmt(tcache)]]) +
         (shares ? `<span class="chart-sub">${shares}</span>` : '') +
-        spark([['accent2', b => b.in], ['ok', b => b.out], ['muted', b => b.cache]])));
+        tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
       parts.push(tile('cost', costSpec.label, costSpec.title || '', costSpec.color,
-        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark([['warn', b => b.cost]])));
+        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
       const health = { label: 'errors / 429',
         title: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.' };
       parts.push(tile('health', health.label, health.title, 'err',
-        `<span class="val-pair"><span class="v-err">${fmt(err)}</span><span class="pair-sep">/</span><span class="v-rl">${fmt(rl)}</span></span>` +
+        tilePair([['v-err', fmt(err)], ['v-rl', fmt(rl)]]) +
         (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
-        spark([['err', b => b.err], ['rl', b => b.rl || 0]])));
+        tileSpark(kept, [['v-err', b => b.err], ['v-rl', b => b.rl || 0]])));
       // The timing tile merges latency and speed into one story with both
       // halves in the latency preset's plot colors. The value is the PERIOD
       // AVERAGE over every captured sample (server-computed, never an
       // average of bucket percentiles), each metric's low-high sample
-      // range underneath, and the per-bucket p95 pair as its spark lines.
+      // range underneath, and the per-bucket pair at CHART_TILE_PCT as its
+      // spark lines.
       const ts = chartAgg.ttft_stat, ps = chartAgg.tps_stat;
       // Range bounds render as integers: a locale comma decimal ('46,853'
       // for 46.85) reads as a count - the same ambiguity that replaced the
@@ -745,11 +791,11 @@ function chartTotals() {
       };
       const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
       parts.push(tile('timing', 'avg latency / speed',
-        'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket 95th percentiles.',
+        'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
         'accent',
-        `<span class="val-pair"><span class="v-ttft">${ts ? fmtDur(ts[0]) : '-'}</span><span class="pair-sep">/</span><span class="v-tps">${ps ? fmt(ps[0]) : '-'}</span></span>` +
+        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', ps ? fmt(ps[0]) : '-']]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
-        spark([['accent', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['ok', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
+        tileSpark(kept, [['v-ttft', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['v-tps', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
       break;
     }
     case 'latency': {
@@ -851,7 +897,7 @@ function renderChart() {
 function chartLegendSync() {
   const l = $('traffic-legend');
   if (!l || !_plan) return;
-  const html = _plan.meta.map(({ spec, bar, stack, hidden }) => {
+  const html = _plan.meta.map(({ spec, bar, hidden }) => {
     const mark = bar ? 'bar' : spec.dash ? 'dashed' : 'line';
     const title = (hidden ? 'Show' : 'Hide') + ' ' + spec.label + (spec.title ? '. ' + spec.title : '');
     return `<button type="button" class="leg-item${hidden ? ' off' : ''}" data-series="${spec.id}" aria-pressed="${!hidden}" title="${escapeHtml(title)}" style="--sw:${COLORS[spec.color]}"><span class="swatch ${mark}" aria-hidden="true"></span>${spec.label}</button>`;
@@ -864,7 +910,7 @@ function toggleChartSeries(id) {
   if (!preset.series || !preset.series.some(([seriesId]) => seriesId === id)) return;
   const cur = chartView.hidden[preset.id] || [];
   chartView.hidden[preset.id] = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
-  storage.set('dash.chart', JSON.stringify(chartView)); // persist across reloads
+  saveChartView();
   renderChart();
 }
 
@@ -876,21 +922,21 @@ function toggleSummaryTile(id) {
   if (!preset.tilesOnly || !preset.tiles.includes(id)) return;
   const cur = chartView.hidden.overview || [];
   chartView.hidden.overview = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
-  storage.set('dash.chart', JSON.stringify(chartView));
+  saveChartView();
   renderChart();
 }
 
 function setChartPreset(v) {
   if (!CHART_PRESETS.some(pr => pr.id === v)) return;
   chartView.preset = v;
-  storage.set('dash.chart', JSON.stringify(chartView));
+  saveChartView();
   renderChart();
 }
 
 function setChartWindow(v) {
   if (!CHART_WINDOWS.some(([val]) => val === v)) return;
   chartView.window = v;
-  storage.set('dash.chart', JSON.stringify(chartView));
+  saveChartView();
   fetchChart(); // buckets are server-computed per window
 }
 
@@ -898,7 +944,7 @@ function setChartPct(v) {
   const n = Number(v);
   if (!CHART_PCTS.includes(n)) return;
   chartView.pct = n;
-  storage.set('dash.chart', JSON.stringify(chartView));
+  saveChartView();
   renderChart();
 }
 
