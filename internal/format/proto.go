@@ -17,6 +17,16 @@ import (
 const (
 	wireVarint = 0 // int32/int64/bool/enum/uint32/uint64
 	wireBytes  = 2 // string/bytes/embedded message
+
+	// protoValueMaxDepth bounds google.protobuf.Value nesting during decode.
+	// The wire costs only ~4-5 bytes per nesting level, so one crafted upstream
+	// frame well under connectMaxFrame (32 MiB) can encode millions of levels;
+	// the mutually recursive Value/Struct/ListValue decode would then exhaust
+	// the goroutine stack, a fatal, unrecoverable process crash from a single
+	// frame. A deeper frame is malformed input denied by default, the same
+	// posture as adminjson's document depth bound. Internal safety guardrail,
+	// not a user-tunable setting.
+	protoValueMaxDepth = 128
 )
 
 // appendVarint encodes v as a base-128 varint (little-endian groups, 7 bits
@@ -201,7 +211,7 @@ func decodeStringValueMapEntry(entry []byte) (string, any, bool) {
 	if key == "" {
 		return "", nil, false
 	}
-	v, ok := decodeProtoValue(valBytes)
+	v, ok := decodeProtoValue(valBytes, 0)
 	return key, v, ok
 }
 
@@ -209,8 +219,12 @@ func decodeStringValueMapEntry(entry []byte) (string, any, bool) {
 // oneof kind { null=1, number=2 (fixed64), string=3, bool=4, struct=5, list=6 }.
 // Falls back to the raw bytes as a UTF-8 string when it isn't a Value envelope
 // (some servers send plain text). Returns ok=false only on a structurally
-// malformed buffer.
-func decodeProtoValue(b []byte) (any, bool) {
+// malformed buffer; Value nesting deeper than protoValueMaxDepth counts as
+// malformed (each container hop adds one level; the entry point passes 0).
+func decodeProtoValue(b []byte, depth int) (any, bool) {
+	if depth > protoValueMaxDepth {
+		return nil, false
+	}
 	if len(b) == 0 {
 		return nil, true
 	}
@@ -234,15 +248,9 @@ func decodeProtoValue(b []byte) (any, bool) {
 			}
 			return f.raw, true
 		case 5: // struct_value: map<string, Value>
-			if m, ok := decodeProtoStruct(f.raw); ok {
-				return m, true
-			}
-			return nil, true
+			return decodeProtoStruct(f.raw, depth+1)
 		case 6: // list_value: repeated Value
-			if arr, ok := decodeProtoList(f.raw); ok {
-				return arr, true
-			}
-			return nil, true
+			return decodeProtoList(f.raw, depth+1)
 		case 1: // null_value
 			return nil, true
 		}
@@ -250,8 +258,9 @@ func decodeProtoValue(b []byte) (any, bool) {
 	return string(b), true
 }
 
-// decodeProtoStruct decodes a Struct (map<string, Value> at field 1).
-func decodeProtoStruct(b []byte) (map[string]any, bool) {
+// decodeProtoStruct decodes a Struct (map<string, Value> at field 1). depth is
+// the caller's nesting level, already incremented for this container.
+func decodeProtoStruct(b []byte, depth int) (map[string]any, bool) {
 	fields, err := parseProtoFields(b)
 	if err != nil {
 		return nil, false
@@ -276,15 +285,19 @@ func decodeProtoStruct(b []byte) (map[string]any, bool) {
 			}
 		}
 		if k != "" {
-			v, _ := decodeProtoValue(vb)
+			v, ok := decodeProtoValue(vb, depth)
+			if !ok {
+				return nil, false
+			}
 			out[k] = v
 		}
 	}
 	return out, true
 }
 
-// decodeProtoList decodes a ListValue (repeated Value at field 1).
-func decodeProtoList(b []byte) ([]any, bool) {
+// decodeProtoList decodes a ListValue (repeated Value at field 1). depth is
+// the caller's nesting level, already incremented for this container.
+func decodeProtoList(b []byte, depth int) ([]any, bool) {
 	fields, err := parseProtoFields(b)
 	if err != nil {
 		return nil, false
@@ -294,7 +307,10 @@ func decodeProtoList(b []byte) ([]any, bool) {
 		if f.num != 1 {
 			continue
 		}
-		v, _ := decodeProtoValue(f.raw)
+		v, ok := decodeProtoValue(f.raw, depth)
+		if !ok {
+			return nil, false
+		}
 		out = append(out, v)
 	}
 	return out, true
