@@ -568,6 +568,45 @@ func TestChartZeroTrafficPayloadShape(t *testing.T) {
 			}
 		}
 	}
+	// The empty-store payload carries the blended price as null - unmeasured,
+	// never a fabricated zero - mirroring the KPI band's absent figure.
+	for _, win := range []string{"all", "15"} {
+		p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window="+win)
+		if p["cost_per_mtok"] != nil {
+			t.Fatalf("window %s: zero-traffic cost_per_mtok = %v, want nil", win, p["cost_per_mtok"])
+		}
+	}
+}
+
+// The chart's period cost_per_mtok reuses the KPI band's blended rule: only
+// cost-REPORTING requests contribute the token denominator, so a mixed
+// window prices over the reporter's tokens alone and a zero-cost window
+// reads null.
+func TestChartBlendedCostPerMTok(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	reporter := mkRec("reporter", now.Add(-2*time.Minute), 200, "", nil, 10, 50, 100, 50, 0, 0.25)
+	plain := mkRec("plain", now.Add(-time.Minute), 200, "", nil, 10, 50, 900, 900, 0, 0)
+	for _, r := range []*metrics.Record{reporter, plain} {
+		s.Record(r)
+	}
+	waitTotals(t, s, 2)
+	api := NewAggAPI(metrics.NewBuffer(4), s, time.Second)
+	p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=15")
+	v, ok := p["cost_per_mtok"].(float64)
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+		t.Fatalf("cost_per_mtok = %v, want the blended price over the reporter's tokens only", p["cost_per_mtok"])
+	}
+	// 0.25 over the reporter's 150 tokens: 0.25/150*1e6 - the plain request's
+	// 1800 tokens must not dilute the price.
+	if want := 0.25 / 150 * 1e6; math.Abs(v-want) > 1e-6 {
+		t.Fatalf("cost_per_mtok = %v, want %v", v, want)
+	}
+	// Scoping away the reporter leaves no price: null, never zero.
+	p = get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=15&f=client:missing")
+	if p["cost_per_mtok"] != nil {
+		t.Fatalf("out-of-scope cost_per_mtok = %v, want nil", p["cost_per_mtok"])
+	}
 }
 
 func TestExplorerBreakdown(t *testing.T) {

@@ -1967,6 +1967,7 @@ async function main() {
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
     chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5];
+    chartAgg.cost_per_mtok = 12.5;
     chartAgg.buckets[3].req = 10; chartAgg.buckets[3].err = 2; chartAgg.buckets[3].rl = 1; chartAgg.buckets[3].cost = 1.25;
     chartAgg.buckets[3].in = 100; chartAgg.buckets[3].out = 40; chartAgg.buckets[3].cache = 60;
     chartAgg.buckets[5].req = 4; chartAgg.buckets[5].err = 1; chartAgg.buckets[5].cost = 0.5;
@@ -1987,25 +1988,29 @@ async function main() {
     dataOv[6][0] === 1.25 && dataOv[6][1] === 0.5);
   const totalsOv = w.eval('chartTotals()');
   check('overview totals carry every headline metric for the period',
-    totalsOv.includes('requests</span> 14') && totalsOv.includes('blended</span> 200') &&
+    totalsOv.includes('requests</span> 14') &&
+    totalsOv.includes('<span class="chart-sub">200 tokens</span>') &&
     totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
-    totalsOv.includes('rate limited</span> 1'));
-  check('overview totals annotate measured shares, cost per request and the in:out balance',
+    totalsOv.includes('<span class="chart-sub">1 rate limited</span>') &&
+    !totalsOv.includes('blended</span>'));
+  check('overview totals annotate measured shares and the server blended price',
     totalsOv.includes('75.0%') && totalsOv.includes('25.0%') && totalsOv.includes('40.0% of in') &&
-    totalsOv.includes('21.4%') && totalsOv.includes('7.1%') &&
-    totalsOv.includes('12.5¢ / req') && totalsOv.includes('in:out 3'));
-  check('the in:out balance stays tile-bounded under extreme distributions', (() => {
+    totalsOv.includes('$12.5 /Mtok') &&
+    !totalsOv.includes('/ req') && !/in:out/.test(totalsOv));
+  check('the in:out balance stays tile-bounded and shows the raw pair', (() => {
     const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
-    w.eval('chartAgg.buckets[3].in = 1000000; chartAgg.buckets[3].out = 3;');
+    w.eval('chartView.preset = "tokens"; chartAgg.buckets[3].in = 1000000; chartAgg.buckets[3].out = 3;');
     const wide = w.eval('chartTotals()');
-    w.eval('chartAgg.buckets[3] = JSON.parse(' + JSON.stringify(saved) + ');');
-    // period tin = 1000050, tout = 13 → 76926.92… → compact '76.93K'
-    return wide.includes('in:out 76.93K') && !wide.includes('76926');
+    w.eval('chartAgg.buckets[3] = JSON.parse(' + JSON.stringify(saved) + '); chartView.preset = "overview";');
+    // period tin = 1000050, tout = 13 → ratio 76926.92… → compact '76.93K'
+    // with the raw pair riding underneath: both numbers, never one alone.
+    return wide.includes('in:out</span> 76.93K') && !wide.includes('76926') &&
+      wide.includes('<span class="chart-sub">1M / 13</span>');
   })());
   check('every overview tile carries its own evolution sparkline',
-    totalsOv.split('<svg class="spark"').length === 11 &&
-    (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 10 &&
-    !totalsOv.includes('NaN'));
+    totalsOv.split('<svg class="spark"').length === 9 &&
+      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 8 &&
+      !totalsOv.includes('NaN'));
   check('overview timing tiles pin the server p95 without a visible pXX label',
     totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
     totalsOv.includes('220ms') && !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&

@@ -603,12 +603,13 @@ type chartBucketJSON struct {
 }
 
 type chartPayload struct {
-	NowMs    int64             `json:"now_ms"`
-	FromMs   int64             `json:"from_ms"`   // CLOCK-ALIGNED window start (floored onto a ladder step)
-	BucketMs int64             `json:"bucket_ms"` // exact integer bucket width - single source of truth
-	TTFTP    []*float64        `json:"ttft_p"`    // period-wide [p50, p95, p99] (the totals strip)
-	TPSP     []*float64        `json:"tps_p"`
-	Buckets  []chartBucketJSON `json:"buckets"`
+	NowMs      int64             `json:"now_ms"`
+	FromMs     int64             `json:"from_ms"`   // CLOCK-ALIGNED window start (floored onto a ladder step)
+	BucketMs   int64             `json:"bucket_ms"` // exact integer bucket width - single source of truth
+	TTFTP      []*float64        `json:"ttft_p"`    // period-wide [p50, p95, p99] (the totals strip)
+	TPSP       []*float64        `json:"tps_p"`
+	CostPerMTk *float64          `json:"cost_per_mtok"` // period blended price; SAME rule as the KPI band (cost-reporting requests only)
+	Buckets    []chartBucketJSON `json:"buckets"`
 }
 
 type bAcc struct {
@@ -624,6 +625,8 @@ type chartFold struct {
 	from, step int64
 	count      int
 	buckets    []bAcc
+	cost       float64 // period totals behind cost_per_mtok (blended price)
+	costInOut  float64 // in+out of cost-REPORTING requests only
 	extraTTFT  []int64 // only unflushed/ring values; durable samples stay in the shared order
 	extraTPS   []float64
 	ttftBucket []uint8
@@ -691,6 +694,19 @@ func (f *chartFold) fold(c *contrib) error {
 	if err != nil {
 		return err
 	}
+	f.cost, err = metrics.SumValues(f.cost, c.cost)
+	if err != nil {
+		return err
+	}
+	// Blended-price denominator: only cost-REPORTING requests contribute
+	// tokens - the SAME rule the explorer/KPI aggregates apply, so the tile
+	// and the KPI band can never quote different figures for one period.
+	if c.cost > 0 {
+		f.costInOut, err = metrics.SumValues(f.costInOut, float64(c.in), float64(c.out))
+		if err != nil {
+			return err
+		}
+	}
 	if c.rowIndex > 0 {
 		f.membership[c.rowIndex-1] = uint8(idx + 1)
 	}
@@ -727,7 +743,8 @@ func (f *chartFold) payload(now int64) chartPayload {
 		out[i] = o
 	}
 	return chartPayload{NowMs: now, FromMs: f.from, BucketMs: f.step,
-		TTFTP: periodTTFT, TPSP: periodTPS, Buckets: out}
+		TTFTP: periodTTFT, TPSP: periodTPS,
+		CostPerMTk: metrics.ScaledRatio(f.cost, f.costInOut, 1e6), Buckets: out}
 }
 
 // chartWindowEdges floors the raw window start onto a clock-aligned ladder

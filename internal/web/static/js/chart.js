@@ -129,8 +129,6 @@ const CHART_SERIES = [
     title: 'Requests with final or retried HTTP 429; each request counted once. A rate limit is not an error.' },
   { id: 'inTok',   label: 'tokens in',  color: 'accent2', fmt: fmt,      bar: true },
   { id: 'outTok',  label: 'tokens out', color: 'ok',      fmt: fmt,      bar: true },
-  { id: 'blended', label: 'blended',    color: 'cyan',    fmt: fmt,
-    title: 'Total tokens: input plus output, cached prompt tokens included.' },
   { id: 'reason',  label: 'reasoning',  color: 'cyan',    fmt: fmt,      bar: true },
   { id: 'cost',    label: 'cost',       color: 'warn',    fmt: fmtMoney, bar: true },
   { id: 'cache',   label: 'cached',     color: 'muted',   fmt: fmt,      dash: [3, 3] },
@@ -251,7 +249,6 @@ function chartBucketVal(s, b) {
     case 'rl': return b.rl;
     case 'inTok': return b.in;
     case 'outTok': return b.out;
-    case 'blended': return b.in + b.out;
     case 'cache': return b.cache;
     case 'reason': return b.reason;
     case 'cost': return b.cost;
@@ -706,7 +703,7 @@ function chartTotals() {
   });
   // Tile percentages flow through pct (the pctCap owner): a strictly-sub-100
   // ratio can never round up to a false "100%".
-  const span = (label, val) => `<span class="chart-total"><span class="tl">${label}</span> ${val}</span>`;
+  const span = (label, val, sub = '') => `<span class="chart-total"><span class="tl">${label}</span> ${val}${sub}</span>`;
   const seriesSpan = (s, val, sub = '', fmtFn) => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${(fmtFn || s.fmt)(val)}${sub}</span>`;
   // pctSub renders a measured part-to-whole share as a small muted sub-row
   // ('60.0% of in') under the value. An unmeasured ratio (zero denominator)
@@ -734,7 +731,10 @@ function chartTotals() {
       parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
       parts.push(seriesSpan(chartSpec('reason'), treason));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
-      parts.push(span('in:out', inOutRatio(tin, tout)));
+      // The balance reads as ratio AND the raw pair: one number alone
+      // cannot be checked against what actually flowed.
+      parts.push(span('in:out', inOutRatio(tin, tout),
+        `<span class="chart-sub">${fmt(tin)} / ${fmt(tout)}</span>`));
       break;
     }
     case 'errors':
@@ -747,23 +747,23 @@ function chartTotals() {
       break;
     case 'overview': {
       // Uniform tiles: every metric reads value first, then its measured
-      // share (where one exists), then its per-bucket evolution sparkline -
-      // the evolution of every listed metric is visible in the strip itself.
+      // companion fact, then its per-bucket evolution sparkline - the
+      // evolution of every listed metric is visible in the strip itself.
+      // Merged tiles keep the strip compact: requests carries the blended
+      // token volume, errors carries the rate-limited count, and cost
+      // carries the server's blended per-Mtok price - the SAME figure the
+      // KPI band shows, cost-reporting requests only.
       const tot = tin + tout;
       const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
-      const bal = inOutRatio(tin, tout);
-      parts.push(seriesSpan(chartSpec('req'), req, spark(chartSpec('req'), b => b.req)));
-      parts.push(seriesSpan(chartSpec('blended'), tot,
-        (bal === '-' ? '' : `<span class="chart-sub">in:out ${bal}</span>`) + spark(chartSpec('blended'), b => b.in + b.out)));
+      parts.push(seriesSpan(chartSpec('req'), req,
+        `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(chartSpec('req'), b => b.req)));
       parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot) + spark(chartSpec('inTok'), b => b.in)));
       parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot) + spark(chartSpec('outTok'), b => b.out)));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in') + spark(chartSpec('cache'), b => b.cache)));
       parts.push(seriesSpan(chartSpec('cost'), cost,
-        (req ? `<span class="chart-sub">${fmtMoney(cost / req)} / req</span>` : '') + spark(chartSpec('cost'), b => b.cost)));
+        (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(chartSpec('cost'), b => b.cost)));
       parts.push(seriesSpan(chartSpec('err'), err,
-        (req ? `<span class="chart-sub">${pct(err, req)}</span>` : '') + spark(chartSpec('err'), b => b.err)));
-      parts.push(seriesSpan(chartSpec('rl'), rl,
-        (req ? `<span class="chart-sub">${pct(rl, req)}</span>` : '') + spark(chartSpec('rl'), b => b.rl)));
+        `<span class="chart-sub">${rl} rate limited</span>` + spark(chartSpec('err'), b => b.err)));
       // Timing tiles pin the server's p95 for the period, with the same
       // per-bucket p95 sparkline (suppressed buckets stay absent). No
       // percentile selector on this preset: the tooltip carries the choice.

@@ -257,11 +257,12 @@ async def check(base, screenshot):
                 # Overview preset: the stacked token bar (input below, output
                 # on top; bar height = blended total) plus the rl, req and err
                 # lines all render on the real canvas, and the uniform
-                # ten-tile totals strip (every tile with its evolution
+                # eight-tile totals strip (every tile with its evolution
                 # sparkline) stays inside the card at both desktop and mobile
                 # widths. The recovered-429 fixture proves the health
-                # invariant end to end: rate limited = 2 while errors stay 0,
-                # no percentile selector, no visible pXX label.
+                # invariant end to end: the merged errors tile reads '2 rate limited'
+                # while errors stay 0, no percentile selector, no visible pXX
+                # label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
@@ -301,7 +302,7 @@ async def check(base, screenshot):
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
                         const totals=document.getElementById('chart-totals').textContent;
                         return {points,inTok,outTok,req,cost,rl,overflow,rlTotal,errTotal,
-                                errors0:/errors\\s*0/.test(totals), rateLimited2:/rate limited\\s*2/.test(totals),
+                                errors0:/errors\\s*0/.test(totals), rateLimited2:/2\\s*rate limited/.test(totals),
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
@@ -313,8 +314,8 @@ async def check(base, screenshot):
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
                     require(state['errors0'] and state['rateLimited2'], state)
                     require(not state['overflow'], state)
-                    require(state['tiles'] == 10, state)
-                    require(state['sparks'] == 10, state)
+                    require(state['tiles'] == 8, state)
+                    require(state['sparks'] == 8, state)
                     require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
