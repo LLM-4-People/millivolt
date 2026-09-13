@@ -203,6 +203,29 @@ async def check(base, screenshot):
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
+                # Compaction contract on the real payload: buckets without
+                # BOTH measurements at the selected percentile drop out of the
+                # timeline (no gap points, no dead space). The kept set must
+                # equal the both-measured buckets exactly, every plotted point
+                # carries both lines, and the axes note reports the omission.
+                state = await page.evaluate('''async () => {
+                    const full = window.__fullChart;
+                    const idx = ['50','95','99'].indexOf(document.getElementById('chart-pct').value);
+                    const measured = full.buckets.filter(b => Number.isFinite(b.tps?.[idx]) && Number.isFinite(b.ttft?.[idx]));
+                    chartAgg = {...full};
+                    renderChart();
+                    await new Promise(requestAnimationFrame);
+                    const u = _up;
+                    const kept = u ? u.data[0].length : -1;
+                    const bothFinite = u ? u.data[0].every((x, i) => Number.isFinite(u.data[1][i]) && Number.isFinite(u.data[2][i])) : false;
+                    const dropped = full.buckets.length - measured.length;
+                    return {kept, want: measured.length, bothFinite, dropped,
+                            note: document.getElementById('chart-context').textContent};
+                }''')
+                require(state['kept'] == state['want'] and state['bothFinite'], state)
+                require(state['want'] >= 1, state)
+                if state['dropped']:
+                    require('unmeasured intervals omitted' in state['note'], state)
                 # Overview preset: the stacked token bar (input below, output
                 # on top; bar height = blended total) plus the rl, req and err
                 # lines all render on the real canvas, and the uniform

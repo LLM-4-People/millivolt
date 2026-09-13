@@ -1505,23 +1505,41 @@ async function main() {
   check('hiding a token series nulls its column, count stable', dataTok2.length === 6 && dataTok2[2].every(v => v === null) && dataTok2[1][tokSlot] === 100 && dataTok2[3][tokSlot] === 10 && dataTok2[4][tokSlot] === 60);
   w.eval('chartView.hidden = {}');
 
-  // Speed + latency: one selected percentile per metric + server sparse gate (no
-  // compaction - lines keep every bucket, gaps are honest)
+  // Speed + latency: one selected percentile per metric. A bucket plots only
+  // when BOTH measurements exist at that percentile (a null in either line is
+  // a gap point, not a zero); unmeasured buckets compact away like empty bar
+  // slots instead of stranding gap points in dead space.
   w.eval(`
     chartView.preset = 'latency'; chartView.pct = 95;
     chartAgg.buckets[2].req = 1;
     chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100.25, 200.75, 300.5];
+    chartAgg.buckets[7].req = 1;
+    chartAgg.buckets[7].ttft = [1, 2, 3];
+    chartAgg.buckets[9].req = 1;
+    chartAgg.buckets[9].ttft = [null, 5, null]; chartAgg.buckets[9].tps = [null, 50, null];
   `);
   const dataLat = w.eval('chartData()');
-  check('speed + latency keeps every bucket (no compaction)', dataLat[0].length === 30 && dataLat[0][2] === CHART_FROM + 2 * BUCKET_MS + BUCKET_MS / 2);
-  check('speed + latency reads only the selected percentile, preserving fractional speed', dataLat.length === 3 && dataLat[1][2] === 200.75 && dataLat[2][2] === 20);
+  check('speed + latency keeps only buckets with both measurements',
+    dataLat[0].length === 2 && dataLat[0][0] === 0.5 && dataLat[0][1] === 1.5);
+  check('compacted points keep their true bucket times for ticks and hover', w.eval(`(() => {
+    const ticks = chartXValues({data: [chartData()[0]]}, [0.5, 1.5]);
+    return (_vis && _vis.join() === '2,9') &&
+      ticks.join() === [chartXTick(chartAgg.buckets[2].t), chartXTick(chartAgg.buckets[9].t)].join();
+  })()`));
+  check('speed + latency reads only the selected percentile, preserving fractional speed',
+    dataLat.length === 3 && dataLat[1][0] === 200.75 && dataLat[2][0] === 20 && dataLat[1][1] === 50 && dataLat[2][1] === 5);
   check('speed + latency uses independent unit-honest axes without bands', w.eval(`(() => {
     const opts = upOpts(640, 210);
     return opts.axes[1].scale === 'ytps' && opts.axes[2].scale === 'yttft' &&
       opts.series.length === 3 && opts.series[1].scale === 'ytps' && opts.series[2].scale === 'yttft' &&
       opts.series[1].label === 'speed' && opts.series[2].label === 'latency' && !opts.bands;
   })()`));
-  check('server sparse percentiles stay honest gaps', dataLat[1][6] === null && dataLat[2][6] === null);
+  check('a bucket missing one measurement never plots, even with that line hidden', w.eval(`(() => {
+    chartView.hidden = {latency:['tps']};
+    const d = chartData();
+    chartView.hidden = {};
+    return d[0].length === 2 && d[1].every(v => v === null) && d[2][0] === 20 && d[2][1] === 5;
+  })()`));
   const isolatedOpts = w.eval('upOpts(370, 210)');
   const [innerPoint, outerPoint] = isolatedOpts.series.slice(1).map(s => s.points);
   check('coincident isolated lines use an inner filled point and transparent outer ring',
@@ -1569,10 +1587,12 @@ async function main() {
   `);
   const latTotals = w.eval('chartTotals()');
   check('speed + latency totals show only selected period values', latTotals.includes('202.75 tok/s') && latTotals.includes('220ms') && !latTotals.includes('101.25') && !latTotals.includes('110ms') && !/p(?:50|95|99)/.test(latTotals));
-  for (const [pct, speed, ttft, totalSpeed, totalTTFT] of [[50, 100.25, 10, 101.25, 110], [99, 300.5, 30, 303.5, 330]]) {
+  for (const [pct, speed, ttft, totalSpeed, totalTTFT, kept] of [[50, 100.25, 10, 101.25, 110, 1], [99, 300.5, 30, 303.5, 330, 1]]) {
     w.setChartPct(String(pct));
     const data = w.eval('chartData()'), totals = w.eval('chartTotals()');
-    check(`percentile dropdown chooses both series and period totals at ${pct}`, data.length === 3 && data[1][2] === speed && data[2][2] === ttft && totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms'));
+    check(`percentile dropdown chooses both series and period totals at ${pct}`,
+      data.length === 3 && data[0].length === kept && data[1][0] === speed && data[2][0] === ttft &&
+      totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms'));
   }
   w.setChartPct('95');
   // blank state: zero merged traffic reads as empty
@@ -1719,21 +1739,21 @@ async function main() {
     [...d.querySelectorAll('#traffic-legend .leg-item')].every(b => b.getAttribute('aria-pressed') === 'true'));
   const dataLegLat = w.eval('chartData()');
   check('speed + latency legend controls the selected value for each metric',
-    dataLegLat.length === 3 && dataLegLat[1][5] === 200 && dataLegLat[2][5] === 20);
+    dataLegLat.length === 3 && dataLegLat[0].length === 1 && dataLegLat[1][0] === 200 && dataLegLat[2][0] === 20);
   legTTFT().click();
   const dataLegLatHidden = w.eval('chartData()');
   check('latency toggle hides only its line and exposes its unpressed state',
     legTTFT().getAttribute('aria-pressed') === 'false' && legTTFT().classList.contains('off') &&
-    dataLegLatHidden.length === 3 && dataLegLatHidden[1][5] === 200 && dataLegLatHidden[2].every(v => v === null));
+    dataLegLatHidden.length === 3 && dataLegLatHidden[0].length === 1 && dataLegLatHidden[1][0] === 200 && dataLegLatHidden[2].every(v => v === null));
   legTTFT().click();
   check('latency metric toggle restores only its own line',
-    legTTFT().getAttribute('aria-pressed') === 'true' && w.eval('chartData()[1][5] === 200 && chartData()[2][5] === 20'));
+    legTTFT().getAttribute('aria-pressed') === 'true' && w.eval('chartData()[1][0] === 200 && chartData()[2][0] === 20'));
   const pctControl = d.getElementById('chart-pct');
   check('the percentile control names both plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed and latency'));
   pctControl.value = '99';
   pctControl.dispatchEvent(new w.Event('change', { bubbles: true }));
-  check('the percentile dropdown updates both plotted lines together', w.eval('chartView.pct === 99 && chartData()[1][5] === 300 && chartData()[2][5] === 30'));
-  w.eval(`upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 5, left: 100}, bbox: {width: 640}})`);
+  check('the percentile dropdown updates both plotted lines together', w.eval('chartView.pct === 99 && chartData()[1][0] === 300 && chartData()[2][0] === 30'));
+  w.eval(`upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 0, left: 100}, bbox: {width: 640}})`);
   check('hover shows one speed and one latency value with no percentile duplication',
     [...d.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join() === 'speed300 tok/s,latency30ms' &&
     !/p(?:50|95|99)/.test(d.getElementById('chart-hover').textContent));
@@ -1894,17 +1914,24 @@ async function main() {
     check('legend + totals still render ahead of the gate (the card stays alive)',
       [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.dataset.series).join() === 'cost,req' &&
       d.getElementById('chart-totals').textContent.includes('cost'));
-    // latency preset: no compaction (data non-null) - the chartIsEmpty term
-    // of the mount gate is the ONLY blocker left
+    // latency preset: zero traffic fails the requireAll keep too - compaction
+    // empties the window, so the blank arrives through both gates
     w.eval("chartView.preset = 'latency'");
     w.renderChart();
-    check('latency preset stays blank on zero traffic (empty gate, data present)',
-      w.eval('chartData()') !== null && !box.querySelector('div.uplot') && w.eval('_up') === null);
+    check('latency preset stays blank on zero traffic (compaction and empty gate agree)',
+      w.eval('chartData()') === null && !box.querySelector('div.uplot') && w.eval('_up') === null);
     // honest-data rule intact: SOME traffic must still plot
     w.eval("chartView.preset = 'cost'; chartAgg.buckets[7].req = 1");
     w.renderChart();
     check('sparse traffic un-blanks and mounts the plot (gaps stay honest)',
       !!box.querySelector('div.uplot') && w.eval('_up') !== null);
+    // traffic without timing samples: compaction empties the latency window
+    // while traffic exists, so the blank names the preset, not the traffic
+    w.eval("chartView.preset = 'latency'");
+    w.renderChart();
+    check("traffic without timing samples paints its own blank, not 'no traffic yet'",
+      w.eval('chartData()') === null && w.eval('chartIsEmpty()') === false &&
+      !box.querySelector('div.uplot') && w.eval('window.__blankMsgs').at(-1) === 'no speed + latency samples yet');
     // restore: tear the mounted plot down, unspy, clear overrides + state
     w.eval("if (_up) { _up.destroy(); _up = null; } drawBlank = window.__drawBlankOrig; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
     for (const c of box.querySelectorAll('canvas.chart-blank')) c.remove();

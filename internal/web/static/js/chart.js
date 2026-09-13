@@ -175,7 +175,11 @@ const CHART_PRESETS = [
     series: [['inTok', 'y'], ['outTok', 'y'], ['reason', 'y'], ['cache', 'y'], ['cachePct', 'pct']],
   },
   {
-    id: 'latency', label: 'Speed + latency',
+    // Speed + latency: both lines must read the same requests, so only
+    // buckets carrying BOTH measurements at the selected percentile plot -
+    // a bucket missing either is dropped (and empty intervals compact
+    // away) instead of stranding gap points in dead space.
+    id: 'latency', label: 'Speed + latency', requireAll: true,
     left: { scale: 'ytps', fmt: fmt, label: 'Speed (tok/s)' }, right: { scale: 'yttft', fmt: fmtDur, label: 'Latency (TTFT)' },
     series: [['tps', 'ytps'], ['ttft', 'yttft']],
   },
@@ -285,11 +289,13 @@ function chartPlan() {
 // chartData builds uPlot's [x, series…] column arrays for the active preset.
 // Hidden series pass all-null columns (stable column count - a toggle is a
 // plain setData; the plot re-creates only on preset changes).
-// x values are bucket-slot centers. On the bars scale the empty buckets are
-// dropped and x compacts to slot centers in index space (an empty slot is an
-// invisible hole that only wastes width - each surviving bar keeps its true
-// time for ticks/hover via _vis); line presets keep every bucket, where a
-// gap is honest data.
+// x values are bucket-slot centers. Bars-scale presets drop empty (req 0)
+// buckets and a requireAll preset (speed + latency) drops buckets missing
+// any row's measurement at the selected percentile: either way x compacts
+// to slot centers in index space (a dropped slot is a hole that only
+// wastes width - each surviving point keeps its true time for ticks/hover
+// via _vis). Hidden rows still count toward requireAll: the bucket contract
+// is what the preset measures, not what is momentarily shown.
 // Stacked rows carry CUMULATIVE columns over the visible stack segments in
 // row order (segment value = column minus the previous visible stack
 // column), so hiding a segment re-stacks the survivors without double
@@ -300,10 +306,14 @@ function chartData() {
   if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return null;
   const bm = chartAgg.bucket_ms || 0;
   let idxs = null;
-  if (_plan.preset.left.scale === 'y' && chartAgg.buckets.some(b => b.req === 0)) {
+  const keep = _plan.preset.requireAll
+    ? (b => _plan.meta.every(m => Number.isFinite(chartBucketVal(m.spec, b))))
+    : (b => b.req > 0);
+  const canCompact = _plan.preset.requireAll || _plan.preset.left.scale === 'y';
+  if (canCompact && chartAgg.buckets.some(b => !keep(b))) {
     idxs = [];
-    chartAgg.buckets.forEach((b, i) => { if (b.req > 0) idxs.push(i); });
-    if (!idxs.length) return null; // everything empty → blank state
+    chartAgg.buckets.forEach((b, i) => { if (keep(b)) idxs.push(i); });
+    if (!idxs.length) return null; // nothing measurable → blank state
   }
   _vis = idxs;
   _compacted = !!idxs;
@@ -777,7 +787,10 @@ function chartChromeSync() {
   const compressed = preset.left.scale === 'y'
     ? ' <span class="chart-scale" title="The scale compresses large values so smaller values remain visible. Compare the labeled values, not bar-height ratios.">· compressed scale</span>' : '';
   updateSection('chart-axes', `<span>${preset.left.label}${compressed}</span><span>${preset.right?.label || ''}</span>`);
-  const context = chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' + (_compacted ? ' · empty intervals omitted' : '') : 'Waiting for traffic';
+  const omitted = _compacted
+    ? (_plan?.preset.requireAll ? ' · unmeasured intervals omitted' : ' · empty intervals omitted')
+    : '';
+  const context = chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
 
@@ -801,7 +814,13 @@ function renderChart() {
     if (canMeasure && w >= 80 && h >= 40) {
       const { ctx } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
-      drawBlank(ctx, 'no traffic yet');
+      // Traffic that the active preset cannot measure (a requireAll preset
+      // whose buckets all lack a measurement) deserves its own message -
+      // 'no traffic yet' would be false.
+      const msg = data || chartIsEmpty()
+        ? 'no traffic yet'
+        : `no ${activePreset().label.toLowerCase()} samples yet`;
+      drawBlank(ctx, msg);
     }
     return;
   }
