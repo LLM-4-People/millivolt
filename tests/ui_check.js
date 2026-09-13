@@ -1647,6 +1647,7 @@ async function main() {
     chartView.hidden = {};
   `);
   const pct50Want = {
+    overview: ['inTok', 'outTok', 'err', 'req', 'cache', 'blended', 'cost'],
     traffic: ['req', 'err'],
     tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
@@ -1742,11 +1743,11 @@ async function main() {
   w.toggleChartSeries('dur');
   check('unknown or obsolete series cannot enter hidden state', w.eval('chartView.hidden.latency.join() === "ttft"'));
   w.eval("chartView.hidden = {}; chartView.window = 'all'; chartView.pct = 95; fillChartControls()");
-  for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency']) {
+  for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency', 'overview']) {
     w.eval(`chartView.preset = '${preset}'`);
     w.renderChart();
-    check(`percentile control is ${preset === 'latency' ? 'visible' : 'hidden'} for ${preset}`,
-      d.getElementById('chart-pct').hidden === (preset !== 'latency'));
+    check(`percentile control is ${['latency', 'overview'].includes(preset) ? 'visible' : 'hidden'} for ${preset}`,
+      d.getElementById('chart-pct').hidden === !['latency', 'overview'].includes(preset));
   }
 
   // Axis callbacks survive setData changing between timestamp and compacted
@@ -1910,6 +1911,74 @@ async function main() {
     delete box.clientWidth;
     delete box.clientHeight;
   }
+
+  // ---- test 11h: Overview preset - the at-a-glance composition ----
+  // In/out/error bars share the compressed left scale; requests and the
+  // cached subset trace it as lines, blended (in+out) traces the bars'
+  // envelope, and cost stays a line on its own right axis. The totals strip
+  // carries every period total with measured shares, and the
+  // percentile-gated speed/latency tiles render per-bucket sparklines from
+  // suppressed-tolerant sparse series.
+  w.eval(`
+    chartAgg = window.__cp = ${JSON.stringify(mkChart())};
+    chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
+    chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5];
+    chartAgg.buckets[3].req = 10; chartAgg.buckets[3].err = 2; chartAgg.buckets[3].cost = 1.25;
+    chartAgg.buckets[3].in = 100; chartAgg.buckets[3].out = 40; chartAgg.buckets[3].cache = 60;
+    chartAgg.buckets[5].req = 4; chartAgg.buckets[5].err = 1; chartAgg.buckets[5].cost = 0.5;
+    chartAgg.buckets[5].in = 50; chartAgg.buckets[5].out = 10; chartAgg.buckets[5].cache = 0;
+    chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100, 200, 300];
+    chartAgg.buckets[3].ttft = [5, 10, 15]; chartAgg.buckets[3].tps = [50, 60, 70];
+  `);
+  check('overview plan: composition bars + riding req/cache/blended lines + right-axis cost line',
+    w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.bar ? "bar" : "line") + "@" + m.scale).join("|")') ===
+      'inTok=bar@y|outTok=bar@y|err=bar@y|req=line@y|cache=line@y|blended=line@y|cost=line@yr');
+  const dataOv = w.eval('chartData()');
+  check('overview compacts empty buckets and keeps a stable column per row',
+    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 8);
+  check('blended derives in+out per bucket',
+    dataOv[6][0] === 140 && dataOv[6][1] === 60);
+  check('overview cost line reads the server bucket on the right axis',
+    dataOv[7][0] === 1.25 && dataOv[7][1] === 0.5);
+  const totalsOv = w.eval('chartTotals()');
+  check('overview totals carry every headline metric for the period',
+    totalsOv.includes('requests</span> 14') && totalsOv.includes('blended</span> 200') &&
+    totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3'));
+  check('overview totals annotate measured shares, never fabricated ones',
+    totalsOv.includes('75.0%') && totalsOv.includes('25.0%') && totalsOv.includes('40.0% of in') &&
+    totalsOv.includes('21.4%'));
+  check('overview totals gate the speed/latency tiles on the one percentile control',
+    totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
+    totalsOv.includes('220ms') && !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
+    !/p(?:50|95|99)/.test(totalsOv));
+  check('overview totals render one sparse-tolerant sparkline per metric tile',
+    totalsOv.split('<svg class="spark"').length === 3 &&
+    (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 2 &&
+    !totalsOv.includes('NaN'));
+  check('speed tile formatter stays placeholder-safe without a unit sub-row',
+    w.eval('chartSpec("tps").tileFmt(null)') === '-' &&
+    w.eval('chartSpec("tps").tileFmt(202.75)') === '202.75<span class="chart-sub">tok/s</span>');
+  check('percentile dropdown re-gates the overview tiles without touching the plot', (() => {
+    w.setChartPct('50');
+    const t50 = w.eval('chartTotals()');
+    w.setChartPct('99');
+    const t99 = w.eval('chartTotals()');
+    w.setChartPct('95');
+    return t50.includes('110ms') && t50.includes('101.25') &&
+      t99.includes('330ms') && t99.includes('303.5') &&
+      w.eval('chartPlan().meta.length') === 7;
+  })());
+  w.eval("chartView.hidden = { overview: ['req'] }");
+  const dataOvH = w.eval('chartData()');
+  const optsOvH = w.eval('upOpts(600, 180)');
+  check('overview hidden toggle keeps a stable all-null line column',
+    dataOvH.length === 8 && dataOvH[4].every(v => v === null) && dataOvH[6][0] === 140);
+  check('hidden lines never leave an isolated point behind',
+    optsOvH.series[4].points.filter?.({ data: dataOvH }, 4) === null);
+  w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['blended', 'bogus']}})); loadChartView();`);
+  check('saved overview selection validates hidden ids against the preset rows',
+    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "blended"'));
+  w.eval("chartView.hidden = {}; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
 
   // ---- test 12: restart menu + rebuild-and-restart poll ----
   const rmenu = d.getElementById('restart-menu');

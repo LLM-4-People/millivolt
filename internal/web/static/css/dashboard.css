@@ -893,16 +893,23 @@
 
   .chart-wrap { position: relative; height: 210px; width: 100%; }
   /* Period totals strip pinned above the plot: the VIEWED window's sums
-     (server buckets + live overlay), always visible regardless of hover. */
+     (server buckets + live overlay), always visible regardless of hover.
+     An auto-fit grid fills one even row while the tiles fit (empty tracks
+     collapse, so sparse presets stretch like before); dense presets like
+     Overview wrap into further rows of the same tile width instead of
+     crushing or overflowing. */
   .chart-totals {
-    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 12px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(72px, 100%), 1fr)); gap: 12px;
     font-size: 17px; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text);
     padding: 2px 0 14px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
     min-height: 57px; flex-shrink: 0;
   }
   .chart-total { display: flex; flex-direction: column; gap: 3px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
-  .chart-totals .chart-sub { font-size: 10px; color: var(--muted); font-weight: 400; margin-left: 3px; }
+  /* Measured shares ride under the value on their own row (block breaks the
+     inline run), so a long suffix can never push a narrow tile sideways. */
+  .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+  .chart-total .spark { display: block; margin-top: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }

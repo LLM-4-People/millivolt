@@ -198,9 +198,11 @@ editable configuration, not a guarantee of provider access or protocol coverage.
 - Use automatic conversation grouping for stateless clients, or explicit
   session/parent headers for main/sub-conversation relationships. Missing or
   conflicting ancestry remains unresolved instead of being guessed.
-- Compare all five timelines: Traffic, Tokens, Speed + latency, Errors and
-  Cost. Choose windows from minutes through All time, toggle individual series,
-  and select one percentile for both speed and first-token latency.
+- Compare all six timelines: Overview, Traffic, Tokens, Speed + latency, Errors
+  and Cost. Overview combines request and token volumes, the blended total,
+  spend, errors and percentile-gated speed/latency readouts in one window;
+  choose windows from minutes through All time, toggle individual series, and
+  select one percentile for both speed and first-token latency.
 - Inspect provider-reported input/output, cache and reasoning usage. Costs below
   $1 display in cents everywhere; data/API values remain USD. Error and HTTP 429
   counts are distinct, zero badges disappear, and a 429 alone is not an error.

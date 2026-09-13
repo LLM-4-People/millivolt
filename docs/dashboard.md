@@ -35,6 +35,19 @@ together. The time-range dropdown runs from 15 minutes through one year and
 Legend controls show or hide individual series; hover a bucket for its precise
 values and time interval. Counts, sums and percentiles come from the server.
 
+### Overview
+
+**Overview** is the at-a-glance composition: input and output token bars share
+the compressed left scale with error bars, requests and the cached share trace
+that scale as lines, the blended total (input plus output) traces the bars'
+envelope, and reported spend stays on its own right axis. The totals strip
+carries every headline metric for the period - requests, blended, input,
+output and cached tokens with their measured shares, spend, errors with the
+affected-request rate - plus the percentile-gated speed and latency readouts,
+each with a per-bucket sparkline so the evolution of both timing metrics stays
+visible. One percentile dropdown controls those readouts. This preset has no
+static capture yet; the gallery images below predate it.
+
 ### Traffic
 
 **Traffic** compares request and error counts. Bars represent bucket totals,

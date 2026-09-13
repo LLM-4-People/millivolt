@@ -713,7 +713,9 @@ parents and main/sub/unresolved counts; read the
 Tools and error occurrences can have multiple memberships per request, while
 error/429 health badges count distinct affected requests.
 
-The [visual guide](dashboard.md) covers every timeline and its controls. Traffic
+The [visual guide](dashboard.md) covers every timeline and its controls. Overview
+composes requests, input/output/cached tokens, the blended total, spend, errors
+and the percentile-gated speed/latency readouts in one window; Traffic
 compares requests/errors; Tokens separates available input/output/reasoning/cache
 usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
 uses independent throughput/TTFT axes; Errors compares

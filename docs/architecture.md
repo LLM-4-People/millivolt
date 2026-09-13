@@ -205,7 +205,9 @@ timestamp/ID cursors and stays outside the live arrival-ordered ring.
 
 Server chart responses alone own buckets/totals at configured cadence. Presets,
 series, money/unit formatters and visible dimension order each have one registry.
-Hidden lines keep stable columns; percentile/range changes reuse the plot.
+Derived series (error rate, cache hit, blended totals) recompute from those
+server bucket sums; the browser never folds events into chart data. Hidden
+lines keep stable columns; percentile/range changes reuse the plot.
 Isolated samples use filled/ring points without coordinate jitter. Shared axis
 formatting avoids duplicate labels. The percentile dropdown is the only visible
 pXX label owner; conditional error/429 badges omit zero independently.

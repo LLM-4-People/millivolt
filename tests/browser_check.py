@@ -174,6 +174,49 @@ async def check(base, screenshot):
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
+                # Overview preset: in/out token bars + the req, cached, blended
+                # and cost lines all render on the real canvas, and the dense
+                # nine-tile totals strip (with sparkline tiles) stays inside the
+                # card at both desktop and mobile widths.
+                await page.select_option('#chart-preset', 'overview')
+                for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
+                    await page.set_viewport_size(viewport)
+                    state = await page.evaluate('''async () => {
+                        const bucket = chartAgg.buckets.find(b => b.req > 0 && b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite));
+                        if (!bucket) throw new Error('fixture has no percentile-bearing bucket');
+                        chartAgg = {...chartAgg, buckets:[bucket], from_ms:bucket.t, now_ms:bucket.t+chartAgg.bucket_ms};
+                        renderChart();
+                        await new Promise(requestAnimationFrame);
+                        const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
+                        let inTok=0, outTok=0, req=0, blended=0, cost=0;
+                        for (let i=0;i<pixels.length;i+=4) {
+                            if (!pixels[i+3]) continue;
+                            const [r,g,b] = [pixels[i],pixels[i+1],pixels[i+2]];
+                            if (b>r*1.3 && b>g*1.2 && r>g) inTok++;   // tokens in bar (#9a6bff)
+                            if (g>r*1.3 && b<g*0.8) outTok++;         // tokens out bar (#2fd186)
+                            if (b>r*1.3 && b>g*1.3 && g>r) req++;     // requests line (#5b8cff)
+                            if (g>r*1.3 && b>g*0.8 && b<g*1.1) blended++; // blended line (#38d5c0)
+                            if (r>b*1.3 && r>g) cost++;                // cost line (#f4c14d)
+                        }
+                        const card=document.querySelector('.traffic-card');
+                        const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
+                        return {inTok,outTok,req,blended,cost,overflow,
+                                tiles:document.querySelectorAll('#chart-totals .chart-total').length,
+                                sparks:document.querySelectorAll('#chart-totals svg.spark').length,
+                                pctHidden:document.getElementById('chart-pct').hidden,
+                                legend:document.querySelector('#traffic-legend').textContent};
+                    }''')
+                    require(state['inTok'] and state['outTok'], state)
+                    require(state['req'] and state['blended'] and state['cost'], state)
+                    require(not state['overflow'], state)
+                    require(state['tiles'] == 9, state)
+                    require(state['sparks'] == 2, state)
+                    require(not state['pctHidden'], state)
+                    require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
+                    results.append({'width': viewport['width'], 'preset': 'overview', **state})
+                # Restore the saved-view expectations the reload check pins.
+                await page.select_option('#chart-preset', 'latency')
+                await page.select_option('#chart-pct', '99')
                 layout_checks = []
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 1706, 'height': 810}):
                     await page.set_viewport_size(viewport)
