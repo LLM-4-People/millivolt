@@ -178,26 +178,36 @@ function hideClientTip() {
 // errors overlay as a thin second line. Independent y-axis per sparkline (nodes
 // have wildly different volumes); the numeric total sits beside it. Decorative:
 // aria-hidden - the adjacent numbers carry the value (WCAG).
-//   series: number[] (volume per bucket), errs: number[] (errors per bucket)
+//   series: number[] (volume per bucket), errs: number[] (errors per bucket).
+//   Sparse series tolerate null/NaN buckets: only finite samples draw, at
+//   their original index (an absent measurement keeps its honest x position
+//   instead of compressing its neighbors); fewer than two finite samples
+//   render an empty spark, never a fabricated line.
 function sparklineSVG(series, errs, w, h, color) {
   if (!color) color = 'var(--accent)';
-  if (!series || series.length <= 1) {
-    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false"></svg>`;
-  }
   const path = (data) => {
-    let min = Math.min(...data), max = Math.max(...data);
+    const pts = [];
+    const n = data ? data.length : 0;
+    for (let i = 0; i < n; i++) if (Number.isFinite(data[i])) pts.push([i, data[i]]);
+    if (pts.length < 2) return '';
+    let min = Infinity, max = -Infinity;
+    for (const [, v] of pts) { if (v < min) min = v; if (v > max) max = v; }
     if (min === max) max = min + 1; // guard divide-by-zero on a flat series
-    const dx = w / (data.length - 1);
-    return data.map((v, i) => `${i ? 'L' : 'M'}${(i * dx).toFixed(1)} ${(h - ((v - min) / (max - min)) * h).toFixed(1)}`).join('');
+    const dx = w / (n - 1);
+    return pts.map(([i, v], k) => `${k ? 'L' : 'M'}${(i * dx).toFixed(1)} ${(h - ((v - min) / (max - min)) * h).toFixed(1)}`).join('');
   };
   const line = path(series);
+  if (!line) {
+    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false"></svg>`;
+  }
   // Close the polygon from the first point (line already starts with M at (0, y0)):
   // baseline right edge → bottom edge → implicit close up the left side. Never
   // splice raw numbers after the M command - the old `M0 ${h}${line.slice(1)}`
   // joined "22" and "0.0" into "220.0", emitting invalid path data (Chrome
   // logged "<path> attribute d: Expected number" for every sparkline).
   const area = `${line}L${w} ${h}L0 ${h}Z`;
-  const errLine = (errs && errs.some(e => e > 0)) ? `<path d="${path(errs)}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
+  const errPath = (errs && errs.some(e => e > 0)) ? path(errs) : '';
+  const errLine = errPath ? `<path d="${errPath}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
   return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false">` +
     `<path d="${area}" fill="${color}" opacity="0.13"/>` +
     `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>` +

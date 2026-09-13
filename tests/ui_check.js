@@ -346,6 +346,26 @@ async function main() {
         !card.querySelector('.xp-node-kpis').textContent.includes('errors'));
     }
     for(const dim of ['status','key']) check(`${dim} retains its error-rate KPI`,renderCard(dim).querySelector('.xp-node-kpis').textContent.includes('err rate'));
+    // sparklineSVG: sparse series (null = unmeasured bucket, e.g. suppressed
+    // percentile triples) keep honest x positions; fewer than two finite
+    // samples render an empty spark, never a fabricated or NaN path.
+    check('sparkline skips absent buckets at their true x positions without NaN', (() => {
+      const sparse = w.eval('sparklineSVG([1, null, 3, null], null, 80, 14, "#fff")');
+      // dx = 80/3; finite samples sit at x=0 and x=53.3
+      return !sparse.includes('NaN') && /M0\.0 /.test(sparse) && /L53\.3 /.test(sparse) && !/L26\.7 /.test(sparse);
+    })());
+    check('sparkline renders empty below two finite samples', (() => {
+      const one = w.eval('sparklineSVG([1], null, 80, 14, "#fff")');
+      const none = w.eval('sparklineSVG([null, null, null], null, 80, 14, "#fff")');
+      const empty = w.eval('sparklineSVG([], null, 80, 14, "#fff")');
+      const flat = w.eval('sparklineSVG([2, 2, 2], null, 80, 14, "#fff")');
+      return ![one, none, empty].some(s => s.includes('<path')) && flat.includes('<path') && !flat.includes('NaN');
+    })());
+    check('sparkline error overlay skips absent error buckets', (() => {
+      const s = w.eval('sparklineSVG([1, 2, 3], [0, null, 1], 80, 14, "#fff")');
+      const allGone = w.eval('sparklineSVG([1, 2, 3], [null, null], 80, 14, "#fff")');
+      return s.split('stroke="var(--err)"').length === 2 && !allGone.includes('var(--err)');
+    })());
     const savedAgg=w.eval('explorerAgg');
     const trigger=d.getElementById('xp-dim-trigger'), originalStyle=w.getComputedStyle;
     try {
