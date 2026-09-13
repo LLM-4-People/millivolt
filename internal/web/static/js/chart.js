@@ -750,15 +750,23 @@ function chartTotals() {
       // companion fact, then its per-bucket evolution sparkline - the
       // evolution of every listed metric is visible in the strip itself.
       // Merged tiles keep the strip compact: requests carries the blended
-      // token volume, errors carries the rate-limited count, and cost
-      // carries the server's blended per-Mtok price - the SAME figure the
-      // KPI band shows, cost-reporting requests only.
+      // token volume, tokens carries the in/out pair with its balance,
+      // errors carries the rate-limited count, and cost carries the
+      // server's blended per-Mtok price - the SAME figure the KPI band
+      // shows, cost-reporting requests only.
       const tot = tin + tout;
       const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
+      const bal = inOutRatio(tin, tout);
+      // The in/out pair mirrors the stacked bar's colors - input purple,
+      // output green - so the tile and the bar read as one story. The spark
+      // carries the blended volume in the total's tone.
+      const tokens = { ...chartSpec('inTok'), label: 'tokens in/out', color: 'cyan',
+        title: 'Input and output tokens as an in / out pair, with the in:out balance underneath.' };
+      const pairVal = `<span class="v-in">${fmt(tin)}</span><span class="pair-sep"> / </span><span class="v-out">${fmt(tout)}</span>`;
       parts.push(seriesSpan(chartSpec('req'), req,
         `<span class="chart-sub">${fmt(tot)} tokens</span>` + spark(chartSpec('req'), b => b.req)));
-      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot) + spark(chartSpec('inTok'), b => b.in)));
-      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot) + spark(chartSpec('outTok'), b => b.out)));
+      parts.push(seriesSpan(tokens, pairVal,
+        (bal === '-' ? '' : `<span class="chart-sub">in:out ${bal}</span>`) + spark(tokens, b => b.in + b.out), v => v));
       parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in') + spark(chartSpec('cache'), b => b.cache)));
       parts.push(seriesSpan(chartSpec('cost'), cost,
         (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + spark(chartSpec('cost'), b => b.cost)));

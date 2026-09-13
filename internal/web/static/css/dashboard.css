@@ -396,8 +396,15 @@
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
     #explorer .xp-gallery { height: auto; }
     .grid-pair { flex: 1 1 280px; min-height: 0; margin-bottom: 0; }
-    .grid-pair .chart-wrap { flex: 1 1 0; min-height: 80px; height: auto; }
+    /* The plot is the card's purpose: it keeps a readable floor even when
+     the totals strip wraps to two rows, and never collapses to a sliver. */
+    .grid-pair .chart-wrap { flex: 1 1 0; min-height: 120px; height: auto; }
     #tbl-requests { flex: 1 1 0; min-height: 0; max-height: none; }
+    /* Short laptop windows: the explorer band yields first so the timeline
+     pair keeps its plot floor. The band scrolls internally, never clips. */
+    @media (max-height: 900px) {
+      #explorer { flex-basis: 190px; max-height: 190px; }
+    }
   }
 
   /* ---- unified explorer: scope bar + dimension rail + node gallery ---- */
@@ -905,20 +912,31 @@
      crushing or overflowing. The 84px floor fits every bounded tile value
      (compact K/M/B money and counts stay ≤ 8 monospace characters). */
   .chart-totals {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(84px, 100%), 1fr)); gap: 12px;
-    font-size: 17px; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text);
-    padding: 2px 0 14px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(84px, 100%), 1fr)); gap: 10px;
+    font-size: 15px; line-height: 1; font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text);
+    padding: 2px 0 10px; margin-bottom: 10px; border-bottom: 1px solid var(--border);
     min-height: 57px; flex-shrink: 0;
   }
-  .chart-total { display: flex; flex-direction: column; gap: 3px; min-width: 0; white-space: nowrap; }
+  /* Fixed tile height: a tile that gains (or never had) a share sub-row
+     reserves the same space, so live data arriving can never re-wrap or
+     resize the strip - and the plot below it never moves. Sparks stay
+     bottom-pinned whatever the tile carries. */
+  .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
+  /* Merged in/out pair: the halves mirror the stacked bar's segment colors
+     (input purple, output green) over a muted separator - tile and bar read
+     as one story. */
+  .chart-totals .v-in { color: var(--accent2); }
+  .chart-totals .v-out { color: var(--ok); }
+  .chart-totals .pair-sep { color: var(--muted); }
   /* Measured shares ride under the value on their own row (block breaks the
      inline run), so a long suffix can never push a narrow tile sideways. */
   .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
   /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
      the tile bottom, so the sparks align across the row whatever sub-rows a
-     tile carries. */
-  .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 4px; }
+     tile carries. The strip stays compact: ten tiles must never out-grow
+     the plot below them. */
+  .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }

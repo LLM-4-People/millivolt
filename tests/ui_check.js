@@ -1993,10 +1993,14 @@ async function main() {
     totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
     totalsOv.includes('<span class="chart-sub">1 rate limited</span>') &&
     !totalsOv.includes('blended</span>'));
-  check('overview totals annotate measured shares and the server blended price',
-    totalsOv.includes('75.0%') && totalsOv.includes('25.0%') && totalsOv.includes('40.0% of in') &&
+  check('merged token tile reads as the bar-colored in/out pair with its balance',
+    totalsOv.includes('tokens in/out</span> <span class="v-in">150</span><span class="pair-sep"> / </span><span class="v-out">50</span>') &&
+    totalsOv.includes('<span class="chart-sub">in:out 3</span>') &&
+    !totalsOv.includes('75.0%') && !totalsOv.includes('25.0%'));
+  check('overview totals annotate the cache share and the server blended price',
+    totalsOv.includes('40.0% of in') &&
     totalsOv.includes('$12.5 /Mtok') &&
-    !totalsOv.includes('/ req') && !/in:out/.test(totalsOv));
+    !totalsOv.includes('/ req'));
   check('the in:out balance stays tile-bounded and shows the raw pair', (() => {
     const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
     w.eval('chartView.preset = "tokens"; chartAgg.buckets[3].in = 1000000; chartAgg.buckets[3].out = 3;');
@@ -2008,8 +2012,8 @@ async function main() {
       wide.includes('<span class="chart-sub">1M / 13</span>');
   })());
   check('every overview tile carries its own evolution sparkline',
-    totalsOv.split('<svg class="spark"').length === 9 &&
-      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 8 &&
+    totalsOv.split('<svg class="spark"').length === 8 &&
+      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 7 &&
       !totalsOv.includes('NaN'));
   check('overview timing tiles pin the server p95 without a visible pXX label',
     totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&

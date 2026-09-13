@@ -47,14 +47,15 @@ Requests, errors and the rate-limited (HTTP 429) count trace the same
 compressed scale as lines (a rate limit is not an error: both health counts
 are distinct affected requests), and reported spend stays on its own right
 axis. The totals strip is uniform and compact: every headline metric reads its
-period value first - requests with the blended token volume, input, output
-and cached tokens with their measured shares, spend with the server's blended
-per-Mtok price (the same figure the KPI band shows, cost-reporting requests
-only), errors with the rate-limited count - followed by its own per-bucket
-evolution sparkline, so the evolution of every metric is visible without
-hovering. The speed and latency tiles pin the 95th percentile. Only the
-time-range control applies here. This preset has no static capture yet; the
-gallery images below predate it.
+period value first - requests with the blended token volume, tokens as the
+in/out pair (the halves colored like the stacked bar's segments) with the
+in:out balance, cached tokens with their share of input, spend with the
+server's blended per-Mtok price (the same figure the KPI band shows,
+cost-reporting requests only), errors with the rate-limited count - followed
+by its own per-bucket evolution sparkline, so the evolution of every metric
+is visible without hovering. The speed and latency tiles pin the 95th
+percentile. Only the time-range control applies here. This preset has no
+static capture yet; the gallery images below predate it.
 
 ### Traffic
 

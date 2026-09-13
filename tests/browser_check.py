@@ -257,7 +257,7 @@ async def check(base, screenshot):
                 # Overview preset: the stacked token bar (input below, output
                 # on top; bar height = blended total) plus the rl, req and err
                 # lines all render on the real canvas, and the uniform
-                # eight-tile totals strip (every tile with its evolution
+                # seven-tile totals strip (every tile with its evolution
                 # sparkline) stays inside the card at both desktop and mobile
                 # widths. The recovered-429 fixture proves the health
                 # invariant end to end: the merged errors tile reads '2 rate limited'
@@ -314,8 +314,8 @@ async def check(base, screenshot):
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
                     require(state['errors0'] and state['rateLimited2'], state)
                     require(not state['overflow'], state)
-                    require(state['tiles'] == 8, state)
-                    require(state['sparks'] == 8, state)
+                    require(state['tiles'] == 7, state)
+                    require(state['sparks'] == 7, state)
                     require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
