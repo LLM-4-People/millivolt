@@ -575,6 +575,52 @@ func TestChartZeroTrafficPayloadShape(t *testing.T) {
 		if p["cost_per_mtok"] != nil {
 			t.Fatalf("window %s: zero-traffic cost_per_mtok = %v, want nil", win, p["cost_per_mtok"])
 		}
+		if p["ttft_stat"] != nil || p["tps_stat"] != nil {
+			t.Fatalf("window %s: zero-traffic timing stats = %v / %v, want nil", win, p["ttft_stat"], p["tps_stat"])
+		}
+	}
+}
+
+// The chart's period timing stats are the average, minimum and maximum over
+// the same occurrence-weighted sample population the period percentiles
+// rank: every captured ttft/tps sample in the window, unmeasured records
+// excluded, and a scoped-out window reads null.
+func TestChartTimingStats(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	mk := func(id string, at time.Time, ttft int64, tps float64) *metrics.Record {
+		r := mkRec(id, at, 200, "", nil, ttft, 1000, 10, 10, 0, 0)
+		r.OverallTPS = tps
+		return r
+	}
+	for _, r := range []*metrics.Record{
+		mk("a", now.Add(-4*time.Minute), 100, 50),
+		mk("b", now.Add(-3*time.Minute), 200, 60),
+		mk("c", now.Add(-2*time.Minute), 300, 70),
+		mk("unmeasured", now.Add(-time.Minute), 0, 0),
+	} {
+		s.Record(r)
+	}
+	waitTotals(t, s, 4)
+	api := NewAggAPI(metrics.NewBuffer(4), s, time.Second)
+	p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=15")
+	want := func(key string, avg, lo, hi float64) {
+		t.Helper()
+		v, ok := p[key].([]any)
+		if !ok || len(v) != 3 {
+			t.Fatalf("%s = %v, want [avg min max]", key, p[key])
+		}
+		for i, w := range []float64{avg, lo, hi} {
+			if math.Abs(v[i].(float64)-w) > 1e-9 {
+				t.Fatalf("%s = %v, want [%v %v %v]", key, p[key], avg, lo, hi)
+			}
+		}
+	}
+	want("ttft_stat", 200, 100, 300)
+	want("tps_stat", 60, 50, 70)
+	p = get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=15&f=client:missing")
+	if p["ttft_stat"] != nil || p["tps_stat"] != nil {
+		t.Fatalf("out-of-scope timing stats = %v / %v, want nil", p["ttft_stat"], p["tps_stat"])
 	}
 }
 

@@ -608,6 +608,8 @@ type chartPayload struct {
 	BucketMs   int64             `json:"bucket_ms"` // exact integer bucket width - single source of truth
 	TTFTP      []*float64        `json:"ttft_p"`    // period-wide [p50, p95, p99] (the totals strip)
 	TPSP       []*float64        `json:"tps_p"`
+	TTFTStat   []*float64        `json:"ttft_stat"` // period-wide [avg, min, max] over every captured sample
+	TPSStat    []*float64        `json:"tps_stat"`
 	CostPerMTk *float64          `json:"cost_per_mtok"` // period blended price; SAME rule as the KPI band (cost-reporting requests only)
 	Buckets    []chartBucketJSON `json:"buckets"`
 }
@@ -735,6 +737,8 @@ func (f *chartFold) payload(now int64) chartPayload {
 	}
 	ttft, periodTTFT := rankPercentiles(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
 	tps, periodTPS := rankPercentiles(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
+	ttftStat := metricStats(f.order.ttft, f.membership, f.extraTTFT, f.ttftBucket, f.count)
+	tpsStat := metricStats(f.order.tps, f.membership, f.extraTPS, f.tpsBucket, f.count)
 	for i, b := range f.buckets {
 		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
@@ -743,7 +747,7 @@ func (f *chartFold) payload(now int64) chartPayload {
 		out[i] = o
 	}
 	return chartPayload{NowMs: now, FromMs: f.from, BucketMs: f.step,
-		TTFTP: periodTTFT, TPSP: periodTPS,
+		TTFTP: periodTTFT, TPSP: periodTPS, TTFTStat: ttftStat, TPSStat: tpsStat,
 		CostPerMTk: metrics.ScaledRatio(f.cost, f.costInOut, 1e6), Buckets: out}
 }
 

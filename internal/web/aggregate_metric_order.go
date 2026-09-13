@@ -134,6 +134,48 @@ func observeMetricRank(sets []metricRankSet, bucket uint8, value float64) {
 	sets[0].observe(value) // one exact period-wide order, not bucket averages
 }
 
+// metricStats returns [avg, min, max] over the exact occurrence-weighted
+// population rankPercentiles ranks for the period: durable order samples
+// whose row maps to a bucket (zero excludes), plus valid in-range ring
+// extras. A tile can therefore quote an average over the same samples the
+// percentiles rank. nil means no captured sample in the window.
+func metricStats[T ~int64 | ~float64](order []metricSample[T], membership []uint8, extraValues []T, extraBuckets []uint8, bucketCount int) []*float64 {
+	var sum float64
+	var n int
+	var lo, hi float64
+	observe := func(v float64) {
+		if n == 0 {
+			lo, hi = v, v
+		} else {
+			if v < lo {
+				lo = v
+			}
+			if v > hi {
+				hi = v
+			}
+		}
+		sum += v
+		n++
+	}
+	for _, s := range order {
+		if uint64(s.row) < uint64(len(membership)) && membership[s.row] != 0 && int(membership[s.row]) <= bucketCount {
+			observe(float64(s.value))
+		}
+	}
+	if len(extraValues) == len(extraBuckets) {
+		for i, v := range extraValues {
+			if b := extraBuckets[i]; b != 0 && int(b) <= bucketCount && validMetricSample(v) {
+				observe(float64(v))
+			}
+		}
+	}
+	if n == 0 {
+		return nil
+	}
+	avg := sum / float64(n)
+	return []*float64{&avg, &lo, &hi}
+}
+
 // rankPercentiles adapts a chart's one-byte row membership to the shared
 // multi-membership reader. Zero excludes a row; other values are bucket+1.
 func rankPercentiles[T ~int64 | ~float64](order []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64) {
