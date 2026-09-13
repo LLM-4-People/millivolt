@@ -6,8 +6,9 @@ import re
 from urllib.parse import unquote, urlsplit
 
 from .support import (ROOT, dead_css_class_errors, duplicate_js_function_errors,
-                      git_environment, js_template_comment_errors, removed_vocabulary_errors,
-                      source_inventory, static_pairs, test_layout_errors)
+                      git_environment, js_template_comment_errors, palette_mirror_errors,
+                      removed_vocabulary_errors, source_inventory, spark_height_mirror_errors,
+                      static_pairs, test_layout_errors)
 
 IGNORED_PATHS = (
     "AGENTS.md", "agents.md", "internal/AGENTS.md",
@@ -126,7 +127,9 @@ def check(root):
             + dead_css_class_errors(pairs)
             + duplicate_js_function_errors(pairs)
             + removed_vocabulary_errors(pairs)
-            + js_template_comment_errors(pairs))
+            + js_template_comment_errors(pairs)
+            + spark_height_mirror_errors(pairs)
+            + palette_mirror_errors(pairs))
 
 
 def main():
@@ -138,7 +141,7 @@ def main():
         raise SystemExit("\n".join(errors))
     print("repository checks passed: local Markdown targets, publication ignore rules, "
           "typography, dead stylesheet classes, duplicated helpers, retired vocabulary, "
-          "template comments")
+          "template comments, spark height mirror, static palette mirror")
 
 
 if __name__ == "__main__":

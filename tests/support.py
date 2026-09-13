@@ -109,7 +109,8 @@ async def operator_signin(context, base):
 STATIC_CSS = ('internal/web/static/css/',)
 STATIC_EMITTERS = ('internal/web/static/js/', 'internal/web/static/index.html',
                    'internal/web/static/sw.js')
-STATIC_SCAN = STATIC_CSS + STATIC_EMITTERS + ('internal/web/static/manifest.webmanifest',)
+STATIC_SCAN = STATIC_CSS + STATIC_EMITTERS + ('internal/web/static/favicon.svg',
+                                              'internal/web/static/manifest.webmanifest',)
 
 
 def static_pairs(names, prefixes=STATIC_SCAN, skip_vendor=True):
@@ -169,19 +170,17 @@ def _js_functions(text):
             yield name, text.count('\n', 0, match.start()) + 1, re.sub(r'\s+', '', body)
 
 
-def duplicate_js_function_errors(pairs, minimum=30):
+def duplicate_js_function_errors(pairs):
     """Two functions with whitespace-identical bodies are one helper written
     twice: a change applied to one silently misses the other. The frontend
     audit found a byte-identical pair exactly this way; this detector keeps
-    the class from returning."""
+    the class from returning. _js_functions owns the minimum body size."""
     seen = {}
     errors = []
     for file, text in pairs:
         if not file.startswith('internal/web/static/js/'):
             continue
         for name, line, body in _js_functions(text):
-            if len(body) < minimum:
-                continue
             key = body
             twin = seen.get(key)
             if twin is not None and twin[1] != name:
@@ -204,27 +203,71 @@ RETIRED_TOKENS = (
 )
 
 
+def _retired_token_pattern(token):
+    """Compile one retired token into its matcher: case folded, word-boundary
+    anchored at both ends. The token's own explicit separators (- and space)
+    require one [\s_-]+ character; camelCase hump boundaries allow those
+    separators or none ([\s_-]*), so inOutRatio, IN_OUT_RATIO and in out
+    ratio all match while ordinary prose does not. The final word tolerates
+    a plural s."""
+    parts = []
+    for i, word in enumerate(re.split(r'[-\s]+', token)):
+        humps = re.findall(r'[A-Z]?[a-z]+|[A-Z]+', word)
+        if ''.join(humps).lower() != word.lower():
+            raise ValueError("retired token has unsupported characters: " + token)
+        if i:
+            parts.append(r'[\s_-]+')
+        for j, hump in enumerate(humps):
+            if j:
+                parts.append(r'[\s_-]*')
+            parts.append(hump)
+    last = parts.pop()
+    if last.endswith('s'):
+        last = last[:-1]
+    parts.append(last + 's?')
+    return re.compile(r'(?i)\b' + ''.join(parts) + r'\b')
+
+
+RETIRED_PATTERNS = tuple((token, _retired_token_pattern(token), reason)
+                         for token, reason in RETIRED_TOKENS)
+
+
 def removed_vocabulary_errors(pairs):
     """Retired feature vocabulary must not reappear in dashboard source:
-    comments referencing it misdescribe current behavior."""
+    comments referencing it misdescribe current behavior. Matching is case
+    folded and separator tolerant, so every spelling of a removed name
+    flags."""
     errors = []
     for name, text in pairs:
         if not name.startswith('internal/web/static/'):
             continue
-        for token, reason in RETIRED_TOKENS:
-            if token in text:
+        for token, pattern, reason in RETIRED_PATTERNS:
+            if pattern.search(text):
                 errors.append(f"{name}: retired token '{token}' ({reason})")
     return sorted(set(errors))
 
 
+# A '/' starts a regex literal when the previous significant token is one
+# of these punctuation characters, one of the keywords below, or nothing
+# yet (start of file). After an identifier, a number, ')', ']' or a string,
+# regex or template close it is division instead.
+_REGEX_PREV_TOKENS = frozenset('(,=:[!&|?{;}+-*%<>^~')
+_REGEX_KEYWORDS = frozenset((
+    'await', 'case', 'delete', 'do', 'else', 'in', 'instanceof', 'new',
+    'of', 'return', 'throw', 'typeof', 'void', 'yield',
+))
+
+
 def _template_comment_spans(text):
     """Return (start, end) spans of template-literal BODIES (excluding
-    ${...} expressions) using a minimal JS lexer: comments, strings and
-    nested templates are tracked so backticks inside them never open a
-    template body."""
+    ${...} expressions) using a minimal JS lexer: comments, strings, regex
+    literals and nested templates are tracked so quotes, backticks and
+    braces inside them never desynchronize the walk."""
     spans = []
-    index = 0
     length = len(text)
+    # Previous significant token as [kind, value]; kind is 'punct',
+    # 'keyword' or 'id'. It decides regex literal vs division for '/'.
+    prev = ['none', '']
 
     def skip_string(position, quote):
         position += 1
@@ -238,76 +281,121 @@ def _template_comment_spans(text):
             position += 1
         return position
 
+    def skip_regex(position):
+        """Consume a regex literal from its opening '/': to the first
+        unescaped '/' outside a [...] character class, then the flags."""
+        position += 1
+        in_class = False
+        while position < length:
+            char = text[position]
+            if char == '\\':
+                position += 2
+                continue
+            if char == '\n':
+                return position  # a real regex literal never spans lines
+            if char == '[':
+                in_class = True
+            elif char == ']':
+                in_class = False
+            elif char == '/' and not in_class:
+                position += 1
+                while position < length and text[position].isalpha():
+                    position += 1
+                return position
+            position += 1
+        return position
+
+    def slash_starts_regex():
+        return (prev[0] == 'none'
+                or prev[0] == 'keyword'
+                or (prev[0] == 'punct' and prev[1] in _REGEX_PREV_TOKENS))
+
     def template_body(position):
         """Walk a template body after its opening backtick; returns the
         index just past the closing backtick and records body spans."""
         start = position
-        depth_stack = []
         while position < length:
             char = text[position]
             if char == '\\':
                 position += 2
                 continue
             if char == '`':
-                if depth_stack:
-                    spans.append((start, position))  # nested template body
-                    return position + 1, depth_stack
                 spans.append((start, position))
-                return position + 1, []
+                return position + 1
             if char == '$' and position + 1 < length and text[position + 1] == '{':
                 spans.append((start, position))
-                position += 2
-                position, depth_stack = _template_expression(position, depth_stack)
+                prev[0], prev[1] = 'punct', '{'
+                position = walk_code(position + 2, True)
                 start = position
                 continue
             position += 1
         spans.append((start, position))
-        return position, []
+        return position
 
-    def _template_expression(position, depth_stack):
-        brace_depth = 1
-        while position < length and brace_depth:
+    def walk_code(position, expression):
+        """Lex code from position, skipping comments, strings, regex
+        literals and template literals while tracking the previous
+        significant token. In expression context (just past '${') the walk
+        ends just past the unmatched closing '}'."""
+        depth = 1 if expression else 0
+        while position < length:
             char = text[position]
-            if char == '\\':
-                position += 2
+            if char == '/' and text.startswith('//', position):
+                end = text.find('\n', position)
+                position = length if end == -1 else end
+                continue
+            if char == '/' and text.startswith('/*', position):
+                end = text.find('*/', position + 2)
+                position = length if end == -1 else end + 2
                 continue
             if char in '\'"':
                 position = skip_string(position, char)
+                prev[0], prev[1] = 'punct', 'str'
                 continue
             if char == '`':
-                position, depth_stack = template_body(position + 1)
+                position = template_body(position + 1)
+                prev[0], prev[1] = 'punct', '`'
                 continue
-            if char == '{':
-                brace_depth += 1
-            elif char == '}':
-                brace_depth -= 1
+            if char == '/' and slash_starts_regex():
+                position = skip_regex(position)
+                prev[0], prev[1] = 'punct', 'regex'
+                continue
+            if char == '/':
+                prev[0], prev[1] = 'punct', '/'
+                position += 1
+                continue
+            if expression and char == '}':
+                depth -= 1
+                prev[0], prev[1] = 'punct', '}'
+                if not depth:
+                    return position + 1
+            elif char == '{':
+                if expression:
+                    depth += 1
+                prev[0], prev[1] = 'punct', '{'
+            elif char.isalnum() or char in '_$':
+                end = position + 1
+                while end < length and (text[end].isalnum() or text[end] in '_$'):
+                    end += 1
+                prev[0] = 'keyword' if text[position:end] in _REGEX_KEYWORDS else 'id'
+                prev[1] = text[position:end]
+                position = end
+                continue
+            elif not char.isspace():
+                prev[0], prev[1] = 'punct', char
             position += 1
-        return position, depth_stack
+        return position
 
-    while index < length:
-        char = text[index]
-        if char == '/' and text.startswith('//', index):
-            index = text.find('\n', index)
-            index = length if index == -1 else index
-            continue
-        if char == '/' and text.startswith('/*', index):
-            end = text.find('*/', index + 2)
-            index = length if end == -1 else end + 2
-            continue
-        if char in '\'"':
-            index = skip_string(index, char)
-            continue
-        if char == '`':
-            index, _ = template_body(index + 1)
-            continue
-        index += 1
+    walk_code(0, False)
     return spans
 
 
 def js_template_comment_errors(pairs):
     """JS comments never belong inside an HTML template-literal body: they
     render as visible text. This tokenizes templates (including nested
-    ${...} expressions) and flags a line comment inside a body span."""
+    ${...} expressions) and flags a line comment or a block-comment opener
+    at a body line start. A rendered URL like //cdn.example/x still flags:
+    suspicious either way."""
     errors = []
     for name, text in pairs:
         if not name.startswith('internal/web/static/js/'):
@@ -316,8 +404,91 @@ def js_template_comment_errors(pairs):
             body = text[start:end]
             offset = 0
             for line in body.split('\n'):
-                if re.match(r'\s*//', line):
+                if re.match(r'\s*(?://|/\*)', line):
                     number = text.count('\n', 0, start + offset) + 1
                     errors.append(f"{name}:{number}: JS comment inside a template-literal body")
                 offset += len(line) + 1
+    return errors
+
+
+def spark_height_mirror_errors(pairs):
+    """chart.js plots each tile's sparkline into an SVG sized by
+    CHART_SPARK_H while dashboard.css boxes .chart-total .spark with a px
+    height. The two sites must stay equal or the plotted extent no longer
+    matches the visible strip."""
+    errors = []
+    js = [text for name, text in pairs if name == 'internal/web/static/js/chart.js']
+    css = [text for name, text in pairs if name == 'internal/web/static/css/dashboard.css']
+    height = None
+    if js:
+        match = re.search(r'\bCHART_SPARK_H\s*=\s*(\d+)', js[0])
+        if match:
+            height = int(match.group(1))
+        else:
+            errors.append('internal/web/static/js/chart.js: CHART_SPARK_H declaration not found')
+    else:
+        errors.append('internal/web/static/js/chart.js: not in the static corpus')
+    rule = None
+    if css:
+        match = re.search(r'\.chart-total\s+\.spark\s*\{[^}]*\bheight:\s*(\d+)px', css[0])
+        if match:
+            rule = int(match.group(1))
+        else:
+            errors.append('internal/web/static/css/dashboard.css: .chart-total .spark height not found')
+    else:
+        errors.append('internal/web/static/css/dashboard.css: not in the static corpus')
+    if height is not None and rule is not None and height != rule:
+        errors.append('internal/web/static/js/chart.js: CHART_SPARK_H=' + str(height)
+                      + ' no longer mirrors the .chart-total .spark height=' + str(rule)
+                      + 'px in internal/web/static/css/dashboard.css')
+    return errors
+
+
+PALETTE_OWNER = 'internal/web/static/css/dashboard.css'
+PALETTE_MIRRORS = ('internal/web/static/favicon.svg', 'internal/web/static/index.html',
+                   'internal/web/static/manifest.webmanifest', 'internal/web/static/sw.js')
+_HEX_LITERAL = re.compile(r'#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])')
+
+
+def _root_palette_hexes(css_text):
+    """Hex literals from :root custom-property values - the palette owner.
+    The stylesheets legitimately carry other hexes outside :root, so only
+    this block is authoritative."""
+    stripped = re.sub(r'/\*.*?\*/', '', css_text, flags=re.S)
+    hexes = set()
+    for match in re.finditer(r':root\s*\{', stripped):
+        end = match.end()
+        depth = 1
+        while end < len(stripped) and depth:
+            if stripped[end] == '{':
+                depth += 1
+            elif stripped[end] == '}':
+                depth -= 1
+            end += 1
+        block = stripped[match.end():end - 1]
+        for _, value in re.findall(r'(--[A-Za-z0-9-]+)\s*:\s*([^;]+);', block):
+            hexes.update(literal.lower() for literal in _HEX_LITERAL.findall(value))
+    return hexes
+
+
+def palette_mirror_errors(pairs):
+    """Standalone static files cannot resolve var(), so their hex colors
+    mirror the :root custom properties in dashboard.css. A mirror hex that
+    is not a palette value is drift by definition."""
+    palette = None
+    for name, text in pairs:
+        if name != PALETTE_OWNER:
+            continue
+        palette = _root_palette_hexes(text)
+        break
+    if palette is None:
+        return [PALETTE_OWNER + ': the :root custom-property palette is missing']
+    errors = []
+    for name, text in pairs:
+        if name not in PALETTE_MIRRORS:
+            continue
+        for literal in sorted({value.lower() for value in _HEX_LITERAL.findall(text)}):
+            if literal not in palette:
+                errors.append(f"{name}: hex {literal} is not a :root custom-property "
+                              f"value in {PALETTE_OWNER}")
     return errors

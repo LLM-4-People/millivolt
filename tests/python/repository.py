@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from .. import repository_check as check
+from ..support import RETIRED_TOKENS, _template_comment_spans
 
 
 class RepositoryChecks(unittest.TestCase):
@@ -152,6 +153,37 @@ class RepositoryChecks(unittest.TestCase):
         self.assertEqual(check.removed_vocabulary_errors(stale), [
             "internal/web/static/js/app.js: retired token 'spark-row' "
             "(the per-half spark rows became one multi-line sparkline per tile)"])
+        # Retired vocabulary flags in every spelling the audit found: case
+        # folded, -, _ and space separators, camel humps with no separator,
+        # and plurals.
+        gap_variants = (
+            "the Spark-Row layout", "the SPARK_ROW layout", "the spark rows layout",
+            "the TileFmt layout", "the TILE_FMT layout",
+            "the InOutRatio layout", "the in_out_ratio layout",
+            "the ChartStackPaths layout", "the Ten tiles layout", "the TEN-TILE layout",
+        )
+        for variant in gap_variants:
+            with self.subTest(variant=variant):
+                errors = check.removed_vocabulary_errors(
+                    [("internal/web/static/js/app.js", "render(); // " + variant + "\n")])
+                self.assertTrue(errors, "retired variant must flag: " + variant)
+        # The exact current spellings still flag.
+        for token, reason in RETIRED_TOKENS:
+            with self.subTest(token=token):
+                errors = check.removed_vocabulary_errors(
+                    [("internal/web/static/js/app.js", "render(); // the " + token + " layout\n")])
+                self.assertTrue(errors, "retired token must flag: " + token)
+        # Near-miss prose must not flag.
+        negatives = (
+            "XTEN TILESX", "sparkline rows", "tile formats",
+            "the tile format helper lives on", "tilefmtx",
+            "input/output ratio commentary", "attentiveness",
+            "stacked paths of the chart", "the tennis court",
+        )
+        for negative in negatives:
+            with self.subTest(negative=negative):
+                self.assertEqual(check.removed_vocabulary_errors(
+                    [("internal/web/static/js/app.js", "render(); // " + negative + "\n")]), [])
 
     def test_js_template_comment_detector(self):
         pairs = [("internal/web/static/js/app.js",
@@ -162,6 +194,132 @@ class RepositoryChecks(unittest.TestCase):
                          ["internal/web/static/js/app.js:2: JS comment inside a template-literal body"])
         self.assertEqual(check.js_template_comment_errors(
             [("internal/web/static/js/app.js", 'const ok = `plain body\nwith https://example.invalid link`;\n')]), [])
+        # Quotes, backticks and braces inside regex literals must not
+        # desynchronize the lexer; comments inside ${...} expressions are
+        # skipped, never flagged. Each row is a real violation class the
+        # corpus audit found. The division row is a control: a naive
+        # always-regex lexer would swallow the template after it.
+        flagged = "internal/web/static/js/app.js:{}: JS comment inside a template-literal body"
+        rows = (
+            # a " inside a regex before a template (the backup download block)
+            ('const m = /say="([^"]+)"/.exec(s);\nconst t = `ok ${m}\n// stray\n`;\n',
+             [flagged.format(3)]),
+            # a ' and a ` inside a regex (the provider header token shape)
+            ("const RE = /^[!#'`|~]+$/;\nconst t = `ok\n// stray\n`;\n",
+             [flagged.format(3)]),
+            # a lone ` in a regex: the old lexer also turned the real code
+            # comment after it into a phantom template body (false positive)
+            ('const re = /`/;\n// innocent code comment\nconst t = `ok\n// stray\n`;\n',
+             [flagged.format(4)]),
+            # quotes and braces inside a regex inside an expression
+            ('const t = `x${/"}/.test(s)}y\n// stray\n`;\n',
+             [flagged.format(2)]),
+            # division context: the slash after an identifier is not a regex
+            ('const mib = n / (1024 * 1024);\nconst t = `ok\n// stray\n`;\n',
+             [flagged.format(3)]),
+            # a character class carrying {, } and " inside an expression
+            ('const t = `x${/[{}"]/.source.length}y\n// stray\n`;\n',
+             [flagged.format(2)]),
+            # a character class carrying /, " and `: none of them close it
+            ('const t = `x${/[/"`]/.source.length}y\n// stray\n`;\n',
+             [flagged.format(2)]),
+            # an apostrophe inside a block comment inside an expression
+            ("const t = `x${s /* it's */}y\n// stray\n`;\n",
+             [flagged.format(2)]),
+            # an apostrophe inside a line comment inside an expression
+            ("const t = `x${s // it's\n}y\n// stray\n`;\n",
+             [flagged.format(3)]),
+            # a } inside a block comment must not phantom-close the
+            # expression and swallow the expression's own comment line
+            ('const t = `a${s /* } */\n// note\n+ 1}b\n`;\n', []),
+        )
+        for text, expected in rows:
+            with self.subTest(text=text):
+                self.assertEqual(check.js_template_comment_errors(
+                    [("internal/web/static/js/app.js", text)]), expected)
+        # A body line starting with /* renders as text, exactly like //.
+        self.assertEqual(check.js_template_comment_errors(
+            [("internal/web/static/js/app.js", 'const t = `x\n/* rendered\n`;\n')]),
+            [flagged.format(2)])
+        # Known accepted false-positive class: a rendered URL at a body line
+        # start still flags - suspicious either way.
+        self.assertEqual(check.js_template_comment_errors(
+            [("internal/web/static/js/app.js", 'const t = `x\n//cdn.example/x\n`;\n')]),
+            [flagged.format(2)])
+
+    def test_template_spans_scan_the_real_shadowed_regions(self):
+        """Corpus canaries: the regions the regex-blind lexer lost to quote
+        desync must be scanned. fillSettingsLive is the first region the
+        chrome.js backup-download regex shadows; renderDrawer and
+        fillDrawerDebug sit behind the escapeHtml regex in log.js."""
+        chrome = (check.ROOT / "internal/web/static/js/chrome.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(chrome)
+        needle = '<div class="st-live-row"><span class="k">listen</span>'
+        start = chrome.index(needle)
+        self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
+                        "fillSettingsLive template body is not scanned")
+        log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(log)
+        expr = log.index("r.client || '?'")
+        sep = log.index(" · ", expr)
+        self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
+                        "renderDrawer template body is not scanned")
+        for needle in ("<h4>Request body", "<h4>Response body"):
+            start = log.index(needle)
+            self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
+                            "fillDrawerDebug template body is not scanned: " + needle)
+
+    def test_spark_height_mirror_detector(self):
+        js = 'const CHART_SPARK_W = 72, CHART_SPARK_H = 14;\n'
+        css = '.chart-total .spark { display: block; height: 14px; }\n'
+        pairs = [("internal/web/static/js/chart.js", js),
+                 ("internal/web/static/css/dashboard.css", css)]
+        self.assertEqual(check.spark_height_mirror_errors(pairs), [])
+        drifted = [("internal/web/static/js/chart.js", js),
+                   ("internal/web/static/css/dashboard.css",
+                    '.chart-total .spark { display: block; height: 13px; }\n')]
+        self.assertEqual(check.spark_height_mirror_errors(drifted), [
+            "internal/web/static/js/chart.js: CHART_SPARK_H=14 no longer mirrors "
+            "the .chart-total .spark height=13px in internal/web/static/css/dashboard.css"])
+        # A vanished anchor is drift too, never a silent pass.
+        self.assertEqual(check.spark_height_mirror_errors(
+            [("internal/web/static/js/chart.js", 'const x = 1;\n'),
+             ("internal/web/static/css/dashboard.css", css)]),
+            ["internal/web/static/js/chart.js: CHART_SPARK_H declaration not found"])
+        self.assertEqual(check.spark_height_mirror_errors(
+            [("internal/web/static/js/chart.js", js),
+             ("internal/web/static/css/dashboard.css", '.x { height: 14px; }\n')]),
+            ["internal/web/static/css/dashboard.css: .chart-total .spark height not found"])
+
+    def test_palette_mirror_detector(self):
+        good = [
+            ("internal/web/static/css/dashboard.css",
+             ':root { --bg: #1b1826; --accent: #5b8cff; }\n'),
+            ("internal/web/static/sw.js",
+             '"background:#1b1826;\'><p style="color:#5b8cff">offline</p></body></html>"'),
+            ("internal/web/static/manifest.webmanifest", '{"theme_color": "#1b1826"}'),
+            ("internal/web/static/index.html", '<meta name="theme-color" content="#1b1826">'),
+            ("internal/web/static/favicon.svg", '<stop stop-color="#5B8CFF"/>'),
+        ]
+        self.assertEqual(check.palette_mirror_errors(good), [])
+        off_palette = good[:-1] + [("internal/web/static/favicon.svg",
+                                    '<stop stop-color="#badbee"/>')]
+        self.assertEqual(check.palette_mirror_errors(off_palette), [
+            "internal/web/static/favicon.svg: hex #badbee is not a :root custom-property "
+            "value in internal/web/static/css/dashboard.css"])
+        # The palette owner is the :root block only: a legitimate non-:root
+        # hex in dashboard.css must not satisfy a mirror.
+        non_root = [
+            ("internal/web/static/css/dashboard.css",
+             ':root { --bg: #1b1826; }\n.mr-err { color: #ff7d72; }\n'),
+            ("internal/web/static/index.html", '<meta name="theme-color" content="#ff7d72">'),
+        ]
+        self.assertEqual(check.palette_mirror_errors(non_root), [
+            "internal/web/static/index.html: hex #ff7d72 is not a :root custom-property "
+            "value in internal/web/static/css/dashboard.css"])
+        self.assertEqual(check.palette_mirror_errors(good[1:]),
+                         ["internal/web/static/css/dashboard.css: "
+                          "the :root custom-property palette is missing"])
 
 
 if __name__ == "__main__":
