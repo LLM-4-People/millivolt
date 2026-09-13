@@ -714,9 +714,9 @@ Tools and error occurrences can have multiple memberships per request, while
 error/429 health badges count distinct affected requests.
 
 The [visual guide](dashboard.md) covers every timeline and its controls. Overview
-composes requests, input/output/cached tokens, the blended total with its in:out
-balance, spend, errors, rate-limited (429) requests and 95th-percentile
-speed/latency readouts in one window; Traffic
+stacks each bucket's token volume into one input/output bar (its height is the
+blended total), traces requests, errors, rate-limited (429) requests and 95th
+percentile speed/latency over it, and keeps spend on its own axis; Traffic
 compares requests/errors; Tokens separates available input/output/reasoning/cache
 usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
 uses independent throughput/TTFT axes; Errors compares

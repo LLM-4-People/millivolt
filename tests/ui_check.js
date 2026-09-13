@@ -1492,9 +1492,9 @@ async function main() {
   check('cache hit derives pct-of-input per bucket and stays unmeasured at zero input',
     dataTok[5][tokSlot] === 60 && dataTok[5][0] === null);
   const tokTotals = w.eval('chartTotals()');
-  check('tokens totals carry shares, cache pct of input and the in:out ratio',
+  check('tokens totals carry shares, cache pct of input and the in:out balance',
     tokTotals.includes('71.4%') && tokTotals.includes('28.6%') &&
-    tokTotals.includes('60.0% of in') && tokTotals.includes('in:out</span> 2.5 : 1'));
+    tokTotals.includes('60.0% of in') && tokTotals.includes('in:out</span> 2.5'));
   check('tokens preset pins the cache-hit line to a 0-100 right axis', w.eval(`(() => {
     const opts = upOpts(600, 180);
     return opts.axes.length === 3 && opts.axes[2].scale === 'pct' && opts.axes[2].side === 1 &&
@@ -1647,7 +1647,7 @@ async function main() {
     chartView.hidden = {};
   `);
   const pct50Want = {
-    overview: ['inTok', 'outTok', 'err', 'rl', 'req', 'cache', 'blended', 'cost'],
+    overview: ['inTok', 'outTok', 'err', 'rl', 'req', 'cost'],
     traffic: ['req', 'err'],
     tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
@@ -1913,12 +1913,13 @@ async function main() {
   }
 
   // ---- test 11h: Overview preset - the at-a-glance composition ----
-  // In/out/error bars share the compressed left scale; the rate-limit (429)
-  // count, requests and the cached subset trace it as lines, blended (in+out)
-  // traces the bars' envelope, and cost stays a line on its own right axis.
-  // The totals strip carries every period total with measured shares (and the
-  // in:out ratio under blended), plus p95-pinned speed/latency tiles with
-  // per-bucket sparklines - no percentile selector or visible pXX label.
+  // One stacked bar per bucket carries the token volume (input below, output
+  // on top - the bar height IS the blended total), while requests, errors and
+  // the rate-limit (429) count trace the same compressed scale as lines and
+  // cost stays a line on its own right axis. The totals strip is uniform:
+  // every tile reads value first, then its measured share (where one
+  // exists), then its per-bucket evolution sparkline; timing tiles pin the
+  // server p95 - no percentile selector or visible pXX label.
   w.eval(`
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
@@ -1930,57 +1931,97 @@ async function main() {
     chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100, 200, 300];
     chartAgg.buckets[3].ttft = [5, 10, 15]; chartAgg.buckets[3].tps = [50, 60, 70];
   `);
-  check('overview plan: composition bars + riding rl/req/cache/blended lines + right-axis cost line',
-    w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.bar ? "bar" : "line") + "@" + m.scale).join("|")') ===
-      'inTok=bar@y|outTok=bar@y|err=bar@y|rl=line@y|req=line@y|cache=line@y|blended=line@y|cost=line@yr');
+  check('overview plan: stacked token bar + rl/req/err lines + right-axis cost line',
+    w.eval('chartPlan().meta.map(m => m.spec.id + "=" + (m.stack ? "stack" : m.bar ? "bar" : "line") + "@" + m.scale).join("|")') ===
+      'inTok=stack@y|outTok=stack@y|err=line@y|rl=line@y|req=line@y|cost=line@yr');
   const dataOv = w.eval('chartData()');
   check('overview compacts empty buckets and keeps a stable column per row',
-    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 9);
-  check('rate-limit line reads the server bucket count',
-    dataOv[4][0] === 1 && dataOv[4][1] === 0);
-  check('blended derives in+out per bucket',
-    dataOv[7][0] === 140 && dataOv[7][1] === 60);
-  check('overview cost line reads the server bucket on the right axis',
-    dataOv[8][0] === 1.25 && dataOv[8][1] === 0.5);
+    w.eval('_vis.join(",")') === '3,5' && dataOv.length === 7);
+  check('stack columns are cumulative: the top segment carries the blended total',
+    dataOv[1][0] === 100 && dataOv[2][0] === 140 && dataOv[2][1] === 60);
+  check('health and traffic lines read the server buckets',
+    dataOv[3][0] === 2 && dataOv[4][0] === 1 && dataOv[5][0] === 10 &&
+    dataOv[6][0] === 1.25 && dataOv[6][1] === 0.5);
   const totalsOv = w.eval('chartTotals()');
   check('overview totals carry every headline metric for the period',
     totalsOv.includes('requests</span> 14') && totalsOv.includes('blended</span> 200') &&
     totalsOv.includes('cost</span> $1.75') && totalsOv.includes('errors</span> 3') &&
     totalsOv.includes('rate limited</span> 1'));
-  check('overview totals annotate measured shares and the in:out ratio, never fabricated ones',
+  check('overview totals annotate measured shares, cost per request and the in:out balance',
     totalsOv.includes('75.0%') && totalsOv.includes('25.0%') && totalsOv.includes('40.0% of in') &&
     totalsOv.includes('21.4%') && totalsOv.includes('7.1%') &&
-    totalsOv.includes('in:out 3 : 1'));
+    totalsOv.includes('12.5¢ / req') && totalsOv.includes('in:out 3'));
+  check('the in:out balance stays tile-bounded under extreme distributions', (() => {
+    const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
+    w.eval('chartAgg.buckets[3].in = 1000000; chartAgg.buckets[3].out = 3;');
+    const wide = w.eval('chartTotals()');
+    w.eval('chartAgg.buckets[3] = JSON.parse(' + JSON.stringify(saved) + ');');
+    // period tin = 1000050, tout = 13 → 76926.92… → compact '76.93K'
+    return wide.includes('in:out 76.93K') && !wide.includes('76926');
+  })());
+  check('every overview tile carries its own evolution sparkline',
+    totalsOv.split('<svg class="spark"').length === 11 &&
+    (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 10 &&
+    !totalsOv.includes('NaN'));
   check('overview timing tiles pin the server p95 without a visible pXX label',
     totalsOv.includes('202.75') && totalsOv.includes('<span class="chart-sub">tok/s</span>') &&
     totalsOv.includes('220ms') && !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
     !/p(?:50|95|99)/.test(totalsOv) && totalsOv.includes('95th percentile over the viewed period.'));
-  check('overview totals render one sparse-tolerant sparkline per metric tile',
-    totalsOv.split('<svg class="spark"').length === 3 &&
-    (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 2 &&
-    !totalsOv.includes('NaN'));
   check('speed tile formatter stays placeholder-safe without a unit sub-row',
     w.eval('chartSpec("tps").tileFmt(null)') === '-' &&
     w.eval('chartSpec("tps").tileFmt(202.75)') === '202.75<span class="chart-sub">tok/s</span>');
+  check('hover reads stack SEGMENT values, never the running total', w.eval(`(() => {
+    chartData();
+    upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 0, left: 100}, bbox: {width: 640}});
+    return [...document.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join();
+  })()`) === 'tokens in100,tokens out40,errors2,rate limited1,requests10,cost$1.25');
+  check('stack builder returns the {stroke, fill} object uPlot paints - never a bare Path2D', w.eval(`(() => {
+    class Path2DStub {
+      constructor() { this.ops = []; }
+      moveTo() { this.ops.push(1); } lineTo() { this.ops.push(1); }
+      arcTo() { this.ops.push(1); } rect() { this.ops.push(1); }
+      closePath() { this.ops.push(1); }
+    }
+    const real = window.Path2D; window.Path2D = Path2DStub;
+    try {
+      const data = chartData();
+      const builder = chartStackPaths();
+      const fakeU = { data, valToPos: (v, s, c) => {
+        if (!c) throw new Error('builder must request canvas coordinates');
+        return s === 'x' ? v * 100 : 200 - v / 10;
+      } };
+      const bottom = builder(fakeU, 1);   // tokens in: square bands
+      const top = builder(fakeU, 2);       // tokens out: rounded-top band over input
+      const shapes = upOpts(600, 180).series;
+      return bottom && bottom.stroke instanceof Path2DStub && bottom.fill === bottom.stroke &&
+        bottom.stroke.ops.length === 2 && top.stroke.ops.length > bottom.stroke.ops.length &&
+        typeof shapes[1].paths === 'function' && typeof shapes[2].paths === 'function' &&
+        shapes[3].paths === undefined && shapes[6].paths === undefined;
+    } finally { window.Path2D = real; }
+  })()`));
   check('the percentile dropdown never re-gates the overview timing tiles', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
     w.setChartPct('99');
-    const t99 = w.eval('chartTotals()');
+    w.eval('chartTotals()');
     w.setChartPct('95');
-    return t50.includes('220ms') && t50.includes('202.75') && t99.includes('220ms') &&
-      w.eval('chartPlan().meta.length') === 8;
+    return t50.includes('220ms') && t50.includes('202.75') &&
+      w.eval('chartPlan().meta.length') === 6;
   })());
-  w.eval("chartView.hidden = { overview: ['rl'] }");
+  w.eval("chartView.hidden = { overview: ['inTok'] }");
   const dataOvH = w.eval('chartData()');
   const optsOvH = w.eval('upOpts(600, 180)');
-  check('overview hidden toggle keeps a stable all-null line column',
-    dataOvH.length === 9 && dataOvH[4].every(v => v === null) && dataOvH[7][0] === 140);
+  check('hiding a stack segment re-stacks the survivor from the baseline',
+    dataOvH.length === 7 && dataOvH[1].every(v => v === null) && dataOvH[2][0] === 40 && dataOvH[2][1] === 10);
   check('hidden lines never leave an isolated point behind',
     optsOvH.series[4].points.filter?.({ data: dataOvH }, 4) === null);
+  w.eval("chartView.hidden = { overview: ['rl'] }");
+  const dataOvH2 = w.eval('chartData()');
+  check('a hidden line keeps its all-null column without disturbing the stack',
+    dataOvH2.length === 7 && dataOvH2[4].every(v => v === null) && dataOvH2[2][0] === 140);
   w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['blended', 'rl', 'bogus']}})); loadChartView();`);
   check('saved overview selection validates hidden ids against the preset rows',
-    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "blended,rl"'));
+    w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "rl"'));
   w.eval("chartView.hidden = {}; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
 
   // ---- test 12: restart menu + rebuild-and-restart poll ----

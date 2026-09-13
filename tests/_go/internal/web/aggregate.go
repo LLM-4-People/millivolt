@@ -480,18 +480,25 @@ func TestChartAllDurableHistoryBounded(t *testing.T) {
 	}
 	waitTotals(t, s, 3)
 	buf.Record(recent) // the ring copy is not a fourth durable contribution
-	live := mkRec("not-flushed", now.Add(-time.Minute), 200, "", nil, 80, 400, 40, 20, 0, 0.04)
+	// The unflushed ring record recovered from an absorbed 429: it must fold
+	// into the chart's rate-limit count through fromRecord (the ring path)
+	// without ever counting as an error or a second request.
+	live := mkRec("not-flushed", now.Add(-time.Minute), 200, "", []metrics.RetryAttempt{
+		{StatusCode: 429, ErrorType: "rate_limit", At: now.Add(-time.Minute)},
+	}, 80, 400, 40, 20, 0, 0.04)
 	live.Provider = old.Provider
 	buf.Record(live)
 	api := NewAggAPI(buf, s, time.Second)
 	for _, c := range []struct {
-		query  string
-		oldest time.Time
-		want   float64
+		query   string
+		oldest  time.Time
+		want    float64
+		wantRL  float64
+		wantErr float64
 	}{
-		{"window=all", other.Start, 4},
-		{"window=all&f=provider:history.example", old.Start, 3},
-		{"window=525600", now.Add(-365 * 24 * time.Hour), 2},
+		{"window=all", other.Start, 4, 1, 1},
+		{"window=all&f=provider:history.example", old.Start, 3, 1, 0},
+		{"window=525600", now.Add(-365 * 24 * time.Hour), 2, 1, 0},
 	} {
 		p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?"+c.query)
 		from, step := int64(p["from_ms"].(float64)), int64(p["bucket_ms"].(float64))
@@ -502,12 +509,21 @@ func TestChartAllDurableHistoryBounded(t *testing.T) {
 		if from > c.oldest.UnixMilli() || c.oldest.UnixMilli()-from >= step {
 			t.Fatalf("%s: from=%d does not start with oldest scoped history %d", c.query, from, c.oldest.UnixMilli())
 		}
-		var sum float64
+		var sum, rl, errSum float64
 		for _, b := range buckets {
-			sum += b.(map[string]any)["req"].(float64)
+			m := b.(map[string]any)
+			sum += m["req"].(float64)
+			rl += m["rl"].(float64)
+			errSum += m["err"].(float64)
 		}
 		if sum != c.want {
 			t.Fatalf("%s: req sum=%v, want %v", c.query, sum, c.want)
+		}
+		// The recovered 429 rides the ring path into rl exactly once, and
+		// never into err - the two health counts stay distinct affected
+		// requests across both ingest paths.
+		if rl != c.wantRL || errSum != c.wantErr {
+			t.Fatalf("%s: rl=%v err=%v, want rl=%v err=%v (ring 429 folded once, never an error)", c.query, rl, errSum, c.wantRL, c.wantErr)
 		}
 	}
 }

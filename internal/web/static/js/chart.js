@@ -29,21 +29,23 @@ const CHART_PCTS = [50, 95, 99];
 // Internal chart geometry: minimum readable tick spacing and restrained bars.
 const CHART_X_TICK_PX = 72;
 const CHART_Y_TICK_PX = 28;
-const CHART_BAR_MAX_PX = 18;
 const CHART_GROUP_WIDTH = 0.72;
 const CHART_GROUP_GAP = 0.08;
 const CHART_AXIS_SIZE = 48;
 const CHART_POINT_SIZE = 4; // isolated line samples need a visible mark
 const CHART_POINT_RING_WIDTH = 1;
-// Totals-strip sparklines: the per-bucket evolution of the percentile-gated
-// readouts (speed/latency tiles). 72px matches the totals grid's minimum
-// tile width, so a spark always fits its cell. Decorative like the explorer
-// sparks; the tile value carries the number.
+// Totals-strip sparklines: the per-bucket evolution carried under EVERY
+// tile value (uniform rhythm; decorative like the explorer sparks - the tile
+// value carries the number, the spark carries the shape). 72px fits the
+// totals grid's 84px minimum tile.
 const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
-// The Overview tiles pin the server's p95 ([p50, p95, p99] index 1): the
-// preset keeps only the time-range control, no percentile selector, and no
-// visible pXX label anywhere - the tile tooltip carries the semantics.
-const CHART_TILE_PCT_IDX = 1;
+// The Overview tiles pin the server's p95: the preset keeps only the
+// time-range control, no percentile selector, and no visible pXX label
+// anywhere - the tile tooltip carries the semantics. The index derives from
+// the CHART_PCTS owner, and the ordinal text derives from the same
+// constant, so the wire triple and the tooltip cannot drift apart.
+const CHART_TILE_PCT = 95;
+const CHART_TILE_PCT_IDX = CHART_PCTS.indexOf(CHART_TILE_PCT);
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -131,7 +133,7 @@ const CHART_SERIES = [
   { id: 'cachePct', label: 'cache hit', color: 'warn',   fmt: fmtPct,
     title: 'Cached prompt tokens as a share of input tokens, per bucket.' },
   { id: 'tps',  metric: 'tps',      label: 'speed',   color: 'ok',     fmt: fmtTPS,
-    // Dense totals tiles (Overview's nine-tile strip) cannot fit ' tok/s'
+    // Dense totals tiles (Overview's ten-tile strip) cannot fit ' tok/s'
     // beside the value; tileFmt renders the number with the unit as a muted
     // sub-row instead. Wide two-tile presets keep fmtTPS.
     tileFmt: v => fmt(v) + (v == null ? '' : '<span class="chart-sub">tok/s</span>'),
@@ -149,17 +151,18 @@ const CHART_SERIES = [
 // accompanying money, never a second sum stacking the bars scale).
 const CHART_PRESETS = [
   {
-    // Overview: the at-a-glance composition. In/out token bars share the
-    // compressed left scale with the error bars; requests, the cached share
-    // and the rate-limit (429) count trace that same scale as lines (counts
-    // accompanying tokens, keeping three bars readable), and the blended
-    // total (in+out) traces the bars' envelope. Spend stays on its own right
-    // axis - money never shares a count scale. The totals strip carries
-    // every headline metric plus the p95-gated speed/latency readouts with
-    // per-bucket sparklines; only the time-range control applies here.
+    // Overview: the at-a-glance composition. One stacked bar per bucket
+    // carries the whole token volume - input segment below, output segment on
+    // top, so the bar's height IS the blended total and its split reads at a
+    // glance (no separate in/out bars, no redundant total line). Over it,
+    // requests and the two health counts (errors, rate-limited 429s - distinct
+    // affected requests) trace the same compressed scale as lines, and spend
+    // stays on its own right axis: money never shares a count scale. The
+    // totals strip carries every headline metric, each tile with its own
+    // per-bucket evolution sparkline; only the time-range control applies.
     id: 'overview', label: 'Overview',
     left: { scale: 'y', fmt: fmt, label: 'Requests + tokens' }, right: { scale: 'yr', fmt: fmtMoney, label: 'Spend (USD)' },
-    series: [['inTok', 'y'], ['outTok', 'y'], ['err', 'y'], ['rl', 'y'], ['req', 'y', 'line'], ['cache', 'y'], ['blended', 'y'], ['cost', 'yr', 'line']],
+    series: [['inTok', 'y', 'stack'], ['outTok', 'y', 'stack'], ['err', 'y', 'line'], ['rl', 'y'], ['req', 'y', 'line'], ['cost', 'yr', 'line']],
   },
   {
     id: 'traffic', label: 'Traffic',
@@ -192,8 +195,9 @@ function chartSpec(id) {
   return CHART_SERIES.find(s => s.id === id);
 }
 // chartRowBar resolves a preset row's renderer: an optional third tuple
-// element ('bar' | 'line') overrides the registry flag for that row alone -
-// CHART_SERIES stays the default owner and the override narrows per preset.
+// element ('bar' | 'line' | 'stack') overrides the registry flag for that row
+// alone - CHART_SERIES stays the default owner and the override narrows per
+// preset. 'stack' renders as one segment of the preset's stacked bar.
 const chartRowBar = (id, rend) => (rend ? rend === 'bar' : !!chartSpec(id).bar);
 
 // Hidden series are per-preset: { presetId: [series ids] }.
@@ -251,10 +255,10 @@ function chartBucketVal(s, b) {
 // chartPlan computes the active preset's full render plan: uPlot series
 // metadata in plot order, the legend rows, and the hidden flags. Every
 // preset row carries its resolved renderer (registry flag or per-row
-// override → m.bar); grouped-bar sizing runs over the visible bar series
-// only, so hiding one re-centers the rest. Hidden series keep their column
-// (all-null) - a toggle must be a pure setData with a stable column count
-// or the plot keeps its stale frame.
+// override → m.bar / m.stack); grouped-bar sizing runs over the visible bar
+// series only, so hiding one re-centers the rest. Hidden series keep their
+// column (all-null) - a toggle must be a pure setData with a stable column
+// count or the plot keeps its stale frame.
 let _plan = null;
 function chartPlan() {
   const preset = activePreset();
@@ -264,7 +268,7 @@ function chartPlan() {
   let barK = 0;
   const meta = rows.map(([id, scale, rend]) => {
     const s = chartSpec(id);
-    const m = { spec: s, scale, bar: chartRowBar(id, rend), hidden: hiddenId(id) };
+    const m = { spec: s, scale, stack: rend === 'stack', bar: chartRowBar(id, rend), hidden: hiddenId(id) };
     // barK counts visible bar rows only - a hidden bar draws nothing and
     // must not consume a slot, or the surviving bars drift off-center.
     if (m.bar && !m.hidden) {
@@ -286,6 +290,10 @@ function chartPlan() {
 // invisible hole that only wastes width - each surviving bar keeps its true
 // time for ticks/hover via _vis); line presets keep every bucket, where a
 // gap is honest data.
+// Stacked rows carry CUMULATIVE columns over the visible stack segments in
+// row order (segment value = column minus the previous visible stack
+// column), so hiding a segment re-stacks the survivors without double
+// counting.
 let _vis = null, _compacted = false;
 function chartData() {
   _plan = chartPlan();
@@ -301,8 +309,21 @@ function chartData() {
   _compacted = !!idxs;
   const src = idxs || chartAgg.buckets.map((_, i) => i);
   const data = [src.map((pi, k) => (idxs ? k + 0.5 : chartAgg.buckets[pi].t + bm / 2))];
+  let stackPrev = null;
   for (const m of _plan.meta) {
-    data.push(src.map(pi => (m.hidden ? null : chartBucketVal(m.spec, chartAgg.buckets[pi]))));
+    if (m.hidden) {
+      data.push(src.map(() => null));
+      continue;
+    }
+    const raw = src.map(pi => chartBucketVal(m.spec, chartAgg.buckets[pi]));
+    if (m.stack) {
+      const col = raw.map((v, k) => (stackPrev ? stackPrev[k] + (v ?? 0) : v));
+      data.push(col);
+      stackPrev = col;
+    } else {
+      data.push(raw);
+      stackPrev = null;
+    }
   }
   return data;
 }
@@ -376,15 +397,16 @@ function chartYTicks(u, ai, min, max) {
 }
 
 // Resolve geometry on every draw, so setData after a legend toggle moves the
-// remaining bars. Cap the whole group proportionally, keeping sparse groups
-// centered. disp.x0 is the left edge; align alone cannot separate three bars.
-function chartBarGeometry(u, si) {
+// remaining bars. Bars fill their fraction of the bucket slot at ANY
+// density: dense windows stay slim, sparse windows fill the plot instead of
+// stranding hairline marks in empty space (a category axis - the compacted
+// x already omits empty intervals). disp.x0 is the left edge; align alone
+// cannot separate three bars.
+function chartBarGeometry(si) {
   const m = _plan.meta[si - 1];
   if (m.hidden) return { offset: 0, size: 0 };
   const step = _compacted ? 1 : chartAgg.bucket_ms;
-  const slotPx = Math.abs(u.valToPos(step, 'x') - u.valToPos(0, 'x'));
-  const factor = Math.min(1, CHART_BAR_MAX_PX / (slotPx * m.size));
-  return { offset: m.offset * step * factor, size: m.size * step * factor };
+  return { offset: m.offset * step, size: m.size * step };
 }
 
 function chartBarPaths() {
@@ -393,12 +415,81 @@ function chartBarPaths() {
     radius: 0.12,
     disp: {
       x0: { unit: 1, values: (u, si) => {
-        const g = chartBarGeometry(u, si);
+        const g = chartBarGeometry(si);
         return u.data[0].map(x => x + g.offset);
       } },
-      size: { unit: 1, values: (u, si) => [chartBarGeometry(u, si).size] },
+      size: { unit: 1, values: (u, si) => [chartBarGeometry(si).size] },
     },
   });
+}
+
+// Stacked bars (Overview): every stack segment draws one band of a single
+// bar per bucket - [previous visible stack column, own cumulative column] -
+// so the bar's height is the stack total and its color split carries the
+// composition. The shared x extent spans the whole (pixel-capped) group
+// width; only the topmost visible segment rounds its top corners, matching
+// the grouped bars. Hidden segments draw nothing and are excluded from the
+// cumulative columns, so a toggle re-stacks the survivors.
+function chartStackPaths() {
+  return (u, si) => {
+    const m = _plan.meta[si - 1];
+    if (m.hidden) return null;
+    let prev = null, topmost = true;
+    for (let k = si; k < _plan.meta.length; k++) {
+      if (_plan.meta[k].stack && !_plan.meta[k].hidden) { topmost = false; break; }
+    }
+    for (let k = si - 2; k >= 0; k--) {
+      if (_plan.meta[k].stack && !_plan.meta[k].hidden) { prev = u.data[k + 1]; break; }
+    }
+    const xs = u.data[0], ys = u.data[si];
+    const step = _compacted ? 1 : chartAgg.bucket_ms;
+    // Canvas flag: valToPos without it returns CSS pixels relative to the
+    // plot area, but the painter fills in device pixels offset by the plot
+    // bbox - paths built both ways land clipped or squashed. This is what
+    // uPlot's orient() passes internally.
+    const v2x = v => u.valToPos(v, 'x', true);
+    const v2y = v => u.valToPos(v, 'y', true);
+    // Slot width measured from an in-domain pair: x is either slot indices
+    // (compacted) or epoch milliseconds, so valToPos(0) would measure from
+    // the 1970 epoch in the millisecond mode and clamp to the plot edge -
+    // a zero-width bar. The first bucket center ± its own step is always
+    // inside the range in both modes.
+    const slotPx = Math.abs(v2x(xs[0] + step) - v2x(xs[0]));
+    // fill the slot fraction like every bar preset: no pixel cap, or sparse
+    // windows would strand narrow bars in empty space
+    const width = slotPx * CHART_GROUP_WIDTH;
+    const path = new Path2D();
+    let drawn = 0;
+    for (let i = 0; i < xs.length; i++) {
+      const high = ys[i];
+      if (high == null) continue;
+      const low = prev ? (prev[i] ?? 0) : 0;
+      if (!(high > low)) continue; // zero-height band draws nothing
+      const x0 = v2x(xs[i]) - width / 2;
+      const x1 = x0 + width;
+      const y0 = v2y(high);
+      const y1 = v2y(low);
+      drawn++;
+      if (topmost) {
+        const r = Math.min(4, width / 2, y1 - y0);
+        path.moveTo(x0, y1);
+        path.lineTo(x0, y0 + r);
+        path.arcTo(x0, y0, x0 + r, y0, r);
+        path.lineTo(x1 - r, y0);
+        path.arcTo(x1, y0, x1, y0 + r, r);
+        path.lineTo(x1, y1);
+        path.closePath();
+      } else {
+        path.rect(x0, y0, width, y1 - y0);
+      }
+    }
+    // uPlot's painter consumes an {stroke, fill, ...} object - a bare
+    // Path2D return silently paints nothing (the shape mirrors what the
+    // built-in builders return). Width 0 keeps these pure fills; an empty
+    // band set returns null so uPlot skips the series cleanly.
+    if (!drawn) return null;
+    return { stroke: path, fill: path, clip: null, band: null, gaps: null, flags: 1 };
+  };
 }
 
 // A connected segment already draws a line. Mark only isolated samples,
@@ -474,7 +565,9 @@ function upOpts(w, h) {
         for (let si = 0; si < _plan.meta.length; si++) {
           const m = _plan.meta[si];
           if (m.hidden) continue;
-          const v = u.data[si + 1][i];
+          // stacked rows plot cumulative columns; the readout owns the
+          // segment value (input / output), never the running total
+          const v = m.stack ? chartBucketVal(m.spec, bucket) : u.data[si + 1][i];
           if (v == null) continue;
           parts.push(`<div class="chart-hover-row"><span style="color:${COLORS[m.spec.color]}">${m.spec.label}</span><span>${m.spec.fmt(v)}</span></div>`);
         }
@@ -500,7 +593,7 @@ function upOpts(w, h) {
       yttft: { auto: true },
       ytps: { auto: true },
       yr: { auto: true },
-      pct: { auto: false, range: [0, 100] }, // error-rate axis pinned to 0–100
+      pct: { auto: false, range: [0, 100] }, // pinned 0-100: error rate and cache hit
     },
     axes: [
       // uPlot's axes[0] is always the bottom (x/time) axis - the left y axis
@@ -530,6 +623,20 @@ function upOpts(w, h) {
       {},
       ..._plan.meta.map(m => {
         const s = m.spec;
+        if (m.stack) {
+          // one segment of the preset's stacked bar: fill only (no stroke),
+          // band drawn by chartStackPaths from the previous visible stack
+          // column to its own cumulative column.
+          return {
+            label: s.label,
+            fill: hexA(COLORS[s.color], 0.8),
+            width: 0,
+            paths: chartStackPaths(),
+            scale: m.scale || preset.left.scale,
+            points: { show: false },
+            value: (u, v) => (v == null ? '-' : s.fmt(v)),
+          };
+        }
         if (m.bar) {
           // per-bucket sum → bar on the shared arcsinh scale; width 0 keeps
           // pure fills (no stroke). bars-preset series carry their grouped
@@ -582,7 +689,8 @@ function chartTotals() {
     treason += b.reason;
     cost += b.cost;
   });
-  const rate = req ? (err / req) * 100 : null;
+  // Tile percentages flow through pct (the pctCap owner): a strictly-sub-100
+  // ratio can never round up to a false "100%".
   const span = (label, val) => `<span class="chart-total"><span class="tl">${label}</span> ${val}</span>`;
   const seriesSpan = (s, val, sub = '', fmtFn) => `<span class="chart-total" style="color:${COLORS[s.color]}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}><span class="tl">${s.label}</span> ${(fmtFn || s.fmt)(val)}${sub}</span>`;
   // pctSub renders a measured part-to-whole share as a small muted sub-row
@@ -592,16 +700,18 @@ function chartTotals() {
     const p = pct(a, b);
     return p === '-' ? '' : `<span class="chart-sub">${p}${of ? ' ' + of : ''}</span>`;
   };
-  // inOutRatio renders the token balance as input per output ('2.5 : 1').
-  // An unmeasured denominator renders '-', never a fabricated ratio.
-  const inOutRatio = (tin, tout) => tout ? (Math.round((tin / tout) * 100) / 100) + ' : 1' : '-';
+  // inOutRatio renders the token balance as input per output, bounded for a
+  // totals tile by the shared compact formatter (at most seven characters
+  // whatever the distribution). An unmeasured denominator renders '-',
+  // never a fabricated ratio.
+  const inOutRatio = (tin, tout) => tout ? fmt(tin / tout) : '-';
   const p = activePreset();
   const parts = [];
   switch (p.id) {
     case 'traffic':
       parts.push(seriesSpan(chartSpec('req'), req));
       parts.push(seriesSpan(chartSpec('err'), err));
-      if (rate != null) parts.push(span('rate', fmtPct(rate)));
+      if (req) parts.push(span('rate', pct(err, req)));
       break;
     case 'tokens': {
       const tot = tin + tout;
@@ -614,30 +724,39 @@ function chartTotals() {
     }
     case 'errors':
       parts.push(seriesSpan(chartSpec('err'), err));
-      if (rate != null) parts.push(span('rate', fmtPct(rate)));
+      if (req) parts.push(span('rate', pct(err, req)));
       break;
     case 'cost':
       parts.push(seriesSpan(chartSpec('cost'), cost));
       parts.push(span('requests', fmt(req)));
       break;
     case 'overview': {
+      // Uniform tiles: every metric reads value first, then its measured
+      // share (where one exists), then its per-bucket evolution sparkline -
+      // the evolution of every listed metric is visible in the strip itself.
       const tot = tin + tout;
-      parts.push(seriesSpan(chartSpec('req'), req));
-      parts.push(seriesSpan(chartSpec('blended'), tot, tout ? `<span class="chart-sub">in:out ${inOutRatio(tin, tout)}</span>` : ''));
-      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot)));
-      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
-      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
-      parts.push(seriesSpan(chartSpec('cost'), cost));
-      parts.push(seriesSpan(chartSpec('err'), err, rate != null ? `<span class="chart-sub">${fmtPct(rate)}</span>` : ''));
-      parts.push(seriesSpan(chartSpec('rl'), rl, req ? `<span class="chart-sub">${fmtPct((rl / req) * 100)}</span>` : ''));
-      // Timing tiles pin the server's p95 for the period, plus the per-bucket
-      // p95 evolution as a sparkline (suppressed buckets stay absent). No
+      const spark = (s, pick) => sparklineSVG(chartAgg.buckets.map(pick), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
+      const bal = inOutRatio(tin, tout);
+      parts.push(seriesSpan(chartSpec('req'), req, spark(chartSpec('req'), b => b.req)));
+      parts.push(seriesSpan(chartSpec('blended'), tot,
+        (bal === '-' ? '' : `<span class="chart-sub">in:out ${bal}</span>`) + spark(chartSpec('blended'), b => b.in + b.out)));
+      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot) + spark(chartSpec('inTok'), b => b.in)));
+      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot) + spark(chartSpec('outTok'), b => b.out)));
+      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in') + spark(chartSpec('cache'), b => b.cache)));
+      parts.push(seriesSpan(chartSpec('cost'), cost,
+        (req ? `<span class="chart-sub">${fmtMoney(cost / req)} / req</span>` : '') + spark(chartSpec('cost'), b => b.cost)));
+      parts.push(seriesSpan(chartSpec('err'), err,
+        (req ? `<span class="chart-sub">${pct(err, req)}</span>` : '') + spark(chartSpec('err'), b => b.err)));
+      parts.push(seriesSpan(chartSpec('rl'), rl,
+        (req ? `<span class="chart-sub">${pct(rl, req)}</span>` : '') + spark(chartSpec('rl'), b => b.rl)));
+      // Timing tiles pin the server's p95 for the period, with the same
+      // per-bucket p95 sparkline (suppressed buckets stay absent). No
       // percentile selector on this preset: the tooltip carries the choice.
       for (const id of ['ttft', 'tps']) {
         const s = chartSpec(id);
-        const spark = sparklineSVG(chartAgg.buckets.map(b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null), null, CHART_SPARK_W, CHART_SPARK_H, COLORS[s.color]);
         const tile = { ...s, title: (s.title ? s.title + ' ' : '') + '95th percentile over the viewed period.' };
-        parts.push(seriesSpan(tile, chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null, spark, s.tileFmt));
+        parts.push(seriesSpan(tile, chartAgg[s.metric + '_p']?.[CHART_TILE_PCT_IDX] ?? null,
+          spark(s, b => b[s.metric]?.[CHART_TILE_PCT_IDX] ?? null), s.tileFmt));
       }
       break;
     }
@@ -707,8 +826,8 @@ function renderChart() {
 function chartLegendSync() {
   const l = $('traffic-legend');
   if (!l || !_plan) return;
-  const html = _plan.meta.map(({ spec, bar, hidden }) => {
-    const mark = bar ? 'bar' : spec.dash ? 'dashed' : 'line';
+  const html = _plan.meta.map(({ spec, bar, stack, hidden }) => {
+    const mark = (bar || stack) ? 'bar' : spec.dash ? 'dashed' : 'line';
     const title = (hidden ? 'Show' : 'Hide') + ' ' + spec.label + (spec.title ? '. ' + spec.title : '');
     return `<button type="button" class="leg-item${hidden ? ' off' : ''}" data-series="${spec.id}" aria-pressed="${!hidden}" title="${escapeHtml(title)}" style="--sw:${COLORS[spec.color]}"><span class="swatch ${mark}" aria-hidden="true"></span>${spec.label}</button>`;
   }).join('');

@@ -37,19 +37,20 @@ values and time interval. Counts, sums and percentiles come from the server.
 
 ### Overview
 
-**Overview** is the at-a-glance composition: input and output token bars share
-the compressed left scale with error bars, while the rate-limited (HTTP 429)
-count, requests and the cached share trace that scale as lines, the blended
-total (input plus output) traces the bars' envelope, and reported spend stays
-on its own right axis. A rate limit is not an error: both health counts are
-distinct affected requests. The totals strip carries every headline metric for
-the period - requests, blended with the in:out balance, input, output and
-cached tokens with their measured shares, spend, errors with the
-affected-request rate, rate-limited requests with their share - plus the
-speed and latency readouts, each pinned to the 95th percentile with a
-per-bucket sparkline so the evolution of both timing metrics stays visible.
-Only the time-range control applies here. This preset has no static capture
-yet; the gallery images below predate it.
+**Overview** is the at-a-glance composition. One stacked bar per bucket carries
+the whole token volume - input below, output on top - so the bar's height is
+the blended total and its color split reads the in/out balance at a glance.
+Requests, errors and the rate-limited (HTTP 429) count trace the same
+compressed scale as lines (a rate limit is not an error: both health counts
+are distinct affected requests), and reported spend stays on its own right
+axis. The totals strip is uniform: every headline metric reads its period
+value first - requests, blended with the in:out balance, input, output and
+cached tokens with their measured shares, spend with the per-request cost,
+errors with the affected-request rate, rate-limited requests with their share
+- followed by its own per-bucket evolution sparkline, so the evolution of
+every metric is visible without hovering. The speed and latency tiles pin
+the 95th percentile. Only the time-range control applies here. This preset
+has no static capture yet; the gallery images below predate it.
 
 ### Traffic
 
@@ -74,7 +75,8 @@ reported fields determine which splits are available. The compressed vertical
 scale keeps large prompt/cache volumes and small outputs readable together.
 A cache-hit line on a separate percentage axis tracks cached prompt tokens as
 a share of input per bucket. The totals strip adds each side's share of the
-blended total, the cache share of input, and the in:out ratio.
+blended total, the cache share of input, and the in:out balance (input per
+output).
 
 ![Token timeline with input, output, reasoning and cached usage](images/charts/tokens.png)
 

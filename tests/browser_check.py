@@ -203,13 +203,14 @@ async def check(base, screenshot):
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})
-                # Overview preset: in/out token bars + the rl, req, cached,
-                # blended and cost lines all render on the real canvas, and
-                # the dense ten-tile totals strip (with sparkline tiles) stays
-                # inside the card at both desktop and mobile widths. The
-                # recovered-429 fixture proves the health invariant end to
-                # end: rate limited = 2 while errors stay 0, no percentile
-                # selector, no visible pXX label.
+                # Overview preset: the stacked token bar (input below, output
+                # on top; bar height = blended total) plus the rl, req and err
+                # lines all render on the real canvas, and the uniform
+                # ten-tile totals strip (every tile with its evolution
+                # sparkline) stays inside the card at both desktop and mobile
+                # widths. The recovered-429 fixture proves the health
+                # invariant end to end: rate limited = 2 while errors stay 0,
+                # no percentile selector, no visible pXX label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
@@ -224,21 +225,20 @@ async def check(base, screenshot):
                         renderChart();
                         await new Promise(requestAnimationFrame);
                         const pixels = _up.ctx.getImageData(0,0,_up.ctx.canvas.width,_up.ctx.canvas.height).data;
-                        let inTok=0, outTok=0, req=0, blended=0, cost=0, rl=0;
+                        let inTok=0, outTok=0, req=0, cost=0, rl=0;
                         for (let i=0;i<pixels.length;i+=4) {
                             if (!pixels[i+3]) continue;
                             const [r,g,b] = [pixels[i],pixels[i+1],pixels[i+2]];
-                            if (b>r*1.3 && b>g*1.2 && r>g) inTok++;   // tokens in bar (#9a6bff)
-                            if (g>r*1.3 && b<g*0.8) outTok++;         // tokens out bar (#2fd186)
+                            if (b>r*1.3 && b>g*1.2 && r>g) inTok++;   // tokens in stack segment (#9a6bff)
+                            if (g>r*1.3 && b<g*0.8) outTok++;         // tokens out stack segment (#2fd186)
                             if (b>r*1.3 && b>g*1.3 && g>r) req++;     // requests line (#5b8cff)
-                            if (g>r*1.3 && b>g*0.8 && b<g*1.1) blended++; // blended line (#38d5c0)
                             if (r>b*1.3 && r>g && r<g*1.4) cost++;    // cost line (#f4c14d)
                             if (r>b*1.3 && r>g*1.5) rl++;             // rate-limit line (#ff9346)
                         }
                         const card=document.querySelector('.traffic-card');
                         const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
                         const totals=document.getElementById('chart-totals').textContent;
-                        return {inTok,outTok,req,blended,cost,rl,overflow,rlTotal,errTotal,
+                        return {inTok,outTok,req,cost,rl,overflow,rlTotal,errTotal,
                                 errors0:/errors\\s*0/.test(totals), rateLimited2:/rate limited\\s*2/.test(totals),
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
@@ -246,13 +246,12 @@ async def check(base, screenshot):
                                 legend:document.querySelector('#traffic-legend').textContent};
                     }''')
                     require(state['inTok'] and state['outTok'], state)
-                    require(state['req'] and state['blended'] and state['cost'], state)
-                    require(state['rl'], state)
+                    require(state['req'] and state['cost'] and state['rl'], state)
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
                     require(state['errors0'] and state['rateLimited2'], state)
                     require(not state['overflow'], state)
                     require(state['tiles'] == 10, state)
-                    require(state['sparks'] == 2, state)
+                    require(state['sparks'] == 10, state)
                     require(state['pctHidden'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})

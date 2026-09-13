@@ -591,7 +591,7 @@ func (a *AggAPI) kpi() kpiPayload {
 type chartBucketJSON struct {
 	T      int64      `json:"t"`
 	Req    int64      `json:"req"`
-	Err    int64      `json:"err"` // affected requests with a final error (Record.IsError); 429 alone is not one
+	Err    int64      `json:"err"` // affected requests Record.IsError counts (final 4xx/5xx or an absorbed 5xx); 429 alone is not one
 	RL     int64      `json:"rl"`  // affected requests with final-or-retried HTTP 429 (Record.HasRateLimit); distinct from Err
 	In     int64      `json:"in"`
 	Out    int64      `json:"out"`

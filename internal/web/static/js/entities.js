@@ -198,7 +198,7 @@ function sparklineSVG(series, errs, w, h, color) {
   };
   const line = path(series);
   if (!line) {
-    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false"></svg>`;
+    return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg>`;
   }
   // Close the polygon from the first point (line already starts with M at (0, y0)):
   // baseline right edge → bottom edge → implicit close up the left side. Never
@@ -208,7 +208,7 @@ function sparklineSVG(series, errs, w, h, color) {
   const area = `${line}L${w} ${h}L0 ${h}Z`;
   const errPath = (errs && errs.some(e => e > 0)) ? path(errs) : '';
   const errLine = errPath ? `<path d="${errPath}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
-  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-hidden="true" focusable="false">` +
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true" focusable="false">` +
     `<path d="${area}" fill="${color}" opacity="0.13"/>` +
     `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>` +
     errLine + `</svg>`;
