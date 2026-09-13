@@ -124,6 +124,45 @@ class RepositoryChecks(unittest.TestCase):
                                  ["public.js:1: use sentence punctuation or '-' instead of an em dash"])
             self.assertFalse((root / "must-not-exist").exists())
 
+    def test_dead_css_class_detector(self):
+        live = [("internal/web/static/css/dash.css", ".tile { color: red }\n.tile.off { opacity: .5 }\n"),
+                ("internal/web/static/js/app.js", 'render(`<span class="tile${hidden ? " off" : ""}">x</span>`);\n'),
+                ("internal/web/static/index.html", '<span class="tile"></span>\n')]
+        self.assertEqual(check.dead_css_class_errors(live), [])
+        dead = live + [("internal/web/static/css/dash.css", ".ghost { color: blue }\n")]
+        self.assertEqual(check.dead_css_class_errors(dead),
+                         ["internal/web/static/css/dash.css: stylesheet class .ghost has no emitter"])
+
+    def test_duplicate_js_function_detector(self):
+        twin = 'function one(box) {\n  return [...document.querySelectorAll("#" + box)].length;\n}\n'
+        text = (twin.replace('one', 'alpha') + twin.replace('one', 'beta')
+                + 'function gamma(box) {\n  return [...document.querySelectorAll("#" + box)].map(c => c);\n}\n')
+        pairs = [("internal/web/static/js/app.js", text)]
+        self.assertEqual(check.duplicate_js_function_errors(pairs), [
+            "internal/web/static/js/app.js:4: function beta duplicates alpha "
+            "(internal/web/static/js/app.js:1) - extract the shared helper"])
+        self.assertEqual(check.duplicate_js_function_errors(
+            [("internal/web/static/js/app.js",
+              'function alpha(x) { return x + 1; }\nfunction beta(x) { return x + 1; }\n')]), [])
+
+    def test_removed_vocabulary_detector(self):
+        clean = [("internal/web/static/js/app.js", "render('spark');\n")]
+        self.assertEqual(check.removed_vocabulary_errors(clean), [])
+        stale = [("internal/web/static/js/app.js", "render(); // the old spark-row layout\n")]
+        self.assertEqual(check.removed_vocabulary_errors(stale), [
+            "internal/web/static/js/app.js: retired token 'spark-row' "
+            "(the per-half spark rows became one multi-line sparkline per tile)"])
+
+    def test_js_template_comment_detector(self):
+        pairs = [("internal/web/static/js/app.js",
+                  'const a = `text\n // stray comment in the body\nmore`;\n'
+                  'const b = `ok ${x.map(v => `item ${v}`).join("")}`;\n'
+                  'const url = `https://example.invalid/x`;\n')]
+        self.assertEqual(check.js_template_comment_errors(pairs),
+                         ["internal/web/static/js/app.js:2: JS comment inside a template-literal body"])
+        self.assertEqual(check.js_template_comment_errors(
+            [("internal/web/static/js/app.js", 'const ok = `plain body\nwith https://example.invalid link`;\n')]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

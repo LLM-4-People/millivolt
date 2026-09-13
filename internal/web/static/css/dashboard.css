@@ -992,8 +992,8 @@
    .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
    /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
       the tile bottom, so the sparks align across the row whatever sub-rows a
-      tile carries. The strip stays compact: ten tiles must never out-grow
-      the plot below them. */
+      tile carries. The strip stays compact: a plotted preset's tiles must
+      never out-grow the plot below them. */
    .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }

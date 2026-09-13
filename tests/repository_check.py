@@ -5,7 +5,9 @@ from pathlib import Path
 import re
 from urllib.parse import unquote, urlsplit
 
-from .support import ROOT, git_environment, source_inventory, test_layout_errors
+from .support import (ROOT, dead_css_class_errors, duplicate_js_function_errors,
+                      git_environment, js_template_comment_errors, removed_vocabulary_errors,
+                      source_inventory, static_pairs, test_layout_errors)
 
 IGNORED_PATHS = (
     "AGENTS.md", "agents.md", "internal/AGENTS.md",
@@ -118,8 +120,13 @@ def publication_errors(root, inventory=None):
 
 def check(root):
     inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
+    pairs = static_pairs(inventory[1])
     return (markdown_errors(root, inventory[1]) + publication_errors(root, inventory)
-            + test_layout_errors(inventory[1]))
+            + test_layout_errors(inventory[1])
+            + dead_css_class_errors(pairs)
+            + duplicate_js_function_errors(pairs)
+            + removed_vocabulary_errors(pairs)
+            + js_template_comment_errors(pairs))
 
 
 def main():
@@ -129,7 +136,9 @@ def main():
         raise SystemExit("repository check: " + str(error)) from error
     if errors:
         raise SystemExit("\n".join(errors))
-    print("repository checks passed: local Markdown targets, publication ignore rules and typography")
+    print("repository checks passed: local Markdown targets, publication ignore rules, "
+          "typography, dead stylesheet classes, duplicated helpers, retired vocabulary, "
+          "template comments")
 
 
 if __name__ == "__main__":

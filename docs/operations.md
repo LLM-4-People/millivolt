@@ -714,16 +714,17 @@ Tools and error occurrences can have multiple memberships per request, while
 error/429 health badges count distinct affected requests.
 
 The [visual guide](dashboard.md) covers every timeline and its controls. Overview
-stacks each bucket's token volume into one input/output bar (its height is the
-blended total), traces requests, errors, rate-limited (429) requests and 95th
-percentile speed/latency over it, and keeps spend on its own axis; Traffic
-compares requests/errors; Tokens separates available input/output/reasoning/cache
+is the summary: it carries no plot, and its tiles take the whole card (requests
+over the blended token volume, tokens in/out/cached with their shares, spend
+with the blended per-Mtok price, the errors / 429 pair, and average latency /
+speed over every measured request with each metric's low-high sample range);
+Traffic compares requests/errors; Tokens separates available input/output/reasoning/cache
 usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
 uses independent throughput/TTFT axes; Errors compares
 error count/rate; Cost places reported USD spend beside request volume. One
-percentile selection controls the timing series (the Overview pins the 95th
-percentile and keeps only the time-range control). Period percentiles are computed
-from period samples, not averages of bucket percentiles. Insufficient samples
+percentile selection controls the timing series (the Overview keeps only the
+time-range control). Period readouts are computed from period samples, not
+averages of bucket percentiles. Insufficient samples
 remain unavailable. All time means the available retained history, not deleted,
 dropped or never-observed requests.
 

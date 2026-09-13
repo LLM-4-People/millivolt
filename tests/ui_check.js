@@ -2599,7 +2599,7 @@ async function main() {
     d.querySelector('#pf-providers input[value="new.example"]').checked = true;
     w.syncPauseMenuState();
     check('pause state refresh preserves the selected cross-scope draft',
-      w.selectedPauseChecks('pf-clients').includes('client-a') && w.selectedPauseChecks('pf-providers').includes('new.example'));
+      w.selectedCheckboxValues('pf-clients').includes('client-a') && w.selectedCheckboxValues('pf-providers').includes('new.example'));
     w.applyPauseState({...paused, holds: [{...named, new: true, known_at_new: ['client-a']}]});
     w.editPauseHold(named.id);
     let scopedPauseBody;

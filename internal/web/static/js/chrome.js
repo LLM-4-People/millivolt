@@ -2217,7 +2217,7 @@ function onPauseScopeChange() {
   updatePauseApplyEnabled();
 }
 
-function selectedPauseChecks(boxId) {
+function selectedCheckboxValues(boxId) {
   return [...document.querySelectorAll('#' + boxId + ' input[type=checkbox]:checked')].map(c => c.value);
 }
 
@@ -2239,7 +2239,7 @@ function updatePauseApplyEnabled() {
   const btn = $('btn-pause-apply');
   if (!btn) return;
   const scope = pauseMenuScope();
-  btn.disabled = operatorState.pause.busy || (scope !== 'all' && scope !== 'new' && selectedPauseChecks('pf-clients').length === 0 && selectedPauseChecks('pf-providers').length === 0);
+  btn.disabled = operatorState.pause.busy || (scope !== 'all' && scope !== 'new' && selectedCheckboxValues('pf-clients').length === 0 && selectedCheckboxValues('pf-providers').length === 0);
   btn.textContent = pauseEditID ? 'Update' : 'Pause';
 }
 
@@ -2284,8 +2284,8 @@ function renderPauseHolds() {
 }
 
 function refreshPauseKnownLists() {
-  const pickedC = new Set(selectedPauseChecks('pf-clients'));
-  const pickedP = new Set(selectedPauseChecks('pf-providers'));
+  const pickedC = new Set(selectedCheckboxValues('pf-clients'));
+  const pickedP = new Set(selectedCheckboxValues('pf-providers'));
   const knownC = [...new Set([...(pauseState.known_clients || []), ...(pauseState.clients || []), ...pickedC])].sort();
   const knownP = [...new Set([...(pauseState.known_providers || []), ...(pauseState.providers || []), ...pickedP])].sort();
   fillPauseChecks($('pf-clients'), knownC, pickedC);
@@ -2408,8 +2408,8 @@ function applyPauseMenu() {
   const scope = pauseMenuScope();
   const all = scope === 'all';
   const neu = scope === 'new';
-  const clients = all ? [] : selectedPauseChecks('pf-clients');
-  const providers = all ? [] : selectedPauseChecks('pf-providers');
+  const clients = all ? [] : selectedCheckboxValues('pf-clients');
+  const providers = all ? [] : selectedCheckboxValues('pf-providers');
   if (!all && !neu && !clients.length && !providers.length) return;
   const body = { paused: true, all, new: !all && neu, clients, providers, duration: pauseMenuDuration() };
   if (pauseEditID) body.id = pauseEditID;
@@ -2511,9 +2511,6 @@ function debugNameTaken(kind, name) {
   return false;
 }
 
-function selectedDebugChecks(boxId) {
-  return [...document.querySelectorAll('#' + boxId + ' input[type=checkbox]:checked')].map(c => c.value);
-}
 
 // Debug-checklist model grouping. Clients and providers spell the same model
 // differently (glm-5.3 vs glm-5-3, moonshotai/kimi-k3:nube vs kimi-k3), so the
@@ -2545,7 +2542,7 @@ function dbgGroupedModels(names) {
 // selectedDebugModels expands the checked model groups back into the exact raw
 // spellings the debug session matches on.
 function selectedDebugModels() {
-  const sel = new Set(selectedDebugChecks('df-models'));
+  const sel = new Set(selectedCheckboxValues('df-models'));
   const out = [];
   for (const g of dbgModelGroups) if (sel.has(g.display)) out.push(...g.variants);
   return out;
@@ -2559,7 +2556,7 @@ function debugMenuDuration() {
 function updateDebugApplyEnabled() {
   const btn = $('btn-debug-apply');
   if (!btn || btn.dataset.busy) return;
-  btn.disabled = operatorState.debug.busy || selectedDebugChecks('df-clients').length === 0 && selectedDebugChecks('df-providers').length === 0 && selectedDebugChecks('df-models').length === 0;
+  btn.disabled = operatorState.debug.busy || selectedCheckboxValues('df-clients').length === 0 && selectedCheckboxValues('df-providers').length === 0 && selectedCheckboxValues('df-models').length === 0;
   btn.textContent = debugEditID ? 'Update' : 'Start';
 }
 
@@ -2630,9 +2627,9 @@ function renderDebugSessions() {
 }
 
 function refreshDebugKnownLists() {
-  const pickedC = new Set(selectedDebugChecks('df-clients'));
-  const pickedP = new Set(selectedDebugChecks('df-providers'));
-  const pickedM = new Set(selectedDebugChecks('df-models'));
+  const pickedC = new Set(selectedCheckboxValues('df-clients'));
+  const pickedP = new Set(selectedCheckboxValues('df-providers'));
+  const pickedM = new Set(selectedCheckboxValues('df-models'));
   const knownC = [...new Set([...(debugState.known_clients || []), ...pickedC])].sort();
   const knownP = [...new Set([...(debugState.known_providers || []), ...pickedP])].sort();
   const knownM = [...new Set([...(debugState.known_models || []), ...pickedM])].sort();
@@ -2726,8 +2723,8 @@ function editDebugSession(id) {
 }
 
 function applyDebugMenu() {
-  const clients = selectedDebugChecks('df-clients');
-  const providers = selectedDebugChecks('df-providers');
+  const clients = selectedCheckboxValues('df-clients');
+  const providers = selectedCheckboxValues('df-providers');
   const models = selectedDebugModels();
   if (!clients.length && !providers.length && !models.length) return;
   const body = { enabled: true, clients, providers, models, duration: debugMenuDuration() };

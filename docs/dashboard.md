@@ -99,7 +99,7 @@ not repeat it. Choose p50, p95 or p99. Each statistic needs at least four valid
 samples; smaller sets and missing measurements remain unavailable. A bucket
 plots only when both measurements exist at the selected percentile, and those
 unmeasured buckets compact out of the timeline instead of stranding gap
-points in dead space - the axes note says when that happened.
+points in dead space - the context row below the plot says when that happened.
 Period readouts use the period's samples, not an average of bucket percentiles.
 
 ![Speed and latency timeline with independent axes and percentile control](images/charts/speed-latency.png)

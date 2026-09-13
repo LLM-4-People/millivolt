@@ -199,12 +199,15 @@ editable configuration, not a guarantee of provider access or protocol coverage.
   session/parent headers for main/sub-conversation relationships. Missing or
   conflicting ancestry remains unresolved instead of being guessed.
 - Compare all six timelines: Overview, Traffic, Tokens, Speed + latency, Errors
-  and Cost. Overview stacks each bucket's token volume into one input/output
-  bar (the height is the blended total), traces requests, errors and
-  rate-limited (429) requests over it, keeps spend on its own axis, and gives
-  every headline metric a period value with its evolution sparkline in the
-  strip above; choose windows from minutes through All time, toggle individual
-  series, and select one percentile for both speed and first-token latency.
+  and Cost. Overview is the summary: it carries no plot, and its tiles take the
+  whole card - requests over the blended token volume, tokens in/out/cached
+  with their shares, spend with the blended per-Mtok price, the errors / 429
+  pair, and average latency / speed over every measured request with each
+  metric's low-high sample range - one multi-line sparkline per tile spanning
+  only traffic-bearing buckets. Click a tile to hide or restore it. Choose
+  windows from minutes through All time, toggle individual series on the
+  plotted presets, and select one percentile for both speed and first-token
+  latency.
 - Inspect provider-reported input/output, cache and reasoning usage. Costs below
   $1 display in cents everywhere; data/API values remain USD. Error and HTTP 429
   counts are distinct, zero badges disappear, and a 429 alone is not an error.
