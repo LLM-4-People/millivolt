@@ -589,9 +589,10 @@ func (a *AggAPI) kpi() kpiPayload {
 
 // chartBucketJSON is one bucket's aggregate row.
 type chartBucketJSON struct {
-	T      int64      `json:"t"` // bucket START edge (from_ms + i*bucket_ms); the client plots slot centers
+	T      int64      `json:"t"`
 	Req    int64      `json:"req"`
-	Err    int64      `json:"err"`
+	Err    int64      `json:"err"` // affected requests with a final error (Record.IsError); 429 alone is not one
+	RL     int64      `json:"rl"`  // affected requests with final-or-retried HTTP 429 (Record.HasRateLimit); distinct from Err
 	In     int64      `json:"in"`
 	Out    int64      `json:"out"`
 	Cache  int64      `json:"cache"` // cached prompt tokens (subset of In)
@@ -611,9 +612,9 @@ type chartPayload struct {
 }
 
 type bAcc struct {
-	t, req, err, in, out, cache, reason int64
-	cost                                float64
-	ttftN, tpsN                         int
+	t, req, err, rl, in, out, cache, reason int64
+	cost                                    float64
+	ttftN, tpsN                             int
 }
 
 // chartFold accumulates one scoped chart series over a stream of
@@ -670,6 +671,9 @@ func (f *chartFold) fold(c *contrib) error {
 	if c.isErr {
 		b.err++
 	}
+	if c.has429 {
+		b.rl++
+	}
 	for _, term := range [...]struct {
 		dst   *int64
 		value int64
@@ -716,7 +720,7 @@ func (f *chartFold) payload(now int64) chartPayload {
 	ttft, periodTTFT := rankPercentiles(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
 	tps, periodTPS := rankPercentiles(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
 	for i, b := range f.buckets {
-		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, In: b.in, Out: b.out,
+		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
 		o.TTFT = ttft[i]
 		o.TPS = tps[i]

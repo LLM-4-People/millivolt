@@ -272,7 +272,14 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	errRec := mkRec("err1", now.Add(-10*time.Minute), 500, "boom", nil, 5, 100, 5, 0, 0, 0)
 	errRec.DecodeTPS = 5.5 // absent overall speed uses the canonical decode fallback
 	s.Record(errRec)
-	waitTotals(t, s, 5)
+	// 1 recovered 429 10 minutes ago: final 200 with an ABSORBED 429 attempt.
+	// Health counts are distinct affected requests: it folds into the chart's
+	// rate-limit bucket only - never into err (429 alone is not an error).
+	rlRec := mkRec("rl1", now.Add(-10*time.Minute), 200, "", []metrics.RetryAttempt{
+		{StatusCode: 429, ErrorType: "rate_limit", At: now.Add(-10 * time.Minute)},
+	}, 0, 100, 0, 0, 0, 0)
+	s.Record(rlRec)
+	waitTotals(t, s, 6)
 	api := NewAggAPI(metrics.NewBuffer(16), s, time.Second)
 
 	// with clock alignment `from` derives from the handler's time.Now(), so
@@ -290,7 +297,7 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	if len(buckets) > chartMaxBuckets+1 {
 		t.Fatalf("buckets = %d, want ≤ %d (cap + one alignment partial)", len(buckets), chartMaxBuckets+1)
 	}
-	var req, err float64
+	var req, err, rl float64
 	var rich map[string]any // the bucket holding the 4 same-start records
 	for i, b := range buckets {
 		m := b.(map[string]any)
@@ -303,6 +310,7 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 		}
 		req += m["req"].(float64)
 		err += m["err"].(float64)
+		rl += m["rl"].(float64)
 		if m["req"].(float64) == 4 {
 			rich = m
 		} else if m["req"].(float64) > 0 {
@@ -316,8 +324,11 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 			}
 		}
 	}
-	if req != 5 || err != 1 {
-		t.Fatalf("chart totals req=%v err=%v, want 5/1", req, err)
+	if req != 6 || err != 1 {
+		t.Fatalf("chart totals req=%v err=%v, want 6/1", req, err)
+	}
+	if rl != 1 {
+		t.Fatalf("chart totals rl=%v, want 1 (recovered 429 folds into rate limit only)", rl)
 	}
 	if rich == nil {
 		t.Fatal("no bucket holds the 4 same-start records")
@@ -338,6 +349,21 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	// cached prompt tokens fold per bucket (4 records × 6 reads = 24).
 	if rich["cache"].(float64) != 24 {
 		t.Fatalf("bucket cache = %v, want 24", rich["cache"])
+	}
+	if rich["rl"].(float64) != 0 {
+		t.Fatalf("rich bucket rl = %v, want 0", rich["rl"])
+	}
+	// The recovered-429 bucket folds both health counts side by side: one
+	// final error and one rate-limited request, two distinct affected requests.
+	var rlBucket map[string]any
+	for _, b := range buckets {
+		m := b.(map[string]any)
+		if m["rl"].(float64) == 1 {
+			rlBucket = m
+		}
+	}
+	if rlBucket == nil || rlBucket["err"].(float64) != 1 || rlBucket["req"].(float64) != 2 {
+		t.Fatalf("recovered-429 bucket = %v, want req=2 err=1 rl=1", rlBucket)
 	}
 	// Period-wide percentile triples (the totals strip): all 5 samples clear
 	// the ≥4 gate - ttft [5,10,20,30,40] → p50 20, p95 38, p99 39.6;
@@ -514,7 +540,7 @@ func TestChartZeroTrafficPayloadShape(t *testing.T) {
 			if int64(m["t"].(float64)) != from+int64(i)*bucketMs {
 				t.Fatalf("window %s: bucket %d t is not a start edge", win, i)
 			}
-			if m["req"].(float64) != 0 || m["err"].(float64) != 0 || m["cost"].(float64) != 0 {
+			if m["req"].(float64) != 0 || m["err"].(float64) != 0 || m["rl"].(float64) != 0 || m["cost"].(float64) != 0 {
 				t.Fatalf("window %s: zero-traffic bucket %d is not zero-filled: %v", win, i, m)
 			}
 			for _, k := range []string{"ttft", "tps"} {
