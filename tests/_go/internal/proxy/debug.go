@@ -363,46 +363,69 @@ func TestDebugSnapshotMatchesGET(t *testing.T) {
 // openProxyTestStore opens a Store at path with the Default-derived Options
 // the stored-proxy tests share (channel/batch caps, flush cadence, query
 // timeout): the debug and pause persist/restore twins, the throttle
-// persist/restore test, and the debug capture test. Close stays at each
-// site: the persist/restore choreography closes mid-test with an error
-// check before reopening.
-func openProxyTestStore(t *testing.T, path string) *storage.Store {
+// persist/restore test, and the debug capture test. It returns the opened
+// store and the options it opened with; the contract row below pins the
+// derivation. Close stays at each site: the persist/restore choreography
+// closes mid-test with an error check before reopening.
+func openProxyTestStore(t *testing.T, path string) (*storage.Store, storage.Options) {
 	t.Helper()
 	d := config.Default()
-	store, err := storage.Open(path, storage.Options{
+	opts := storage.Options{
 		WriteChanCap:  d.StorageWriteChanCap,
 		BatchCap:      d.StorageBatchCap,
 		FlushInterval: d.StorageFlushInterval,
 		QueryTimeout:  d.StorageQueryTimeout,
-	})
+	}
+	store, err := storage.Open(path, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return store
+	return store, opts
+}
+
+// TestProxyStoreOptsDeriveFromDefault pins openProxyTestStore's Options
+// derivation: the four Default-derived fields (channel/batch caps, flush
+// cadence, query timeout) must track config.Default(), so hardcoding one
+// in the helper reddens here.
+func TestProxyStoreOptsDeriveFromDefault(t *testing.T) {
+	store, opts := openProxyTestStore(t, filepath.Join(t.TempDir(), "opts.db"))
+	t.Cleanup(func() { store.Close() })
+	d := config.Default()
+	if opts.WriteChanCap != d.StorageWriteChanCap {
+		t.Errorf("WriteChanCap = %d, want config.Default().StorageWriteChanCap (%d)", opts.WriteChanCap, d.StorageWriteChanCap)
+	}
+	if opts.BatchCap != d.StorageBatchCap {
+		t.Errorf("BatchCap = %d, want config.Default().StorageBatchCap (%d)", opts.BatchCap, d.StorageBatchCap)
+	}
+	if opts.FlushInterval != d.StorageFlushInterval {
+		t.Errorf("FlushInterval = %v, want config.Default().StorageFlushInterval (%v)", opts.FlushInterval, d.StorageFlushInterval)
+	}
+	if opts.QueryTimeout != d.StorageQueryTimeout {
+		t.Errorf("QueryTimeout = %v, want config.Default().StorageQueryTimeout (%v)", opts.QueryTimeout, d.StorageQueryTimeout)
+	}
 }
 
 // persistRestoreProxy drives the admin persist/restore choreography the
 // debug and pause twins share: open a Default-derived store at <dir>/<name>,
 // attach it to a fresh proxy, POST via post (each site owns its endpoint
-// and payload), require 200, close with an error check, reopen the database,
-// and return the proxy that restored from the reopened store. Each site
-// keeps its own restore assertions.
-func persistRestoreProxy(t *testing.T, name string, post func(p *Server, rr *httptest.ResponseRecorder)) *Server {
+// and payload and returns its recorder), require 200, close with an error
+// check, reopen the database, and return the proxy that restored from the
+// reopened store. Each site keeps its own restore assertions.
+func persistRestoreProxy(t *testing.T, name string, post func(p *Server) *httptest.ResponseRecorder) *Server {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
 	d := config.Default()
-	store := openProxyTestStore(t, path)
+	store, _ := openProxyTestStore(t, path)
 	p := New(d, metrics.Noop{})
 	p.AttachPausePersist(store)
-	rr := httptest.NewRecorder()
-	post(p, rr)
+	rr := post(p)
 	if rr.Code != 200 {
 		t.Fatalf("status = %d body %s", rr.Code, rr.Body.Bytes())
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store2 := openProxyTestStore(t, path)
+	store2, _ := openProxyTestStore(t, path)
 	t.Cleanup(func() { store2.Close() })
 	p2 := New(d, metrics.Noop{})
 	p2.AttachPausePersist(store2)
@@ -410,9 +433,11 @@ func persistRestoreProxy(t *testing.T, name string, post func(p *Server, rr *htt
 }
 
 func TestDebugPersistsAndRestores(t *testing.T) {
-	p2 := persistRestoreProxy(t, "debug.db", func(p *Server, rr *httptest.ResponseRecorder) {
+	p2 := persistRestoreProxy(t, "debug.db", func(p *Server) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
 		p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 			strings.NewReader(`{"enabled":true,"clients":["client-a"],"duration":"1h"}`)))
+		return rr
 	})
 	if p2.matchDebug("client-a", "any", "any") == nil {
 		t.Fatal("restored session did not match client-a")
@@ -428,7 +453,7 @@ func TestDebugPersistsAndRestores(t *testing.T) {
 func TestDebugRequestPublishedAndCaptured(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "debug-cap.db")
 	d := config.Default()
-	store := openProxyTestStore(t, path)
+	store, _ := openProxyTestStore(t, path)
 	defer store.Close()
 
 	spy := &liveSpy{}

@@ -1046,20 +1046,8 @@ func TestAttemptsSurviveRestart(t *testing.T) {
 			{StatusCode: 503, ErrorType: "service_unavailable", ErrorMsg: "try later", RetryAfterMs: 1000, At: time.Now()},
 		},
 	}
-	metrics.FinalizeRecord(rec)
-	s.Record(rec)
-	s.Close()
-
-	s2, err := Open(path, testOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-	got, err := s2.LoadRecent(t.Context(), 10)
-	if err != nil || len(got) != 1 {
-		t.Fatalf("load: %v n=%d", err, len(got))
-	}
-	atts := got[0].Attempts
+	r := recordReopenLoadOne(t, s, path, rec)
+	atts := r.Attempts
 	if len(atts) != 2 {
 		t.Fatalf("Attempts = %d, want 2", len(atts))
 	}
@@ -1069,7 +1057,7 @@ func TestAttemptsSurviveRestart(t *testing.T) {
 	if atts[1].StatusCode != 503 || atts[1].RetryAfterMs != 1000 || atts[1].ErrorMsg != "try later" {
 		t.Errorf("attempt[1] = %+v", atts[1])
 	}
-	if got[0].FinalAttemptAt.IsZero() {
+	if r.FinalAttemptAt.IsZero() {
 		t.Errorf("FinalAttemptAt lost on restart (zero), want preserved")
 	}
 }
@@ -1079,18 +1067,9 @@ func TestConversationIDSurvivesRestart(t *testing.T) {
 	s, _ := Open(path, testOpts)
 	rec := &metrics.Record{ID: "cv1", Provider: "alpha.example", Model: "model-a", KeyHash: "k",
 		StatusCode: 200, Start: time.Now(), ConversationID: "c-abc123def4"}
-	metrics.FinalizeRecord(rec)
-	s.Record(rec)
-	s.Close()
-
-	s2, _ := Open(path, testOpts)
-	defer s2.Close()
-	got, err := s2.LoadRecent(t.Context(), 10)
-	if err != nil || len(got) != 1 {
-		t.Fatalf("load: %v n=%d", err, len(got))
-	}
-	if got[0].ConversationID != "c-abc123def4" {
-		t.Errorf("ConversationID = %q, want c-abc123def4 (lost on restart)", got[0].ConversationID)
+	r := recordReopenLoadOne(t, s, path, rec)
+	if r.ConversationID != "c-abc123def4" {
+		t.Errorf("ConversationID = %q, want c-abc123def4 (lost on restart)", r.ConversationID)
 	}
 }
 

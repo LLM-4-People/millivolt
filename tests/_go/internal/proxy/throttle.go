@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -429,23 +428,9 @@ func TestThrottlePOSTDenyByDefault(t *testing.T) {
 }
 
 func TestThrottlePersistsAndRestores(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "th.db")
-	d := config.Default()
-	store := openProxyTestStore(t, path)
-	p := New(d, metrics.Noop{})
-	p.AttachPausePersist(store)
-	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":2,"requests":20,"request_window":"1m"}`)
-	if rr.Code != 200 {
-		t.Fatalf("status = %d %s", rr.Code, rr.Body.Bytes())
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store2 := openProxyTestStore(t, path)
-	defer store2.Close()
-	p2 := New(d, metrics.Noop{})
-	p2.AttachPausePersist(store2)
+	p2 := persistRestoreProxy(t, "th.db", func(p *Server) *httptest.ResponseRecorder {
+		return postThrottle(t, p, `{"provider":"alpha.example","concurrency":2,"requests":20,"request_window":"1m"}`)
+	})
 	th := schedThrottleFor(p2.scheduler, "alpha.example")
 	if th.Limit.Concurrency != 2 || th.Limit.Requests != 20 {
 		t.Fatalf("restored = %+v", th.Limit)

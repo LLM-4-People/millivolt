@@ -243,9 +243,11 @@ func TestPauseTimerUnpauses(t *testing.T) {
 }
 
 func TestPausePersistsAndRestores(t *testing.T) {
-	p2 := persistRestoreProxy(t, "pause.db", func(p *Server, rr *httptest.ResponseRecorder) {
+	p2 := persistRestoreProxy(t, "pause.db", func(p *Server) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
 		p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
 			strings.NewReader(`{"paused":true,"clients":["client-a"],"duration":"1h"}`)))
+		return rr
 	})
 	if !p2.scheduler.Holds("client-a") {
 		t.Fatal("restored scheduler did not hold the client")

@@ -37,14 +37,7 @@ func cursorReaskUpstream(t *testing.T, matchAction func(payload []byte)) *httpte
 			matchAction(payload)
 		}
 		// 2. KV pull → answer; request-context handshake → answer.
-		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
-		w.Write(cframe(kvGet))
-		fl.Flush()
-		readFrame(t, body)
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
-		w.Write(cframe(execReq))
-		fl.Flush()
-		readFrame(t, body)
+		cursorConnectHandshake(t, w, body, fl)
 
 		if n == 1 {
 			// The void: turn ends immediately with no tokens and no deltas.
@@ -172,14 +165,7 @@ func TestCursorReaskDisabledByConfig(t *testing.T) {
 		fl := w.(http.Flusher)
 		w.WriteHeader(200)
 		readFrame(t, body)
-		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
-		w.Write(cframe(kvGet))
-		fl.Flush()
-		readFrame(t, body)
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
-		w.Write(cframe(execReq))
-		fl.Flush()
-		readFrame(t, body)
+		cursorConnectHandshake(t, w, body, fl)
 		w.Write(cframe(cmsg(1, cmsg(14, nil))))
 		w.Write(cend("{}"))
 		fl.Flush()
@@ -230,14 +216,7 @@ func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 		// 1. Read the run_request envelope.
 		readFrame(t, body)
 		// 2. KV pull → answer; request-context handshake → answer.
-		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
-		w.Write(cframe(kvGet))
-		fl.Flush()
-		readFrame(t, body)
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
-		w.Write(cframe(execReq))
-		fl.Flush()
-		readFrame(t, body)
+		cursorConnectHandshake(t, w, body, fl)
 
 		if calls.Add(1) == 1 {
 			// The void: one tokenless text delta (the timing footprint the

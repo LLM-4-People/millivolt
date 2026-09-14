@@ -1410,9 +1410,10 @@ func TestWriteRunJSONErrorWriteFailureMarksCursorDisconnect(t *testing.T) {
 // byte-exact: a void (an empty resume-action continuation that finished
 // with zero output tokens) must surface a real 502 whose body is the
 // canonical empty_turn error JSON - the same message text the record and
-// the in-band SSE path carry - followed by emitHTTPError's newline. The
-// disconnect twin above drives this arm through a dead socket, so nothing
-// pinned the body bytes a live non-streaming client actually receives.
+// the in-band SSE path carry - followed by emitHTTPError's newline, with
+// emitHTTPError's error headers (plain text, nosniff). The disconnect
+// twin above drives this arm through a dead socket, so nothing pinned the
+// body bytes a live non-streaming client actually receives.
 func TestWriteRunJSONVoidBodyBytes(t *testing.T) {
 	s := &Server{cursorRuns: newCursorRunStore(time.Hour)}
 	pr, pw := io.Pipe()
@@ -1423,6 +1424,12 @@ func TestWriteRunJSONVoidBodyBytes(t *testing.T) {
 	s.writeRunJSON(w, run, res, "", nil, rec, "id-1", cursorTurnRender{est: 10}, true)
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (the void must surface a real failure)", w.Code)
+	}
+	if got := w.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain; charset=utf-8 (emitHTTPError's plain-text error header)", got)
+	}
+	if got := w.Header().Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff (emitHTTPError's nosniff guard)", got)
 	}
 	want := `{"error":{"message":"cursor returned an empty turn for a resume-action continuation (0 output tokens, finish stop) - there was nothing to resume upstream","type":"empty_turn"}}` + "\n"
 	if got := w.Body.String(); got != want {

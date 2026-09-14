@@ -311,10 +311,29 @@ func TestCursorBidiTranslation(t *testing.T) {
 	}
 }
 
+// cursorConnectHandshake owns the byte-identical connect handshake the
+// cursor upstream fixtures speak after their run_request envelope read: it
+// sends the KV pull and the request-context handshake (the client answers
+// each) - write, flush, await the answer, write, flush, await the answer.
+// Envelope reads and per-site payload hooks stay at their sites; the bidi
+// translation exchange has a different shape and stays inline.
+func cursorConnectHandshake(t *testing.T, w http.ResponseWriter, body io.Reader, fl http.Flusher) {
+	t.Helper()
+	kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
+	w.Write(cframe(kvGet))
+	fl.Flush()
+	readFrame(t, body)
+	execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
+	w.Write(cframe(execReq))
+	fl.Flush()
+	readFrame(t, body)
+}
+
 // cursorVoidUpstream serves the connect-proto upstream that answers every
 // Run exchange with the void: it reads the run_request envelope (asserting
-// the claude-sonnet-5 model id), answers the KV pull and the request-context
-// handshake, then ends the turn immediately with no tokens and no deltas.
+// the claude-sonnet-5 model id), sends the KV pull and the request-context
+// handshake (the client answers each), then ends the turn immediately with
+// no tokens and no deltas.
 // calls, when non-nil, counts every exchange (the re-ask sites assert on
 // it). The h2c-wrapped server is HTTP/2-enabled, started, and closed via
 // t.Cleanup.
@@ -337,14 +356,7 @@ func cursorVoidUpstream(t *testing.T, calls *atomic.Int32) *httptest.Server {
 		}
 
 		// 2. KV pull → answer; request-context handshake → answer.
-		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
-		w.Write(cframe(kvGet))
-		fl.Flush()
-		readFrame(t, body)
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
-		w.Write(cframe(execReq))
-		fl.Flush()
-		readFrame(t, body)
+		cursorConnectHandshake(t, w, body, fl)
 
 		// 3. The void: turn ends immediately with NO tokens and no deltas.
 		w.Write(cframe(cmsg(1, cmsg(14, nil))))
