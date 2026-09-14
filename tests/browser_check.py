@@ -197,10 +197,19 @@ async def check(base, screenshot):
                             const box = document.getElementById('chart-traffic');
                             const pair = document.querySelector('.grid-pair');
                             const sparseH = Math.round(box.getBoundingClientRect().height) + '/' + Math.round(pair.getBoundingClientRect().height);
+                            // One ladder ascends, the other descends:
+                            // each series is normalized to its own
+                            // min/max, so two same-slope ladders would
+                            // sit at identical normalized positions
+                            // whenever the range snap pads them
+                            // alike, letting the latency line occlude
+                            // the speed line exactly. Mirrored slopes
+                            // can coincide at only the single crossing,
+                            // so both lines always paint.
                             const five = Array.from({length:5}, (_, k) => ({...bucket,
                                 t: bucket.t + k*bm,
                                 tps: bucket.tps.map(v => v * (1 + k/10)),
-                                ttft: bucket.ttft.map(v => v + k)}));
+                                ttft: bucket.ttft.map(v => v * (1 + (4-k)/10))}));
                             chartAgg = {...chartAgg, buckets:five, from_ms:bucket.t, now_ms:bucket.t+5*bm};
                             renderChart();
                             // uPlot commits setData in a microtask; inspect
