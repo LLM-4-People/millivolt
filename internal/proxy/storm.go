@@ -194,6 +194,23 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 	return true
 }
 
+// writeTransportFailure renders the shared epilogue when a fresh upstream
+// send failed with no HTTP response: an operator storm-queue rejection
+// (rate_limit_error + Retry-After) wins when it applies, otherwise the client
+// receives the canonical upstream_unreachable 502. The generic doWithRetry
+// epilogue and the cursor bidi open - whose five-statement blocks were
+// byte-identical - both route through here, so the two can never drift. The
+// relay's quality re-send epilogues do NOT join: their status lines are
+// already committed, so they stamp the same typeUpstreamUnreachable
+// classification and surface it in-band (relay.go) instead of calling a sink
+// that writes an HTTP status.
+func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, err error) {
+	if s.writeStormQueueError(w, rec, err) {
+		return
+	}
+	writeClientError(w, rec, typeUpstreamUnreachable, "upstream error: "+transportErrText(err), http.StatusBadGateway)
+}
+
 // StormSnapshot shares scheduler-authoritative status with embedded bootstrap
 // and ordinary dashboard refreshes. It does no history or storage work.
 func (s *Server) StormSnapshot() map[string]any {

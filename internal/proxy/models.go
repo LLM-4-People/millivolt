@@ -106,7 +106,7 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 // writeModelsError surfaces a models-fetch failure with the uniform 502 JSON
 // wrapper.
 func writeModelsError(w http.ResponseWriter, err error) {
-	http.Error(w, errJSON("api_error", err.Error()), http.StatusBadGateway)
+	http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
 }
 
 // fetchModelsUpstream GETs one upstream models URL with the target's auth
@@ -228,17 +228,18 @@ func normalizeModelEntries(entries []map[string]any, provider string) []map[stri
 		if e == nil {
 			continue
 		}
-		if id, _ := e["id"].(string); strings.TrimSpace(id) == "" {
+		id, _ := e["id"].(string)
+		if strings.TrimSpace(id) == "" {
 			continue
 		}
-		if _, ok := e["object"]; !ok {
-			e["object"] = "model"
-		}
-		if _, ok := e["created"]; !ok {
-			e["created"] = 0
-		}
-		if _, ok := e["owned_by"]; !ok {
-			e["owned_by"] = provider
+		// Fill-only backfill of the canonical base (format.NewModelEntry):
+		// an upstream field always wins over the proxy's default, and id is
+		// guaranteed present by the check above, so exactly object/created/
+		// owned_by can be filled.
+		for k, v := range providerformat.NewModelEntry(id, provider, 0) {
+			if _, ok := e[k]; !ok {
+				e[k] = v
+			}
 		}
 		mirrorContextWindow(e)
 		out = append(out, e)

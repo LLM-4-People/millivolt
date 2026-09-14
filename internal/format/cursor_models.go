@@ -128,12 +128,7 @@ func CursorModelEntries(models []CursorModel, defaultContext int) []map[string]a
 	now := time.Now().Unix()
 	entries := make([]map[string]any, 0, len(models))
 	for _, m := range models {
-		e := map[string]any{
-			"id":       m.ID,
-			"object":   "model",
-			"created":  now,
-			"owned_by": "cursor",
-		}
+		e := NewModelEntry(m.ID, "cursor", now)
 		if m.DisplayName != "" {
 			e["display_name"] = m.DisplayName
 		}

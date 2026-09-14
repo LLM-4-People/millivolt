@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -477,7 +476,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
 			http.Error(w, errJSON(typeInvalidRequestError,
-				fmt.Sprintf("invalid %s %q", hdrMaxConcurrency, v)), http.StatusBadRequest)
+				errInvalidHeader(hdrMaxConcurrency, v).Error()), http.StatusBadRequest)
 			return
 		}
 		maxConc = n
@@ -576,10 +575,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			markClientGone(rec)
 			return
 		}
-		if s.writeStormQueueError(w, rec, err) {
-			return
-		}
-		writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)
+		s.writeTransportFailure(w, rec, err)
 		return
 	}
 	// The per-send deadline's cancel is owned here: it must survive until the
@@ -610,13 +606,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A 4xx/5xx body after that commit cannot change the status - emit
 		// it in-band so the SDK sees a retryable error, not raw JSON on 200.
 		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode >= 400 {
-			typ, msg := rec.ErrorType, rec.ErrorMsg
-			if typ == "" {
-				typ = "api_error"
-			}
-			if msg == "" {
-				msg = fmt.Sprintf("upstream HTTP %d", resp.StatusCode)
-			}
+			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			if err := emitErrorSSE(w, rec.ID, typ, msg); err != nil {
 				// The in-band error hit a dead socket: the client is gone.
 				// The decided error status stays on the record (markClientGone

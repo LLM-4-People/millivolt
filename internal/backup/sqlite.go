@@ -53,6 +53,16 @@ func CheckDatabaseFile(path string) error {
 	return err
 }
 
+// StageSnapshotError wraps a failure to create the staging directory for a
+// database-sized transient file, naming the directory that rejected it.
+// Staging must live on the live database's own volume (the backup-capacity
+// contract), so the directory names the capacity owner. Shared by the
+// backup inspector and storage's snapshot/overlap/merge staging sites so the
+// wording cannot drift.
+func StageSnapshotError(dir string, err error) error {
+	return fmt.Errorf("stage snapshot in %s: %w", dir, err)
+}
+
 func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error) {
 	if stageDir == "" {
 		return SnapshotCounts{}, fmt.Errorf("snapshot staging directory is required")
@@ -62,7 +72,7 @@ func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error)
 	}
 	dir, err := os.MkdirTemp(stageDir, "millivolt-backup-db-*")
 	if err != nil {
-		return SnapshotCounts{}, fmt.Errorf("stage snapshot in %s: %w", stageDir, err)
+		return SnapshotCounts{}, StageSnapshotError(stageDir, err)
 	}
 	defer os.RemoveAll(dir)
 	path := filepath.Join(dir, "snapshot.db")

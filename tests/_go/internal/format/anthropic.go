@@ -2,8 +2,10 @@ package format
 
 import (
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTranslateRequestBasic(t *testing.T) {
@@ -285,6 +287,80 @@ func TestStreamToOpenAIDataOnly(t *testing.T) {
 	}
 }
 
+// The Anthropic bridge pins ONE created timestamp per stream (the opposite
+// of the cursor bridge's per-chunk policy, pinned in internal/proxy). The
+// stream below pauses more than a second between events, so the two delta
+// chunks cannot share a Unix second by accident: a per-chunk mutation
+// produces different created values and reddens here deterministically.
+func TestStreamToOpenAIPinsOneCreatedPerStream(t *testing.T) {
+	first := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude"}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}`,
+		"",
+	}, "\n") + "\n"
+	second := strings.Join([]string{
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" world"}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n") + "\n"
+	src := &pausingReader{chunks: [][]byte{[]byte(first), []byte(second)}, pause: 1100 * time.Millisecond}
+
+	var out strings.Builder
+	if err := StreamToOpenAI(&out, src, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var created []int64
+	for _, line := range strings.Split(out.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk struct {
+			Created int64 `json:"created"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+			t.Fatalf("bad chunk %q: %v", line, err)
+		}
+		created = append(created, chunk.Created)
+	}
+	if len(created) < 3 {
+		t.Fatalf("chunks = %d, want at least 3: %q", len(created), out.String())
+	}
+	for _, c := range created[1:] {
+		if c != created[0] {
+			t.Fatalf("created = %v, want ONE stream-pinned timestamp (anthropic policy)", created)
+		}
+	}
+	if created[0] == 0 {
+		t.Fatalf("created = 0, want a real timestamp")
+	}
+}
+
+// pausingReader yields one chunk per Read, sleeping between chunks so a test
+// stream spans a Unix-second boundary deterministically.
+type pausingReader struct {
+	chunks [][]byte
+	i      int
+	pause  time.Duration
+}
+
+func (r *pausingReader) Read(p []byte) (int, error) {
+	if r.i >= len(r.chunks) {
+		return 0, io.EOF
+	}
+	if r.i > 0 {
+		time.Sleep(r.pause)
+	}
+	n := copy(p, r.chunks[r.i])
+	r.i++
+	return n, nil
+}
+
 func TestMapFinishReasonPassthrough(t *testing.T) {
 	for reason, want := range map[string]string{
 		"end_turn":      "stop",
@@ -297,5 +373,49 @@ func TestMapFinishReasonPassthrough(t *testing.T) {
 		if got := mapFinishReason(reason); got != want {
 			t.Errorf("mapFinishReason(%q) = %q, want %q", reason, got, want)
 		}
+	}
+}
+
+// anthropicErrorEvent is the shared owner of the {error:{type,message}}
+// decode + OpenAI re-render on both Anthropic surfaces (the non-streaming
+// error body and the SSE "error" event). Pin each surface's rendered shape.
+func TestAnthropicErrorEventSurfaces(t *testing.T) {
+	// Non-streaming: an Anthropic error body passes through as an
+	// OpenAI-style error object.
+	out, err := TranslateResponse([]byte(`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Error.Type != "overloaded_error" || got.Error.Message != "Overloaded" {
+		t.Errorf("translated error body = %s", out)
+	}
+
+	// Streaming: the "error" event is forwarded as an in-band error chunk.
+	stream := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude"}}`,
+		"",
+		"event: error",
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n") + "\n"
+	var sseOut strings.Builder
+	if err := StreamToOpenAI(&sseOut, strings.NewReader(stream), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sseOut.String(), `"error":{"message":"Overloaded","type":"overloaded_error"}`) {
+		t.Errorf("stream error event not re-rendered as the shared OpenAI envelope: %q", sseOut.String())
 	}
 }

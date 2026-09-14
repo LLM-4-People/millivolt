@@ -222,7 +222,7 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 	if hasC {
 		n, off, err := parseLimitInt(r.Header.Get(hdrLimitConcurrency), maxLimitConcurrency)
 		if err != nil {
-			return fmt.Errorf("invalid %s %q", hdrLimitConcurrency, r.Header.Get(hdrLimitConcurrency))
+			return errInvalidHeader(hdrLimitConcurrency, r.Header.Get(hdrLimitConcurrency))
 		}
 		if off {
 			next.Concurrency = 0
@@ -233,7 +233,7 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 	if hasR {
 		n, win, off, err := parseLimitRate(r.Header.Get(hdrLimitRequests), maxLimitRequests)
 		if err != nil {
-			return fmt.Errorf("invalid %s %q", hdrLimitRequests, r.Header.Get(hdrLimitRequests))
+			return errInvalidHeader(hdrLimitRequests, r.Header.Get(hdrLimitRequests))
 		}
 		if off {
 			next.Requests = 0
@@ -246,7 +246,7 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 	if hasT {
 		n, win, off, err := parseLimitRate(r.Header.Get(hdrLimitTokens), maxLimitTokens)
 		if err != nil {
-			return fmt.Errorf("invalid %s %q", hdrLimitTokens, r.Header.Get(hdrLimitTokens))
+			return errInvalidHeader(hdrLimitTokens, r.Header.Get(hdrLimitTokens))
 		}
 		if off {
 			next.Tokens = 0

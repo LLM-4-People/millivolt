@@ -44,7 +44,7 @@ func errByteSize() error {
 func checkByteSize(key string, got ByteSize, min, max int64) error {
 	n := int64(got)
 	if n < min || n > max {
-		return fmt.Errorf("%s: must be %s..%s, got %s", key, FormatByteSize(min), FormatByteSize(max), FormatByteSize(n))
+		return errRange(key, FormatByteSize(min), FormatByteSize(max), FormatByteSize(n))
 	}
 	return nil
 }

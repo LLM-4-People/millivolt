@@ -252,25 +252,42 @@ func parseToolChoice(raw json.RawMessage) any {
 	return nil
 }
 
+// anthropicErrorEvent is Anthropic's error payload shape as both surfaces
+// carry it: the non-streaming error body ({"type":"error","error":{…}}) and
+// the SSE "error" event ({"error":{…}}). One owner of the anonymous
+// {error:{type,message}} decode and its OpenAI-style re-render. Deliberately
+// not metrics.ParseErrorEnvelope: that is the OpenAI/compatible envelope at
+// the record trust boundary, a different contract from the provider wire
+// shape decoded here.
+type anthropicErrorEvent struct {
+	Error struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// openAIError re-renders the decoded event as the OpenAI error envelope
+// object ({"error":{"message":…,"type":…}}) both surfaces emit.
+func (e anthropicErrorEvent) openAIError() map[string]any {
+	return map[string]any{
+		"error": map[string]any{
+			"message": e.Error.Message,
+			"type":    e.Error.Type,
+		},
+	}
+}
+
 // TranslateResponse converts an Anthropic Messages (non-streaming) response
 // into an OpenAI Chat Completions response. An Anthropic error body
 // ({"type":"error",...}) is passed through as a JSON object with an error key.
 func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 	// Detect Anthropic error bodies and surface them as OpenAI-style errors.
 	var errProbe struct {
-		Type  string `json:"type"`
-		Error struct {
-			Type    string `json:"type"`
-			Message string `json:"message"`
-		} `json:"error"`
+		Type string `json:"type"`
+		anthropicErrorEvent
 	}
 	if json.Unmarshal(anthropicBody, &errProbe) == nil && errProbe.Type == "error" {
-		return json.Marshal(map[string]any{
-			"error": map[string]any{
-				"message": errProbe.Error.Message,
-				"type":    errProbe.Error.Type,
-			},
-		})
+		return json.Marshal(errProbe.openAIError())
 	}
 
 	var in struct {
@@ -617,20 +634,14 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		case "error":
 			// Forward the error payload inline. A malformed payload is skipped
 			// (consistent with the other branches) - never emit an empty error.
-			var e struct {
-				Error struct {
-					Type    string `json:"type"`
-					Message string `json:"message"`
-				} `json:"error"`
-			}
+			var e anthropicErrorEvent
 			if err := json.Unmarshal(payload, &e); err != nil {
 				continue
 			}
 			if e.Error.Type != "" || e.Error.Message != "" {
 				sawError = true
 			}
-			if err := emit(sse.Chunk(id, created, model, []map[string]any{},
-				map[string]any{"error": map[string]string{"type": e.Error.Type, "message": e.Error.Message}})); err != nil {
+			if err := emit(sse.Chunk(id, created, model, []map[string]any{}, e.openAIError())); err != nil {
 				return err
 			}
 		}

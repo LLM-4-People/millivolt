@@ -44,7 +44,7 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	}
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-snapshot-*")
 	if err != nil {
-		return nil, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
+		return nil, backup.StageSnapshotError(s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	dest := filepath.Join(dir, "snapshot.db")
@@ -87,6 +87,10 @@ func StageSnapshot(path string, data []byte) error {
 	return os.Rename(tmp.Name(), incoming)
 }
 
+// admitPendingSnapshot installs a staged replacement database before Open.
+// Its errors are returned bare: Open owns the single "pending snapshot:"
+// label (every cause, including the final rename, carries exactly one
+// prefix from that one wrap).
 func admitPendingSnapshot(path string) error {
 	incoming := path + pendingSnapshotSuffix
 	if err := backup.CheckDatabaseFile(incoming); err != nil {
@@ -94,17 +98,17 @@ func admitPendingSnapshot(path string) error {
 			return nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
-			return fmt.Errorf("pending snapshot: %w", err)
+			return err
 		}
 		_ = os.Rename(incoming, incoming+".invalid")
 		log.Printf("storage: pending snapshot rejected: %v", err)
 		return nil
 	}
 	if err := removeIfExists(path + "-wal"); err != nil {
-		return fmt.Errorf("pending snapshot: %w", err)
+		return err
 	}
 	if err := removeIfExists(path + "-shm"); err != nil {
-		return fmt.Errorf("pending snapshot: %w", err)
+		return err
 	}
 	return os.Rename(incoming, path)
 }
@@ -128,7 +132,7 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 	}
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-overlap-*")
 	if err != nil {
-		return 0, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
+		return 0, backup.StageSnapshotError(s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	src := filepath.Join(dir, "snap.db")
@@ -167,7 +171,7 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	}
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-merge-*")
 	if err != nil {
-		return 0, 0, fmt.Errorf("stage snapshot in %s: %w", s.stageDir(), err)
+		return 0, 0, backup.StageSnapshotError(s.stageDir(), err)
 	}
 	defer os.RemoveAll(dir)
 	src := filepath.Join(dir, "snap.db")

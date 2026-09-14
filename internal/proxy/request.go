@@ -184,7 +184,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	}
 	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return nil, fmt.Errorf("invalid %s %q", hdrBaseURL, baseURL)
+		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return nil, fmt.Errorf("unsupported %s scheme %q", hdrBaseURL, parsed.Scheme)
@@ -238,7 +238,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	if ms := r.Header.Get(hdrTimeout); ms != "" {
 		d, err := time.ParseDuration(ms + "ms")
 		if err != nil || d <= 0 {
-			return nil, fmt.Errorf("invalid %s %q", hdrTimeout, ms)
+			return nil, errInvalidHeader(hdrTimeout, ms)
 		}
 		t.timeout = d
 	}
@@ -597,6 +597,44 @@ func firstNonEmpty(vals ...string) string {
 // boundaries stamp on client-side rejections (routing headers, body decode,
 // token caps). One constant owns the spelling across every 400 surface.
 const typeInvalidRequestError = "invalid_request_error"
+
+// typeAPIError is OpenAI's generic error type: the unclassified default for
+// upstream failures that carried no structured error envelope, and the type
+// the proxy's own 502 surfaces (translation, metadata, degenerate
+// completions) stamp. One constant owns the spelling across every 502
+// surface.
+const typeAPIError = "api_error"
+
+// typeUpstreamUnreachable is the OpenAI error type for a transport-level
+// upstream failure: no HTTP response at all (connect refused/reset, DNS,
+// timeout awaiting headers). Shared by the send-failure epilogues and both
+// in-band relay variants so the classification cannot drift.
+const typeUpstreamUnreachable = "upstream_unreachable"
+
+// upstreamErrorFields resolves the error type/message to surface for an
+// upstream 4xx/5xx whose captured envelope carried neither: the
+// unclassified default is OpenAI's api_error type plus the bare HTTP status.
+// One owner for the defaulting the three upstream-error surfaces (the cursor
+// bidi 4xx/5xx, the committed-SSE in-band error, and the pacer's in-band
+// 4xx/5xx) previously hand-rolled independently.
+func upstreamErrorFields(rec *metrics.Record, status int) (typ, msg string) {
+	typ, msg = rec.ErrorType, rec.ErrorMsg
+	if typ == "" {
+		typ = typeAPIError
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("upstream HTTP %d", status)
+	}
+	return typ, msg
+}
+
+// errInvalidHeader is the shared rejection error for a client-supplied
+// routing or limit header whose value failed its parse: "invalid <header>
+// <value>". One owner of the wording across the routing-header and
+// X-Proxy-Limit-* trust boundaries.
+func errInvalidHeader(name, value string) error {
+	return fmt.Errorf("invalid %s %q", name, value)
+}
 
 func errJSON(typ, msg string) string {
 	b, _ := json.Marshal(map[string]any{

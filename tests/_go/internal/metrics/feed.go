@@ -370,6 +370,25 @@ func TestHandleStreamRecordEventsCarryID(t *testing.T) {
 	}
 }
 
+// SetStreamHeaders is the one owner of the SSE response header triple shared
+// by every server-sent stream the process serves. This pins the full triple
+// on the dashboard feed surface (the direct SetStreamHeaders consumer), so
+// dropping any header from the shared owner reddens here immediately.
+func TestHandleStreamSSEHeaderTriple(t *testing.T) {
+	b := NewBuffer(2)
+	b.Record(record("first"))
+	w := runStreamRequest(t, b, httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil))
+	for name, want := range map[string]string{
+		"Content-Type":  "text/event-stream",
+		"Cache-Control": "no-cache",
+		"Connection":    "keep-alive",
+	} {
+		if got := w.Header().Get(name); got != want {
+			t.Errorf("%s = %q, want %q (SetStreamHeaders triple drifted)", name, got, want)
+		}
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

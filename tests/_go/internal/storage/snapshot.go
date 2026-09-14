@@ -140,8 +140,17 @@ func TestOpenAbortsAdmitWhenSidecarCannotBeRemoved(t *testing.T) {
 			blockRemove(t, dstPath+sidecar)
 			if _, err := Open(dstPath, testOpts); err == nil {
 				t.Fatal("Open succeeded when a WAL/SHM sidecar could not be removed")
-			} else if !strings.Contains(err.Error(), "pending snapshot") {
-				t.Fatalf("error %q should name the pending snapshot", err)
+			} else {
+				msg := err.Error()
+				if !strings.Contains(msg, "pending snapshot") {
+					t.Fatalf("error %q should name the pending snapshot", msg)
+				}
+				// Exactly one level owns the label: the Open wrap. A doubled
+				// "pending snapshot: pending snapshot:" means admitPendingSnapshot
+				// started wrapping its own cause again.
+				if n := strings.Count(msg, "pending snapshot:"); n != 1 {
+					t.Fatalf("error %q carries %d \"pending snapshot:\" prefixes, want exactly 1", msg, n)
+				}
 			}
 			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
 				t.Fatalf("pending snapshot was discarded: %v", err)

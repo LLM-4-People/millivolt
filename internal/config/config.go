@@ -684,7 +684,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if c.DebugCaptureTTL < DebugCaptureTTLMin || c.DebugCaptureTTL > DebugCaptureTTLMax {
-		return fmt.Errorf("debug_capture_ttl: must be %s..%s, got %s", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))
+		return errRange("debug_capture_ttl", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))
 	}
 	if err := checkByteSize("debug_capture_max_bytes", c.DebugCaptureMaxBytes, DebugCaptureMaxBytesMin, DebugCaptureMaxBytesMax); err != nil {
 		return err
@@ -1237,6 +1237,14 @@ func (c *Config) RetryAfterSeconds() int {
 	return int(c.QueueRetryAfter / time.Second)
 }
 
+// errRange is the shared wording for a validated field outside its allowed
+// range; callers render min/max/got in the field's own unit (bytes,
+// durations, or the schema-typed bound). One owner so the phrasing cannot
+// drift between the byte-size, duration and storm validators.
+func errRange(key, min, max, got string) error {
+	return fmt.Errorf("%s: must be %s..%s, got %s", key, min, max, got)
+}
+
 // validateModelsDiscovery checks the one-request metadata budget.
 func validateModelsDiscovery(c *Config) error {
 	for _, limit := range [...]struct {
@@ -1249,7 +1257,7 @@ func validateModelsDiscovery(c *Config) error {
 	} {
 		if limit.value < limit.min || limit.value > limit.max {
 			if limit.key == "models_discovery_timeout" {
-				return fmt.Errorf("%s: must be %s..%s, got %s", limit.key, FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax), FormatDuration(c.ModelsDiscoveryTimeout))
+				return errRange(limit.key, FormatDuration(ModelsDiscoveryTimeoutMin), FormatDuration(ModelsDiscoveryTimeoutMax), FormatDuration(c.ModelsDiscoveryTimeout))
 			}
 			if limit.key == "models_discovery_max_bytes" {
 				return checkByteSize(limit.key, ByteSize(limit.value), limit.min, limit.max)
@@ -1298,7 +1306,7 @@ func validateStorm(c *Config) error {
 	} {
 		if limit.value < limit.min || limit.value > limit.max {
 			field := FieldByKey(limit.key)
-			return fmt.Errorf("%s: must be %s..%s, got %s", limit.key,
+			return errRange(limit.key,
 				field.formatBound(float64(limit.min)), field.formatBound(float64(limit.max)), field.formatBound(float64(limit.value)))
 		}
 	}

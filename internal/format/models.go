@@ -40,6 +40,20 @@ type AnthropicModelsPage struct {
 	NextAfter string // pass as ?after_id= for the next page; empty when done
 }
 
+// NewModelEntry builds the canonical OpenAI model-entry base: id,
+// object:"model", created, owned_by. Both format translators (Anthropic
+// models, Cursor GetUsableModels) start from it and add their
+// provider-specific extras; the proxy's list normalization reuses the same
+// base as its fill-if-absent defaults (existing upstream fields always win).
+func NewModelEntry(id, ownedBy string, created int64) map[string]any {
+	return map[string]any{
+		"id":       id,
+		"object":   "model",
+		"created":  created,
+		"owned_by": ownedBy,
+	}
+}
+
 // TranslateAnthropicModels converts one Anthropic /v1/models page into OpenAI
 // model entries, returning the entries and the pagination cursor for the next
 // page (empty when has_more is false). Fail-closed on a malformed body.
@@ -56,12 +70,7 @@ func TranslateAnthropicModels(body []byte) (AnthropicModelsPage, error) {
 		if m.ID == "" {
 			continue
 		}
-		e := map[string]any{
-			"id":       m.ID,
-			"object":   "model",
-			"owned_by": "anthropic",
-			"created":  rfc3339ToUnix(m.CreatedAt),
-		}
+		e := NewModelEntry(m.ID, "anthropic", rfc3339ToUnix(m.CreatedAt))
 		if m.DisplayName != "" {
 			e["display_name"] = m.DisplayName
 		}

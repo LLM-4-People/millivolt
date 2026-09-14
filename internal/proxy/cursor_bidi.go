@@ -288,10 +288,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 			rec.ClientDisconnected = true
 			return
 		}
-		if s.writeStormQueueError(w, rec, err) {
-			return
-		}
-		writeClientError(w, rec, "upstream_unreachable", "upstream error: "+transportErrText(err), http.StatusBadGateway)
+		s.writeTransportFailure(w, rec, err)
 		return
 	}
 
@@ -311,13 +308,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		// this Close is a no-op, kept only so a future Close-propagating wrap
 		// cannot leak the stream.
 		resp.Body.Close()
-		typ, msg := rec.ErrorType, rec.ErrorMsg
-		if typ == "" {
-			typ = "api_error"
-		}
-		if msg == "" {
-			msg = fmt.Sprintf("upstream HTTP %d", resp.StatusCode)
-		}
+		typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 		writeClientError(w, rec, typ, msg, resp.StatusCode)
 		return
 	}
@@ -597,6 +588,26 @@ func cursorTrackDelta(rec *metrics.Record, delta map[string]any) {
 	}
 }
 
+// openCursorStream runs the cursor streaming prologue: SSE headers, the
+// chunk emitter, the opening role delta, and the per-turn timing/usage
+// reset. The opening role chunk already hitting a dead socket marks the
+// disconnect immediately - a turn that ends with zero delta events (an empty
+// upstream turn) would otherwise never reach the emit-failure path and would
+// record a clean outcome. Shared by serveRunStream and serveResumeStream,
+// whose prologues were identical.
+func openCursorStream(w http.ResponseWriter, rec *metrics.Record, id, model string) func(map[string]any, any) error {
+	flusher, _ := w.(http.Flusher)
+	writeSSEHeaders(w, rec.StatusCode)
+	emit := sseEmitter(w, id, model, flusher)
+	if err := emit(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
+		rec.ClientDisconnected = true
+	}
+	rec.FirstTokenAt = time.Time{}
+	rec.LastTokenAt = time.Time{}
+	rec.Usage = metrics.Usage{}
+	return emit
+}
+
 // serveRunStream drives a fresh run's turn, writing OpenAI SSE. When a
 // resume-action turn voids (0 output tokens) and a re-ask opener is available,
 // the void is absorbed as one transparent re-ask: a NEW run opens with the
@@ -606,19 +617,7 @@ func cursorTrackDelta(rec *metrics.Record, delta map[string]any) {
 // (no opener, opener failure, or this WAS the re-ask) surfaces as in-band
 // empty_turn.
 func (s *Server) serveRunStream(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, id string, rec *metrics.Record, rr cursorTurnRender, resumeRequest bool, reask func() (*providerformat.CursorRun, error)) {
-	flusher, _ := w.(http.Flusher)
-	writeSSEHeaders(w, rec.StatusCode)
-	emit := sseEmitter(w, id, rr.model, flusher)
-	if err := emit(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
-		// The opening role chunk already hit a dead socket. Mark the
-		// disconnect now: a turn that ends with zero delta events (an empty
-		// upstream turn) would otherwise never reach the emitDelta failure
-		// path and would record a clean outcome.
-		rec.ClientDisconnected = true
-	}
-	rec.FirstTokenAt = time.Time{}
-	rec.LastTokenAt = time.Time{}
-	rec.Usage = metrics.Usage{}
+	emit := openCursorStream(w, rec, id, rr.model)
 
 	emitDeltas := func(delta map[string]any) error {
 		cursorTrackDelta(rec, delta)
@@ -648,15 +647,7 @@ func (s *Server) serveRunStream(ctx context.Context, w http.ResponseWriter, run 
 
 // serveResumeStream resumes a parked run with tool results, writing OpenAI SSE.
 func (s *Server) serveResumeStream(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, results []cursorToolResult, steerText string, id string, rec *metrics.Record, rr cursorTurnRender) {
-	flusher, _ := w.(http.Flusher)
-	writeSSEHeaders(w, rec.StatusCode)
-	emit := sseEmitter(w, id, rr.model, flusher)
-	if err := emit(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
-		rec.ClientDisconnected = true // same zero-delta-turn gap as serveRunStream
-	}
-	rec.FirstTokenAt = time.Time{}
-	rec.LastTokenAt = time.Time{}
-	rec.Usage = metrics.Usage{}
+	emit := openCursorStream(w, rec, id, rr.model)
 
 	m := map[string]struct {
 		Text    string
@@ -970,7 +961,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		}
 		rec.ErrorType = "transform_error"
 		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markGone(emitHTTPError(w, errJSON("api_error", fmt.Sprint(result.Err)), http.StatusBadGateway))
+		markGone(emitHTTPError(w, errJSON(typeAPIError, fmt.Sprint(result.Err)), http.StatusBadGateway))
 		return
 	}
 	if result.Outcome == providerformat.TurnParked && !s.cursorRuns.park(rr.scope, run) {
@@ -1047,7 +1038,7 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL,
 		bytes.NewReader(providerformat.EncodeGetUsableModelsRequest(nil)))
 	if err != nil {
-		http.Error(w, errJSON("api_error", err.Error()), http.StatusBadGateway)
+		http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
 		return
 	}
 	// Unary call: the shared client is fine (it negotiates h2 via ALPN for
@@ -1061,7 +1052,7 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 	}
 	models, err := providerformat.ParseGetUsableModelsResponse(body)
 	if err != nil {
-		http.Error(w, errJSON("api_error", "decode models: "+err.Error()), http.StatusBadGateway)
+		http.Error(w, errJSON(typeAPIError, "decode models: "+err.Error()), http.StatusBadGateway)
 		return
 	}
 	s.emitModelsList(d, w, r, t, key,

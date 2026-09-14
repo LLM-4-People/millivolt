@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math"
 	"net"
@@ -235,7 +234,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					return
 				}
 				rec.StatusCode = http.StatusBadGateway
-				http.Error(w, errJSON("api_error", "upstream error: "+transportErrText(rerr)), http.StatusBadGateway)
+				http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(rerr)), http.StatusBadGateway)
 				return
 			}
 			// Past the cap the document cannot be translated, and verbatim
@@ -245,7 +244,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "response_too_large"
 				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
-				http.Error(w, errJSON("api_error", "upstream response too large to translate"), http.StatusBadGateway)
+				http.Error(w, errJSON(typeAPIError, "upstream response too large to translate"), http.StatusBadGateway)
 				return
 			}
 			// The provider's in-band error envelope on a 200 is its own
@@ -264,7 +263,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				if errors.Is(terr, metrics.ErrMetricRange) {
 					invalidateUsage(rec, terr)
 				}
-				http.Error(w, errJSON("api_error", "translate upstream response: "+terr.Error()), http.StatusBadGateway)
+				http.Error(w, errJSON(typeAPIError, "translate upstream response: "+terr.Error()), http.StatusBadGateway)
 				return
 			}
 			// The translated response owns completion shape and normalized
@@ -356,9 +355,9 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 						return
 					}
 					rec.StatusCode = http.StatusBadGateway
-					rec.ErrorType = "upstream_unreachable"
+					rec.ErrorType = typeUpstreamUnreachable
 					rec.ErrorMsg = transportErrText(err)
-					http.Error(w, errJSON("api_error", "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+					http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
 					return
 				}
 				// ServeHTTP's defer still binds the FIRST body (and its
@@ -381,7 +380,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			rec.ErrorCode = code
 			rec.ErrorMsg = metrics.DegenerateMessage(code)
 			rec.StatusCode = http.StatusBadGateway
-			http.Error(w, errJSONCode("api_error", metrics.DegenerateMessage(code), code), http.StatusBadGateway)
+			http.Error(w, errJSONCode(typeAPIError, metrics.DegenerateMessage(code), code), http.StatusBadGateway)
 			return
 		}
 
@@ -450,9 +449,9 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				return
 			}
 			rec.StatusCode = http.StatusBadGateway
-			rec.ErrorType = "upstream_unreachable"
+			rec.ErrorType = typeUpstreamUnreachable
 			rec.ErrorMsg = transportErrText(err)
-			if werr := emitErrorSSE(w, rec.ID, "upstream_unreachable", rec.ErrorMsg); werr != nil {
+			if werr := emitErrorSSE(w, rec.ID, typeUpstreamUnreachable, rec.ErrorMsg); werr != nil {
 				markClientGone(rec)
 			}
 			return
@@ -471,13 +470,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			// capture the detail and surface it in-band (the first-attempt
 			// committed-SSE contract), never as raw JSON on the stream.
 			captureErrorFromResponse(resp, rec)
-			typ, msg := rec.ErrorType, rec.ErrorMsg
-			if typ == "" {
-				typ = "api_error"
-			}
-			if msg == "" {
-				msg = fmt.Sprintf("upstream HTTP %d", resp.StatusCode)
-			}
+			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
 				markClientGone(rec)
 			}
