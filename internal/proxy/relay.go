@@ -41,6 +41,18 @@ func (s *Server) usageKeysFor(provider string) map[string]string {
 	return nil
 }
 
+// analyzerFor returns the SSE analyzer wired for one relayed record: the
+// provider's configured cost/usage key paths and the capture-preview gate.
+// The analyzer's zero value is otherwise stream-ready - every other field is
+// unexported per-line state - so this is the whole external wiring.
+func (s *Server) analyzerFor(rec *metrics.Record) sse.Analyzer {
+	var a sse.Analyzer
+	a.CostKeys = s.costKeysFor(rec.Provider)
+	a.UsageKeys = s.usageKeysFor(rec.Provider)
+	a.CapturePreview = s.cfg().CaptureBodyPreview
+	return a
+}
+
 // markClientGone records the LOCAL client disappearing mid-relay (a write to
 // it failed on a broken pipe, or its request context canceled): the client's
 // own cancellation - client_disconnected, the documented `cancel` bucket,
@@ -1138,10 +1150,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	}
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, sseScannerBufInit), sseScannerBufMax)
-	var a sse.Analyzer
-	a.CostKeys = s.costKeysFor(rec.Provider)
-	a.UsageKeys = s.usageKeysFor(rec.Provider)
-	a.CapturePreview = s.cfg().CaptureBodyPreview
+	a := s.analyzerFor(rec)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		// One Write per frame so a keepalive comment cannot splice onto a
@@ -1203,7 +1212,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		return false
 	}
 	var (
-		a       sse.Analyzer
 		lineBuf bytes.Buffer // partial line + current chunk bytes not yet consumed
 		out     bytes.Buffer // released bytes awaiting one client write
 		hold    []byte       // bytes withheld from the terminal-candidate event onward
@@ -1216,9 +1224,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// classes, and the client already saw the finish-reason bytes).
 		holdAborted bool
 	)
-	a.CostKeys = s.costKeysFor(rec.Provider)
-	a.UsageKeys = s.usageKeysFor(rec.Provider)
-	a.CapturePreview = s.cfg().CaptureBodyPreview
+	a := s.analyzerFor(rec)
 	writeOut := func() bool {
 		if out.Len() == 0 {
 			return true

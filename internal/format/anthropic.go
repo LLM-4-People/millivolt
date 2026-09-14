@@ -422,20 +422,8 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		sawMessageStop bool
 		sawError       bool
 	)
-	// frame emission routes through the sse frames owner: one marshal, one
-	// DataFrame render, one Write per chunk.
 	emit := func(obj any) error {
-		b, err := json.Marshal(obj)
-		if err != nil {
-			return err
-		}
-		if _, err := dst.Write(sse.DataFrame(b)); err != nil {
-			return err
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
+		return sse.EmitFrame(dst, flusher, obj)
 	}
 	writeDone := func() error {
 		if _, err := io.WriteString(dst, sse.DoneFrame); err != nil {

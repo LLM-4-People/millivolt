@@ -207,17 +207,23 @@ func (rs *restarter) setPhase(p int, errMsg string) {
 	rs.publish()
 }
 
-// publish fans the current status out to every watch stream. Delivery drops
-// rather than blocks - a slow dashboard must never stall the choreography.
-func (rs *restarter) publish() {
-	rs.mu.Lock()
-	ev := rs.statusLocked()
+// fanoutLocked hands ev to every live watch stream, dropping when a
+// watcher's buffer is full - a slow dashboard must never stall the
+// choreography. Caller holds rs.mu; the callers keep their retire policies:
+// publish only sends, finishFailure closes and retires after the fanout.
+func (rs *restarter) fanoutLocked(ev map[string]any) {
 	for ch := range rs.watchers {
 		select {
 		case ch <- ev:
 		default:
 		}
 	}
+}
+
+// publish fans the current status out to every watch stream.
+func (rs *restarter) publish() {
+	rs.mu.Lock()
+	rs.fanoutLocked(rs.statusLocked())
 	rs.mu.Unlock()
 }
 
@@ -578,12 +584,8 @@ func (rs *restarter) finishFailure(err error) {
 	rs.mu.Lock()
 	rs.inHandoff.Store(false)
 	rs.phase, rs.phaseAt, rs.errMsg = restartIdle, time.Now(), err.Error()
-	ev := rs.statusLocked()
+	rs.fanoutLocked(rs.statusLocked())
 	for ch := range rs.watchers {
-		select {
-		case ch <- ev:
-		default:
-		}
 		close(ch)
 	}
 	rs.watchers = map[chan map[string]any]struct{}{}

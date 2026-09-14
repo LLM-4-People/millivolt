@@ -3,6 +3,8 @@ package sse
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"net/http"
 )
 
 // Client-facing OpenAI-compatible SSE frame primitives, the write-side
@@ -22,6 +24,26 @@ func DataFrame(payload []byte) []byte {
 	b = append(b, payload...)
 	b = append(b, '\n', '\n')
 	return b
+}
+
+// EmitFrame marshals obj, writes it to w as one SSE data frame, and flushes
+// when flusher is non-nil: the plain-chunk emit pipeline (one marshal, one
+// DataFrame render, one Write, one flush) the two bridges' streaming
+// emitters share. The obj itself - chunk shape and created stamping - stays
+// with each caller, and so does every other write path: the error-frame
+// emitters keep their own write, flush and error handling (ErrorEnvelope).
+func EmitFrame(w io.Writer, flusher http.Flusher, obj any) error {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(DataFrame(b)); err != nil {
+		return err
+	}
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return nil
 }
 
 // ErrorEnvelope marshals the client-facing OpenAI error object carried

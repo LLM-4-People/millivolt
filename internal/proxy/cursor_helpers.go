@@ -138,17 +138,7 @@ func sseEmitter(w http.ResponseWriter, id, model string, flusher http.Flusher) f
 	return func(delta map[string]any, finish any) error {
 		obj := sse.Chunk(id, time.Now().Unix(), model,
 			[]map[string]any{sse.DeltaChoice(delta, finish)}, nil)
-		b, err := json.Marshal(obj)
-		if err != nil {
-			return err
-		}
-		if _, err := w.Write(sse.DataFrame(b)); err != nil {
-			return err
-		}
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return nil
+		return sse.EmitFrame(w, flusher, obj)
 	}
 }
 
