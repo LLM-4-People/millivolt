@@ -572,7 +572,11 @@ func cursorTrackDelta(rec *metrics.Record, delta map[string]any) {
 // resetTurnMetrics clears the per-turn timing and usage window so the next
 // driven turn - or a fresh analyzer pass over a translated stream - reports
 // its own responsiveness and counts instead of accumulating the turn that
-// was just absorbed or reset.
+// was just absorbed or reset. The void re-ask site is load-bearing and
+// pinned (a first turn's stamps must survive into the re-ask's window); the
+// fresh-stream and translated-stream prologue sites are defensive - both
+// run on records that cannot yet carry turn data - and are deliberately
+// unpinned for that reason.
 func resetTurnMetrics(rec *metrics.Record) {
 	rec.FirstTokenAt = time.Time{}
 	rec.LastTokenAt = time.Time{}
