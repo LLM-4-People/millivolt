@@ -4,6 +4,18 @@ import "encoding/json"
 
 func jsonSpace(b byte) bool { return b == ' ' || b == '\t' || b == '\r' || b == '\n' }
 
+// SkipSpace advances i past JSON whitespace in data. It is the one owner of
+// the whitespace classification shared by the lexical JSON scanners
+// (JSONKey here, the SSE analyzer's value checks): some gateways
+// re-serialize upstream JSON with extra whitespace, so value scans must
+// tolerate it.
+func SkipSpace(data []byte, i int) int {
+	for i < len(data) && jsonSpace(data[i]) {
+		i++
+	}
+	return i
+}
+
 // JSONKey locates the first named JSON key at any nesting depth, returning
 // the input tail beginning at its value. The result aliases data. String
 // values are skipped, key escapes and all JSON whitespace are accepted, and
@@ -31,9 +43,7 @@ func JSONKey(data []byte, key string) []byte {
 		end := i
 		i++
 		j := i
-		for j < len(data) && jsonSpace(data[j]) {
-			j++
-		}
+		j = SkipSpace(data, j)
 		if j >= len(data) || data[j] != ':' {
 			continue
 		}
@@ -46,9 +56,7 @@ func JSONKey(data []byte, key string) []byte {
 			continue
 		}
 		j++
-		for j < len(data) && jsonSpace(data[j]) {
-			j++
-		}
+		j = SkipSpace(data, j)
 		if j < len(data) {
 			return data[j:]
 		}

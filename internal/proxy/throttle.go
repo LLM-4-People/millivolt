@@ -86,7 +86,7 @@ func (s *Server) attachThrottlePersist(p throttlePersist) {
 			log.Printf("throttle: skip %s: %v", it.Provider, err)
 			continue
 		}
-		s.noteProvider(t.Provider)
+		s.pause.providers.add(t.Provider)
 		ts = append(ts, t)
 	}
 	s.scheduler.RestoreThrottles(ts)
@@ -165,8 +165,20 @@ func (s *Server) updateThrottle(provider string, update func(scheduler.Throttle)
 	if !s.scheduler.UpdateThrottle(provider, update) {
 		return nil
 	}
-	s.noteProvider(provider)
+	s.pause.providers.add(provider)
 	return s.persistThrottles()
+}
+
+// latestThrottleSnap captures the scheduler's live provider caps in the
+// persisted shape. Called outside the generation lock for the first write and
+// under it on retry.
+func (s *Server) latestThrottleSnap() []persistedThrottle {
+	items := s.scheduler.ListThrottles()
+	snap := make([]persistedThrottle, 0, len(items))
+	for _, inf := range items {
+		snap = append(snap, throttleToPersisted(inf.Throttle))
+	}
+	return snap
 }
 
 func (s *Server) persistThrottles() error {
@@ -174,42 +186,19 @@ func (s *Server) persistThrottles() error {
 	s.throttle.persistGen++
 	gen := s.throttle.persistGen
 	s.throttle.mu.Unlock()
-	for {
-		items := s.scheduler.ListThrottles()
-		snap := make([]persistedThrottle, 0, len(items))
-		for _, inf := range items {
-			snap = append(snap, throttleToPersisted(inf.Throttle))
-		}
-		err := s.writeThrottleSnap(snap)
-		s.throttle.mu.Lock()
-		if s.throttle.persistGen == gen {
-			s.throttle.mu.Unlock()
-			if err != nil {
-				return &operatorPersistenceError{err}
-			}
-			return nil
-		}
-		gen = s.throttle.persistGen
-		s.throttle.mu.Unlock()
-	}
+	return persistStableGen(s.latestThrottleSnap(), gen, &s.throttle.mu,
+		func() uint64 { return s.throttle.persistGen },
+		s.writeThrottleSnap,
+		func() ([]persistedThrottle, uint64) {
+			return s.latestThrottleSnap(), s.throttle.persistGen
+		})
 }
 
 func (s *Server) writeThrottleSnap(items []persistedThrottle) error {
 	if s.throttle.persist == nil {
 		return nil
 	}
-	raw, err := json.Marshal(persistedThrottleDoc{Throttles: items})
-	if err != nil {
-		log.Printf("throttle: persist: %v", err)
-		return err
-	}
-	ctx, cancel := s.storeQueryCtx()
-	defer cancel()
-	if err := s.throttle.persist.SaveThrottle(ctx, raw); err != nil {
-		log.Printf("throttle: persist: %v", err)
-		return err
-	}
-	return nil
+	return s.persistOperatorDoc("throttle", persistedThrottleDoc{Throttles: items}, s.throttle.persist.SaveThrottle)
 }
 
 // applyThrottleHeaders parses X-Proxy-Limit-* on this request. Absent
@@ -444,138 +433,132 @@ func invalidateUsage(rec *metrics.Record, err error) {
 // merges; omitted dimensions keep their current value; 0 / empty window
 // turns that dimension off.
 func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGetPost(w, r) {
+	if !s.operatorStateGet(w, r, s.ThrottleSnapshot) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		writeOperatorState(w, s.ThrottleSnapshot(), nil)
-	case http.MethodPost:
-		var body struct {
-			Provider    string  `json:"provider"`
-			Clear       bool    `json:"clear"`
-			Concurrency *int    `json:"concurrency"`
-			Requests    *int64  `json:"requests"`
-			ReqWindow   *string `json:"request_window"`
-			Tokens      *int64  `json:"tokens"`
-			TokWindow   *string `json:"token_window"`
-		}
-		if err := adminjson.Decode(w, r, &body); err != nil {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		provider := strings.TrimSpace(body.Provider)
-		if provider == "" {
-			adminjson.WriteError(w, http.StatusBadRequest, "provider required")
-			return
-		}
-		if body.Clear {
-			persistErr := s.applyThrottle(scheduler.Throttle{Provider: provider})
-			log.Printf("throttle cleared (%s)", provider)
-			writeOperatorState(w, s.ThrottleSnapshot(), persistErr)
-			return
-		}
-		if body.Concurrency == nil && body.Requests == nil && body.Tokens == nil &&
-			body.ReqWindow == nil && body.TokWindow == nil {
-			adminjson.WriteError(w, http.StatusBadRequest, "concurrency, requests, or tokens required")
-			return
-		}
-		var next scheduler.Limit
-		var updateErr error
-		persistErr := s.updateThrottle(provider, func(cur scheduler.Throttle) scheduler.Throttle {
-			next = cur.Limit
-			if body.Concurrency != nil {
-				if *body.Concurrency < 0 {
-					updateErr = fmt.Errorf("concurrency must be >= 0")
-					return cur
-				}
-				next.Concurrency = *body.Concurrency
-			}
-			if body.Requests != nil || body.ReqWindow != nil {
-				var n int64
-				if body.Requests != nil {
-					n = *body.Requests
-				} else {
-					n = next.Requests
-				}
-				if n < 0 {
-					updateErr = fmt.Errorf("requests must be >= 0")
-					return cur
-				}
-				if n == 0 {
-					next.Requests = 0
-					next.ReqWindow = 0
-				} else {
-					win := next.ReqWindow
-					if body.ReqWindow != nil {
-						d, err := parseLimitWindow(*body.ReqWindow)
-						if err != nil {
-							updateErr = fmt.Errorf("invalid request_window")
-							return cur
-						}
-						win = d
-					}
-					if win <= 0 {
-						updateErr = fmt.Errorf("request_window required")
-						return cur
-					}
-					next.Requests = n
-					next.ReqWindow = win
-				}
-			}
-			if body.Tokens != nil || body.TokWindow != nil {
-				var n int64
-				if body.Tokens != nil {
-					n = *body.Tokens
-				} else {
-					n = next.Tokens
-				}
-				if n < 0 {
-					updateErr = fmt.Errorf("tokens must be >= 0")
-					return cur
-				}
-				if n == 0 {
-					next.Tokens = 0
-					next.TokWindow = 0
-				} else {
-					win := next.TokWindow
-					if body.TokWindow != nil {
-						d, err := parseLimitWindow(*body.TokWindow)
-						if err != nil {
-							updateErr = fmt.Errorf("invalid token_window")
-							return cur
-						}
-						win = d
-					}
-					if win <= 0 {
-						updateErr = fmt.Errorf("token_window required")
-						return cur
-					}
-					next.Tokens = n
-					next.TokWindow = win
-				}
-			}
-			if err := validateLimit(next); err != nil {
-				updateErr = err
+	var body struct {
+		Provider    string  `json:"provider"`
+		Clear       bool    `json:"clear"`
+		Concurrency *int    `json:"concurrency"`
+		Requests    *int64  `json:"requests"`
+		ReqWindow   *string `json:"request_window"`
+		Tokens      *int64  `json:"tokens"`
+		TokWindow   *string `json:"token_window"`
+	}
+	if err := adminjson.Decode(w, r, &body); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	provider := strings.TrimSpace(body.Provider)
+	if provider == "" {
+		adminjson.WriteError(w, http.StatusBadRequest, "provider required")
+		return
+	}
+	if body.Clear {
+		s.resetOperatorState(w, s.ThrottleSnapshot,
+			func() error { return s.applyThrottle(scheduler.Throttle{Provider: provider}) },
+			"throttle cleared (%s)", provider)
+		return
+	}
+	if body.Concurrency == nil && body.Requests == nil && body.Tokens == nil &&
+		body.ReqWindow == nil && body.TokWindow == nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "concurrency, requests, or tokens required")
+		return
+	}
+	var next scheduler.Limit
+	var updateErr error
+	persistErr := s.updateThrottle(provider, func(cur scheduler.Throttle) scheduler.Throttle {
+		next = cur.Limit
+		if body.Concurrency != nil {
+			if *body.Concurrency < 0 {
+				updateErr = fmt.Errorf("concurrency must be >= 0")
 				return cur
 			}
-			return scheduler.Throttle{
-				Provider:  provider,
-				Limit:     next,
-				Source:    scheduler.ThrottleSourceUI,
-				UpdatedBy: "dashboard",
-			}
-		})
-		if updateErr != nil {
-			adminjson.WriteError(w, http.StatusBadRequest, updateErr.Error())
-			return
+			next.Concurrency = *body.Concurrency
 		}
-		log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s)", provider,
-			next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
-			next.Tokens, config.FormatDuration(next.TokWindow))
-		writeOperatorState(w, s.ThrottleSnapshot(), persistErr)
+		if body.Requests != nil || body.ReqWindow != nil {
+			var n int64
+			if body.Requests != nil {
+				n = *body.Requests
+			} else {
+				n = next.Requests
+			}
+			if n < 0 {
+				updateErr = fmt.Errorf("requests must be >= 0")
+				return cur
+			}
+			if n == 0 {
+				next.Requests = 0
+				next.ReqWindow = 0
+			} else {
+				win := next.ReqWindow
+				if body.ReqWindow != nil {
+					d, err := parseLimitWindow(*body.ReqWindow)
+					if err != nil {
+						updateErr = fmt.Errorf("invalid request_window")
+						return cur
+					}
+					win = d
+				}
+				if win <= 0 {
+					updateErr = fmt.Errorf("request_window required")
+					return cur
+				}
+				next.Requests = n
+				next.ReqWindow = win
+			}
+		}
+		if body.Tokens != nil || body.TokWindow != nil {
+			var n int64
+			if body.Tokens != nil {
+				n = *body.Tokens
+			} else {
+				n = next.Tokens
+			}
+			if n < 0 {
+				updateErr = fmt.Errorf("tokens must be >= 0")
+				return cur
+			}
+			if n == 0 {
+				next.Tokens = 0
+				next.TokWindow = 0
+			} else {
+				win := next.TokWindow
+				if body.TokWindow != nil {
+					d, err := parseLimitWindow(*body.TokWindow)
+					if err != nil {
+						updateErr = fmt.Errorf("invalid token_window")
+						return cur
+					}
+					win = d
+				}
+				if win <= 0 {
+					updateErr = fmt.Errorf("token_window required")
+					return cur
+				}
+				next.Tokens = n
+				next.TokWindow = win
+			}
+		}
+		if err := validateLimit(next); err != nil {
+			updateErr = err
+			return cur
+		}
+		return scheduler.Throttle{
+			Provider:  provider,
+			Limit:     next,
+			Source:    scheduler.ThrottleSourceUI,
+			UpdatedBy: "dashboard",
+		}
+	})
+	if updateErr != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, updateErr.Error())
+		return
 	}
+	log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s)", provider,
+		next.Concurrency, next.Requests, config.FormatDuration(next.ReqWindow),
+		next.Tokens, config.FormatDuration(next.TokWindow))
+	writeOperatorState(w, s.ThrottleSnapshot(), persistErr)
 }
 
 // ThrottleSnapshot builds the GET /admin/throttle state document - the
@@ -603,7 +586,7 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 			"tokens_capacity":    inf.TokCapacity,
 		})
 	}
-	known := sanitizeNameList(append(s.knownProviders(), throttleProviders(infos)...))
+	known := sanitizeNameList(append(s.pause.providers.list(), throttleProviders(infos)...))
 	return map[string]any{
 		"ok":              true,
 		"throttles":       throttles,

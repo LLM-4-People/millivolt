@@ -122,6 +122,14 @@ const cursorConnectPath = "/agent.v1.AgentService/Run"
 // literal.
 func CursorConnectPath() string { return cursorConnectPath }
 
+// cursorModelsPath is the Connect-RPC route for the unary model-discovery
+// RPC; the proxy targets it when serving GET /v1/models for format=cursor.
+const cursorModelsPath = "/agent.v1.AgentService/GetUsableModels"
+
+// CursorModelsPath exposes the canonical model-discovery route so the proxy
+// layer can target it without duplicating the literal.
+func CursorModelsPath() string { return cursorModelsPath }
+
 // cursorAssistantBlob builds the structured history blob for an assistant turn.
 // Cursor's prompt blobs use a Vercel-AI-SDK message shape: content is an array
 // of {type:"text",text} and {type:"tool-call",toolCallId,toolName,args} parts.

@@ -28,6 +28,7 @@ import (
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 
 	"golang.org/x/net/http2"
 )
@@ -799,7 +800,7 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 		eErr := emit(map[string]any{}, "tool_calls")
 		markGone(eErr)
 		markGone(usageChunk(w, id, rr.model, rr.includeUsage, prompt, result.Output, result.Reasoning))
-		_, dErr := io.WriteString(w, "data: [DONE]\n\n")
+		_, dErr := io.WriteString(w, sse.DoneFrame)
 		markGone(dErr)
 		return
 
@@ -813,24 +814,21 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			// holding. Flag the record (dashboard error row + error dimension)
 			// and surface a real failure in-band instead of an empty stop.
 			stampCursorVoid(rec)
-			obj := map[string]any{"error": map[string]any{
-				"message": cursorVoidMsg, "type": "upstream_error", "param": nil, "code": "empty_turn",
-			}}
-			if b, mErr := json.Marshal(obj); mErr == nil {
-				_, wErr := fmt.Fprintf(w, "data: %s\n\n", b)
+			if b, mErr := sse.ErrorEnvelope("", "upstream_error", "empty_turn", cursorVoidMsg); mErr == nil {
+				_, wErr := w.Write(sse.DataFrame(b))
 				markGone(wErr)
 			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
-			_, dErr := io.WriteString(w, "data: [DONE]\n\n")
+			_, dErr := io.WriteString(w, sse.DoneFrame)
 			markGone(dErr)
 			return
 		}
 		eErr := emit(map[string]any{}, "stop")
 		markGone(eErr)
 		markGone(usageChunk(w, id, rr.model, rr.includeUsage, prompt, result.Output, result.Reasoning))
-		_, dErr := io.WriteString(w, "data: [DONE]\n\n")
+		_, dErr := io.WriteString(w, sse.DoneFrame)
 		markGone(dErr)
 		return
 	}
@@ -861,7 +859,7 @@ func usageChunk(w http.ResponseWriter, id, model string, includeUsage bool, prom
 		"model": model, "choices": []map[string]any{}, "usage": usage,
 	}
 	if b, err := json.Marshal(obj); err == nil {
-		if _, werr := fmt.Fprintf(w, "data: %s\n\n", b); werr != nil {
+		if _, werr := w.Write(sse.DataFrame(b)); werr != nil {
 			return werr
 		}
 	}
@@ -1052,7 +1050,7 @@ func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, es
 // renders them in the OpenAI GET /v1/models shape. This lets OpenAI-compatible
 // clients discover the usable model ids natively instead of hardcoding them.
 func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r *http.Request, t *target, key string) {
-	targetURL := t.baseURL + "/agent.v1.AgentService/GetUsableModels"
+	targetURL := t.baseURL + providerformat.CursorModelsPath()
 	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL,
 		bytes.NewReader(providerformat.EncodeGetUsableModelsRequest(nil)))
 	if err != nil {

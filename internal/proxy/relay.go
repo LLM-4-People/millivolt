@@ -1377,15 +1377,8 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 // the degenerate classes + their messages). A failed write to the (already
 // dying) client still marks client-disconnected on the record.
 func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, code string, rec *metrics.Record) {
-	obj := map[string]any{"error": map[string]any{
-		"message": metrics.DegenerateMessage(code),
-		"type":    "upstream_error",
-		"param":   nil,
-		"code":    code,
-	}}
-	if b, err := json.Marshal(obj); err == nil {
-		line := append([]byte("data: "), b...)
-		line = append(line, '\n', '\n')
+	if b, err := sse.ErrorEnvelope("", "upstream_error", code, metrics.DegenerateMessage(code)); err == nil {
+		line := sse.DataFrame(b)
 		a.Feed(line[:len(line)-2], now)
 		if _, werr := w.Write(line); werr != nil {
 			markClientGone(rec)
@@ -1393,7 +1386,7 @@ func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, co
 		}
 	}
 	a.Feed([]byte("data: [DONE]"), now)
-	if _, werr := io.WriteString(w, "data: [DONE]\n\n"); werr != nil {
+	if _, werr := io.WriteString(w, sse.DoneFrame); werr != nil {
 		markClientGone(rec)
 	}
 }

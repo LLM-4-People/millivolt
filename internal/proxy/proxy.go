@@ -443,9 +443,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if lp, ok := s.rec.(livePublisher); ok {
 		lp.PublishLive("begin", rec)
 	}
-	s.noteClient(rec.Client)
-	s.noteProvider(rec.Provider)
-	s.noteModel(rec.Model)
+	s.pause.clients.add(rec.Client)
+	s.pause.providers.add(rec.Provider)
+	s.pause.models.add(canonicalModel(rec.Model))
 	defer func() {
 		rec.End = time.Now()
 		metrics.FinalizeRecord(rec)

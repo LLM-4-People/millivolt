@@ -4,8 +4,10 @@ package format
 //
 // The Cursor upstream speaks Connect-RPC carrying protobuf messages. Rather
 // than pull in a protobuf runtime (and a .proto codegen step) for a handful of
-// fields, we hand-encode/decode the exact wire format. Only the two wire types
-// the Cursor schema uses are implemented: varint (0) and length-delimited (2).
+// fields, we hand-encode/decode the exact wire format. The strict parser
+// accepts the two wire types the Cursor schema uses - varint (0) and
+// length-delimited (2); the Value shim's parser additionally admits the
+// fixed64/fixed32 encodings (see parseProtoFieldsWire).
 //
 // These are internal, non-tunable implementation details.
 
@@ -114,6 +116,24 @@ type protoField struct {
 // The returned slices alias into msg - callers must not retain them past msg's
 // lifetime, which is fine for our single-pass decode.
 func parseProtoFields(msg []byte) ([]protoField, error) {
+	return parseProtoFieldsWire(msg, false)
+}
+
+// parseProtoFieldsLenient is parseProtoFields but tolerates a fixed64 (wire 1)
+// field by reading 8 bytes into raw, so google.protobuf.Value number fields
+// decode. All other wire types behave as parseProtoFields (fail closed).
+func parseProtoFieldsLenient(msg []byte) ([]protoField, error) {
+	return parseProtoFieldsWire(msg, true)
+}
+
+// parseProtoFieldsWire is the one wire-format parser, parameterized by the
+// accepted wire types. The strict set is varint (0) and length-delimited (2) -
+// the two the Cursor schema uses; fixedNumbers admits the fixed64/fixed32
+// encodings (wires 1 and 5) on top, for the google.protobuf.Value shim. Any
+// other wire type (group, or a fixed type in strict mode) means we're
+// misaligned or the schema grew a type we don't model: fail closed rather
+// than mis-parse.
+func parseProtoFieldsWire(msg []byte, fixedNumbers bool) ([]protoField, error) {
 	var fields []protoField
 	i := 0
 	for i < len(msg) {
@@ -144,10 +164,25 @@ func parseProtoFields(msg []byte) ([]protoField, error) {
 			}
 			f.raw = msg[i : i+int(l)]
 			i += int(l)
+		case 1: // fixed64 (google.protobuf.Value number_value)
+			if !fixedNumbers {
+				return nil, fmt.Errorf("protobuf: unsupported wire type %d for field %d", wire, num)
+			}
+			if len(msg)-i < 8 {
+				return nil, fmt.Errorf("protobuf: truncated fixed64 field %d", num)
+			}
+			f.raw = msg[i : i+8]
+			i += 8
+		case 5: // fixed32
+			if !fixedNumbers {
+				return nil, fmt.Errorf("protobuf: unsupported wire type %d for field %d", wire, num)
+			}
+			if len(msg)-i < 4 {
+				return nil, fmt.Errorf("protobuf: truncated fixed32 field %d", num)
+			}
+			f.raw = msg[i : i+4]
+			i += 4
 		default:
-			// We only need varint + length-delimited for the Cursor schema; a
-			// fixed32/64/group field means we're misaligned or the schema grew
-			// a type we don't model. Fail closed rather than mis-parse.
 			return nil, fmt.Errorf("protobuf: unsupported wire type %d for field %d", wire, num)
 		}
 		fields = append(fields, f)
@@ -314,58 +349,4 @@ func decodeProtoList(b []byte, depth int) ([]any, bool) {
 		out = append(out, v)
 	}
 	return out, true
-}
-
-// parseProtoFieldsLenient is parseProtoFields but tolerates a fixed64 (wire 1)
-// field by reading 8 bytes into raw, so google.protobuf.Value number fields
-// decode. All other wire types behave as parseProtoFields (fail closed).
-func parseProtoFieldsLenient(msg []byte) ([]protoField, error) {
-	var fields []protoField
-	i := 0
-	for i < len(msg) {
-		key, n := consumeVarint(msg[i:])
-		if n <= 0 {
-			return nil, fmt.Errorf("protobuf: bad field key at offset %d", i)
-		}
-		i += n
-		num := int(key >> 3)
-		wire := int(key & 0x7)
-		f := protoField{num: num, wire: wire}
-		switch wire {
-		case wireVarint:
-			v, m := consumeVarint(msg[i:])
-			if m <= 0 {
-				return nil, fmt.Errorf("protobuf: bad varint field %d", num)
-			}
-			i += m
-			f.n = v
-		case 1: // fixed64 (google.protobuf.Value number_value)
-			if len(msg)-i < 8 {
-				return nil, fmt.Errorf("protobuf: truncated fixed64 field %d", num)
-			}
-			f.raw = msg[i : i+8]
-			i += 8
-		case wireBytes:
-			l, m := consumeVarint(msg[i:])
-			if m <= 0 {
-				return nil, fmt.Errorf("protobuf: bad length field %d", num)
-			}
-			i += m
-			if l > uint64(len(msg)-i) {
-				return nil, fmt.Errorf("protobuf: field %d length %d overruns buffer", num, l)
-			}
-			f.raw = msg[i : i+int(l)]
-			i += int(l)
-		case 5: // fixed32
-			if len(msg)-i < 4 {
-				return nil, fmt.Errorf("protobuf: truncated fixed32 field %d", num)
-			}
-			f.raw = msg[i : i+4]
-			i += 4
-		default:
-			return nil, fmt.Errorf("protobuf: unsupported wire type %d for field %d", wire, num)
-		}
-		fields = append(fields, f)
-	}
-	return fields, nil
 }

@@ -217,11 +217,11 @@ func TestDebugMatchAND(t *testing.T) {
 
 func TestKnownModelsCanonicalizesFusedIds(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.noteModel("claude-4.5-sonnet-thinking")
-	p.noteModel("claude-sonnet-4-5")
-	p.noteModel(" grok-4.6-fast ")
-	p.noteModel("grok-4.6")
-	got := p.knownModels()
+	p.pause.models.add(canonicalModel("claude-4.5-sonnet-thinking"))
+	p.pause.models.add(canonicalModel("claude-sonnet-4-5"))
+	p.pause.models.add(canonicalModel(" grok-4.6-fast "))
+	p.pause.models.add(canonicalModel("grok-4.6"))
+	got := p.pause.models.list()
 	if len(got) != 2 {
 		t.Fatalf("known models = %v, want 2 canonical ids", got)
 	}

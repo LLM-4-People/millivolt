@@ -1,7 +1,9 @@
 package scheduler
 
 import (
-	"sort"
+	"maps"
+	"slices"
+	"strconv"
 	"sync/atomic"
 	"time"
 )
@@ -72,21 +74,7 @@ type policySnap struct {
 var holdSeq atomic.Uint64
 
 func newHoldID() string {
-	return "p" + itoa(holdSeq.Add(1))
-}
-
-func itoa(n uint64) string {
-	if n == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(b[i:])
+	return "p" + strconv.FormatUint(holdSeq.Add(1), 10)
 }
 
 func setFrom(ss []string) map[string]struct{} {
@@ -103,15 +91,7 @@ func setFrom(ss []string) map[string]struct{} {
 }
 
 func keysOf(m map[string]struct{}) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(m))
 }
 
 func snapHold(h Hold) *holdSnap {

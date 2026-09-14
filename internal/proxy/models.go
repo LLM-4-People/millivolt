@@ -78,7 +78,7 @@ func (s *Server) serveOpenAIModels(d *modelsDiscovery, w http.ResponseWriter, r 
 		writeModelsError(w, err)
 		return
 	}
-	entries, constructed := parseModelsListBody(body)
+	entries, constructed := unwrapEntries(body, "data")
 	if !constructed {
 		// Not a shape we construct (foreign envelope or unparsable): relay
 		// verbatim - the passthrough contract for anything unknown.
@@ -173,20 +173,43 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 	return body, nil
 }
 
-// parseModelsListBody recognizes the upstream list shapes observed across the
-// OpenAI-compatible ecosystem: {"data":[...]} (OpenAI, Groq, xAI, vLLM), a
-// bare top-level array (Together), or a body already carrying entries under a
-// foreign key (served verbatim by the caller). ok=false means "not ours to
-// construct".
-func parseModelsListBody(body []byte) (entries []map[string]any, ok bool) {
-	var wrapper struct {
-		Data []map[string]any `json:"data"`
+// unwrapEntries returns a provider models/metadata body's entry array,
+// recognizing the shapes observed across the OpenAI-compatible ecosystem:
+// the first present key of keys ({"data":[...]} - OpenAI, Groq, xAI, vLLM;
+// {"data","models"} - xAI's language-models endpoint) or a bare top-level
+// array (Together). ok=false means "not ours to construct" (a foreign
+// envelope or unparsable body the caller relays verbatim / skips).
+//
+// A requested key whose value is not an entry array rejects the wrapper as a
+// whole - matching a strict struct decode, where one bad field fails the
+// document - while unrequested keys stay ignored.
+func unwrapEntries(body []byte, keys ...string) ([]map[string]any, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err == nil {
+		byKey := make([][]map[string]any, len(keys))
+		for i, k := range keys {
+			raw, present := obj[k]
+			if !present {
+				continue
+			}
+			var entries []map[string]any
+			if err := json.Unmarshal(raw, &entries); err != nil {
+				byKey = nil
+				break
+			}
+			byKey[i] = entries
+		}
+		if byKey != nil {
+			for _, entries := range byKey {
+				if entries != nil {
+					return entries, true
+				}
+			}
+		}
 	}
-	if err := json.Unmarshal(body, &wrapper); err == nil && wrapper.Data != nil {
-		return wrapper.Data, true
-	}
-	if err := json.Unmarshal(body, &entries); err == nil && entries != nil {
-		return entries, true
+	var arr []map[string]any
+	if err := json.Unmarshal(body, &arr); err == nil && arr != nil {
+		return arr, true
 	}
 	return nil, false
 }
@@ -260,7 +283,7 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 	if err != nil {
 		return
 	}
-	src, ok := parseEnrichmentEntries(body)
+	src, ok := unwrapEntries(body, "data", "models")
 	if !ok {
 		return
 	}
@@ -285,29 +308,6 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 			}
 		}
 	}
-}
-
-// parseEnrichmentEntries - the enrichment endpoint may nest its entry array
-// under "data" (OpenAI style), "models" (xAI's language-models), or return a
-// bare root array; anything else is "no enrichment available".
-func parseEnrichmentEntries(body []byte) ([]map[string]any, bool) {
-	var wrapper struct {
-		Data   []map[string]any `json:"data"`
-		Models []map[string]any `json:"models"`
-	}
-	if err := json.Unmarshal(body, &wrapper); err == nil {
-		if wrapper.Data != nil {
-			return wrapper.Data, true
-		}
-		if wrapper.Models != nil {
-			return wrapper.Models, true
-		}
-	}
-	var arr []map[string]any
-	if err := json.Unmarshal(body, &arr); err == nil && arr != nil {
-		return arr, true
-	}
-	return nil, false
 }
 
 // serveAnthropicModels pages Anthropic's /v1/models (collecting all pages) and

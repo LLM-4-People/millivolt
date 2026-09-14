@@ -55,6 +55,21 @@ func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
+// newHTTPServer builds the proxy's http.Server: the boot config's request
+// timeouts, no WriteTimeout (it would cut off long-lived SSE streams), and
+// the shared base context cancelled on shutdown so in-flight SSE streams
+// abort immediately and Shutdown is never gated on their timeout. The main
+// server and the restart handoff's clone share this one constructor.
+func newHTTPServer(handler http.Handler, cfg *config.Config, srvCtx context.Context) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
+		// No WriteTimeout: it would cut off long-lived SSE streams.
+		BaseContext: func(net.Listener) context.Context { return srvCtx },
+	}
+}
+
 func main() {
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
@@ -351,14 +366,7 @@ func main() {
 	defer stopServing()
 
 	handler := protectOperatorRequests(mux, gate)
-	httpSrv := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
-		// No WriteTimeout: it would cut off long-lived SSE streams.
-		BaseContext: func(net.Listener) context.Context { return srvCtx },
-	}
-
+	httpSrv := newHTTPServer(handler, cfg, srvCtx)
 	// Serve in a goroutine; main blocks on the shutdown signal so we can shut
 	// down gracefully and close storage only after in-flight requests finish.
 
@@ -369,13 +377,7 @@ func main() {
 		listener: ln,
 		server:   httpSrv,
 		cloneServer: func() *http.Server {
-			return &http.Server{
-				Handler:           handler,
-				ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-				IdleTimeout:       cfg.IdleTimeout,
-				// No WriteTimeout: it would cut off long-lived SSE streams.
-				BaseContext: func(net.Listener) context.Context { return srvCtx },
-			}
+			return newHTTPServer(handler, cfg, srvCtx)
 		},
 		closeFeeds: buf.CloseFeeds,
 		flushStore: func() error {

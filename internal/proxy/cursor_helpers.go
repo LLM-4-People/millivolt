@@ -5,12 +5,13 @@ package proxy
 
 import (
 	"encoding/json"
-	"fmt"
-	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // cursorToolResult is one role:"tool" message from a client request.
@@ -103,7 +104,7 @@ func sseEmitter(w http.ResponseWriter, id, model string, flusher http.Flusher) f
 		if err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", b); err != nil {
+		if _, err := w.Write(sse.DataFrame(b)); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -124,19 +125,13 @@ func emitErrorSSE(w http.ResponseWriter, id, typ, msg string) error {
 	if typ == "" {
 		typ = "upstream_error"
 	}
-	obj := map[string]any{"error": map[string]any{
-		"message": msg, "type": typ, "param": nil, "code": nil,
-	}}
-	if id != "" {
-		obj["id"] = id
-	}
 	var wErr error
-	if b, mErr := json.Marshal(obj); mErr == nil {
-		if _, e := fmt.Fprintf(w, "data: %s\n\n", b); e != nil {
+	if b, mErr := sse.ErrorEnvelope(id, typ, nil, msg); mErr == nil {
+		if _, e := w.Write(sse.DataFrame(b)); e != nil {
 			wErr = e
 		}
 	}
-	if _, e := io.WriteString(w, "data: [DONE]\n\n"); e != nil && wErr == nil {
+	if _, e := io.WriteString(w, sse.DoneFrame); e != nil && wErr == nil {
 		wErr = e
 	}
 	if f, ok := w.(http.Flusher); ok {

@@ -15,7 +15,11 @@ const sseHeartbeat = 30 * time.Second
 // metricsAllow is RFC 9110 Allow for ring-buffer JSON/SSE/Prometheus.
 const metricsAllow = "GET"
 
-func rejectUnlessGet(w http.ResponseWriter, r *http.Request) bool {
+// RejectUnlessGet gates a GET-only JSON/SSE/Prometheus endpoint (these
+// handlers produce no HEAD bodies; do not reuse a GET/HEAD gate for them).
+// A wrong method gets the Allow header and a 405. Shared with the dashboard
+// aggregate endpoints (internal/web), which serve the same response shape.
+func RejectUnlessGet(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method == http.MethodGet {
 		return true
 	}
@@ -76,7 +80,7 @@ func (b *Buffer) SnapshotRequest(r *http.Request) Snapshot {
 // between the two is delivered both in the snapshot and freshly from the
 // channel - the client upserts by record id, so the duplicate is harmless.
 func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGet(w, r) {
+	if !RejectUnlessGet(w, r) {
 		return
 	}
 	flusher, ok := w.(http.Flusher)

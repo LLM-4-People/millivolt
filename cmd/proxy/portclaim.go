@@ -97,29 +97,28 @@ func portFromAddr(addr string) int {
 	return p
 }
 
-func killWithFuser(port int, grace time.Duration) bool {
-	if _, err := exec.LookPath("fuser"); err != nil {
-		return false
+// probePIDs runs one port-probe tool and returns the PID tokens it printed.
+// A missing tool or a failing probe reports no PIDs (the caller then treats
+// the strategy as unavailable).
+func probePIDs(tool string, args ...string) []string {
+	if _, err := exec.LookPath(tool); err != nil {
+		return nil
 	}
-	out, err := exec.Command("fuser", fmt.Sprintf("%d/tcp", port)).Output()
+	out, err := exec.Command(tool, args...).Output()
 	if err != nil {
-		return false
+		return nil
 	}
-	// fuser prints PIDs to stdout.
-	fields := strings.Fields(string(out))
-	return killIfProxy(fields, grace)
+	return strings.Fields(string(out))
+}
+
+// killWithFuser reclaims the port via fuser, which prints the owning PIDs to
+// stdout.
+func killWithFuser(port int, grace time.Duration) bool {
+	return killIfProxy(probePIDs("fuser", fmt.Sprintf("%d/tcp", port)), grace)
 }
 
 func killWithLsof(port int, grace time.Duration) bool {
-	if _, err := exec.LookPath("lsof"); err != nil {
-		return false
-	}
-	out, err := exec.Command("lsof", "-ti", fmt.Sprintf(":%d", port)).Output()
-	if err != nil {
-		return false
-	}
-	fields := strings.Fields(string(out))
-	return killIfProxy(fields, grace)
+	return killIfProxy(probePIDs("lsof", "-ti", fmt.Sprintf(":%d", port)), grace)
 }
 
 func killWithSS(port int, grace time.Duration) bool {

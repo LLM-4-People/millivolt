@@ -202,7 +202,7 @@ func TestHandlePauseRejectsBadDuration(t *testing.T) {
 
 func TestHandlePauseClientsAndNew(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.noteClient("client-a")
+	p.pause.clients.add("client-a")
 	rr := httptest.NewRecorder()
 	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
 		strings.NewReader(`{"paused":true,"new":true,"clients":["client-a"],"duration":"1h"}`)))
@@ -482,7 +482,7 @@ func TestHandlePauseOverlap409(t *testing.T) {
 
 func TestHandlePauseProviderAndSecondClient(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.noteProvider("alpha.example")
+	p.pause.providers.add("alpha.example")
 	rr := httptest.NewRecorder()
 	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
 		strings.NewReader(`{"paused":true,"providers":["alpha.example"],"max_queued":2}`)))

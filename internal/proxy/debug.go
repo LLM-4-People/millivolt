@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -77,9 +78,9 @@ func (s *Server) attachDebugPersist(p pausePersist) {
 	now := time.Now()
 	kept := sessions[:0]
 	for _, d := range sessions {
-		s.seedSeen(d.Clients)
-		s.seedSeenProv(d.Providers)
-		s.seedSeenModel(d.Models)
+		s.pause.clients.seed(d.Clients)
+		s.pause.providers.seed(d.Providers)
+		s.pause.models.seed(canonicalModelList(d.Models))
 		if !d.Until.IsZero() && now.After(d.Until) {
 			continue
 		}
@@ -120,10 +121,10 @@ func canonicalModelList(in []string) []string {
 }
 
 func debugSessionMatches(d persistedDebug, client, provider, model string) bool {
-	if len(d.Clients) > 0 && !nameIn(d.Clients, client) {
+	if len(d.Clients) > 0 && !slices.Contains(d.Clients, client) {
 		return false
 	}
-	if len(d.Providers) > 0 && !nameIn(d.Providers, provider) {
+	if len(d.Providers) > 0 && !slices.Contains(d.Providers, provider) {
 		return false
 	}
 	if len(d.Models) > 0 && !modelIn(d.Models, model) {
@@ -139,15 +140,6 @@ func modelIn(list []string, model string) bool {
 	}
 	for _, x := range list {
 		if canonicalModel(x) == want {
-			return true
-		}
-	}
-	return false
-}
-
-func nameIn(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
 			return true
 		}
 	}
@@ -328,35 +320,17 @@ func (s *Server) persistDebugSessions(sessions []persistedDebug) error {
 	if s.pause.persist == nil {
 		return nil
 	}
-	raw, err := json.Marshal(persistedDebugDoc{Sessions: sessions})
-	if err != nil {
-		log.Printf("debug: persist: %v", err)
-		return err
-	}
-	ctx, cancel := s.storeQueryCtx()
-	defer cancel()
-	if err := s.pause.persist.SaveDebugSessions(ctx, raw); err != nil {
-		log.Printf("debug: persist: %v", err)
-		return err
-	}
-	return nil
+	return s.persistOperatorDoc("debug", persistedDebugDoc{Sessions: sessions}, s.pause.persist.SaveDebugSessions)
 }
 
 func (s *Server) persistDebugLatest(snap []persistedDebug, gen uint64) error {
-	for {
-		err := s.persistDebugSessions(snap)
-		s.debug.mu.Lock()
-		if s.debug.persistGen == gen {
-			s.debug.mu.Unlock()
-			if err != nil {
-				return &operatorPersistenceError{err}
-			}
-			return nil
-		}
-		snap = append([]persistedDebug(nil), s.debug.sessions...)
-		gen = s.debug.persistGen
-		s.debug.mu.Unlock()
-	}
+	return persistStableGen(snap, gen, &s.debug.mu,
+		func() uint64 { return s.debug.persistGen },
+		s.persistDebugSessions,
+		func() ([]persistedDebug, uint64) {
+			snap := append([]persistedDebug(nil), s.debug.sessions...)
+			return snap, s.debug.persistGen
+		})
 }
 
 func (s *Server) rearmDebugTimersLocked() {
@@ -430,107 +404,87 @@ func debugDescribe(d persistedDebug) string {
 // the previous values. enabled:false clears everything, or just {"id"} when
 // set. Overlapping filters return 409.
 func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGetPost(w, r) {
+	if !s.operatorStateGet(w, r, s.DebugSnapshot) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		writeOperatorState(w, s.DebugSnapshot(), nil)
-	case http.MethodPost:
-		var body struct {
-			Enabled   *bool           `json:"enabled"`
-			Clients   []string        `json:"clients"`
-			Providers []string        `json:"providers"`
-			Models    []string        `json:"models"`
-			Duration  *string         `json:"duration"`
-			ID        json.RawMessage `json:"id"`
-		}
-		// Surface the strict decoder's cause; io.EOF is the empty-body
-		// command, which falls through to the requirement message below.
-		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if body.Enabled == nil {
-			adminjson.WriteError(w, http.StatusBadRequest, "enabled boolean required")
-			return
-		}
-		id, err := adminjson.OptionalID(body.ID)
-		if err != nil {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if !*body.Enabled {
-			var persistErr error
-			if id != "" {
-				_, persistErr = s.removeDebug(id, time.Time{})
-				log.Printf("debug session %s stopped", id)
-			} else {
-				persistErr = s.applyDebug(nil)
-				log.Printf("debug sessions cleared")
-			}
-			writeOperatorState(w, s.DebugSnapshot(), persistErr)
-			return
-		}
-		hasPrev := id != ""
-		var snap persistedDebug
-		err = s.editDebug(id, func(prev persistedDebug) (persistedDebug, error) {
-			dur := ""
-			if body.Duration != nil {
-				dur = strings.TrimSpace(*body.Duration)
-			} else if hasPrev {
-				dur = prev.Duration
-			}
-			wait, ok := pauseDurations[dur]
-			if !ok {
-				return prev, pauseDurationError()
-			}
-			clients := sanitizeNameList(body.Clients)
-			providers := sanitizeNameList(body.Providers)
-			models := body.Models
-			scopeOmitted := body.Clients == nil && body.Providers == nil && body.Models == nil
-			if hasPrev && scopeOmitted {
-				clients, providers, models = prev.Clients, prev.Providers, prev.Models
-			}
-			snap = persistedDebug{
-				Clients: clients, Providers: providers, Models: models, Duration: dur,
-			}
-			if hasPrev && body.Duration == nil {
-				snap.Until = prev.Until
-			} else if wait > 0 {
-				if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
-					snap.Until = prev.Until
-				} else {
-					snap.Until = time.Now().Add(wait)
-				}
-			}
-			return snap, nil
-		})
-		if err != nil {
-			var persistErr *operatorPersistenceError
-			if errors.As(err, &persistErr) {
-				writeOperatorState(w, s.DebugSnapshot(), persistErr)
-				return
-			}
-			if errors.Is(err, errDebugOverlap) {
-				adminjson.WriteError(w, http.StatusConflict, "debug session overlaps existing session")
-				return
-			}
-			if errors.Is(err, errDebugNotFound) {
-				adminjson.WriteError(w, http.StatusNotFound, "debug session not found")
-				return
-			}
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if hasPrev {
-			log.Printf("debug session updated %s (%s)", id, debugDescribe(snap))
-		} else {
-			log.Printf("debug session started (%s)", debugDescribe(snap))
-		}
-		writeOperatorState(w, s.DebugSnapshot(), nil)
+	var body struct {
+		Enabled   *bool           `json:"enabled"`
+		Clients   []string        `json:"clients"`
+		Providers []string        `json:"providers"`
+		Models    []string        `json:"models"`
+		Duration  *string         `json:"duration"`
+		ID        json.RawMessage `json:"id"`
 	}
+	// Surface the strict decoder's cause; io.EOF is the empty-body
+	// command, which falls through to the requirement message below.
+	if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.Enabled == nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "enabled boolean required")
+		return
+	}
+	id, err := adminjson.OptionalID(body.ID)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !*body.Enabled {
+		if id != "" {
+			s.resetOperatorState(w, s.DebugSnapshot, func() error { _, err := s.removeDebug(id, time.Time{}); return err },
+				"debug session %s stopped", id)
+		} else {
+			s.resetOperatorState(w, s.DebugSnapshot, func() error { return s.applyDebug(nil) },
+				"debug sessions cleared")
+		}
+		return
+	}
+	hasPrev := id != ""
+	var snap persistedDebug
+	err = s.editDebug(id, func(prev persistedDebug) (persistedDebug, error) {
+		dur := ""
+		if body.Duration != nil {
+			dur = strings.TrimSpace(*body.Duration)
+		} else if hasPrev {
+			dur = prev.Duration
+		}
+		wait, ok := pauseDurations[dur]
+		if !ok {
+			return prev, pauseDurationError()
+		}
+		clients := sanitizeNameList(body.Clients)
+		providers := sanitizeNameList(body.Providers)
+		models := body.Models
+		scopeOmitted := body.Clients == nil && body.Providers == nil && body.Models == nil
+		if hasPrev && scopeOmitted {
+			clients, providers, models = prev.Clients, prev.Providers, prev.Models
+		}
+		snap = persistedDebug{
+			Clients: clients, Providers: providers, Models: models, Duration: dur,
+		}
+		if hasPrev && body.Duration == nil {
+			snap.Until = prev.Until
+		} else if wait > 0 {
+			if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
+				snap.Until = prev.Until
+			} else {
+				snap.Until = time.Now().Add(wait)
+			}
+		}
+		return snap, nil
+	})
+	if err != nil {
+		s.writeOperatorEditError(w, err, errDebugOverlap, errDebugNotFound,
+			"debug session overlaps existing session", "debug session not found", s.DebugSnapshot)
+		return
+	}
+	if hasPrev {
+		log.Printf("debug session updated %s (%s)", id, debugDescribe(snap))
+	} else {
+		log.Printf("debug session started (%s)", debugDescribe(snap))
+	}
+	writeOperatorState(w, s.DebugSnapshot(), nil)
 }
 
 // DebugSnapshot builds the GET /admin/debug state document - the single
@@ -541,7 +495,6 @@ func (s *Server) DebugSnapshot() map[string]any {
 	sessions := append([]persistedDebug(nil), s.debug.sessions...)
 	s.debug.mu.Unlock()
 
-	var until any
 	var soonest time.Time
 	now := time.Now()
 	out := make([]map[string]any, 0, len(sessions))
@@ -553,14 +506,6 @@ func (s *Server) DebugSnapshot() map[string]any {
 		active++
 		if !d.Until.IsZero() && (soonest.IsZero() || d.Until.Before(soonest)) {
 			soonest = d.Until
-		}
-		var u any
-		if !d.Until.IsZero() {
-			u = d.Until.UTC().Format(time.RFC3339)
-		}
-		var started any
-		if !d.StartedAt.IsZero() {
-			started = d.StartedAt.UTC().Format(time.RFC3339)
 		}
 		var captures int64
 		if s.pause.persist != nil && d.ID != "" {
@@ -590,24 +535,21 @@ func (s *Server) DebugSnapshot() map[string]any {
 			"providers":  nullSlice(d.Providers),
 			"models":     nullSlice(d.Models),
 			"duration":   d.Duration,
-			"until":      u,
-			"started_at": started,
+			"until":      rfc3339OrNil(d.Until),
+			"started_at": rfc3339OrNil(d.StartedAt),
 			"ran_ms":     ranMs,
 			"captures":   captures,
 		})
 	}
-	if !soonest.IsZero() {
-		until = soonest.UTC().Format(time.RFC3339)
-	}
-	knownModels := s.knownModels()
+	knownModels := s.pause.models.list()
 	state := map[string]any{
 		"ok":              true,
 		"enabled":         active > 0,
 		"sessions":        out,
-		"known_clients":   nullSlice(s.knownClients()),
-		"known_providers": nullSlice(s.knownProviders()),
+		"known_clients":   nullSlice(s.pause.clients.list()),
+		"known_providers": nullSlice(s.pause.providers.list()),
 		"known_models":    nullSlice(knownModels),
-		"until":           until,
+		"until":           rfc3339OrNil(soonest),
 		"ttl":             config.FormatDuration(s.cfg().DebugCaptureTTL),
 		"max_bytes":       config.FormatByteSize(int64(s.cfg().DebugCaptureMaxBytes)),
 	}

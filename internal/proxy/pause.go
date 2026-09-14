@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,20 +118,61 @@ func pauseDurationError() error {
 
 type pauseRuntime struct {
 	persist    pausePersist
-	seenMu     sync.Mutex
-	seen       map[string]struct{}
-	seenProv   map[string]struct{}
-	seenModel  map[string]struct{}
+	clients    nameSet
+	providers  nameSet
+	models     nameSet
 	mu         sync.Mutex
 	holds      []persistedPause
 	timers     map[string]*time.Timer
 	persistGen uint64
 }
 
+// nameSet is one operator-known dimension (clients, providers, canonical
+// models): the names an operator can scope a future hold or debug session
+// to. Empty names are never recorded; the model set stores canonical names,
+// so callers canonicalize before add/seed.
+type nameSet struct {
+	mu    sync.Mutex
+	names map[string]struct{}
+}
+
+// add records one observed name.
+func (n *nameSet) add(name string) {
+	if name == "" {
+		return
+	}
+	n.mu.Lock()
+	if n.names == nil {
+		n.names = make(map[string]struct{})
+	}
+	n.names[name] = struct{}{}
+	n.mu.Unlock()
+}
+
+// seed bulk-records a restored list (durable-store lists, restored holds and
+// sessions).
+func (n *nameSet) seed(names []string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.names == nil {
+		n.names = make(map[string]struct{})
+	}
+	for _, name := range names {
+		if name != "" {
+			n.names[name] = struct{}{}
+		}
+	}
+}
+
+// list returns the known names in lexicographic order.
+func (n *nameSet) list() []string {
+	n.mu.Lock()
+	out := slices.Sorted(maps.Keys(n.names))
+	n.mu.Unlock()
+	return out
+}
+
 func (s *Server) initPause() {
-	s.pause.seen = make(map[string]struct{})
-	s.pause.seenProv = make(map[string]struct{})
-	s.pause.seenModel = make(map[string]struct{})
 	s.pause.timers = make(map[string]*time.Timer)
 	s.initDebug()
 }
@@ -166,17 +209,17 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 	if cs, err := p.ListClients(ctx); err != nil {
 		log.Printf("pause: list clients: %v", err)
 	} else {
-		s.seedSeen(cs)
+		s.pause.clients.seed(cs)
 	}
 	if ps, err := p.ListProviders(ctx); err != nil {
 		log.Printf("pause: list providers: %v", err)
 	} else {
-		s.seedSeenProv(ps)
+		s.pause.providers.seed(ps)
 	}
 	if ms, err := p.ListModels(ctx); err != nil {
 		log.Printf("pause: list models: %v", err)
 	} else {
-		s.seedSeenModel(ms)
+		s.pause.models.seed(canonicalModelList(ms))
 	}
 	raw, err := p.LoadPause(ctx)
 	if err != nil {
@@ -185,9 +228,9 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 		holds := decodePause(raw)
 		kept := holds[:0]
 		for _, h := range holds {
-			s.seedSeen(h.Clients)
-			s.seedSeen(h.KnownAtNew)
-			s.seedSeenProv(h.Providers)
+			s.pause.clients.seed(h.Clients)
+			s.pause.clients.seed(h.KnownAtNew)
+			s.pause.providers.seed(h.Providers)
 			if !toSchedHold(h).Active() {
 				continue
 			}
@@ -204,115 +247,6 @@ func (s *Server) AttachPausePersist(p pausePersist) {
 	}
 	s.attachThrottlePersist(p)
 	s.attachDebugPersist(p)
-}
-
-func (s *Server) seedSeen(cs []string) {
-	s.pause.seenMu.Lock()
-	defer s.pause.seenMu.Unlock()
-	if s.pause.seen == nil {
-		s.pause.seen = make(map[string]struct{})
-	}
-	for _, c := range cs {
-		if c != "" {
-			s.pause.seen[c] = struct{}{}
-		}
-	}
-}
-
-func (s *Server) seedSeenProv(ps []string) {
-	s.pause.seenMu.Lock()
-	defer s.pause.seenMu.Unlock()
-	if s.pause.seenProv == nil {
-		s.pause.seenProv = make(map[string]struct{})
-	}
-	for _, p := range ps {
-		if p != "" {
-			s.pause.seenProv[p] = struct{}{}
-		}
-	}
-}
-
-func (s *Server) noteClient(c string) {
-	if c == "" {
-		return
-	}
-	s.pause.seenMu.Lock()
-	if s.pause.seen == nil {
-		s.pause.seen = make(map[string]struct{})
-	}
-	s.pause.seen[c] = struct{}{}
-	s.pause.seenMu.Unlock()
-}
-
-func (s *Server) noteProvider(p string) {
-	if p == "" {
-		return
-	}
-	s.pause.seenMu.Lock()
-	if s.pause.seenProv == nil {
-		s.pause.seenProv = make(map[string]struct{})
-	}
-	s.pause.seenProv[p] = struct{}{}
-	s.pause.seenMu.Unlock()
-}
-
-func (s *Server) seedSeenModel(ms []string) {
-	s.pause.seenMu.Lock()
-	defer s.pause.seenMu.Unlock()
-	if s.pause.seenModel == nil {
-		s.pause.seenModel = make(map[string]struct{})
-	}
-	for _, m := range ms {
-		if c := canonicalModel(m); c != "" {
-			s.pause.seenModel[c] = struct{}{}
-		}
-	}
-}
-
-func (s *Server) noteModel(m string) {
-	m = canonicalModel(m)
-	if m == "" {
-		return
-	}
-	s.pause.seenMu.Lock()
-	if s.pause.seenModel == nil {
-		s.pause.seenModel = make(map[string]struct{})
-	}
-	s.pause.seenModel[m] = struct{}{}
-	s.pause.seenMu.Unlock()
-}
-
-func (s *Server) knownModels() []string {
-	s.pause.seenMu.Lock()
-	out := make([]string, 0, len(s.pause.seenModel))
-	for m := range s.pause.seenModel {
-		out = append(out, m)
-	}
-	s.pause.seenMu.Unlock()
-	sort.Strings(out)
-	return out
-}
-
-func (s *Server) knownClients() []string {
-	s.pause.seenMu.Lock()
-	out := make([]string, 0, len(s.pause.seen))
-	for c := range s.pause.seen {
-		out = append(out, c)
-	}
-	s.pause.seenMu.Unlock()
-	sort.Strings(out)
-	return out
-}
-
-func (s *Server) knownProviders() []string {
-	s.pause.seenMu.Lock()
-	out := make([]string, 0, len(s.pause.seenProv))
-	for p := range s.pause.seenProv {
-		out = append(out, p)
-	}
-	s.pause.seenMu.Unlock()
-	sort.Strings(out)
-	return out
 }
 
 // defaultPauseCap is the default MaxQueued of a new hold: how many matching
@@ -349,145 +283,125 @@ func (s *Server) PauseStats() scheduler.Stats {
 // with no id and no scope still is. paused:false clears everything,
 // or just {"id"} when set. In-flight requests are never cancelled.
 func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGetPost(w, r) {
+	if !s.operatorStateGet(w, r, s.PauseSnapshot) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	switch r.Method {
-	case http.MethodGet:
-		writeOperatorState(w, s.PauseSnapshot(), nil)
-	case http.MethodPost:
-		var body struct {
-			Paused    *bool           `json:"paused"`
-			All       pauseBool       `json:"all"`
-			New       pauseBool       `json:"new"`
-			Clients   pauseNames      `json:"clients"`
-			Providers pauseNames      `json:"providers"`
-			Duration  *string         `json:"duration"`
-			MaxQueued *int            `json:"max_queued"`
-			ID        json.RawMessage `json:"id"`
+	var body struct {
+		Paused    *bool           `json:"paused"`
+		All       pauseBool       `json:"all"`
+		New       pauseBool       `json:"new"`
+		Clients   pauseNames      `json:"clients"`
+		Providers pauseNames      `json:"providers"`
+		Duration  *string         `json:"duration"`
+		MaxQueued *int            `json:"max_queued"`
+		ID        json.RawMessage `json:"id"`
+	}
+	// Surface the strict decoder's cause; io.EOF is the empty-body
+	// command, which falls through to the requirement message below.
+	if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if body.Paused == nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "paused boolean required")
+		return
+	}
+	id, err := adminjson.OptionalID(body.ID)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if !*body.Paused {
+		if id != "" {
+			s.resetOperatorState(w, s.PauseSnapshot, func() error { return s.removePause(id, time.Time{}) },
+				"proxy resumed hold %s", id)
+		} else {
+			s.resetOperatorState(w, s.PauseSnapshot, func() error { return s.applyHolds(nil) },
+				"proxy resumed (in-flight finish, queued drain)")
 		}
-		// Surface the strict decoder's cause; io.EOF is the empty-body
-		// command, which falls through to the requirement message below.
-		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
+		return
+	}
+	hasPrev := id != ""
+	var snap persistedPause
+	err = s.editPersisted(id, func(prev persistedPause) (persistedPause, error) {
+		dur := ""
+		if body.Duration != nil {
+			dur = strings.TrimSpace(*body.Duration)
+		} else if hasPrev {
+			dur = prev.Duration
 		}
-		if body.Paused == nil {
-			adminjson.WriteError(w, http.StatusBadRequest, "paused boolean required")
-			return
+		wait, ok := pauseDurations[dur]
+		if !ok {
+			return prev, pauseDurationError()
 		}
-		id, err := adminjson.OptionalID(body.ID)
-		if err != nil {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
+		if body.MaxQueued != nil && *body.MaxQueued < 0 {
+			return prev, fmt.Errorf("max_queued must be >= 0")
 		}
-		if !*body.Paused {
-			var persistErr error
-			if id != "" {
-				persistErr = s.removePause(id, time.Time{})
-				log.Printf("proxy resumed hold %s", id)
-			} else {
-				persistErr = s.applyHolds(nil)
-				log.Printf("proxy resumed (in-flight finish, queued drain)")
+		clients := sanitizeNameList(body.Clients)
+		providers := sanitizeNameList(body.Providers)
+		newc := body.New.value
+		scopeOmitted := !body.All.set && !body.New.set && body.Clients == nil && body.Providers == nil
+		var all bool
+		if hasPrev && scopeOmitted {
+			// Replace without restated scope keeps the hold. Compat
+			// {"paused":true} → All is only for a new hold.
+			all, newc = prev.All, prev.New
+			clients, providers = prev.Clients, prev.Providers
+		} else {
+			all = scopeOmitted || body.All.value
+			// An explicit empty / whitespace-only scope is not a
+			// global hold - deny by default.
+			if !all && !newc && len(clients) == 0 && len(providers) == 0 {
+				return prev, fmt.Errorf("all, new, clients, or providers required")
 			}
-			writeOperatorState(w, s.PauseSnapshot(), persistErr)
-			return
+			if all {
+				newc = false
+				clients = nil
+				providers = nil
+			}
 		}
-		hasPrev := id != ""
-		var snap persistedPause
-		err = s.editPersisted(id, func(prev persistedPause) (persistedPause, error) {
-			dur := ""
-			if body.Duration != nil {
-				dur = strings.TrimSpace(*body.Duration)
-			} else if hasPrev {
-				dur = prev.Duration
-			}
-			wait, ok := pauseDurations[dur]
-			if !ok {
-				return prev, pauseDurationError()
-			}
-			if body.MaxQueued != nil && *body.MaxQueued < 0 {
-				return prev, fmt.Errorf("max_queued must be >= 0")
-			}
-			clients := sanitizeNameList(body.Clients)
-			providers := sanitizeNameList(body.Providers)
-			newc := body.New.value
-			scopeOmitted := !body.All.set && !body.New.set && body.Clients == nil && body.Providers == nil
-			var all bool
-			if hasPrev && scopeOmitted {
-				// Replace without restated scope keeps the hold. Compat
-				// {"paused":true} → All is only for a new hold.
-				all, newc = prev.All, prev.New
-				clients, providers = prev.Clients, prev.Providers
-			} else {
-				all = scopeOmitted || body.All.value
-				// An explicit empty / whitespace-only scope is not a
-				// global hold - deny by default.
-				if !all && !newc && len(clients) == 0 && len(providers) == 0 {
-					return prev, fmt.Errorf("all, new, clients, or providers required")
-				}
-				if all {
-					newc = false
-					clients = nil
-					providers = nil
-				}
-			}
-			capn := s.defaultPauseCap()
-			if body.MaxQueued != nil {
-				capn = *body.MaxQueued
-			} else if hasPrev {
-				capn = prev.MaxQueued
-			}
-			snap = persistedPause{
-				ID: newPauseID(), All: all, New: newc, Clients: clients,
-				Providers: providers, Duration: dur, MaxQueued: capn,
-			}
-			if hasPrev {
-				snap.ID = id
-			}
-			if newc {
-				if hasPrev && prev.New {
-					snap.KnownAtNew = prev.KnownAtNew
-				} else {
-					snap.KnownAtNew = s.knownClients()
-				}
-			}
-			if hasPrev && body.Duration == nil {
-				snap.Until = prev.Until
-			} else if wait > 0 {
-				if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
-					snap.Until = prev.Until
-				} else {
-					snap.Until = time.Now().Add(wait)
-				}
-			}
-			return snap, nil
-		})
-		if err != nil {
-			var persistErr *operatorPersistenceError
-			if errors.As(err, &persistErr) {
-				writeOperatorState(w, s.PauseSnapshot(), persistErr)
-				return
-			}
-			if errors.Is(err, scheduler.ErrOverlap) {
-				adminjson.WriteError(w, http.StatusConflict, "pause overlaps existing hold")
-				return
-			}
-			if errors.Is(err, scheduler.ErrHoldNotFound) {
-				adminjson.WriteError(w, http.StatusNotFound, "pause hold not found")
-				return
-			}
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
+		capn := s.defaultPauseCap()
+		if body.MaxQueued != nil {
+			capn = *body.MaxQueued
+		} else if hasPrev {
+			capn = prev.MaxQueued
+		}
+		snap = persistedPause{
+			ID: newPauseID(), All: all, New: newc, Clients: clients,
+			Providers: providers, Duration: dur, MaxQueued: capn,
 		}
 		if hasPrev {
-			log.Printf("proxy pause updated %s (%s)", id, pauseDescribe(snap))
-		} else {
-			log.Printf("proxy paused (%s)", pauseDescribe(snap))
+			snap.ID = id
 		}
-		writeOperatorState(w, s.PauseSnapshot(), nil)
+		if newc {
+			if hasPrev && prev.New {
+				snap.KnownAtNew = prev.KnownAtNew
+			} else {
+				snap.KnownAtNew = s.pause.clients.list()
+			}
+		}
+		if hasPrev && body.Duration == nil {
+			snap.Until = prev.Until
+		} else if wait > 0 {
+			if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
+				snap.Until = prev.Until
+			} else {
+				snap.Until = time.Now().Add(wait)
+			}
+		}
+		return snap, nil
+	})
+	if err != nil {
+		s.writeOperatorEditError(w, err, scheduler.ErrOverlap, scheduler.ErrHoldNotFound,
+			"pause overlaps existing hold", "pause hold not found", s.PauseSnapshot)
+		return
 	}
+	if hasPrev {
+		log.Printf("proxy pause updated %s (%s)", id, pauseDescribe(snap))
+	} else {
+		log.Printf("proxy paused (%s)", pauseDescribe(snap))
+	}
+	writeOperatorState(w, s.PauseSnapshot(), nil)
 }
 
 func sanitizeNameList(in []string) []string {
@@ -495,20 +409,13 @@ func sanitizeNameList(in []string) []string {
 		return nil
 	}
 	seen := make(map[string]struct{}, len(in))
-	var out []string
 	for _, c := range in {
 		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
+		if c != "" {
+			seen[c] = struct{}{}
 		}
-		if _, ok := seen[c]; ok {
-			continue
-		}
-		seen[c] = struct{}{}
-		out = append(out, c)
 	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(seen))
 }
 
 func toSchedHold(h persistedPause) scheduler.Hold {
@@ -634,35 +541,17 @@ func (s *Server) persistHolds(holds []persistedPause) error {
 	if s.pause.persist == nil {
 		return nil
 	}
-	raw, err := json.Marshal(persistedDoc{Holds: holds})
-	if err != nil {
-		log.Printf("pause: persist: %v", err)
-		return err
-	}
-	ctx, cancel := s.storeQueryCtx()
-	defer cancel()
-	if err := s.pause.persist.SavePause(ctx, raw); err != nil {
-		log.Printf("pause: persist: %v", err)
-		return err
-	}
-	return nil
+	return s.persistOperatorDoc("pause", persistedDoc{Holds: holds}, s.pause.persist.SavePause)
 }
 
 func (s *Server) persistLatest(snap []persistedPause, gen uint64) error {
-	for {
-		err := s.persistHolds(snap)
-		s.pause.mu.Lock()
-		if s.pause.persistGen == gen {
-			s.pause.mu.Unlock()
-			if err != nil {
-				return &operatorPersistenceError{err}
-			}
-			return nil
-		}
-		snap = append([]persistedPause(nil), s.pause.holds...)
-		gen = s.pause.persistGen
-		s.pause.mu.Unlock()
-	}
+	return persistStableGen(snap, gen, &s.pause.mu,
+		func() uint64 { return s.pause.persistGen },
+		s.persistHolds,
+		func() ([]persistedPause, uint64) {
+			snap := append([]persistedPause(nil), s.pause.holds...)
+			return snap, s.pause.persistGen
+		})
 }
 
 func (s *Server) rearmTimersLocked() {
@@ -745,7 +634,6 @@ func (s *Server) PauseSnapshot() map[string]any {
 	s.pause.mu.Unlock()
 
 	var clients, providers []string
-	var until any
 	var soonest time.Time
 	outHolds := make([]map[string]any, 0, len(holds))
 	for _, h := range holds {
@@ -757,10 +645,6 @@ func (s *Server) PauseSnapshot() map[string]any {
 		if !h.Until.IsZero() && (soonest.IsZero() || h.Until.Before(soonest)) {
 			soonest = h.Until
 		}
-		var u any
-		if !h.Until.IsZero() {
-			u = h.Until.UTC().Format(time.RFC3339)
-		}
 		outHolds = append(outHolds, map[string]any{
 			"id":           h.ID,
 			"all":          h.All,
@@ -769,13 +653,10 @@ func (s *Server) PauseSnapshot() map[string]any {
 			"providers":    nullSlice(h.Providers),
 			"known_at_new": nullSlice(h.KnownAtNew),
 			"duration":     h.Duration,
-			"until":        u,
+			"until":        rfc3339OrNil(h.Until),
 			"max_queued":   h.MaxQueued,
 			"queued":       s.scheduler.HoldQueued(h.ID),
 		})
-	}
-	if !soonest.IsZero() {
-		until = soonest.UTC().Format(time.RFC3339)
 	}
 	return map[string]any{
 		"ok":                 true,
@@ -783,9 +664,9 @@ func (s *Server) PauseSnapshot() map[string]any {
 		"clients":            nullSlice(sanitizeNameList(clients)),
 		"providers":          nullSlice(sanitizeNameList(providers)),
 		"holds":              outHolds,
-		"known_clients":      nullSlice(s.knownClients()),
-		"known_providers":    nullSlice(s.knownProviders()),
-		"until":              until,
+		"known_clients":      nullSlice(s.pause.clients.list()),
+		"known_providers":    nullSlice(s.pause.providers.list()),
+		"until":              rfc3339OrNil(soonest),
 		"default_max_queued": s.defaultPauseCap(),
 		"queued":             st.Queued,
 	}

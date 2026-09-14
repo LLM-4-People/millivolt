@@ -1,7 +1,8 @@
 // Package sse provides minimal, allocation-conscious parsers for extracting
-// metrics from OpenAI-compatible SSE chat completion streams. Ordinary text
-// chunks are analyzed without allocations; structured metadata is decoded only
-// when needed.
+// metrics from OpenAI-compatible SSE chat completion streams, plus the
+// client-facing frame primitives (frames.go) the proxy renders through.
+// Ordinary text chunks are analyzed without allocations; structured metadata
+// is decoded only when needed.
 //
 // The format we handle:
 //
@@ -26,6 +27,7 @@ package sse
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"time"
 
@@ -138,23 +140,17 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		return
 	}
 
-	// Skip comments and any non-data line. Require the full "data:" prefix
-	// (not just a leading 'd') so a short/garbled upstream line like "data"
-	// or "d" can never slice out of range below. A non-blank, non-data line
+	// Skip comments and any non-data line: a non-blank, non-data line
 	// (e.g. "event:"/"id:"/"retry:") is part of the current event: keep the
 	// accumulated data for it, don't reset.
-	if !bytes.HasPrefix(line, []byte("data:")) {
+	payload, ok := DataPayload(line)
+	if !ok {
 		return
 	}
 
 	// Fast-path: check for the [DONE] sentinel. Tolerate "data:[DONE]" (no
-	// space) and a trailing \r. Skip "data:" + one optional space, then the
-	// payload must be exactly "[DONE]" (modulo \r); anything else (e.g.
-	// "[DONE]extra") falls through to the normal JSON scan.
-	payload := line[len("data:"):]
-	if len(payload) > 0 && payload[0] == ' ' {
-		payload = payload[1:]
-	}
+	// space) and a trailing \r. Anything else (e.g. "[DONE]extra") falls
+	// through to the normal JSON scan.
 	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" {
 		a.terminatorSeen = true
 		return
@@ -179,7 +175,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	hasContent := a.tokenStart(payload) || responsesContentEvent(eventType, payload)
 	hasReasoning := a.reasoningStart(payload) || responsesReasoningEvent(eventType, payload)
 	toolBlock := extractContainer(jsonKey(payload, "tool_calls"), '[', ']')
-	hasToolCall := len(toolBlock) > 0 && skipWS(toolBlock, 1) < len(toolBlock)-1
+	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
@@ -227,7 +223,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 					continue
 				}
 				a.toolCalls++
-				if name := call.Function.Name; name != "" && !containsStr(a.toolNames, name) {
+				if name := call.Function.Name; name != "" && !slices.Contains(a.toolNames, name) {
 					a.toolNames = append(a.toolNames, name)
 				}
 			}
@@ -382,12 +378,9 @@ func responseEventType(payload []byte) string {
 // TerminalLine is the shared terminal-marker gate for analysis and relay
 // hold release. A quoted marker in content is never an event type.
 func TerminalLine(line []byte) bool {
-	if !bytes.HasPrefix(line, []byte("data:")) {
+	payload, ok := DataPayload(line)
+	if !ok {
 		return false
-	}
-	payload := line[len("data:"):]
-	if len(payload) > 0 && payload[0] == ' ' {
-		payload = payload[1:]
 	}
 	return string(bytes.TrimRight(payload, "\r")) == "[DONE]" ||
 		responsesTerminalEvent(responseEventType(payload))
@@ -630,16 +623,6 @@ func responsesContentEvent(eventType string, payload []byte) bool {
 	return false
 }
 
-// skipWS advances past JSON whitespace. Some gateways re-serialize the
-// upstream JSON (Python json.dumps emits "key": "value" with a space after the
-// colon), so value checks must tolerate that whitespace.
-func skipWS(payload []byte, i int) int {
-	for i < len(payload) && (payload[i] == ' ' || payload[i] == '\t' || payload[i] == '\r' || payload[i] == '\n') {
-		i++
-	}
-	return i
-}
-
 // tokenHasNonEmpty reports whether the payload carries `"key"` (exact key, not
 // `"key_suffix"`) with a non-empty, non-null value. The value may be a string
 // ("reasoning_content":"…"), an array ("reasoning_details":[…]), or an object -
@@ -654,7 +637,7 @@ func tokenHasNonEmpty(payload []byte, key string) bool {
 				return true
 			}
 		case '[', '{':
-			i := skipWS(value, 1)
+			i := metrics.SkipSpace(value, 1)
 			if i < len(value) && value[i] != ']' && value[i] != '}' {
 				return true
 			}
@@ -713,16 +696,6 @@ func jsonKey(payload []byte, key string) []byte {
 		return nil
 	}
 	return metrics.JSONKey(payload, key)
-}
-
-// containsStr reports whether s is in list.
-func containsStr(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // extractObject returns the {...} portion of raw starting at the opening

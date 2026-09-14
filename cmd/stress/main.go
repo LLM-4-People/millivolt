@@ -190,10 +190,15 @@ type settings struct {
 	Effective       map[string]any    `json:"effective"`
 }
 
-// Match dev.sh's reserved disposable namespace, including the explicit database
-// override. A saved setting can differ from the running database during restart.
+// devNamespacePath is scripts/dev.sh's reserved disposable namespace prefix
+// for a loopback port, including the explicit database override (a saved
+// setting can differ from the running database during restart).
+func devNamespacePath(port string) string {
+	return "/tmp/millivolt/millivolt-dev-" + port
+}
+
 func validateDevSettings(cfg settings, u *url.URL) error {
-	expected := "/tmp/millivolt/millivolt-dev-" + u.Port()
+	expected := devNamespacePath(u.Port())
 	if cfg.Path != expected+".yaml" || cfg.Overrides["listen"] != u.Host {
 		return errors.New("target is not a scripts/dev.sh private-config instance")
 	}
@@ -243,7 +248,7 @@ func verifyDev(ctx context.Context, c control, u *url.URL) (settings, int, error
 	if err := c.get(ctx, "/admin/config", &cfg); err != nil {
 		return cfg, 0, err
 	}
-	expected := "/tmp/millivolt/millivolt-dev-" + u.Port()
+	expected := devNamespacePath(u.Port())
 	if err := validateDevSettings(cfg, u); err != nil {
 		return cfg, 0, err
 	}

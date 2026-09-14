@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"reflect"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -327,12 +328,7 @@ func checkProvPath(label, slot, name, path string) error {
 // nondeterministic first error when several entries are invalid. Every loop in
 // Validate that can return an error iterates through this.
 func sortedKeys[V any](m map[string]V) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }
 
 // ProviderOverride customizes how the proxy reads usage/cost/cache fields from
@@ -1050,11 +1046,7 @@ func loadYAMLBytes(path string, b []byte) (*Config, []string, error) {
 	if len(present) == 0 {
 		return def, skipped, nil
 	}
-	keys := make([]string, 0, len(present))
-	for key := range present {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(present))
 	var accepted []string
 	for _, key := range keys {
 		if FieldByKey(key) == nil {

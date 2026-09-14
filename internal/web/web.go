@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"maps"
 	"net/http"
 	"path"
 	"slices"
@@ -162,19 +163,6 @@ func rejectUnlessGetHead(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// aggAllow is RFC 9110 Allow for dashboard JSON aggregates. These
-// handlers are GET-only (no HEAD body); do not reuse rejectUnlessGetHead.
-const aggAllow = "GET"
-
-func rejectUnlessGet(w http.ResponseWriter, r *http.Request) bool {
-	if r.Method == http.MethodGet {
-		return true
-	}
-	w.Header().Set("Allow", aggAllow)
-	http.Error(w, `{"error":"GET only"}`, http.StatusMethodNotAllowed)
-	return false
-}
-
 // writeStaticCached serves a precomputed static asset directly - zero
 // per-request sha256, ReadFile, or compression. Shared by every static
 // handler; dynamic HTML/JSON instead use Gzip's live writer with the same
@@ -268,12 +256,7 @@ func Handler(agg *AggAPI) http.Handler {
 // BrandPaths is the origin-root PWA/brand surface registered on the mux so
 // those URLs never fall through to inference.
 func BrandPaths() []string {
-	out := make([]string, 0, len(brandByURL))
-	for p := range brandByURL {
-		out = append(out, p)
-	}
-	slices.Sort(out)
-	return out
+	return slices.Sorted(maps.Keys(brandByURL))
 }
 
 // Brand serves one ungated origin-root brand/PWA asset. Browsers fetch these

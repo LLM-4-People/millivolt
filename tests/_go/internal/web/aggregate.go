@@ -1241,16 +1241,16 @@ func TestHandleLogPage(t *testing.T) {
 	if postRec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST → %d, want 405", postRec.Code)
 	}
-	if postRec.Header().Get("Allow") != aggAllow {
-		t.Fatalf("POST Allow = %q, want %q", postRec.Header().Get("Allow"), aggAllow)
+	if postRec.Header().Get("Allow") != "GET" {
+		t.Fatalf("POST Allow = %q, want %q", postRec.Header().Get("Allow"), "GET")
 	}
 	kpiPost := httptest.NewRecorder()
 	http.HandlerFunc(api.HandleBootstrap).ServeHTTP(kpiPost, httptest.NewRequest(http.MethodPost, "/metrics/bootstrap", nil))
 	if kpiPost.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /metrics/bootstrap → %d, want 405", kpiPost.Code)
 	}
-	if kpiPost.Header().Get("Allow") != aggAllow {
-		t.Fatalf("POST /metrics/bootstrap Allow = %q, want %q", kpiPost.Header().Get("Allow"), aggAllow)
+	if kpiPost.Header().Get("Allow") != "GET" {
+		t.Fatalf("POST /metrics/bootstrap Allow = %q, want %q", kpiPost.Header().Get("Allow"), "GET")
 	}
 
 	// 24 rows older than l24; first page is newest-first and exclusive of the cursor.

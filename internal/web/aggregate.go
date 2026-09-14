@@ -781,7 +781,7 @@ func chartWindowEdges(now, rawFrom int64) (from, step int64, count int) {
 // and the window start is floored onto a step boundary, so bucket t values
 // are clock-aligned START edges (t = from_ms + i*bucket_ms).
 func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGet(w, r) {
+	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
 	winMin, ok := windowParam(r)
@@ -897,7 +897,7 @@ type storageSignal struct {
 // takes no scope parameters. The traffic chart and explorer breakdown keep
 // their own endpoints (the slow full-history scans).
 func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGet(w, r) {
+	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
 	// State and the running asset version must come from the current process.
@@ -949,7 +949,7 @@ func (f scopeFilter) matches(c *contrib) bool {
 	switch f.dim {
 	case "error":
 		for _, e := range c.ent {
-			if strings.Join([]string{e.typ, e.code, e.msg}, "|") == f.id {
+			if errorKey(e) == f.id {
 				return true
 			}
 		}
@@ -1528,7 +1528,7 @@ func (e *explorerFold) payload() explorerPayload {
 // follow the FULL filter set. Every count is
 // since-inception - computed server-side over the durable history.
 func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGet(w, r) {
+	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
 	dim := r.URL.Query().Get("dim")
@@ -1627,7 +1627,7 @@ const (
 // HandleLogPage starts at durable newest, then pages below an exact (time,id)
 // cursor. The ring is arrival-ordered and cannot supply a safe history cutoff.
 func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
-	if !rejectUnlessGet(w, r) {
+	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
 	fs, statusCode, ok := parseScope(r)

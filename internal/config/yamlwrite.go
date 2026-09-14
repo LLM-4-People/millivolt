@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -174,13 +175,8 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 			return nil
 		}
 		b.WriteString(f.Key + ":\n")
-		// Stable order: Go map iteration is random; sort via a slice of keys.
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, label := range keys {
+		// Stable order: Go map iteration is random.
+		for _, label := range slices.Sorted(maps.Keys(m)) {
 			p := m[label]
 			b.WriteString("  " + yamlQuote(label) + ":\n")
 			if len(p.CostKeys) == 0 {
@@ -195,12 +191,7 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 				b.WriteString("    usage_keys: {}\n")
 			} else {
 				b.WriteString("    usage_keys:\n")
-				uks := make([]string, 0, len(p.UsageKeys))
-				for k := range p.UsageKeys {
-					uks = append(uks, k)
-				}
-				sort.Strings(uks)
-				for _, k := range uks {
+				for _, k := range slices.Sorted(maps.Keys(p.UsageKeys)) {
 					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(p.UsageKeys[k]) + "\n")
 				}
 			}
@@ -209,12 +200,7 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 				b.WriteString("    models_keys: {}\n")
 			} else {
 				b.WriteString("    models_keys:\n")
-				mks := make([]string, 0, len(p.ModelsKeys))
-				for k := range p.ModelsKeys {
-					mks = append(mks, k)
-				}
-				sort.Strings(mks)
-				for _, k := range mks {
+				for _, k := range slices.Sorted(maps.Keys(p.ModelsKeys)) {
 					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(p.ModelsKeys[k]) + "\n")
 				}
 			}
@@ -222,12 +208,7 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 				b.WriteString("    headers: {}\n")
 			} else {
 				b.WriteString("    headers:\n")
-				hks := make([]string, 0, len(p.Headers))
-				for k := range p.Headers {
-					hks = append(hks, k)
-				}
-				sort.Strings(hks)
-				for _, k := range hks {
+				for _, k := range slices.Sorted(maps.Keys(p.Headers)) {
 					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(p.Headers[k]) + "\n")
 				}
 			}
@@ -240,12 +221,7 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 			return nil
 		}
 		b.WriteString(f.Key + ":\n")
-		keys := make([]string, 0, len(m))
-		for k := range m {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, from := range keys {
+		for _, from := range slices.Sorted(maps.Keys(m)) {
 			b.WriteString("  " + yamlQuote(from) + ": " + yamlQuote(m[from]) + "\n")
 		}
 		return nil

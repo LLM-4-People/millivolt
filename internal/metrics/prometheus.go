@@ -3,7 +3,9 @@ package metrics
 import (
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -11,7 +13,7 @@ import (
 // HandlePrometheus renders the /metrics/prometheus exposition. It snapshots
 // the ring buffer and emits aggregates. Callers register this on the mux.
 func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
-	if !rejectUnlessGet(w, r) {
+	if !RejectUnlessGet(w, r) {
 		return
 	}
 	// Operator-plane JSON lives behind the credential: the response carries
@@ -97,10 +99,5 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 }
 
 func sortedKeys(m map[string]int) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return slices.Sorted(maps.Keys(m))
 }

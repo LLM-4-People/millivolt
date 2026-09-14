@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -386,28 +387,46 @@ func asStrings(v any) ([]string, error) {
 	}
 }
 
-func asProviders(v any) (map[string]ProviderOverride, error) {
+// strictCoerce owns the Settings-POST coercion skeleton shared by the
+// map/list settings decoders: nil stays nil (the field is absent - no
+// change), an already-typed value passes through verbatim (a typed nil map
+// stays nil - "no change"), and anything else is re-marshaled and strictly
+// decoded with DisallowUnknownFields so a drifted or hostile POST shape can
+// never smuggle unknown fields past the schema. A re-marshaled null or
+// empty collection returns the caller's empty collection - an explicit
+// clear, not an absent field. Callers keep their per-entry validation and
+// error vocabulary.
+func strictCoerce[T any](v any, empty T, emptyLiteral, want, shape string) (T, error) {
 	if v == nil {
-		return nil, nil
+		var zero T
+		return zero, nil
 	}
-	if m, ok := v.(map[string]ProviderOverride); ok {
-		return m, nil
+	if t, ok := v.(T); ok {
+		return t, nil
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
-		return nil, fmt.Errorf("want object")
+		var zero T
+		return zero, errors.New(want)
 	}
-	if string(b) == "null" || string(b) == "{}" {
-		return map[string]ProviderOverride{}, nil
+	if string(b) == "null" || string(b) == emptyLiteral {
+		return empty, nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
-	var m map[string]ProviderOverride
-	if err := dec.Decode(&m); err != nil {
-		return nil, fmt.Errorf("want {label: {cost_keys, usage_keys, models_path, models_keys, headers}}: %w", err)
+	var out T
+	if err := dec.Decode(&out); err != nil {
+		var zero T
+		return zero, fmt.Errorf("%s: %w", shape, err)
 	}
-	if m == nil {
-		m = map[string]ProviderOverride{}
+	return out, nil
+}
+
+func asProviders(v any) (map[string]ProviderOverride, error) {
+	m, err := strictCoerce(v, map[string]ProviderOverride{}, "{}", "want object",
+		"want {label: {cost_keys, usage_keys, models_path, models_keys, headers}}")
+	if err != nil {
+		return nil, err
 	}
 	for label := range m {
 		if strings.TrimSpace(label) == "" {
@@ -423,26 +442,7 @@ func asProviders(v any) (map[string]ProviderOverride, error) {
 // (mode vocabulary, pattern compilability, cap) runs in Validate - the same
 // gate the YAML path passes through.
 func asModelRules(v any) ([]ModelRule, error) {
-	if v == nil {
-		return nil, nil
-	}
-	if rs, ok := v.([]ModelRule); ok {
-		return rs, nil
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("want list")
-	}
-	if string(b) == "null" || string(b) == "[]" {
-		return []ModelRule{}, nil
-	}
-	var rs []ModelRule
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&rs); err != nil {
-		return nil, fmt.Errorf("want [{mode, from, to}]: %w", err)
-	}
-	return rs, nil
+	return strictCoerce(v, []ModelRule{}, "[]", "want list", "want [{mode, from, to}]")
 }
 
 // asAliases coerces the JSON shape of provider_aliases (map of old label →
@@ -450,25 +450,10 @@ func asModelRules(v any) ([]ModelRule, error) {
 // a malformed pair fails the Apply with a clear error instead of silently
 // splitting the label again.
 func asAliases(v any) (map[string]string, error) {
-	if v == nil {
-		return nil, nil
-	}
-	if m, ok := v.(map[string]string); ok {
-		return m, nil
-	}
-	b, err := json.Marshal(v)
+	m, err := strictCoerce(v, map[string]string{}, "{}", "want object",
+		"want {old label: canonical label}")
 	if err != nil {
-		return nil, fmt.Errorf("want object")
-	}
-	if string(b) == "null" || string(b) == "{}" {
-		return map[string]string{}, nil
-	}
-	var m map[string]string
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("want {old label: canonical label}: %w", err)
-	}
-	if m == nil {
-		m = map[string]string{}
+		return nil, err
 	}
 	for from, to := range m {
 		if strings.TrimSpace(from) == "" {
