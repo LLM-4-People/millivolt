@@ -129,31 +129,15 @@ func TestAggregateToolCallsChecked(t *testing.T) {
 	}
 }
 
-// TestAggregateIsErrorSemantics pins the error contract: 429 (flow control)
-// and 499 (the LOCAL client closed the connection - its own cancellation)
-// never count on their own; a genuine failure counts whether it's the final
-// outcome OR an absorbed retry attempt the client never saw.
+// TestAggregateIsErrorSemantics pins the error contract over the shared
+// isErrorCorpus truth table (also feeding the rate-limit suite): 429 (flow
+// control) and 499 (the LOCAL client closed the connection - its own
+// cancellation) never count on their own; a genuine failure counts whether
+// it's the final outcome OR an absorbed retry attempt the client never saw.
 func TestAggregateIsErrorSemantics(t *testing.T) {
-	cases := []struct {
-		name string
-		rec  *Record
-		want bool
-	}{
-		{"final 200, no attempts", &Record{StatusCode: 200}, false},
-		{"final 429 rate limit", &Record{StatusCode: 429, ErrorType: "rate_limit_error", RateLimited: true}, false},
-		{"final 499 client closed", &Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true}, false},
-		{"final 499 after an absorbed 5xx", &Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, Attempts: []RetryAttempt{{StatusCode: 503}}}, true},
-		{"final 500", &Record{StatusCode: 500}, true},
-		{"final 502", &Record{StatusCode: 502}, true},
-		{"final 400 (4xx other than 429)", &Record{StatusCode: 400}, true},
-		{"structured error, status 0", &Record{StatusCode: 0, ErrorType: "upstream_unreachable"}, true},
-		{"recovered after absorbed 5xx", &Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 502}}}, true},
-		{"recovered after absorbed 429 only", &Record{StatusCode: 200, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 429, ErrorType: "rate_limit"}}}, false},
-		{"final 429 after an absorbed 5xx", &Record{StatusCode: 429, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 503}}}, true},
-	}
-	for _, tc := range cases {
-		if got := tc.rec.IsError(); got != tc.want {
-			t.Errorf("%s: IsError() = %v, want %v", tc.name, got, tc.want)
+	for _, tc := range isErrorCorpus {
+		if got := tc.rec.IsError(); got != tc.wantErr {
+			t.Errorf("%s: IsError() = %v, want %v", tc.name, got, tc.wantErr)
 		}
 	}
 }

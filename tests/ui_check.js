@@ -587,6 +587,47 @@ async function main() {
   check('tick replay of the same record never duplicates the row', rows().length === 4);
   w.fetch = origTick;
 
+  // ---- test 7d: selection identity survives re-render ticks ----
+  // The drawer's selection (drawerId) owns both the drawer's content and
+  // the row highlight. Two re-render paths must keep the selection on the
+  // same request: the lifecycle finalization that replaces the selected
+  // row's own DOM node in place, and the full resync (renderAll re-renders
+  // drawer AND log together).
+  {
+    const expandingRows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row')]
+      .filter(tr => tr.classList.contains('expanding'));
+    const selRec = { ...mkRec('sel-live', 200, 1700000104000) };
+    delete selRec.status_code;
+    fire('begin', { phase: 'begin', record: selRec, in_flight: 1 });
+    await sleep(20); // the live row paints on the coalesced render
+    w.openDrawer('sel-live');
+    check('opening a request row selects it in the drawer and highlights exactly its row',
+      d.getElementById('drawer').classList.contains('open') &&
+        d.getElementById('drawer-body').textContent.includes('sel-live') &&
+        expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
+    const nodeBefore = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
+    fire('end', { phase: 'end', record: { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }, in_flight: 0 });
+    await sleep(20);
+    const nodeAfter = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
+    check('the selected row keeps its highlight when its own node is re-rendered',
+      nodeBefore && nodeAfter && nodeBefore !== nodeAfter &&
+        nodeAfter.classList.contains('expanding') &&
+        expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live' &&
+        d.getElementById('drawer').classList.contains('open'));
+    fire('snapshot', { feed_id: 'feedB', seq: 4, oldest_seq: 1, incremental: false,
+      records: [mkRec('fresh1', 200, 1700000100000), mkRec('fresh2', 200, 1700000101000),
+        mkRec('fresh3', 200, 1700000102000), mkRec('fresh4', 200, 1700000103000),
+        { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }],
+      counters: { in_flight: 0, total_requests: 5, total_errors: 0 } });
+    await sleep(20);
+    check('a full resync re-renders drawer and log from the same selection identity',
+      d.getElementById('drawer').classList.contains('open') &&
+        d.getElementById('drawer-body').textContent.includes('sel-live') &&
+        d.getElementById('drawer-body').textContent.includes('999ms') &&
+        expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
+    w.closeDrawer();
+  }
+
 
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');
@@ -627,6 +668,33 @@ async function main() {
   check('opening debug closes logs', logsMenu.hidden);
   w.toggleDebugMenu({ stopPropagation() {} });
   check('debug menu closes on second toggle', debugMenu.hidden);
+  // Stamped-first debug priority: a request row's dbg pill must edit the
+  // session the server STAMPED on the record (debug_session_id), even when
+  // another live session's scope would also match the record. The stamp is
+  // the authoritative match; the raw-scope heuristic only serves records
+  // the stamp does not reach.
+  fire('record', { ...mkRec('dbg-stamped-rec'), debug: true, debug_session_id: 'dbg-stamped' }, '5');
+  await sleep(20); // the record row paints on the coalesced live render
+  check('a stamped debug record renders the dbg pill on its row',
+    !!d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]'));
+  w.eval("debugState = {...debugState, enabled: true, sessions: [" +
+    "{id: 'dbg-stamped', clients: ['other-client'], duration: '15m'}," +
+    "{id: 'dbg-scope', clients: ['c'], duration: '1h'}]}");
+  d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]').click();
+  {
+    const holds = [...d.querySelectorAll('#debug-menu .pause-hold')];
+    const editing = holds.filter(h => h.classList.contains('editing'));
+    check('the dbg pill edits the stamped session, not a scope-matching one',
+      !debugMenu.hidden && holds.length === 2 && editing.length === 1 &&
+        editing[0].querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-stamped' &&
+        holds.some(h => !h.classList.contains('editing') &&
+          h.querySelector('[data-operator="debug-edit"]').dataset.value === 'dbg-scope') &&
+        d.querySelector('#debug-menu .clear-menu-hd').textContent === 'Edit session…');
+  }
+  w.resetDebugMenuForm();
+  w.toggleDebugMenu({ stopPropagation() {} });
+  w.eval("debugState = {...debugState, enabled: false, sessions: []}");
+  check('debug menu closes after the stamped edit', debugMenu.hidden);
   const canonCases = [
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
@@ -1372,6 +1440,50 @@ async function main() {
   await sleep(50);
   check('clearing the scope restores the unfiltered window', rows().length === 60);
 
+  // ---- test 10c-bis: per-view history rows ----
+  // A selected view owns its durable history rows: the scoped window must
+  // page the store under its own scope and render exactly its own rows (its
+  // scoped ring rows plus its archive page, never the default view's rows),
+  // and a view's history must not leak back into the default window.
+  {
+    const mixed = [
+      mkRec('p-row0', 200, 1700000000000),
+      { ...mkRec('sa-ring0', 200, 1700000100000), provider: 'scope-a.example' },
+      mkRec('p-row1', 200, 1700000200000),
+      { ...mkRec('sa-ring1', 200, 1700000300000), provider: 'scope-a.example' },
+      mkRec('p-row2', 200, 1700000400000),
+      { ...mkRec('sa-ring2', 200, 1700000500000), provider: 'scope-a.example' },
+      mkRec('p-row3', 200, 1700000600000),
+    ];
+    fire('snapshot', { feed_id: 'feedB', seq: 90, oldest_seq: 1, incremental: false,
+      records: mixed, counters: { in_flight: 0, total_requests: 7, total_errors: 0 } });
+    await sleep(30);
+    check('the mixed ring paints the default window', rows().length === 7);
+    logPage = {
+      records: [
+        { ...mkRec('sa-old1', 200, 1699999900000), provider: 'scope-a.example' },
+        { ...mkRec('sa-old0', 200, 1699999800000), provider: 'scope-a.example' },
+      ],
+      more: false, cursor_ms: 1699999800000,
+    };
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 200; } });
+    w.navigateTo([{ dim: 'provider', id: 'scope-a.example' }]);
+    await sleep(50);
+    const scopedIds = rows().map(tr => tr.dataset.id);
+    check('the scoped view renders its own ring rows plus its own history rows',
+      scopedIds.join() === 'sa-ring2,sa-ring1,sa-ring0,sa-old1,sa-old0' &&
+        w.eval('logArchive.length') === 2);
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
+    logPage = { records: [], more: false, cursor_ms: 0 };
+    w.navigateTo([]);
+    await sleep(50);
+    check('the default view renders its own ring rows without the scope\'s history',
+      w.eval('logArchive.length') === 0 && rows().length === 7 &&
+        rows().some(tr => tr.dataset.id === 'p-row3') &&
+        rows().some(tr => tr.dataset.id === 'sa-ring2') &&
+        !rows().some(tr => tr.dataset.id.startsWith('sa-old')));
+  }
+
   // ---- test 10d: the request log nests by local calendar day - a divider
   // rides above each day's first row, moves with live inserts, and never
   // duplicates or orphans across full resyncs. Fixtures anchor to local
@@ -1441,6 +1553,24 @@ async function main() {
   })());
   check('explorer cost uses cents with a unit-neutral per-token label',
     w.kpiBlend({cost_per_mtok: 0.025}).includes('2.5¢') && !w.kpiBlend({cost_per_mtok: 0.025}).includes('$/Mtok'));
+  // shareText owns every summary/plotted share row: a zero denominator means
+  // the ratio was never measured, so nothing may render - never a fabricated
+  // share (the underlying pctCap on a zero b would floor an infinite ratio to
+  // a false "99.9%").
+  check('shareText renders a measured share and guards the zero denominator',
+    w.eval('shareText(60, 100, "in")') === '60.0% in' &&
+      w.eval('shareText(50, 0, "in")') === null &&
+      w.eval('shareText(0, 0, "in")') === null);
+  // hexA blends only exact 6-digit hex colors; anything else (a CSS var
+  // reference, a named color, a 3-digit hex, an empty string from a failed
+  // palette read) must pass through unchanged so a malformed value can never
+  // become rgba(NaN,NaN,NaN,...).
+  check('hexA blends real hex and passes non-hex colors through unchanged',
+    w.hexA('#5b8cff', 0.5) === 'rgba(91,140,255,0.5)' &&
+      w.hexA('var(--accent)', 0.5) === 'var(--accent)' &&
+      w.hexA('red', 0.8) === 'red' &&
+      w.hexA('#fff', 0.8) === '#fff' &&
+      w.hexA('', 0.8) === '');
   const BUCKET_MS = 120000;
   const mkChart = () => ({
     from_ms: CHART_FROM, now_ms: CHART_FROM + 30 * BUCKET_MS, bucket_ms: BUCKET_MS,
@@ -2104,6 +2234,26 @@ async function main() {
     return wide.includes('<span class="v-in">1M</span><span class="pair-sep">/</span><span class="v-out">13</span>') &&
       !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% in</span>');
   })());
+  // The tokens tile's mini-chart: one self-scaled spark line per metric half
+  // (in accent2, out ok, cache muted) over the kept buckets. Crafted series
+  // with distinct shapes pin that each rendered line traces its OWN input
+  // series, in its half's palette color.
+  check('the tokens tile spark renders the crafted in/out/cache series', (() => {
+    const saved = w.eval('JSON.stringify([chartAgg.buckets[3], chartAgg.buckets[5]])');
+    w.eval('chartAgg.buckets[3].in = 10; chartAgg.buckets[3].out = 60; chartAgg.buckets[3].cache = 30;' +
+      'chartAgg.buckets[5].in = 60; chartAgg.buckets[5].out = 10; chartAgg.buckets[5].cache = 30;');
+    const t = w.eval('chartTotals()');
+    w.eval('const b = JSON.parse(' + JSON.stringify(saved) + '); chartAgg.buckets[3] = b[0]; chartAgg.buckets[5] = b[1];');
+    const seg = t.slice(t.indexOf('data-tile="tokens"'), t.indexOf('data-tile="cost"'));
+    const byColor = {};
+    for (const [, dattr, stroke] of seg.matchAll(/<path d="([^"]+)" fill="none" stroke="([^"]+)"/g)) byColor[stroke] = dattr;
+    // kept buckets 3 and 5: in [10, 60] rises, out [60, 10] falls, cache
+    // [30, 30] is flat - each line can only come from its own series.
+    return Object.keys(byColor).length === 3 &&
+      byColor[w.eval('COLORS.accent2')] === 'M0.0 14.0L72.0 0.0' &&
+      byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 14.0' &&
+      byColor[w.eval('COLORS.muted')] === 'M0.0 14.0L72.0 14.0';
+  })());
   check('every summary tile is a toggle and carries one multi-line spark',
     totalsOv.split('<svg class="spark"').length === 6 &&
       (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 5 &&
@@ -2138,6 +2288,27 @@ async function main() {
     return Object.keys(halves).length === 9 && wired &&
       emitted.length === 9 && emitted.every(cls => halves[cls]);
   })());
+  // Real palette pin: the registry test above proves the half class pairs
+  // with its palette KEY; this proves the VALUES. jsdom's CSSOM resolves the
+  // inlined dashboard.css :root custom properties, so the palette registry
+  // the tiles and sparks consume (COLORS, read at boot from the computed
+  // style) must hold the real declared values - not the empty strings a
+  // failed resolution or a renamed property would leave behind - and every
+  // rendered spark must stroke one of those declared colors. Only a run
+  // against the live style sheet can see this; the repository_check mirror
+  // detector only compares static file text.
+  check('the tile palette registry holds the real declared :root palette values', (() => {
+    const cs = w.getComputedStyle(d.documentElement);
+    const keys = w.eval('Object.keys(COLORS).filter(k => k !== "grid")');
+    const declared = Object.fromEntries(keys.map(k => [k, cs.getPropertyValue('--' + k).trim()]));
+    const hex = v => /^#[0-9a-f]{6}$/i.test(v);
+    const halves = w.eval('TILE_HALVES');
+    const consumed = Object.entries(halves).every(([, key]) =>
+      hex(declared[key]) && w.eval(`COLORS[${JSON.stringify(key)}]`) === declared[key]);
+    const strokes = [...totalsOv.matchAll(/ stroke="([^"]+)"/g)].map(m => m[1]);
+    return keys.length === 9 && Object.keys(halves).length === 9 && consumed &&
+      strokes.length > 0 && strokes.every(s => Object.values(declared).includes(s));
+  })());
   check('the summary hides the bucket-cadence context row',
     d.getElementById('chart-context').hidden &&
       w.eval('chartView.preset') === 'overview');
@@ -2154,6 +2325,26 @@ async function main() {
     w.setChartPct('95');
     return t50.includes('220ms') && t50.includes('202.75') &&
       w.eval('chartPlan().meta.length') === 0;
+  })());
+  // The timing tile's spark lines draw the per-bucket 95TH-percentile series
+  // (CHART_TILE_PCT), independent of the percentile dropdown. Crafted
+  // triples where p50, p95 and p99 have different shapes pin the selection:
+  // only the p95 series produces the drawn paths.
+  check('the timing tile spark selects the per-bucket p95 series', (() => {
+    const saved = w.eval('JSON.stringify([chartAgg.buckets[3], chartAgg.buckets[5]])');
+    w.eval('chartAgg.buckets[3].ttft = [5, 30, 5]; chartAgg.buckets[3].tps = [10, 60, 10];' +
+      'chartAgg.buckets[5].ttft = [30, 5, 5]; chartAgg.buckets[5].tps = [60, 10, 10];');
+    const t = w.eval('chartTotals()');
+    w.eval('const b = JSON.parse(' + JSON.stringify(saved) + '); chartAgg.buckets[3] = b[0]; chartAgg.buckets[5] = b[1];');
+    const seg = t.slice(t.indexOf('data-tile="timing"'));
+    const paths = [...seg.matchAll(/<path d="([^"]+)" fill="none" stroke="([^"]+)"/g)];
+    // kept buckets 3 and 5: the p95 triples ([30, 5] ttft, [60, 10] tps) are
+    // falling lines, while p50 ([5, 30] / [10, 60]) rises and p99 ([5, 5] /
+    // [10, 10]) is flat - the drawn shapes can only be the 95th percentile.
+    return paths.length === 2 &&
+      paths.every(([, dattr]) => dattr === 'M0.0 0.0L72.0 14.0') &&
+      paths.some(([, , stroke]) => stroke === w.eval('COLORS.accent')) &&
+      paths.some(([, , stroke]) => stroke === w.eval('COLORS.ok'));
   })());
   // Tile toggling: the legend's contract over tile ids. A hidden tile keeps
   // its grid cell as a label-only stub, so the strip never rewraps.
@@ -2221,6 +2412,18 @@ async function main() {
     check('drain step shows the live drain window',
       [...d.querySelectorAll('#restart-steps .rs-step')][1].classList.contains('active') &&
       [...d.querySelectorAll('#restart-steps .rs-step')][1].querySelector('.rs-sub').textContent.includes('/'));
+    // The deadline text itself derives from the status fields: elapsed
+    // seconds over the configured drain_timeout_ms, rounded to whole
+    // seconds. A zero timeout means the server waits indefinitely and must
+    // render no deadline at all.
+    check('the drain deadline renders the exact elapsed/timeout text',
+      [...d.querySelectorAll('#restart-steps .rs-step')][1].querySelector('.rs-sub').textContent === '5s / 10m');
+    w.renderRestartSteps({ rank: 1, phase: 'draining', error: '', drain_timeout_ms: 600000, drain_elapsed_ms: 30500 });
+    check('the drain deadline rounds elapsed milliseconds up to whole seconds',
+      [...d.querySelectorAll('#restart-steps .rs-step')][1].querySelector('.rs-sub').textContent === '31s / 10m');
+    w.renderRestartSteps({ rank: 1, phase: 'draining', error: '', drain_timeout_ms: 0 });
+    check('an unbounded drain renders no deadline text',
+      ![...d.querySelectorAll('#restart-steps .rs-step')].some(s => s.querySelector('.rs-sub')));
     w.renderRestartSteps({ rank: 0, phase: 'idle', error: 'build failed: boom' });
     check('a failed run marks its step red', !!d.querySelector('#restart-steps .rs-step.failed'));
     w.renderRestartSteps(null);
