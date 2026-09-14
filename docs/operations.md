@@ -381,7 +381,9 @@ packed. Picking a file first inspects the archive: created time, size,
 request span, and each config key as default vs modified vs the live file.
 Config **replace** writes the backup document. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
-stay unless the backup also customized them. Database
+stay unless the backup also customized them. Either way the restored config
+hot-applies through the same owner as a Settings save, is reflected in
+`last_reload`, and reports restart-required keys. Database
 **replace** stages a pending snapshot next to `db_path` and waits for process
 restart; Open admits the pending file only after it checks again. Database
 **merge** inserts request ids that are not already in the live store
@@ -439,9 +441,10 @@ visibility; see GitHub's
 
 ## Reload, restart and shutdown
 
-`SIGHUP`, `POST /admin/reload`, and a successful Settings save use the same
-hot-reload owner. Invalid reloads preserve the running config. Reloadable
-transport/scheduler settings affect new work without closing active transports.
+`SIGHUP`, `POST /admin/reload`, a successful Settings save, and a backup
+config restore use the same hot-reload owner. Invalid reloads preserve the
+running config. Reloadable transport/scheduler settings affect new work
+without closing active transports.
 
 Startup-bound consumers keep their boot settings until restart. Settings reports
 `restart_required`; its effective configuration snapshot can contain new values
