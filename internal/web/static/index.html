@@ -291,6 +291,10 @@
           <select id="chart-preset" aria-label="Chart metric" title="Chart metric"></select>
           <select id="chart-window" aria-label="Chart time window" title="Chart time window"></select>
           <select id="chart-pct" aria-label="Percentile" title="Percentile applied to speed and latency" hidden></select>
+          <div class="metrics-pick" id="chart-metrics" hidden>
+            <button type="button" id="chart-metrics-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="chart-metrics-menu" aria-label="Summary metrics"></button>
+            <div class="metrics-menu" id="chart-metrics-menu" role="menu" aria-label="Summary metrics" hidden></div>
+          </div>
         </div>
       </div>
       <div class="chart-totals" id="chart-totals" aria-live="polite"></div>

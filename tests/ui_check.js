@@ -2196,10 +2196,11 @@ async function main() {
     w.eval('chartView.hidden.latency.join() === "ttft"') &&
     JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden.latency.join() === 'ttft');
   w.eval("chartView.preset = 'overview'; chartView.hidden = {};");
-  w.toggleSummaryTile('cost');
-  check('a tile toggle hides its tile under the overview key, not the preset id',
+  w.toggleSummaryMetric('cost');
+  check('a picker flip hides its metric under the overview key, not the preset id',
     w.eval('chartView.hidden.overview.join() === "cost"') &&
     (JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden || {}).overview.join() === 'cost');
+  w.toggleSummaryMetric('cost');
   w.eval("chartView.hidden = {}; chartView.preset = 'traffic';");
   w.eval("chartView.hidden = {}; chartView.window = 'all'; chartView.pct = 95; fillChartControls()");
   for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency', 'overview']) {
@@ -2635,9 +2636,10 @@ async function main() {
   // value first, then its measured companion fact, then its per-bucket
   // evolution sparkline; the merged timing tile carries the server's period
   // averages with each metric's low-high sample range - no percentile
-  // selector or visible pXX label. Tiles follow the legend's toggle
-  // contract: click hides (a label-only stub keeps the grid cell), the
-  // choice persists in dash.chart, unknown ids drop on load.
+  // selector or visible pXX label. The tiles are plain readouts; the
+  // metrics picker at the card head owns what shows through the legend's
+  // hidden-set contract: flips persist in dash.chart, hidden metrics leave
+  // the band, unknown ids drop on load.
   w.eval(`
     chartAgg = window.__cp = ${JSON.stringify(mkChart())};
     chartView.preset = 'overview'; chartView.hidden = {}; chartView.pct = 95;
@@ -2673,7 +2675,7 @@ async function main() {
   check('the tokens triple reads in/out/cached in the plot colors with one share row',
     totalsOv.includes('tokens in/out/cached</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span><span class="pair-sep">/</span><span class="v-cache">60</span>') &&
       totalsOv.includes('<span class="chart-sub">75.0% in · 40.0% of in</span>') &&
-      !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile="cache"'));
+      !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile'));
   check('overview totals annotate the server blended price',
     totalsOv.includes('$12.5 /Mtok') &&
     !totalsOv.includes('/ req'));
@@ -2698,7 +2700,7 @@ async function main() {
       'chartAgg.buckets[5].in = 60; chartAgg.buckets[5].out = 10; chartAgg.buckets[5].cache = 30;');
     const t = w.eval('chartTotals()');
     w.eval('const b = JSON.parse(' + JSON.stringify(saved) + '); chartAgg.buckets[3] = b[0]; chartAgg.buckets[5] = b[1];');
-    const seg = t.slice(t.indexOf('data-tile="tokens"'), t.indexOf('data-tile="cost"'));
+    const seg = t.slice(t.indexOf('title="tokens in/out/cached'), t.indexOf('title="cost'));
     const byColor = {};
     for (const [, dattr, stroke] of seg.matchAll(/<path d="([^"]+)" fill="none" stroke="([^"]+)"/g)) byColor[stroke] = dattr;
     // kept buckets 3 and 5: in [10, 60] rises, out [60, 10] falls, cache
@@ -2708,18 +2710,20 @@ async function main() {
       byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 14.0' &&
       byColor[w.eval('COLORS.muted')] === 'M0.0 14.0L72.0 14.0';
   })());
-  check('every summary tile is a toggle and carries one multi-line spark',
-    totalsOv.split('<svg class="spark"').length === 6 &&
+  check('every summary tile is a plain readout carrying one multi-line spark',
+    (totalsOv.match(/class="chart-total"/g) || []).length === 5 &&
+      totalsOv.split('<svg class="spark"').length === 6 &&
       (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 5 &&
       !totalsOv.includes('spark-row') &&
-      (totalsOv.match(/data-tile="/g) || []).length === 5 &&
+      !totalsOv.includes('role="button"') &&
+      !totalsOv.includes('data-tile') &&
       !totalsOv.includes('NaN'));
   check('tile sparks span kept buckets only, one self-scaled line per half', (() => {
     // The fixture carries traffic in exactly two buckets (3 and 5), so each
     // spark line over the kept buckets has one M + one L command; the raw
     // ladder would draw ~30. The requests tile draws two lines (requests +
     // token volume) in the pair halves' colors.
-    const seg = totalsOv.slice(totalsOv.indexOf('data-tile="req"'), totalsOv.indexOf('data-tile="tokens"'));
+    const seg = totalsOv.slice(totalsOv.indexOf('title="requests / tokens'), totalsOv.indexOf('title="tokens in/out/cached'));
     const kept = w.eval('chartAgg.buckets.filter(b => b.req > 0).length');
     const paths = (seg.match(/<path /g) || []).length;
     const cmds = (seg.match(/[ML](?=[0-9])/g) || []).length;
@@ -2773,23 +2777,22 @@ async function main() {
     return null;
   };
   // Summary-blend pin: the tiles-only preset replaces the boxed tile chrome
-  // with the KPI band's cell language (the old explorer-style card + lift
-  // contract for these tiles is retired with that change; the explorer
-  // category tile keeps its own card language). The override must (a)
-  // declare the exact wash .kpi:hover declares - one hover reaction across
-  // the top band and the summary tiles, (b) keep the per-tile box gone
-  // (background none, hairline left border, first cell open) so cells read
-  // as blended readouts, not nested cards, and (c) close the band through
-  // the shared tick strip like the KPI band instead of a hard rule.
+  // with the KPI band's cell language (the tiles are plain readouts now -
+  // the metrics picker owns what shows - so the old hover lift and toggle
+  // affordance rules are retired with it; the explorer category tile keeps
+  // its own card language). The override must (a) keep the per-tile box
+  // gone (background none, hairline left border, first cell open) so cells
+  // read as blended readouts, not nested cards, (b) close the band through
+  // the shared tick strip like the KPI band instead of a hard rule, and
+  // (c) leave no interactive tile rule behind - a reintroduced
+  // role="button" affordance redds here without a browser.
   check('the summary tiles blend into the card like the KPI band cells', (() => {
-    const ov = firstCSSRule('.traffic-card.tiles-only .chart-total[role="button"]:hover');
-    const kpi = firstCSSRule('.kpi:hover');
     const flat = firstCSSRule('.traffic-card.tiles-only .chart-total');
     const first = firstCSSRule('.traffic-card.tiles-only .chart-total:first-child');
     const strip = firstCSSRule('.traffic-card.tiles-only .chart-totals::after');
-    return !!ov && !!kpi && !!flat && !!first && !!strip &&
-      ov.style.getPropertyValue('background') !== '' &&
-      ov.style.getPropertyValue('background') === kpi.style.getPropertyValue('background') &&
+    return !!flat && !!first && !!strip &&
+      !firstCSSRule('.chart-total[role="button"]') &&
+      !firstCSSRule('.chart-total.off') &&
       flat.style.getPropertyValue('background') === 'none' &&
       flat.style.getPropertyValue('border-radius') === '0px' &&
       flat.style.getPropertyValue('border-left') !== '' &&
@@ -2880,7 +2883,7 @@ async function main() {
       'chartAgg.buckets[5].ttft = [30, 5, 5]; chartAgg.buckets[5].tps = [60, 10, 10];');
     const t = w.eval('chartTotals()');
     w.eval('const b = JSON.parse(' + JSON.stringify(saved) + '); chartAgg.buckets[3] = b[0]; chartAgg.buckets[5] = b[1];');
-    const seg = t.slice(t.indexOf('data-tile="timing"'));
+    const seg = t.slice(t.indexOf('title="avg latency / speed'));
     const paths = [...seg.matchAll(/<path d="([^"]+)" fill="none" stroke="([^"]+)"/g)];
     // kept buckets 3 and 5: the p95 triples ([30, 5] ttft, [60, 10] tps) are
     // falling lines, while p50 ([5, 30] / [10, 60]) rises and p99 ([5, 5] /
@@ -2890,22 +2893,56 @@ async function main() {
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.accent')) &&
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.ok'));
   })());
-  // Tile toggling: the legend's contract over tile ids. A hidden tile keeps
-  // its grid cell as a label-only stub, so the strip never rewraps.
-  w.eval('toggleSummaryTile("tokens")');
+  // The metrics picker: the card-head trigger opens the menu (the prov-menu
+  // pattern), rows flip the same dash.chart hidden set, hidden metrics leave
+  // the band (no stub - the grid reflows), and the trigger's count and
+  // accessible name always tell the truth. The menu stays open across row
+  // flips - it is multi-select - and a flip must not rebuild the rows, so
+  // an open menu never loses focus.
+  const mBtn = d.getElementById('chart-metrics-btn');
+  const mMenu = d.getElementById('chart-metrics-menu');
+  check('the picker control shows for the summary with all rows checked and a truthful count',
+    !d.getElementById('chart-metrics').hidden &&
+      mBtn.getAttribute('aria-haspopup') === 'menu' &&
+      [...mMenu.querySelectorAll('.metrics-row')].map(r => r.dataset.metric).join() === 'req,tokens,cost,health,timing' &&
+      [...mMenu.querySelectorAll('.metrics-row')].every(r => r.getAttribute('aria-checked') === 'true' && r.querySelector('.mp-check').textContent === '✓') &&
+      d.getElementById('chart-metrics-count').textContent === '5/5' &&
+      mBtn.getAttribute('aria-label') === 'Summary metrics: 5 of 5 shown');
+  mBtn.click();
+  check('the picker trigger opens the menu and focuses its first row',
+    !mMenu.hidden && mBtn.getAttribute('aria-expanded') === 'true' &&
+      d.activeElement === mMenu.querySelector('.metrics-row'));
+  w.eval('window.__mrow0 = document.getElementById("chart-metrics-menu").querySelector(".metrics-row")');
+  const tokRow = [...mMenu.querySelectorAll('.metrics-row')].find(r => r.dataset.metric === 'tokens');
+  tokRow.click();
   const totalsHidden = w.eval('chartTotals()');
-  check('hiding a tile leaves a label-only stub and never drops the cell',
-    (totalsHidden.match(/class="chart-total/g) || []).length === 5 &&
-    totalsHidden.includes('class="chart-total off" role="button" tabindex="0" data-tile="tokens" aria-pressed="false"') &&
-    !totalsHidden.includes('75.0% in') && w.eval('chartView.hidden.overview.join()') === 'tokens');
-  check('toggle round-trips and unknown tile ids never enter hidden state', (() => {
-    w.eval('toggleSummaryTile("bogus")');
-    const kept = w.eval('chartView.hidden.overview.join()') === 'tokens';
-    w.eval('toggleSummaryTile("tokens")');
-    const restored = w.eval('chartTotals()').includes('75.0% in') &&
-      w.eval('(chartView.hidden.overview || []).length') === 0;
-    return kept && restored;
-  })());
+  check('a picker flip drops the tile from the band and updates row, count and name',
+    (totalsHidden.match(/class="chart-total"/g) || []).length === 4 &&
+      !totalsHidden.includes('title="tokens in/out/cached') && !totalsHidden.includes('75.0% in') &&
+      tokRow.getAttribute('aria-checked') === 'false' && tokRow.querySelector('.mp-check').textContent === '' &&
+      d.getElementById('chart-metrics-count').textContent === '4/5' &&
+      mBtn.getAttribute('aria-label') === 'Summary metrics: 4 of 5 shown' &&
+      !mMenu.hidden && w.eval('chartView.hidden.overview.join()') === 'tokens' &&
+      w.eval('window.__mrow0 === document.getElementById("chart-metrics-menu").querySelector(".metrics-row")'));
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+  check('Escape closes the menu and returns focus to the trigger',
+    mMenu.hidden && mBtn.getAttribute('aria-expanded') === 'false' && d.activeElement === mBtn);
+  mBtn.click();
+  check('reopening the picker carries the stored selection',
+    !mMenu.hidden && tokRow.getAttribute('aria-checked') === 'false' &&
+      d.getElementById('chart-metrics-count').textContent === '4/5');
+  d.body.click();
+  check('a click outside the picker closes it',
+    mMenu.hidden && mBtn.getAttribute('aria-expanded') === 'false');
+  mBtn.click();
+  tokRow.click();
+  check('a second flip restores the tile and re-persists',
+    w.eval('chartTotals()').includes('75.0% in') &&
+      w.eval('(chartView.hidden.overview || []).length') === 0 &&
+      d.getElementById('chart-metrics-count').textContent === '5/5');
+  d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+  check('unknown tile ids never enter hidden state',
+    (() => { w.eval('toggleSummaryMetric("bogus")'); return w.eval('(chartView.hidden.overview || []).length') === 0; })());
   w.eval(`storage.set('dash.chart', JSON.stringify({preset: 'overview', hidden: {overview: ['cost', 'bogus', 'inTok']}})); loadChartView();`);
   check('saved summary selection validates hidden ids against the tile list',
     w.eval('chartView.preset === "overview" && chartView.hidden.overview.join() === "cost"'));

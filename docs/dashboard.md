@@ -55,10 +55,11 @@ rank, never an average of bucket percentiles), each metric's low-high sample
 range underneath. Each tile carries one sparkline; combined tiles draw one
 self-scaled line per metric half in exactly the half's color. Sparks span
 only traffic-bearing buckets - the same empty-bucket removal the plots
-apply - so window padding never squeezes the data into a corner. Click a
-tile to hide it - it keeps its cell as a label-only stub so the strip never
-rewraps - and click again to restore; the selection persists per browser
-like every chart view. Only the time-range control applies. This preset has
+apply - so window padding never squeezes the data into a corner. The
+metrics picker in the card head chooses what shows: one dropdown of
+checkable rows, checked metrics render and unchecked ones leave the band
+(it reflows), and the selection persists per browser like every chart
+view. Only the time-range control applies. This preset has
 no static capture yet; the gallery images below predate it.
 
 ### Traffic

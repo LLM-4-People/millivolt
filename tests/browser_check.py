@@ -299,7 +299,7 @@ async def check(base, screenshot):
                         const reqPair=document.querySelector('#chart-totals .v-req') && document.querySelector('#chart-totals .v-tok');
                         const cacheThird=document.querySelector('#chart-totals .v-cache');
                         const kept = full.buckets.filter(b => b.req > 0).length;
-                        const reqPath = document.querySelector('[data-tile="req"] svg.spark path');
+                        const reqPath = document.querySelector('#chart-totals .chart-total[title^="requests / tokens"] svg.spark path');
                         const sparkCmds = reqPath ? (reqPath.getAttribute('d').match(/[ML]/g) || []).length : 0;
                         return {tilesOnly: card.classList.contains('tiles-only'),
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
@@ -308,12 +308,13 @@ async def check(base, screenshot):
                                 errors0:errV && errV.textContent === '0',
                                 rateLimited2:rlV && rlV.textContent === '2',
                                 reqTokensPair:!!reqPair,
-                                cacheThird:!!cacheThird && !!document.querySelector('[data-tile="tokens"] .v-cache'),
+                                cacheThird:!!cacheThird && !!document.querySelector('#chart-totals .chart-total[title^="tokens in/out/cached"] .v-cache'),
                                 timingPair:!!ttftV && !!tpsV && ttftV.textContent !== '-' && tpsV.textContent !== '-',
                                 kept, sparkCmds,
                                 tiles:document.querySelectorAll('#chart-totals .chart-total').length,
                                 sparks:document.querySelectorAll('#chart-totals svg.spark').length,
                                 pctHidden:document.getElementById('chart-pct').hidden,
+                                metricsPick:!document.getElementById('chart-metrics').hidden,
                                 contextHidden:document.getElementById('chart-context').hidden,
                                 legend:document.querySelector('#traffic-legend').textContent};
                     }""")
@@ -327,24 +328,40 @@ async def check(base, screenshot):
                     require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
                     require(state['tiles'] == 5, state)
-                    require(state['pctHidden'], state)
+                    require(state['pctHidden'] and state['metricsPick'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
-                    # Tile toggle contract on the real DOM: click hides the
-                    # tile to a label-only stub, the grid cell count is
-                    # stable, and the choice persists in dash.chart.
+                    # Metrics picker contract on the real DOM: the card-head
+                    # trigger opens the menu, a row flip drops the tile from
+                    # the band (no stub - the grid reflows), the trigger's
+                    # count follows, and the choice persists in dash.chart.
                     toggle = await page.evaluate("""async () => {
-                        const before = document.querySelectorAll('#chart-totals .chart-total').length;
-                        document.querySelector('[data-tile="tokens"]').click();
+                        document.getElementById('chart-metrics-btn').click();
                         await new Promise(requestAnimationFrame);
-                        const stub = document.querySelector('[data-tile="tokens"]');
+                        const menu = document.getElementById('chart-metrics-menu');
+                        const row = [...menu.querySelectorAll('.metrics-row')].find(r => r.dataset.metric === 'tokens');
+                        row.click();
+                        await new Promise(requestAnimationFrame);
                         const after = document.querySelectorAll('#chart-totals .chart-total').length;
                         const saved = JSON.parse(localStorage.getItem('dash.chart') || '{}');
-                        return {before, after, off: stub.classList.contains('off'),
-                                pressed: stub.getAttribute('aria-pressed') === 'false',
+                        return {open: !menu.hidden,
+                                expanded: document.getElementById('chart-metrics-btn').getAttribute('aria-expanded'),
+                                rowUnchecked: row.getAttribute('aria-checked') === 'false',
+                                tileGone: !document.querySelector('#chart-totals .chart-total[title^="tokens in/out/cached"]'),
+                                after,
+                                count: document.getElementById('chart-metrics-count').textContent,
                                 persisted: (saved.hidden && saved.hidden.overview || []).join() === 'tokens'};
                     }""")
-                    require(toggle['before'] == toggle['after'] == 5 and toggle['off'] and toggle['pressed'] and toggle['persisted'], toggle)
-                    await page.evaluate('document.querySelector("[data-tile=\'tokens\']").click()')
+                    require(toggle['open'] and toggle['expanded'] == 'true' and toggle['rowUnchecked'], toggle)
+                    require(toggle['tileGone'] and toggle['after'] == 4 and toggle['count'] == '4/5', toggle)
+                    require(toggle['persisted'], toggle)
+                    await page.evaluate("""async () => {
+                        const menu = document.getElementById('chart-metrics-menu');
+                        const row = [...menu.querySelectorAll('.metrics-row')].find(r => r.dataset.metric === 'tokens');
+                        row.click();
+                        await new Promise(requestAnimationFrame);
+                        document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+                        await new Promise(requestAnimationFrame);
+                    }""")
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
                 # Restore the saved-view expectations the reload check pins.
                 await page.select_option('#chart-preset', 'latency')

@@ -699,14 +699,25 @@ const tileSpark = (kept, halves) => sparkLines(kept, halves.map(([cls, pick]) =>
 // TILE_LABELS is the one owner of the overview tiles' labels: the
 // skeleton strip maps the preset's tile order through it and the
 // data-filled tiles read theirs from it, so the two can never drift
-// (ui_check pins them label for label). Ids match the data-tile toggle
-// contract.
+// (ui_check pins them label for label). Ids match the metrics picker's
+// rows and the summary hidden set.
 const TILE_LABELS = {
   req: 'requests / tokens',
   tokens: 'tokens in/out/cached',
   cost: 'cost',
   health: 'errors / 429',
   timing: 'avg latency / speed',
+};
+
+// TILE_TITLES is the single description source for every summary tile: the
+// strip's title attribute and the metrics picker's row descriptions read the
+// same text, so a tile can never explain itself two different ways.
+const TILE_TITLES = {
+  req: 'Request count over the blended token volume (input plus output), as a pair.',
+  tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
+  cost: 'Spend over the viewed period in USD (the same figure the KPI band shows, cost-reporting requests only), with the server\'s blended per-Mtok price underneath.',
+  health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.',
+  timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
 
 // Placeholder strip for the no-data state: the active preset's tile skeleton
@@ -796,16 +807,14 @@ function chartTotals() {
       // in the chart's health colors, and cost carries the server's blended
       // per-Mtok price - the SAME figure the KPI band shows,
       // cost-reporting requests only.
-      // Tiles follow the legend's toggle contract: role=button +
-      // aria-pressed + data-tile, the choice persists in dash.chart, and a
-      // hidden tile keeps its grid cell as a label-only stub so toggling
-      // never rewraps or shifts anything.
+      // Tiles are plain readouts: the metrics picker at the card head owns
+      // what shows (the same dash.chart hidden set the legend uses), hidden
+      // metrics simply leave the band, and each visible tile keeps its
+      // registry label plus its TILE_TITLES description as the title.
       const hid = chartView.hidden.overview || [];
-      const tile = (id, label, title, color, body) => {
-        const attrs = `role="button" tabindex="0" data-tile="${id}" aria-pressed="${!hid.includes(id)}" title="${escapeHtml((hid.includes(id) ? 'Show ' : 'Hide ') + label + '. ' + title)}"`;
-        return hid.includes(id)
-          ? `<span class="chart-total off" ${attrs}><span class="tl">${label}</span></span>`
-          : `<span class="chart-total" style="color:${COLORS[color]}" ${attrs}><span class="tl">${label}</span> ${body}</span>`;
+      const tile = (id, color, body) => {
+        if (hid.includes(id)) return '';
+        return `<span class="chart-total" style="color:${COLORS[color]}" title="${escapeHtml(TILE_LABELS[id] + '. ' + (TILE_TITLES[id] || ''))}"><span class="tl">${TILE_LABELS[id]}</span> ${body}</span>`;
       };
       const tot = tin + tout;
       // Tile sparks are mini charts: one sparkline per tile, one line per
@@ -815,26 +824,21 @@ function chartTotals() {
       // buckets enter the spark - the same empty-bucket removal the plots
       // apply - so ladder padding never squeezes the data into a corner.
       const kept = chartAgg.buckets.filter(b => b.req > 0);
-      parts.push(tile('req', TILE_LABELS.req,
-        'Request count over the blended token volume (input plus output), as a pair.',
-        'accent',
+      parts.push(tile('req', 'accent',
         tilePair([['v-req', fmt(req)], ['v-tok', fmt(tot)]]) +
         tileSpark(kept, [['v-req', b => b.req], ['v-tok', b => b.in + b.out]])));
       // One share row for the tokens triple: the input share of the blended
       // volume and the cached share of input, both through the shareText
       // owner (pct/pctCap) so a sub-100 ratio can never round to a false 100%.
       const shares = [shareText(tin, tot, 'in'), shareText(tcache, tin, 'of in')].filter(Boolean).join(' · ');
-      parts.push(tile('tokens', TILE_LABELS.tokens,
-        'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
-        'cyan',
+      parts.push(tile('tokens', 'cyan',
         tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)], ['v-cache', fmt(tcache)]]) +
         (shares ? `<span class="chart-sub">${shares}</span>` : '') +
         tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
-      parts.push(tile('cost', TILE_LABELS.cost, costSpec.title || '', costSpec.color,
+      parts.push(tile('cost', costSpec.color,
         fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
-      parts.push(tile('health', TILE_LABELS.health,
-        'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.', 'err',
+      parts.push(tile('health', 'err',
         tilePair([['v-err', fmt(err)], ['v-rl', fmt(rl)]]) +
         (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
         tileSpark(kept, [['v-err', b => b.err], ['v-rl', b => b.rl || 0]])));
@@ -858,9 +862,7 @@ function chartTotals() {
         return `${shared ? String(lo).slice(0, -unitOf(lo).length) : lo}-${hi}${unit}`;
       };
       const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
-      parts.push(tile('timing', TILE_LABELS.timing,
-        'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
-        'accent',
+      parts.push(tile('timing', 'accent',
         tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', ps ? fmt(ps[0]) : '-']]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
         tileSpark(kept, [['v-ttft', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['v-tps', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
@@ -878,6 +880,7 @@ function chartTotals() {
 }
 
 function chartChromeSync() {
+  summaryPickerSync();
   const preset = activePreset();
   if (preset.tilesOnly) {
     // The summary has no axes, no percentile control and no cadence note:
@@ -990,13 +993,66 @@ function toggleChartSeries(id) {
   toggleHiddenMember(preset.id, id, preset.series.map(([seriesId]) => seriesId));
 }
 
-// toggleSummaryTile flips one summary tile - the same contract as a legend
+// toggleSummaryMetric flips one picker row - the same contract as a legend
 // toggle, over tile ids: validated against the preset's tile list, persisted
 // in dash.chart under the overview key, re-rendered in place.
-function toggleSummaryTile(id) {
+function toggleSummaryMetric(id) {
   const preset = activePreset();
   if (!preset.tilesOnly) return;
   toggleHiddenMember('overview', id, preset.tiles);
+}
+
+// setMetricsMenuOpen is the one open-state writer for the summary metrics
+// picker (the prov-menu pattern): the menu's hidden flag and the trigger's
+// aria-expanded always move together.
+function setMetricsMenuOpen(open) {
+  const menu = $('chart-metrics-menu');
+  if (!menu) return;
+  menu.hidden = !open;
+  const btn = $('chart-metrics-btn');
+  if (btn) btn.setAttribute('aria-expanded', String(!!open));
+}
+
+// summaryPickerRows builds the menu's checkable rows from the preset's tile
+// list - the same TILE_LABELS/TILE_TITLES registries the strip renders, so
+// a metric can never introduce itself two different ways.
+function summaryPickerRows(preset) {
+  return preset.tiles.map(id =>
+    `<button type="button" class="metrics-row" role="menuitemcheckbox" aria-checked="true" data-metric="${id}" title="${escapeHtml(TILE_TITLES[id] || '')}">` +
+    `<span class="mp-check" aria-hidden="true"></span>${escapeHtml(TILE_LABELS[id])}</button>`).join('');
+}
+
+// summaryPickerSync owns the picker's whole visible state: the control shows
+// only for the tiles-only summary, rows rebuild when the preset changes (not
+// on every live render, so an open menu never loses focus), and every render
+// refreshes row checks, the trigger count and the accessible name in place.
+let _pickerPreset = null;
+function summaryPickerSync() {
+  const wrap = $('chart-metrics');
+  if (!wrap) return;
+  const preset = activePreset();
+  const show = !!preset.tilesOnly;
+  wrap.hidden = !show;
+  if (!show) { _pickerPreset = null; setMetricsMenuOpen(false); return; }
+  const btn = $('chart-metrics-btn');
+  const menu = $('chart-metrics-menu');
+  if (_pickerPreset !== preset.id) {
+    if (btn) btn.innerHTML = `<span class="mp-label">metrics</span><span class="mp-count" id="chart-metrics-count"></span>${PROV_CHEV_SVG}`;
+    if (menu) menu.innerHTML = summaryPickerRows(preset);
+    _pickerPreset = preset.id;
+  }
+  const hid = chartView.hidden.overview || [];
+  const rows = menu ? [...menu.querySelectorAll('.metrics-row')] : [];
+  for (const r of rows) {
+    const on = !hid.includes(r.dataset.metric);
+    r.setAttribute('aria-checked', String(on));
+    const chk = r.querySelector('.mp-check');
+    if (chk) chk.textContent = on ? '✓' : '';
+  }
+  const shown = preset.tiles.filter(id => !hid.includes(id)).length;
+  const count = $('chart-metrics-count');
+  if (count) count.textContent = shown + '/' + preset.tiles.length;
+  if (btn) btn.setAttribute('aria-label', `Summary metrics: ${shown} of ${preset.tiles.length} shown`);
 }
 
 function setChartPreset(v) {

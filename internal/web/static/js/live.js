@@ -720,17 +720,26 @@ $('traffic-legend').addEventListener('click', e => {
   const b = e.target.closest('.leg-item');
   if (b) toggleChartSeries(b.dataset.series);
 });
-// Summary tiles toggle like legend buttons (delegated on the strip:
-// updateSection rewrites the tiles, so the listener must live here). The
-// tiles are role=button spans, so Enter and Space act like a click.
-$('chart-totals').addEventListener('click', e => {
-  const t = e.target.closest('[data-tile]');
-  if (t) toggleSummaryTile(t.dataset.tile);
+// The summary metrics picker (the strip's tiles are plain readouts): the
+// trigger opens the menu, rows flip the same dash.chart hidden set through
+// toggleSummaryMetric, Escape and outside clicks close, and focus returns
+// to the trigger. Row clicks keep the menu open for multi-selection.
+$('chart-metrics-btn').addEventListener('click', () => {
+  const open = $('chart-metrics-menu').hidden;
+  setMetricsMenuOpen(open);
+  if (open) { const first = $('chart-metrics-menu').querySelector('.metrics-row'); if (first) first.focus(); }
 });
-$('chart-totals').addEventListener('keydown', e => {
-  if (e.key !== 'Enter' && e.key !== ' ') return;
-  const t = e.target.closest('[data-tile]');
-  if (t) { e.preventDefault(); toggleSummaryTile(t.dataset.tile); }
+$('chart-metrics-menu').addEventListener('click', e => {
+  const row = e.target.closest('.metrics-row');
+  if (row) toggleSummaryMetric(row.dataset.metric);
+});
+document.addEventListener('click', e => {
+  if (!e.target.closest('#chart-metrics')) setMetricsMenuOpen(false);
+});
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || $('chart-metrics-menu').hidden) return;
+  setMetricsMenuOpen(false);
+  $('chart-metrics-btn').focus();
 });
 
 // Server-state refresh cadence from dashCfg (the bootstrap payload's dash
