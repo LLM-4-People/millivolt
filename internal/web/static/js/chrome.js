@@ -2652,6 +2652,11 @@ const PAUSE_SCOPES = [
 // values, so every surface spells the same span the same way ('15 minutes',
 // never '15 min'). Surfaces keep their own value sets; only the wording
 // is shared. Ages beyond a day stay context-specific ('1 day', '1 week').
+// The chart's window register (CHART_WINDOWS in chart.js) is the documented
+// exclusion: its values are minute counts ('15', '60'), not these duration
+// keys, and the two files share no module - deriving its four matching
+// sub-day wordings would need a cross-file load-order dependency plus a
+// value-translation table, so those coincident spellings stay separate.
 const DURATION_LABELS = {
   '15m': '15 minutes', '1h': '1 hour', '6h': '6 hours',
   '12h': '12 hours', '24h': '24 hours',
@@ -2707,22 +2712,30 @@ function debugNameTaken(kind, name) {
 // base name. Checking a group selects every variant of it, and editing a
 // session re-checks the group holding any of its raw models.
 let dbgModelGroups = [];
-// dbgGroupedModels: raw (deduped, sorted) names → ordered [group] objects
-// {key, display, variants}; a group's display name is its shortest variant
-// (the bare spelling), ties broken lexicographically.
-function dbgGroupedModels(names) {
+// groupByCanonical is the one fold of raw model spellings into canonical
+// groups: deduped input, one canonicalModel pass per name, each group's
+// variants sorted. Both grouped surfaces build on it - the debug
+// checklist (dbgGroupedModels below) and the Clear/Logs model optgroups
+// (populateFilterMenu) - while each keeps its own projection
+// (display-name groups vs raw-value optgroups).
+function groupByCanonical(names) {
   const byGroup = new Map();
   for (const n of [...new Set(names || [])]) {
     const g = canonicalModel(n);
     if (!byGroup.has(g)) byGroup.set(g, []);
     byGroup.get(g).push(n);
   }
-  const groups = [...byGroup.entries()].map(([key, variants]) => ({
+  return [...byGroup.entries()].map(([key, variants]) => ({ key, variants: variants.sort() }));
+}
+// dbgGroupedModels: raw (deduped, sorted) names → ordered [group] objects
+// {key, display, variants}; a group's display name is its shortest variant
+// (the bare spelling), ties broken lexicographically.
+function dbgGroupedModels(names) {
+  return groupByCanonical(names).map(({ key, variants }) => ({
     key,
     display: [...variants].sort((a, b) => a.length - b.length || (a < b ? -1 : 1))[0],
-    variants: variants.sort(),
-  }));
-  return groups.sort((a, b) => (a.display < b.display ? -1 : a.display > b.display ? 1 : 0));
+    variants,
+  })).sort((a, b) => (a.display < b.display ? -1 : a.display > b.display ? 1 : 0));
 }
 // selectedDebugModels expands the checked model groups back into the exact raw
 // spellings the debug session matches on.
@@ -3204,23 +3217,17 @@ function populateFilterMenu(prefix) {
   {
     const el = $(prefix+'-model');
     const cur = el.value;
-    const raws = [...new Set(recs.map(r => r.model).filter(Boolean))].sort();
-    const byGroup = new Map();
-    for (const m of raws) {
-      const g = canonicalModel(m);
-      if (!byGroup.has(g)) byGroup.set(g, []);
-      byGroup.get(g).push(m);
-    }
-    const groups = [...byGroup.entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const groups = groupByCanonical(recs.map(r => r.model).filter(Boolean))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     let html = '<option value="">any</option>';
     let curPresent = cur === '';
-    for (const [g, variants] of groups) {
+    for (const { key, variants } of groups) {
       const opts = variants.map(m => {
         if (m === cur) curPresent = true;
         return `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`;
       }).join('');
       html += (variants.length > 1)
-        ? `<optgroup label="${escapeHtml(g)} (${variants.length})">${opts}</optgroup>`
+        ? `<optgroup label="${escapeHtml(key)} (${variants.length})">${opts}</optgroup>`
         : opts;
     }
     el.innerHTML = html;

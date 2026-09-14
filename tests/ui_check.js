@@ -2955,6 +2955,49 @@ async function main() {
     w.fetch = originalFetch;
   }
 
+  // ---- NONE_YET_NOTE: the operator menus' one empty-state sentence ----
+  // Both directions are pinned: empty known lists render the note (the
+  // pause/debug checklists paint it as .pause-none; the limits provider
+  // select carries it as its empty option), and populated lists render
+  // their rows without it anywhere - an empty surface silently painting
+  // nothing, or a populated one leaking the note, are both drift. This
+  // also repairs the W14 record: that commit claimed this pin existed.
+  {
+    const noteText = 'none yet - they appear as requests arrive';
+    w.applyPauseState({ok: true, paused: false, holds: [], known_clients: [], known_providers: []});
+    w.resetPauseMenuForm();
+    w.eval("debugState = {...debugState, sessions: [], known_clients: [], known_providers: [], known_models: []}");
+    w.resetDebugMenuForm();
+    w.applyThrottleState({ok: true, active: false, throttles: [], known_providers: []});
+    w.syncLimitsMenuState();
+    check('empty known lists render the none-yet note in the pause and debug checklists',
+      ['#pf-clients', '#pf-providers', '#df-clients', '#df-providers', '#df-models']
+        .every(id => d.querySelector(id + ' .pause-none')?.textContent === noteText));
+    check('the empty limits provider select carries the none-yet note as its only option',
+      d.getElementById('lim-provider').options.length === 1 &&
+      d.getElementById('lim-provider').options[0].value === '' &&
+      d.getElementById('lim-provider').options[0].textContent === noteText);
+    w.applyPauseState({ok: true, paused: false, holds: [], known_clients: ['client-a'], known_providers: ['prov-a']});
+    w.resetPauseMenuForm();
+    w.eval("debugState = {...debugState, known_clients: ['client-a'], known_providers: ['prov-a'], known_models: ['glm-5.3']}");
+    w.resetDebugMenuForm();
+    w.applyThrottleState({ok: true, active: false, throttles: [], known_providers: ['prov-a']});
+    w.syncLimitsMenuState();
+    check('populated known lists render their rows, never the none-yet note',
+      !d.querySelector('#pause-menu .pause-none') && !d.querySelector('#debug-menu .pause-none') &&
+      !!d.querySelector('#pf-clients input[value="client-a"]') &&
+      !!d.querySelector('#pf-providers input[value="prov-a"]') &&
+      !!d.querySelector('#df-models input[value="glm-5.3"]') &&
+      [...d.getElementById('lim-provider').options].every(o => o.value === 'prov-a'));
+    // Leave the surfaces on the empty baseline the rest of the suite expects.
+    w.applyPauseState({ok: true, paused: false, holds: [], known_clients: [], known_providers: []});
+    w.resetPauseMenuForm();
+    w.eval("debugState = {...debugState, known_clients: [], known_providers: [], known_models: []}");
+    w.resetDebugMenuForm();
+    w.applyThrottleState({ok: true, active: false, throttles: [], known_providers: []});
+    w.syncLimitsMenuState();
+  }
+
   // ---- test 12d: a stale tick's pending snapshot must never regress an
   // in-flight row's retry progress (attempts are append-only - an older
   // snapshot carries fewer absorbed attempts than a just-arrived SSE update).

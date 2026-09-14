@@ -21,7 +21,8 @@
      Vendored IIFE build (25k gz): exposes window.uPlot; canvas 2D, zero deps.
      jsdom safety: the IIFE itself runs under jsdom (so a bare typeof guard is
      not the shield) - renderChart skips uPlot when the chart box measures
-     w < 80 || h < 40 (jsdom clientWidth/Height are 0). Keep that size guard.
+     below CHART_MIN_W or CHART_MIN_H (the chart.js constants; jsdom
+     clientWidth/Height are 0). Keep that size guard.
      Do not strip the license header in vendor/uplot.js. -->
 <script defer src="/dash/vendor/uplot.js"></script>
 <script defer src="/dash/js/core.js"></script>

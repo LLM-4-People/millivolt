@@ -39,7 +39,19 @@
        focus strength, and a stronger halo for hover feedback on pressed or
        accent-filled controls. Derived from --accent so theme drifts once. */
     --focus-ring: color-mix(in srgb, var(--accent) 12%, transparent);
-    --focus-ring-strong: color-mix(in srgb, var(--accent) 14%, transparent);
+    --focus-ring-strong: color-mix(in srgb, var(--accent) var(--halo), transparent);
+    /* Shared alpha strengths for the tinted overlays, so a rung of the
+       ladder cannot drift surface by surface: the status pills rest at
+       --pill-tint and wear --pill-tint-strong once they flag an
+       operator-visible state (paused, throttled, debug; the live pill
+       keeps its one-off mid tint in place), and the pressed/danger hover
+       rings share --halo - the strength --focus-ring-strong already
+       carries - so those rings painted in the warn, cyan and err hues
+       stay in step with the accent pair above. Alpha-only tokens: each
+       rule pairs its own hue with the shared strength. */
+    --pill-tint: 13%;
+    --pill-tint-strong: 16%;
+    --halo: 14%;
     /* Full-screen veils behind modal surfaces: one warm near-black scrim
        keyed to the palette's base tone. The deliberate exceptions stay
        literal where they sit (the storm dialog's heavier urgent scrim, the
@@ -109,7 +121,7 @@
     width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
     background: radial-gradient(130% 130% at 30% 22%, var(--well-hi) 0%, var(--well-lo) 70%);
     display: flex; align-items: center; justify-content: center;
-    box-shadow: 0 0 0 1px rgba(154,107,255,.28) inset, 0 4px 16px rgba(154,107,255,.28);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent2) 28%, transparent) inset, 0 4px 16px color-mix(in srgb, var(--accent2) 28%, transparent);
   }
   .brand-logo svg { display: block; }
   header h1 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; font-family: var(--mono); }
@@ -172,17 +184,17 @@
   .pause-cap-row { grid-template-columns: 1fr; margin-top: 10px; }
   .pause-holds { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
   .pause-hold { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text); text-transform: none; letter-spacing: 0; cursor: pointer; border-radius: 6px; padding: 2px 4px; }
-  .pause-hold:hover { background: rgba(232,228,222,.04); }
+  .pause-hold:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
   .pause-hold.editing { color: var(--warn); }
   .pause-hold button { min-width: 0; padding: 2px 8px; cursor: pointer; }
   #pause-menu { width: 360px; }
   #debug-menu { width: 360px; }
   #btn-debug[aria-pressed="true"] { color: var(--cyan); border-color: var(--cyan); }
-  #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(56,213,192,.14); }
+  #btn-debug[aria-pressed="true"]:hover { color: var(--cyan); border-color: var(--cyan); box-shadow: 0 0 0 3px color-mix(in srgb, var(--cyan) var(--halo), transparent); }
   .hdr-menu[hidden] { display: none !important; }
   #btn-settings[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
   #btn-pause[aria-pressed="true"] { color: var(--warn); border-color: var(--warn); }
-  #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px rgba(244,193,77,.14); }
+  #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) var(--halo), transparent); }
   #btn-limits[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
   #btn-limits[aria-pressed="true"]:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   #limits-menu { width: 380px; }
@@ -204,11 +216,11 @@
     border: 1px solid var(--border2); background: transparent;
   }
   .rs-step.active { color: var(--text); }
-  .rs-step.active .rs-dot { border-color: var(--accent); background: rgba(91,140,255,.35); animation: livepulse 1.6s ease-in-out infinite; }
+  .rs-step.active .rs-dot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 35%, transparent); animation: livepulse 1.6s ease-in-out infinite; }
   .rs-step.done { color: var(--muted); }
-  .rs-step.done .rs-dot { border-color: var(--ok); background: rgba(47,209,134,.3); }
+  .rs-step.done .rs-dot { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 30%, transparent); }
   .rs-step.failed { color: var(--err); }
-  .rs-step.failed .rs-dot { border-color: var(--err); background: rgba(240,93,93,.35); animation: none; }
+  .rs-step.failed .rs-dot { border-color: var(--err); background: color-mix(in srgb, var(--err) 35%, transparent); animation: none; }
   .rs-step .rs-sub { margin-left: auto; color: var(--muted); font-size: 9.5px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
   @media (prefers-reduced-motion: reduce) { .rs-step.active .rs-dot { animation: none; } }
   .lim-src { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
@@ -253,12 +265,12 @@
      with impact: delete-matching = light red tint; the "everything"
      companion = red outline; DELETE EVERYTHING = solid red fill (the most
      destructive action on the dashboard wears the heaviest red). */
-  .btn-danger { background: rgba(240,93,93,.16); border-color: var(--err); color: var(--err); }
-  .btn-danger:hover { background: rgba(240,93,93,.28); color: var(--err); }
-  .btn-danger-outline { background: rgba(240,93,93,.07); border-color: var(--err); color: var(--err); }
-  .btn-danger-outline:hover { background: rgba(240,93,93,.22); color: var(--err); box-shadow: 0 0 0 3px rgba(240,93,93,.14); }
+  .btn-danger { background: color-mix(in srgb, var(--err) 16%, transparent); border-color: var(--err); color: var(--err); }
+  .btn-danger:hover { background: color-mix(in srgb, var(--err) 28%, transparent); color: var(--err); }
+  .btn-danger-outline { background: color-mix(in srgb, var(--err) 7%, transparent); border-color: var(--err); color: var(--err); }
+  .btn-danger-outline:hover { background: color-mix(in srgb, var(--err) 22%, transparent); color: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   .btn-danger-solid { background: var(--err); border-color: var(--err); color: var(--bg); font-weight: 600; }
-  .btn-danger-solid:hover { background: #ff7d7d; border-color: #ff7d7d; color: var(--bg); box-shadow: 0 0 0 3px rgba(240,93,93,.14); }
+  .btn-danger-solid:hover { background: #ff7d7d; border-color: #ff7d7d; color: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   /* Accent-filled primary action (settings Apply, restart Restart now) -
      after .btn so the cascade beats the neutral base skin. */
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
@@ -376,7 +388,7 @@
     background: var(--_kc, var(--border2)); border-radius: 1px; opacity: .55;
     transition: opacity .16s ease;
   }
-  .kpi:hover { background: rgba(232,228,222,.02); }
+  .kpi:hover { background: color-mix(in srgb, var(--text) 2%, transparent); }
   .kpi:hover::before { opacity: .9; }
   .kpi.k-cache { --_kc: var(--accent2); }
   .kpi.k-cost { --_kc: var(--warn); }
@@ -435,6 +447,10 @@
      Beyond two rows we scroll rather than let the chips push the gallery/pair
      down and break the viewport fit. */
   .xp-scope { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; overflow-y: auto; overflow-x: hidden; max-height: 56px; margin-bottom: 12px; font-family: var(--mono); font-size: 11px; scrollbar-width: thin; }
+  /* Deliberately slimmer than the grouped 5px/3px and 6px/3px overlay
+     recipes: this scrollbar only appears once chips wrap past the two rows
+     the 56px strip allows, and a 4px thumb with a 2px radius keeps the rare
+     fallback from eating the short strip's height. */
   .xp-scope::-webkit-scrollbar { width: 4px; }
   .xp-scope::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
   .xp-scope .bc-root { color: var(--muted); font-weight: 600; text-decoration: none; padding: 2px 6px; border-radius: 5px; }
@@ -449,7 +465,7 @@
     background: none; border: none; color: var(--muted); cursor: pointer;
     font: inherit; padding: 0 4px; border-radius: 4px; line-height: 1.4;
   }
-  .xp-chip .chip-x:hover { color: var(--err); background: rgba(240,93,93,.12); }
+  .xp-chip .chip-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
   .xp-clear { margin-left: auto; }
   /* Two-column body: fixed rail + flexible gallery. The rail is the stable
      anchor (9 dimensions ≈ a fixed height); the gallery sizes to its content
@@ -622,7 +638,7 @@
     width: min(1080px, calc(100vw - 24px)); height: calc(100vh - var(--rail-h) - var(--rail-tick) - 8px);
     display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 14px;
-    box-shadow: 0 24px 64px rgba(0,0,0,.55), 0 1px 0 rgba(232,228,222,.04) inset;
+    box-shadow: 0 24px 64px rgba(0,0,0,.55), 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset;
     transform: translateX(-50%) translateY(12px); opacity: 0; pointer-events: none;
     transition: transform .2s cubic-bezier(.32,.72,.35,1), opacity .2s ease;
     overflow: hidden;
@@ -685,7 +701,7 @@
     border-bottom: 1px solid var(--border);
   }
   .st-row[hidden] { display: none !important; }
-  .st-row:hover { background: rgba(232,228,222,.03); }
+  .st-row:hover { background: color-mix(in srgb, var(--text) 3%, transparent); }
   .st-row.st-block { grid-template-columns: 1fr; align-items: start; gap: 8px; padding-top: 12px; padding-bottom: 12px; }
   .st-check { display: flex; align-items: center; gap: 8px; font: 12px/1.3 var(--sans); color: var(--text); }
   .st-backup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
@@ -695,7 +711,7 @@
     font: 600 9px var(--mono); letter-spacing: .04em; padding: 1px 6px; border-radius: 4px;
     text-transform: lowercase;
   }
-  .st-pill.lock { color: var(--accent); background: rgba(91,140,255,.12); }
+  .st-pill.lock { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .st-ctl { display: flex; flex-direction: column; gap: 4px; align-items: stretch; min-width: 0; }
   .st-ctl-line { display: flex; align-items: center; gap: 8px; }
   .st-unit { font: 10px var(--mono); color: var(--muted); flex-shrink: 0; }
@@ -735,7 +751,7 @@
   .prov-hd {
     display: flex; align-items: center; gap: 8px;
     padding: 8px 8px 8px 12px;
-    background: rgba(232,228,222,.03);
+    background: color-mix(in srgb, var(--text) 3%, transparent);
     border-bottom: 1px solid var(--border);
     cursor: pointer; /* the band toggles collapse; its inputs keep their own */
   }
@@ -868,7 +884,7 @@
     border-radius: 6px; padding: 5px 7px; cursor: pointer;
     transition: background .16s ease;
   }
-  .prov-menu-item:hover { background: rgba(232,228,222,.05); }
+  .prov-menu-item:hover { background: color-mix(in srgb, var(--text) 5%, transparent); }
   .prov-menu-item .prov-ic { font-size: 11px; }
   .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
   .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
@@ -882,7 +898,7 @@
     stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
     transition: transform .16s ease;
   }
-  .prov-chev:hover { color: var(--text); background: rgba(232,228,222,.06); }
+  .prov-chev:hover { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
   .st-prov.collapsed .prov-chev svg { transform: rotate(-90deg); }
   .st-prov.collapsed .prov-body { display: none; }
   .prov-x {
@@ -894,8 +910,8 @@
     width: 13px; height: 13px; display: block; stroke: currentColor; fill: none;
     stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
   }
-  .prov-x:hover { color: var(--err); background: rgba(240,93,93,.12); }
-  .prov-bad, .prov-bad:focus { border-color: var(--err) !important; box-shadow: 0 0 0 2px rgba(240,93,93,.15) !important; }
+  .prov-x:hover { color: var(--err); background: color-mix(in srgb, var(--err) 12%, transparent); }
+  .prov-bad, .prov-bad:focus { border-color: var(--err) !important; box-shadow: 0 0 0 2px color-mix(in srgb, var(--err) 15%, transparent) !important; }
   .st-ft {
     display: flex; align-items: center; gap: 12px; padding: 12px 16px 10px;
     border-top: 1px solid var(--border2); flex-shrink: 0; background: var(--rail); position: relative;
@@ -926,7 +942,7 @@
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
     padding: 16px 18px; overflow: hidden; position: relative;
-    box-shadow: 0 1px 0 rgba(232,228,222,.03) inset, 0 12px 28px rgba(0,0,0,.24);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(0,0,0,.24);
   }
   .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: none; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
 
@@ -1126,17 +1142,17 @@
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
   .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-family: var(--mono); font-weight: 600; }
-  .pill.ok { background: rgba(47,209,134,.13); color: var(--ok); }
-  .pill.err { background: rgba(240,93,93,.13); color: var(--err); }
-  .pill.warn { background: rgba(244,193,77,.13); color: var(--warn); }
+  .pill.ok { background: color-mix(in srgb, var(--ok) var(--pill-tint), transparent); color: var(--ok); }
+  .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
+  .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }
   /* Client-cancelled row: warm muted gray - an outcome of its own, not a failure. */
   .pill.cancel { background: rgba(168,160,150,.13); color: var(--muted); }
   /* In-flight request pill: the accent "live" pulse for a row still streaming. */
-  .pill.live { background: rgba(91,140,255,.15); color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
+  .pill.live { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
   /* Operator hold: parked, not in flight. Muted, no pulse. Click opens the hold editor. */
-  .pill.paused { background: rgba(244,193,77,.16); color: var(--warn); cursor: pointer; }
-  .pill.throttled { background: rgba(154,107,255,.16); color: var(--accent2); cursor: pointer; }
-  .pill.debug { background: rgba(56,213,192,.16); color: var(--cyan); cursor: pointer; }
+  .pill.paused { background: color-mix(in srgb, var(--warn) var(--pill-tint-strong), transparent); color: var(--warn); cursor: pointer; }
+  .pill.throttled { background: color-mix(in srgb, var(--accent2) var(--pill-tint-strong), transparent); color: var(--accent2); cursor: pointer; }
+  .pill.debug { background: color-mix(in srgb, var(--cyan) var(--pill-tint-strong), transparent); color: var(--cyan); cursor: pointer; }
   @keyframes livepulse { 0%,100% { opacity: 1; } 50% { opacity: .55; } }
   @media (prefers-reduced-motion: reduce) { .pill.live { animation: none; } }
   tr.live-row td { color: var(--muted); }
@@ -1144,9 +1160,9 @@
   .retry-toggle { border: none; cursor: pointer; font: inherit; }
   .retry-toggle .retry-caret { display: inline-block; margin-left: 2px; }
   .retry-toggle:hover { filter: brightness(1.2); }
-  tr.retry-sub td { background: rgba(244,193,77,.04); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
+  tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
   tr.retry-sub { cursor: pointer; }
-  tr.retry-sub:hover td { background: rgba(244,193,77,.1); }
+  tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
   .retry-tick { color: var(--warn); margin-right: 4px; }
   .retry-sub-label { font-size: 10.5px; color: var(--muted); }
   .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
