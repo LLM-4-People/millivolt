@@ -301,20 +301,7 @@ func main() {
 	mux.Handle("/admin/config", adminConfigHandler())
 	registerBackupRoutes(mux)
 
-	mux.HandleFunc("/admin/reload", func(w http.ResponseWriter, r *http.Request) {
-		if !rejectUnless(w, r, http.MethodPost) {
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		skipped, err := reloadConfig()
-		if err != nil {
-			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", *configPath, strings.Join(skipped, ","))
-		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped})
-		w.Write(enc)
-	})
+	mux.HandleFunc("/admin/reload", reloadHandler())
 
 	// Root serves the dashboard; web.DashPrefix is the allowlisted CSS/JS
 	// tree (a miss is 404 - never forwarded to the LLM proxy). Register
@@ -583,6 +570,30 @@ func adminConfigHandler() *config.Handler {
 		Persist:      reloadConfig,
 		Backup:       backupStatus,
 		ReloadStatus: lastReloadDoc,
+	}
+}
+
+// reloadHandler wires POST /admin/reload: the HTTP choke point over
+// reloadConfig (the shared application path SIGHUP, Settings saves and
+// backup restores also use). Boot and the endpoint-shape test share this
+// one constructor so the response contract cannot silently drift out of
+// main (the adminConfigHandler precedent). The success log names
+// liveConfigPath - the boot flag value it was seeded from - because the
+// flag pointer is main-local; the two are equal for the process lifetime.
+func reloadHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !rejectUnless(w, r, http.MethodPost) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		skipped, err := reloadConfig()
+		if err != nil {
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
+		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped})
+		w.Write(enc)
 	}
 }
 

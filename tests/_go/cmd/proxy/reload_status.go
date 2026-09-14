@@ -220,6 +220,90 @@ func TestReloadFailureRecordedRenameError(t *testing.T) {
 	}
 }
 
+// TestAdminReloadEndpointShape drives the real POST /admin/reload handler
+// (the reloadHandler constructor main wires, the R5 lost finding: reload
+// plumbing was pinned but never the endpoint's response contract). The
+// success row reuses the last_reload fixture's config (one hot-applied
+// field, one dropped key, one startup-bound change) so the body bytes are
+// deterministic; the failure row reuses the load-error induction (a
+// directory where the config file should be).
+func TestAdminReloadEndpointShape(t *testing.T) {
+	post := func(t *testing.T) *httptest.ResponseRecorder {
+		t.Helper()
+		w := httptest.NewRecorder()
+		reloadHandler().ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/reload", nil))
+		return w
+	}
+
+	t.Run("success", func(t *testing.T) {
+		liveReloadFixture(t)
+		raw := "max_retries: 3\nmax_retriez: 9\nhistory_size: " +
+			strconv.Itoa(config.Default().HistorySize+1) + "\n"
+		if err := os.WriteFile(liveConfigPath, []byte(raw), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := post(t)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST /admin/reload = %d %s, want 200", w.Code, w.Body.Bytes())
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		if got, want := w.Body.String(), `{"ok":true,"restart_required":["history_size"]}`; got != want {
+			t.Errorf("success body = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("load failure", func(t *testing.T) {
+		liveReloadFixture(t)
+		// A directory where the config file should be: the load fails at
+		// the read, the endpoint keeps the running config and answers with
+		// the flat operator error body. The failure transport is
+		// adminjson.WriteError (http.Error), whose Go 1.26 contract resets
+		// Content-Type to text/plain even though the handler set
+		// application/json first - the body stays the flat JSON error
+		// either way. Pinned as it stands: the W30 batch owns no second
+		// behavior change.
+		if err := os.Mkdir(liveConfigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		w := post(t)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("POST /admin/reload against a directory config path = %d %s, want 400", w.Code, w.Body.Bytes())
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+			t.Errorf("Content-Type = %q, want http.Error's text/plain reset (observed transport)", ct)
+		}
+		var doc struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+			t.Fatalf("failure body is not the flat error JSON: %v (%q)", err, w.Body.String())
+		}
+		if !strings.Contains(doc.Error, "read config") {
+			t.Errorf("failure error = %q, want the wrapped read-config cause", doc.Error)
+		}
+		if !strings.HasSuffix(w.Body.String(), "\n") {
+			t.Errorf("failure body %q lost the transport's trailing newline", w.Body.String())
+		}
+	})
+
+	t.Run("method gate", func(t *testing.T) {
+		liveReloadFixture(t)
+		w := httptest.NewRecorder()
+		reloadHandler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/admin/reload", nil))
+		if w.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET /admin/reload = %d %s, want 405", w.Code, w.Body.Bytes())
+		}
+		if allow := w.Header().Get("Allow"); allow != http.MethodPost {
+			t.Errorf("Allow = %q, want POST", allow)
+		}
+		if got, want := w.Body.String(), "{\"error\":\"POST only\"}\n"; got != want {
+			t.Errorf("method-gate body = %q, want %q", got, want)
+		}
+	})
+}
+
 // TestReloadStatusConcurrentRecordAndRead pins the mutex contract of the
 // reload-status pair under -race: concurrent recordReloadStatus writers and
 // lastReloadDoc readers must be safe, and once the writers finish a recorded

@@ -426,9 +426,17 @@ function chartBarRange(u, min, max) {
 // useful upper measurement for sub-dollar ranges, even when the last decade
 // occupies only a few pixels. The same filter removes duplicate money labels.
 function chartYTicks(u, ai, min, max) {
-  const axis = _plan.preset.left;
+  const axis = _plan?.preset.left;
   const ticks = asinhTickLadder(max);
   if (max > 0 && ticks[ticks.length - 1] < max / 2) ticks.push(max);
+  // A queued draw (uPlot queues redraws as microtasks and destroy() does
+  // not cancel them) can run after restart teardown cleared the payload or
+  // after a tiles-only preset replaced the plan: no plotted left axis
+  // exists then. Deny by default, the !chartAgg guard shape the x callbacks
+  // use, applied to this callback's absent dependency: return the same
+  // decade ladder a guarded draw computes instead of dereferencing the
+  // missing axis (the screen-space filter needs a live valToPos anyway).
+  if (!axis) return ticks;
   const kept = [];
   let lastPos = null, lastLabel = null;
   for (const v of ticks) {

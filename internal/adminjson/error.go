@@ -40,6 +40,16 @@ func WriteError(w http.ResponseWriter, status int, msg string) {
 // single encoding owner (ErrorBody); the Content-Type is the only difference
 // from WriteError. The trailing newline matches json.Encoder's, which these
 // routes used previously.
+//
+// Nosniff position, decided once here so call sites do not re-derive it:
+// this transport deliberately does not set X-Content-Type-Options. The body
+// is application/json from the single encoding owner, which browsers do
+// not sniff-execute, and the JSON operator routes never sent the header on
+// their success paths - setting it only on errors at one site would be a
+// per-caller patch over a shared transport (WriteError keeps it only
+// because http.Error always set it). Adding nosniff here means changing the
+// pinned /metrics, /admin and /healthz error contracts together, as one
+// owner-wide decision.
 func WriteErrorJSON(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

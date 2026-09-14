@@ -2167,10 +2167,24 @@ async function main() {
       rendered.length >= 2 && new Set(rendered.map(t => t.label)).size === rendered.length &&
       rendered.every((t, i) => i === 0 || Math.abs(u.valToPos(t.value) - u.valToPos(rendered[i - 1].value)) >= 28 - 1e-9));
   }
-  w.eval('chartAgg = null');
+  // Cleared-for-restart state: the payload is gone and the plan no longer
+  // carries a plotted left axis (uPlot queues redraws as microtasks and
+  // destroy() does not cancel them, so a queued draw fires after teardown -
+  // the TypeError observed twice in fresh npm runs). The x values callback
+  // guards !chartAgg; the y splits callback (chartYTicks, uPlot's
+  // splits(self, axisIdx, scaleMin, scaleMax) signature) must tolerate the
+  // same cleared state and return the same ladder a guarded draw computes.
+  w.eval('window.__aggKeep = chartAgg; chartAgg = null; chartView.preset = "overview"; chartData()');
   let resetAxisSafe = true;
   try { compactOpts.axes[0].values({}, [0.5]); } catch { resetAxisSafe = false; }
-  check('a queued axis callback tolerates chart state being cleared for restart', resetAxisSafe);
+  const yStub = { valToPos: v => -v * 1000 }; // decades land >= CHART_Y_TICK_PX apart, so a guarded draw keeps the whole ladder
+  let clearedY;
+  try { clearedY = compactOpts.axes[1].splits(yStub, 1, 0, 100, 28, 1); } catch { resetAxisSafe = false; }
+  w.eval('chartAgg = window.__aggKeep; chartView.preset = "traffic"; chartData()');
+  const guardedY = compactOpts.axes[1].splits(yStub, 1, 0, 100, 28, 1);
+  w.eval('chartAgg = null');
+  check('a queued axis callback tolerates chart state being cleared for restart',
+    resetAxisSafe && JSON.stringify(clearedY) === JSON.stringify(guardedY));
 
   // ---- test 11f: dash.chart restore (deny by default) ----
   // A legacy FLAT hidden array is discarded wholesale (the old shape carried

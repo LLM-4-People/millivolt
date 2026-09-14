@@ -21,10 +21,15 @@ func TestLoginFailuresDoNotPrintResponseBodies(t *testing.T) {
 		t.Run(tc.script+tc.status, func(t *testing.T) {
 			dir := t.TempDir()
 			const secret = "SENSITIVE_FIXTURE_MUST_NOT_LOG"
+			// The openssl stub drains stdin before answering: the real
+			// openssl reads its input contract (the b64url/verifier/challenge
+			// pipelines), and a stub that exits without draining takes the
+			// pipe writer down with SIGPIPE (exit 141) before the expected
+			// wording under load. The jq stub already drains.
 			stubs := map[string]string{
 				"curl":    "#!/bin/sh\nprintf '%s\\n%s\\n' '{\"refresh_token\":\"" + secret + "\"}' \"$FIXTURE_STATUS\"\n",
 				"jq":      "#!/bin/sh\ncat >/dev/null\n",
-				"openssl": "#!/bin/sh\nprintf fixture\n",
+				"openssl": "#!/bin/sh\ncat >/dev/null\nprintf fixture\n",
 			}
 			for name, body := range stubs {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o700); err != nil {

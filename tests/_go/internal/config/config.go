@@ -745,6 +745,24 @@ func TestDashLogRowsValidateWording(t *testing.T) {
 	}
 }
 
+// The heartbeat pair's rejection wording is the same pinned errRange
+// contract, byte-exact in canonical duration spellings (heartbeatRange
+// stays the schema Help-string owner; the error bytes come from errRange).
+func TestHeartbeatValidateWording(t *testing.T) {
+	c := Default()
+	c.CursorHeartbeatInterval = HeartbeatIntervalMax + time.Second
+	err := c.Validate()
+	if err == nil || err.Error() != "cursor_heartbeat_interval: must be 1ns..10m, got 601s" {
+		t.Fatalf("Validate error = %v, want the exact errRange wording", err)
+	}
+	c = Default()
+	c.SSEKeepaliveInterval = 0
+	err = c.Validate()
+	if err == nil || err.Error() != "sse_keepalive_interval: must be 1ns..10m, got 0s" {
+		t.Fatalf("Validate error = %v, want the exact errRange wording", err)
+	}
+}
+
 // TestApplyProviderAliases pins the Settings-sheet path for provider_aliases:
 // the JSON map coerces into the Go field, a malformed pair fails the Apply,
 // and Map() round-trips the map so the editor cannot silently drop it.

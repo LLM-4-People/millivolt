@@ -58,26 +58,93 @@ func chromeMenuSource(t *testing.T) []byte {
 	}
 }
 
-// menuDeclStatement extracts one `const NAME = ...;` statement's text. The
-// cut at the first ";\n" is the boundary the real chrome.js statements
-// satisfy; its documented blind spot: a label containing a semicolon
-// followed by a raw newline could only be spelled as a backtick template
-// literal ('...' and "..." literals cannot carry raw newlines), which these
-// one-line menus never use. Covering that would need a real JS parser -
-// out of scope for source pins.
-func menuDeclStatement(t *testing.T, src []byte, name string) string {
-	t.Helper()
+// menuDeclStatementErr extracts one `const NAME = ...;` statement's text.
+// The cut at the first ";\n" stays the extraction boundary, and it is LOUD:
+// every real chrome.js menu statement closes its last pair literal or call
+// before that semicolon, so a cut that leaves any other trailing character
+// truncated the statement (a `//` comment carrying a semicolon at
+// end-of-line, or a ";\n" inside a backtick template literal) and fails
+// here by name instead of silently dropping tokens. The residual blind spot
+// is only that raw cut: covering it fully would need a real JS parser - out
+// of scope for source pins.
+func menuDeclStatementErr(src []byte, name string) (string, error) {
 	decl := "const " + name + " = "
 	start := strings.Index(string(src), decl)
 	if start < 0 {
-		t.Fatalf("chrome.js missing const %s", name)
+		return "", fmt.Errorf("chrome.js missing const %s", name)
 	}
 	rest := string(src[start:])
 	end := strings.Index(rest, ";\n")
 	if end < 0 {
-		t.Fatalf("chrome.js %s statement is not terminated", name)
+		return "", fmt.Errorf("chrome.js %s statement is not terminated", name)
 	}
-	return rest[:end]
+	stmt := rest[:end]
+	trimmed := strings.TrimRight(stmt, " \t\r\n")
+	last := byte(0)
+	if trimmed != "" {
+		last = trimmed[len(trimmed)-1]
+	}
+	if last != ']' && last != ')' {
+		return "", fmt.Errorf("chrome.js %s statement truncated at the first %q cut (comment or template literal carrying it?): %q", name, ";\n", stmt)
+	}
+	return stmt, nil
+}
+
+// menuDeclStatement is the test-facing wrapper around menuDeclStatementErr:
+// any extraction failure is a loud test failure, never a silently narrowed
+// statement (the menuDurationTokens wrapper's rule).
+func menuDeclStatement(t *testing.T, src []byte, name string) string {
+	t.Helper()
+	stmt, err := menuDeclStatementErr(src, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stmt
+}
+
+// stripJSComments removes `//` line comments and `/* */` block comments from
+// a menu statement before token scanning, writing one space per comment (a
+// comment is a token separator in JS; tokens cannot fuse). String literals
+// are skipped with the same scanner the token pass uses, so a delimiter
+// inside a comment can never phantom-pair with a later token's delimiter,
+// and a comment marker inside a label stays data. An unterminated block
+// comment is a loud error - the extractor never guesses at a truncated
+// statement.
+func stripJSComments(stmt string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(stmt); {
+		c := stmt[i]
+		if isJSStringDelimiter(c) {
+			_, after, ok := scanJSString(stmt, i)
+			if !ok {
+				return "", fmt.Errorf("unterminated string literal at offset %d in: %s", i, stmt)
+			}
+			b.WriteString(stmt[i:after])
+			i = after
+			continue
+		}
+		if c == '/' && i+1 < len(stmt) && stmt[i+1] == '/' {
+			if j := strings.IndexByte(stmt[i:], '\n'); j >= 0 {
+				b.WriteByte(' ')
+				i += j + 1
+			} else {
+				i = len(stmt)
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(stmt) && stmt[i+1] == '*' {
+			j := strings.Index(stmt[i:], "*/")
+			if j < 0 {
+				return "", fmt.Errorf("unterminated block comment at offset %d in: %s", i, stmt)
+			}
+			b.WriteByte(' ')
+			i += j + 2
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return b.String(), nil
 }
 
 // isJSStringDelimiter reports whether c opens a JS string literal the menu
@@ -179,6 +246,10 @@ func scanBracketGroup(s string, i int) (next int, err error) {
 // backtick literal, an embedded quote or a paren inside a token either
 // extracts exactly or reports an error - nothing truncates silently.
 func menuDurationTokensErr(stmt string) ([]string, error) {
+	stmt, err := stripJSComments(stmt)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
 	var toks []string
 	add := func(tok string) {
@@ -290,6 +361,8 @@ func TestMenuDurationTokensAcceptEitherQuoteStyle(t *testing.T) {
 		{"backticks", "const X = durationPairs(`15m`, `1 hour`);", []string{"15m", "1 hour"}},
 		{"paren token", `const X = durationPairs('15m', '1 hour (and change)');`, []string{"15m", "1 hour (and change)"}},
 		{"unbalanced paren token", `const X = durationPairs('15m', 'half ) hour');`, []string{"15m", "half ) hour"}},
+		{"line comment skipped, not paired", "const X = durationPairs('15m', // it's a whole hour\n'1h');", []string{"15m", "1h"}},
+		{"block comment skipped, not paired", `const X = durationPairs('15m', /* it's */ '1 hour');`, []string{"15m", "1 hour"}},
 	}
 	for _, row := range rows {
 		got := menuDurationTokens(t, row.stmt)
@@ -300,9 +373,34 @@ func TestMenuDurationTokensAcceptEitherQuoteStyle(t *testing.T) {
 	for _, bad := range []struct{ name, stmt string }{
 		{"unterminated literal", `const X = durationPairs('15m', 'oops);`},
 		{"unterminated group", `const X = durationPairs('15m', '1 hour'`},
+		{"unterminated block comment", `const X = durationPairs('15m'/* never closes, '1 hour');`},
 	} {
 		if _, err := menuDurationTokensErr(bad.stmt); err == nil {
 			t.Errorf("%s: extraction succeeded, want a loud failure", bad.name)
+		}
+	}
+}
+
+// TestMenuDeclStatementCutIsLoud pins the first ";\n" cut's shape check: the
+// four real statements all close their last pair or call before that
+// semicolon, so a statement a comment (or anything else) truncates fails by
+// name instead of silently dropping its tokens with every acceptance pin
+// green.
+func TestMenuDeclStatementCutIsLoud(t *testing.T) {
+	// (a) a `//` comment carrying ";" at end-of-line inside the statement
+	// cuts it short; the truncated text fails the ]/)-shape check loudly.
+	truncated := []byte("const X = durationPairs('15m',\n  // thirty;\n  '30m');\n")
+	if _, err := menuDeclStatementErr(truncated, "X"); err == nil {
+		t.Error("comment-semicolon truncation extracted, want a loud failure")
+	}
+	// Complete statements ending in `]` or `)` still extract exactly.
+	for _, tc := range []struct{ name, src, want string }{
+		{"pair list", "const X = [['', 'I resume']];\nnext();\n", "const X = [['', 'I resume']]"},
+		{"call tail", "const X = [['a']].concat(P.slice(1));\n", "const X = [['a']].concat(P.slice(1))"},
+	} {
+		got, err := menuDeclStatementErr([]byte(tc.src), "X")
+		if err != nil || got != tc.want {
+			t.Errorf("%s: extracted (%q, %v), want %q", tc.name, got, err, tc.want)
 		}
 	}
 }
