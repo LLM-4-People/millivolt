@@ -29,12 +29,13 @@
     --rail-h: calc(56px + env(safe-area-inset-top, 0px));
     --rail-tick: 8px;
     --hdr-btn: 32px;
-    /* Graduated-scale tick color (the shell's signature motif). */
-    --tick: rgba(232,228,222,.07);
+    /* Graduated-scale tick color (the shell's signature motif), derived
+       from the text color so the faint rail tracks it. */
+    --tick: color-mix(in srgb, var(--text) 7%, transparent);
     /* --tick-major paints the minor graph-paper gridlines shared by the
        sparklines and chart plots (a touch stronger than --tick's faint
-       micro grid): one value so six surfaces cannot drift apart. */
-    --tick-major: rgba(232,228,222,.11);
+       rail wash) and derives from --text the same way. */
+    --tick-major: color-mix(in srgb, var(--text) 11%, transparent);
     /* Focus-ring glows are one design: a 3px soft accent halo at input
        focus strength, and a stronger halo for hover feedback on pressed or
        accent-filled controls. Derived from --accent so theme drifts once. */

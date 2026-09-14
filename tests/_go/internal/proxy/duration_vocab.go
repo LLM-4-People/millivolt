@@ -87,11 +87,13 @@ func menuDurationTokens(t *testing.T, stmt string) []string {
 			toks = append(toks, tok)
 		}
 	}
-	for _, m := range regexp.MustCompile(`\['([^']*)'`).FindAllStringSubmatch(stmt, -1) {
+	// Quote-style agnostic: a pair literal may widen to double quotes,
+	// and a mixed widening must not let tokens slip past the pin.
+	for _, m := range regexp.MustCompile(`\[['"]([^'"]*)["']`).FindAllStringSubmatch(stmt, -1) {
 		add(m[1])
 	}
 	for _, m := range regexp.MustCompile(`durationPairs\(([^)]*)\)`).FindAllStringSubmatch(stmt, -1) {
-		for _, q := range regexp.MustCompile(`'([^']*)'`).FindAllStringSubmatch(m[1], -1) {
+		for _, q := range regexp.MustCompile(`['"]([^'"]*)["']`).FindAllStringSubmatch(m[1], -1) {
 			add(q[1])
 		}
 	}
@@ -107,6 +109,28 @@ func quoteJSON(tok string) string {
 		return `""`
 	}
 	return `"` + tok + `"`
+}
+
+// TestMenuDurationTokensAcceptEitherQuoteStyle pins the extractor's
+// quote-agnosticism: chrome.js pair literals may widen to double quotes,
+// and a mixed widening must not let tokens slip past the server-
+// acceptance pins. Single- and double-quoted spellings of the same
+// statement must extract identical token lists.
+func TestMenuDurationTokensAcceptEitherQuoteStyle(t *testing.T) {
+	single := "const X = [['', 'I resume'], durationPairs('15m', '1 hour')];"
+	double := `const X = [["", "I resume"], durationPairs("15m", "1 hour")];`
+	want := []string{"", "15m", "1 hour"}
+	for name, stmt := range map[string]string{"single": single, "double": double} {
+		got := menuDurationTokens(t, stmt)
+		if len(got) != len(want) {
+			t.Fatalf("%s-quoted statement extracted %v, want %v", name, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("%s-quoted statement extracted %v, want %v", name, got, want)
+			}
+		}
+	}
 }
 
 // TestPauseDebugMenuDurationsAreServerAccepted posts every PAUSE_DURS token
