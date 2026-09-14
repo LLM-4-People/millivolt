@@ -2234,6 +2234,32 @@ async function main() {
     w.setChartPct('42');
     check('setChartPct rejects unlisted percentiles without touching the view',
       w.eval('chartView.pct') === 99 && savedView().pct === 99);
+    // GAP-C pin: the window select's setChartWindow caller. No jsdom row
+    // drove #chart-window (mutation-proven: swapping the body to
+    // commitChartView or dropping its validation left npm green), so the
+    // window dropdown's real handler could be dropped or broken without
+    // reddening anything. setChartWindow deliberately diverges from
+    // commitChartView (a window change needs new server-computed buckets):
+    // a valid switch must persist the merged view, issue a window-keyed
+    // chart fetch, and apply the fetched payload; an unlisted window is
+    // denied by default - no persist, no fetch.
+    const chartFetchURLs = () => initialFetches.filter(u => u.includes('/metrics/agg/chart'));
+    const fetchesBeforeWindow = chartFetchURLs().length;
+    w.setChartWindow('15');
+    check('setChartWindow persists the merged view and issues the window-keyed fetch',
+      w.eval('chartView.window') === '15' &&
+        savedView() && savedView().window === '15' && savedView().pct === 99 &&
+        savedView().preset === 'latency' &&
+        chartFetchURLs().length === fetchesBeforeWindow + 1 &&
+        chartFetchURLs().at(-1).includes('window=15'));
+    await sleep(30);
+    check('setChartWindow applies the fetched window payload',
+      w.eval('chartAgg && chartAgg.now_ms') === chartPayload.now_ms);
+    const fetchesBeforeReject = chartFetchURLs().length;
+    w.setChartWindow('bogus');
+    check('setChartWindow rejects unlisted windows without persisting or fetching',
+      w.eval('chartView.window') === '15' && savedView().window === '15' &&
+        chartFetchURLs().length === fetchesBeforeReject);
   }
 
   // Axis callbacks survive setData changing between timestamp and compacted
@@ -2301,13 +2327,15 @@ async function main() {
       rendered.length >= 2 && new Set(rendered.map(t => t.label)).size === rendered.length &&
       rendered.every((t, i) => i === 0 || Math.abs(u.valToPos(t.value) - u.valToPos(rendered[i - 1].value)) >= 28 - 1e-9));
   }
-  // Cleared-for-restart state: the payload is gone and the plan no longer
+  // Hand-cleared payload state, defense-in-depth: chartAgg is never nulled
+  // after boot, this row clears it by hand, and the plan no longer
   // carries a plotted left axis (uPlot queues redraws as microtasks and
-  // destroy() does not cancel them, so a queued draw fires after teardown -
-  // the TypeError observed twice in fresh npm runs). The x values callback
-  // guards !chartAgg; the y splits callback (chartYTicks, uPlot's
-  // splits(self, axisIdx, scaleMin, scaleMax) signature) must tolerate the
-  // same cleared state and return the same ladder a guarded draw computes.
+  // destroy() does not cancel them, so a queued draw can fire after the
+  // plot is gone - the TypeError observed twice in fresh npm runs). The
+  // x values callback guards !chartAgg; the y splits callback (chartYTicks,
+  // uPlot's splits(self, axisIdx, scaleMin, scaleMax) signature) must
+  // tolerate the same cleared state and return the same ladder a guarded
+  // draw computes.
   w.eval('window.__aggKeep = chartAgg; chartAgg = null; chartView.preset = "overview"; chartData()');
   let resetAxisSafe = true;
   try { compactOpts.axes[0].values({}, [0.5]); } catch { resetAxisSafe = false; }
@@ -2349,23 +2377,28 @@ async function main() {
     guardedBarGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
   } catch { guardedBarSafe = false; }
   w.eval('chartAgg = null');
-  // The payload-cleared window with the plan still live: the deref shape
-  // the overview state never reaches (chartAgg.bucket_ms read on a null
-  // payload, with the traffic plan's meta row present and visible).
+  // The hand-cleared payload state with the plan still live: chartAgg is
+  // never nulled after boot (a missing payload is real only before the
+  // first payload arrives), so this row is defense-in-depth, pinning the
+  // deny-by-default guard's tolerance of the deref shape the overview
+  // state never reaches (chartAgg.bucket_ms read on a null payload, with
+  // the traffic plan's meta row present and visible).
   let clearedPayloadBarSafe = true, clearedPayloadBarGeom = '';
   try {
     compactOpts.series[1].paths(barU, 1, 0, 1);
     clearedPayloadBarGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
   } catch { clearedPayloadBarSafe = false; }
-  check('a queued axis callback tolerates chart state being cleared for restart',
+  check('a queued axis callback tolerates a hand-cleared chart payload',
     resetAxisSafe && JSON.stringify(clearedY) === JSON.stringify(guardedY));
-  check('a queued bar disp callback tolerates chart state being cleared for restart',
+  check('a queued bar disp callback tolerates a hand-cleared chart payload',
     resetBarSafe && clearedPayloadBarSafe && guardedBarSafe &&
     clearedBarGeom === '{"offset":0,"size":0}' && clearedPayloadBarGeom === '{"offset":0,"size":0}' &&
     guardedBarGeom !== '{"offset":0,"size":0}');
   // The sticky-_compacted window: a queued draw can also land after a
-  // hole-bucket compaction armed _vis/_compacted and restart teardown
-  // cleared the payload. The guard's (!_compacted && !chartAgg) arm must
+  // hole-bucket compaction armed _vis/_compacted and the payload was
+  // hand-cleared - defense-in-depth, since chartAgg is never nulled after
+  // boot (the production stale-_vis window is the blank-state early
+  // return pinned below). The guard's (!_compacted && !chartAgg) arm must
   // NOT fire: the compacted step is 1 with no payload read, so the bar
   // answers with its live compacted geometry, never the hidden contract.
   w.eval('chartAgg = window.__aggKeep; chartAgg.buckets.forEach((b, i) => { b.req = i === 3 || i === 7 ? 1 : 0; }); chartData()');
