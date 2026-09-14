@@ -1430,7 +1430,7 @@ function modelRulesEditorHTML(val) {
     `<div class="mr-hint">rules apply top→bottom to each stored model name · exact merges a whole spelling · pattern is a regex replace-all (RE2, $1 refs) · lower folds case · ◉ parks a rule</div>` +
     `<div class="mr-tools">` +
     `<select class="mr-tpl" aria-label="add a rule from a template"><option value="">add from template…</option>${MR_TEMPLATES.map((t, i) => `<option value="${i}">${escapeHtml(t[0])}</option>`).join('')}</select>` +
-    `<button type="button" class="mr-restore" data-mr-restore title="replace the draft with the shipped four-rule pipeline">↺ default pipeline</button>` +
+    `<button type="button" class="mr-restore" data-mr-restore title="replace the draft with the shipped five-rule pipeline">↺ default pipeline</button>` +
     `<span class="mr-count muted"></span>` +
     `</div>` +
     `<div class="prov-urow mr-preview">` +

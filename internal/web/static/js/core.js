@@ -88,8 +88,8 @@ function hexA(hex, a) {
 }
 // Faint warm gridline (translucent panel border) for chart axes. The alpha
 // is owned by the dashboard token --chart-grid-a; the literal is the
-// fallback when the token is unreadable (jsdom never resolves stylesheet
-// custom properties, and a failed CSS load must not break the axes).
+// fallback when the token is unreadable (robustness: a failed or stripped
+// CSS load must not break the axes).
 const chartGridA = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chart-grid-a'));
 COLORS.grid = hexA(COLORS.border2, Number.isFinite(chartGridA) ? chartGridA : 0.5);
 

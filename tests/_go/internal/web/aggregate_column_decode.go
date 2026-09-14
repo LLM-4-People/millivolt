@@ -90,8 +90,8 @@ func TestExplorerAbsorbsCorruptAttemptsColumn(t *testing.T) {
 
 // TestBootstrapSignalsTotalsDegraded pins the storage signal wiring: a store
 // whose boot scan failed reports totals_degraded=true in the bootstrap
-// payload (the contract for the planned degraded banner; no frontend render
-// yet), and a healthy store reports false.
+// payload (the status footer renders it as the totals-degraded footnote
+// and tooltip), and a healthy store reports false.
 func TestBootstrapSignalsTotalsDegraded(t *testing.T) {
 	d := config.Default()
 	bootSignal := func(queryTimeout time.Duration) map[string]any {

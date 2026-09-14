@@ -878,8 +878,8 @@ type storageSignal struct {
 	Enabled bool   `json:"enabled"`
 	Dropped uint64 `json:"dropped"`
 	// TotalsDegraded reports a failed boot scan: the since-inception KPI
-	// totals count only rows committed since that scan. No frontend render
-	// yet; the field is the contract for the planned degraded banner.
+	// totals count only rows committed since that scan. The status footer
+	// renders it as the totals-degraded footnote and tooltip.
 	TotalsDegraded bool `json:"totals_degraded"`
 }
 

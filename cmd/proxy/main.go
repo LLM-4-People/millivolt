@@ -510,8 +510,9 @@ func logDroppedConfigKeys(path string, skipped []string) {
 // application: the boot-time dropped-keys scan or a reload through
 // reloadConfig (the single choke point for SIGHUP, POST /admin/reload,
 // config saves and backup restores). The log lines remain the history; this
-// is the structured view /admin/config will serve for the dashboard's
-// planned last_reload section (no frontend consumer yet).
+// is the structured view /admin/config serves as the dashboard's
+// last_reload section (the Settings sheet renders it as its last-apply
+// row).
 var reloadStatus = struct {
 	mu              sync.Mutex
 	at              time.Time
