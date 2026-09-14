@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -573,5 +575,40 @@ func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
 	if p := fullSnapshot(t, b); len(p.Records) != total {
 		t.Errorf("no store after store: full snapshot has %d records, want all %d restored",
 			len(p.Records), total)
+	}
+}
+
+// TestNewHTTPServerContract pins the real server constructor the main boot
+// and the restart handoff's clone share. The round-seven mutation round
+// proved NOTHING constructed newHTTPServer: dropping the BaseContext tie (the
+// shared shutdown context that aborts in-flight SSE streams immediately and
+// keeps Shutdown off the per-request timeouts) or the timeout set (boot
+// config values, no WriteTimeout - it would cut off long-lived SSE streams)
+// went unnoticed. The tie is asserted behaviorally: the context the server
+// hands its listeners IS the caller's srvCtx, so cancelling it is observable
+// by every connection the server accepted.
+func TestNewHTTPServerContract(t *testing.T) {
+	cfg := config.Default()
+	cfg.ReadHeaderTimeout = 3 * time.Second
+	cfg.IdleTimeout = 4 * time.Minute
+	srvCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv := newHTTPServer(http.NotFoundHandler(), cfg, srvCtx)
+	if srv.ReadHeaderTimeout != cfg.ReadHeaderTimeout || srv.IdleTimeout != cfg.IdleTimeout {
+		t.Fatalf("timeouts = (%v, %v), want the boot config's (%v, %v)",
+			srv.ReadHeaderTimeout, srv.IdleTimeout, cfg.ReadHeaderTimeout, cfg.IdleTimeout)
+	}
+	if srv.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %v, want 0 (it would cut off long-lived SSE streams)", srv.WriteTimeout)
+	}
+	if srv.BaseContext == nil {
+		t.Fatal("BaseContext is nil; in-flight streams could never observe the shared shutdown context")
+	}
+	if got := srv.BaseContext(nil); got != srvCtx {
+		t.Fatalf("BaseContext() = %v, want the caller's srvCtx (the shutdown tie)", got)
+	}
+	cancel()
+	if err := srvCtx.Err(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("srvCtx.Err() = %v, want Canceled through the server's base context", err)
 	}
 }

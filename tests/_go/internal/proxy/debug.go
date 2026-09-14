@@ -423,6 +423,28 @@ func TestDebugRequestPublishedAndCaptured(t *testing.T) {
 	if !strings.Contains(raw, "hello debug") {
 		t.Fatal("capture missing response body")
 	}
+	// The rendered timestamps must carry the explicit UTC designator: the
+	// drawer renders them verbatim, and dropping the .UTC() call changes the
+	// zone silently (the same mutation class as rfc3339OrNil's pin).
+	var doc struct {
+		CapturedAt string `json:"captured_at"`
+		ExpiresAt  string `json:"expires_at"`
+		Timing     struct {
+			Start string `json:"start"`
+			End   string `json:"end"`
+		} `json:"timing"`
+	}
+	if err := json.Unmarshal(got.Body.Bytes(), &doc); err != nil {
+		t.Fatalf("capture doc: %v", err)
+	}
+	for name, s := range map[string]string{"captured_at": doc.CapturedAt, "expires_at": doc.ExpiresAt, "timing.start": doc.Timing.Start, "timing.end": doc.Timing.End} {
+		if !strings.HasSuffix(s, "Z") {
+			t.Fatalf("%s = %q, want the UTC Z designator", name, s)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, s); err != nil {
+			t.Fatalf("%s = %q does not parse as RFC 3339: %v", name, s, err)
+		}
+	}
 }
 
 func TestRedactHeaderName(t *testing.T) {

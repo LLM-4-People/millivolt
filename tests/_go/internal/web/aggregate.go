@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,15 @@ func testStore(t *testing.T) *storage.Store {
 	t.Cleanup(func() { s.Close() })
 	return s
 }
+
+// The two identity widths the browser regexes assert (live.js
+// DASHBOARD_VERSION_RE and explorer.js MODEL_REVISION_RE): 16 lowercase hex
+// for the stamped asset version (web.go etagHex) and 64 for the model-canon
+// content revision (aggregate_observer.go sha256).
+var (
+	hexRe16 = regexp.MustCompile(`^[a-f0-9]{16}$`)
+	hexRe64 = regexp.MustCompile(`^[a-f0-9]{64}$`)
+)
 
 // waitTotals polls until the store's durable totals reach n requests.
 func waitTotals(t *testing.T, s *storage.Store, n int64) {
@@ -802,6 +812,9 @@ func TestStatusClassAndBuckets(t *testing.T) {
 	if got := contribStatusClass(&contrib{live: true, paused: true, stream: true}); got != "paused" {
 		t.Errorf("live paused = %q, want paused", got)
 	}
+	if got := contribStatusClass(&contrib{live: true, throttled: true, stream: true}); got != "throttled" {
+		t.Errorf("live throttled = %q, want throttled (the pill precedence pauses > throttles > streams)", got)
+	}
 	if got := contribStatusClass(&contrib{live: true, stream: true}); got != "streaming" {
 		t.Errorf("live stream = %q, want streaming", got)
 	}
@@ -841,7 +854,11 @@ func TestExplorerLiveStatusClasses(t *testing.T) {
 
 func TestErrorEntriesSemantics(t *testing.T) {
 	// 429 final = no error entry (flow control); 499 = none (client cancel).
-	r := &metrics.Record{StatusCode: 499, Start: time.Now()}
+	r := &metrics.Record{StatusCode: 429, ErrorType: "rate_limit_error", Start: time.Now()}
+	if n := len(errorEntries(r)); n != 0 {
+		t.Fatalf("429 → %d entries, want 0 (flow control is never an error event)", n)
+	}
+	r = &metrics.Record{StatusCode: 499, Start: time.Now()}
 	if n := len(errorEntries(r)); n != 0 {
 		t.Fatalf("499 → %d entries, want 0", n)
 	}
@@ -1551,5 +1568,96 @@ func TestCanonicalModelScopeAppliesEverywhere(t *testing.T) {
 	rows, ok := pl["records"].([]any)
 	if !ok || len(rows) != 3 {
 		t.Fatalf("scoped log rows = %d, want 3 (raw spellings matched by the canonical filter)", pl["records"])
+	}
+}
+
+// TestBootstrapWireKeysStrict pins the dashboard bootstrap payload's exact
+// wire key set with a DisallowUnknownFields decoder through the real
+// handler and marshaling path. The W15 drop removed the KPI's answer_tokens
+// and tool_calls and the snapshot's oldest_seq/buffer_size; the round-seven
+// mutation round proved a re-added or renamed key went unnoticed. Nested
+// records stay raw (their key set is the record contract, pinned by the
+// storage/log suites); the envelope keys and the KPI section are the pinned
+// surface. The same decode also pins the two identity widths the browser
+// regexes assert: dashboard_version is 16 lowercase hex (web.go etagHex,
+// mirrored by live.js DASHBOARD_VERSION_RE) and the model_canon revision
+// is 64 lowercase hex (aggregate_observer.go sha256, mirrored by
+// explorer.js MODEL_REVISION_RE).
+func TestBootstrapWireKeysStrict(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	now := time.Now()
+	buf.Record(mkRec("b1", now, 200, "", nil, 10, 100, 10, 5, 0, 0.5))
+	live := mkRec("b2", now, 0, "", nil, 0, 0, 0, 0, 0, 0)
+	live.Stream = true
+	buf.PublishLive("begin", live)
+	agg := NewAggAPI(buf, nil, time.Second)
+
+	rec := httptest.NewRecorder()
+	http.HandlerFunc(agg.HandleBootstrap).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics/bootstrap", nil))
+	if rec.Code != 200 {
+		t.Fatalf("bootstrap status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var wire struct {
+		Records         json.RawMessage `json:"records"`
+		InFlightRecords json.RawMessage `json:"in_flight_records"`
+		PendingRevision uint64          `json:"pending_revision"`
+		Counters        struct {
+			InFlight int64 `json:"in_flight"`
+			TotalReq int64 `json:"total_requests"`
+			TotalErr int64 `json:"total_errors"`
+		} `json:"counters"`
+		Seq              int64           `json:"seq"`
+		FeedID           string          `json:"feed_id"`
+		Incremental      bool            `json:"incremental"`
+		ModelCanon       json.RawMessage `json:"model_canon"`
+		DashboardVersion string          `json:"dashboard_version"`
+		KPI              struct {
+			Requests    int64    `json:"requests"`
+			Errors      int64    `json:"errors"`
+			InFlight    int64    `json:"in_flight"`
+			Cost        float64  `json:"cost"`
+			CostPerReq  *float64 `json:"cost_per_req"`
+			CostPerMTok *float64 `json:"cost_per_mtok"`
+			InputTok    int64    `json:"input_tokens"`
+			OutputTok   int64    `json:"output_tokens"`
+			CacheRead   int64    `json:"cache_read_tokens"`
+			Reasoning   int64    `json:"reasoning_tokens"`
+			AvgTTFT     *float64 `json:"avg_ttft_ms"`
+			AvgTPS      *float64 `json:"avg_tps"`
+		} `json:"kpi"`
+		Storage struct {
+			Enabled        bool   `json:"enabled"`
+			Dropped        uint64 `json:"dropped"`
+			TotalsDegraded bool   `json:"totals_degraded"`
+		} `json:"storage"`
+	}
+	dec := json.NewDecoder(rec.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		t.Fatalf("strict decode: %v\n%s", err, rec.Body.String())
+	}
+	if wire.KPI.Requests != 1 || wire.KPI.InputTok != 10 || wire.KPI.OutputTok != 5 || wire.KPI.Cost != 0.5 {
+		t.Fatalf("kpi = %+v, want the folded ring record", wire.KPI)
+	}
+	if wire.KPI.CostPerReq == nil || *wire.KPI.CostPerReq != 0.5 {
+		t.Fatalf("kpi cost_per_req = %v, want the folded 0.5 blended rate", wire.KPI.CostPerReq)
+	}
+	if wire.KPI.AvgTTFT == nil || *wire.KPI.AvgTTFT != 10 {
+		t.Fatalf("kpi avg_ttft_ms = %v, want the folded 10ms mean", wire.KPI.AvgTTFT)
+	}
+	if wire.KPI.AvgTPS != nil {
+		t.Fatalf("kpi avg_tps = %v, want nil with no captured throughput sample", wire.KPI.AvgTPS)
+	}
+	if !hexRe16.MatchString(wire.DashboardVersion) {
+		t.Fatalf("dashboard_version = %q, want 16 lowercase hex (web.go etagHex width; live.js DASHBOARD_VERSION_RE mirrors it)", wire.DashboardVersion)
+	}
+	var canon struct {
+		Revision string `json:"revision"`
+	}
+	if err := json.Unmarshal(wire.ModelCanon, &canon); err != nil {
+		t.Fatalf("model_canon: %v", err)
+	}
+	if !hexRe64.MatchString(canon.Revision) {
+		t.Fatalf("model_canon revision = %q, want 64 lowercase hex (sha256; explorer.js MODEL_REVISION_RE mirrors it)", canon.Revision)
 	}
 }

@@ -159,6 +159,51 @@ func TestSnapshotJSON(t *testing.T) {
 	}
 }
 
+// TestSnapshotWireKeysStrict pins the live snapshot payload's exact wire key
+// set with a DisallowUnknownFields decoder over the real marshaling path.
+// The W15 drop removed oldest_seq and made buffer_size json-only-in-Go; the
+// round-seven mutation round proved a re-added or renamed key went unnoticed
+// by every existing test. The decoder below accepts ONLY the current keys
+// (records, in_flight_records, pending_revision, counters, seq, feed_id,
+// incremental); nested records stay raw - their own key set belongs to the
+// record contract, not the snapshot envelope.
+func TestSnapshotWireKeysStrict(t *testing.T) {
+	b := NewBuffer(8)
+	b.Record(&Record{ID: "s1", Provider: "p", Model: "m", Client: "c"})
+	b.PublishLive("begin", &Record{ID: "live1", Client: "c", Provider: "p", Model: "m"})
+	raw, err := json.Marshal(b.SnapshotSince(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Records         json.RawMessage `json:"records"`
+		InFlightRecords json.RawMessage `json:"in_flight_records"`
+		PendingRevision uint64          `json:"pending_revision"`
+		Counters        struct {
+			InFlight int64 `json:"in_flight"`
+			TotalReq int64 `json:"total_requests"`
+			TotalErr int64 `json:"total_errors"`
+		} `json:"counters"`
+		Seq         int64  `json:"seq"`
+		FeedID      string `json:"feed_id"`
+		Incremental bool   `json:"incremental"`
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		t.Fatalf("strict decode: %v\n%s", err, raw)
+	}
+	if wire.PendingRevision == 0 || wire.Seq != 1 || wire.FeedID == "" || wire.Incremental {
+		t.Fatalf("snapshot metadata = %+v, want pending revision set, seq 1, feed set, full snapshot", wire)
+	}
+	if len(wire.Records) == 0 || len(wire.InFlightRecords) == 0 {
+		t.Fatalf("records/in_flight_records missing: %s", raw)
+	}
+	if wire.Counters.InFlight != 1 {
+		t.Fatalf("counters.in_flight = %d, want 1 (the published begin)", wire.Counters.InFlight)
+	}
+}
+
 func TestPercentile(t *testing.T) {
 	sorted := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	if p := Percentile(sorted, 50); p != 5 {

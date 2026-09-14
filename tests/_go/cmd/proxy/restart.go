@@ -17,7 +17,104 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
+
+// TestRestartStatusDocWireKeysStrict pins the GET /admin/restart status
+// document's exact key set with a DisallowUnknownFields decoder through the
+// real handler. The W15 drop removed phase_ms (pure test telemetry); the
+// round-seven mutation round proved a re-added key went unnoticed. Every
+// conditional key is exercised here: drain_timeout_ms via the wired
+// drainTimeout dep, drain_elapsed_ms via the draining phase.
+func TestRestartStatusDocWireKeysStrict(t *testing.T) {
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func() error { return nil },
+		drainTimeout: func() time.Duration { return 90 * time.Second },
+	})
+	rs.mu.Lock()
+	rs.phase = restartDraining
+	rs.phaseAt = time.Now()
+	rs.mu.Unlock()
+	rec := httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodGet, "/admin/restart", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var doc struct {
+		Ok             bool   `json:"ok"`
+		Phase          string `json:"phase"`
+		Error          string `json:"error"`
+		Pid            int    `json:"pid"`
+		StartedAt      int64  `json:"started_at"`
+		Available      bool   `json:"available"`
+		Reason         string `json:"reason"`
+		Rank           int    `json:"rank"`
+		DrainTimeoutMs int64  `json:"drain_timeout_ms"`
+		DrainElapsedMs int64  `json:"drain_elapsed_ms"`
+	}
+	dec := json.NewDecoder(rec.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&doc); err != nil {
+		t.Fatalf("strict decode: %v\n%s", err, rec.Body.String())
+	}
+	if doc.Phase != "draining" || doc.Rank != phaseRank(restartDraining) || doc.Pid != os.Getpid() || doc.StartedAt == 0 {
+		t.Fatalf("status doc = %+v, want draining with cursor metadata", doc)
+	}
+	if doc.DrainTimeoutMs != 90000 || doc.DrainElapsedMs < 0 {
+		t.Fatalf("drain window = %+v, want the wired 90s bound and a live elapsed value", doc)
+	}
+}
+
+// TestRestartBudgetMirrorsPinned pins the three choreography bounds the
+// dashboard's poll fallback mirrors as literals (chrome.js
+// RESTART_BUILD_BUDGET_MS / RESTART_READY_BUDGET_MS / RESTART_DRAIN_FALLBACK_
+// MS = 300000 / 30000 / 600000): the build bound, the child-ready bound, and
+// the config default the fallback renders for documents that omit or zero
+// the drain bound.
+func TestRestartBudgetMirrorsPinned(t *testing.T) {
+	if restartBuildTimeout != 5*time.Minute {
+		t.Errorf("restartBuildTimeout = %v, want 5 minutes (dashboard RESTART_BUILD_BUDGET_MS 300000)", restartBuildTimeout)
+	}
+	if restartReadyTimeout != 30*time.Second {
+		t.Errorf("restartReadyTimeout = %v, want 30 seconds (dashboard RESTART_READY_BUDGET_MS 30000)", restartReadyTimeout)
+	}
+	if got := config.Default().RestartDrainTimeout; got != 10*time.Minute {
+		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes (dashboard RESTART_DRAIN_FALLBACK_MS 600000)", got)
+	}
+}
+
+// TestPhaseRankOrderPinned pins the step ordering the dashboard's
+// RESTART_STEPS list renders (ranks 0..3: rebuild, drain, flush, handoff).
+// A phase reordering must redden here, not mis-order the step tracker.
+func TestPhaseRankOrderPinned(t *testing.T) {
+	order := []struct {
+		phase int
+		name  string
+		rank  int
+	}{
+		{restartBuilding, "building", 0},
+		{restartDraining, "draining", 1},
+		{restartFlushing, "flushing", 2},
+		{restartHandingOff, "handing_off", 3},
+	}
+	for i, want := range order {
+		if got := phaseRank(want.phase); got != want.rank {
+			t.Errorf("phaseRank(%s) = %d, want %d", want.name, got, want.rank)
+		}
+		if got := phaseName(want.phase); got != want.name {
+			t.Errorf("phaseName(%d) = %q, want %q", want.phase, got, want.name)
+		}
+		if i > 0 && phaseRank(want.phase) <= phaseRank(order[i-1].phase) {
+			t.Errorf("phaseRank(%s) = %d does not follow %d", want.name, phaseRank(want.phase), phaseRank(order[i-1].phase))
+		}
+	}
+	if phaseRank(restartIdle) != -1 || phaseName(restartIdle) != "idle" {
+		t.Errorf("idle phase = rank %d name %q, want unranked idle", phaseRank(restartIdle), phaseName(restartIdle))
+	}
+}
 
 func TestModuleRootFrom(t *testing.T) {
 	dir := t.TempDir()

@@ -87,3 +87,26 @@ func TestProjectionParentIdentitySharesConversationDictionary(t *testing.T) {
 		t.Fatal("parent identity failed to reuse canonical bytes/counts")
 	}
 }
+
+// TestDimensionNamesMirrorExplorerRail pins the dimension dictionary's name
+// set. The dictionary indices are internal slots, but the NAMES own the API
+// dimension allowlist (validDims) and are what the explorer rail mirrors
+// (XP_RAIL_DIMS in explorer.js, whose order the jsdom suite pins). A
+// renamed, added or removed dimension must redden here instead of silently
+// stranding the browser rail or the filter grammar. Set equality is
+// order-independent against the rail; the array's own order is pinned too
+// because it defines the dictionary slot indices.
+func TestDimensionNamesMirrorExplorerRail(t *testing.T) {
+	want := []string{"client", "provider", "model", "conversation", "key", "status", "time", "tool", "error"}
+	if !reflect.DeepEqual(dimensionNames[:], want) {
+		t.Fatalf("dimensionNames = %v, want %v (the explorer rail's dimension set, in dictionary slot order)", dimensionNames[:], want)
+	}
+	if len(validDims) != len(want) {
+		t.Fatalf("validDims = %v, want exactly the rail dimensions accepted", validDims)
+	}
+	for _, name := range want {
+		if !validDims[name] {
+			t.Fatalf("validDims[%q] = false, want every rail dimension accepted by the explorer API", name)
+		}
+	}
+}

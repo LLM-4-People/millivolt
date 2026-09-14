@@ -2,6 +2,8 @@ package main
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +52,51 @@ func TestIsProxyProcessOther(t *testing.T) {
 	// A nonexistent pid must not match.
 	if isProxyProcess(1<<30, myExe) {
 		t.Errorf("isProxyProcess(bogus pid) = true, want false")
+	}
+}
+
+// TestProbePIDsPATHFixture pins the port-probe extraction through real PATH
+// fixtures: a stub tool emitting crafted output yields exactly its PID
+// tokens (whitespace-split, any layout), a failing probe and a missing tool
+// yield none, and the caller treats both as "strategy unavailable". Nothing
+// exercised probePIDs before; a parsing or lookup regression (the stale
+// instance reclaimer's first two strategies) went unnoticed.
+func TestProbePIDsPATHFixture(t *testing.T) {
+	dir := t.TempDir()
+	stub := func(name, script string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	// The unique tool name cannot shadow a real system tool when PATH is
+	// narrowed to the fixture directory.
+	const tool = "millivolt-probe-stub"
+	run := func(script string) []string {
+		t.Helper()
+		stub(tool, script)
+		t.Setenv("PATH", dir)
+		return probePIDs(tool, "8080/tcp")
+	}
+	if got := run("#!/bin/sh\nprintf '1234\\n5678 90\\n'"); strings.Join(got, ",") != "1234,5678,90" {
+		t.Fatalf("crafted multi-line output = %v, want [1234 5678 90]", got)
+	}
+	if got := run("#!/bin/sh\nprintf ''"); len(got) != 0 {
+		t.Fatalf("empty output = %v, want no PIDs", got)
+	}
+	if got := run("#!/bin/sh\nexit 1"); len(got) != 0 {
+		t.Fatalf("failing probe = %v, want no PIDs (strategy unavailable)", got)
+	}
+	if got := run("#!/bin/sh\nprintf 'nope' 1>&2\nexit 0"); len(got) != 0 {
+		t.Fatalf("stderr-only probe = %v, want no PIDs (stdout carries them)", got)
+	}
+	// A missing tool reports no PIDs, never an error path.
+	t.Setenv("PATH", dir)
+	if err := os.Remove(filepath.Join(dir, tool)); err != nil {
+		t.Fatal(err)
+	}
+	if got := probePIDs(tool, "8080/tcp"); len(got) != 0 {
+		t.Fatalf("missing tool = %v, want no PIDs", got)
 	}
 }

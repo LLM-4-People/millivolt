@@ -193,3 +193,44 @@ func TestModelRuleExactNoPadding(t *testing.T) {
 		t.Fatalf("padded parked exact rule rejected: %v", err)
 	}
 }
+
+// TestModelRulesMaxMirrorsDashboard pins the pipeline cap's literal value:
+// the dashboard's MODEL_RULES_MAX (chrome.js) mirrors it in the editor's
+// count line and add gate, and the rejection text carries the number to the
+// operator. TestModelRulesCap exercises the boundary symbolically; this pin
+// holds the VALUE so a Go-side change cannot silently strand the JS mirror.
+func TestModelRulesMaxMirrorsDashboard(t *testing.T) {
+	if ModelRulesMax != 64 {
+		t.Fatalf("ModelRulesMax = %d, want 64 (the dashboard's MODEL_RULES_MAX mirror)", ModelRulesMax)
+	}
+	rules := make([]ModelRule, ModelRulesMax+1)
+	for i := range rules {
+		rules[i] = ModelRule{Mode: ModelRuleLower}
+	}
+	err := ValidateModelRules(rules)
+	if err == nil || !strings.Contains(err.Error(), "cap of 64") {
+		t.Fatalf("cap error = %v, want the operator-facing \"cap of 64\"", err)
+	}
+}
+
+// TestDefaultModelRulesPayloadPinned pins the shipped pipeline's exact rule
+// payloads. The dashboard's template menu and restore-defaults derive their
+// rows from this list via the settings doc (defaults.model_rules), and the
+// ui_check harness seeds its fixtures from the same payloads - a changed
+// pattern or reordered step must redden here, not drift through as a
+// silently different shipped pipeline.
+func TestDefaultModelRulesPayloadPinned(t *testing.T) {
+	want := []ModelRule{
+		{Mode: ModelRuleLower},
+		{Mode: ModelRulePattern, From: `^[a-z0-9][a-z0-9._-]*/`, To: ""},
+		{Mode: ModelRulePattern, From: `:[a-z0-9._-]+$`, To: ""},
+		{Mode: ModelRulePattern, From: `-(?:[a-z]{0,2}fp\d+|bf\d+|int\d+|nf\d+|[a-z]?q\d+(?:_[0-9a-z]+)*)$`, To: ""},
+		{Mode: ModelRulePattern, From: `(\d)\.(\d)`, To: "$1-$2"},
+	}
+	if !reflect.DeepEqual(DefaultModelRules(), want) {
+		t.Fatalf("DefaultModelRules() = %+v, want the pinned five-step shipped pipeline %+v", DefaultModelRules(), want)
+	}
+	if err := ValidateModelRules(DefaultModelRules()); err != nil {
+		t.Fatalf("shipped pipeline rejected by its own validator: %v", err)
+	}
+}

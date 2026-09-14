@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -252,5 +253,126 @@ func TestWriteYAMLStringIdentityAndPrivateMode(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("temporary files leaked: %v %v", entries, err)
+	}
+}
+
+// settingsWireDoc is the strict decoder for the GET/POST /admin/config
+// response document, pinned to the CURRENT key set. A re-added or renamed
+// key (the W15 drop removed the save response's top-level ok; the round-seven
+// mutation round proved re-adds go unnoticed) must redden here. Sections the
+// dashboard re-fetches as opaque server-owned maps (fields, categories,
+// defaults, values, effective, backup, last_reload) decode as raw JSON:
+// their inner shapes are owned by Schema/Categories/Default/Map and the
+// reload-status owner.
+type settingsWireDoc struct {
+	RestartRequired []string        `json:"restart_required"`
+	Values          json.RawMessage `json:"values"`
+	Revision        string          `json:"revision"`
+	Effective       json.RawMessage `json:"effective"`
+	Fields          json.RawMessage `json:"fields"`
+	Categories      json.RawMessage `json:"categories"`
+	Defaults        json.RawMessage `json:"defaults"`
+	Overrides       map[string]any  `json:"overrides"`
+	Writable        bool            `json:"writable"`
+	Path            string          `json:"path"`
+	UsageFields     json.RawMessage `json:"usage_fields"`
+	ModelFields     json.RawMessage `json:"model_fields"`
+	Backup          json.RawMessage `json:"backup,omitempty"`
+	LastReload      json.RawMessage `json:"last_reload,omitempty"`
+	Saved           bool            `json:"saved,omitempty"`
+	Error           string          `json:"error,omitempty"`
+}
+
+// TestSettingsDocWireKeysStrict runs one strict decode over both real
+// responses (GET and POST) with every optional section wired, so each key
+// the dashboard consumes is the only one present.
+func TestSettingsDocWireKeysStrict(t *testing.T) {
+	h := &Handler{
+		Path:      filepath.Join(t.TempDir(), "config.yaml"),
+		Startup:   Default(),
+		Effective: Default,
+		Overrides: map[string]string{"listen": "127.0.0.1:8081"},
+		Backup:    func() map[string]any { return map[string]any{"config": true} },
+		ReloadStatus: func() any {
+			return map[string]any{"ok": true, "dropped_keys": []string{}, "restart_required": []string{}, "at": int64(1)}
+		},
+	}
+	strict := func(t *testing.T, body []byte) settingsWireDoc {
+		t.Helper()
+		var doc settingsWireDoc
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&doc); err != nil {
+			t.Fatalf("strict decode: %v\n%s", err, body)
+		}
+		return doc
+	}
+
+	get := httptest.NewRecorder()
+	h.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/admin/config", nil))
+	if get.Code != 200 {
+		t.Fatalf("GET status = %d body=%s", get.Code, get.Body.String())
+	}
+	doc := strict(t, get.Body.Bytes())
+	if doc.Saved || doc.Error != "" {
+		t.Fatalf("GET doc carries save-only keys: %+v", doc)
+	}
+	if !doc.Writable || doc.Path != h.Path || len(doc.Overrides) != 1 {
+		t.Fatalf("GET doc identity = %+v", doc)
+	}
+	if len(doc.Backup) == 0 || len(doc.LastReload) == 0 {
+		t.Fatalf("GET doc omitted wired sections: %s", get.Body.String())
+	}
+
+	// The save response carries the STATE subset only (restart_required,
+	// values, revision, effective) plus saved, last_reload and error - the
+	// dashboard merges those into the doc its GET already fetched
+	// (chrome.js saveSettings). A re-added GET-only key reddens here.
+	post := settingsPost(h, doc.Revision, `{"max_retries":2}`)
+	if post.Code != 200 {
+		t.Fatalf("POST status = %d body=%s", post.Code, post.Body.String())
+	}
+	var saved struct {
+		RestartRequired []string        `json:"restart_required"`
+		Values          json.RawMessage `json:"values"`
+		Revision        string          `json:"revision"`
+		Effective       json.RawMessage `json:"effective"`
+		LastReload      json.RawMessage `json:"last_reload,omitempty"`
+		Saved           bool            `json:"saved,omitempty"`
+		Error           string          `json:"error,omitempty"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(post.Body.Bytes()))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&saved); err != nil {
+		t.Fatalf("strict decode of the save response: %v\n%s", err, post.Body.String())
+	}
+	if !saved.Saved || saved.Error != "" || saved.Revision == "" {
+		t.Fatalf("save response = %+v, want saved state with a fresh revision", saved)
+	}
+	if len(saved.LastReload) == 0 {
+		t.Fatalf("save response omitted the wired last_reload section: %s", post.Body.String())
+	}
+
+	h.Persist = func() ([]string, error) { return nil, errors.New("reload rejected") }
+	post = settingsPost(h, saved.Revision, `{"max_retries":3}`)
+	if post.Code != 500 {
+		t.Fatalf("failed-reload POST status = %d body=%s", post.Code, post.Body.String())
+	}
+	var failed struct {
+		RestartRequired []string        `json:"restart_required"`
+		Values          json.RawMessage `json:"values"`
+		Revision        string          `json:"revision"`
+		Effective       json.RawMessage `json:"effective"`
+		LastReload      json.RawMessage `json:"last_reload,omitempty"`
+		Saved           bool            `json:"saved,omitempty"`
+		Error           string          `json:"error,omitempty"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(post.Body.Bytes()))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&failed); err != nil {
+		t.Fatalf("strict decode of the failed-reload response: %v\n%s", err, post.Body.String())
+	}
+	if !failed.Saved || !strings.Contains(failed.Error, "reload rejected") {
+		t.Fatalf("failed-reload response = %+v, want saved plus the reload error", failed)
 	}
 }

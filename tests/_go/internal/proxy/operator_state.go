@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -240,5 +241,189 @@ func TestDebugEditExpiredSessionDoesNotReviveIt(t *testing.T) {
 	p.HandleDebug(w, httptest.NewRequest(http.MethodPost, "/admin/debug", strings.NewReader(`{"enabled":true,"id":"expired","duration":"1h"}`)))
 	if w.Code != http.StatusNotFound || p.DebugSnapshot()["enabled"] != false {
 		t.Fatalf("expired session revived: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// TestOperatorStateMethodGates pins the RFC 9110 method gate the three
+// operator-state endpoints share (rejectUnlessGetPost via operatorStateGet):
+// a wrong method gets 405 with the Allow header, never a fall-through to a
+// decode or the LLM proxy. The restart endpoint's gate is pinned separately
+// in the cmd/proxy suite; nothing pinned these three.
+func TestOperatorStateMethodGates(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	served := map[string]func(http.ResponseWriter, *http.Request){
+		"/admin/pause":    p.HandlePause,
+		"/admin/debug":    p.HandleDebug,
+		"/admin/throttle": p.HandleThrottle,
+	}
+	for path, handler := range served {
+		for _, method := range []string{http.MethodPut, http.MethodDelete, http.MethodPatch} {
+			rec := httptest.NewRecorder()
+			handler(rec, httptest.NewRequest(method, path, nil))
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Errorf("%s %s = %d, want 405", method, path, rec.Code)
+			}
+			if allow := rec.Header().Get("Allow"); allow != "GET, POST" {
+				t.Errorf("%s %s Allow = %q, want \"GET, POST\"", method, path, allow)
+			}
+			if !strings.Contains(rec.Body.String(), "GET or POST") {
+				t.Errorf("%s %s body = %q, want the shared gate text", method, path, rec.Body.String())
+			}
+		}
+	}
+}
+
+// TestOperatorStateUntilRFC3339UTC pins rfc3339OrNil's wire format on every
+// surface that renders it: each pause hold's until, the pause document's
+// soonest until, each debug session's until, and the debug document's
+// soonest until. Format(time.RFC3339) only emits the trailing Z through the
+// explicit UTC() call - the round-seven mutation dropped that call silently,
+// changing the zone without breaking a single test. A value is valid only if
+// it parses as RFC 3339 AND carries the UTC Z designator; a zero Until
+// renders no field at all (nil omission is the existing contract).
+func TestOperatorStateUntilRFC3339UTC(t *testing.T) {
+	// Force a non-UTC local zone so the pin catches the dropped .UTC() call
+	// on any machine: with a UTC local zone the mutation is invisible.
+	zoneShift := time.FixedZone("fixture-shift", 3600)
+	savedLocal := time.Local
+	time.Local = zoneShift
+	defer func() { time.Local = savedLocal }()
+
+	p := New(config.Default(), metrics.Noop{})
+	rec := httptest.NewRecorder()
+	p.HandlePause(rec, httptest.NewRequest(http.MethodPost, "/admin/pause",
+		strings.NewReader(`{"paused":true,"clients":["client-a"],"duration":"15m"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("pause add = %d %s", rec.Code, rec.Body.Bytes())
+	}
+	rec = httptest.NewRecorder()
+	p.HandlePause(rec, httptest.NewRequest(http.MethodGet, "/admin/pause", nil))
+	st := pauseJSON(t, rec)
+	holds, _ := st["holds"].([]any)
+	if len(holds) != 1 {
+		t.Fatalf("holds = %v, want the one timed hold", st["holds"])
+	}
+	untils := []any{holds[0].(map[string]any)["until"], st["until"]}
+	for i, raw := range untils {
+		s, ok := raw.(string)
+		if !ok {
+			t.Fatalf("pause until[%d] = %v, want an RFC 3339 string", i, raw)
+		}
+		if !strings.HasSuffix(s, "Z") {
+			t.Fatalf("pause until[%d] = %q, want the UTC Z designator", i, s)
+		}
+		if _, err := time.Parse(time.RFC3339, s); err != nil {
+			t.Fatalf("pause until[%d] = %q does not parse as RFC 3339: %v", i, s, err)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	p.HandleDebug(rec, httptest.NewRequest(http.MethodPost, "/admin/debug",
+		strings.NewReader(`{"enabled":true,"clients":["client-a"],"duration":"15m"}`)))
+	if rec.Code != 200 {
+		t.Fatalf("debug add = %d %s", rec.Code, rec.Body.Bytes())
+	}
+	rec = httptest.NewRecorder()
+	p.HandleDebug(rec, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
+	dst := pauseJSON(t, rec)
+	sessions, _ := dst["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("debug sessions = %v, want the one timed session", dst["sessions"])
+	}
+	untils = []any{sessions[0].(map[string]any)["until"], dst["until"]}
+	for i, raw := range untils {
+		s, ok := raw.(string)
+		if !ok {
+			t.Fatalf("debug until[%d] = %v, want an RFC 3339 string", i, raw)
+		}
+		if !strings.HasSuffix(s, "Z") {
+			t.Fatalf("debug until[%d] = %q, want the UTC Z designator", i, s)
+		}
+		if _, err := time.Parse(time.RFC3339, s); err != nil {
+			t.Fatalf("debug until[%d] = %q does not parse as RFC 3339: %v", i, s, err)
+		}
+	}
+}
+
+// TestKnownSetsSeedFromRealRequest pins the operator known-name content: a
+// proxied request seeds exactly the client it carried and the provider its
+// base URL derives, while an EMPTY name never seeds a checkbox row (the
+// nameSet.add empty guard - a request body with no model field records an
+// empty rec.Model, and the round-seven mutation round proved removing the
+// guard went unnoticed). The direct add("") rows pin the same guard for the
+// client and provider sets, which the HTTP path cannot reach with an empty
+// value (classifyClient and providerFromURL both fall back to a label).
+func TestKnownSetsSeedFromRealRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	p := New(config.Default(), metrics.Noop{})
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	// A JSON body with NO model field: the record's model stays empty, and
+	// the known-model checkbox list must not gain an empty row.
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("X-Proxy-Client", "seeded-client")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	known := func(t *testing.T, doc map[string]any, key string) []string {
+		t.Helper()
+		raw, _ := doc[key].([]any)
+		out := make([]string, 0, len(raw))
+		for _, v := range raw {
+			out = append(out, v.(string))
+		}
+		return out
+	}
+	rec := httptest.NewRecorder()
+	p.HandlePause(rec, httptest.NewRequest(http.MethodGet, "/admin/pause", nil))
+	st := pauseJSON(t, rec)
+	if got := known(t, st, "known_clients"); strings.Join(got, ",") != "seeded-client" {
+		t.Fatalf("known_clients = %v, want exactly the request's client", got)
+	}
+	provider := providerFromURL(mustParseURL(t, upstream.URL))
+	if got := known(t, st, "known_providers"); strings.Join(got, ",") != provider {
+		t.Fatalf("known_providers = %v, want exactly %q (the base URL's derived label)", got, provider)
+	}
+
+	rec = httptest.NewRecorder()
+	p.HandleDebug(rec, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
+	dst := pauseJSON(t, rec)
+	if got := known(t, dst, "known_models"); len(got) != 0 {
+		t.Fatalf("known_models = %v, want no entry for the model-less request", got)
+	}
+
+	// The guard itself: a direct empty add on any dimension is a no-op.
+	p.pause.clients.add("")
+	p.pause.providers.add("")
+	p.pause.models.add("")
+	rec = httptest.NewRecorder()
+	p.HandlePause(rec, httptest.NewRequest(http.MethodGet, "/admin/pause", nil))
+	st = pauseJSON(t, rec)
+	for _, key := range []string{"known_clients", "known_providers"} {
+		for _, name := range known(t, st, key) {
+			if name == "" {
+				t.Fatalf("%s gained an empty checkbox row", key)
+			}
+		}
+	}
+	rec = httptest.NewRecorder()
+	p.HandleDebug(rec, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
+	for _, name := range known(t, pauseJSON(t, rec), "known_models") {
+		if name == "" {
+			t.Fatal("known_models gained an empty checkbox row")
+		}
 	}
 }
