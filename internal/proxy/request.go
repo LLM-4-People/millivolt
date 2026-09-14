@@ -37,6 +37,19 @@ const requestReadHintMax = 1 << 20
 // Exponents are checked separately by the standard decoder.
 const requestFloatDigits = 309
 
+// setResolvedAuth stamps the extracted upstream key into the target's
+// configured auth header (name + prefix); an empty key stamps nothing. The
+// one owner shared by the generic upstream request builder, the metadata
+// fetchers, and the cursor identity headers. The anthropic x-api-key
+// fallback (a target with no configured auth header) keeps its own branch,
+// and buildUpstreamRequest additionally strips the client's forwarded
+// credential before stamping.
+func setResolvedAuth(h http.Header, t *target, key string) {
+	if key != "" {
+		h.Set(t.authHeader, t.authPrefix+key)
+	}
+}
+
 func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *target, key string, body []byte) (*http.Request, error) {
 	path := t.path
 	if path == "" {
@@ -80,12 +93,13 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 		req.Header[k] = append([]string(nil), vs...)
 	}
 
-	// Place the upstream key into the provider's auth header.
+	// Place the upstream key into the provider's auth header. The strip is
+	// passthrough-specific: forwarded client headers may carry a stale
+	// credential, while the metadata and cursor builders start from fresh
+	// header maps.
 	req.Header.Del("Authorization")
 	req.Header.Del(t.authHeader)
-	if key != "" {
-		req.Header.Set(t.authHeader, t.authPrefix+key)
-	}
+	setResolvedAuth(req.Header, t, key)
 
 	// Provider-configured headers (e.g. mimicking a first-party client's wire
 	// fingerprint) override client-forwarded values; the explicit per-request

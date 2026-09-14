@@ -69,6 +69,15 @@ func TestModelsDiscoveryConfigBoundsAndPersistence(t *testing.T) {
 			t.Error("Validate accepted invalid discovery limit")
 		}
 	}
+	// The rejection wording is a pinned contract (the errRange owner, shared
+	// with the schema bounds): byte-exact, with the integer band rendered
+	// without formatting drift.
+	c := Default()
+	c.ModelsDiscoveryMaxPages = ModelsDiscoveryMaxPagesMax + 1
+	err = c.Validate()
+	if err == nil || err.Error() != "models_discovery_max_pages: must be 1..1000, got 1001" {
+		t.Fatalf("Validate error = %v, want the exact errRange wording", err)
+	}
 	changed := Default()
 	changed.ModelsDiscoveryTimeout = ModelsDiscoveryTimeoutMin
 	changed.ModelsDiscoveryMaxBytes = ModelsDiscoveryMaxBytesMin

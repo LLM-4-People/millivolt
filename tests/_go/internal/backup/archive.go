@@ -123,8 +123,15 @@ func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
 	if errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("verify I/O reported as invalid snapshot: %v", err)
 	}
-	if !strings.Contains(err.Error(), blocked) {
-		t.Fatalf("error %q should name the staging directory", err)
+	// StageSnapshotError owns the wrap: the message names the staging
+	// directory (the capacity owner) and the %w keeps the underlying I/O
+	// error classifiable by callers.
+	if !strings.HasPrefix(err.Error(), "stage snapshot in "+blocked+": ") {
+		t.Fatalf("error %q should open with the StageSnapshotError wrap naming the staging directory", err)
+	}
+	var perr *os.PathError
+	if !errors.As(err, &perr) {
+		t.Fatalf("error %q must wrap the underlying *os.PathError so callers can classify I/O failures", err)
 	}
 }
 

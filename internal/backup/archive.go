@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -19,6 +20,10 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
+
+// ErrEmptyArchive rejects an archive with no members: Encode and Validate
+// both require at least one of config or database.
+var ErrEmptyArchive = errors.New("backup must include config, database, or both")
 
 const (
 	magic          = "MVB1"
@@ -74,7 +79,7 @@ func (a Archive) flags() byte {
 // round-tripped through Decode and Validate.
 func Encode(stageDir string, a Archive) ([]byte, error) {
 	if a.flags() == 0 {
-		return nil, fmt.Errorf("backup must include config, database, or both")
+		return nil, ErrEmptyArchive
 	}
 	if a.Created.IsZero() {
 		a.Created = time.Now().UTC()
@@ -198,7 +203,7 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 // carries a database member and ignored otherwise.
 func Validate(stageDir string, a Archive) error {
 	if a.flags() == 0 {
-		return fmt.Errorf("backup must include config, database, or both")
+		return ErrEmptyArchive
 	}
 	if len(a.Config) > 0 {
 		cfg, skipped, err := config.LoadBytes(a.Config)

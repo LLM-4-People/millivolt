@@ -116,6 +116,25 @@ func pauseDurationError() error {
 	return fmt.Errorf("duration must be %s, or empty", strings.Join(keys, ", "))
 }
 
+// mergeUntil owns the deadline merge shared by the pause and debug edit
+// transactions: an edit that omits duration keeps the previous deadline
+// untouched; a stated duration re-anchors a fresh window now, except the same
+// duration restated while the previous window is still live keeps it (an
+// extend-in-place edit must not reset the clock). Zero wait with no carried
+// deadline means no deadline (until the operator resumes).
+func mergeUntil(hasPrev, durationOmitted bool, dur string, wait time.Duration, prevDur string, prevUntil time.Time) time.Time {
+	if hasPrev && durationOmitted {
+		return prevUntil
+	}
+	if wait > 0 {
+		if hasPrev && prevDur == dur && !prevUntil.IsZero() && time.Now().Before(prevUntil) {
+			return prevUntil
+		}
+		return time.Now().Add(wait)
+	}
+	return time.Time{}
+}
+
 type pauseRuntime struct {
 	persist    pausePersist
 	clients    nameSet
@@ -365,15 +384,7 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 				snap.KnownAtNew = s.pause.clients.list()
 			}
 		}
-		if hasPrev && body.Duration == nil {
-			snap.Until = prev.Until
-		} else if wait > 0 {
-			if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
-				snap.Until = prev.Until
-			} else {
-				snap.Until = time.Now().Add(wait)
-			}
-		}
+		snap.Until = mergeUntil(hasPrev, body.Duration == nil, dur, wait, prev.Duration, prev.Until)
 		return snap, nil
 	})
 	if err != nil {

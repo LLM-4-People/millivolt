@@ -1,8 +1,11 @@
 package proxy
 
 import (
+	"io"
 	"testing"
+	"time"
 
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -50,5 +53,41 @@ func TestCursorTrackDeltaSetsHadAnswerContent(t *testing.T) {
 	}
 	if rec2.AnswerTokens != 0 || rec2.GenTokens != 0 {
 		t.Errorf("tool-only turn: AnswerTokens=%d GenTokens=%d, want 0/0", rec2.AnswerTokens, rec2.GenTokens)
+	}
+}
+
+// TestOpenCursorStreamOpeningDeltaDisconnect pins the disconnect accounting
+// for a client that died before the turn's first content frame: the opening
+// role delta writes to the dead socket and openCursorStream must mark the
+// disconnect immediately, because a turn that then ends with zero delta
+// events would never reach an emit-failure path and would otherwise record a
+// clean outcome. The flag must also SURVIVE finishRunTurn's zero-delta finish
+// (markGone is monotone, it never clears the flag) with cursor's documented
+// exception: the committed upstream 200 stays the record's status.
+func TestOpenCursorStreamOpeningDeltaDisconnect(t *testing.T) {
+	s := &Server{cursorRuns: newCursorRunStore(time.Hour)}
+	rec := &metrics.Record{StatusCode: 200}
+
+	emit := openCursorStream(failingSSEWriter{}, rec, "cursor-1", "neutral-model")
+	if !rec.ClientDisconnected {
+		t.Fatal("the opening role delta hit a dead socket: ClientDisconnected must be set immediately")
+	}
+
+	// A turn that finishes with zero delta events renders only the terminal
+	// frames on the same dead socket.
+	pr, pw := io.Pipe()
+	run := providerformat.NewCursorRun(pw, pr, nil, func() {}, 5*time.Second)
+	s.finishRunTurn(failingSSEWriter{}, run,
+		providerformat.TurnResult{Outcome: providerformat.TurnFinished},
+		emit, rec, "cursor-1", cursorTurnRender{est: 10}, false)
+
+	if !rec.ClientDisconnected {
+		t.Error("the zero-delta turn finish must keep the disconnect flag set at stream open")
+	}
+	if rec.StatusCode != 200 {
+		t.Errorf("StatusCode = %d, want 200 (cursor's documented exception: never markClientGone's 499)", rec.StatusCode)
+	}
+	if rec.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop (the turn itself finished normally)", rec.FinishReason)
 	}
 }

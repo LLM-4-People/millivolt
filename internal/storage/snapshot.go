@@ -257,6 +257,9 @@ func mergeAttachedTable(ctx context.Context, db mergeConn, table string) (int64,
 	return n, nil
 }
 
+// pragmaTableInfo guards the schema/table allowlists (the query is built by
+// concatenation, so the guards are load-bearing) and delegates the shared
+// PRAGMA read to tableColumnSet.
 func pragmaTableInfo(ctx context.Context, db mergeConn, schema, table string) (map[string]struct{}, error) {
 	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
 		return nil, fmt.Errorf("unknown backup schema")
@@ -264,28 +267,7 @@ func pragmaTableInfo(ctx context.Context, db mergeConn, schema, table string) (m
 	if table != "requests" && table != "request_debug" {
 		return nil, fmt.Errorf("unknown merge table")
 	}
-	q := "PRAGMA table_info(" + table + ")"
-	if schema != "" {
-		q = "PRAGMA " + schema + ".table_info(" + table + ")"
-	}
-	rows, err := db.QueryContext(ctx, q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	cols := make(map[string]struct{})
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull int
-		var dflt any
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return nil, err
-		}
-		cols[name] = struct{}{}
-	}
-	return cols, rows.Err()
+	return tableColumnSet(ctx, db, schema, table)
 }
 
 func intersectColumns(a, b map[string]struct{}) []string {

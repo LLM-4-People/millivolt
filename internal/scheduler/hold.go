@@ -547,13 +547,7 @@ func (s *Scheduler) seedQueuedHolds() {
 		h *holdSnap
 	}
 	var fire []seeded
-	s.mu.Lock()
-	groups := make([]*group, 0, len(s.groups))
-	for _, g := range s.groups {
-		groups = append(groups, g)
-	}
-	s.mu.Unlock()
-	for _, g := range groups {
+	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		for _, w := range g.queue {
 			if w == nil {

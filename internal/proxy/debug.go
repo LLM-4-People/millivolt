@@ -464,15 +464,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		snap = persistedDebug{
 			Clients: clients, Providers: providers, Models: models, Duration: dur,
 		}
-		if hasPrev && body.Duration == nil {
-			snap.Until = prev.Until
-		} else if wait > 0 {
-			if hasPrev && prev.Duration == dur && !prev.Until.IsZero() && time.Now().Before(prev.Until) {
-				snap.Until = prev.Until
-			} else {
-				snap.Until = time.Now().Add(wait)
-			}
-		}
+		snap.Until = mergeUntil(hasPrev, body.Duration == nil, dur, wait, prev.Duration, prev.Until)
 		return snap, nil
 	})
 	if err != nil {

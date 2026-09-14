@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 func TestRoutingControlConstantsAreStripped(t *testing.T) {
@@ -87,5 +88,27 @@ func TestHeaderValueGrammarSplit(t *testing.T) {
 	r.Header.Set(hdrHeaders, "{\"X-A\":[\"bad\x01value\"]}")
 	if _, err := resolveTarget(r, config.Default()); err == nil {
 		t.Error("control byte in X-Proxy-Headers value accepted: want a routing-boundary rejection")
+	}
+}
+
+// TestInvalidRoutingHeaderRejectionWording pins the 400 wire contract for a
+// malformed routing header served through ServeHTTP: errInvalidHeader's
+// "invalid <header> <value>" wording inside the OpenAI error envelope,
+// byte-exact. SDKs and the docs match on this shape; errJSON marshals the
+// message before the type (sorted keys) and http.Error appends one newline.
+func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
+	s := New(config.Default(), metrics.Noop{})
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions",
+		strings.NewReader(`{"model":"m"}`))
+	r.Header.Set(hdrBaseURL, "http://127.0.0.1:9")
+	r.Header.Set(hdrTimeout, "abc")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	want := `{"error":{"message":"invalid X-Proxy-Timeout-Ms \"abc\"","type":"invalid_request_error"}}`
+	if got := strings.TrimSpace(rec.Body.String()); got != want {
+		t.Fatalf("body = %s, want %s", got, want)
 	}
 }

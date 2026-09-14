@@ -254,7 +254,7 @@ func translateCursorRunRequest(openaiBody []byte, conversationID string, forceUs
 		Tools    []openaiTool    `json:"tools"`
 	}
 	if err := json.Unmarshal(openaiBody, &in); err != nil {
-		return nil, nil, false, fmt.Errorf("parse openai body: %w", err)
+		return nil, nil, false, errParseOpenAIBody(err)
 	}
 	if strings.TrimSpace(in.Model) == "" {
 		return nil, nil, false, fmt.Errorf("model is required for cursor format")

@@ -56,6 +56,15 @@ func TestQueryLimitConfigPersistenceAndBounds(t *testing.T) {
 			t.Errorf("Validate accepted %s overflow", field.key)
 		}
 	}
+	// The rejection wording is a pinned contract (the errRange owner, shared
+	// with the schema bounds): byte-exact, with the integer band rendered
+	// without formatting drift.
+	c := Default()
+	c.StorageQueryMaxRows = StorageQueryMaxRowsMax + 1
+	err = c.Validate()
+	if err == nil || err.Error() != "storage_query_max_rows: must be 1..100000, got 100001" {
+		t.Fatalf("Validate error = %v, want the exact errRange wording", err)
+	}
 	changed := Default()
 	changed.StorageQueryMaxBytes = StorageQueryMaxBytesMin
 	changed.StorageQueryMaxRows = StorageQueryMaxRowsMin

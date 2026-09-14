@@ -921,7 +921,7 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(requestDebugDDL); err != nil {
 		return fmt.Errorf("request_debug: %w", err)
 	}
-	cols, err := columnSet(db, "requests")
+	cols, err := tableColumnSet(context.Background(), db, "", "requests")
 	if err != nil {
 		return err
 	}
@@ -1032,8 +1032,19 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-func columnSet(db *sql.DB, table string) (map[string]struct{}, error) {
-	rows, err := db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+// tableColumnSet reads one table's column-name set through PRAGMA table_info.
+// schema may name an ATTACHed backup schema ("" reads the main database); the
+// caller owns the allowlist guards on both arguments before calling, because
+// the query is built by concatenation (migrate passes its own table literal;
+// the snapshot paths reject unknown schemas and tables first).
+func tableColumnSet(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, schema, table string) (map[string]struct{}, error) {
+	query := "PRAGMA table_info(" + table + ")"
+	if schema != "" {
+		query = "PRAGMA " + schema + ".table_info(" + table + ")"
+	}
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}

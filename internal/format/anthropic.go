@@ -45,7 +45,7 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int) ([]byte, error) {
 		ResponseFormat     json.RawMessage `json:"response_format"`
 	}
 	if err := json.Unmarshal(openaiBody, &in); err != nil {
-		return nil, fmt.Errorf("parse openai body: %w", err)
+		return nil, errParseOpenAIBody(err)
 	}
 
 	system := in.System

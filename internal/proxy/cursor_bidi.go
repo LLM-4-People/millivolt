@@ -352,17 +352,20 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clientMessage []byte, groupKey string, hooks scheduler.WaiterHooks, firstSendIsRetry bool) (*http.Response, *io.PipeWriter, context.CancelFunc, error) {
 	own, failed := false, false
 	defer func() { s.cursorEndSend(groupKey, own, failed) }()
+	// permit and attemptStart are declared outside the loop so the admission
+	// call can assign them (and own) with a plain = : a := would shadow the
+	// outer own inside the loop body and silently drop the Trip-claimed send
+	// token between attempts.
+	var (
+		permit       *scheduler.StormPermit
+		attemptStart time.Time
+	)
 	for attempt := 0; ; attempt++ {
 		var err error
-		own, err = s.scheduler.WaitSend(ctx, groupKey, hooks, firstSendIsRetry || attempt > 0, own)
+		own, permit, attemptStart, err = s.admitSendAttempt(ctx, groupKey, hooks, firstSendIsRetry, attempt, own)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		permit, err := s.waitStorm(ctx, hooks)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		attemptStart := time.Now()
 		state := stormState(ctx)
 		if state != nil && state.rec.Retries > 0 {
 			state.rec.FinalAttemptAt = attemptStart
@@ -404,10 +407,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 				failed = retryable
 				return nil, nil, nil, err
 			}
-			state.rec.Attempts = append(state.rec.Attempts, metrics.RetryAttempt{ErrorType: "transport", ErrorMsg: msg, At: time.Now()})
-			state.rec.Retries++
-			s.publishUpdate(state.rec)
-			own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
+			own = s.absorbTransportRetry(state.rec, groupKey, msg, own)
 			continue
 		}
 		// Quota-envelope classification precedes storm observation. Keep the
@@ -420,16 +420,12 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 			failed = retryable
 			return resp, pw, upstreamCancel, nil
 		}
-		retryAfter := parseRetryAfter(resp)
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))
 		resp.Body.Close()
 		stopRead()
 		upstreamCancel()
-		at := metrics.RetryAttempt{StatusCode: resp.StatusCode, RetryAfterMs: int(retryAfter.Milliseconds()), At: time.Now()}
-		at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
-		state.rec.Attempts = append(state.rec.Attempts, at)
-		state.rec.Retries++
-		state.rec.RetryAfterMs = at.RetryAfterMs
+		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody)
+		state.rec.RetryAfterMs = int(retryAfter.Milliseconds())
 		if resp.StatusCode == 429 || resp.StatusCode == 503 {
 			state.rec.RateLimited = true
 		}
@@ -530,9 +526,7 @@ func (s *Server) setCursorIdentity(req *http.Request, t *target, key string) {
 	s.applyProviderHeaders(req.Header, t.provider)
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Te", "trailers")
-	if key != "" {
-		req.Header.Set(t.authHeader, t.authPrefix+key)
-	}
+	setResolvedAuth(req.Header, t, key)
 }
 
 // setCursorHeaders applies the agent.v1 passthrough headers to a cursor Run
@@ -588,6 +582,16 @@ func cursorTrackDelta(rec *metrics.Record, delta map[string]any) {
 	}
 }
 
+// resetTurnMetrics clears the per-turn timing and usage window so the next
+// driven turn - or a fresh analyzer pass over a translated stream - reports
+// its own responsiveness and counts instead of accumulating the turn that
+// was just absorbed or reset.
+func resetTurnMetrics(rec *metrics.Record) {
+	rec.FirstTokenAt = time.Time{}
+	rec.LastTokenAt = time.Time{}
+	rec.Usage = metrics.Usage{}
+}
+
 // openCursorStream runs the cursor streaming prologue: SSE headers, the
 // chunk emitter, the opening role delta, and the per-turn timing/usage
 // reset. The opening role chunk already hitting a dead socket marks the
@@ -602,9 +606,7 @@ func openCursorStream(w http.ResponseWriter, rec *metrics.Record, id, model stri
 	if err := emit(map[string]any{"role": "assistant", "content": ""}, nil); err != nil {
 		rec.ClientDisconnected = true
 	}
-	rec.FirstTokenAt = time.Time{}
-	rec.LastTokenAt = time.Time{}
-	rec.Usage = metrics.Usage{}
+	resetTurnMetrics(rec)
 	return emit
 }
 
@@ -633,9 +635,7 @@ func (s *Server) serveRunStream(ctx context.Context, w http.ResponseWriter, run 
 		s.absorbCursorVoid(rec)
 		next, err := reask()
 		if err == nil && next != nil {
-			rec.FirstTokenAt = time.Time{}
-			rec.LastTokenAt = time.Time{}
-			rec.Usage = metrics.Usage{}
+			resetTurnMetrics(rec)
 			result = next.RunTurn(ctx, emitDeltas)
 			s.finishRunTurn(w, next, result, emit, rec, id, rr, true) // re-ask turn: void surfaces
 			return
@@ -883,9 +883,7 @@ func (s *Server) serveRunJSON(ctx context.Context, w http.ResponseWriter, run *p
 		s.absorbCursorVoid(rec)
 		next, err := reask()
 		if err == nil && next != nil {
-			rec.FirstTokenAt = time.Time{}
-			rec.LastTokenAt = time.Time{}
-			rec.Usage = metrics.Usage{}
+			resetTurnMetrics(rec)
 			content.Reset()
 			toolCalls = toolCalls[:0]
 			result = next.RunTurn(ctx, accumulate)
@@ -1038,7 +1036,7 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 	req, err := http.NewRequestWithContext(d.ctx, http.MethodPost, targetURL,
 		bytes.NewReader(providerformat.EncodeGetUsableModelsRequest(nil)))
 	if err != nil {
-		http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
+		writeModelsError(w, err)
 		return
 	}
 	// Unary call: the shared client is fine (it negotiates h2 via ALPN for
@@ -1052,7 +1050,7 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 	}
 	models, err := providerformat.ParseGetUsableModelsResponse(body)
 	if err != nil {
-		http.Error(w, errJSON(typeAPIError, "decode models: "+err.Error()), http.StatusBadGateway)
+		writeModelsError(w, fmt.Errorf("decode models: %w", err))
 		return
 	}
 	s.emitModelsList(d, w, r, t, key,

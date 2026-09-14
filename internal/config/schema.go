@@ -331,6 +331,12 @@ func FieldByKey(key string) *Field {
 	return nil
 }
 
+// errUnknownKey rejects a key that is not in the schema: the single wording
+// owner shared by Apply (Settings POST) and the YAML overlay path.
+func errUnknownKey(key string) error {
+	return fmt.Errorf("unknown config key %q", key)
+}
+
 // TypeLine is the "type · range · default" annotation written into YAML
 // comments via WriteYAML (Settings Apply). Not rendered in the Settings form.
 func (f Field) TypeLine(def any) string {

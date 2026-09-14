@@ -33,7 +33,7 @@ func (c *Config) Apply(values map[string]any) error {
 	for k, v := range values {
 		f := FieldByKey(k)
 		if f == nil {
-			return fmt.Errorf("unknown config key %q", k)
+			return errUnknownKey(k)
 		}
 		if f.Category == "storm" && v == nil {
 			return fmt.Errorf("%s: null is not a valid setting", k)

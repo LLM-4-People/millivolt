@@ -362,13 +362,7 @@ func (s *Scheduler) ListThrottles() []ThrottleInfo {
 
 func (s *Scheduler) throttleQueued() map[string]int {
 	out := map[string]int{}
-	s.mu.Lock()
-	groups := make([]*group, 0, len(s.groups))
-	for _, g := range s.groups {
-		groups = append(groups, g)
-	}
-	s.mu.Unlock()
-	for _, g := range groups {
+	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		for _, w := range g.queue {
 			if w.provider != "" {
@@ -489,13 +483,7 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 }
 
 func (s *Scheduler) drainProvider(provider string) {
-	s.mu.Lock()
-	groups := make([]*group, 0, len(s.groups))
-	for _, g := range s.groups {
-		groups = append(groups, g)
-	}
-	s.mu.Unlock()
-	for _, g := range groups {
+	for _, g := range s.snapshotGroups() {
 		g.mu.Lock()
 		match := provider == "" || g.provider == provider
 		g.mu.Unlock()

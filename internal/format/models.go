@@ -54,6 +54,12 @@ func NewModelEntry(id, ownedBy string, created int64) map[string]any {
 	}
 }
 
+// errParseOpenAIBody wraps a failed OpenAI request-body decode: the single
+// wording owner shared by the Anthropic and Cursor request translators.
+func errParseOpenAIBody(err error) error {
+	return fmt.Errorf("parse openai body: %w", err)
+}
+
 // TranslateAnthropicModels converts one Anthropic /v1/models page into OpenAI
 // model entries, returning the entries and the pagination cursor for the next
 // page (empty when has_more is false). Fail-closed on a malformed body.

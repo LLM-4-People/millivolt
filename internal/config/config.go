@@ -1184,7 +1184,7 @@ func decodeUserOverlay(raw []byte, strict bool) (*userFile, error) {
 func overlayYAMLKey(dst *Config, key string, valueNode *yaml.Node, value any) (loose bool, err error) {
 	field := FieldByKey(key)
 	if field == nil {
-		return false, fmt.Errorf("unknown config key %q", key)
+		return false, errUnknownKey(key)
 	}
 	if err := checkYAMLType(*field, value); err != nil {
 		return false, err
@@ -1238,9 +1238,11 @@ func (c *Config) RetryAfterSeconds() int {
 }
 
 // errRange is the shared wording for a validated field outside its allowed
-// range; callers render min/max/got in the field's own unit (bytes,
-// durations, or the schema-typed bound). One owner so the phrasing cannot
-// drift between the byte-size, duration and storm validators.
+// range; callers render min/max/got in the field's own unit (byte sizes,
+// durations, integers, or the schema-typed bound). The byte-size, duration
+// and storm validators and the models_discovery_max_pages /
+// storage_query_max_rows integer pair all route through this one owner, so
+// the phrasing cannot drift between them.
 func errRange(key, min, max, got string) error {
 	return fmt.Errorf("%s: must be %s..%s, got %s", key, min, max, got)
 }
@@ -1262,7 +1264,8 @@ func validateModelsDiscovery(c *Config) error {
 			if limit.key == "models_discovery_max_bytes" {
 				return checkByteSize(limit.key, ByteSize(limit.value), limit.min, limit.max)
 			}
-			return fmt.Errorf("%s: must be %d..%d, got %d", limit.key, limit.min, limit.max, limit.value)
+			return errRange(limit.key,
+				strconv.FormatInt(limit.min, 10), strconv.FormatInt(limit.max, 10), strconv.FormatInt(limit.value, 10))
 		}
 	}
 	return nil
@@ -1280,7 +1283,8 @@ func validateQueryLimits(c *Config) error {
 			if limit.key == "storage_query_max_bytes" {
 				return checkByteSize(limit.key, ByteSize(limit.value), int64(limit.min), int64(limit.max))
 			}
-			return fmt.Errorf("%s: must be %d..%d, got %d", limit.key, limit.min, limit.max, limit.value)
+			return errRange(limit.key,
+				strconv.FormatInt(int64(limit.min), 10), strconv.FormatInt(int64(limit.max), 10), strconv.FormatInt(int64(limit.value), 10))
 		}
 	}
 	return nil

@@ -103,8 +103,8 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 	w.Write(providerformat.ModelsListJSON(entries))
 }
 
-// writeModelsError surfaces a models-fetch failure with the uniform 502 JSON
-// wrapper.
+// writeModelsError surfaces a models-discovery failure - request build, fetch,
+// or decode - with the uniform 502 JSON wrapper.
 func writeModelsError(w http.ResponseWriter, err error) {
 	http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
 }
@@ -119,9 +119,7 @@ func (s *Server) fetchModelsUpstream(d *modelsDiscovery, t *target, key, u strin
 	if err != nil {
 		return nil, err
 	}
-	if key != "" {
-		req.Header.Set(t.authHeader, t.authPrefix+key)
-	}
+	setResolvedAuth(req.Header, t, key)
 	return s.fetchModelsResponse(d, req, t, key)
 }
 

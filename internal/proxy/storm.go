@@ -162,6 +162,14 @@ func (s *Server) allowStormRetry(ctx context.Context, active bool) bool {
 	return true
 }
 
+// isStormQueueRejection reports whether err is an operator storm-queue
+// rejection - the classes stormQueueErrorRecord stamps as 429.
+func isStormQueueRejection(err error) bool {
+	return errors.Is(err, scheduler.ErrStormQueueFull) ||
+		errors.Is(err, scheduler.ErrStormMaxWait) ||
+		errors.Is(err, scheduler.ErrStormCapacity)
+}
+
 // stormQueueErrorRecord stamps the record for a storm-queue rejection with
 // the decided HTTP status (429 - the status the proxy sent, or would have
 // sent on a committed socket) and returns the in-band error envelope. The 429
@@ -174,7 +182,7 @@ func (s *Server) allowStormRetry(ctx context.Context, active bool) bool {
 // sockets), while relay failure paths on an already committed socket emit it
 // in-band via emitErrorSSE. ok=false when err is not a storm-queue rejection.
 func (s *Server) stormQueueErrorRecord(rec *metrics.Record, err error) (typ, msg string, ok bool) {
-	if !errors.Is(err, scheduler.ErrStormQueueFull) && !errors.Is(err, scheduler.ErrStormMaxWait) && !errors.Is(err, scheduler.ErrStormCapacity) {
+	if !isStormQueueRejection(err) {
 		return "", "", false
 	}
 	rec.StatusCode = http.StatusTooManyRequests
@@ -200,10 +208,12 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 // receives the canonical upstream_unreachable 502. The generic doWithRetry
 // epilogue and the cursor bidi open - whose five-statement blocks were
 // byte-identical - both route through here, so the two can never drift. The
-// relay's quality re-send epilogues do NOT join: their status lines are
-// already committed, so they stamp the same typeUpstreamUnreachable
-// classification and surface it in-band (relay.go) instead of calling a sink
-// that writes an HTTP status.
+// relay's quality re-send epilogues do NOT join - each surface sinks the
+// failure differently (classifyResendFailure owns their shared record
+// stamps): the non-streaming loop's status line is still open, so it answers
+// the client with an api_error JSON http.Error; the streaming loop's status
+// line is already committed, so it emits the same upstream_unreachable
+// classification in-band on the SSE socket (relay.go).
 func (s *Server) writeTransportFailure(w http.ResponseWriter, rec *metrics.Record, err error) {
 	if s.writeStormQueueError(w, rec, err) {
 		return

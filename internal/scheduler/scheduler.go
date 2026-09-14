@@ -211,14 +211,22 @@ func (s *Scheduler) Stats() Stats {
 	return st
 }
 
-func (s *Scheduler) drainAll() {
+// snapshotGroups copies the current group set under s.mu and releases the
+// lock before the caller walks it, so per-group work never nests the
+// scheduler lock. Stats deliberately keeps its own nested-lock protocol: it
+// sums in-flight and queue counters inside s.mu.
+func (s *Scheduler) snapshotGroups() []*group {
 	s.mu.Lock()
 	groups := make([]*group, 0, len(s.groups))
 	for _, g := range s.groups {
 		groups = append(groups, g)
 	}
 	s.mu.Unlock()
-	for _, g := range groups {
+	return groups
+}
+
+func (s *Scheduler) drainAll() {
+	for _, g := range s.snapshotGroups() {
 		g.drain()
 	}
 }

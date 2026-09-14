@@ -83,6 +83,31 @@ func markStreamErr(ctx context.Context, rec *metrics.Record, err error, errType 
 	rec.ErrorMsg = err.Error()
 }
 
+// classifyResendFailure runs the shared failure policy of the two relay
+// quality re-send loops (serveNonStreaming, streamBodyWithRetry): the LOCAL
+// client's own cancellation is markClientGone (never an upstream error), an
+// operator storm-queue rejection is reported for the caller's per-surface
+// sink (which owns the record stamp), and the genuine transport default
+// stamps the record trio - 502 + upstream_unreachable + transport text -
+// ahead of the caller's sink. The wire sinks stay per-surface (see
+// writeTransportFailure, the fresh-send twin): the non-streaming loop's
+// status line is still open, so it answers with an api_error JSON http.Error;
+// the streaming loop's status line is already committed, so it emits
+// in-band on the SSE socket.
+func (s *Server) classifyResendFailure(r *http.Request, rec *metrics.Record, err error) (clientGone, stormQueue bool) {
+	if r.Context().Err() == context.Canceled {
+		markClientGone(rec)
+		return true, false
+	}
+	if isStormQueueRejection(err) {
+		return false, true
+	}
+	rec.StatusCode = http.StatusBadGateway
+	rec.ErrorType = typeUpstreamUnreachable
+	rec.ErrorMsg = transportErrText(err)
+	return false, false
+}
+
 // nonStreamBody relays a non-streaming response verbatim while capturing the
 // usage block (and any error payload) for metrics. The body is scanned
 // incrementally so large responses are not fully buffered. A read error caused
@@ -347,16 +372,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				// holds ("a retry is a new send and waits").
 				next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
 				if err != nil {
-					if r.Context().Err() == context.Canceled {
-						markClientGone(rec)
+					clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+					switch {
+					case clientGone:
+						return
+					case stormQueue:
+						// Already classified: the sink owner stamps the record
+						// and writes the 429 + Retry-After.
+						s.writeStormQueueError(w, rec, err)
 						return
 					}
-					if s.writeStormQueueError(w, rec, err) {
-						return
-					}
-					rec.StatusCode = http.StatusBadGateway
-					rec.ErrorType = typeUpstreamUnreachable
-					rec.ErrorMsg = transportErrText(err)
 					http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
 					return
 				}
@@ -435,22 +460,20 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		// holds ("a retry is a new send and waits").
 		next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
 		if err != nil {
-			if r.Context().Err() == context.Canceled {
-				markClientGone(rec)
+			clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+			switch {
+			case clientGone:
 				return
-			}
-			// The status line is committed (applyUpstream ran before this
-			// loop): the failure goes in-band on the SSE socket, and the
-			// record carries the real error status (stamped by the owner).
-			if typ, msg, ok := s.stormQueueErrorRecord(rec, err); ok {
-				if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
-					markClientGone(rec)
+			case stormQueue:
+				// The status line is committed (applyUpstream ran before this
+				// loop): the rejection goes in-band on the SSE socket.
+				if typ, msg, ok := s.stormQueueErrorRecord(rec, err); ok {
+					if werr := emitErrorSSE(w, rec.ID, typ, msg); werr != nil {
+						markClientGone(rec)
+					}
 				}
 				return
 			}
-			rec.StatusCode = http.StatusBadGateway
-			rec.ErrorType = typeUpstreamUnreachable
-			rec.ErrorMsg = transportErrText(err)
 			if werr := emitErrorSSE(w, rec.ID, typeUpstreamUnreachable, rec.ErrorMsg); werr != nil {
 				markClientGone(rec)
 			}
@@ -708,6 +731,66 @@ func withSendTimeout(ctx context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(ctx, timeout)
 }
 
+// admitSendAttempt gates one upstream send attempt on the retry-driver
+// admission policy shared by the generic relay and the cursor bidi driver:
+// the WaitSend hold rule (the opening send honors operator holds when it is
+// itself a retry - "a retry is a new send and waits"; later attempts always
+// do), the storm permit, and the attemptStart stamp taken only after every
+// admission gate so waits never burn send deadlines. own is WaitSend's
+// returned token (unchanged on error). The caller keeps its own
+// end-of-request choreography.
+func (s *Server) admitSendAttempt(ctx context.Context, groupKey string, hooks scheduler.WaiterHooks, firstSendIsRetry bool, attempt int, own bool) (bool, *scheduler.StormPermit, time.Time, error) {
+	own, err := s.scheduler.WaitSend(ctx, groupKey, hooks, attempt > 0 || firstSendIsRetry, own)
+	if err != nil {
+		return own, nil, time.Time{}, err
+	}
+	permit, err := s.waitStorm(ctx, hooks)
+	if err != nil {
+		return own, nil, time.Time{}, err
+	}
+	return own, permit, time.Now(), nil
+}
+
+// absorbTransportRetry books one absorbed transport-level failure: the
+// attempt-log entry (transport class, the caller's rendered message), the
+// retry counter with a live publish, and the Trip that paces the group and
+// keeps the send token claimed. Which transport errors are retryable, the
+// message rendering, and the give-up condition stay per-transport. Returns
+// the send-token ownership after Trip.
+func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string, own bool) bool {
+	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
+		StatusCode: 0,
+		ErrorType:  "transport",
+		ErrorMsg:   msg,
+		At:         time.Now(),
+	})
+	rec.Retries++
+	s.publishUpdate(rec)
+	return s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
+}
+
+// absorbHTTPRetry books one absorbed retryable HTTP response: the provider
+// retry hint (parseRetryAfter) and the attempt-log entry (status, bounded
+// error-body envelope via parseErrorBody, hint milliseconds), appended with
+// the retry counter. Returns the hint - the pacing floor for the caller's
+// Trip and RetryAfterMs stamp. The bounded body read, per-send cleanup,
+// record stamps and publish order stay per-transport: the generic relay
+// interplays with the durable-quota 429 peek and clears stale error fields
+// after its publish; the cursor driver closes its duplex pipe and stamps
+// before publishing.
+func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte) time.Duration {
+	retryAfter := parseRetryAfter(resp)
+	at := metrics.RetryAttempt{
+		StatusCode:   resp.StatusCode,
+		RetryAfterMs: int(retryAfter.Milliseconds()),
+		At:           time.Now(),
+	}
+	at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
+	rec.Attempts = append(rec.Attempts, at)
+	rec.Retries++
+	return retryAfter
+}
+
 // doWithRetry executes the upstream request, transparently absorbing transient
 // failures: 429 and any 5xx are retried with backoff while the client has not
 // yet received any bytes, so the client only ever sees the final outcome. It
@@ -751,25 +834,25 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			s.scheduler.EndSend(groupKey, retried)
 		}
 	}
+	// permit and attemptStart are declared outside the loop so the admission
+	// call can assign them (and own) with a plain = : a := would shadow the
+	// outer own inside the loop body and silently drop the Trip-claimed send
+	// token between attempts.
+	var (
+		permit       *scheduler.StormPermit
+		attemptStart time.Time
+	)
 	for attempt := 0; ; attempt++ {
 		var err error
-		// The opening send honors holds when it is itself a retry (the
-		// quality re-run); internal retries always do (attempt > 0).
-		own, err = s.scheduler.WaitSend(ctx, groupKey, hooks, attempt > 0 || firstSendIsRetry, own)
+		own, permit, attemptStart, err = s.admitSendAttempt(ctx, groupKey, hooks, firstSendIsRetry, attempt, own)
 		if err != nil {
 			end(false)
 			return nil, nil, err
 		}
-		permit, err := s.waitStorm(ctx, hooks)
-		if err != nil {
-			end(false)
-			return nil, nil, err
-		}
-		// Stamp after all admission gates so waits do not burn send deadlines.
-		attemptStart := time.Now()
 		// Per-send deadline: X-Proxy-Timeout-Ms bounds this ONE send (the
-		// Do below and the returned body), anchored here - a fresh budget per
-		// attempt, never eaten by the waits above.
+		// Do below and the returned body), anchored on the attemptStart the
+		// admission helper stamped - a fresh budget per attempt, never eaten
+		// by the waits above.
 		attemptCtx, attemptCancel := withSendTimeout(ctx, t.timeout)
 		// Rebuild the upstream request (body can't be reused across retries).
 		upstream, err := s.buildUpstreamRequest(attemptCtx, r, t, key, body)
@@ -802,16 +885,8 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 				end(retryable)
 				return nil, nil, err
 			}
-			rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
-				StatusCode: 0,
-				ErrorType:  "transport",
-				ErrorMsg:   transportErrText(err),
-				At:         time.Now(),
-			})
-			rec.Retries++
-			s.publishUpdate(rec)
+			own = s.absorbTransportRetry(rec, groupKey, transportErrText(err), own)
 			retried = true
-			own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, 0)) || own
 			continue
 		}
 
@@ -877,8 +952,6 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			return resp, attemptCancel, nil
 		}
 
-		// Parse provider retry hints for a smart delay.
-		retryAfter := parseRetryAfter(resp)
 		// Read the failed attempt's error body (bounded) so the proxy logs the
 		// full failure detail even though the client never sees it. The body is
 		// then discarded - it is never forwarded. Best-effort: a read failure
@@ -898,15 +971,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 
 		// Record the absorbed attempt so the dashboard/drawer show the errors
 		// that preceded the final (e.g. 200) outcome.
-		at := metrics.RetryAttempt{
-			StatusCode:   resp.StatusCode,
-			RetryAfterMs: int(retryAfter.Milliseconds()),
-			At:           time.Now(),
-		}
-		at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
-		rec.Attempts = append(rec.Attempts, at)
-
-		rec.Retries++
+		retryAfter := s.absorbHTTPRetry(rec, resp, errBody)
 		s.publishUpdate(rec)
 		// 429/503 are genuine rate limits; other 5xx are transient upstream
 		// errors. Record the distinction so the dashboard doesn't mislabel a
@@ -1061,9 +1126,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				pw.CloseWithError(err)
 			}()
 			// Re-run the SSE analyzer over the transformed stream.
-			rec.FirstTokenAt = time.Time{}
-			rec.LastTokenAt = time.Time{}
-			rec.Usage = metrics.Usage{}
+			resetTurnMetrics(rec)
 			s.streamBodyTranslated(ctx, w, pr, rec, flusher)
 			// Close both ends of upstream work on early client failure, then
 			// join before reading source accounting or finalizing the record.
