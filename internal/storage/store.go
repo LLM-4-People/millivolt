@@ -361,10 +361,10 @@ func (t *Totals) Add(r *metrics.Record) {
 		}
 	}
 	if err := metrics.SumTerms(
-		metrics.Term{&t.InputTok, r.Usage.InputTokens},
-		metrics.Term{&t.OutputTok, r.Usage.OutputTokens},
-		metrics.Term{&t.CacheRead, r.Usage.CacheReadTokens},
-		metrics.Term{&t.Reasoning, r.Usage.ReasoningTokens},
+		metrics.Term{Dst: &t.InputTok, Value: r.Usage.InputTokens},
+		metrics.Term{Dst: &t.OutputTok, Value: r.Usage.OutputTokens},
+		metrics.Term{Dst: &t.CacheRead, Value: r.Usage.CacheReadTokens},
+		metrics.Term{Dst: &t.Reasoning, Value: r.Usage.ReasoningTokens},
 	); err != nil {
 		t.err = err
 		return

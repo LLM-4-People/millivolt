@@ -680,10 +680,10 @@ func (f *chartFold) fold(c *contrib) error {
 		b.rl++
 	}
 	if err := metrics.SumTerms(
-		metrics.Term{&b.in, c.in},
-		metrics.Term{&b.out, c.out},
-		metrics.Term{&b.cache, c.cacheR},
-		metrics.Term{&b.reason, c.reason},
+		metrics.Term{Dst: &b.in, Value: c.in},
+		metrics.Term{Dst: &b.out, Value: c.out},
+		metrics.Term{Dst: &b.cache, Value: c.cacheR},
+		metrics.Term{Dst: &b.reason, Value: c.reason},
 	); err != nil {
 		return err
 	}
@@ -1374,11 +1374,11 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*ent
 		}
 	}
 	if err := metrics.SumTerms(
-		metrics.Term{&g.in, c.in},
-		metrics.Term{&g.out, c.out},
-		metrics.Term{&g.cacheR, c.cacheR},
-		metrics.Term{&g.reason, c.reason},
-		metrics.Term{&g.tools, c.tools},
+		metrics.Term{Dst: &g.in, Value: c.in},
+		metrics.Term{Dst: &g.out, Value: c.out},
+		metrics.Term{Dst: &g.cacheR, Value: c.cacheR},
+		metrics.Term{Dst: &g.reason, Value: c.reason},
+		metrics.Term{Dst: &g.tools, Value: c.tools},
 	); err != nil {
 		return nil, err
 	}
