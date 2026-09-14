@@ -1222,18 +1222,32 @@ function costChipHTML(path) {
   return `<span class="prov-chip" data-cost="${escapeHtml(path)}"><span class="prov-chip-p">${escapeHtml(path)}</span><button type="button" class="prov-x" data-prov-chip-rm aria-label="remove ${escapeHtml(path)}">✕</button></span>`;
 }
 
-const PROV_TRASH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 5.4h9.6"/><path d="M6.1 5.4V4.3A1.2 1.2 0 0 1 7.3 3.1h1.4A1.2 1.2 0 0 1 9.9 4.3v1.1"/><path d="M4.2 5.4l.7 7.4a1 1 0 0 0 1 .8h5.2a1 1 0 0 0 1-.8l.7-7.4"/></svg>';
+// The provider card's remove icon is the header Clear button's trash
+// glyph, cloned at render time (the brandLogoSVG precedent) so the
+// geometry stays authored once, in index.html. The clone drops the
+// header-only .hdr-ico class; .prov-x svg owns this surface's stroke and
+// size, and unlike the brand logo there are no ids to rewrite.
+function trashIconSVG() {
+  const svg = document.querySelector('#btn-clear svg');
+  if (!svg) return '';
+  const clone = svg.cloneNode(true);
+  clone.removeAttribute('class');
+  return clone.outerHTML;
+}
 const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.2 8 10.2 12 6.2"/></svg>';
 
-function usageRowHTML(field, path, fields) {
+// mappingRowHTML renders one canonical-field → custom-path row for both
+// structured maps. The two kinds differ only in wire keys: the select and
+// input classes the delegated handlers and the value collector match on,
+// the remove attribute, the aria-labels and the placeholders.
+function mappingRowHTML(kind, field, path, fields) {
+  const usage = kind === 'usage';
   const opts = settingsFieldOptions(fields, field);
-  return `<div class="prov-urow"><select class="sp-ufield" aria-label="canonical token field">${opts}</select><span class="prov-arrow" aria-hidden="true">→</span><input class="sp-upath" value="${escapeHtml(path == null ? '' : String(path))}" placeholder="usage-relative path" aria-label="usage key path"><button type="button" class="prov-x" data-prov-urow-rm aria-label="remove mapping">✕</button></div>`;
+  return `<div class="prov-urow"><select class="sp-${usage ? 'ufield' : 'mfield'}" aria-label="canonical ${usage ? 'token' : 'model'} field">${opts}</select><span class="prov-arrow" aria-hidden="true">→</span><input class="sp-${usage ? 'upath' : 'mkey'}" value="${escapeHtml(path == null ? '' : String(path))}" placeholder="${usage ? 'usage-relative path' : 'path inside the enrichment entry'}" aria-label="${usage ? 'usage key path' : 'model metadata path'}"><button type="button" class="prov-x" data-prov-${usage ? 'u' : 'm'}row-rm aria-label="remove mapping">✕</button></div>`;
 }
 
-function modelRowHTML(field, path, fields) {
-  const opts = settingsFieldOptions(fields, field);
-  return `<div class="prov-urow"><select class="sp-mfield" aria-label="canonical model field">${opts}</select><span class="prov-arrow" aria-hidden="true">→</span><input class="sp-mkey" value="${escapeHtml(path == null ? '' : String(path))}" placeholder="path inside the enrichment entry" aria-label="model metadata path"><button type="button" class="prov-x" data-prov-mrow-rm aria-label="remove mapping">✕</button></div>`;
-}
+function usageRowHTML(field, path, fields) { return mappingRowHTML('usage', field, path, fields); }
+function modelRowHTML(field, path, fields) { return mappingRowHTML('model', field, path, fields); }
 
 function settingsFieldOptions(fields, selected) {
   // Models enrichment can carry custom output keys. Existing names must
@@ -1261,7 +1275,7 @@ function providerCardHTML(label, p) {
   // into each other (the models section once rendered nested inside usage
   // keys).
   return `<div class="st-prov">` +
-    `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${PROV_TRASH_SVG}</button></div>` +
+    `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${trashIconSVG()}</button></div>` +
     `<div class="prov-body">` +
     `<div class="prov-sec"><div class="prov-lb"><span>cost keys</span><span class="prov-sub">dotted JSON path from the response root - e.g. usage.cost</span></div>` +
     `<div class="prov-chips">${costs.map(costChipHTML).join('')}</div>` +
@@ -1680,6 +1694,18 @@ function mrPreview(wrap) {
   mrSyncCount(wrap);
 }
 
+// mrDraftChanged is the one draft-changed epilogue: every edit that
+// mutates the rules draft (add, remove, reorder, park/unpark, restore)
+// marks the sheet dirty, revalidates the whole draft and refreshes the
+// preview bench. Per-keystroke typing and the settings open/refetch paint
+// call the validate+preview pair directly - no draft mutation happens
+// there, so they must not mark the sheet.
+function mrDraftChanged(wrap) {
+  markSettingsDirty();
+  validateModelRulesDraft(wrap);
+  mrPreview(wrap);
+}
+
 // mrValidateInputs pre-checks the add-row inputs (deny by default: an
 // invalid pattern or empty from flashes instead of adding a row that could
 // never load). Server-only syntax (info level) is accepted - it saves and
@@ -1711,9 +1737,7 @@ function addModelRuleRow(addRow) {
   wrap.querySelector('.mr-rows').insertAdjacentHTML('beforeend', modelRuleRowHTML(rule));
   addRow.querySelector('.mr-new-from').value = '';
   addRow.querySelector('.mr-new-to').value = '';
-  markSettingsDirty();
-  validateModelRulesDraft(wrap);
-  mrPreview(wrap);
+  mrDraftChanged(wrap);
 }
 
 // mrApplyTemplate appends one pre-filled rule from the templates select -
@@ -1745,9 +1769,7 @@ function mrRestoreDefaults(wrap) {
   const rules = settingsDoc?.defaults?.model_rules;
   if (!Array.isArray(rules)) return;
   wrap.querySelector('.mr-rows').innerHTML = rules.map(modelRuleRowHTML).join('');
-  markSettingsDirty();
-  validateModelRulesDraft(wrap);
-  mrPreview(wrap);
+  mrDraftChanged(wrap);
 }
 
 // addAliasRow appends one mapping row from the add inputs. Deny by default:
@@ -1912,10 +1934,10 @@ function providersEditorClick(e) {
   const t = e.target;
   if (t.closest('[data-al-rm]')) { t.closest('.al-row').remove(); markSettingsDirty(); return; }
   if (t.closest('[data-al-add]')) { addAliasRow(t.closest('.prov-add')); return; }
-  if (t.closest('[data-mr-rm]')) { const wrap = t.closest('.mr-wrap'); t.closest('.mr-row').remove(); markSettingsDirty(); validateModelRulesDraft(wrap); mrPreview(wrap); return; }
+  if (t.closest('[data-mr-rm]')) { const wrap = t.closest('.mr-wrap'); t.closest('.mr-row').remove(); mrDraftChanged(wrap); return; }
   if (t.closest('[data-mr-add]')) { addModelRuleRow(t.closest('.mr-add')); return; }
-  if (t.closest('[data-mr-up]')) { const row = t.closest('.mr-row'); const prev = row.previousElementSibling; const wrap = t.closest('.mr-wrap'); if (prev) row.parentNode.insertBefore(row, prev); markSettingsDirty(); validateModelRulesDraft(wrap); mrPreview(wrap); return; }
-  if (t.closest('[data-mr-dn]')) { const row = t.closest('.mr-row'); const next = row.nextElementSibling; const wrap = t.closest('.mr-wrap'); if (next) row.parentNode.insertBefore(next, row); markSettingsDirty(); validateModelRulesDraft(wrap); mrPreview(wrap); return; }
+  if (t.closest('[data-mr-up]')) { const row = t.closest('.mr-row'); const prev = row.previousElementSibling; const wrap = t.closest('.mr-wrap'); if (prev) row.parentNode.insertBefore(row, prev); mrDraftChanged(wrap); return; }
+  if (t.closest('[data-mr-dn]')) { const row = t.closest('.mr-row'); const next = row.nextElementSibling; const wrap = t.closest('.mr-wrap'); if (next) row.parentNode.insertBefore(next, row); mrDraftChanged(wrap); return; }
   if (t.closest('[data-mr-vis]')) {
     const btn = t.closest('[data-mr-vis]');
     const row = btn.closest('.mr-row');
@@ -1930,9 +1952,7 @@ function providersEditorClick(e) {
     mode.disabled = !off;
     row.querySelector('.mr-from').disabled = !off || lower;
     row.querySelector('.mr-to').disabled = !off || lower;
-    markSettingsDirty();
-    validateModelRulesDraft(wrap);
-    mrPreview(wrap);
+    mrDraftChanged(wrap);
     return;
   }
   if (t.closest('[data-mr-restore]')) { mrRestoreDefaults(t.closest('.mr-wrap')); return; }
@@ -2001,8 +2021,7 @@ function wireSettingsDelegation() {
       validateModelRulesDraft(wrap);
       mrPreview(wrap);
     }
-    if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]'))) return;
-    if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
+    dirty(e);
   });
   box.addEventListener('change', e => {
     if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
@@ -2031,9 +2050,7 @@ function wireSettingsDelegation() {
       const lower = e.target.value === 'lower';
       mrMode.querySelector('.mr-from').disabled = lower;
       mrMode.querySelector('.mr-to').disabled = lower;
-      markSettingsDirty();
-      validateModelRulesDraft(e.target.closest('.mr-wrap'));
-      mrPreview(e.target.closest('.mr-wrap'));
+      mrDraftChanged(e.target.closest('.mr-wrap'));
     }
     if (e.target.classList && e.target.classList.contains('mr-tpl')) mrApplyTemplate(e.target);
     dirty(e);
@@ -2176,9 +2193,11 @@ function showSettingsCat() {
   const cats = (settingsDoc && settingsDoc.categories) || [];
   const cat = cats.find(c => c.id === settingsCat) || cats[0];
   let shown = 0, restarts = 0;
+  // Both the row filter and the rail badge counts search the same
+  // label + key + help haystack.
+  const rowMatches = row => ((row.dataset.label || '') + ' ' + (row.dataset.key || '') + ' ' + (row.dataset.help || '')).toLowerCase().includes(q);
   box.querySelectorAll('.st-row').forEach(row => {
-    const hay = ((row.dataset.label || '') + ' ' + (row.dataset.key || '') + ' ' + (row.dataset.help || '')).toLowerCase();
-    const hit = !q || hay.includes(q);
+    const hit = !q || rowMatches(row);
     const inCat = !q && row.dataset.cat === (cat && cat.id);
     row.hidden = q ? !hit : !inCat;
     if (!row.hidden) {
@@ -2201,8 +2220,7 @@ function showSettingsCat() {
       const n = [...box.querySelectorAll('.st-row')].filter(r => {
         if (r.dataset.cat !== id) return false;
         if (!q) return true;
-        const hay = ((r.dataset.label || '') + ' ' + (r.dataset.key || '') + ' ' + (r.dataset.help || '')).toLowerCase();
-        return hay.includes(q);
+        return rowMatches(r);
       }).length;
       const badge = btn.querySelector('.rail-n');
       if (badge) badge.textContent = n;
@@ -2499,17 +2517,7 @@ function syncPauseMenuState() {
     hd.textContent = pauseEditID ? 'Edit hold…' : (pauseActive() ? 'Holding requests…' : 'Hold requests…');
   }
   const count = $('pause-count');
-  if (count && !count.dataset.err) {
-    if (pauseActive()) {
-      const bits = ['paused'];
-      if (pauseState.queued > 0) bits.push('queued ' + pauseState.queued);
-      const left = pauseUntilLabel(pauseState.until);
-      if (left) bits.push(left);
-      count.textContent = bits.join(' · ');
-    } else {
-      count.textContent = '';
-    }
-  }
+  if (count && !count.dataset.err) count.textContent = pauseActive() ? pauseStatusBits().join(' · ') : '';
   renderPauseHolds();
   updatePauseApplyEnabled();
 }
@@ -2855,19 +2863,7 @@ function syncDebugMenuState() {
     hd.textContent = debugEditID ? 'Edit session…' : (debugActive() ? 'Capturing debug…' : 'Capture debug…');
   }
   const count = $('debug-count');
-  if (count && !count.dataset.err) {
-    if (debugActive()) {
-      const bits = ['debug'];
-      const live = liveDebugSessions();
-      if (live.length === 1) bits.push(debugScopeLabel(live[0]));
-      else if (live.length > 1) bits.push(live.length + ' sessions');
-      const left = pauseUntilLabel(debugState.until);
-      if (left) bits.push(left);
-      count.textContent = bits.join(' · ');
-    } else {
-      count.textContent = '';
-    }
-  }
+  if (count && !count.dataset.err) count.textContent = debugActive() ? debugStatusBits().join(' · ') : '';
   renderDebugSessions();
   updateDebugApplyEnabled();
 }
@@ -3092,6 +3088,28 @@ function pauseUntilLabel(until) {
   return hmBreakdown(Math.ceil(ms / 60000)) + ' left';
 }
 
+// pauseStatusBits and debugStatusBits own the operator status word lists
+// shared by the menus' count lines and the footer state line. The footer's
+// hold variant inserts the live-hold scope bits before the queued count;
+// only that surface renders scope, so its call site passes them in.
+function pauseStatusBits(scopeBits = []) {
+  const bits = ['paused', ...scopeBits];
+  if (pauseState.queued > 0) bits.push('queued ' + pauseState.queued);
+  const left = pauseUntilLabel(pauseState.until);
+  if (left) bits.push(left);
+  return bits;
+}
+
+function debugStatusBits() {
+  const bits = ['debug'];
+  const live = liveDebugSessions();
+  if (live.length === 1) bits.push(debugScopeLabel(live[0]));
+  else if (live.length > 1) bits.push(live.length + ' sessions');
+  const left = pauseUntilLabel(debugState.until);
+  if (left) bits.push(left);
+  return bits;
+}
+
 // setFooterLive mirrors SSE connectivity. refreshFooterState combines that
 // with every other footer input: the operator surfaces (a hold reads as
 // "paused", a debug session as "debug", each with scope and remaining
@@ -3125,22 +3143,11 @@ function refreshFooterState() {
   if (dstop) dstop.disabled = operatorState.debug.busy || !debugging;
   if (state) {
     if (holding) {
-      const bits = ['paused'];
       const live = liveHolds();
-      if (live.length === 1) bits.push(holdScopeLabel(live[0]));
-      else if (live.length > 1) bits.push(live.length + ' holds');
-      if (pauseState.queued > 0) bits.push('queued ' + pauseState.queued);
-      const left = pauseUntilLabel(pauseState.until);
-      if (left) bits.push(left);
-      state.textContent = bits.join(' · ');
+      const scopeBits = live.length === 1 ? [holdScopeLabel(live[0])] : live.length > 1 ? [live.length + ' holds'] : [];
+      state.textContent = pauseStatusBits(scopeBits).join(' · ');
     } else if (debugging) {
-      const bits = ['debug'];
-      const live = liveDebugSessions();
-      if (live.length === 1) bits.push(debugScopeLabel(live[0]));
-      else if (live.length > 1) bits.push(live.length + ' sessions');
-      const left = pauseUntilLabel(debugState.until);
-      if (left) bits.push(left);
-      state.textContent = bits.join(' · ');
+      state.textContent = debugStatusBits().join(' · ');
     } else {
       state.textContent = streamLive ? 'live' : 'offline';
     }

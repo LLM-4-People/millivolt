@@ -567,6 +567,37 @@ async function main() {
     neverMeasured.includes('0 of 0') && neverMeasured.includes('0 / 0 in') &&
     !neverMeasured.includes('%'));
 
+  // ---- test 7b-3: the static KPI skeleton in index.html and the live
+  // renderer's first kpiHtml must agree on tile count, headings and class
+  // structure, so the first payload only swaps text and nothing below the
+  // band moves (the chart-tile skeleton pin is the same idea for totals).
+  {
+    const skelDoc = new JSDOM(fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8')).window.document;
+    const shape = root => [...root.querySelectorAll('.kpi')].map(k => {
+      const val = k.querySelector('.val');
+      return {
+        cls: [...k.classList].sort().join(' '),
+        h2: (k.querySelector('h2') || {textContent: ''}).textContent,
+        val: val ? [...val.classList].sort().join(' ') : '',
+      };
+    });
+    const skel = shape(skelDoc.getElementById('kpis'));
+    const firstRender = w.eval(`(() => {
+      const saved = kpiAgg;
+      kpiAgg = { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null };
+      const html = derive({ records: [], counters: { in_flight: 0 }, _rev: 1 }).kpiHtml;
+      kpiAgg = saved;
+      return html;
+    })()`);
+    const host = d.createElement('div');
+    host.innerHTML = firstRender;
+    const live = shape(host);
+    check('KPI band skeleton matches the first-rendered tile structure',
+      skel.length === live.length && JSON.stringify(skel) === JSON.stringify(live) &&
+      JSON.stringify(live));
+  }
+
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.
