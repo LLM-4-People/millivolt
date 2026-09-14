@@ -36,6 +36,13 @@
        sparklines and chart plots (a touch stronger than --tick's faint
        rail wash) and derives from --text the same way. */
     --tick-major: color-mix(in srgb, var(--text) 11%, transparent);
+    /* The graduated tick strip every rail edge, readout band and day rule
+       paints: minor ticks every 7px plus a major tick every 35px, one
+       direction (90deg), so the shell's signature motif is authored once.
+       Each wearing site feathers it with its own directional mask. */
+    --tick-strip:
+      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     /* Focus-ring glows are one design: a 3px soft accent halo at input
        focus strength, and a stronger halo for hover feedback on pressed or
        accent-filled controls. Derived from --accent so theme drifts once. */
@@ -109,9 +116,7 @@
   }
   header::after {
     content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--rail-tick); pointer-events: none;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
     mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
   }
@@ -370,9 +375,7 @@
      "scale". Feathered so it reads as a scale, not a hard rule. */
   .kpis::after {
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
   }
@@ -653,9 +656,7 @@
   }
   .st-hd::after {
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 7px; pointer-events: none;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
   }
@@ -919,9 +920,7 @@
   }
   .st-ft::before {
     content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
     mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
   }
@@ -1189,9 +1188,7 @@
   }
   .day-rule {
     flex: 1; height: 7px; min-width: 40px;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
     mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
   }
@@ -1224,9 +1221,7 @@
   }
   footer::before {
     content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--rail-tick); pointer-events: none;
-    background:
-      repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
+    background: var(--tick-strip);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
   }

@@ -272,12 +272,15 @@ function brandLogoSVG(gradientId) {
 // Single-flight credential prompt: concurrent gated calls share one dialog
 // and one resolution. Resolves '' on cancel or dismiss. A prompt after a
 // rejected attempt says so instead of repeating the intro line.
+// OPERATOR_DIALOG_NOTE is the one intro sentence, spelled identically in the
+// built dialog and the reset branch that restores it.
+const OPERATOR_DIALOG_NOTE = 'This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.';
 function askOperatorToken() {
   if (operatorPrompt) return operatorPrompt;
   operatorPrompt = new Promise(resolve => {
     let dialog = $('operator-dialog');
     if (!dialog) {
-      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
+      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">${OPERATOR_DIALOG_NOTE}</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
       wireDialogDismiss(dialog, () => operatorDismiss(''));
     }
     const input = $('operator-dialog-input');
@@ -288,7 +291,7 @@ function askOperatorToken() {
       note.textContent = 'That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.';
       note.setAttribute('data-err', '');
     } else {
-      note.textContent = 'This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.';
+      note.textContent = OPERATOR_DIALOG_NOTE;
       note.removeAttribute('data-err');
     }
     // The dialog owns its promise. If anything else closes it (another modal
@@ -353,10 +356,13 @@ function operatorError(kind, message) {
   if (el) { el.textContent = message; el.dataset.err = '1'; }
 }
 // operatorCountClear is operatorError's reset counterpart: one owner for the
-// count-line clear (text + error flag), keyed by kind. The limits sites are
-// behavior-neutral on the text half: updateLimitCount repaints the line
-// immediately after them, and mutateOperator's gate.sync() repaints it for
-// every kind.
+// count-line clear (text + error flag), keyed by kind. The limits sites'
+// text clear alone would be behavior-neutral (updateLimitCount repaints the
+// line immediately after them, and mutateOperator's gate.sync() repaints it
+// for every kind), but the ERROR-FLAG clear is load-bearing:
+// updateLimitCount early-returns while dataset.err is set, so without this
+// clear a provider edit after a failed limits write would leave the stale
+// error on the line instead of repainting the live facts (jsdom-pinned).
 function operatorCountClear(kind) {
   const el = $(operatorState[kind].count);
   if (el) { el.textContent = ''; delete el.dataset.err; }
@@ -1251,7 +1257,7 @@ function trashIconSVG() {
   clone.removeAttribute('class');
   return clone.outerHTML;
 }
-const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.2 8 10.2 12 6.2"/></svg>';
+const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>';
 
 // mappingRowHTML renders one canonical-field → custom-path row for both
 // structured maps. The two kinds differ only in wire keys: the select and
@@ -2884,7 +2890,6 @@ function syncDebugMenuState() {
 function resetDebugMenuForm() {
   debugEditID = '';
   fillSelectPairs($('df-dur'), DEBUG_DURS, '');
-  if ($('df-dur')) $('df-dur').value = '';
   operatorCountClear('debug');
   fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY), new Set(), 'client');
   fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY), new Set(), 'provider');

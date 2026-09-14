@@ -759,6 +759,86 @@ async function main() {
   w.toggleDebugMenu({ stopPropagation() {} });
   w.eval("debugState = {...debugState, enabled: false, sessions: []}");
   check('debug menu closes after the stamped edit', debugMenu.hidden);
+  // GAP-A pin: the pill-edit table's paused and throttled arms. The debug
+  // arm is pinned above; these two had zero coverage (mutation-proven).
+  // Same contract per arm: a live record carrying the server's state flag
+  // renders its state pill, and the pill opens the matching operator editor
+  // - the pause menu editing the hold matched via holdMatchesRecord (not
+  // the all-requests fallback, not a non-matching named hold), the limits
+  // menu editing the record's own provider among several.
+  {
+    const pausedRec = { ...mkRec('paused-live-rec', 0, 1700000105000), paused: true };
+    fire('begin', { record: pausedRec, in_flight: 1 });
+    await sleep(20);
+    const pausedPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="paused-live-rec"] .pill.paused[data-edit-pause]');
+    check('a paused live record renders the paused pill on its row', !!pausedPill());
+    w.eval("pauseState = {...pauseState, paused: true, holds: [" +
+      "{id: 'hold-other', clients: ['other-client'], duration: '1h'}," +
+      "{id: 'hold-named', clients: ['c'], duration: '15m'}," +
+      "{id: 'hold-all', all: true, duration: '6h'}]}");
+    pausedPill().click();
+    {
+      const pauseMenu = d.getElementById('pause-menu');
+      const holds = [...pauseMenu.querySelectorAll('.pause-hold')];
+      const editing = holds.filter(h => h.classList.contains('editing'));
+      check('the paused pill edits the hold matched via holdMatchesRecord',
+        !pauseMenu.hidden && holds.length === 3 && editing.length === 1 &&
+          editing[0].querySelector('[data-operator="pause-edit"]').dataset.value === 'hold-named');
+    }
+    w.resetPauseMenuForm();
+    w.hideHdrMenu('pause-menu');
+    w.eval("pauseState = {...pauseState, paused: false, holds: []}");
+
+    const throttledRec = { ...mkRec('throttled-live-rec', 0, 1700000106000), throttled: true };
+    fire('begin', { record: throttledRec, in_flight: 2 });
+    await sleep(20);
+    const throttledPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="throttled-live-rec"] .pill.throttled[data-edit-limit]');
+    check('a throttled live record renders the throttled pill on its row', !!throttledPill());
+    w.eval("throttleState = {...throttleState, active: true, throttles: [" +
+      "{provider: 'other.example', requests: 1, request_window: '1m'}," +
+      "{provider: 'p', requests: 2, request_window: '2m'}]," +
+      "known_providers: ['p', 'other.example']}");
+    throttledPill().click();
+    {
+      const limitsMenu = d.getElementById('limits-menu');
+      const holds = [...limitsMenu.querySelectorAll('#lim-holds .pause-hold')];
+      const editing = holds.filter(h => h.classList.contains('editing'));
+      check('the throttled pill opens the limits editor for the record provider',
+        !limitsMenu.hidden && d.getElementById('lim-provider').value === 'p' &&
+          holds.length === 2 && editing.length === 1 &&
+          editing[0].querySelector('[data-operator="limit-edit"]').dataset.value === 'p');
+    }
+    w.hideHdrMenu('limits-menu');
+    w.eval("throttleState = {...throttleState, active: false, throttles: []}");
+  }
+  // GAP-C pin: resyncOperatorSurfaces' live-repaint tail. The menu-sync
+  // half is pinned (the count-bits checks); `if (lastData)
+  // scheduleRenderLive()` is not. The row renderer detects change by record
+  // identity, so the tail's contract: after a wholesale record replacement
+  // in lastData (what upsert does) with the derivation invalidated but NO
+  // render scheduled and no feed event, applying operator state repaints
+  // the stale row from the fresh record.
+  {
+    const liveRec = { ...mkRec('gapc-live-rec', 0, 1700000107000) };
+    fire('begin', { record: liveRec, in_flight: 1 });
+    await sleep(20);
+    const gapcPill = () => d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill');
+    check('the in-flight row paints the live pill first', !!gapcPill() && gapcPill().classList.contains('live'));
+    w.eval("lastData.records[lastData.records.findIndex(r => r.id === 'gapc-live-rec')]" +
+      " = {...lastData.records.find(r => r.id === 'gapc-live-rec'), paused: true}; bumpData();");
+    check('no feed event leaves the painted row stale', gapcPill().classList.contains('live'));
+    let livePaints = 0;
+    const originalLive = w.renderLive;
+    w.renderLive = () => { livePaints++; originalLive(); };
+    w.applyPauseState({ ok: true, paused: true, holds: [{ id: 'gapc-hold', all: true, duration: '15m' }],
+      known_clients: ['c'], known_providers: ['p'], until: null, queued: 0, default_max_queued: 0 });
+    await sleep(20);
+    w.renderLive = originalLive;
+    check('applying a pause state repaints the held row without a feed event',
+      livePaints === 1 &&
+        !!d.querySelector('#tbl-requests tr.exp-row[data-id="gapc-live-rec"] .pill.paused[data-edit-pause]'));
+    w.eval("pauseState = {...pauseState, paused: false, holds: []}");
+  }
   const canonCases = [
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
@@ -2102,6 +2182,33 @@ async function main() {
       d.getElementById('chart-pct').hidden === (preset !== 'latency'));
   }
 
+  // GAP-D pin: commitChartView's preset/pct callers. setChartPreset had no
+  // test caller at all (mutation-proven - every other test assigned
+  // chartView.preset directly), so the dropdown's real handler could be
+  // dropped or broken without reddening anything. Both setters must
+  // validate, persist the merged view through dash.chart, and re-render:
+  // the percentile control's visibility flip proves the render, and the
+  // stored payload proves the save kept the rest of the view.
+  {
+    const savedView = () => JSON.parse(w.eval('storage.get("dash.chart")') || 'null');
+    w.eval("chartView.hidden = {}; chartView.window = 'all'; chartView.pct = 95;");
+    w.setChartPreset('latency');
+    check("setChartPreset persists the merged view and re-renders",
+      w.eval('chartView.preset') === 'latency' &&
+        savedView() && savedView().preset === 'latency' && savedView().pct === 95 &&
+        savedView().window === 'all' && d.getElementById('chart-pct').hidden === false);
+    w.setChartPreset('bogus');
+    check('setChartPreset rejects unknown preset ids without touching the view',
+      w.eval('chartView.preset') === 'latency' && savedView().preset === 'latency');
+    w.setChartPct('99');
+    check("setChartPct persists the merged view and re-renders",
+      w.eval('chartView.pct') === 99 && savedView().pct === 99 && savedView().preset === 'latency' &&
+        w.eval('chartData()[1][0]') === 300 && w.eval('chartData()[2][0]') === 30);
+    w.setChartPct('42');
+    check('setChartPct rejects unlisted percentiles without touching the view',
+      w.eval('chartView.pct') === 99 && savedView().pct === 99);
+  }
+
   // Axis callbacks survive setData changing between timestamp and compacted
   // slots. Reusing the original options is deliberate: legend/window changes
   // update data without constructing a new plot.
@@ -2433,6 +2540,29 @@ async function main() {
     return keys.length === 9 && Object.keys(halves).length === 9 && consumed &&
       strokes.length > 0 && strokes.every(s => Object.values(declared).includes(s));
   })());
+  // Hover-contract pin: the explorer tile and the summary chart tile claim
+  // one shared hover reaction ("every clickable tile reacts identically",
+  // dashboard.css's summary-preset comment), and the two :hover rules carry
+  // byte-identical bodies. They are deliberately NOT grouped into one
+  // selector (grouping would couple the explorer and chart sections), so
+  // the contract needs a pin: both rules must exist and keep declaring the
+  // same border-color, transform and box-shadow, non-vacuously. jsdom's
+  // CSSOM exposes each rule's declared values, so a renamed property,
+  // a dropped declaration or a one-sided edit all redden here.
+  check('the explorer and chart tiles declare one identical hover contract', (() => {
+    const find = sel => {
+      const rules = [];
+      const visit = list => { for (const r of list) { if (r.selectorText === sel) rules.push(r); if (r.cssRules && r.cssRules.length) visit(r.cssRules); } };
+      for (const sheet of d.styleSheets) visit(sheet.cssRules);
+      return rules.length === 1 ? rules[0] : null;
+    };
+    const xp = find('.xp-node:hover'), ct = find('.chart-total[role="button"]:hover');
+    const props = ['border-color', 'transform', 'box-shadow'];
+    return !!xp && !!ct && props.every(p => {
+      const a = xp.style.getPropertyValue(p), b = ct.style.getPropertyValue(p);
+      return a !== '' && a === b;
+    });
+  })());
   check('the summary hides the bucket-cadence context row',
     d.getElementById('chart-context').hidden &&
       w.eval('chartView.preset') === 'overview');
@@ -2642,6 +2772,19 @@ async function main() {
     check('the card trash icon is the header glyph, minus the header class',
       JSON.stringify([...clone.querySelectorAll('path')].map(p => p.getAttribute('d'))) === JSON.stringify(hdrPaths) &&
       clone.getAttribute('class') === null);
+  }
+  // The 16x16 down-chevron is one glyph authored twice as markup: the
+  // explorer dimension picker's caret (index-adjacent, .hdr-ico family) and
+  // the provider card's collapse chevron (PROV_CHEV_SVG). The paths were
+  // born drifted by 0.3 units and aligned to the header-family variant;
+  // byte-equality of the rendered d attributes keeps them from drifting
+  // apart again (either side may not re-derive its geometry alone).
+  {
+    const caret = d.querySelector('#xp-dim-trigger .xp-dim-caret path');
+    const chevs = [...card.querySelectorAll('.prov-chev svg path')].map(p => p.getAttribute('d'));
+    check('the provider chevron and the explorer caret share one glyph geometry',
+      !!caret && chevs.length === 1 &&
+        JSON.stringify(chevs) === JSON.stringify([caret.getAttribute('d')]));
   }
   topBtn.click();
   check('add menu opens; already-added providers are not offered', !menu.hidden && !!menu.querySelector('[data-prov-pick="p"]') && !menu.querySelector('[data-prov-pick="epsilon.example"]'));
@@ -2885,6 +3028,37 @@ async function main() {
     w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
     w.closeSettings(true);
     delete w.__settingsTestDoc;
+  }
+
+  // mrDraftChanged's dirty leg (the R9 lost finding): markSettingsDirty was
+  // pinned only through non-mr paths, so dropping it from mrDraftChanged
+  // reddened nothing. Every rules-draft mutation runs through that epilogue;
+  // pin it through the real settings surface - a rule added via the editor's
+  // add-row must mark the sheet dirty and count itself on the unsaved line.
+  {
+    const doc = JSON.parse(JSON.stringify(cfgDoc));
+    doc.fields.push({ key: 'model_rules', category: 'providers', label: 'Model rules', kind: 'model_rules', hot_reload: true });
+    doc.values.model_rules = [{ mode: 'lower' }];
+    w.__mrDirtyDoc = doc;
+    w.eval('settingsDoc = window.__mrDirtyDoc; fillSettingsForm(settingsDoc)');
+    d.getElementById('settings-sheet').hidden = false;
+    const mrSettingsWrap = d.querySelector('#settings-fields [data-kind="model_rules"]');
+    check('the settings sheet renders the rules editor for the model_rules field', !!mrSettingsWrap);
+    check('the clean settings draft reports no unsaved changes',
+      d.getElementById('settings-count').textContent === '' && !w.settingsIsDirty());
+    mrSettingsWrap.querySelector('.mr-add .mr-mode').value = 'pattern';
+    mrSettingsWrap.querySelector('.mr-add .mr-new-from').value = 'glm-5\\.3';
+    mrSettingsWrap.querySelector('.mr-add .mr-new-to').value = 'glm-5-3';
+    w.addModelRuleRow(mrSettingsWrap.querySelector('.mr-add'));
+    check('adding a model rule marks the settings sheet dirty through the mr path',
+      w.settingsIsDirty() && d.getElementById('settings-count').textContent === '1 unsaved' &&
+        !d.getElementById('btn-settings-apply').disabled &&
+        w.collectSettingsValues().model_rules.length === 2);
+    w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__settingsTestDoc;
+    delete w.__mrDirtyDoc;
   }
 
   // ---- test 12: chart preset registry - ids unique, dropdown follows ----
@@ -4161,6 +4335,20 @@ async function main() {
       adminReply=Promise.resolve({ok:false,json:async()=>({error:'limit write failed'})});
       await sw.clearLimitsMenu();
       check('failed Limits clear preserves the confirmed limit and shows an error', sw.eval('throttleState.throttles.length')===1 && sd.getElementById('lim-count').textContent.includes('limit write failed'));
+      // GAP-B pin: operatorCountClear's limits repaint is load-bearing, not
+      // behavior-neutral: updateLimitCount early-returns while the count line
+      // carries the error flag, so the err clear in the shared reset is what
+      // lets a later provider edit repaint the live facts. Pin the whole
+      // sequence: failed write (err flagged) -> provider edit -> repaint.
+      check('the failed Limits write flags the count line as an error', sd.getElementById('lim-count').dataset.err === '1');
+      sw.applyThrottleState({ok:true,active:true,known_providers:[hostile],
+        throttles:[{provider:hostile,source:'ui',in_flight:1,queued:2,requests:10,requests_capacity:20,requests_remaining:5}]});
+      const errLine = sd.getElementById('lim-count').textContent;
+      sw.onLimitProviderChange();
+      check('a provider edit repaints the limits count line after a failed write',
+        !sd.getElementById('lim-count').dataset.err &&
+          sd.getElementById('lim-count').textContent === 'set in UI · in-flight 1 · queued 2 · 5/20 req' &&
+          errLine.includes('limit write failed'));
 
       const draft=sd.createElement('div');
       const rules=[{mode:'pattern',from:' x ',to:' y '},{mode:'exact',from:' padded ',to:' kept ',disabled:true},{mode:'lower',from:' parked ',to:' value ',disabled:true}];
