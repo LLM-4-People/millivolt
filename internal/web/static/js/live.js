@@ -17,7 +17,7 @@ let explorerAgg = null;
 let _pendingRevision = -1; // server lifecycle revision, scoped to the accepted feed
 
 function kpiNow() {
-  return kpiAgg || { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0, avg_ttft_ms: null, avg_tps: null };
+  return kpiAgg || { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null };
 }
 function kpiInFlight() {
   // 0 is a live value - do not fall through to a stale /metrics/agg gauge.
@@ -391,7 +391,6 @@ function applySnapshotPayload(data, bootstrapApplied = false) {
       for (const r of pending) upsertPendingRec(r, data.pending_revision);
     }
     lastData.seq = data.seq;
-    lastData.oldest_seq = data.oldest_seq;
     if ((lastData._rev || 0) !== revision) scheduleRenderLive();
   } else {
     // Full replacement: fold the in-flight rows into the record set the

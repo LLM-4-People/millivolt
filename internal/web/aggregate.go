@@ -539,8 +539,6 @@ type kpiPayload struct {
 	OutputTok   int64    `json:"output_tokens"`
 	CacheRead   int64    `json:"cache_read_tokens"`
 	Reasoning   int64    `json:"reasoning_tokens"`
-	Answer      int64    `json:"answer_tokens"`
-	ToolCalls   int64    `json:"tool_calls"`
 	AvgTTFT     *float64 `json:"avg_ttft_ms"`
 	AvgTPS      *float64 `json:"avg_tps"`
 }
@@ -581,8 +579,6 @@ func (a *AggAPI) kpi() kpiPayload {
 		OutputTok:   t.OutputTok,
 		CacheRead:   t.CacheRead,
 		Reasoning:   t.Reasoning,
-		Answer:      t.Answer,
-		ToolCalls:   t.ToolCalls,
 		AvgTTFT:     t.AvgTTFT(),
 		AvgTPS:      t.AvgTPS(),
 	}

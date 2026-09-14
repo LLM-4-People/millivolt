@@ -71,9 +71,9 @@ func TestSnapshotSinceWrappedRangesAndGaps(t *testing.T) {
 				}
 				got := b.SnapshotSince(since)
 				if got.Records == nil || !slices.Equal(got.Records, want) || got.Incremental != !full ||
-					got.BufferSize != len(history) || got.OldestSeq != oldest || got.Seq != latest || got.FeedID != b.FeedID() {
-					t.Fatalf("%s limit %d since %d: IDs %v, metadata %+v; want IDs %v, full %v, oldest %d, latest %d",
-						stage, limit, since, ids(got.Records), got, ids(want), full, oldest, latest)
+					got.BufferSize != len(history) || got.Seq != latest || got.FeedID != b.FeedID() {
+					t.Fatalf("%s limit %d since %d: IDs %v, metadata %+v; want IDs %v, full %v, latest %d",
+						stage, limit, since, ids(got.Records), got, ids(want), full, latest)
 				}
 				// The returned window must not alias the ring, even when it fits
 				// entirely within one physical half of the ring.

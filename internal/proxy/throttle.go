@@ -577,7 +577,6 @@ func (s *Server) ThrottleSnapshot() map[string]any {
 			"token_window":       durationOrEmpty(inf.Limit.TokWindow),
 			"source":             inf.Source,
 			"updated_by":         inf.UpdatedBy,
-			"updated_at":         inf.UpdatedAt.UTC().Format(time.RFC3339Nano),
 			"in_flight":          inf.InFlight,
 			"queued":             inf.Queued,
 			"requests_remaining": inf.ReqRemaining,

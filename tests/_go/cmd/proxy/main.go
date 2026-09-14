@@ -480,7 +480,6 @@ func TestOperatorTokenEnv(t *testing.T) {
 type livePayload struct {
 	Records     []*metrics.Record `json:"records"`
 	Seq         int64             `json:"seq"`
-	OldestSeq   int64             `json:"oldest_seq"`
 	Incremental bool              `json:"incremental"`
 }
 

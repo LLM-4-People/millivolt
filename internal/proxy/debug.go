@@ -530,15 +530,14 @@ func (s *Server) DebugSnapshot() map[string]any {
 			}
 		}
 		out = append(out, map[string]any{
-			"id":         d.ID,
-			"clients":    nullSlice(d.Clients),
-			"providers":  nullSlice(d.Providers),
-			"models":     nullSlice(d.Models),
-			"duration":   d.Duration,
-			"until":      rfc3339OrNil(d.Until),
-			"started_at": rfc3339OrNil(d.StartedAt),
-			"ran_ms":     ranMs,
-			"captures":   captures,
+			"id":        d.ID,
+			"clients":   nullSlice(d.Clients),
+			"providers": nullSlice(d.Providers),
+			"models":    nullSlice(d.Models),
+			"duration":  d.Duration,
+			"until":     rfc3339OrNil(d.Until),
+			"ran_ms":    ranMs,
+			"captures":  captures,
 		})
 	}
 	knownModels := s.pause.models.list()

@@ -20,9 +20,7 @@ func record(id string) *Record {
 // payload decodes the live-payload wrapper for cursor assertions.
 type payload struct {
 	Records     []*Record `json:"records"`
-	BufferSize  int       `json:"buffer_size"`
 	Seq         int64     `json:"seq"`
-	OldestSeq   int64     `json:"oldest_seq"`
 	FeedID      string    `json:"feed_id"`
 	Incremental bool      `json:"incremental"`
 }
@@ -48,9 +46,9 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := decodePayload(t, full)
-	if p.Seq != 2 || p.OldestSeq != 1 || len(p.Records) != 2 || p.Incremental {
-		t.Errorf("no-cursor payload = seq%d oldest%d n%d inc%v, want seq2 oldest1 n2 incremental=false",
-			p.Seq, p.OldestSeq, len(p.Records), p.Incremental)
+	if p.Seq != 2 || len(p.Records) != 2 || p.Incremental {
+		t.Errorf("no-cursor payload = seq%d n%d inc%v, want seq2 n2 incremental=false",
+			p.Seq, len(p.Records), p.Incremental)
 	}
 	if p.FeedID == "" {
 		t.Error("feed_id empty")
@@ -79,9 +77,9 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	b.Record(record("d"))
 	ev, _ := json.Marshal(b.SnapshotSince(1))
 	p4 := decodePayload(t, ev)
-	if p4.Incremental || len(p4.Records) != 3 || p4.OldestSeq != 2 || p4.Seq != 4 {
-		t.Errorf("stale since=1: inc=%v n=%d oldest=%d seq=%d, want FULL 3 records oldest2 seq4",
-			p4.Incremental, len(p4.Records), p4.OldestSeq, p4.Seq)
+	if p4.Incremental || len(p4.Records) != 3 || p4.Seq != 4 {
+		t.Errorf("stale since=1: inc=%v n=%d seq=%d, want FULL 3 records seq4",
+			p4.Incremental, len(p4.Records), p4.Seq)
 	}
 
 	// A cursor AHEAD of the current range (restart/reset) is also full.
@@ -109,8 +107,8 @@ func TestSnapshotSinceSurvivesRemoveWhere(t *testing.T) {
 		t.Errorf("since=1 after purge: inc=%v n=%d ids=%v, want incremental 1 record (b)",
 			p.Incremental, len(p.Records), ids(p.Records))
 	}
-	if p.OldestSeq != 1 || p.Seq != 3 {
-		t.Errorf("cursor range = %d..%d, want 1..3 (kept sequences preserved)", p.OldestSeq, p.Seq)
+	if p.Seq != 3 {
+		t.Errorf("latest seq = %d, want 3 (kept sequences preserved)", p.Seq)
 	}
 
 	// A later append continues the sequence, never reusing the gap.

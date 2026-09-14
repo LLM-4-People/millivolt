@@ -103,7 +103,9 @@ type RingEvent struct {
 // process-wide in-flight gauge (post-transition), so the dashboard KPI band can
 // react the moment a stream starts or ends.
 type LiveEvent struct {
-	Phase           string  `json:"phase"` // "begin" | "update" | "end"
+	// Phase names the SSE event (HandleStream's "event:" line); it is not a
+	// wire field - clients read the event name, never a payload key.
+	Phase           string  `json:"-"` // "begin" | "update" | "end"
 	Record          *Record `json:"record"`
 	InFlight        int64   `json:"in_flight"`
 	PendingRevision uint64  `json:"pending_revision"`
@@ -616,16 +618,15 @@ func Percentile(sorted []int64, p float64) float64 {
 
 // Snapshot is the live-feed payload: finalized ring records, the in-flight
 // pending registry, live counters, and the cursor metadata a client needs to
-// resume (seq / oldest_seq / feed_id). Embedded wholesale into the dashboard
+// resume (seq / feed_id). Embedded wholesale into the dashboard
 // bootstrap payload; HandleStream marshals it directly.
 type Snapshot struct {
 	Records         []*Record `json:"records"`
 	InFlightRecords []*Record `json:"in_flight_records"`
 	PendingRevision uint64    `json:"pending_revision"`
-	BufferSize      int       `json:"buffer_size"`
+	BufferSize      int       `json:"-"`
 	Counters        Counters  `json:"counters"`
 	Seq             int64     `json:"seq"`
-	OldestSeq       int64     `json:"oldest_seq"`
 	FeedID          string    `json:"feed_id"`
 	Incremental     bool      `json:"incremental"`
 }
@@ -657,8 +658,8 @@ func (b *Buffer) FeedID() string {
 // a foreign/stale cursor from before a restart or reset) yields a full
 // snapshot (`Incremental: false`) so a client can never silently miss
 // records. Every payload carries the cursor metadata: `seq` (the newest
-// sequence number), `oldest_seq`, and `feed_id` - a client that sees a
-// changed feed_id must discard its cursor and keep the snapshot wholesale.
+// sequence number) and `feed_id` - a client that sees a changed feed_id must
+// discard its cursor and keep the snapshot wholesale.
 // A full snapshot is capped to the newest snapshot-limit records (a
 // cursor-less client only needs the first log pages; older history pages
 // from the store); an incremental delta is delivered verbatim - capping one
@@ -700,7 +701,6 @@ func (b *Buffer) snapshotSinceLocked(since int64) Snapshot {
 		BufferSize:      size,
 		Counters:        b.Counters(),
 		Seq:             latest,
-		OldestSeq:       oldest,
 		FeedID:          b.feedID,
 		Incremental:     !full,
 	}

@@ -85,7 +85,7 @@ const mkRec = (id, status = 200, start = Date.now() - 1000) => ({
 const LIST = Array.from({ length: 30 }, (_, i) => mkRec('req' + String(i).padStart(3, '0'), 200, 1700000000000 + i * 1000));
 
 let fullPayload = {
-  feed_id: 'feedA', seq: 30, oldest_seq: 1, incremental: false,
+  feed_id: 'feedA', seq: 30, incremental: false,
   records: LIST.map((r, i) => ({ ...r, __seq: i + 1 })),
   counters: { in_flight: 0, total_requests: 30, total_errors: 0 },
 };
@@ -208,15 +208,13 @@ const pageOptions = {
         const brecs = bsince ? bp.records.filter(r => r.__seq > Number(bsince)) : bp.records;
         return Promise.resolve({ ok: true, json: async () => ({
           records: JSON.parse(JSON.stringify(brecs)),
-          buffer_size: brecs.length,
           counters: bp.counters,
           pending_revision: bp.pending_revision ?? Math.max(0, window.eval('_pendingRevision')),
           // These ordinary fixtures replace the sample collection between
           // scenarios; a live server's same-feed cursor never rewinds with it.
           seq: bp.feed_id === window.eval('feedId') ? Math.max(bp.seq, window.eval('lastSeq')) : bp.seq,
-          oldest_seq: bp.oldest_seq,
           feed_id: bp.feed_id, incremental: !!bsince,
-          kpi: { requests: 30, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0 },
+          kpi: { requests: 30, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0 },
           dashboard_version: TEST_DASHBOARD_VERSION,
           model_canon: {rules: []},
           dash: {},
@@ -230,10 +228,9 @@ const pageOptions = {
       const recs = since ? fp.records.filter(r => r.__seq > Number(since)) : fp.records;
       const payload = {
         records: JSON.parse(JSON.stringify(recs)),
-        buffer_size: recs.length,
         counters: fp.counters,
         pending_revision: fp.pending_revision ?? 0,
-        seq: fp.seq, oldest_seq: fp.oldest_seq,
+        seq: fp.seq,
         feed_id: fp.feed_id, incremental: !!since,
       };
       return Promise.resolve({ json: async () => payload });
@@ -445,12 +442,12 @@ async function main() {
   // ---- test 3: in-flight begin → final end replaces ONLY that row ----
   const inRec = { ...mkRec('reqnew1', 200, 1700000032000) };
   delete inRec.status_code;
-  fire('begin', { phase: 'begin', record: inRec, in_flight: 1 });
+  fire('begin', { record: inRec, in_flight: 1 });
   await sleep(20);
   const inRow = d.querySelector('#tbl-requests tr.live-row[data-id="reqnew1"]');
   check('begin event renders the in-flight live-row', !!inRow);
   const stable = rows().find(tr => tr === oldFifth);
-  fire('end', { phase: 'end', record: mkRec('reqnew1', 200, 1700000032000), in_flight: 0 });
+  fire('end', { record: mkRec('reqnew1', 200, 1700000032000), in_flight: 0 });
   await sleep(20);
   const finRow = d.querySelector('#tbl-requests tr.exp-row[data-id="reqnew1"]');
   check('end event finalizes only that row', finRow && !finRow.classList.contains('live-row') && finRow.textContent.includes('200'));
@@ -465,14 +462,14 @@ async function main() {
   check('scrollTop compensated for the inserted row height', cont.scrollTop === 220);
 
   // ---- test 5: incremental snapshot merge (SSE reconnect with cursor) ----
-  fire('snapshot', { feed_id: 'feedA', seq: 34, oldest_seq: 1, incremental: true,
+  fire('snapshot', { feed_id: 'feedA', seq: 34, incremental: true,
     records: [{ ...mkRec('reqnew3', 200, 1700000034000) }],
     counters: { in_flight: 0, total_requests: 34, total_errors: 0 } });
   await sleep(20);
   check('incremental snapshot merges without full replace', rows().includes(oldFifth) && rows().length === 34);
 
   // ---- test 6: feed change (proxy restart) → full replace ----
-  fire('snapshot', { feed_id: 'feedB', seq: 2, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedB', seq: 2, incremental: false,
     records: [{ ...mkRec('fresh1', 200, 1700000100000) }, { ...mkRec('fresh2', 200, 1700000101000) }],
     counters: { in_flight: 0, total_requests: 2, total_errors: 0 } });
   await sleep(20);
@@ -484,7 +481,7 @@ async function main() {
   // the page's own cursor was invalidated to 2, so the page asks since=2 and
   // the stub returns an in-range delta. Verify the page cursor followed.)
   fullPayload = {
-    feed_id: 'feedB', seq: 3, oldest_seq: 1,
+    feed_id: 'feedB', seq: 3,
     records: [{ ...mkRec('fresh1', 200, 1700000100000), __seq: 1 },
               { ...mkRec('fresh2', 200, 1700000101000), __seq: 2 },
               { ...mkRec('fresh3', 200, 1700000102000), __seq: 3 }],
@@ -501,7 +498,7 @@ async function main() {
   // run the page's poll tick handler? The interval skips when SSE 'connected'.
   // The page's sse readyState is 1, so polling is dormant - verify cursor by
   // calling the page's own snapshot application with an in-range delta.
-  fire('snapshot', { feed_id: 'feedB', seq: 3, oldest_seq: 1, incremental: true,
+  fire('snapshot', { feed_id: 'feedB', seq: 3, incremental: true,
     records: [{ ...mkRec('fresh3', 200, 1700000102000) }],
     counters: { in_flight: 0, total_requests: 3, total_errors: 0 } });
   await sleep(20);
@@ -518,9 +515,9 @@ async function main() {
     if (u.includes('/metrics/bootstrap')) {
       bootstrapStateApplied = true;
       return Promise.resolve({ ok: true, json: async () => ({
-        records: [], buffer_size: 3, counters: { in_flight: 0, total_requests: 3, total_errors: 0 },
-        seq: 3, oldest_seq: 1, feed_id: 'feedB', incremental: true,
-        kpi: { requests: 31, errors: 1, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0 },
+        records: [], counters: { in_flight: 0, total_requests: 3, total_errors: 0 },
+        seq: 3, feed_id: 'feedB', incremental: true,
+        kpi: { requests: 31, errors: 1, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0 },
         dash: {}, pause: {}, throttle: {},
       }) });
     }
@@ -539,9 +536,9 @@ async function main() {
     const u = String(url);
     if (u.includes('/metrics/bootstrap')) {
       return Promise.resolve({ ok: true, json: async () => ({
-        records: [], buffer_size: 3, counters: { in_flight: 0, total_requests: 0, total_errors: 0 },
-        seq: 4, oldest_seq: 1, feed_id: 'feedB', incremental: true,
-        kpi: { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0 },
+        records: [], counters: { in_flight: 0, total_requests: 0, total_errors: 0 },
+        seq: 4, feed_id: 'feedB', incremental: true,
+        kpi: { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0 },
         dash: {}, pause: {}, throttle: {},
       }) });
     }
@@ -568,14 +565,14 @@ async function main() {
       const since = new URL(url, 'http://x').searchParams.get('since');
       const recs = since ? fp.records.filter(r => r.__seq > Number(since)) : fp.records;
       return Promise.resolve({ ok: true, json: async () => ({
-        records: JSON.parse(JSON.stringify(recs)), buffer_size: recs.length,
-        counters: fp.counters, seq: fp.seq, oldest_seq: fp.oldest_seq,
+        records: JSON.parse(JSON.stringify(recs)),
+        counters: fp.counters, seq: fp.seq,
         feed_id: fp.feed_id, incremental: !!since,
       }) });
     }
     return origTick(url);
   };
-  fullPayload = { feed_id: 'feedB', seq: 4, oldest_seq: 1,
+  fullPayload = { feed_id: 'feedB', seq: 4,
     records: [{ ...mkRec('fresh4', 200, 1700000103000), __seq: 4 }],
     counters: { in_flight: 0, total_requests: 4, total_errors: 0 } };
   w.eval("fetchBootstrap('resume')");
@@ -598,7 +595,7 @@ async function main() {
       .filter(tr => tr.classList.contains('expanding'));
     const selRec = { ...mkRec('sel-live', 200, 1700000104000) };
     delete selRec.status_code;
-    fire('begin', { phase: 'begin', record: selRec, in_flight: 1 });
+    fire('begin', { record: selRec, in_flight: 1 });
     await sleep(20); // the live row paints on the coalesced render
     w.openDrawer('sel-live');
     check('opening a request row selects it in the drawer and highlights exactly its row',
@@ -606,7 +603,7 @@ async function main() {
         d.getElementById('drawer-body').textContent.includes('sel-live') &&
         expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
     const nodeBefore = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
-    fire('end', { phase: 'end', record: { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }, in_flight: 0 });
+    fire('end', { record: { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }, in_flight: 0 });
     await sleep(20);
     const nodeAfter = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
     check('the selected row keeps its highlight when its own node is re-rendered',
@@ -614,7 +611,7 @@ async function main() {
         nodeAfter.classList.contains('expanding') &&
         expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live' &&
         d.getElementById('drawer').classList.contains('open'));
-    fire('snapshot', { feed_id: 'feedB', seq: 4, oldest_seq: 1, incremental: false,
+    fire('snapshot', { feed_id: 'feedB', seq: 4, incremental: false,
       records: [mkRec('fresh1', 200, 1700000100000), mkRec('fresh2', 200, 1700000101000),
         mkRec('fresh3', 200, 1700000102000), mkRec('fresh4', 200, 1700000103000),
         { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }],
@@ -1173,7 +1170,7 @@ async function main() {
 
   // ---- test 10: infinite-scroll grows the log window, then pages the store ----
   const BIG = Array.from({ length: 80 }, (_, i) => mkRec('big' + String(i).padStart(3, '0'), 200, 1800000000000 + i * 1000));
-  fire('snapshot', { feed_id: 'feedB', seq: 80, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedB', seq: 80, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
   await sleep(30);
   check('first paint caps at dash_log_rows (60 of 80)', rows().length === 60);
@@ -1249,7 +1246,7 @@ async function main() {
   check('live insert stays at top after paging', rows()[0].dataset.id === 'bignew');
   check('paged oldest row is not evicted by a live insert', rows().some(tr => tr.dataset.id === 'old000'));
   box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
-  fire('snapshot', { feed_id: 'feedB', seq: 81, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
   await sleep(30);
   check('full resync after paging resets to page size', rows().length === 60);
@@ -1370,7 +1367,7 @@ async function main() {
   // ---- test 10b: the purge re-sync - no removal event exists, so clearAll
   // must fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
   // the deletions) and the empty post-purge snapshot IS the wipe render.
-  fullPayload = { feed_id: 'feedB', seq: 0, oldest_seq: 0, records: [],
+  fullPayload = { feed_id: 'feedB', seq: 0, records: [],
     counters: { in_flight: 0, total_requests: 0, total_errors: 0 } };
   let purgeURL = '';
   const origPurge = w.fetch;
@@ -1390,7 +1387,7 @@ async function main() {
   check('the empty post-purge snapshot IS the wipe render', rows().length === 0);
   check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0);
   // Restore a live view so the later suites run against real state.
-  fullPayload = { feed_id: 'feedB', seq: 80, oldest_seq: 1,
+  fullPayload = { feed_id: 'feedB', seq: 80,
     records: BIG.map((r, i) => ({ ...r, __seq: i + 1 })),
     counters: { in_flight: 0, total_requests: 80, total_errors: 0 } };
   w.eval("fetchBootstrap('full')");
@@ -1455,7 +1452,7 @@ async function main() {
       { ...mkRec('sa-ring2', 200, 1700000500000), provider: 'scope-a.example' },
       mkRec('p-row3', 200, 1700000600000),
     ];
-    fire('snapshot', { feed_id: 'feedB', seq: 90, oldest_seq: 1, incremental: false,
+    fire('snapshot', { feed_id: 'feedB', seq: 90, incremental: false,
       records: mixed, counters: { in_flight: 0, total_requests: 7, total_errors: 0 } });
     await sleep(30);
     check('the mixed ring paints the default window', rows().length === 7);
@@ -1496,7 +1493,7 @@ async function main() {
     mkRec('day1', 200, at(1)),
     mkRec('day0', 200, at(0)),
   ];
-  fire('snapshot', { feed_id: 'feedB', seq: 3, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedB', seq: 3, incremental: false,
     records: MIXED, counters: { in_flight: 0, total_requests: 3, total_errors: 0 } });
   await sleep(30);
   const seps = () => [...d.querySelectorAll('#tbl-requests tr.day-sep')];
@@ -1518,7 +1515,7 @@ async function main() {
   // divider tracks the displayed sequence, never a re-sorted one.
   check('late-arriving previous-day record opens its own divider at its arrival position',
     seps().length === 4 && seps()[0].nextElementSibling.dataset.id === 'day1b');
-  fire('snapshot', { feed_id: 'feedB', seq: 5, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedB', seq: 5, incremental: false,
     records: [ mkRec('day2', 200, at(2)), mkRec('day1', 200, at(1)), mkRec('day0', 200, at(0)),
       mkRec('day0b', 200, at(0) + 3600000), mkRec('day1b', 200, at(1) + 7200000) ],
     counters: { in_flight: 0, total_requests: 5, total_errors: 0 } });
@@ -2451,7 +2448,7 @@ async function main() {
   // the log AND refreshAfterRestart re-pulls operator state (pause, throttle,
   // effective config) + aggregates in place when frontend assets match.
   const cfgBefore = cfgFetches;
-  fire('snapshot', { feed_id: 'feedC', seq: 1, oldest_seq: 1, incremental: false,
+  fire('snapshot', { feed_id: 'feedC', seq: 1, incremental: false,
     records: [{ ...mkRec('restarted1', 200, 1700000200000) }],
     counters: { in_flight: 0, total_requests: 1, total_errors: 0 } });
   await sleep(30);
@@ -2729,7 +2726,7 @@ async function main() {
   // must re-derive the scoped log even with zero record mutations.
   {
     const origF = w.fetch;
-    fullPayload = { feed_id: 'feedB', seq: 3, oldest_seq: 1,
+    fullPayload = { feed_id: 'feedB', seq: 3,
       records: [{ ...mkRec('mix1', 200, 1700000200000), __seq: 1 },
                 { ...mkRec('mix2', 500, 1700000201000), __seq: 2 },
                 { ...mkRec('mix3', 200, 1700000202000), __seq: 3 }],
@@ -2762,7 +2759,7 @@ async function main() {
     const counters = w.eval('lastData.counters');
     const derived = w.eval('derive(lastData)');
     const cursor = w.eval('lastSeq') + 1;
-    const payload = { feed_id: w.eval('feedId'), seq: cursor, oldest_seq: 1,
+    const payload = { feed_id: w.eval('feedId'), seq: cursor,
       pending_revision: w.eval('_pendingRevision'), incremental: true, records: [], in_flight_records: [], counters: { ...counters } };
     w.applySnapshotPayload(observerFixture(payload));
     check('empty SSE replay advances metadata without deriving or rendering',
@@ -2790,9 +2787,9 @@ async function main() {
   {
     const origSup = w.fetch;
     const bootResp = reqs => ({ ok: true, json: async () => ({
-      records: [], buffer_size: 0, counters: { in_flight: 0, total_requests: reqs, total_errors: 0 },
-      seq: 5, oldest_seq: 1, feed_id: 'feedB', incremental: false,
-      kpi: { requests: reqs, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, answer_tokens: 0 },
+      records: [], counters: { in_flight: 0, total_requests: reqs, total_errors: 0 },
+      seq: 5, feed_id: 'feedB', incremental: false,
+      kpi: { requests: reqs, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0 },
       dash: {}, pause: {}, throttle: {},
     }) });
     w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;'); // no tick may race the two calls
@@ -2923,7 +2920,7 @@ async function main() {
   // ---- test 12e: O(1) upsert - _recIdx map is maintained on insert/update ----
   {
     const origU = w.fetch;
-    fullPayload = { feed_id: 'feedB', seq: 5, oldest_seq: 1,
+    fullPayload = { feed_id: 'feedB', seq: 5,
       records: [{ ...mkRec('idx1', 200, 1700000400000), __seq: 1 },
                 { ...mkRec('idx2', 200, 1700000401000), __seq: 2 }],
       counters: { in_flight: 0, total_requests: 2, total_errors: 0 } };
@@ -3208,7 +3205,7 @@ async function main() {
   // happened between HTML generation and opening the live feed.
   {
     const seed = {
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'seed-feed', seq: 12, oldest_seq: 1, pending_revision: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'seed-feed', seq: 12, pending_revision: 1,
       incremental: false, records: [mkRec('seed-final'), {...mkRec('excluded'), provider: 'other.example'}],
       in_flight_records: [mkRec('seed-pending', 0)], counters: {in_flight: 1},
       kpi: {requests: 100, errors: 0}, dash: {}, model_canon: {rules: []},
@@ -3268,7 +3265,7 @@ async function main() {
   // config or model-rule application, and an empty SSE replay remains a no-op.
   {
     const seed = {
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'state-only-feed', seq: 17, oldest_seq: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'state-only-feed', seq: 17,
       incremental: false,
       records: Array.from({length: 17}, (_, i) => ({
         ...mkRec('state' + i, 200, 1700000000000 + i * 1000),
@@ -3326,7 +3323,7 @@ async function main() {
   // after close(), as well as an older bootstrap that completes after SSE.
   {
     const seed = {
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'purge-epoch-1', seq: 2, oldest_seq: 1, pending_revision: 0,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'purge-epoch-1', seq: 2, pending_revision: 0,
       incremental: false, records: [mkRec('delete-me'), mkRec('survivor')],
       in_flight_records: [], counters: {in_flight: 0, total_requests: 2, total_errors: 0},
       kpi: {requests: 2, errors: 0}, dash: {}, model_canon: {rules: []},
@@ -3412,7 +3409,7 @@ async function main() {
   // gates. Keep closed-source callbacks available to reproduce browser queues.
   {
     let state = {
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'ordered-feed', seq: 1, oldest_seq: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'ordered-feed', seq: 1,
       pending_revision: 0, incremental: false, records: [mkRec('ordered-base')], in_flight_records: [],
       counters: {in_flight: 0, total_requests: 1, total_errors: 0},
       kpi: {requests: 1, errors: 0}, dash: {}, model_canon: {rules: []},
@@ -3639,7 +3636,7 @@ async function main() {
       retry_at:'2026-09-05T12:00:00Z',recovery_successes:0,recovery_required:2,
     }]};
     let state = observerFixture({
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'frontend-audit', seq: 1, oldest_seq: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'frontend-audit', seq: 1,
       pending_revision: 0, incremental: false, records: [{...mkRec('audit-row'), model: ' a ', time_bucket: 'night'}],
       in_flight_records: [], counters: {in_flight: 0, total_requests: 1}, kpi: {requests: 1}, dash: {},
       model_canon: baseCanon, storage: {enabled: true, dropped: 3}, storm:stormFixture,
@@ -3953,7 +3950,7 @@ async function main() {
   // rejected token says so instead of silently asking the same question ----
   {
     const authState = observerFixture({
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-auth', seq: 1, oldest_seq: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-auth', seq: 1,
       pending_revision: 0, incremental: false, records: [], in_flight_records: [],
       counters: {in_flight: 0, total_requests: 0}, kpi: {requests: 0}, dash: {},
       model_canon: modelFixture(), storm: {enabled: false, banner_enabled: false, storms: []},
@@ -4138,7 +4135,7 @@ async function main() {
   // the documented Chromium freeze-exemption Web Lock until visible again ----
   {
     const bgState = observerFixture({
-      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-bg', seq: 1, oldest_seq: 1,
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'feed-bg', seq: 1,
       pending_revision: 0, incremental: false, records: [], in_flight_records: [],
       counters: {in_flight: 0, total_requests: 0}, kpi: {requests: 0}, dash: {},
       model_canon: modelFixture(), storm: {enabled: false, banner_enabled: false, storms: []},
