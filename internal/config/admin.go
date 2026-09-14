@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -95,10 +96,17 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 			body["last_reload"] = s
 		}
 	}
-	enc := json.NewEncoder(w)
-	if err := enc.Encode(body); err != nil {
+	// Marshal first, then write: a streaming encoder cannot tell a marshal
+	// bug from a dead socket, so only a real encode failure logs (write
+	// noise stays unlogged) - the same discipline as the web.go bootstrap
+	// writer.
+	b, err := json.Marshal(body)
+	if err != nil {
+		log.Printf("admin config: encode failed: %v", err)
+		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
 		return
 	}
+	w.Write(append(b, '\n'))
 }
 
 func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +175,10 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 		result["error"] = "settings saved, but reload failed: " + reloadErr.Error()
 		w.WriteHeader(http.StatusInternalServerError)
 	}
+	// Post-commit write: the settings are already saved and the reload
+	// outcome recorded, so an encode failure here cannot be acted on and is
+	// never logged. The map holds schema-owned values, so marshal cannot
+	// fail anyway - same class discipline as SSE response writes.
 	_ = json.NewEncoder(w).Encode(result)
 }
 

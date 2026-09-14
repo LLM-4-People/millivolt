@@ -881,6 +881,10 @@ type bootstrapPayload struct {
 type storageSignal struct {
 	Enabled bool   `json:"enabled"`
 	Dropped uint64 `json:"dropped"`
+	// TotalsDegraded reports a failed boot scan: the since-inception KPI
+	// totals count only rows committed since that scan. No frontend render
+	// yet; the field is the contract for the planned degraded banner.
+	TotalsDegraded bool `json:"totals_degraded"`
 }
 
 // HandleBootstrap is THE dashboard's live endpoint - one round trip carrying
@@ -908,7 +912,7 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	observed := metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords))
 	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardVersion}
 	if a.store != nil {
-		payload.Storage = storageSignal{Enabled: true, Dropped: a.store.Dropped()}
+		payload.Storage = storageSignal{Enabled: true, Dropped: a.store.Dropped(), TotalsDegraded: a.store.TotalsDegraded()}
 	}
 	if a.Dash != nil {
 		payload.Dash = a.Dash()

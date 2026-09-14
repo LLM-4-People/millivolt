@@ -422,6 +422,17 @@ func TestRedactHeaderName(t *testing.T) {
 			t.Errorf("%s must not redact", name)
 		}
 	}
+	// Accepted residual, pinned: the ratelimit exemptions are prefix-wide,
+	// so a token-NAMED header under them stays retained (x-ratelimit-token,
+	// anthropic-ratelimit-token). The upstream already holds the credential
+	// and any header name can carry data; see redactHeaderName.
+	for _, name := range []string{
+		"x-ratelimit-token", "anthropic-ratelimit-token",
+	} {
+		if redactHeaderName(name, "") {
+			t.Errorf("%s must stay retained (prefix-wide exemption residual)", name)
+		}
+	}
 	// Deny by default stays: credential-bearing proxy controls and any
 	// unknown token-bearing header remain redacted.
 	for _, name := range []string{

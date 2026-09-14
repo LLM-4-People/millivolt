@@ -337,3 +337,32 @@ func TestPerKeyCapStillAppliesUnderProviderThrottle(t *testing.T) {
 		t.Fatal("per-key waiter stuck")
 	}
 }
+
+// TestBucketWaitClampedToCeiling pins the overflow guard in bucket.waitFor.
+// A legal 1-token/24h cap plus one settled huge usage leaves a debt whose
+// exact refill time (200001 tokens at 1/86400 tokens/s, roughly 547 years)
+// exceeds time.Duration's ~292-year span: the naive
+// time.Duration(need / rate * float64(time.Second)) conversion overflowed to
+// minInt64, the sub-millisecond floor then clamped it to 1ms, and
+// armThrottleDrain re-armed about a thousand times per second while the
+// provider stayed token-blocked. The wait must clamp to the MaxRetryHint
+// ceiling (throttle.go's maxBucketWait) before converting; a larger debt
+// wakes once per ceiling and re-arms, while settles and cap changes re-check
+// admission anyway - the timer is only a fallback heartbeat.
+func TestBucketWaitClampedToCeiling(t *testing.T) {
+	var b bucket
+	b.reset(1, 24*time.Hour, time.Now())
+	// Settled-debt shape: one request settling a huge negative usage.
+	b.tokens = -200000
+	if got := b.waitFor(1); got != MaxRetryHint {
+		t.Fatalf("overflowed bucket wait = %v, want the %v ceiling", got, MaxRetryHint)
+	}
+
+	// Control: a small in-range need still computes the exact duration (a
+	// zero last lets refill only stamp the clock, so tokens stay put).
+	var c bucket
+	c.enabled, c.rate, c.capacity, c.tokens = true, 2, 10, -5
+	if got := c.waitFor(1); got != 3*time.Second {
+		t.Fatalf("in-range bucket wait = %v, want exactly 3s", got)
+	}
+}

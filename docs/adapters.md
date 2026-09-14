@@ -71,7 +71,11 @@ must supply the native endpoint's correct auth/version/path headers; the
 Stored parameter and conversation-composition metadata describe the translated
 upstream body, not an exact copy of the original request. If the caller omits
 both output-limit fields, translation supplies `anthropic_default_max_tokens`,
-which can therefore appear in request details as a captured value.
+which can therefore appear in request details as a captured value. When a
+request supplies both output-limit fields, translation prefers
+`max_completion_tokens`; the proxy's request decode applies the same
+precedence when capturing the cap, so the captured value always agrees with
+the one the translated body carries upstream.
 
 Non-streaming translation buffers the full response before committing status;
 a translation failure can therefore return a real error status. Streaming

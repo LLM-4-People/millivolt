@@ -110,7 +110,11 @@ An unauthenticated local upstream needs no dummy API key.
 
 Ordinary requests preserve original body bytes, but the request is buffered up
 to `max_request_bytes` before metadata extraction and sending. Larger requests
-are rejected with HTTP 413 without an upstream send. Invalid JSON is
+are rejected with HTTP 413 without an upstream send. A decoded output cap
+above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
+upstream send and at both trust boundaries - the original body's decode and
+the re-decode of a translated body - for either spelling (`max_tokens` or
+`max_completion_tokens`). Invalid JSON is
 passed through on the nontranslated path. The proxy can retry transient
 transport failures, 429 and 5xx before returning the final response. Durable
 quota/billing 429s are not treated as transient. Provider retry hints and

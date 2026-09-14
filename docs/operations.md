@@ -70,7 +70,10 @@ a second complete list of defaults here.
 The generated example is the complete field reference: it includes defaults,
 types, ranges, units and hot-reload/restart behavior. `GET /admin/config` exposes
 the same field/category metadata alongside saved values, neutral defaults,
-CLI overrides, the process-effective snapshot and the current revision.
+CLI overrides, the process-effective snapshot and the current revision. Its
+`last_reload` section reports the most recent configuration application:
+`ok`, `error` (empty when ok), `dropped_keys`, `restart_required` and the
+unix-millisecond `at` timestamp.
 Settings searches labels, keys and help across categories.
 Durations and byte sizes use a magnitude plus unit (`2s`, `32MiB`) in YAML and
 Settings; do not write a bare number and assume seconds. A bare integer is still
@@ -472,7 +475,7 @@ the credential gates both.
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
 | `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*` or `/v1`. |
 | `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
-| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. |
+| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET carries a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
@@ -563,7 +566,8 @@ created. "New" does not mean new requests or new conversations. Multiple names
 within a dimension are alternatives; provider and client constraints intersect.
 When named clients and New are combined, either client condition may match.
 
-A hold has its own duration and queue cap. Excess waiting work can be refused;
+A hold has its own duration and queue cap; the cap defaults to `max_queue_size`
+when the hold does not set one. Excess waiting work can be refused;
 an indefinite hold needs an explicit resume. Existing holds can be edited in
 place or resumed individually, while Resume all clears all holds. Overlapping
 scopes are rejected instead of silently replacing a different hold.

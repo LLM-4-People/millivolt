@@ -75,6 +75,15 @@ const (
 	// error. Past the cap the hold is abandoned: no terminal region this large
 	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
 	terminalHoldMax = 64 * 1024
+	// maxTranslateBodyBytes caps the buffered read of a translated
+	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool
+	// prefixes above, translation needs the WHOLE document, so this is a
+	// hard fail-closed cap, not a graceful prefix: past it the body cannot be
+	// translated, and relaying it verbatim would break the translated-shape
+	// contract, so the read fails closed as a 502 (nothing has been written
+	// to the client yet on that path). Sized at the request-side default
+	// scale (max_request_bytes). Safety guardrail, not user-tunable.
+	maxTranslateBodyBytes = 32 << 20 // 32 MiB
 )
 
 // nonRetryableQuotaClasses are provider error type/code strings that, when
@@ -342,8 +351,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
 	if hostileTokenCap(rec.ReqMaxTokens) {
-		http.Error(w, errJSON("invalid_request_error",
-			fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+		writeHostileTokenCap(w)
 		return
 	}
 	stream, model := rec.Stream, rec.Model
@@ -374,8 +382,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// while the translator still carries the hostile cap into the
 		// translated body, so the first check alone does not cover this path.
 		if hostileTokenCap(rec.ReqMaxTokens) {
-			http.Error(w, errJSON("invalid_request_error",
-				fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+			writeHostileTokenCap(w)
 			return
 		}
 	}

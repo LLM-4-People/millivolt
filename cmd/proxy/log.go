@@ -94,7 +94,9 @@ func (w *exportWriter) Write(p []byte) (int, error) {
 
 func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storage.Store) {
 	// Reserve the read-only SQL endpoint even when storage is disabled, so
-	// requests cannot fall through to inference. HandleQuery owns both cases.
+	// requests cannot fall through to inference (HandleQuery owns both
+	// cases). It is operator-gated like every /metrics route: gatedPath
+	// gates the whole namespace, read surfaces included.
 	mux.HandleFunc("/metrics/query", store.HandleQuery)
 	mux.HandleFunc("/metrics/export", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodGet) {
@@ -137,8 +139,10 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			}
 		}
 	})
-	// Destructive purge belongs in the /admin operator plane, never the
-	// open-read /metrics namespace. The operator gate owns the /admin prefix.
+	// Destructive purge stays in the /admin operator action plane, never the
+	// /metrics namespace. The operator credential gates both planes alike
+	// (gatedPath gates /metrics too), so the split is action vs read, never
+	// open-read vs gated.
 	mux.HandleFunc("/admin/purge", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
 			return

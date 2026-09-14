@@ -16,14 +16,20 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
+// TestRequestMetadataRoutingAndTypeBoundaries pins the split-decode
+// contract. On a parameters-block type error the early return recovers
+// exactly ONE field - the token cap (max_tokens / max_completion_tokens,
+// the value the ServeHTTP trust-boundary check reads) - while every other
+// parameter stays dropped (the temperature probe row) and routing still
+// survives independently. Malformed JSON never decodes anything.
 func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, model string
-		stream, params    bool
+		stream, cap       bool
 	}{
 		{"valid", `{"model":"m","stream":true,"max_tokens":7,"messages":[{"role":"user","content":"hi"}]}`, "m", true, true},
-		{"metadata type error", `{"tools":{},"model":"m","stream":true,"max_tokens":7}`, "m", true, false},
-		{"late metadata type error", `{"model":"m","stream":true,"max_tokens":7,"tools":{}}`, "m", true, false},
+		{"metadata type error", `{"tools":{},"model":"m","stream":true,"max_tokens":7}`, "m", true, true},
+		{"late metadata type error", `{"model":"m","stream":true,"max_tokens":7,"tools":{}}`, "m", true, true},
 		{"routing type error", `{"model":{},"stream":true,"max_tokens":7}`, "", false, true},
 		{"late routing type error", `{"max_tokens":7,"stream":"yes","model":"m"}`, "", false, true},
 		{"syntax error", `{"model":"m","stream":true,"max_tokens":7,`, "", false, false},
@@ -32,9 +38,9 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 		{"null root", `null`, "", false, false},
 		{"case insensitive duplicate", `{"MODEL":"old","model":"m","STREAM":false,"Stream":true,"MAX_TOKENS":3,"max_tokens":7}`, "m", true, true},
 		{"null routing duplicate", `{"model":"m","model":null,"stream":true,"stream":null,"max_tokens":7}`, "m", true, true},
-		{"overflow in tools", `{"model":"m","stream":true,"max_tokens":7,"tools":[{"nested":1e999}]}`, "m", true, false},
-		{"overflow in metadata", `{"model":"m","stream":true,"max_tokens":7,"metadata":{"x":1e999}}`, "m", true, false},
-		{"overflow in logit bias", `{"model":"m","stream":true,"max_tokens":7,"logit_bias":{"x":` + strings.Repeat("9", 309) + `}}`, "m", true, false},
+		{"overflow in tools", `{"model":"m","stream":true,"max_tokens":7,"tools":[{"nested":1e999}]}`, "m", true, true},
+		{"overflow in metadata", `{"model":"m","stream":true,"max_tokens":7,"metadata":{"x":1e999}}`, "m", true, true},
+		{"overflow in logit bias", `{"model":"m","stream":true,"max_tokens":7,"logit_bias":{"x":` + strings.Repeat("9", 309) + `}}`, "m", true, true},
 		{"finite scientific value", `{"model":"m","stream":true,"max_tokens":7,"tools":[1e99,"1e999"]}`, "m", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -43,10 +49,22 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 			if rec.Model != tc.model || rec.Stream != tc.stream {
 				t.Fatalf("routing = %q/%v, want %q/%v", rec.Model, rec.Stream, tc.model, tc.stream)
 			}
-			if (rec.ReqMaxTokens != nil) != tc.params || (tc.params && *rec.ReqMaxTokens != 7) {
-				t.Fatalf("max_tokens = %v, metadata valid=%v", rec.ReqMaxTokens, tc.params)
+			if (rec.ReqMaxTokens != nil) != tc.cap || (tc.cap && *rec.ReqMaxTokens != 7) {
+				t.Fatalf("max_tokens = %v, cap recovered=%v", rec.ReqMaxTokens, tc.cap)
 			}
 		})
+	}
+
+	// The cap is the ONLY parameter the split path recovers: a type error
+	// elsewhere must not blind the trust-boundary check, but it must also
+	// not resurrect the rest of the parameters block.
+	var rec metrics.Record
+	parseLLMRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"tools":{}}`), &rec, false)
+	if rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 7 {
+		t.Fatalf("split path: max_tokens = %v, want the recovered 7", rec.ReqMaxTokens)
+	}
+	if rec.ReqTemperature != nil {
+		t.Fatalf("split path: temperature = %v, want it dropped with the failed parameters decode", *rec.ReqTemperature)
 	}
 }
 
@@ -316,5 +334,41 @@ func TestRequestMetadataTranslatedBodyOwnership(t *testing.T) {
 		got.CharsSystem != expected.CharsSystem || got.CharsUser != expected.CharsUser ||
 		got.ReqMetadataKeys != expected.ReqMetadataKeys || got.ReqMetadataKeys != 0 {
 		t.Fatalf("metadata must describe translated body: got=%+v expected=%+v", got, expected)
+	}
+}
+
+// TestMaxCompletionTokensPrecedence pins the merge order in parseLLMRequest:
+// when a body carries BOTH max_tokens and max_completion_tokens, the decode
+// takes max_completion_tokens. The merge matches the Anthropic translator's
+// pick (TranslateRequest writes max_completion_tokens into the translated
+// max_tokens), so the trust-boundary hostileTokenCap check sees exactly the
+// field a translated body actually carries - a flipped merge would let a
+// decoy max_tokens hide a hostile max_completion_tokens from the bound (and
+// vice versa against the translator). Nothing else discriminated this order:
+// the bound rows use one field at a time.
+func TestMaxCompletionTokensPrecedence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want int // 0 means nil
+	}{
+		{"both fields: max_completion_tokens wins", `{"model":"m","max_tokens":100,"max_completion_tokens":200}`, 200},
+		{"max_tokens only", `{"model":"m","max_tokens":100}`, 100},
+		{"max_completion_tokens only", `{"model":"m","max_completion_tokens":200}`, 200},
+		{"null controls: both present but null decode to nil", `{"model":"m","max_tokens":null,"max_completion_tokens":null}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			parseLLMRequest([]byte(tc.body), &rec, false)
+			if tc.want == 0 {
+				if rec.ReqMaxTokens != nil {
+					t.Fatalf("ReqMaxTokens = %v, want nil", *rec.ReqMaxTokens)
+				}
+				return
+			}
+			if rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != tc.want {
+				t.Fatalf("ReqMaxTokens = %v, want %d", rec.ReqMaxTokens, tc.want)
+			}
+		})
 	}
 }

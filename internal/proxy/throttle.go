@@ -462,7 +462,7 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 			TokWindow   *string `json:"token_window"`
 		}
 		if err := adminjson.Decode(w, r, &body); err != nil {
-			http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
 			return
 		}
 		provider := strings.TrimSpace(body.Provider)

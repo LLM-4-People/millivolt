@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -446,7 +447,13 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 			Duration  *string         `json:"duration"`
 			ID        json.RawMessage `json:"id"`
 		}
-		if err := adminjson.Decode(w, r, &body); err != nil || body.Enabled == nil {
+		// Surface the strict decoder's cause; io.EOF is the empty-body
+		// command, which falls through to the requirement message below.
+		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			return
+		}
+		if body.Enabled == nil {
 			http.Error(w, `{"error":"enabled boolean required"}`, http.StatusBadRequest)
 			return
 		}
@@ -636,6 +643,7 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	raw, err := s.pause.persist.LoadDebugCapture(ctx, id)
 	if err != nil {
+		log.Printf("debug: load capture %s: %v", id, err)
 		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
 		return
 	}

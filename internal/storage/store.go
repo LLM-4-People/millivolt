@@ -433,6 +433,11 @@ type Store struct {
 	writtenCap   int
 	totals       Totals
 	totalsBuilt  bool
+	// totalsDegraded reports that the boot scan failed and totals count
+	// only rows committed since (account() rebuilds from zero on the first
+	// post-boot commit). The dashboard surfaces the flag so the subset is
+	// never presented as since-inception; a later successful scan clears it.
+	totalsDegraded bool
 	// flushCh carries synchronous flush requests (restart handoff): the
 	// writer drains the buffered channel and commits before replying, so
 	// the caller knows every accepted record is durable - without sealing
@@ -535,6 +540,9 @@ func Open(path string, opts Options) (*Store, error) {
 	tctx, cancel := s.withQueryTimeout(context.Background())
 	if err := s.computeTotals(tctx); err != nil {
 		log.Printf("storage: initial totals scan failed (dashboard aggregates degraded): %v", err)
+		s.aggMu.Lock()
+		s.totalsDegraded = true
+		s.aggMu.Unlock()
 	}
 	cancel()
 	s.wg.Add(1)
@@ -851,7 +859,17 @@ func (s *Store) installTotals(t Totals) {
 	s.aggMu.Lock()
 	s.totals = t
 	s.totalsBuilt = true
+	s.totalsDegraded = false
 	s.aggMu.Unlock()
+}
+
+// TotalsDegraded reports whether the boot-time totals scan failed, leaving
+// the aggregate a truthful subset (rows committed since the failed scan)
+// instead of since-inception totals.
+func (s *Store) TotalsDegraded() bool {
+	s.aggMu.Lock()
+	defer s.aggMu.Unlock()
+	return s.totalsDegraded
 }
 
 func readTotals(ctx context.Context, db interface {
@@ -1164,32 +1182,31 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 	return &r, nil
 }
 
-// DecodeAttemptsColumn decodes the stored attempts JSON column. Empty and
-// "null" are the canonical no-attempts spellings and yield nil with no
-// error; any other unmarshal failure is column corruption the caller logs
-// per record.
-func DecodeAttemptsColumn(raw []byte) ([]metrics.RetryAttempt, error) {
+// decodeJSONColumn is the shared owner of the stored JSON-column decode:
+// empty and "null" are the canonical no-value spellings and yield nil with
+// no error; any other unmarshal failure is column corruption the caller
+// logs per record (never a failed scan).
+func decodeJSONColumn[T any](raw []byte) ([]T, error) {
 	if len(raw) == 0 || string(raw) == "null" {
 		return nil, nil
 	}
-	var attempts []metrics.RetryAttempt
-	if err := json.Unmarshal(raw, &attempts); err != nil {
+	var out []T
+	if err := json.Unmarshal(raw, &out); err != nil {
 		return nil, err
 	}
-	return attempts, nil
+	return out, nil
+}
+
+// DecodeAttemptsColumn decodes the stored attempts JSON column through the
+// shared decodeJSONColumn contract (external consumers live in internal/web).
+func DecodeAttemptsColumn(raw []byte) ([]metrics.RetryAttempt, error) {
+	return decodeJSONColumn[metrics.RetryAttempt](raw)
 }
 
 // DecodeToolNamesColumn decodes the stored tool_names JSON column with the
 // same empty/"null" contract as DecodeAttemptsColumn.
 func DecodeToolNamesColumn(raw []byte) ([]string, error) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
-	}
-	var names []string
-	if err := json.Unmarshal(raw, &names); err != nil {
-		return nil, err
-	}
-	return names, nil
+	return decodeJSONColumn[string](raw)
 }
 
 func marshalClientMeta(m metrics.ClientMeta) string {

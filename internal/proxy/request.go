@@ -742,6 +742,14 @@ func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
 }
 
+// writeHostileTokenCap rejects a hostile token cap with the shared 400
+// envelope. Both ServeHTTP enforcement sites use it, so the two trust
+// boundaries can never drift in status, type or wording.
+func writeHostileTokenCap(w http.ResponseWriter) {
+	http.Error(w, errJSON("invalid_request_error",
+		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+}
+
 type requestRouting struct {
 	Model  string `json:"model"`
 	Stream bool   `json:"stream"`
@@ -805,6 +813,25 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 		}
 		req.requestParameters = requestParameters{}
 		if json.Unmarshal(body, &req.requestParameters) != nil {
+			// The cap is the one extracted field the trust boundary rejects on
+			// (hostileTokenCap reads rec.ReqMaxTokens): a type error anywhere
+			// else in the parameters block - including tool parameters carried
+			// as raw JSON by the Anthropic translator - must not blind that
+			// check. Recover the cap alone with a minimal decode of the same
+			// body, applying the same max_completion_tokens-wins precedence as
+			// the clean merge below.
+			var caps struct {
+				MaxTokens     *int `json:"max_tokens"`
+				MaxCompTokens *int `json:"max_completion_tokens"`
+			}
+			if json.Unmarshal(body, &caps) == nil {
+				switch {
+				case caps.MaxCompTokens != nil:
+					rec.ReqMaxTokens = caps.MaxCompTokens
+				case caps.MaxTokens != nil:
+					rec.ReqMaxTokens = caps.MaxTokens
+				}
+			}
 			rec.Model, rec.Stream = req.Model, req.Stream
 			return
 		}

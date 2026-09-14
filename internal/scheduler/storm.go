@@ -453,9 +453,7 @@ func (s *stormState) delay(scope *stormScope, now time.Time, retryAfter time.Dur
 			delay = 0
 		}
 	}
-	if retryAfter > MaxRetryHint {
-		retryAfter = MaxRetryHint
-	}
+	retryAfter = ClampRetryHint(retryAfter)
 	if retryAfter > delay {
 		delay = retryAfter
 	}
@@ -507,9 +505,7 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 	if len(reason) > maxStormReasonBytes {
 		reason = reason[:maxStormReasonBytes]
 	}
-	if retryAfter > MaxRetryHint {
-		retryAfter = MaxRetryHint
-	}
+	retryAfter = ClampRetryHint(retryAfter)
 	// First record both samples. Provider promotion must see the current
 	// model's observation, independent of the order in which gates settle.
 	if observe {

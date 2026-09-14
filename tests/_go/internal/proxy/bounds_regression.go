@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
@@ -81,7 +82,9 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 		raw, _ := io.ReadAll(r.Body)
 		upstreamBody = string(raw)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`))
+		// Anthropic-shaped response: the translated rows need a body their
+		// response translation accepts; passthrough rows relay it verbatim.
+		w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer upstream.Close()
 	srv := proxyServer(t)
@@ -117,6 +120,14 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 		// tolerates it and carries the hostile cap into the re-decoded body.
 		{`{"model":"m","max_tokens":2000000000,"n":"x"}`, "anthropic"},
 		{`{"model":"m","max_completion_tokens":9999999999999,"n":"x"}`, "anthropic"},
+		// Tools-decoy bypass shape: an out-of-range number inside tool
+		// parameters is carried as json.RawMessage by BOTH decoders, so the
+		// type error suppresses the original record's ReqMaxTokens AND the
+		// translated re-decode's (the early-return fires twice) - both
+		// hostileTokenCap checks see nil while the hostile cap still
+		// reaches the passthrough/translated upstream body.
+		{`{"model":"m","max_tokens":2000000000,"tools":[{"type":"function","function":{"name":"f","parameters":1e400}}]}`, ""},
+		{`{"model":"m","max_tokens":2000000000,"tools":[{"type":"function","function":{"name":"f","parameters":1e400}}]}`, "anthropic"},
 	} {
 		status, respBody := post(tc.payload, tc.format)
 		if status != http.StatusBadRequest {
@@ -137,6 +148,103 @@ func TestMaxRequestOutputTokensBound(t *testing.T) {
 	}
 	if upstreamBody != payload {
 		t.Errorf("in-range body mutated:\n got %q\nwant %q", upstreamBody, payload)
+	}
+
+	// Transparency control for the tools decoy: the decoy body is valid JSON
+	// whose type error lives outside the cap fields, so a SANE cap still
+	// proxies verbatim (translated upstream with format anthropic). The
+	// invariant protects forwarding; a recoverable cap must not blind the
+	// bound check, and an in-range one must not be rejected.
+	decoy := `{"model":"m","max_tokens":100,"tools":[{"type":"function","function":{"name":"f","parameters":1e400}}]}`
+	if status, _ := post(decoy, "anthropic"); status != http.StatusOK {
+		t.Errorf("in-range cap with tools decoy: status = %d, want 200", status)
+	}
+}
+
+// TestTranslatedResponseBodyBounded pins the byte cap on the translated
+// non-streaming 200 read in serveNonStreaming. Every sibling read is bounded
+// (request upload, error-body prefix, quality spool, SSE line scanner), but
+// the translated path io.ReadAll'd the whole document with no ceiling: a
+// client-chosen base URL (X-Proxy-Base-URL is client-supplied;
+// allowed_base_urls only gates it when configured) could point at an upstream
+// that streams gigabytes and exhaust proxy memory per request. Past the cap
+// the document cannot be translated, and relaying it verbatim would break the
+// translated-shape contract, so the read fails closed as 502 (nothing has been
+// written to the client yet on that path - the status line is committed only
+// after a successful translation). The 32 MiB ceiling (relay.go's
+// maxTranslateBodyBytes, the request-side default scale) is pinned literally
+// here: silent drift of that constant must fail this test.
+func TestTranslatedResponseBodyBounded(t *testing.T) {
+	const wantCapBytes = 32 << 20
+	// A valid Anthropic 200 body whose single text block pads the framed
+	// document past the cap (the JSON framing alone adds >1 byte).
+	bigBody := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"` +
+		strings.Repeat("x", wantCapBytes) +
+		`"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	smallBody := `{"id":"msg_2","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"model":"m","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`
+	var served atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if served.Add(1) == 1 {
+			w.Write([]byte(bigBody))
+			return
+		}
+		w.Write([]byte(smallBody))
+	}))
+	defer upstream.Close()
+	buf := metrics.NewBuffer(4)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	post := func() *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer sk-test-key")
+		req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+		req.Header.Set("X-Proxy-Format", "anthropic")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// Oversized: fail closed 502, nothing translated or relayed.
+	resp := post()
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("oversized translated body: status = %d, want 502 (body: %s)", resp.StatusCode, raw)
+	}
+	if !strings.Contains(string(raw), "upstream response too large to translate") {
+		t.Errorf("502 body = %q, want the too-large message", raw)
+	}
+	snap := waitForRecord(t, buf, 1)
+	if len(snap) != 1 {
+		t.Fatalf("recorded %d records, want 1", len(snap))
+	}
+	rec := snap[0]
+	if rec.StatusCode != http.StatusBadGateway {
+		t.Errorf("record status = %d, want 502", rec.StatusCode)
+	}
+	if rec.ErrorType != "response_too_large" {
+		t.Errorf("record error type = %q, want response_too_large", rec.ErrorType)
+	}
+	if want := config.FormatByteSize(wantCapBytes); !strings.Contains(rec.ErrorMsg, want) {
+		t.Errorf("record error msg = %q, want it to carry the byte size %q", rec.ErrorMsg, want)
+	}
+
+	// Control: an in-range body still translates to a 200.
+	resp2 := post()
+	raw2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("in-range translated body: status = %d, want 200 (body: %s)", resp2.StatusCode, raw2)
+	}
+	if !strings.Contains(string(raw2), `"object":"chat.completion"`) {
+		t.Errorf("in-range translated body = %q, want an OpenAI completion shape", raw2)
 	}
 }
 

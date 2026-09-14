@@ -474,6 +474,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		// Inference and SSE keep the server's no-body-timeout design. A
 		// transport that cannot set deadlines proceeds byte-bounded only.
 		if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(sessionBodyReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			log.Printf("operator session: read deadline: %v", err)
 			w.Header().Set("Cache-Control", "no-store")
 			http.Error(w, `{"error":"unsupported connection"}`, http.StatusInternalServerError)
 			return

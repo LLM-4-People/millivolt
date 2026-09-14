@@ -14,9 +14,12 @@ func apply(rules []ModelRule, name string) string {
 	return ApplyModelRules(CompileModelRules(rules), name)
 }
 
-// TestCanonicalModel is the Go half of the canonicalization contract - the
-// SAME case table is mirrored in ui_check.js (the JS mirror canonicalModel
-// in explorer.js); keep both in lockstep.
+// TestCanonicalModel is the Go half of the canonicalization contract. The
+// default-pipeline rows are shared with the ui_check.js mirror (the JS
+// `canonicalModel` in explorer.js applies them to the same spellings); the
+// custom rule-list rows below (exact/pattern ordering, case-sensitivity,
+// `(?i)` flags) run only here, with adjacent JS checks of their own. Keep
+// the shared default-pipeline rows in lockstep with the mirror.
 func TestCanonicalModel(t *testing.T) {
 	def := DefaultModelRules()
 	cases := []struct {

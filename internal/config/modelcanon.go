@@ -26,8 +26,10 @@ import (
 //
 // JS MIRROR: explorer.js `canonicalModel` applies the identical rule
 // semantics (the client's log-scope mirror recordMatchesDim needs it);
-// pinned by matching case tables (TestCanonicalModel + the ui_check mirror
-// test) - keep them in lockstep.
+// pinned by the shared case-table rows (TestCanonicalModel + the ui_check
+// mirror test). The Go table also runs custom rule-list rows (exact/pattern
+// ordering, case-sensitivity, `(?i)` flags) the JS suite covers with its
+// own adjacent checks - keep the shared rows in lockstep.
 
 // Rule modes - the complete vocabulary. `exact` compares the whole string
 // (a plain merge/rewrite); `pattern` is a regex rewrite (all occurrences,

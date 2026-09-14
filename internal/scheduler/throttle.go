@@ -128,6 +128,17 @@ func (b *bucket) reset(count int64, window time.Duration, now time.Time) {
 	b.last = now
 }
 
+// maxBucketWait is the ceiling on one bucket waitFor: the exact refill time
+// of a deep debt (need/rate) can exceed time.Duration's ~292-year span, and
+// the naive float-to-Duration conversion overflows to minInt64 - the
+// sub-millisecond floor would then clamp it to ~1ms and armThrottleDrain
+// would re-arm about a thousand times per second while the provider stays
+// token-blocked. The ceiling mirrors MaxRetryHint, the daily-quota window
+// maxLimitWindow is pinned to: a larger debt wakes once per ceiling and
+// re-arms, while settles and cap changes re-check admission anyway - the
+// timer is only a fallback heartbeat.
+const maxBucketWait = MaxRetryHint
+
 func (b *bucket) waitFor(n float64) time.Duration {
 	if !b.enabled || b.rate <= 0 {
 		return 0
@@ -138,7 +149,11 @@ func (b *bucket) waitFor(n float64) time.Duration {
 		return 0
 	}
 	need := n - b.tokens
-	d := time.Duration(need / b.rate * float64(time.Second))
+	sec := need / b.rate
+	if sec > maxBucketWait.Seconds() {
+		sec = maxBucketWait.Seconds()
+	}
+	d := time.Duration(sec * float64(time.Second))
 	if d < time.Millisecond {
 		d = time.Millisecond
 	}

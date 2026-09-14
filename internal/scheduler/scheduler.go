@@ -814,6 +814,24 @@ func (g *group) removeWaiter(w *waiter) {
 // non-finite upstream value can never reach record fields or the scheduler.
 const MaxRetryHint = 24 * time.Hour
 
+// ClampRetryHint bounds a retry hint to [0, MaxRetryHint]: a negative (past
+// HTTP-date or negative duration) means "retry now", and a value above the
+// ceiling is pathological. It is the single clamp owner for every stored or
+// compared hint - the proxy's parseRetryAfter decode paths, BackoffFor's
+// floor compare, and the storm delay/settle paths, which must clamp BEFORE
+// their sibling-window compare so a hostile or overflowed hint can never
+// extend a storm window past the ceiling.
+func ClampRetryHint(d time.Duration) time.Duration {
+	switch {
+	case d <= 0:
+		return 0
+	case d > MaxRetryHint:
+		return MaxRetryHint
+	default:
+		return d
+	}
+}
+
 // BackoffFor computes the pacing delay after a retryable failure. Adaptive
 // exponential backoff always grows (base_backoff, cap max_backoff). A
 // provider Retry-After / rate-limit-reset is a floor: the wait is the
@@ -832,9 +850,7 @@ func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Durati
 	// Jitter: 0.75x–1.25x to avoid thundering herd. Do not write
 	// nextAllowedAt here - only Trip/SetRateLimit trip the group.
 	adaptive := jitterBackoff(g.backoff)
-	if retryAfter > MaxRetryHint {
-		retryAfter = MaxRetryHint
-	}
+	retryAfter = ClampRetryHint(retryAfter)
 	if retryAfter > adaptive {
 		return retryAfter
 	}

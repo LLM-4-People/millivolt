@@ -449,12 +449,11 @@ loop:
 			if sig == syscall.SIGHUP {
 				// Config reload: hot-apply the reloadable subset with zero
 				// dropped requests; report any restart-required field changes.
+				// reloadConfig failure branches own the failure log lines.
 				skipped, err := reloadConfig()
-				if err != nil {
-					log.Printf("config reload failed (keeping current): %v", err)
-				} else if len(skipped) > 0 {
+				if err == nil && len(skipped) > 0 {
 					log.Printf("config reloaded; restart required for: %s", strings.Join(skipped, ", "))
-				} else {
+				} else if err == nil {
 					log.Printf("config reloaded from %s", liveConfigPath)
 				}
 				continue
@@ -609,6 +608,11 @@ func reloadConfig() ([]string, error) {
 	defer liveMu.Unlock()
 	fresh, dropped, err := config.LoadFileRepair(liveConfigPath)
 	if err != nil {
+		// last_reload is a mutable single slot; the process log is the
+		// history, so every failure leaves exactly one record regardless
+		// of the trigger (SIGHUP, POST /admin/reload, Settings save,
+		// backup restore - they all funnel through here).
+		log.Printf("config reload failed (keeping current): %v", err)
 		recordReloadStatus(false, err.Error(), nil, nil)
 		return nil, err
 	}
@@ -626,6 +630,7 @@ func reloadConfig() ([]string, error) {
 	if liveStore != nil && !maps.Equal(liveCfg.ProviderAliases, fresh.ProviderAliases) {
 		if _, err := liveStore.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
 			err = fmt.Errorf("provider_aliases: %w", err)
+			log.Printf("config reload failed (keeping current): %v", err)
 			recordReloadStatus(false, err.Error(), dropped, nil)
 			return nil, err
 		}

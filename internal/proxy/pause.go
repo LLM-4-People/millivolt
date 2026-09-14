@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"sort"
@@ -366,7 +367,13 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			MaxQueued *int            `json:"max_queued"`
 			ID        json.RawMessage `json:"id"`
 		}
-		if err := adminjson.Decode(w, r, &body); err != nil || body.Paused == nil {
+		// Surface the strict decoder's cause; io.EOF is the empty-body
+		// command, which falls through to the requirement message below.
+		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			return
+		}
+		if body.Paused == nil {
 			http.Error(w, `{"error":"paused boolean required"}`, http.StatusBadRequest)
 			return
 		}

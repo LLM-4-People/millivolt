@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -19,6 +20,7 @@ func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr 
 	}
 	enc, err := json.Marshal(state)
 	if err != nil {
+		log.Printf("operator state: encode failed: %v", err)
 		http.Error(w, `{"error":"could not encode operator state"}`, http.StatusInternalServerError)
 		return
 	}

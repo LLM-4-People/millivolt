@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
@@ -227,7 +228,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
 		if t.format != "" && t.format != "openai" {
-			full, rerr := io.ReadAll(resp.Body)
+			full, rerr := io.ReadAll(io.LimitReader(resp.Body, maxTranslateBodyBytes+1))
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr, "stream_read_error")
 				if rec.ClientDisconnected {
@@ -235,6 +236,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				}
 				rec.StatusCode = http.StatusBadGateway
 				http.Error(w, errJSON("api_error", "upstream error: "+transportErrText(rerr)), http.StatusBadGateway)
+				return
+			}
+			// Past the cap the document cannot be translated, and verbatim
+			// relay would break the translated-shape contract: fail closed
+			// with a real 502 (the status line is still uncommitted here).
+			if int64(len(full)) > maxTranslateBodyBytes {
+				rec.StatusCode = http.StatusBadGateway
+				rec.ErrorType = "response_too_large"
+				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
+				http.Error(w, errJSON("api_error", "upstream response too large to translate"), http.StatusBadGateway)
 				return
 			}
 			// The provider's in-band error envelope on a 200 is its own
@@ -972,7 +983,7 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 			}
 		}
 		if ts, err := http.ParseTime(v); err == nil {
-			return clampRetryHint(time.Until(ts))
+			return scheduler.ClampRetryHint(time.Until(ts))
 		}
 	}
 	for _, h := range []string{
@@ -983,7 +994,7 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	} {
 		if v := resp.Header.Get(h); v != "" {
 			if d, err := time.ParseDuration(v); err == nil {
-				return clampRetryHint(d)
+				return scheduler.ClampRetryHint(d)
 			}
 			// NaN and +/-Inf are malformed like any parse failure: fall
 			// through to the next candidate. A finite value is range-checked
@@ -1003,20 +1014,6 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 		}
 	}
 	return 0
-}
-
-// clampRetryHint floors a parsed retry hint into [0, scheduler.MaxRetryHint]:
-// a negative (past HTTP-date or negative duration) means "retry now", and a
-// value above the ceiling is pathological.
-func clampRetryHint(d time.Duration) time.Duration {
-	switch {
-	case d <= 0:
-		return 0
-	case d > scheduler.MaxRetryHint:
-		return scheduler.MaxRetryHint
-	default:
-		return d
-	}
 }
 
 // transformResponse relays a format-translated upstream response, translating
