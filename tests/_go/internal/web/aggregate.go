@@ -1050,6 +1050,12 @@ func TestExplorerScopeLiveStatusFilter(t *testing.T) {
 	stream := mkRec("live-s", now, 0, "", nil, 0, 0, 0, 0, 0, 0)
 	stream.Stream = true
 	buf.PublishLive("begin", stream)
+	throttled := mkRec("live-t", now, 0, "", nil, 0, 0, 0, 0, 0, 0)
+	throttled.Stream = true
+	throttled.Throttled = true
+	buf.PublishLive("begin", throttled)
+	pending := mkRec("live-w", now, 0, "", nil, 0, 0, 0, 0, 0, 0)
+	buf.PublishLive("begin", pending)
 
 	p := getExplorerScope(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=status&s=streaming")
 	if p["matches"] != float64(1) {
@@ -1058,6 +1064,14 @@ func TestExplorerScopeLiveStatusFilter(t *testing.T) {
 	p = getExplorerScope(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=status&s=paused")
 	if p["matches"] != float64(1) {
 		t.Fatalf("s=paused matches = %v, want 1", p["matches"])
+	}
+	p = getExplorerScope(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=status&s=throttled")
+	if p["matches"] != float64(1) {
+		t.Fatalf("s=throttled matches = %v, want 1 (throttled outranks streaming, so the streaming row must not leak in)", p["matches"])
+	}
+	p = getExplorerScope(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=status&s=pending")
+	if p["matches"] != float64(1) {
+		t.Fatalf("s=pending matches = %v, want 1 (a queued-not-streaming row is its own live class)", p["matches"])
 	}
 	p = getExplorerScope(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=status&s=200")
 	if p["matches"] != float64(1) {

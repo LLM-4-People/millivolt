@@ -174,6 +174,17 @@ const pageOptions = {
       if (u.includes('/admin/restart')) {
         if (opts && opts.method === 'POST') {
           restartState.postCount++;
+          // postFail simulates a refusal whose body is not JSON-with-an-
+          // error field (the operator plane writes plain-text denials): the
+          // fallback contract, not a server error message, must surface.
+          if (restartState.postFail) {
+            const status = restartState.postFail.status;
+            return Promise.resolve({
+              ok: false, status,
+              json: async () => { throw new SyntaxError('unexpected token < in HTML'); },
+              text: async () => '<html>bad gateway</html>',
+            });
+          }
           const response = () => { restartState.restarted = true; return { ok: true, json: async () => ({ ok: true, phase: 'building', rank: 0, drain_timeout_ms: 600000, error: '' }) }; };
           return restartState.postGate ? restartState.postGate.then(response) : Promise.resolve(response());
         }
@@ -1086,6 +1097,19 @@ async function main() {
     await sleep(20);
     check('backup download uses the operator fetch gate',
       calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token'));
+    // The generic operatorErrorBody site: an empty-body 502 (no JSON
+    // anywhere, like a bare gateway refusal) must reject with the caller's
+    // designed fallback message, never an empty Error. The W20 mutation
+    // round proved nothing reddened when the fallback was dropped.
+    w.fetch = (url, opts) => {
+      const u = String(url);
+      if (u.includes('/admin/backup')) return Promise.resolve({ ok: false, status: 502, headers: { get: () => null } });
+      return originalFetch(url, opts);
+    };
+    w.runBackupDownload();
+    await sleep(20);
+    check('an empty-body 502 backup download surfaces the designed fallback message',
+      d.getElementById('settings-count').textContent === 'backup failed');
     calls.length = 0;
     const inspectPayload = {
       ok: true, created: '2026-09-07T12:00:00Z',
@@ -2477,6 +2501,21 @@ async function main() {
   check('unavailable restart stays disabled', restartAction.disabled);
   restartState.status = {};
   await w.fetchRestartStatus();
+  // The refusal path through operatorErrorBody: a non-2xx whose body is not
+  // JSON-with-an-error (a plain-text operator denial, an HTML 502) must
+  // reject with the restart site's designed fallback text, marked as a
+  // server answer so the generic transport prefix never wraps it. Nothing
+  // reddened before this pin (the W20 mutation round proved the fallback
+  // could be dropped silently).
+  restartState.postFail = { status: 502 };
+  const refusalPostCount = restartState.postCount;
+  await w.restartProxy();
+  const restartStatusLine = d.getElementById('restart-count');
+  check('a non-JSON 502 restart refusal shows the designed fallback, never an empty error',
+    restartState.postCount === refusalPostCount + 1 &&
+    restartStatusLine.textContent === 'restart failed (502)' &&
+    restartStatusLine.dataset.err === '1');
+  restartState.postFail = null;
   w.toggleRestartMenu({ stopPropagation() {} });
   check('restart menu closes on second toggle', rmenu.hidden);
 
@@ -4527,6 +4566,64 @@ async function main() {
         JSON.stringify([...sd.getElementById('pf-dur').options].map(o => o.value)) ===
         JSON.stringify(['', '15m', '1h', '6h', '12h', '24h']));
       sw.togglePauseMenu({stopPropagation() {}});
+
+      // holdMatchesRecord mirrors scheduler holdSnap.matches on the scope
+      // half (scheduler/hold.go); chrome.js holdLive owns the expiry half
+      // the Go matcher folds in. The matrix mirrors the Go suite's
+      // TestHoldMatchesMatrix row for row (that suite owns the table, the
+      // hand-mirror documented here): the wire keys are all/new/clients/
+      // providers/known_at_new, and every verdict must agree.
+      const holdRows = [
+        ['all matches any request', {all: true}, {client: 'client-a', provider: 'alpha.example'}, true],
+        ['all matches an empty identity', {all: true}, {client: '', provider: ''}, true],
+        ['new skips a known client', {new: true, known_at_new: ['known']}, {client: 'known', provider: 'alpha.example'}, false],
+        ['new matches an unseen client', {new: true, known_at_new: ['known']}, {client: 'fresh', provider: 'alpha.example'}, true],
+        ['named client matches itself', {clients: ['client-a']}, {client: 'client-a', provider: 'alpha.example'}, true],
+        ['named client matches with any provider', {clients: ['client-a']}, {client: 'client-a', provider: ''}, true],
+        ['named client misses another client', {clients: ['client-a']}, {client: 'client-b', provider: 'alpha.example'}, false],
+        ['named hit wins over new', {clients: ['client-a'], new: true, known_at_new: ['client-a', 'seen']}, {client: 'client-a', provider: 'alpha.example'}, true],
+        ['named plus new skips a known non-member', {clients: ['client-a'], new: true, known_at_new: ['client-a', 'seen']}, {client: 'seen', provider: 'alpha.example'}, false],
+        ['named plus new matches an unseen client', {clients: ['client-a'], new: true, known_at_new: ['client-a', 'seen']}, {client: 'brand-new', provider: 'alpha.example'}, true],
+        ['provider-only matches its provider with any client', {providers: ['alpha.example']}, {client: 'whoever', provider: 'alpha.example'}, true],
+        ['provider-only misses another provider', {providers: ['alpha.example']}, {client: 'whoever', provider: 'beta.example'}, false],
+        ['provider-only never matches an empty provider argument', {providers: ['alpha.example']}, {client: 'whoever', provider: ''}, false],
+        ['client and provider AND-match', {clients: ['client-a'], providers: ['alpha.example']}, {client: 'client-a', provider: 'alpha.example'}, true],
+        ['pair hold misses on provider', {clients: ['client-a'], providers: ['alpha.example']}, {client: 'client-a', provider: 'beta.example'}, false],
+        ['pair hold misses on client', {clients: ['client-a'], providers: ['alpha.example']}, {client: 'client-b', provider: 'alpha.example'}, false],
+        ['dimensionless hold is inactive', {all: false, clients: [], providers: [], new: false}, {client: 'client-a', provider: 'alpha.example'}, false],
+      ];
+      const holdMisses = holdRows
+        .filter(([name, h, r, want]) => sw.eval(`holdMatchesRecord(${JSON.stringify(h)}, ${JSON.stringify(r)})`) !== want)
+        .map(([name]) => name);
+      check('holdMatchesRecord agrees with the Go matcher matrix' +
+        (holdMisses.length ? ' (missed: ' + holdMisses.join(', ') + ')' : ''),
+        holdMisses.length === 0);
+      check('holdLive owns the expiry half the Go matcher folds in',
+        sw.eval(`holdLive({all: true, until: new Date(Date.now() - 60000).toISOString()})`) === false &&
+        sw.eval(`holdLive({all: true, until: new Date(Date.now() + 60000).toISOString()})`) === true);
+
+      // parseGoDuration mirrors Go's duration grammar for every spelling
+      // config.FormatDuration emits (pinned Go-side by
+      // TestFormatDurationSpellingsParseBack, whose d.String() fallback row
+      // spells microseconds with the micro sign, and whose parser accepts
+      // the Greek mu too). Rows mirror that Go table; values are
+      // milliseconds.
+      const durRows = [
+        ['0s', 0], ['1ns', 0.000001], ['1.5µs', 0.0015], ['1500us', 1.5],
+        ['1500μs', 1.5], ['5ms', 5], ['500ms', 500], ['2s', 2000],
+        ['90m', 5400000], ['3h', 10800000], ['24h', 86400000], ['-5s', -5000],
+        ['1h30m', 5400000], ['0.5s', 500],
+      ];
+      const durMisses = durRows
+        .filter(([spelling, want]) => sw.eval(`parseGoDuration(${JSON.stringify(spelling)})`) !== want)
+        .map(([spelling]) => spelling);
+      check('parseGoDuration parses every FormatDuration spelling the surfaces use' +
+        (durMisses.length ? ' (missed: ' + durMisses.join(', ') + ')' : ''),
+        durMisses.length === 0);
+      check('parseGoDuration fails closed to 0 on garbage and empty input',
+        sw.eval('parseGoDuration(\'45 min\')') === 0 &&
+        sw.eval('parseGoDuration(\'\')') === 0 &&
+        sw.eval('parseGoDuration(null)') === 0);
 
       // MODEL_RULES_MAX mirrors config.ModelRulesMax (pinned Go-side): the
       // count line and the add gate at the cap.

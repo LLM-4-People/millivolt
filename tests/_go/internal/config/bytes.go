@@ -98,6 +98,36 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+// TestFormatDurationSpellingsParseBack pins that every spelling
+// FormatDuration emits parses back through time.ParseDuration to the same
+// duration. The dashboard's parseGoDuration mirrors that grammar for the
+// settings cadences and menu tokens (ui_check pins its side against this
+// table), so a spelling only one side accepts breaks the pair. The
+// d.String() fallback row matters most: it spells sub-microsecond values
+// with the micro sign (1.5µs), which the JS parser must keep accepting.
+func TestFormatDurationSpellingsParseBack(t *testing.T) {
+	for _, d := range []time.Duration{
+		0,
+		time.Nanosecond,
+		1500 * time.Nanosecond, // the d.String() fallback: "1.5µs"
+		time.Microsecond,
+		1500 * time.Microsecond,
+		5 * time.Millisecond,
+		500 * time.Millisecond,
+		2 * time.Second,
+		90 * time.Minute,
+		3 * time.Hour,
+		24 * time.Hour,
+		-5 * time.Second,
+	} {
+		s := FormatDuration(d)
+		back, err := time.ParseDuration(s)
+		if err != nil || back != d {
+			t.Errorf("FormatDuration(%v) = %q parses back to %v, %v", d, s, back, err)
+		}
+	}
+}
+
 func TestHeartbeatRange(t *testing.T) {
 	want := FormatDuration(HeartbeatIntervalMin) + ".." + FormatDuration(HeartbeatIntervalMax)
 	if heartbeatRange() != want {

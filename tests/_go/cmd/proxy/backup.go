@@ -283,6 +283,44 @@ func TestStageSnapshotIsAdmittedOnOpen(t *testing.T) {
 	}
 }
 
+// restoreInspectWire is the strict decoder for the POST /admin/restore
+// ?inspect=1 document. The W15 drop removed the flag-echo key "inspect"
+// (no consumer); a re-added or renamed key must redden here instead of
+// passing the lenient reads, as the round-seven mutation round proved it
+// would. Both member shapes (present or absent) decode through the one
+// struct: absent sections simply stay zero.
+type restoreInspectWire struct {
+	OK      bool   `json:"ok"`
+	Created string `json:"created"`
+	Config  struct {
+		Present  bool           `json:"present"`
+		Bytes    int            `json:"bytes"`
+		Values   map[string]any `json:"values"`
+		Modified []string       `json:"modified"`
+		VsLive   []string       `json:"vs_live"`
+	} `json:"config"`
+	Database struct {
+		Present  bool  `json:"present"`
+		Bytes    int   `json:"bytes"`
+		Requests int64 `json:"requests"`
+		Debug    int64 `json:"debug"`
+		OldestMs int64 `json:"oldest_ms"`
+		NewestMs int64 `json:"newest_ms"`
+		Overlap  int64 `json:"overlap"`
+	} `json:"database"`
+}
+
+func decodeRestoreInspectStrict(t *testing.T, body []byte) restoreInspectWire {
+	t.Helper()
+	var ins restoreInspectWire
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&ins); err != nil {
+		t.Fatalf("strict decode of the restore-inspect document: %v (%s)", err, body)
+	}
+	return ins
+}
+
 func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	liveReloadFixture(t)
 	live := config.Default()
@@ -311,19 +349,9 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
 	}
-	var ins struct {
-		OK      bool   `json:"ok"`
-		Created string `json:"created"`
-		Config  struct {
-			Present  bool           `json:"present"`
-			Bytes    int            `json:"bytes"`
-			Modified []string       `json:"modified"`
-			VsLive   []string       `json:"vs_live"`
-			Values   map[string]any `json:"values"`
-		} `json:"config"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&ins); err != nil {
-		t.Fatal(err)
+	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
+	if ins.Database.Present || ins.Database.Bytes != 0 || ins.Database.Requests != 0 {
+		t.Fatalf("config-only inspect reported database members: %+v", ins.Database)
 	}
 	if !ins.OK || !ins.Config.Present || ins.Created == "" || ins.Config.Bytes == 0 {
 		t.Fatalf("inspect %+v", ins)
@@ -420,20 +448,9 @@ func TestRestoreInspectDatabase(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("inspect status %d body %s", rr.Code, rr.Body.String())
 	}
-	var ins struct {
-		OK       bool   `json:"ok"`
-		Created  string `json:"created"`
-		Database struct {
-			Present  bool  `json:"present"`
-			Bytes    int   `json:"bytes"`
-			Requests int   `json:"requests"`
-			OldestMs int64 `json:"oldest_ms"`
-			NewestMs int64 `json:"newest_ms"`
-			Overlap  int64 `json:"overlap"`
-		} `json:"database"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&ins); err != nil {
-		t.Fatal(err)
+	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
+	if ins.Config.Present || ins.Config.Bytes != 0 || len(ins.Config.Values) != 0 {
+		t.Fatalf("database-only inspect reported config members: %+v", ins.Config)
 	}
 	if !ins.OK || !ins.Database.Present || ins.Database.Bytes == 0 {
 		t.Fatalf("inspect %+v", ins)
@@ -543,6 +560,80 @@ func TestBackupStatusJSON(t *testing.T) {
 	st := backupStatus()
 	if st["config"] != true || st["database"] != false {
 		t.Fatalf("%v", st)
+	}
+}
+
+// backupStatusWire is the strict decoder for the backup section GET
+// /admin/config serves (backupStatus plus the modified list the settings
+// handler appends). The W15 drop removed restart_for_database after
+// re-verifying it had no consumer; the round-seven mutation round proved a
+// re-added key passes the lenient reads unnoticed, so the served document
+// must decode against exactly the current key set.
+type backupStatusWire struct {
+	Config          bool     `json:"config"`
+	Database        bool     `json:"database"`
+	PendingDatabase bool     `json:"pending_database"`
+	Requests        int64    `json:"requests"`
+	Modified        []string `json:"modified"`
+}
+
+// TestBackupStatusDocWireKeysStrict drives the production wiring
+// (adminConfigHandler wires the real backupStatus) with a live store and a
+// modified config file, then strict-decodes the served backup section: the
+// re-added restart_for_database, or any renamed or new key, reddens.
+func TestBackupStatusDocWireKeysStrict(t *testing.T) {
+	liveReloadFixture(t)
+	changed := config.Default()
+	changed.CaptureBodyPreview = true
+	if err := config.WriteFile(liveConfigPath, changed); err != nil {
+		t.Fatal(err)
+	}
+	d := config.Default()
+	dbPath := filepath.Join(t.TempDir(), "live.db")
+	live, err := storage.Open(dbPath, storage.Options{
+		WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
+		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout,
+		QueryMaxBytes: int(d.StorageQueryMaxBytes), QueryMaxRows: d.StorageQueryMaxRows,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { live.Close() })
+	liveCfg.DBPath = dbPath
+	liveStore = live
+	live.Record(&metrics.Record{ID: "one", Provider: "neutral.example", StatusCode: 200, Start: time.Now()})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	adminConfigHandler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/config", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /admin/config = %d %s", rr.Code, rr.Body.String())
+	}
+	var doc struct {
+		Backup json.RawMessage `json:"backup"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Backup) == 0 {
+		t.Fatalf("GET /admin/config served no backup section: %s", rr.Body.String())
+	}
+	var status backupStatusWire
+	dec := json.NewDecoder(bytes.NewReader(doc.Backup))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&status); err != nil {
+		t.Fatalf("strict decode of the backup section: %v (%s)", err, doc.Backup)
+	}
+	if !status.Config || !status.Database || status.PendingDatabase {
+		t.Fatalf("backup status members = %+v, want live config and database, no pending snapshot", status)
+	}
+	if status.Requests != 1 {
+		t.Fatalf("requests = %d, want the one recorded request", status.Requests)
+	}
+	if len(status.Modified) != 1 || status.Modified[0] != "capture_body_preview" {
+		t.Fatalf("modified = %v, want [capture_body_preview]", status.Modified)
 	}
 }
 

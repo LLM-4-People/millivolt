@@ -178,6 +178,50 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	}
 }
 
+// TestPurgeResponseWireKeysStrict pins the /admin/purge response to exactly
+// {"ok": true}. The W15 drop removed the wire-only deleted and
+// buffer_removed counts (the store-level PurgeResult keeps them); the
+// count-focused tests never read the response body, so a re-added key must
+// redden on this strict decode instead of passing unnoticed.
+func TestPurgeResponseWireKeysStrict(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			recorder.Record(&metrics.Record{ID: "purge-strict", Provider: "neutral.example", StatusCode: 200, Start: time.Now()})
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, body := range []string{`{"provider":"neutral.example"}`, ""} {
+				w := httptest.NewRecorder()
+				mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(body)))
+				if w.Code != 200 {
+					t.Fatalf("purge %q = %d %s", body, w.Code, w.Body.String())
+				}
+				var purge struct {
+					OK bool `json:"ok"`
+				}
+				dec := json.NewDecoder(w.Body)
+				dec.DisallowUnknownFields()
+				if err := dec.Decode(&purge); err != nil {
+					t.Fatalf("strict decode of the purge response: %v (%s)", err, w.Body.String())
+				}
+				if !purge.OK {
+					t.Fatalf("purge response ok = false: %s", w.Body.String())
+				}
+			}
+			if b.Len() != 0 {
+				t.Fatalf("ring = %d, want both purges to clear it", b.Len())
+			}
+		})
+	}
+}
+
 type failingLogExportWriter struct {
 	*httptest.ResponseRecorder
 	writes int

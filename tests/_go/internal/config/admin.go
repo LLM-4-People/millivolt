@@ -323,6 +323,33 @@ func TestSettingsDocWireKeysStrict(t *testing.T) {
 	if len(doc.Backup) == 0 || len(doc.LastReload) == 0 {
 		t.Fatalf("GET doc omitted wired sections: %s", get.Body.String())
 	}
+	// Producer-side presence: every section the dashboard consumes must be
+	// in the GET doc, not merely decodable when present. The dashboard's
+	// degraded modes (canonicalUsageFields and canonicalModelFields fall
+	// back to their first-paint lists when the section is missing) must not
+	// be the only witness of a producer-side drop.
+	for _, section := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"values", doc.Values},
+		{"effective", doc.Effective},
+		{"fields", doc.Fields},
+		{"categories", doc.Categories},
+		{"defaults", doc.Defaults},
+		{"usage_fields", doc.UsageFields},
+		{"model_fields", doc.ModelFields},
+	} {
+		if len(section.raw) == 0 || string(section.raw) == "null" {
+			t.Errorf("GET doc omitted the %s section the dashboard consumes", section.name)
+		}
+	}
+	if doc.Revision == "" {
+		t.Error("GET doc omitted revision")
+	}
+	if doc.RestartRequired == nil {
+		t.Error("GET doc omitted restart_required (the state builder always serves a list)")
+	}
 
 	// The save response carries the STATE subset only (restart_required,
 	// values, revision, effective) plus saved, last_reload and error - the
@@ -349,6 +376,9 @@ func TestSettingsDocWireKeysStrict(t *testing.T) {
 	if !saved.Saved || saved.Error != "" || saved.Revision == "" {
 		t.Fatalf("save response = %+v, want saved state with a fresh revision", saved)
 	}
+	if len(saved.Values) == 0 || len(saved.Effective) == 0 || saved.RestartRequired == nil {
+		t.Fatalf("save response omitted the state sections: %s", post.Body.String())
+	}
 	if len(saved.LastReload) == 0 {
 		t.Fatalf("save response omitted the wired last_reload section: %s", post.Body.String())
 	}
@@ -374,5 +404,8 @@ func TestSettingsDocWireKeysStrict(t *testing.T) {
 	}
 	if !failed.Saved || !strings.Contains(failed.Error, "reload rejected") {
 		t.Fatalf("failed-reload response = %+v, want saved plus the reload error", failed)
+	}
+	if len(failed.Values) == 0 || len(failed.Effective) == 0 || failed.RestartRequired == nil {
+		t.Fatalf("failed-reload response omitted the state sections: %s", post.Body.String())
 	}
 }

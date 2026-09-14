@@ -36,6 +36,52 @@ func TestHoldsOverlapCases(t *testing.T) {
 	must(Hold{New: true}, Hold{New: true, KnownAtNew: []string{"x"}}, true)
 }
 
+// TestHoldMatchesMatrix pins holdSnap.matches over a crafted hold/record
+// matrix. This table is the Go owner of the pair's truth:
+// tests/ui_check.js mirrors the same rows against the dashboard's
+// holdMatchesRecord (which shares the scope semantics; its callers own the
+// expiry half through holdLive), so drift on either side reddens at least
+// one suite and forces a deliberate re-sync of the pair.
+func TestHoldMatchesMatrix(t *testing.T) {
+	cases := []struct {
+		name             string
+		hold             Hold
+		client, provider string
+		want             bool
+	}{
+		{"all matches any request", Hold{All: true}, "client-a", "alpha.example", true},
+		{"all matches an empty identity", Hold{All: true}, "", "", true},
+		{"new skips a known client", Hold{New: true, KnownAtNew: []string{"known"}}, "known", "alpha.example", false},
+		{"new matches an unseen client", Hold{New: true, KnownAtNew: []string{"known"}}, "fresh", "alpha.example", true},
+		{"named client matches itself", Hold{Clients: []string{"client-a"}}, "client-a", "alpha.example", true},
+		{"named client matches with any provider", Hold{Clients: []string{"client-a"}}, "client-a", "", true},
+		{"named client misses another client", Hold{Clients: []string{"client-a"}}, "client-b", "alpha.example", false},
+		{"named hit wins over new", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "client-a", "alpha.example", true},
+		{"named plus new skips a known non-member", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "seen", "alpha.example", false},
+		{"named plus new matches an unseen client", Hold{Clients: []string{"client-a"}, New: true, KnownAtNew: []string{"client-a", "seen"}}, "brand-new", "alpha.example", true},
+		{"provider-only matches its provider with any client", Hold{Providers: []string{"alpha.example"}}, "whoever", "alpha.example", true},
+		{"provider-only misses another provider", Hold{Providers: []string{"alpha.example"}}, "whoever", "beta.example", false},
+		{"provider-only never matches an empty provider argument", Hold{Providers: []string{"alpha.example"}}, "whoever", "", false},
+		{"client and provider AND-match", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-a", "alpha.example", true},
+		{"pair hold misses on provider", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-a", "beta.example", false},
+		{"pair hold misses on client", Hold{Clients: []string{"client-a"}, Providers: []string{"alpha.example"}}, "client-b", "alpha.example", false},
+		{"dimensionless hold is inactive", Hold{}, "client-a", "alpha.example", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := snapHold(tc.hold).matches(tc.client, tc.provider); got != tc.want {
+				t.Fatalf("matches(%q, %q) = %v, want %v", tc.client, tc.provider, got, tc.want)
+			}
+		})
+	}
+	// The Go matcher folds expiry into the verdict (holdSnap.active); the
+	// JS mirror splits that half into holdLive, which the ui_check pin
+	// covers separately. This row is therefore Go-only by design.
+	if snapHold(Hold{All: true, Until: time.Now().Add(-time.Minute)}).matches("client-a", "alpha.example") {
+		t.Fatal("an expired hold still matched")
+	}
+}
+
 func TestAddHoldRejectsOverlap(t *testing.T) {
 	s := New(Options{})
 	if err := s.AddHold(Hold{Clients: []string{"client-a"}}); err != nil {
