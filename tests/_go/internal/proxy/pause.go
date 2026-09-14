@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +16,6 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
-	"github.com/LLM-4-People/millivolt/internal/storage"
 
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
@@ -245,43 +243,10 @@ func TestPauseTimerUnpauses(t *testing.T) {
 }
 
 func TestPausePersistsAndRestores(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "pause.db")
-	d := config.Default()
-	store, err := storage.Open(path, storage.Options{
-		WriteChanCap:  d.StorageWriteChanCap,
-		BatchCap:      d.StorageBatchCap,
-		FlushInterval: d.StorageFlushInterval,
-		QueryTimeout:  d.StorageQueryTimeout,
+	p2 := persistRestoreProxy(t, "pause.db", func(p *Server, rr *httptest.ResponseRecorder) {
+		p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
+			strings.NewReader(`{"paused":true,"clients":["client-a"],"duration":"1h"}`)))
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	p := New(d, metrics.Noop{})
-	p.AttachPausePersist(store)
-	rr := httptest.NewRecorder()
-	p.HandlePause(rr, httptest.NewRequest(http.MethodPost, "/admin/pause",
-		strings.NewReader(`{"paused":true,"clients":["client-a"],"duration":"1h"}`)))
-	if rr.Code != 200 {
-		t.Fatalf("status = %d body %s", rr.Code, rr.Body.Bytes())
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store2, err := storage.Open(path, storage.Options{
-		WriteChanCap:  d.StorageWriteChanCap,
-		BatchCap:      d.StorageBatchCap,
-		FlushInterval: d.StorageFlushInterval,
-		QueryTimeout:  d.StorageQueryTimeout,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store2.Close()
-
-	p2 := New(d, metrics.Noop{})
-	p2.AttachPausePersist(store2)
 	if !p2.scheduler.Holds("client-a") {
 		t.Fatal("restored scheduler did not hold the client")
 	}

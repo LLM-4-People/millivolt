@@ -16,7 +16,6 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
-	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 type countingThrottlePersist struct {
@@ -432,13 +431,7 @@ func TestThrottlePOSTDenyByDefault(t *testing.T) {
 func TestThrottlePersistsAndRestores(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "th.db")
 	d := config.Default()
-	store, err := storage.Open(path, storage.Options{
-		WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
-		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := openProxyTestStore(t, path)
 	p := New(d, metrics.Noop{})
 	p.AttachPausePersist(store)
 	rr := postThrottle(t, p, `{"provider":"alpha.example","concurrency":2,"requests":20,"request_window":"1m"}`)
@@ -449,13 +442,7 @@ func TestThrottlePersistsAndRestores(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store2, err := storage.Open(path, storage.Options{
-		WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
-		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	store2 := openProxyTestStore(t, path)
 	defer store2.Close()
 	p2 := New(d, metrics.Noop{})
 	p2.AttachPausePersist(store2)

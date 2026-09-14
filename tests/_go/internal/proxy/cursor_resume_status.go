@@ -28,14 +28,12 @@ const (
 	mcpArgsToolCallID    = 3 // McpArgs.tool_call_id
 )
 
-func TestCursorResumeRecordGetsStatus(t *testing.T) {
-	// Fabricate a parked run: the pump processes one mcp_args exec frame
-	// (surfacing it as a pending tool call) and then EOFs.
-	serverIn, testIn := io.Pipe()
-	run := format.NewCursorRun(io.Discard, serverIn, nil, func() {
-		testIn.Close()
-	}, 5*time.Second)
-	run.Start()
+// parkMcpArgsRun feeds the shared one-call park into the run's input side:
+// a single mcp_args exec frame (tool "read", call id "call-abc"), then waits
+// for the pump to surface the pending tool call. The resume/steer tests
+// share the exact park choreography.
+func parkMcpArgsRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) {
+	t.Helper()
 	mcpArgs := append(cstr(mcpArgsName, "read"), cstr(mcpArgsToolCallID, "call-abc")...)
 	exec := cmsg(asmExecServerMessage, append(cvint(execMessageID, 1), cmsg(execServerMcpArgs, mcpArgs)...))
 	if _, err := testIn.Write(cframe(exec)); err != nil {
@@ -48,6 +46,36 @@ func TestCursorResumeRecordGetsStatus(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// finishResumedRun waits for the resume request to consume the pending tool
+// call, then ends the upstream stream (cend + Close) so the parked turn
+// finishes. The resume/steer tests share the exact consume-and-finish
+// choreography.
+func finishResumedRun(t *testing.T, run *format.CursorRun, testIn *io.PipeWriter) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(run.PendingToolCallIDs()) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("resume did not consume the pending tool call")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := testIn.Write(cend("{}")); err != nil {
+		t.Fatal(err)
+	}
+	testIn.Close()
+}
+
+func TestCursorResumeRecordGetsStatus(t *testing.T) {
+	// Fabricate a parked run: the pump processes one mcp_args exec frame
+	// (surfacing it as a pending tool call) and then EOFs.
+	serverIn, testIn := io.Pipe()
+	run := format.NewCursorRun(io.Discard, serverIn, nil, func() {
+		testIn.Close()
+	}, 5*time.Second)
+	run.Start()
+	parkMcpArgsRun(t, run, testIn)
 
 	buf := metrics.NewBuffer(100)
 	s := New(config.Default(), buf)
@@ -77,17 +105,7 @@ func TestCursorResumeRecordGetsStatus(t *testing.T) {
 		resp, err := http.DefaultClient.Do(req)
 		resCh <- res{resp, err}
 	}()
-	deadline = time.Now().Add(2 * time.Second)
-	for len(run.PendingToolCallIDs()) > 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("resume did not consume the pending tool call")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if _, err := testIn.Write(cend("{}")); err != nil {
-		t.Fatal(err)
-	}
-	testIn.Close()
+	finishResumedRun(t, run, testIn)
 
 	out := <-resCh
 	if out.err != nil {

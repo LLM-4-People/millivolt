@@ -5,11 +5,11 @@ import (
 	"testing"
 )
 
-// The frame primitives are the single owner of the proxy's client-facing SSE
-// data frames (envelope, frame wrapper, terminal marker). These tests pin
-// the exact bytes so a change to the envelope, the frame wrapper, or the
-// terminal marker can never drift silently: the values below are the bytes
-// clients see today.
+// The frame primitives are the single owner of the proxy's client-facing
+// OpenAI-compatible SSE data frames (envelope, frame wrapper, terminal
+// marker). These tests pin the exact bytes so a change to the envelope, the
+// frame wrapper, or the terminal marker can never drift silently: the
+// values below are the bytes clients see today.
 
 func TestDoneFrameBytes(t *testing.T) {
 	if DoneFrame != "data: [DONE]\n\n" {

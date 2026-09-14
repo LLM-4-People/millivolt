@@ -1405,3 +1405,27 @@ func TestWriteRunJSONErrorWriteFailureMarksCursorDisconnect(t *testing.T) {
 		t.Errorf("ErrorType = %q, want empty_turn (the void is still recorded)", rec2.ErrorType)
 	}
 }
+
+// TestWriteRunJSONVoidBodyBytes pins the void's non-streaming wire contract
+// byte-exact: a void (an empty resume-action continuation that finished
+// with zero output tokens) must surface a real 502 whose body is the
+// canonical empty_turn error JSON - the same message text the record and
+// the in-band SSE path carry - followed by emitHTTPError's newline. The
+// disconnect twin above drives this arm through a dead socket, so nothing
+// pinned the body bytes a live non-streaming client actually receives.
+func TestWriteRunJSONVoidBodyBytes(t *testing.T) {
+	s := &Server{cursorRuns: newCursorRunStore(time.Hour)}
+	pr, pw := io.Pipe()
+	run := providerformat.NewCursorRun(pw, pr, nil, func() {}, 5*time.Second)
+	rec := &metrics.Record{StatusCode: 200}
+	res := providerformat.TurnResult{Outcome: providerformat.TurnFinished}
+	w := httptest.NewRecorder()
+	s.writeRunJSON(w, run, res, "", nil, rec, "id-1", cursorTurnRender{est: 10}, true)
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (the void must surface a real failure)", w.Code)
+	}
+	want := `{"error":{"message":"cursor returned an empty turn for a resume-action continuation (0 output tokens, finish stop) - there was nothing to resume upstream","type":"empty_turn"}}` + "\n"
+	if got := w.Body.String(); got != want {
+		t.Fatalf("void 502 body = %q, want the canonical empty_turn error JSON", got)
+	}
+}

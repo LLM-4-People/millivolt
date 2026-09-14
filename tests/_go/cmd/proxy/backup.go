@@ -111,6 +111,51 @@ func openLiveStoreFixture(t *testing.T) (store *storage.Store, opts storage.Opti
 	return store, opts, path, dir
 }
 
+// TestRestoreFixtureRestoresGlobals pins openLiveStoreFixture's save-restore
+// contract: it saves liveCfg/liveStore before opening the store, and its
+// cleanup must return the globals to those pre-fixture values when the test
+// ends. The verification cleanup registers BEFORE the fixture call, so LIFO
+// runs it after the fixture's own restore - dropping the restore reddens
+// here, and so would a cleanup registered in the wrong order.
+func TestRestoreFixtureRestoresGlobals(t *testing.T) {
+	preCfg, preStore := liveCfg, liveStore
+	t.Cleanup(func() {
+		if liveCfg != preCfg {
+			t.Error("openLiveStoreFixture left liveCfg assigned: the save-restore cleanup is missing or out of order")
+		}
+		if liveStore != preStore {
+			t.Error("openLiveStoreFixture left liveStore assigned: the save-restore cleanup is missing or out of order")
+		}
+	})
+	store, _, dbPath, _ := openLiveStoreFixture(t)
+	// Every real site assigns the globals mid-test (the restore handlers read
+	// them); the row does the same so the restore has something to undo.
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+}
+
+// TestRestoreFixtureOptsDeriveFromDefault pins the helper's Options
+// derivation: the four Default-derived fields must track config.Default()
+// (the channel and batch caps are the helper's own literals), so switching
+// the helper to literal opts reddens here.
+func TestRestoreFixtureOptsDeriveFromDefault(t *testing.T) {
+	_, opts, _, _ := openLiveStoreFixture(t)
+	d := config.Default()
+	if opts.FlushInterval != d.StorageFlushInterval {
+		t.Errorf("FlushInterval = %v, want config.Default().StorageFlushInterval (%v)", opts.FlushInterval, d.StorageFlushInterval)
+	}
+	if opts.QueryTimeout != d.StorageQueryTimeout {
+		t.Errorf("QueryTimeout = %v, want config.Default().StorageQueryTimeout (%v)", opts.QueryTimeout, d.StorageQueryTimeout)
+	}
+	if opts.QueryMaxBytes != int(d.StorageQueryMaxBytes) {
+		t.Errorf("QueryMaxBytes = %d, want config.Default().StorageQueryMaxBytes (%d)", opts.QueryMaxBytes, d.StorageQueryMaxBytes)
+	}
+	if opts.QueryMaxRows != d.StorageQueryMaxRows {
+		t.Errorf("QueryMaxRows = %d, want config.Default().StorageQueryMaxRows (%d)", opts.QueryMaxRows, d.StorageQueryMaxRows)
+	}
+}
+
 func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 	src, _, dbPath, dir := openLiveStoreFixture(t)
 	data, err := src.Snapshot(t.Context())

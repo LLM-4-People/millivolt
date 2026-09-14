@@ -36,18 +36,7 @@ func TestCursorResumeSteersTrailingUserMessage(t *testing.T) {
 	run.Start()
 
 	// Park: one mcp_args exec frame surfaces a pending tool call, then idle.
-	mcpArgs := append(cstr(mcpArgsName, "read"), cstr(mcpArgsToolCallID, "call-abc")...)
-	exec := cmsg(asmExecServerMessage, append(cvint(execMessageID, 1), cmsg(execServerMcpArgs, mcpArgs)...))
-	if _, err := testIn.Write(cframe(exec)); err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(2 * time.Second)
-	for len(run.PendingToolCallIDs()) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("pump did not register the pending tool call")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	parkMcpArgsRun(t, run, testIn)
 	sw.reset() // ignore the frames written during parking; we assert on the resume writes
 
 	buf := metrics.NewBuffer(100)
@@ -78,18 +67,7 @@ func TestCursorResumeSteersTrailingUserMessage(t *testing.T) {
 	go func() { resp, err := http.DefaultClient.Do(req); resCh <- res{resp, err} }()
 
 	// Wait for the resume to consume the pending call (and write the steer).
-	deadline = time.Now().Add(2 * time.Second)
-	for len(run.PendingToolCallIDs()) > 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("resume did not consume the pending tool call")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	// End the upstream stream so the turn finishes.
-	if _, err := testIn.Write(cend("{}")); err != nil {
-		t.Fatal(err)
-	}
-	testIn.Close()
+	finishResumedRun(t, run, testIn)
 
 	out := <-resCh
 	if out.err != nil {

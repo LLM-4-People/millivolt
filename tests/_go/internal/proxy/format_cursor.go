@@ -311,15 +311,20 @@ func TestCursorBidiTranslation(t *testing.T) {
 	}
 }
 
-// TestCursorBidiVoidFlaggedToClient reproduces the "void": a cold-start
-// continuation (empty resume_action - trailing tool results, no parked run)
-// where Cursor finishes the turn with ZERO output tokens. The proxy must flag
-// the record (error_type=empty_turn → dashboard error row/error dimension) and
-// surface a real failure in-band on the stream (OpenAI error chunk with
-// code=empty_turn + [DONE]) instead of a silently empty success.
-func TestCursorBidiVoidFlaggedToClient(t *testing.T) {
+// cursorVoidUpstream serves the connect-proto upstream that answers every
+// Run exchange with the void: it reads the run_request envelope (asserting
+// the claude-sonnet-5 model id), answers the KV pull and the request-context
+// handshake, then ends the turn immediately with no tokens and no deltas.
+// calls, when non-nil, counts every exchange (the re-ask sites assert on
+// it). The h2c-wrapped server is HTTP/2-enabled, started, and closed via
+// t.Cleanup.
+func cursorVoidUpstream(t *testing.T, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
 	h2s := &http2.Server{}
 	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls != nil {
+			calls.Add(1)
+		}
 		body := r.Body
 		w.Header().Set("Content-Type", "application/connect+proto")
 		fl := w.(http.Flusher)
@@ -348,7 +353,18 @@ func TestCursorBidiVoidFlaggedToClient(t *testing.T) {
 	}), h2s))
 	upstream.EnableHTTP2 = true
 	upstream.Start()
-	defer upstream.Close()
+	t.Cleanup(upstream.Close)
+	return upstream
+}
+
+// TestCursorBidiVoidFlaggedToClient reproduces the "void": a cold-start
+// continuation (empty resume_action - trailing tool results, no parked run)
+// where Cursor finishes the turn with ZERO output tokens. The proxy must flag
+// the record (error_type=empty_turn → dashboard error row/error dimension) and
+// surface a real failure in-band on the stream (OpenAI error chunk with
+// code=empty_turn + [DONE]) instead of a silently empty success.
+func TestCursorBidiVoidFlaggedToClient(t *testing.T) {
+	upstream := cursorVoidUpstream(t, nil)
 
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cursorTestCfg(upstream.URL), buf))

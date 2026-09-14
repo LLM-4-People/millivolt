@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -130,33 +129,8 @@ func TestCursorVoidReaskFreshUser(t *testing.T) {
 // turn, the void is surfaced exactly like today - in-band empty_turn error.
 // (The upstream answers empty on every call.)
 func TestCursorVoidReaskStillVoidSurfaces(t *testing.T) {
-	h2s := &http2.Server{}
 	var calls atomic.Int32
-	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		body := r.Body
-		w.Header().Set("Content-Type", "application/connect+proto")
-		fl := w.(http.Flusher)
-		w.WriteHeader(200)
-		_, payload := readFrame(t, body)
-		if !bytes.Contains(payload, []byte("claude-sonnet-5")) {
-			t.Errorf("model id not in run_request: %x", payload)
-		}
-		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
-		w.Write(cframe(kvGet))
-		fl.Flush()
-		readFrame(t, body)
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
-		w.Write(cframe(execReq))
-		fl.Flush()
-		readFrame(t, body)
-		w.Write(cframe(cmsg(1, cmsg(14, nil))))
-		w.Write(cend("{}"))
-		fl.Flush()
-	}), h2s))
-	upstream.EnableHTTP2 = true
-	upstream.Start()
-	defer upstream.Close()
+	upstream := cursorVoidUpstream(t, &calls)
 
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(config.Default(), buf))

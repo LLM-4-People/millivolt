@@ -276,6 +276,31 @@ func TestStoreRoundTrip(t *testing.T) {
 	}
 }
 
+// recordReopenLoadOne drives the restart epilogue the record-survival tests
+// share: finalize rec, record it, close the store, reopen the database at
+// path with testOpts (simulating a restart), and return the single record
+// LoadRecent must surface. The caller owns the record's fields and every
+// survival assertion.
+func recordReopenLoadOne(t *testing.T, s *Store, path string, rec *metrics.Record) *metrics.Record {
+	t.Helper()
+	metrics.FinalizeRecord(rec)
+	s.Record(rec)
+	s.Close()
+	s2, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	got, err := s2.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("LoadRecent returned %d records, want 1", len(got))
+	}
+	return got[0]
+}
+
 // TestAllFieldsSurviveRestart populates every persistable Record field,
 // closes the store, reopens it (simulating a restart), and asserts the fields
 // round-trip through LoadRecent - including JSON-encoded tool names and the
@@ -369,23 +394,7 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 		},
 		ResponseHeaders: map[string][]string{"x-request-id": {"req_abc123"}},
 	}
-	metrics.FinalizeRecord(rec)
-	s.Record(rec)
-	s.Close()
-
-	s2, err := Open(path, testOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-	got, err := s2.LoadRecent(t.Context(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("LoadRecent returned %d records, want 1", len(got))
-	}
-	r := got[0]
+	r := recordReopenLoadOne(t, s, path, rec)
 
 	// Representative spot-checks across every field group.
 	if r.AnswerTokens != 30 {
@@ -487,23 +496,7 @@ func TestNilPointersStayNil(t *testing.T) {
 		ID: "nil1", Provider: "p", Model: "m", KeyHash: "k", UserAgent: "ua",
 		StatusCode: 200, Start: time.Now(),
 	}
-	metrics.FinalizeRecord(rec)
-	s.Record(rec)
-	s.Close()
-
-	s2, err := Open(path, testOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-	got, err := s2.LoadRecent(t.Context(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("LoadRecent returned %d records, want 1", len(got))
-	}
-	r := got[0]
+	r := recordReopenLoadOne(t, s, path, rec)
 	if r.ReqTemperature != nil || r.ReqMaxTokens != nil || r.ReqSeed != nil ||
 		r.ReqParallelTools != nil || r.ReqTopP != nil || r.ReqN != nil ||
 		r.ReqPresencePen != nil || r.ReqFrequencyPen != nil || r.ReqTopLogprobs != nil {
@@ -1026,24 +1019,7 @@ func TestClientIdentitySurvivesRestart(t *testing.T) {
 		StatusCode: 200,
 		Start:      time.Now(),
 	}
-	metrics.FinalizeRecord(rec)
-	s.Record(rec)
-	s.Close()
-
-	// Reopen (simulates a restart) and backfill via the real path.
-	s2, err := Open(path, testOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s2.Close()
-	got, err := s2.LoadRecent(t.Context(), 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Fatalf("LoadRecent returned %d records, want 1", len(got))
-	}
-	r := got[0]
+	r := recordReopenLoadOne(t, s, path, rec)
 	if r.Client != "client-a/1.0.0" {
 		t.Errorf("Client = %q, want client-a/1.0.0 (client identity lost on restart)", r.Client)
 	}
