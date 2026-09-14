@@ -17,7 +17,7 @@ defines their supported combinations.
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, native-run ownership, operator state/capture. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets. |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
-| [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection. |
+| [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
 | [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
