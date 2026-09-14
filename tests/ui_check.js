@@ -681,6 +681,27 @@ async function main() {
   check('logs open sets aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'true');
   check('opening logs closes clear', clearMenu.hidden);
   check('logs menu populated from records', d.querySelector('#lf-provider option[value="p"]') !== null);
+  // ---- L4-C8 pin: the Logs (lf-) and Clear (cf-) filter menus are one row
+  // set modulo the id prefix. The static HTML row lists must stay identical
+  // (same label texts, same per-row select ids after the prefix), and the
+  // runtime fill (populateFilterMenu, already prefix-parameterized) must
+  // write the same option values into both menus from one record set.
+  {
+    const skelDoc = new JSDOM(fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8')).window.document;
+    const filterRows = menu => [...menu.querySelectorAll('.clear-opts label')].map(l => [
+      l.textContent.replace(/\s+/g, ' ').trim(),
+      l.querySelector('select').id.replace(/^[cl]f-/, ''),
+    ]);
+    const lfRows = filterRows(skelDoc.getElementById('logs-menu'));
+    const cfRows = filterRows(skelDoc.getElementById('clear-menu'));
+    check('the logs and clear menus render one prefix-identical filter row set',
+      lfRows.length === 7 && JSON.stringify(lfRows) === JSON.stringify(cfRows));
+    w.populateFilterMenu('cf');
+    const optValues = pre => ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']
+      .map(name => [...d.getElementById(pre + '-' + name).options].map(o => o.value));
+    check('both filter menus fill the same option values per row',
+      JSON.stringify(optValues('lf')) === JSON.stringify(optValues('cf')));
+  }
   check('export URL encodes the filter', w.logsExportURL({ provider: 'openai', status_code: 429, has_error: false, debug: false, before_ms: 0, model: '', client: '' }) === '/metrics/export?provider=openai&status_code=429');
   check('empty filter exports everything', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: false, before_ms: 0 }) === '/metrics/export');
   check('debug-only export encodes the flag', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: true, before_ms: 0 }) === '/metrics/export?debug=1');
@@ -2597,6 +2618,17 @@ async function main() {
   const menu = prow.querySelector('.prov-menu');
   check('add button sits in the title row, lowercase', !!topBtn && topBtn.textContent === '+ add provider' && topBtn.closest('.st-name') === prow.querySelector('.st-name'));
   check('remove is a recycle-bin icon', !!card.querySelector('[data-prov-rm] svg'));
+  // trashIconSVG clones the header Clear button's glyph at render time: the
+  // geometry (every path d) must stay authored once, in index.html, and the
+  // header-only .hdr-ico class must stay stripped (the .prov-x svg owns this
+  // surface's stroke and size).
+  {
+    const hdrPaths = [...d.getElementById('btn-clear').querySelectorAll('svg path')].map(p => p.getAttribute('d'));
+    const clone = card.querySelector('[data-prov-rm] svg');
+    check('the card trash icon is the header glyph, minus the header class',
+      JSON.stringify([...clone.querySelectorAll('path')].map(p => p.getAttribute('d'))) === JSON.stringify(hdrPaths) &&
+      clone.getAttribute('class') === null);
+  }
   topBtn.click();
   check('add menu opens; already-added providers are not offered', !menu.hidden && !!menu.querySelector('[data-prov-pick="p"]') && !menu.querySelector('[data-prov-pick="epsilon.example"]'));
   // setProvMenuOpen is the one open-state writer: the toggle's aria-expanded
@@ -3066,6 +3098,117 @@ async function main() {
     w.resetDebugMenuForm();
     w.applyThrottleState({ok: true, active: false, throttles: [], known_providers: []});
     w.syncLimitsMenuState();
+  }
+
+  // ---- GAP-6 pin: the pause/debug status-bits wording on menu AND footer.
+  // jsdom only ever asserted menu counts for error/busy strings; the
+  // composition itself ('queued N', the until countdown) was unpinned on
+  // both surfaces. One fixture drives each builder through the real apply
+  // path: the menu count line and the footer state line must compose the
+  // identical bits string, with the footer adding only its documented
+  // scope insertion (holdScopeLabel after 'paused · ').
+  {
+    const until = new Date(Date.now() + 90 * 60000).toISOString();
+    d.getElementById('pause-menu').hidden = false;
+    w.applyPauseState({ok: true, paused: true, queued: 3, until,
+      holds: [{id: 'bits-hold', all: true, until}],
+      known_clients: [], known_providers: []});
+    const pauseMenuBits = d.getElementById('pause-count').textContent;
+    const pauseFooterBits = d.getElementById('f-state').textContent;
+    check('the pause menu count composes the paused/queued/until wording',
+      pauseMenuBits === 'paused · queued 3 · 1h 30m left');
+    check('the pause footer carries the identical bits around its scope insertion',
+      pauseFooterBits === 'paused · all requests · queued 3 · 1h 30m left' &&
+      pauseFooterBits === pauseMenuBits.replace('paused · ', 'paused · all requests · '));
+    d.getElementById('pause-menu').hidden = true;
+    w.applyPauseState({ok: true, paused: false, holds: [], known_clients: [], known_providers: []});
+    w.resetPauseMenuForm();
+
+    d.getElementById('debug-menu').hidden = false;
+    w.applyDebugState(observerFixture({ok: true, enabled: true, until,
+      sessions: [{id: 'bits-session', clients: ['client-a'], duration: '15m'}],
+      known_clients: [], known_providers: [], known_models: [],
+      ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture()}));
+    const debugBits = 'debug · client-a · 1h 30m left';
+    check('menu and footer compose the identical debug bits string',
+      d.getElementById('debug-count').textContent === debugBits &&
+      d.getElementById('f-state').textContent === debugBits);
+    w.applyDebugState(observerFixture({ok: true, enabled: true, until,
+      sessions: [{id: 'bits-session', clients: ['client-a'], duration: '15m'},
+        {id: 'bits-session-2', providers: ['prov-a'], duration: '1h'}],
+      known_clients: [], known_providers: [], known_models: [],
+      ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture()}));
+    const debugMultiBits = 'debug · 2 sessions · 1h 30m left';
+    check('the multi-session debug count stays one wording on both surfaces',
+      d.getElementById('debug-count').textContent === debugMultiBits &&
+      d.getElementById('f-state').textContent === debugMultiBits);
+    d.getElementById('debug-menu').hidden = true;
+    w.applyDebugState(observerFixture({ok: true, enabled: false, sessions: [],
+      known_clients: [], known_providers: [], known_models: [],
+      ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture()}));
+    w.resetDebugMenuForm();
+  }
+
+  // ---- GAP-5 pin: the settings search filter (rowMatches/showSettingsCat).
+  // No jsdom check ever set settingsQ or typed into settings-q, so the row
+  // filter, the "N matches" header and the rail badge counts were unpinned.
+  // A crafted two-category doc drives the real oninput entry
+  // (filterSettings): a help-text word, a multi-hit help word, and a key
+  // word; the rail badges must equal the visible rows per category.
+  {
+    w.__filterDoc = {
+      revision: 'fixture-revision',
+      fields: [
+        { key: 'conc_cap', category: 'rate', label: 'Concurrency cap', help: 'upstream in-flight request ceiling', kind: 'int', hot_reload: true },
+        { key: 'queue_cap', category: 'rate', label: 'Queue cap', help: 'requests held while paused', kind: 'int', hot_reload: true },
+        { key: 'rpm_limit', category: 'window', label: 'Request window', help: 'per-minute request budget', kind: 'int', hot_reload: true },
+        { key: 'tpm_limit', category: 'window', label: 'Token window', help: 'per-minute token budget', kind: 'int', hot_reload: true },
+      ],
+      categories: [
+        { id: 'rate', label: 'Rate', help: 'rate controls' },
+        { id: 'window', label: 'Windows', help: 'window controls' },
+      ],
+      values: { conc_cap: 4, queue_cap: 0, rpm_limit: 60, tpm_limit: 1000 },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.eval('settingsDoc = window.__filterDoc; fillSettingsForm(settingsDoc)');
+    const visibleKeys = () => [...d.querySelectorAll('#settings-fields .st-row')]
+      .filter(r => !r.hidden).map(r => r.dataset.key);
+    const badges = () => Object.fromEntries([...d.querySelectorAll('#settings-rail .st-rail-item')]
+      .map(b => [b.dataset.stCat, Number(b.querySelector('.rail-n').textContent)]));
+    const q = d.getElementById('settings-q');
+    q.value = 'ceiling';
+    w.filterSettings();
+    check('a help-text word narrows the settings rows to its haystack hit',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['conc_cap']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '1 match');
+    check('the rail badges count the visible rows per category',
+      JSON.stringify(badges()) === JSON.stringify({rate: 1, window: 0}) &&
+      d.querySelector('[data-st-cat="rate"]').classList.contains('has-hit') &&
+      d.querySelector('[data-st-cat="window"]').classList.contains('is-miss'));
+    q.value = 'per-minute';
+    w.filterSettings();
+    check('a multi-hit help word shows every matching row in its category',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['rpm_limit', 'tpm_limit']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '2 matches');
+    check('the multi-hit badge counts stay per-category',
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2}));
+    q.value = 'rpm_limit';
+    w.filterSettings();
+    check('a key word matches by the row key alone',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['rpm_limit']) &&
+      d.querySelector('#settings-pane-hd p').textContent === 'rpm_limit');
+    check('the key-word hit re-badges both categories',
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1}) &&
+      d.querySelector('[data-st-cat="window"]').classList.contains('has-hit'));
+    q.value = '';
+    w.filterSettings();
+    check('clearing the query restores the category view',
+      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2}) &&
+      ![...d.querySelectorAll('#settings-rail .st-rail-item')].some(b => b.classList.contains('has-hit')));
+    w.__filterDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__filterDoc; fillSettingsForm(settingsDoc)');
+    delete w.__filterDoc;
   }
 
   // ---- test 12d: a stale tick's pending snapshot must never regress an

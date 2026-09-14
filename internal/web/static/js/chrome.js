@@ -352,13 +352,30 @@ function operatorError(kind, message) {
   const el = $(operatorState[kind].count);
   if (el) { el.textContent = message; el.dataset.err = '1'; }
 }
+// operatorCountClear is operatorError's reset counterpart: one owner for the
+// count-line clear (text + error flag), keyed by kind. The limits sites are
+// behavior-neutral on the text half: updateLimitCount repaints the line
+// immediately after them, and mutateOperator's gate.sync() repaints it for
+// every kind.
+function operatorCountClear(kind) {
+  const el = $(operatorState[kind].count);
+  if (el) { el.textContent = ''; delete el.dataset.err; }
+}
+// resyncOperatorSurfaces is the shared apply-state epilogue: re-sync the
+// kind's header menu when it is open, then schedule a live repaint when a
+// snapshot exists. The per-kind pre-work (footer refresh, pressed bits)
+// stays at its apply site.
+function resyncOperatorSurfaces(kind) {
+  const menu = $(operatorState[kind].menu);
+  if (menu && !menu.hidden) operatorState[kind].sync();
+  if (lastData) scheduleRenderLive();
+}
 async function mutateOperator(kind, body, after) {
   const gate = operatorState[kind];
   if (gate.busy) return;
   gate.busy = true;
   ++gate.revision;
-  const count = $(gate.count);
-  if (count) delete count.dataset.err;
+  operatorCountClear(kind);
   gate.sync();
   let confirmed;
   const fail = 'could not change ' + kind;
@@ -401,9 +418,7 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
   };
   refreshFooterState();
-  const menu = $('pause-menu');
-  if (menu && !menu.hidden) syncPauseMenuState();
-  if (lastData) scheduleRenderLive();
+  resyncOperatorSurfaces('pause');
 }
 
 function applyThrottleState(st, revision = operatorState.throttle.revision) {
@@ -415,9 +430,7 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   };
   const btn = $('btn-limits');
   if (btn) btn.setAttribute('aria-pressed', throttleState.active ? 'true' : 'false');
-  const menu = $('limits-menu');
-  if (menu && !menu.hidden) syncLimitsMenuState();
-  if (lastData) scheduleRenderLive();
+  resyncOperatorSurfaces('throttle');
 }
 
 const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-clear': 'clear-menu', 'btn-restart': 'restart-menu' };
@@ -998,6 +1011,16 @@ function backupSetBusy(on) {
   }
 }
 
+// backupPaneReset is the one restore-baseline epilogue, shared by the
+// validated-inspect path and cancel: both include flags back on, end the
+// busy state, and repaint the pane.
+function backupPaneReset() {
+  backupIncludeConfig = true;
+  backupIncludeDatabase = true;
+  backupSetBusy(false);
+  paintBackupPane();
+}
+
 function wireBackupPane() {
   const backupFile = $('backup-file');
   if (backupFile) backupFile.addEventListener('change', runBackupRestore);
@@ -1051,10 +1074,7 @@ function runBackupRestore(ev) {
   }, 'restore failed').then(j => {
     if (req !== backupReq) return;
     backupInspect = { file, data: j };
-    backupIncludeConfig = true;
-    backupIncludeDatabase = true;
-    backupSetBusy(false);
-    paintBackupPane();
+    backupPaneReset();
     settingsStatus('review then apply', 'ok');
   }).catch(err => {
     if (req !== backupReq) return;
@@ -1105,10 +1125,7 @@ function runBackupCancel() {
   if (backupBusy && backupInspect) return;
   backupReq++;
   backupInspect = null;
-  backupIncludeConfig = true;
-  backupIncludeDatabase = true;
-  backupSetBusy(false);
-  paintBackupPane();
+  backupPaneReset();
   settingsStatus('');
 }
 
@@ -1979,22 +1996,19 @@ function providersEditorClick(e) {
     return; // clicks inside the open menu close nothing but themselves
   }
   if (t.closest('[data-prov-chip-rm]')) { t.closest('.prov-chip').remove(); markSettingsDirty(); return; }
-  if (t.closest('[data-prov-urow-rm]')) {
+  // Usage and model mapping rows share one remove branch: both remove their
+  // .prov-urow and re-sync the kind's picker (the render/add twins already
+  // share mappingRowHTML).
+  const rowRm = t.closest('[data-prov-urow-rm], [data-prov-mrow-rm]');
+  if (rowRm) {
     const sec = t.closest('.prov-sec');
     t.closest('.prov-urow').remove();
-    syncMappingPicker(sec, 'usage');
+    syncMappingPicker(sec, rowRm.matches('[data-prov-urow-rm]') ? 'usage' : 'model');
     markSettingsDirty();
     return;
   }
   if (t.closest('[data-prov-add-cost]')) { addCostKey(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-add-usage]')) { addUsageRow(t.closest('.prov-sec')); return; }
-  if (t.closest('[data-prov-mrow-rm]')) {
-    const sec = t.closest('.prov-sec');
-    t.closest('.prov-urow').remove();
-    syncMappingPicker(sec, 'model');
-    markSettingsDirty();
-    return;
-  }
   if (t.closest('[data-prov-add-model]')) { addModelRow(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-hrow-rm]')) { t.closest('.prov-urow').remove(); markSettingsDirty(); return; }
   if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); return; }
@@ -2089,6 +2103,17 @@ function collectSettingsValues(validate = false) {
     }
     map[key] = value;
   };
+  // Usage and model mapping rows collect through one loop: the card's map
+  // section selector, the field/path selectors the delegated handlers match,
+  // and the target map differ per kind. The headers collector stays separate
+  // (its two inputs trim differently and key on the name field).
+  const collectMappingRows = (card, mapSel, fieldSel, pathSel, into) => {
+    card.querySelectorAll(mapSel).forEach(row => {
+      const f = (row.querySelector(fieldSel) || {}).value;
+      const p = String((row.querySelector(pathSel) || {}).value || '').trim();
+      put(into, f, p, row.querySelector(fieldSel));
+    });
+  };
   box.querySelectorAll('[data-key]').forEach(el => {
     if (el.disabled) return;
     if (el.classList.contains('st-row')) return;
@@ -2100,17 +2125,9 @@ function collectSettingsValues(validate = false) {
         const label = String((card.querySelector('.sp-label') || {}).value || '').trim();
         const cost = [...new Set([...card.querySelectorAll('.prov-chip')].map(c => String(c.dataset.cost || '').trim()).filter(Boolean))];
         const usage = Object.create(null);
-        card.querySelectorAll('.prov-umap .prov-urow').forEach(row => {
-          const f = (row.querySelector('.sp-ufield') || {}).value;
-          const p = String((row.querySelector('.sp-upath') || {}).value || '').trim();
-          put(usage, f, p, row.querySelector('.sp-ufield'));
-        });
+        collectMappingRows(card, '.prov-umap .prov-urow', '.sp-ufield', '.sp-upath', usage);
         const modelsKeys = Object.create(null);
-        card.querySelectorAll('.prov-mmap .prov-urow').forEach(row => {
-          const f = (row.querySelector('.sp-mfield') || {}).value;
-          const p = String((row.querySelector('.sp-mkey') || {}).value || '').trim();
-          put(modelsKeys, f, p, row.querySelector('.sp-mfield'));
-        });
+        collectMappingRows(card, '.prov-mmap .prov-urow', '.sp-mfield', '.sp-mkey', modelsKeys);
         const headers = Object.create(null);
         card.querySelectorAll('.prov-hmap .prov-hrow').forEach(row => {
           const n = String((row.querySelector('.sp-hname') || {}).value || '').trim();
@@ -2326,9 +2343,7 @@ function applyDebugState(st, revision = operatorState.debug.revision) {
     max_bytes: st.max_bytes == null || st.max_bytes === '' ? '' : String(st.max_bytes),
   };
   refreshFooterState();
-  const menu = $('debug-menu');
-  if (menu && !menu.hidden) syncDebugMenuState();
-  if (lastData) scheduleRenderLive();
+  resyncOperatorSurfaces('debug');
 }
 
 // toggleHdrMenu is the one header-menu toggle branch: stop the event,
@@ -2529,8 +2544,7 @@ function resetPauseMenuForm() {
   if ($('pf-dur')) $('pf-dur').value = '';
   const cap = $('pf-cap');
   if (cap) cap.value = '';
-  const count = $('pause-count');
-  if (count) { count.textContent = ''; delete count.dataset.err; }
+  operatorCountClear('pause');
   fillPauseChecks($('pf-clients'), knownNames(pauseState, KNOWN_CLIENTS_KEY, pauseState.clients), new Set());
   fillPauseChecks($('pf-providers'), knownNames(pauseState, KNOWN_PROVIDERS_KEY, pauseState.providers), new Set());
   onPauseScopeChange();
@@ -2595,8 +2609,7 @@ function editPauseHold(id) {
   fillSelectPairs($('pf-dur'), PAUSE_DURS, h.duration || '');
   const cap = $('pf-cap');
   if (cap) cap.value = typeof h.max_queued === 'number' ? String(h.max_queued) : '';
-  const count = $('pause-count');
-  if (count) { count.textContent = ''; delete count.dataset.err; }
+  operatorCountClear('pause');
   const knownC = knownNames(pauseState, KNOWN_CLIENTS_KEY, h.clients);
   const knownP = knownNames(pauseState, KNOWN_PROVIDERS_KEY, h.providers);
   fillPauseChecks($('pf-clients'), knownC, new Set(h.clients || []));
@@ -2872,8 +2885,7 @@ function resetDebugMenuForm() {
   debugEditID = '';
   fillSelectPairs($('df-dur'), DEBUG_DURS, '');
   if ($('df-dur')) $('df-dur').value = '';
-  const count = $('debug-count');
-  if (count) { count.textContent = ''; delete count.dataset.err; }
+  operatorCountClear('debug');
   fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY), new Set(), 'client');
   fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY), new Set(), 'provider');
   fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY), new Set(), 'model');
@@ -2913,8 +2925,7 @@ function editDebugSession(id) {
   if (!h) return;
   debugEditID = id;
   fillSelectPairs($('df-dur'), DEBUG_DURS, h.duration || '');
-  const count = $('debug-count');
-  if (count) { count.textContent = ''; delete count.dataset.err; }
+  operatorCountClear('debug');
   fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY, h.clients), new Set(h.clients || []), 'client');
   fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY, h.providers), new Set(h.providers || []), 'provider');
   fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY, h.models), new Set(h.models || []), 'model');
@@ -2979,8 +2990,7 @@ function onLimitProviderChange() {
   if (tok) tok.value = t && t.tokens ? String(t.tokens) : '';
   fillLimitWindows($('lim-reqw'), t && t.request_window);
   fillLimitWindows($('lim-tokw'), t && t.token_window);
-  const count = $('lim-count');
-  if (count) delete count.dataset.err;
+  operatorCountClear('throttle');
   updateLimitCount();
   updateLimitsApplyEnabled();
 }
@@ -3068,8 +3078,7 @@ function editLimitProvider(name) {
     }
     sel.value = name;
   }
-  const count = $('lim-count');
-  if (count) delete count.dataset.err;
+  operatorCountClear('throttle');
   onLimitProviderChange();
   renderLimitHolds();
 }

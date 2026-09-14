@@ -538,23 +538,19 @@ const REQ_COLS = (REQ_THEAD.match(/<th>/g) || []).length;
 $('tbl-requests').addEventListener('click', e => {
   // A pivot/entity link navigates via the hash router - never open the drawer.
   if (e.target.closest('a.ent-link')) return;
-  // The paused pill edits the matching hold (same form as clicking the hold row).
-  if (e.target.closest('.pill.paused[data-edit-pause]')) {
+  // A state pill edits its matching operator hold/session/limit (the same
+  // form as clicking the hold row in the header menu): one table keyed by
+  // the pill's data-edit vocabulary, one branch.
+  const pillEdits = [
+    ['.pill.paused[data-edit-pause]', editHoldForRecord],
+    ['.pill.debug[data-edit-debug]', editDebugForRecord],
+    ['.pill.throttled[data-edit-limit]', editLimitForRecord],
+  ];
+  for (const [sel, edit] of pillEdits) {
+    if (!e.target.closest(sel)) continue;
     e.stopPropagation();
     const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) editHoldForRecord(recordById(tr.dataset.id));
-    return;
-  }
-  if (e.target.closest('.pill.debug[data-edit-debug]')) {
-    e.stopPropagation();
-    const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) editDebugForRecord(recordById(tr.dataset.id));
-    return;
-  }
-  if (e.target.closest('.pill.throttled[data-edit-limit]')) {
-    e.stopPropagation();
-    const tr = e.target.closest('.exp-row[data-id]');
-    if (tr) editLimitForRecord(recordById(tr.dataset.id));
+    if (tr) edit(recordById(tr.dataset.id));
     return;
   }
   // The retry badge toggles the absorbed-attempt sub-rows (collapsed default).

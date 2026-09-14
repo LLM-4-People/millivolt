@@ -124,6 +124,40 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 	}
 }
 
+// TestModelRuleModesMatchGoVocabulary pins chrome.js MODEL_RULE_MODES to
+// config's exported rule-mode constants (ModelRuleExact/Pattern/Lower - the
+// literals ValidateModelRules switches on, so they are the complete Go
+// vocabulary). The editor's mode dropdown and the draft fallback both read
+// this table; previously only a ui_check hand list guarded it, so a Go-side
+// mode rename or removal drifted silently. The label half of each pair stays
+// presentation-only and unpinned.
+func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := "const MODEL_RULE_MODES = "
+	start := strings.Index(string(src), decl)
+	if start < 0 {
+		t.Fatal("static source missing const MODEL_RULE_MODES")
+	}
+	line := string(src[start:])
+	if end := strings.Index(line, ";"); end >= 0 {
+		line = line[:end]
+	}
+	var got []string
+	for _, m := range regexp.MustCompile(`\['([^']+)'(?:\s*,\s*'[^']*')?\]`).FindAllStringSubmatch(line, -1) {
+		got = append(got, m[1])
+	}
+	if len(got) == 0 {
+		t.Fatal("MODEL_RULE_MODES declares no [value, label] pairs")
+	}
+	want := []string{config.ModelRuleExact, config.ModelRulePattern, config.ModelRuleLower}
+	if !slices.Equal(got, want) {
+		t.Fatalf("chrome.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
+	}
+}
+
 // TestShellAssetsEqualBrandPaths pins the sw.js SHELL_ASSETS precache list
 // to the exact Go brand-path set minus the service worker itself (the worker
 // updates independently and never precaches its own URL). The previous

@@ -234,6 +234,14 @@ const CHART_VIEW_STORAGE_KEY = 'dash.chart';
 function saveChartView() {
   storage.set(CHART_VIEW_STORAGE_KEY, JSON.stringify(chartView));
 }
+// commitChartView is the one save-and-repaint epilogue for view changes that
+// only swap data on the live canvas (preset, percentile, hidden sets).
+// setChartWindow deliberately diverges: a window change needs new
+// server-computed buckets, so it saves then fetches instead of rendering.
+function commitChartView() {
+  saveChartView();
+  renderChart();
+}
 // loadChartView applies the persisted dash.chart payload onto chartView.
 // Deny by default: each field lands only when its saved shape validates
 // (window/pct/preset against their owner lists, hidden per-preset), so a
@@ -946,8 +954,7 @@ function toggleHiddenMember(key, id, validList) {
   if (!validList.includes(id)) return;
   const cur = chartView.hidden[key] || [];
   chartView.hidden[key] = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
-  saveChartView();
-  renderChart();
+  commitChartView();
 }
 
 function toggleChartSeries(id) {
@@ -968,8 +975,7 @@ function toggleSummaryTile(id) {
 function setChartPreset(v) {
   if (!CHART_PRESETS.some(pr => pr.id === v)) return;
   chartView.preset = v;
-  saveChartView();
-  renderChart();
+  commitChartView();
 }
 
 function setChartWindow(v) {
@@ -983,8 +989,7 @@ function setChartPct(v) {
   const n = Number(v);
   if (!CHART_PCTS.includes(n)) return;
   chartView.pct = n;
-  saveChartView();
-  renderChart();
+  commitChartView();
 }
 
 function fillChartControls() {
