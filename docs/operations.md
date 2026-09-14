@@ -83,14 +83,15 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Settings category | Configuration area |
 | --- | --- |
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
-| Request | Upload bound, allowed upstream prefixes, content preview, debug retention and token refresh. |
+| Request | Upload bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
 | Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
-| Queue & retry | Per-key admission, queue capacity/wait, retry hints, backoff and quality retries. |
-| Error storm protection | Enable provider/model detection, configure failure/window thresholds, recovery, queue bounds and banner visibility. |
+| Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff and quality retries. |
+| Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Conversations | Automatic grouping idle gap and open-conversation cap. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
-| Dashboard | Request-log page size and KPI/chart/explorer refresh cadence. |
+| Backup | Size cap for one Settings backup download or restore upload. |
+| Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
 | Models | Ordered model-name grouping rules and their preview. |
 | Providers | Usage/cost field paths, discovery enrichment, upstream headers and provider aliases. |
 
@@ -111,11 +112,14 @@ example, `providers`, `provider_aliases` and `model_rules` are not recursively
 patched. Read the current document and preserve wanted entries when editing a
 structured field. Explicitly empty collections clear those fields.
 
-The response separates saved values from the effective snapshot and reports
-restart-required keys. A successful file write can still be followed by a reload
-failure; `saved:true` means the file changed even when the response reports an
-error. Do not assume rollback. The `writable` indicator means a config path is
-configured, not that filesystem permissions or every future write are guaranteed.
+The response separates saved values from the effective snapshot, reports
+restart-required keys and carries the same `last_reload` section as GET; the
+Settings sheet renders it as its last-apply row with apply time, failure,
+dropped-key count and restart notice. A successful file write can still be
+followed by a reload failure; `saved:true` means the file changed even when
+the response reports an error. Do not assume rollback. The `writable`
+indicator means a config path is configured, not that filesystem permissions
+or every future write are guaranteed.
 See [persistence](#persistent-state-and-configuration) and
 [reload behavior](#reload-restart-and-shutdown) before changing startup-bound fields.
 
@@ -475,7 +479,7 @@ the credential gates both.
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
 | `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*` or `/v1`. |
 | `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
-| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET carries a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
+| `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
@@ -787,8 +791,9 @@ The HTML includes the canonical bootstrap state so the first paint need not wait
 for a second state request. Live SSE carries pending progress and finalization;
 KPI/operator polling and configured aggregate refresh keep derived surfaces current.
 Reconnects use sequence/feed identity and fall back to full snapshots when replay
-cannot be trusted. The footer distinguishes live/offline, active holds/Debug and
-process-local storage drops. An offline indicator alone does not prove inference
+cannot be trusted. The footer distinguishes live/offline, active holds/Debug,
+process-local storage drops and totals degraded by a failed startup history
+scan. An offline indicator alone does not prove inference
 is down. None of these mechanisms makes initial history preload instantaneous.
 
 For integrations, use the documented read routes rather than scraping the DOM.
@@ -811,8 +816,10 @@ observation. Full bootstrap windows are capped in durable mode and older log
 rows page from storage. Without storage, the ring is the available history.
 
 Enqueue is bounded and nonblocking. Overflow or write failures can lose durable
-records even when HTTP succeeds. Bootstrap's `storage:{enabled,dropped}` reports
-cumulative process-local loss; a nonzero value appears in the status footer.
+records even when HTTP succeeds. Bootstrap's
+`storage:{enabled,dropped,totals_degraded}` reports cumulative process-local
+loss and a failed startup history scan. Either appears in the status footer;
+degraded since-inception totals count only rows committed since process start.
 Increasing queue size absorbs bursts, not arbitrary sustained overload.
 Storage overload remains an unresolved capacity boundary, not a lossless mode.
 Measure it with the [isolated stress workflow](../CONTRIBUTING.md#performance-evidence):

@@ -33,8 +33,9 @@ and precedes metadata/translation CPU.
 Immutable config/client snapshots hot-swap for new work; old transports finish
 active requests. Admission is provider+key scoped, with provider-wide token,
 request and concurrency limits layered at the same grant owner. Acquisition
-release settles exactly once. Policy generations prevent clearing/replacing a
-cap from charging another generation's reservation.
+release settles exactly once. The provider gate and token-bucket epoch captured
+at admission keep clearing/replacing a cap from charging another generation's
+reservation.
 
 [tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
 from response policy. Exchange adapters return credential data only; the shared
@@ -54,7 +55,8 @@ exclusive recovery permits. Provider activation requires all models with
 activity inside the same window to independently qualify. Old permits cannot
 recover newer incidents. Initial admission waits for readiness without reserving
 a probe; only the actual send boundary claims a probe after key admission.
-Policy generations reset/wake gates without mutating retained history. Each
+Storm policy changes reset observations and wake waiters without mutating
+retained history. Each
 request carries an observation for its provider and model, moving distinct
 failed-request membership between fixed buckets across retries without retaining
 a request-ID map. No storm observation scans metrics history or waits for SQLite.
