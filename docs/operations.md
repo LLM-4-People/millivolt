@@ -419,12 +419,15 @@ are not intrinsically immutable; moving development/stable aliases can change.
 
 The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64`.
-Publication is limited to this repository's pushes to `main` and matching
-release tags, and depends on those checks. Pull requests do not publish images.
+Publication is limited to this repository's pushes to `main`, matching
+release tags, and `testing`-branch pushes (which publish only the moving
+`testing` tag), and depends on those checks. Pull requests do not publish
+images.
 
 | Image tag | Meaning |
 | --- | --- |
 | `main` | Moving development image after a successful main-branch push. |
+| `testing` | Moving development image after a successful testing-branch push. |
 | `sha-<full commit>` | Source-commit tag for a published build. |
 | Version from `VERSION` | Created by the matching `v`-prefixed release tag. |
 | `latest` | Updated only by a non-prerelease version tag, not main-branch pushes. |

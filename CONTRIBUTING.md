@@ -19,7 +19,8 @@ or push a completed, checked feature directly there when that is authorized.
 Promotion from `testing` to `main` is a separate deliberate integration after
 validation, not part of an ordinary feature push. Do not push release tags as a
 side effect of feature work: CI cuts releases itself. CI checks every branch;
-production image publishing remains restricted to `main` and version tags.
+production image publishing remains restricted to `main` and version tags,
+and `testing`-branch pushes publish only the moving development alias.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -278,6 +279,9 @@ Docs-only pushes never cut a release or rebuild images. A manually pushed
 `v*` tag still ships exactly as tagged through the same pipeline. VERSION is
 recomputed from the higher of the file and the newest tag on every release, so
 a promotion merge that resolves a VERSION conflict to either side is safe.
+Code-bearing pushes to `testing` publish the moving
+`ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
+container builds, without cutting a release or any version tag.
 Manual validation of a candidate remains available:
 
 ```sh
@@ -288,13 +292,15 @@ Run the shared checks before relying on a release. Confirm the hosted container
 build and smoke tests succeed, then check the package visibility and anonymous
 pull. Do not report a release/image as available merely because validation or a
 local build passed. Image usage and persistence limits live in
-[operations](docs/operations.md#versions-and-images).The gate clears inherited Git routing/configuration variables before checking
+[operations](docs/operations.md#versions-and-images). The gate clears inherited
+Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.
 
 Only push the intended branch and release tag after that check succeeds. The
-workflow publishes images automatically; it does not create GitHub release
-notes. Native container checks run before the multi-platform publish job.
+workflow publishes images automatically and creates the release with notes
+generated from the commit log. Native container checks run before the
+multi-platform publish job.
 
 For local container verification, build with Docker, resolve the image's
 immutable ID, then use the same fixture as CI:
