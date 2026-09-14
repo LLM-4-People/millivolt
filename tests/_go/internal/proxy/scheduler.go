@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1091,12 +1090,6 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 	srv := httptest.NewServer(p)
 	defer srv.Close()
 
-	u, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	groupKey := providerFromURL(u) + "|" + hashKey("sk-test")
-
 	do := func() {
 		t.Helper()
 		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
@@ -1114,12 +1107,9 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 	if got := calls.Load(); got != 3 {
 		t.Fatalf("first request hits = %d, want 3", got)
 	}
-	if got := p.scheduler.Backoff(groupKey); got != 0 {
-		t.Fatalf("attempt backoff after FailSend(own) = %v, want 0", got)
-	}
-	if got := p.scheduler.RequestBackoff(groupKey); got != 200*time.Millisecond {
-		t.Fatalf("request backoff = %v, want 200ms (base, not leftover attempt 400ms)", got)
-	}
+	// The exhausted retryable failure grows the REQUEST backoff to base
+	// (200ms) and clears the owner's attempt streak; the pacing of the next
+	// first send below is the behavioral proof of both.
 	t0 := time.Now()
 	do()
 	if secondFirst.IsZero() {

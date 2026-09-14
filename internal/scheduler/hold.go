@@ -25,30 +25,6 @@ type Hold struct {
 	MaxQueued  int
 }
 
-// Policy is the operator hold. SetPolicy replaces the whole set with this
-// single hold (compat). Prefer AddHold / RemoveHold / SetHolds for multiple
-// non-overlapping pauses.
-type Policy struct {
-	All        bool
-	New        bool
-	Clients    []string
-	Providers  []string
-	KnownAtNew []string
-	Until      time.Time
-	MaxQueued  int
-}
-
-func (p Policy) Active() bool {
-	return p.asHold().Active()
-}
-
-func (p Policy) asHold() Hold {
-	return Hold{
-		All: p.All, New: p.New, Clients: p.Clients, Providers: p.Providers,
-		KnownAtNew: p.KnownAtNew, Until: p.Until, MaxQueued: p.MaxQueued,
-	}
-}
-
 func (h Hold) Active() bool {
 	if holdExpired(h.Until) {
 		return false
@@ -364,53 +340,10 @@ func HoldsOverlap(a, b Hold) bool {
 	return clientsOverlap(sa, sb) && providersOverlap(sa, sb)
 }
 
-func overlapAny(holds []Hold) bool {
-	for i := 0; i < len(holds); i++ {
-		if !holds[i].Active() {
-			continue
-		}
-		for j := i + 1; j < len(holds); j++ {
-			if HoldsOverlap(holds[i], holds[j]) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// SetPaused parks or releases every group. SetPaused(true) is a global hold
-// (Policy.All). SetPaused(false) clears the whole set. Prefer SetHolds /
-// AddHold for scoped pauses.
-func (s *Scheduler) SetPaused(paused bool) {
-	if paused {
-		s.SetPolicy(Policy{All: true})
-		return
-	}
-	s.SetPolicy(Policy{})
-}
-
-// SetPolicy replaces the operator hold with a single policy. In-flight slots
-// finish; drain skips held waiters so a paused client does not
-// head-of-line-block others on the same key. Time spent held does not count
-// toward MaxWait.
-func (s *Scheduler) SetPolicy(p Policy) {
-	if !p.Active() {
-		_ = s.replaceHolds(nil, false)
-		return
-	}
-	_ = s.replaceHolds([]Hold{p.asHold()}, false)
-}
-
-// SetHolds replaces the whole pause set. Returns ErrOverlap when two holds
-// cover the same targets.
-func (s *Scheduler) SetHolds(holds []Hold) error {
-	return s.replaceHolds(holds, true)
-}
-
 // RestoreHolds loads a persisted set without overlap rejection (already
 // accepted) and without dropping hold-queue counts we do not have yet.
 func (s *Scheduler) RestoreHolds(holds []Hold) {
-	_ = s.replaceHolds(holds, false)
+	s.replaceHolds(holds)
 }
 
 // AddHold appends one pause. Returns ErrOverlap when it covers a target
@@ -506,14 +439,13 @@ func (s *Scheduler) RemoveHold(id string) {
 	s.commitHolds(next, false)
 }
 
-func (s *Scheduler) replaceHolds(holds []Hold, checkOverlap bool) error {
-	if checkOverlap && overlapAny(holds) {
-		return ErrOverlap
-	}
+// replaceHolds installs a whole hold set as-is (RestoreHolds' mechanism):
+// acceptance already happened at the operator boundary, so no overlap check
+// runs here.
+func (s *Scheduler) replaceHolds(holds []Hold) {
 	next := snapFromHolds(holds)
 	s.pauseMu.Lock()
 	s.commitHolds(next, true)
-	return nil
 }
 
 // commitHolds finishes a policy transition: it publishes the prepared
@@ -630,7 +562,7 @@ func (s *Scheduler) seedQueuedHolds() {
 			h := s.matchingHold(w.client, w.provider)
 			s.holdCountMu.Lock()
 			if h == nil {
-				// ReplaceHold / SetHolds may drop this waiter from the
+				// ReplaceHold / RestoreHolds may drop this waiter from the
 				// new scope. Uncount in place - do not call dropHold
 				// (that would nest holdCountMu / fire OnUnhold from seed).
 				s.clearHoldCountLocked(w)
@@ -671,11 +603,6 @@ func (s *Scheduler) fireSeededHold(w *waiter, h *holdSnap) {
 		w.onHold()
 	}
 	s.holdCountMu.Unlock()
-}
-
-// HoldsList returns the active pauses (expired Until omitted).
-func (s *Scheduler) HoldsList() []Hold {
-	return s.policy.Load().list()
 }
 
 // Holds reports whether Acquire for this client is parked when the provider

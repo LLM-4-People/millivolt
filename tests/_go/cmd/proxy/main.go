@@ -495,7 +495,7 @@ func decodeLivePayload(t *testing.T, raw []byte) livePayload {
 
 func fullSnapshot(t *testing.T, b *metrics.Buffer) livePayload {
 	t.Helper()
-	raw, err := b.SnapshotJSONSince(0)
+	raw, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +559,7 @@ func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
 		t.Errorf("with store: capped window = %s..%s, want newest %d (%s..)",
 			p.Records[0].ID, p.Records[len(p.Records)-1].ID, capN, wantFirst)
 	}
-	raw, err := b.SnapshotJSONSince(1)
+	raw, err := json.Marshal(b.SnapshotSince(1))
 	if err != nil {
 		t.Fatal(err)
 	}

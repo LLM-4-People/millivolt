@@ -233,15 +233,6 @@ func (p *ssePacer) Stop() {
 	}
 }
 
-func (p *ssePacer) Started() bool {
-	if p == nil {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.started
-}
-
 // applyUpstream copies hdr and writes status if headers are still open.
 // Returns true when SSE was already committed (caller must not stream a
 // raw 4xx JSON body onto that socket).

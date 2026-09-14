@@ -60,7 +60,7 @@ func TestHandlePauseGetAndPost(t *testing.T) {
 	if st["paused"] != true {
 		t.Fatalf("POST paused = %v, want true", st["paused"])
 	}
-	if !p.PauseStats().Paused {
+	if !p.scheduler.Stats().Paused {
 		t.Fatal("scheduler not paused after POST")
 	}
 }
@@ -133,7 +133,7 @@ func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 		t.Fatalf("first request never reached upstream (hits=%d)", hits.Load())
 	}
 
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 
 	secondDone := make(chan int, 1)
 	go func() {
@@ -152,10 +152,10 @@ func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 	// for it instead of a fixed window - if the proxy were broken and the
 	// request slipped through to upstream, it would complete and never park.
 	parkDeadline := time.Now().Add(2 * time.Second)
-	for p.PauseStats().Queued < 1 && time.Now().Before(parkDeadline) {
+	for p.scheduler.Stats().Queued < 1 && time.Now().Before(parkDeadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if q := p.PauseStats().Queued; q != 1 {
+	if q := p.scheduler.Stats().Queued; q != 1 {
 		t.Fatalf("paused request never parked (queued=%d, upstream hits=%d)", q, hits.Load())
 	}
 	if hits.Load() != 1 {
@@ -176,7 +176,7 @@ func TestPauseQueuesNewRequestsUntilUnpause(t *testing.T) {
 		t.Fatalf("queued request ran after in-flight finished while paused (hits=%d)", hits.Load())
 	}
 
-	p.SetPaused(false)
+	p.applyHolds(nil)
 	select {
 	case code := <-secondDone:
 		if code != 200 {
@@ -309,7 +309,7 @@ func (s *liveSpy) PublishLive(_ string, r *metrics.Record) {
 func TestPausedRequestPublishedAsPaused(t *testing.T) {
 	spy := &liveSpy{}
 	p := New(config.Default(), spy)
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
@@ -336,13 +336,13 @@ func TestPausedRequestPublishedAsPaused(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if rec := spy.last.Load(); rec != nil && rec.Paused {
-			p.SetPaused(false)
+			p.applyHolds(nil)
 			<-done
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	p.SetPaused(false)
+	p.applyHolds(nil)
 	<-done
 	t.Fatal("live record never published with paused=true")
 }
@@ -414,11 +414,11 @@ func TestReplaceHoldPublishesPausedOnCapWaiter(t *testing.T) {
 		}
 	}()
 	deadline = time.Now().Add(time.Second)
-	for p.PauseStats().Queued < 1 && time.Now().Before(deadline) {
+	for p.scheduler.Stats().Queued < 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if p.PauseStats().Queued != 1 {
-		t.Fatalf("queued = %d, want 1", p.PauseStats().Queued)
+	if q := p.scheduler.Stats().Queued; q != 1 {
+		t.Fatalf("queued = %d, want 1", q)
 	}
 
 	rr = httptest.NewRecorder()
@@ -519,15 +519,15 @@ func TestHandlePauseTwoNonOverlappingAndResumeOne(t *testing.T) {
 	if !p.scheduler.Holds("client-a") || !p.scheduler.Holds("client-b") {
 		t.Fatal("both clients should be held")
 	}
-	holds := p.scheduler.HoldsList()
+	holds := p.PauseSnapshot()["holds"].([]map[string]any)
 	if len(holds) != 2 {
 		t.Fatalf("holds = %d, want 2", len(holds))
 	}
 	var idOpen string
 	for _, h := range holds {
-		for _, c := range h.Clients {
+		for _, c := range h["clients"].([]string) {
 			if c == "client-a" {
-				idOpen = h.ID
+				idOpen = h["id"].(string)
 			}
 		}
 	}
@@ -668,8 +668,8 @@ func TestHandlePauseConcurrentNonOverlap(t *testing.T) {
 		}
 	}
 	if !p.scheduler.Holds("a") || !p.scheduler.Holds("b") {
-		t.Fatalf("lost a concurrent hold: a=%v b=%v list=%v",
-			p.scheduler.Holds("a"), p.scheduler.Holds("b"), p.scheduler.HoldsList())
+		t.Fatalf("lost a concurrent hold: a=%v b=%v",
+			p.scheduler.Holds("a"), p.scheduler.Holds("b"))
 	}
 }
 
@@ -718,7 +718,7 @@ func TestModelsBypassesPause(t *testing.T) {
 	}))
 	defer upstream.Close()
 	p := New(config.Default(), metrics.Noop{})
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer sk-test")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
@@ -777,7 +777,7 @@ func TestHandlePauseReplaceKeepsID(t *testing.T) {
 	if !p.scheduler.Holds("client-a") || !p.scheduler.Holds("client-b") {
 		t.Fatal("replaced hold did not cover both clients")
 	}
-	if n := len(p.scheduler.HoldsList()); n != 1 {
+	if n := len(p.PauseSnapshot()["holds"].([]map[string]any)); n != 1 {
 		t.Fatalf("holds = %d, want 1 (update, not add)", n)
 	}
 }
@@ -901,7 +901,7 @@ func TestHandlePauseReplaceOmittedScopeKeepsPrevious(t *testing.T) {
 		t.Fatalf("omitted-scope replace mutated hold %v", h)
 	}
 	if p.scheduler.HoldsTarget("c", "beta.example") || !p.scheduler.HoldsTarget("c", "gamma.example") {
-		t.Fatalf("omitted-scope replace became %+v", p.scheduler.HoldsList())
+		t.Fatalf("omitted-scope replace became %+v", st["holds"])
 	}
 }
 
@@ -928,10 +928,10 @@ func TestHandlePauseReplaceOverlap409(t *testing.T) {
 		}
 	}
 	var idA string
-	for _, h := range p.scheduler.HoldsList() {
-		for _, c := range h.Clients {
+	for _, h := range p.PauseSnapshot()["holds"].([]map[string]any) {
+		for _, c := range h["clients"].([]string) {
 			if c == "a" {
-				idA = h.ID
+				idA = h["id"].(string)
 			}
 		}
 	}
@@ -960,7 +960,7 @@ func TestPauseStreamSendsSSEKeepalive(t *testing.T) {
 	defer upstream.Close()
 
 	p := New(config.Default(), metrics.Noop{})
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 	srv := httptest.NewServer(p)
 	defer srv.Close()
 
@@ -1013,7 +1013,7 @@ func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
 	defer upstream.Close()
 
 	p := New(config.Default(), metrics.Noop{})
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 	srv := httptest.NewServer(p)
 	defer srv.Close()
 
@@ -1040,7 +1040,7 @@ func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Fatal("X-Proxy-Timeout-Ms fired during pause")
 	}
-	p.SetPaused(false)
+	p.applyHolds(nil)
 	select {
 	case code := <-done:
 		if code != 200 {
@@ -1073,7 +1073,7 @@ func TestRetryHoldWaitNotBoundedByProxyTimeout(t *testing.T) {
 			// Arm the hold DURING the first attempt: Acquire already granted
 			// (in-flight slots finish) and attempt 0's WaitSend ignores holds,
 			// so the hold deterministically parks the RETRY's WaitSend.
-			p.SetPaused(true)
+			p.applyHolds([]persistedPause{{All: true}})
 			w.WriteHeader(500)
 			w.Write([]byte(`{"error":{"message":"boom","type":"server_error"}}`))
 			close(firstAttempt)
@@ -1113,7 +1113,7 @@ func TestRetryHoldWaitNotBoundedByProxyTimeout(t *testing.T) {
 	// Hold well past the 300ms header timeout, then release: the retry must
 	// proceed with a fresh per-send budget, not a burned one.
 	time.Sleep(600 * time.Millisecond)
-	p.SetPaused(false)
+	p.applyHolds(nil)
 
 	select {
 	case code := <-done:
@@ -1146,7 +1146,7 @@ func TestQualityRetryHonorsOperatorHold(t *testing.T) {
 			// Arm the global hold DURING the degenerate attempt: Acquire
 			// already granted (in-flight slots finish), so the hold
 			// deterministically parks the quality RE-SEND's WaitSend.
-			p.SetPaused(true)
+			p.applyHolds([]persistedPause{{All: true}})
 			w.Write([]byte(voidBody))
 			return
 		}
@@ -1193,7 +1193,7 @@ func TestQualityRetryHonorsOperatorHold(t *testing.T) {
 		t.Fatalf("quality re-send hit upstream %d× while the operator hold was live, want 0 (a retry is a new send and waits)", n-1)
 	}
 
-	p.SetPaused(false)
+	p.applyHolds(nil)
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
@@ -1299,12 +1299,6 @@ func TestCursorFiredSendTimeoutIsNotPaced(t *testing.T) {
 	srv := httptest.NewServer(p)
 	defer srv.Close()
 
-	u, err := url.Parse(upstream.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	groupKey := providerFromURL(u) + "|" + hashKey("cursor-key")
-
 	newReq := func() *http.Request {
 		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
 			strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`))
@@ -1342,10 +1336,9 @@ func TestCursorFiredSendTimeoutIsNotPaced(t *testing.T) {
 	if rec.StatusCode != http.StatusBadGateway || rec.ErrorType != "upstream_unreachable" || !rec.IsError() {
 		t.Errorf("record = status %d type %q, want 502/upstream_unreachable error", rec.StatusCode, rec.ErrorType)
 	}
-	// The direct no-pacing proof: FailSend would leave the base backoff set.
-	if got := p.scheduler.RequestBackoff(groupKey); got != 0 {
-		t.Errorf("request backoff = %v, want 0 (a fired client budget must not pace the group)", got)
-	}
+	// The direct no-pacing proof is behavioral: the follow-up on the same
+	// provider|key below must complete immediately - any FailSend pacing
+	// (base_backoff is 1s here) would be unmistakable.
 
 	// The follow-up on the same provider|key must complete immediately.
 	start := time.Now()

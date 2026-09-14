@@ -358,13 +358,6 @@ func (r *CursorRun) PendingToolCallIDs() map[string]bool {
 	return out
 }
 
-// Parked reports whether the run is waiting on tool results.
-func (r *CursorRun) Parked() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.pending) > 0
-}
-
 // Closed reports whether the run has been torn down.
 func (r *CursorRun) Closed() bool {
 	r.mu.Lock()

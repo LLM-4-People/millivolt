@@ -42,7 +42,7 @@ func TestCursorResumeRecordGetsStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for !run.Parked() {
+	for len(run.PendingToolCallIDs()) == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("pump did not register the pending tool call")
 		}
@@ -78,7 +78,7 @@ func TestCursorResumeRecordGetsStatus(t *testing.T) {
 		resCh <- res{resp, err}
 	}()
 	deadline = time.Now().Add(2 * time.Second)
-	for run.Parked() {
+	for len(run.PendingToolCallIDs()) > 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("resume did not consume the pending tool call")
 		}

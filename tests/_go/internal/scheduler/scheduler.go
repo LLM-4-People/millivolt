@@ -23,12 +23,22 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// groupBackoffState reads a group's stored attempt-level and request-level
+// backoff under the group lock. The scheduler exports no observer; production
+// consumes these values through BackoffFor/FailSend/EndSend behavior.
+func groupBackoffState(s *Scheduler, key string) (attempt, request time.Duration) {
+	g := s.groupFor(key, 0)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.backoff, g.requestBackoff
+}
+
 func TestFIFOOrdering(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx := context.Background()
 
 	// Acquire the first slot.
-	release1, err := s.Acquire(ctx, "k", 1)
+	release1, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +55,7 @@ func TestFIFOOrdering(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			release, err := s.Acquire(ctx, "k", 1)
+			release, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 			if err != nil {
 				t.Error(err)
 				return
@@ -80,13 +90,13 @@ func TestConcurrencyCap(t *testing.T) {
 	s := New(Options{MaxConcurrent: 2})
 	ctx := context.Background()
 
-	r1, _ := s.Acquire(ctx, "k", 2)
-	r2, _ := s.Acquire(ctx, "k", 2)
+	r1, _ := s.AcquireWith(ctx, "k", 2, WaiterHooks{})
+	r2, _ := s.AcquireWith(ctx, "k", 2, WaiterHooks{})
 
 	// Third should block until a release.
 	done := make(chan struct{})
 	go func() {
-		r3, err := s.Acquire(ctx, "k", 2)
+		r3, err := s.AcquireWith(ctx, "k", 2, WaiterHooks{})
 		if err != nil {
 			return
 		}
@@ -134,7 +144,7 @@ func TestConcurrentCapChangeNoRace(t *testing.T) {
 				default:
 				}
 				// Vary the cap per call; Acquire applies it to the live group.
-				rel, err := s.Acquire(ctx, "k", 1+(i%4))
+				rel, err := s.AcquireWith(ctx, "k", 1+(i%4), WaiterHooks{})
 				if err == nil {
 					rel(0)
 				}
@@ -151,7 +161,7 @@ func TestConcurrentCapChangeNoRace(t *testing.T) {
 				return
 			default:
 			}
-			s.SetRateLimit("k", 0)
+			s.extendWindow("k", 0, false)
 			s.BackoffFor("k", 0)
 		}
 	}()
@@ -163,34 +173,34 @@ func TestConcurrentCapChangeNoRace(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSetRateLimitZeroKeepsWindow pins the fail-closed guard: a non-positive
-// SetRateLimit duration must NOT erase an existing pacing window (a past
-// HTTP-date Retry-After yields a negative time.Until; that must never un-pause
-// the group).
-func TestSetRateLimitZeroKeepsWindow(t *testing.T) {
+// TestTripZeroKeepsWindow pins the fail-closed guard of the pacing window
+// (Trip's extendWindow path): a non-positive duration must NOT erase an
+// existing window (a past HTTP-date Retry-After yields a negative
+// time.Until; that must never un-pause the group).
+func TestTripZeroKeepsWindow(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
 
-	s.SetRateLimit("k", 300*time.Millisecond)
+	s.Trip("k", 300*time.Millisecond)
 	// A zero/negative follow-up must not clobber the live window.
-	s.SetRateLimit("k", 0)
-	s.SetRateLimit("k", -5*time.Second)
+	s.Trip("k", 0)
+	s.Trip("k", -5*time.Second)
 
 	start := time.Now()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rel(0)
 	if elapsed := time.Since(start); elapsed < 200*time.Millisecond {
-		t.Errorf("Acquire returned in %v; the pacing window was clobbered by a non-positive SetRateLimit", elapsed)
+		t.Errorf("Acquire returned in %v; the pacing window was clobbered by a non-positive Trip", elapsed)
 	}
 }
 
 func TestAcquireZeroRelaxesExistingCap(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	r1, err := s.Acquire(ctx, "k", 1)
+	r1, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,10 +209,10 @@ func TestAcquireZeroRelaxesExistingCap(t *testing.T) {
 	cap := g.maxConcurrent
 	g.mu.Unlock()
 	if cap != 1 {
-		t.Fatalf("after Acquire(1) cap = %d, want 1", cap)
+		t.Fatalf("after AcquireWith(1) cap = %d, want 1", cap)
 	}
 	r1(0)
-	r2, err := s.Acquire(ctx, "k", 0)
+	r2, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +221,7 @@ func TestAcquireZeroRelaxesExistingCap(t *testing.T) {
 	cap = g.maxConcurrent
 	g.mu.Unlock()
 	if cap != 0 {
-		t.Fatalf("after Acquire(0) cap = %d, want 0 (unlimited)", cap)
+		t.Fatalf("after AcquireWith(0) cap = %d, want 0 (unlimited)", cap)
 	}
 }
 
@@ -219,11 +229,12 @@ func TestRateLimitPacing(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
 
-	// Pace the group by 100ms.
-	s.SetRateLimit("k", 100*time.Millisecond)
+	// Pace the group by 100ms (Trip's window; Acquire does not consult the
+	// send token, only the pacing deadline).
+	s.Trip("k", 100*time.Millisecond)
 
 	start := time.Now()
-	release, err := s.Acquire(ctx, "k", 0)
+	release, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,12 +250,12 @@ func TestCancelInQueue(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 
-	r1, _ := s.Acquire(ctx, "k", 1)
+	r1, _ := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 
 	// Start a waiter, then cancel its context.
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.Acquire(ctx, "k", 1)
+		_, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 		done <- err
 	}()
 
@@ -266,15 +277,15 @@ func TestMaxQueueSize(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1, MaxQueueSize: 2})
 	ctx := context.Background()
 
-	r1, _ := s.Acquire(ctx, "k", 1)
+	r1, _ := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	// queue 2
-	go s.Acquire(ctx, "k", 1)
-	go s.Acquire(ctx, "k", 1)
+	go s.AcquireWith(ctx, "k", 1, WaiterHooks{})
+	go s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	// Both waiters must be parked before the queue-full attempt.
 	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "two waiters to queue")
 
 	// Fourth should fail (queue full).
-	_, err := s.Acquire(ctx, "k", 1)
+	_, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err == nil {
 		t.Error("expected queue full error")
 	}
@@ -302,8 +313,8 @@ func TestAdaptiveBackoff(t *testing.T) {
 	if d3 != 3*time.Second {
 		t.Errorf("explicit hint = %v, want 3s (unclamped by MaxBackoff)", d3)
 	}
-	if got := s.Backoff("k"); got != 400*time.Millisecond {
-		t.Errorf("stored adaptive after long hint = %v, want 400ms (hint must not reset doubling)", got)
+	if attempt, _ := groupBackoffState(s, "k"); attempt != 400*time.Millisecond {
+		t.Errorf("stored adaptive after long hint = %v, want 400ms (hint must not reset doubling)", attempt)
 	}
 	// Short hint is a floor, not a reset: adaptive grows to 800ms, so the
 	// wait is the jittered adaptive (~600-1000ms), not 500ms.
@@ -311,11 +322,11 @@ func TestAdaptiveBackoff(t *testing.T) {
 	if d3b < 600*time.Millisecond || d3b > 1000*time.Millisecond {
 		t.Errorf("short hint = %v, want ~800ms adaptive (hint is a floor, not a reset)", d3b)
 	}
-	if got := s.Backoff("k"); got != 800*time.Millisecond {
-		t.Errorf("stored adaptive after short hint = %v, want 800ms (must keep growing)", got)
+	if attempt, _ := groupBackoffState(s, "k"); attempt != 800*time.Millisecond {
+		t.Errorf("stored adaptive after short hint = %v, want 800ms (must keep growing)", attempt)
 	}
-	// After reset, backoff goes back to base.
-	s.ResetBackoff("k")
+	// After a success (EndSend owns the reset), backoff goes back to base.
+	s.EndSend("k", false)
 	d4 := s.BackoffFor("k", 0)
 	if d4 < 75*time.Millisecond || d4 > 125*time.Millisecond {
 		t.Errorf("post-reset backoff = %v, want ~100ms", d4)
@@ -339,8 +350,8 @@ func TestBackoffForShortHintKeepsGrowing(t *testing.T) {
 		if d < w*3/4 || d > w*5/4 {
 			t.Fatalf("attempt %d delay %v, want ~%v (max(hint, adaptive))", i+1, d, w)
 		}
-		if got := s.Backoff("k"); got != w {
-			t.Fatalf("attempt %d stored adaptive %v, want %v (short hint must not reset)", i+1, got, w)
+		if attempt, _ := groupBackoffState(s, "k"); attempt != w {
+			t.Fatalf("attempt %d stored adaptive %v, want %v (short hint must not reset)", i+1, attempt, w)
 		}
 	}
 }
@@ -364,18 +375,18 @@ func TestPauseLetsInFlightFinishAndQueuesNew(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx := context.Background()
 
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.SetPaused(true)
+	s.RestoreHolds([]Hold{{All: true}})
 	if !s.Paused() {
-		t.Fatal("Paused() = false after SetPaused(true)")
+		t.Fatal("Paused() = false after a global hold")
 	}
 
 	got := make(chan struct{})
 	go func() {
-		r, err := s.Acquire(ctx, "k", 1)
+		r, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 		if err != nil {
 			t.Error(err)
 			return
@@ -399,7 +410,7 @@ func TestPauseLetsInFlightFinishAndQueuesNew(t *testing.T) {
 		t.Fatalf("stats while paused = %+v, want paused queued=1 in_flight=0", st)
 	}
 
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -410,11 +421,11 @@ func TestPauseLetsInFlightFinishAndQueuesNew(t *testing.T) {
 func TestPauseBlocksEmptyGroup(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	s.SetPaused(true)
+	s.RestoreHolds([]Hold{{All: true}})
 
 	got := make(chan struct{})
 	go func() {
-		r, err := s.Acquire(ctx, "k", 0)
+		r, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
 		if err != nil {
 			t.Error(err)
 			return
@@ -429,7 +440,7 @@ func TestPauseBlocksEmptyGroup(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -442,11 +453,11 @@ func TestPauseBlocksEmptyGroup(t *testing.T) {
 func TestPauseDoesNotCountTowardMaxWait(t *testing.T) {
 	s := New(Options{MaxWait: 40 * time.Millisecond})
 	ctx := context.Background()
-	s.SetPaused(true)
+	s.RestoreHolds([]Hold{{All: true}})
 
 	done := make(chan error, 1)
 	go func() {
-		rel, err := s.Acquire(ctx, "k", 0)
+		rel, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
 		if err == nil {
 			rel(0)
 		}
@@ -462,7 +473,7 @@ func TestPauseDoesNotCountTowardMaxWait(t *testing.T) {
 	default:
 	}
 
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -473,13 +484,16 @@ func TestPauseDoesNotCountTowardMaxWait(t *testing.T) {
 	}
 }
 
-func TestSetPausedIdempotent(t *testing.T) {
+// TestRestoreHoldsIdempotent pins the policy-transition no-op: replaying the
+// same hold set (or the empty set twice) must be a safe snapEqual short
+// circuit, never a lost kick or a double epilogue.
+func TestRestoreHoldsIdempotent(t *testing.T) {
 	s := New(Options{})
-	s.SetPaused(true)
-	s.SetPaused(true)
-	s.SetPaused(false)
-	s.SetPaused(false)
-	rel, err := s.Acquire(context.Background(), "k", 0)
+	s.RestoreHolds([]Hold{{All: true}})
+	s.RestoreHolds([]Hold{{All: true}})
+	s.RestoreHolds(nil)
+	s.RestoreHolds(nil)
+	rel, err := s.AcquireWith(context.Background(), "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +505,7 @@ func TestSetPausedIdempotent(t *testing.T) {
 func TestPauseOneClientDoesNotBlockAnother(t *testing.T) {
 	s := New(Options{MaxConcurrent: 1})
 	ctx := context.Background()
-	s.SetPolicy(Policy{Clients: []string{"slow"}})
+	s.RestoreHolds([]Hold{{Clients: []string{"slow"}}})
 
 	slowGot := make(chan struct{})
 	go func() {
@@ -524,7 +538,7 @@ func TestPauseOneClientDoesNotBlockAnother(t *testing.T) {
 	case <-time.After(40 * time.Millisecond):
 	}
 
-	s.SetPolicy(Policy{})
+	s.RestoreHolds(nil)
 	select {
 	case <-slowGot:
 	case <-time.After(time.Second):
@@ -535,7 +549,7 @@ func TestPauseOneClientDoesNotBlockAnother(t *testing.T) {
 func TestPauseNewHoldsUnknownOnly(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	s.SetPolicy(Policy{New: true, KnownAtNew: []string{"old"}})
+	s.RestoreHolds([]Hold{{New: true, KnownAtNew: []string{"old"}}})
 
 	rel, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{Client: "old"})
 	if err != nil {
@@ -561,7 +575,7 @@ func TestPauseNewHoldsUnknownOnly(t *testing.T) {
 	if !s.Holds("stranger") || s.Holds("old") {
 		t.Fatalf("holds stranger=%v old=%v", s.Holds("stranger"), s.Holds("old"))
 	}
-	s.SetPolicy(Policy{})
+	s.RestoreHolds(nil)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -569,13 +583,13 @@ func TestPauseNewHoldsUnknownOnly(t *testing.T) {
 	}
 }
 
-func TestPolicyUntilExpiredDoesNotHold(t *testing.T) {
+func TestRestoredExpiredHoldDoesNotHold(t *testing.T) {
 	s := New(Options{})
-	s.SetPolicy(Policy{All: true, Until: time.Now().Add(-time.Second)})
+	s.RestoreHolds([]Hold{{All: true, Until: time.Now().Add(-time.Second)}})
 	if s.Paused() || s.Holds("x") {
 		t.Fatal("expired until must not hold")
 	}
-	rel, err := s.Acquire(context.Background(), "k", 0)
+	rel, err := s.AcquireWith(context.Background(), "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}

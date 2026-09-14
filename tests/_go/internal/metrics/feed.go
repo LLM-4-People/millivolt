@@ -43,7 +43,7 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	b.Record(record("a"))
 	b.Record(record("b"))
 
-	full, err := b.SnapshotJSONSince(0)
+	full, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	}
 
 	// In-range cursor: only newer records.
-	inc, _ := b.SnapshotJSONSince(1)
+	inc, _ := json.Marshal(b.SnapshotSince(1))
 	p2 := decodePayload(t, inc)
 	if !p2.Incremental || len(p2.Records) != 1 || p2.Records[0].ID != "b" {
 		t.Errorf("since=1: inc=%v n=%d ids=%v, want incremental, 1 record (b)", p2.Incremental, len(p2.Records), ids(p2.Records))
@@ -67,7 +67,7 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	}
 
 	// Cursor at the tip: empty delta, still incremental.
-	tip, _ := b.SnapshotJSONSince(2)
+	tip, _ := json.Marshal(b.SnapshotSince(2))
 	p3 := decodePayload(t, tip)
 	if !p3.Incremental || len(p3.Records) != 0 {
 		t.Errorf("since=2: inc=%v n=%d, want incremental, 0 records", p3.Incremental, len(p3.Records))
@@ -77,7 +77,7 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	// degrade to a FULL snapshot, never a silently-missing delta.
 	b.Record(record("c"))
 	b.Record(record("d"))
-	ev, _ := b.SnapshotJSONSince(1)
+	ev, _ := json.Marshal(b.SnapshotSince(1))
 	p4 := decodePayload(t, ev)
 	if p4.Incremental || len(p4.Records) != 3 || p4.OldestSeq != 2 || p4.Seq != 4 {
 		t.Errorf("stale since=1: inc=%v n=%d oldest=%d seq=%d, want FULL 3 records oldest2 seq4",
@@ -85,7 +85,7 @@ func TestSnapshotSinceCursorSemantics(t *testing.T) {
 	}
 
 	// A cursor AHEAD of the current range (restart/reset) is also full.
-	fwd, _ := b.SnapshotJSONSince(99)
+	fwd, _ := json.Marshal(b.SnapshotSince(99))
 	p5 := decodePayload(t, fwd)
 	if p5.Incremental || len(p5.Records) != 3 {
 		t.Errorf("since=99: inc=%v n=%d, want FULL", p5.Incremental, len(p5.Records))
@@ -103,7 +103,7 @@ func TestSnapshotSinceSurvivesRemoveWhere(t *testing.T) {
 	}
 	// The survivors keep their original sequences (2 is now a gap, not reused);
 	// a cursor below 2 must still be in range and see only seq>since records.
-	inc, _ := b.SnapshotJSONSince(1)
+	inc, _ := json.Marshal(b.SnapshotSince(1))
 	p := decodePayload(t, inc)
 	if !p.Incremental || len(p.Records) != 1 || p.Records[0].ID != "b" {
 		t.Errorf("since=1 after purge: inc=%v n=%d ids=%v, want incremental 1 record (b)",
@@ -115,7 +115,7 @@ func TestSnapshotSinceSurvivesRemoveWhere(t *testing.T) {
 
 	// A later append continues the sequence, never reusing the gap.
 	b.Record(record("c"))
-	all, _ := b.SnapshotJSONSince(0)
+	all, _ := json.Marshal(b.SnapshotSince(0))
 	p2 := decodePayload(t, all)
 	if p2.Seq != 4 {
 		t.Errorf("seq after purge+append = %d, want 4 (nextSeq never rewinds)", p2.Seq)
@@ -125,19 +125,19 @@ func TestSnapshotSinceSurvivesRemoveWhere(t *testing.T) {
 func TestResetKeepsFeedCursorForward(t *testing.T) {
 	b := NewBuffer(4)
 	b.Record(record("a"))
-	before, _ := b.SnapshotJSONSince(0)
+	before, _ := json.Marshal(b.SnapshotSince(0))
 	pb := decodePayload(t, before)
 
 	b.Reset()
 	b.Record(record("b"))
-	after, _ := b.SnapshotJSONSince(0)
+	after, _ := json.Marshal(b.SnapshotSince(0))
 	pa := decodePayload(t, after)
 
 	if pa.Seq <= pb.Seq {
 		t.Errorf("post-reset seq %d not ahead of pre-reset %d - a stale cursor would silently collide", pa.Seq, pb.Seq)
 	}
 	// A pre-reset cursor must force a full resync against the wiped ring.
-	ev, _ := b.SnapshotJSONSince(pb.Seq)
+	ev, _ := json.Marshal(b.SnapshotSince(pb.Seq))
 	pe := decodePayload(t, ev)
 	if pe.Incremental {
 		t.Errorf("pre-reset cursor yielded incremental on a wiped ring, want full resync")
@@ -551,7 +551,7 @@ func TestSnapshotLimitCapsFullOnly(t *testing.T) {
 	}
 	b.SetSnapshotLimit(2)
 
-	full, err := b.SnapshotJSONSince(0)
+	full, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestSnapshotLimitCapsFullOnly(t *testing.T) {
 	}
 
 	// Delta unaffected by the cap.
-	inc, _ := b.SnapshotJSONSince(2)
+	inc, _ := json.Marshal(b.SnapshotSince(2))
 	ip := decodePayload(t, inc)
 	if !ip.Incremental || len(ip.Records) != 2 || ip.Records[0].ID != "c" || ip.Records[1].ID != "d" {
 		t.Errorf("capped delta: inc=%v n=%d ids=%v, want incremental 2 (c,d) uncapped",
@@ -571,7 +571,7 @@ func TestSnapshotLimitCapsFullOnly(t *testing.T) {
 
 	// Limit 0 = unlimited (memory-only mode).
 	b.SetSnapshotLimit(0)
-	full2, _ := b.SnapshotJSONSince(0)
+	full2, _ := json.Marshal(b.SnapshotSince(0))
 	if p := decodePayload(t, full2); p.Incremental || len(p.Records) != 4 {
 		t.Errorf("unlimited full: inc=%v n=%d, want FULL 4", p.Incremental, len(p.Records))
 	}
@@ -588,7 +588,7 @@ func TestBootstrapCursorFeedsStream(t *testing.T) {
 	b.SetSnapshotLimit(2)
 
 	// Boot: cursor-less bootstrap (capped full snapshot).
-	boot, err := b.SnapshotJSONSince(0)
+	boot, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}

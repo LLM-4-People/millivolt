@@ -129,7 +129,10 @@ func TestStormCursorFreshOpenersShareRetryBudgetAndCleanup(t *testing.T) {
 					t.Fatalf("native pipe remains open: %v", err)
 				}
 			}
-			if s.scheduler.RequestBackoff("native-retry") != 0 || len(s.scheduler.StormSnapshot()) != 0 {
+			// Successful recovery resets the storm scope (the request-backoff
+			// reset it shares this success path with is pinned at the
+			// scheduler layer in TestEndSendResetsRequestBackoff).
+			if len(s.scheduler.StormSnapshot()) != 0 {
 				t.Fatal("successful native recovery retained pacing")
 			}
 		})

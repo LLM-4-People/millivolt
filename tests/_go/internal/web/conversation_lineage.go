@@ -181,7 +181,7 @@ func TestConversationLineageStoredRingPendingAndExactScope(t *testing.T) {
 		}
 	}
 	// Destructive projection invalidation must also remove old parent evidence.
-	if _, err := s.PurgeWhere(t.Context(), storage.PurgeFilter{ConversationID: "s:parent"}); err != nil {
+	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{ConversationID: "s:parent"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	p, err = api.explorer(t.Context(), "conversation", nil, "")

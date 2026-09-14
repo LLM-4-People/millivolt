@@ -22,7 +22,7 @@ func TestAcquisitionOwnsOriginalThrottle(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				s.ClearThrottle(provider)
+				s.SetThrottle(Throttle{Provider: provider})
 				s.SetThrottle(cap)
 				second, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 20})
 				if err != nil {
@@ -75,7 +75,7 @@ func TestCancelledGrantedWaiterUsesOriginalGate(t *testing.T) {
 		w := &waiter{ch: make(chan struct{}, 1), ctx: context.Background(), provider: provider, estTokens: 40}
 		g.queue = []*waiter{w}
 		g.drain() // grant sent, but the caller has not consumed it
-		s.ClearThrottle(provider)
+		s.SetThrottle(Throttle{Provider: provider})
 		s.SetThrottle(limit)
 		release, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 20})
 		if err != nil {

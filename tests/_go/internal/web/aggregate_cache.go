@@ -160,7 +160,7 @@ func TestAggregateMemoInvalidatesDatabaseMutations(t *testing.T) {
 	if cost := api.explorerMemo.entry.value.Groups[0].Cost; cost != 0.75 {
 		t.Fatalf("external writer invisible to cache: cost %v, want 0.75", cost)
 	}
-	if _, err := s.PurgeWhere(t.Context(), storage.PurgeFilter{Provider: "new.example"}); err != nil {
+	if _, err := s.Clear(t.Context(), &storage.PurgeFilter{Provider: "new.example"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	refresh(0, "")
@@ -169,7 +169,7 @@ func TestAggregateMemoInvalidatesDatabaseMutations(t *testing.T) {
 		t.Fatal(err)
 	}
 	refresh(1, "old.example")
-	if err := s.Purge(t.Context()); err != nil {
+	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	refresh(0, "")

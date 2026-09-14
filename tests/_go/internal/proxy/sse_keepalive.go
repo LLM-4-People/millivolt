@@ -44,7 +44,7 @@ func TestWriteSSEHeadersOnPacer(t *testing.T) {
 	if got := rec.Header().Get("Content-Type"); got != "text/event-stream" {
 		t.Fatalf("Content-Type = %q, want text/event-stream", got)
 	}
-	if !p.Started() {
+	if !p.applyUpstream(nil, http.StatusOK) {
 		t.Fatal("writeSSEHeaders on *ssePacer must go through applyUpstream")
 	}
 }
@@ -54,8 +54,11 @@ func TestPacerWriteHeaderIsNotSSEComment(t *testing.T) {
 	p := newSSEPacer(rec, 15*time.Second)
 	p.Arm()
 	p.WriteHeader(http.StatusTooManyRequests)
-	if p.Started() != true {
-		t.Fatal("WriteHeader must set started")
+	// The started guard is behavioral: a second WriteHeader must be a no-op
+	// so the JSON 429 status stays committed.
+	p.WriteHeader(http.StatusInternalServerError)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second WriteHeader = %d, want the first commit to stand", rec.Code)
 	}
 	if !p.writeComment(true) {
 		t.Fatal("writeComment should keep looping")

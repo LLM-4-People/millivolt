@@ -278,10 +278,6 @@ func Brand(urlPath string) http.Handler {
 	})
 }
 
-// Favicon is Brand("/favicon.ico"): a real ICO so automatic /favicon.ico
-// fetches (and reverse proxies that sniff image types) are not given SVG.
-func Favicon() http.Handler { return Brand("/favicon.ico") }
-
 // ServeDash is the single choke point for dashboard CSS/JS. It serves only
 // allowlisted extensions from the precomputed cache (avoiding per-request
 // embed.FS.ReadFile + sha256 + gzip pool cycle). Unknown paths and `..` are

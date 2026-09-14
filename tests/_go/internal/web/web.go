@@ -144,7 +144,7 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	Favicon().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
+	Brand("/favicon.ico").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/favicon.ico", nil))
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "image/x-icon" {
 		t.Fatalf("GET /favicon.ico → %d %s, want 200 image/x-icon", rec.Code, rec.Header().Get("Content-Type"))
 	}
@@ -185,7 +185,7 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	Favicon().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/favicon.ico", nil))
+	Brand("/favicon.ico").ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/favicon.ico", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /favicon.ico → %d, want 405", rec.Code)
 	}

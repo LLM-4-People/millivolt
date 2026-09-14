@@ -39,6 +39,18 @@ func (p *countingThrottlePersist) LoadThrottle(context.Context) ([]byte, error) 
 	return append([]byte(nil), p.raw...), nil
 }
 
+// schedThrottleFor reads one provider's installed cap through the production
+// list path (ListThrottles is the dashboard GET). A provider with no gate
+// reads as a zero Throttle, matching a cleared cap.
+func schedThrottleFor(sched *scheduler.Scheduler, provider string) scheduler.Throttle {
+	for _, info := range sched.ListThrottles() {
+		if info.Provider == provider {
+			return info.Throttle
+		}
+	}
+	return scheduler.Throttle{}
+}
+
 func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
 	store := &countingThrottlePersist{}
@@ -53,7 +65,7 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if store.saves != 1 || p.scheduler.ThrottleFor(provider) != initial {
+	if store.saves != 1 || schedThrottleFor(p.scheduler, provider) != initial {
 		t.Fatal("repeated header rewrote a dashboard policy or its persistence")
 	}
 	// The opposite source direction is also a policy no-op.
@@ -61,13 +73,13 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 	if err := p.applyThrottleHeaders(r, provider, "another-client"); err != nil {
 		t.Fatal(err)
 	}
-	headerPolicy := p.scheduler.ThrottleFor(provider)
+	headerPolicy := schedThrottleFor(p.scheduler, provider)
 	if store.saves != 2 || headerPolicy.Source != scheduler.ThrottleSourceHeader || headerPolicy.UpdatedBy != "another-client" || !headerPolicy.UpdatedAt.After(initial.UpdatedAt) {
 		t.Fatal("changed header policy was not persisted with new attribution")
 	}
 	initial.Limit.Concurrency = 4
 	p.applyThrottle(initial)
-	if store.saves != 2 || p.scheduler.ThrottleFor(provider) != headerPolicy {
+	if store.saves != 2 || schedThrottleFor(p.scheduler, provider) != headerPolicy {
 		t.Fatal("identical UI cap replaced the last actual header policy change")
 	}
 	r.Header.Set(hdrLimitConcurrency, "off")
@@ -76,7 +88,7 @@ func TestThrottleUnchangedHeadersSkipPersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if store.saves != 3 || p.scheduler.ThrottleFor(provider).Limit.Active() {
+	if store.saves != 3 || schedThrottleFor(p.scheduler, provider).Limit.Active() {
 		t.Fatal("turning the same cap off must persist exactly once")
 	}
 }
@@ -103,7 +115,7 @@ func TestThrottleConcurrentHeadersMergeLatestPolicy(t *testing.T) {
 		close(start)
 		wg.Wait()
 		want := scheduler.Limit{Concurrency: 3, Requests: 10, ReqWindow: time.Minute, Tokens: 100, TokWindow: time.Minute}
-		if got := p.scheduler.ThrottleFor(provider).Limit; got != want {
+		if got := schedThrottleFor(p.scheduler, provider).Limit; got != want {
 			t.Fatalf("concurrent partial updates lost a dimension: %+v", got)
 		}
 		raw, _ := store.LoadThrottle(context.Background())
@@ -164,7 +176,7 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		close(start)
 		wg.Wait()
 		want := scheduler.Limit{Concurrency: 3, Tokens: 100, TokWindow: time.Minute}
-		if got := p.scheduler.ThrottleFor(provider).Limit; got != want {
+		if got := schedThrottleFor(p.scheduler, provider).Limit; got != want {
 			t.Fatalf("UI/header merge lost a dimension: %+v", got)
 		}
 		// A window-only update depends on the current count under that same
@@ -172,14 +184,14 @@ func TestThrottleConcurrentUIAndHeaderMerge(t *testing.T) {
 		if rr := postThrottle(t, p, `{"provider":"provider.example","token_window":"2m"}`); rr.Code != http.StatusOK {
 			t.Fatalf("window-only patch: %d %s", rr.Code, rr.Body.String())
 		}
-		before, saves := p.scheduler.ThrottleFor(provider), store.saves
+		before, saves := schedThrottleFor(p.scheduler, provider), store.saves
 		if before.Limit.Tokens != 100 || before.Limit.TokWindow != 2*time.Minute {
 			t.Fatal("window-only patch lost the current count")
 		}
 		if rr := postThrottle(t, p, `{"provider":"provider.example","concurrency":8,"tokens":-1}`); rr.Code != http.StatusBadRequest {
 			t.Fatalf("invalid UI patch status = %d", rr.Code)
 		}
-		if p.scheduler.ThrottleFor(provider) != before || store.saves != saves {
+		if schedThrottleFor(p.scheduler, provider) != before || store.saves != saves {
 			t.Fatal("invalid UI patch partly changed or persisted the policy")
 		}
 	}
@@ -280,7 +292,7 @@ func TestThrottleHeaderSetsProviderWideAndShowsInAPI(t *testing.T) {
 	}
 
 	// A different key does not need to resend the headers; the cap is provider-wide.
-	th := p.scheduler.ThrottleFor(testProvider(t, upstream.URL))
+	th := schedThrottleFor(p.scheduler, testProvider(t, upstream.URL))
 	if th.Limit.Concurrency != 3 {
 		t.Fatalf("scheduler cap = %+v", th.Limit)
 	}
@@ -306,7 +318,7 @@ func TestThrottleHeaderOffClearsDimension(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
-	th := p.scheduler.ThrottleFor(testProvider(t, upstream.URL))
+	th := schedThrottleFor(p.scheduler, testProvider(t, upstream.URL))
 	if th.Limit.Concurrency != 0 {
 		t.Errorf("concurrency still %d", th.Limit.Concurrency)
 	}
@@ -320,7 +332,7 @@ func TestThrottleHeaderOffClearsDimension(t *testing.T) {
 	})
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
-	th = p.scheduler.ThrottleFor(testProvider(t, upstream.URL))
+	th = schedThrottleFor(p.scheduler, testProvider(t, upstream.URL))
 	if th.Limit.Active() {
 		t.Fatalf("wanted all off, got %+v", th.Limit)
 	}
@@ -351,7 +363,7 @@ func TestThrottleHeaderInvalidIsAtomic(t *testing.T) {
 	if !strings.Contains(string(body), "X-Proxy-Limit-Requests") {
 		t.Errorf("error body = %s", body)
 	}
-	th := p.scheduler.ThrottleFor(testProvider(t, upstream.URL))
+	th := schedThrottleFor(p.scheduler, testProvider(t, upstream.URL))
 	if th.Limit.Concurrency != 2 {
 		t.Fatalf("partial apply: concurrency = %d, want still 2", th.Limit.Concurrency)
 	}
@@ -378,7 +390,7 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("status = %d body %s", rr.Code, rr.Body.Bytes())
 	}
-	th := p.scheduler.ThrottleFor("alpha.example")
+	th := schedThrottleFor(p.scheduler, "alpha.example")
 	if th.Limit.Concurrency != 4 || th.Limit.Requests != 30 || th.Limit.Tokens != 90000 {
 		t.Fatalf("limit = %+v", th.Limit)
 	}
@@ -390,7 +402,7 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("clear conc status = %d", rr.Code)
 	}
-	th = p.scheduler.ThrottleFor("alpha.example")
+	th = schedThrottleFor(p.scheduler, "alpha.example")
 	if th.Limit.Concurrency != 0 || th.Limit.Requests != 30 {
 		t.Fatalf("merge = %+v", th.Limit)
 	}
@@ -399,7 +411,7 @@ func TestThrottlePOSTAndClear(t *testing.T) {
 	if rr.Code != 200 {
 		t.Fatalf("clear status = %d", rr.Code)
 	}
-	if p.scheduler.ThrottleFor("alpha.example").Limit.Active() {
+	if schedThrottleFor(p.scheduler, "alpha.example").Limit.Active() {
 		t.Fatal("clear left a cap")
 	}
 }
@@ -447,7 +459,7 @@ func TestThrottlePersistsAndRestores(t *testing.T) {
 	defer store2.Close()
 	p2 := New(d, metrics.Noop{})
 	p2.AttachPausePersist(store2)
-	th := p2.scheduler.ThrottleFor("alpha.example")
+	th := schedThrottleFor(p2.scheduler, "alpha.example")
 	if th.Limit.Concurrency != 2 || th.Limit.Requests != 20 {
 		t.Fatalf("restored = %+v", th.Limit)
 	}
@@ -477,7 +489,7 @@ func TestThrottleHeaderOnModelsDoesNotConsume(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("models status = %d", resp.StatusCode)
 	}
-	th := p.scheduler.ThrottleFor(testProvider(t, upstream.URL))
+	th := schedThrottleFor(p.scheduler, testProvider(t, upstream.URL))
 	if th.Limit.Concurrency != 1 || th.Limit.Requests != 1 {
 		t.Fatalf("models did not set cap: %+v", th.Limit)
 	}

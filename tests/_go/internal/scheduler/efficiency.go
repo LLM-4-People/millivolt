@@ -31,6 +31,16 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 		s.armThrottleDrain(initial.Provider, time.Hour)
 		defer g.wake.stop()
 		req, kick := g.req, s.kickC()
+		// currentCap reads the live gate's policy the way ListThrottles does
+		// (the gate is re-looked-up: a clear deletes it and a restore builds
+		// a new one).
+		currentCap := func() Throttle {
+			gg := s.gate(initial.Provider)
+			gg.mu.Lock()
+			cur := gg.throttle
+			gg.mu.Unlock()
+			return cur
+		}
 		timer, _ := wakeTimerState(&g.wake)
 		for _, source := range []string{ThrottleSourceHeader, ThrottleSourceUI} {
 			repeated := initial
@@ -40,14 +50,14 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 				t.Fatal("identical effective cap counted as a policy change")
 			}
 			current, _ := wakeTimerState(&g.wake)
-			if s.ThrottleFor(initial.Provider) != initial || g.req != req || g.inFlight != 1 || s.kickC() != kick || current != timer {
+			if currentCap() != initial || g.req != req || g.inFlight != 1 || s.kickC() != kick || current != timer {
 				t.Fatal("no-op changed metadata, occupancy, bucket state or wakeups")
 			}
 		}
 		changed := initial
 		changed.Limit.Concurrency++
 		changed.UpdatedAt = time.Time{}
-		if !s.SetThrottle(changed) || !s.ThrottleFor(initial.Provider).UpdatedAt.Equal(time.Now()) {
+		if !s.SetThrottle(changed) || !currentCap().UpdatedAt.Equal(time.Now()) {
 			t.Fatal("actual policy change was not timestamped")
 		}
 		if timer, _ := wakeTimerState(&g.wake); timer != nil {
@@ -57,7 +67,7 @@ func TestThrottleUnchangedPreservesPolicy(t *testing.T) {
 			t.Fatal("clear must change an existing policy exactly once")
 		}
 		s.RestoreThrottles([]Throttle{initial})
-		if s.ThrottleFor(initial.Provider) != initial || s.SetThrottle(initial) {
+		if currentCap() != initial || s.SetThrottle(initial) {
 			t.Fatal("restore did not preserve policy metadata")
 		}
 	})
@@ -101,13 +111,13 @@ func TestWakeTimerCoalescesRearmsAndCancels(t *testing.T) {
 func TestSharedPacingExpiryAndCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := New(Options{})
-		s.SetRateLimit("group", time.Second)
+		s.Trip("group", time.Second)
 		g := s.groupFor("group", 0)
 		ctx, cancel := context.WithCancel(context.Background())
 		var granted, sent, cancelled atomic.Int32
 		for i := 0; i < 16; i++ {
 			go func() {
-				release, err := s.Acquire(ctx, "group", 0)
+				release, err := s.AcquireWith(ctx, "group", 0, WaiterHooks{})
 				if err != nil {
 					cancelled.Add(1)
 					return
@@ -123,7 +133,7 @@ func TestSharedPacingExpiryAndCancel(t *testing.T) {
 			}()
 		}
 		synctest.Wait()
-		s.SetRateLimit("group", 2*time.Second)
+		s.Trip("group", 2*time.Second)
 		time.Sleep(time.Second)
 		synctest.Wait()
 		if granted.Load() != 0 || sent.Load() != 0 {
@@ -139,9 +149,9 @@ func TestSharedPacingExpiryAndCancel(t *testing.T) {
 		if timer, _ := wakeTimerState(&g.pacer); sent.Load() != 16 || timer != nil {
 			t.Fatal("shared deadline did not wake every sender")
 		}
-		s.SetRateLimit("group", time.Hour)
+		s.Trip("group", time.Hour)
 		go func() {
-			release, err := s.Acquire(context.Background(), "group", 0)
+			release, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{})
 			if err != nil {
 				t.Error(err)
 				return
@@ -195,7 +205,7 @@ func TestThrottleConcurrentPolicyTimerAndCancel(t *testing.T) {
 		})
 		wg.Go(func() { time.Sleep(time.Second); cancel() })
 		wg.Wait()
-		s.ClearThrottle(provider)
+		s.SetThrottle(Throttle{Provider: provider})
 		synctest.Wait()
 		if st := s.Stats(); st.Queued != 0 || st.InFlight != 0 {
 			t.Fatalf("concurrent timer/policy/cancel leaked slots: %+v", st)
@@ -248,7 +258,7 @@ func TestCancelledThrottleHeadWakesFittingFollower(t *testing.T) {
 		s := New(Options{})
 		provider := "provider.example"
 		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Tokens: 10, TokWindow: time.Hour}})
-		defer s.ClearThrottle(provider)
+		defer s.SetThrottle(Throttle{Provider: provider})
 		release, err := s.AcquireWith(context.Background(), "group", 0, WaiterHooks{Provider: provider, EstTokens: 8})
 		if err != nil {
 			t.Fatal(err)
@@ -290,11 +300,11 @@ func TestCancelledThrottleHeadWakesFittingFollower(t *testing.T) {
 func BenchmarkAcquireUncontended(b *testing.B) {
 	s := New(Options{})
 	ctx := context.Background()
-	release, _ := s.Acquire(ctx, "group", 0)
+	release, _ := s.AcquireWith(ctx, "group", 0, WaiterHooks{})
 	release(0)
 	b.ReportAllocs()
 	for b.Loop() {
-		release, err := s.Acquire(ctx, "group", 0)
+		release, err := s.AcquireWith(ctx, "group", 0, WaiterHooks{})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -316,7 +326,7 @@ func BenchmarkThrottleWakeCoalesced(b *testing.B) {
 	s := New(Options{})
 	provider := "provider.example"
 	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Requests: 1, ReqWindow: time.Hour}})
-	defer s.ClearThrottle(provider)
+	defer s.SetThrottle(Throttle{Provider: provider})
 	s.armThrottleDrain(provider, time.Hour)
 	b.ReportAllocs()
 	for b.Loop() {
@@ -326,13 +336,13 @@ func BenchmarkThrottleWakeCoalesced(b *testing.B) {
 
 func BenchmarkAcquireQueuedCancel(b *testing.B) {
 	s := New(Options{})
-	release, _ := s.Acquire(context.Background(), "group", 1)
+	release, _ := s.AcquireWith(context.Background(), "group", 1, WaiterHooks{})
 	defer release(0)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := s.Acquire(ctx, "group", 1); err != context.Canceled {
+		if _, err := s.AcquireWith(ctx, "group", 1, WaiterHooks{}); err != context.Canceled {
 			b.Fatal(err)
 		}
 	}

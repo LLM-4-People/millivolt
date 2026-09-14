@@ -19,7 +19,7 @@ func TestPendingRecordsInSnapshot(t *testing.T) {
 
 	checkJSON := func(wantPending, wantFinal int) {
 		t.Helper()
-		data, err := b.SnapshotJSONSince(0)
+		data, err := json.Marshal(b.SnapshotSince(0))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +47,7 @@ func TestPendingRecordsInSnapshot(t *testing.T) {
 	// An update refreshes the pending view (mid-flight retry visibility).
 	rec.Attempts = append(rec.Attempts, RetryAttempt{StatusCode: 500, ErrorType: "retry"})
 	b.PublishLive("update", rec)
-	data, _ := b.SnapshotJSONSince(0)
+	data, _ := json.Marshal(b.SnapshotSince(0))
 	var p struct {
 		InFlightRecords []*Record `json:"in_flight_records"`
 	}
@@ -74,7 +74,7 @@ func TestPendingRecordsOrdered(t *testing.T) {
 	b.PublishLive("begin", later)
 	b.PublishLive("begin", earlier)
 
-	data, err := b.SnapshotJSONSince(0)
+	data, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}

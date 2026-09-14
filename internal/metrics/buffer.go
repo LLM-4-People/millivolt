@@ -3,7 +3,6 @@ package metrics
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"math"
 	"slices"
 	"sort"
@@ -705,11 +704,6 @@ func (b *Buffer) snapshotSinceLocked(since int64) Snapshot {
 		FeedID:          b.feedID,
 		Incremental:     !full,
 	}
-}
-
-// SnapshotJSONSince returns the live-payload JSON for the given cursor.
-func (b *Buffer) SnapshotJSONSince(since int64) ([]byte, error) {
-	return json.Marshal(b.SnapshotSince(since))
 }
 
 // PendingRecords returns the current in-flight begin/update snapshots

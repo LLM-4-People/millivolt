@@ -160,9 +160,10 @@ func (b *bucket) waitFor(n float64) time.Duration {
 	return d
 }
 
-// providerGate is the live limiter for one provider. Policy (Throttle) and
-// occupancy (inFlight, buckets) live together so SetThrottle and tryAdmit
-// share one mutex. The map of gates is the single owner of provider limits.
+// providerGate is the live limiter for one provider. The cap policy
+// (Throttle) and occupancy (inFlight, buckets) live together so SetThrottle
+// and tryAdmit share one mutex. The map of gates is the single owner of
+// provider limits.
 type providerGate struct {
 	mu       sync.Mutex
 	throttle Throttle
@@ -343,25 +344,6 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 	s.throttleMu.Unlock()
 	s.kickThrottles()
 	return true
-}
-
-// ClearThrottle drops the cap for provider (same as SetThrottle with a
-// zero Limit). Unknown providers are a no-op.
-func (s *Scheduler) ClearThrottle(provider string) {
-	s.SetThrottle(Throttle{Provider: provider})
-}
-
-// ThrottleFor returns a copy of the current cap, or a zero Throttle.
-func (s *Scheduler) ThrottleFor(provider string) Throttle {
-	s.throttleMu.Lock()
-	g := s.gates[provider]
-	s.throttleMu.Unlock()
-	if g == nil {
-		return Throttle{}
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.throttle
 }
 
 // ListThrottles returns every active provider cap, sorted by provider,

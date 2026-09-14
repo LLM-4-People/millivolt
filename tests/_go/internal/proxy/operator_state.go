@@ -161,7 +161,7 @@ func TestThrottleHeaderPersistenceFailureDoesNotRejectOrRewrite(t *testing.T) {
 			t.Fatalf("save failure rejected validated inference headers: %v", err)
 		}
 	}
-	if calls != 1 || p.scheduler.ThrottleFor("provider.example").Limit.Concurrency != 2 {
+	if calls != 1 || schedThrottleFor(p.scheduler, "provider.example").Limit.Concurrency != 2 {
 		t.Fatalf("save failure rolled back runtime cap or repeated no-op persistence: calls=%d", calls)
 	}
 }

@@ -176,15 +176,12 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 	return g
 }
 
-// Acquire blocks until the group's head-of-queue slot is available, respecting
-// concurrency caps, rate-limit pacing, and operator pause (AddHold / SetHolds).
-// It returns a Release that settles usage and frees the slot, or an error if
-// the context is cancelled or the wait exceeds MaxWait.
-func (s *Scheduler) Acquire(ctx context.Context, key string, maxConcurrent int) (Release, error) {
-	return s.AcquireWith(ctx, key, maxConcurrent, WaiterHooks{})
-}
-
-// AcquireWith is Acquire plus the caller's client identity and hold hooks.
+// AcquireWith blocks until the group's head-of-queue slot is available,
+// respecting concurrency caps, rate-limit pacing, and operator pause
+// (AddHold / RestoreHolds). hooks carry the caller's client and provider
+// identity plus hold callbacks. It returns a Release that settles usage and
+// frees the slot, or an error if the context is cancelled or the wait
+// exceeds MaxWait.
 func (s *Scheduler) AcquireWith(ctx context.Context, key string, maxConcurrent int, hooks WaiterHooks) (Release, error) {
 	s.mu.Lock()
 	g := s.groupForLocked(key, maxConcurrent, true)
@@ -231,14 +228,6 @@ func (s *Scheduler) kickC() <-chan struct{} {
 	ch := s.kick
 	s.pauseMu.Unlock()
 	return ch
-}
-
-// SetRateLimit pauses the group for at least d. In-flight requests already
-// on the wire are unaffected; Acquire waiters wait. A shorter follow-up
-// must not shrink a longer window (fail closed). Does not claim the retry
-// send token - use Trip for that.
-func (s *Scheduler) SetRateLimit(key string, d time.Duration) {
-	s.extendWindow(key, d, false)
 }
 
 // Trip records a retryable failure (429, 5xx, or transport): extends the
@@ -491,32 +480,6 @@ func (s *Scheduler) FailSend(key string, own bool) {
 	g.kickSendLocked()
 	g.mu.Unlock()
 	g.drain()
-}
-
-// RequestBackoff is the stored consecutive-request backoff (pre-jitter).
-func (s *Scheduler) RequestBackoff(key string) time.Duration {
-	s.mu.Lock()
-	g, ok := s.groups[key]
-	s.mu.Unlock()
-	if !ok {
-		return 0
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.requestBackoff
-}
-
-// Backoff returns the current adaptive backoff for a group.
-func (s *Scheduler) Backoff(key string) time.Duration {
-	s.mu.Lock()
-	g, ok := s.groups[key]
-	s.mu.Unlock()
-	if !ok {
-		return 0
-	}
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.backoff
 }
 
 func (g *group) kickC() <-chan struct{} {
@@ -848,7 +811,7 @@ func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Durati
 	defer g.mu.Unlock()
 	g.backoff = growBackoff(g.backoff, opts.BaseBackoff, opts.MaxBackoff)
 	// Jitter: 0.75x–1.25x to avoid thundering herd. Do not write
-	// nextAllowedAt here - only Trip/SetRateLimit trip the group.
+	// nextAllowedAt here - only Trip/FailSend trip the group.
 	adaptive := jitterBackoff(g.backoff)
 	retryAfter = ClampRetryHint(retryAfter)
 	if retryAfter > adaptive {
@@ -857,24 +820,11 @@ func (s *Scheduler) BackoffFor(key string, retryAfter time.Duration) time.Durati
 	return adaptive
 }
 
-// ResetBackoff clears the adaptive backoff after a success.
-func (s *Scheduler) ResetBackoff(key string) {
-	s.mu.Lock()
-	g, ok := s.groups[key]
-	s.mu.Unlock()
-	if !ok {
-		return
-	}
-	g.mu.Lock()
-	g.backoff = 0
-	g.mu.Unlock()
-}
-
 var (
 	// ErrQueueFull is returned when the group queue or a pause's MaxQueued
 	// cap is exhausted. The proxy maps this to HTTP 429.
 	ErrQueueFull = errorString("queue full")
-	// ErrOverlap is returned when AddHold / SetHolds / ReplaceHold would
+	// ErrOverlap is returned when AddHold / ReplaceHold would
 	// park a target already covered by another pause.
 	ErrOverlap = errorString("pause overlaps existing hold")
 	// ErrHoldNotFound is returned when ReplaceHold targets an unknown id.

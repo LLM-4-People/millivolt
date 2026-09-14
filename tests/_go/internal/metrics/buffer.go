@@ -145,7 +145,7 @@ func TestAggregateIsErrorSemantics(t *testing.T) {
 func TestSnapshotJSON(t *testing.T) {
 	b := NewBuffer(100)
 	b.Record(&Record{ID: "x", Provider: "test"})
-	raw, err := b.SnapshotJSONSince(0)
+	raw, err := json.Marshal(b.SnapshotSince(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,9 +309,10 @@ func TestAggregateToleratesNilRecord(t *testing.T) {
 	if b.Len() != 1 {
 		t.Errorf("len = %d, want 1 (nil records dropped)", b.Len())
 	}
-	// SnapshotJSONSince(0) (the live endpoint path) must not panic on the result.
-	if _, err := b.SnapshotJSONSince(0); err != nil {
-		t.Fatalf("SnapshotJSONSince: %v", err)
+	// SnapshotSince(0) plus its JSON marshal (the live endpoint path) must
+	// not panic on the result.
+	if _, err := json.Marshal(b.SnapshotSince(0)); err != nil {
+		t.Fatalf("snapshot marshal: %v", err)
 	}
 }
 

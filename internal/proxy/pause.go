@@ -259,21 +259,6 @@ func (s *Server) defaultPauseCap() int {
 	return s.cfg().MaxQueueSize
 }
 
-// SetPaused parks every client (true) or clears the hold (false).
-// In-flight slots finish; new requests queue until resume.
-func (s *Server) SetPaused(paused bool) {
-	if paused {
-		s.applyHolds([]persistedPause{{ID: newPauseID(), All: true}})
-		return
-	}
-	s.applyHolds(nil)
-}
-
-// PauseStats is the scheduler occupancy snapshot (paused / in-flight / queued).
-func (s *Server) PauseStats() scheduler.Stats {
-	return s.scheduler.Stats()
-}
-
 // HandlePause is GET/POST /admin/pause. GET returns current state; POST
 // applies {"paused": bool} (required - deny by default). paused:true adds
 // one hold (all/new/clients/providers/duration/max_queued). paused:true

@@ -149,14 +149,20 @@ func TestWriterRollbackAfterShapePromotion(t *testing.T) {
 	if err := s.rdb.QueryRow("SELECT count(*) FROM requests").Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 0 || s.Totals().Requests != 0 || s.IsWritten(first.ID) || s.IsWritten(bad.ID) {
+	written := func(id string) bool {
+		s.aggMu.Lock()
+		defer s.aggMu.Unlock()
+		_, ok := s.written[id]
+		return ok
+	}
+	if n != 0 || s.Totals().Requests != 0 || written(first.ID) || written(bad.ID) {
 		t.Fatalf("failed batch partially committed: rows=%d totals=%+v", n, s.Totals())
 	}
 	// The failed statement/transaction must not poison subsequent batches.
 	if err := s.insertBatch([]*metrics.Record{first}); err != nil {
 		t.Fatal(err)
 	}
-	if s.Totals().Requests != 1 || !s.IsWritten(first.ID) {
+	if s.Totals().Requests != 1 || !written(first.ID) {
 		t.Fatal("successful replacement batch was not accounted exactly once")
 	}
 }

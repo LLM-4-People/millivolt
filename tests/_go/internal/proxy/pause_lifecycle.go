@@ -32,7 +32,7 @@ func pausePost(t *testing.T, p *Server, body string) map[string]any {
 func TestPauseStaleTimerCannotRemoveExtendedHold(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := New(config.Default(), metrics.Noop{})
-		defer p.SetPaused(false)
+		defer p.applyHolds(nil)
 		until := time.Now().Add(time.Second)
 		p.applyHolds([]persistedPause{{ID: "hold", All: true, Until: until}})
 		// Let the old AfterFunc start while the policy mutex is held, then
@@ -54,7 +54,7 @@ func TestPauseStaleTimerCannotRemoveExtendedHold(t *testing.T) {
 
 func TestPauseConcurrentPartialEditsPreserveLatestFields(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	defer p.SetPaused(false)
+	defer p.applyHolds(nil)
 	for i := 0; i < 40; i++ {
 		p.applyHolds([]persistedPause{{ID: "hold", Clients: []string{"client"}, Duration: "1h", Until: time.Now().Add(time.Hour), MaxQueued: 1}})
 		start := make(chan struct{})
@@ -76,7 +76,7 @@ func TestPauseConcurrentPartialEditsPreserveLatestFields(t *testing.T) {
 func TestPauseOmittedDurationPreservesAbsoluteDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := New(config.Default(), metrics.Noop{})
-		defer p.SetPaused(false)
+		defer p.applyHolds(nil)
 		until := time.Now().Add(time.Hour)
 		p.applyHolds([]persistedPause{{ID: "hold", All: true, Until: until}})
 		pausePost(t, p, `{"paused":true,"id":"hold","max_queued":17}`)
@@ -97,8 +97,8 @@ func TestPauseOmittedDurationPreservesAbsoluteDeadline(t *testing.T) {
 
 func TestPauseInvalidIdentifiersAndScopesFailClosed(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.SetPaused(true)
-	defer p.SetPaused(false)
+	p.applyHolds([]persistedPause{{All: true}})
+	defer p.applyHolds(nil)
 	for _, body := range []string{
 		`{"paused":false,"id":""}`, `{"paused":false,"id":"  "}`, `{"paused":false,"id":null}`, `{"paused":false,"id":7}`,
 		`{"paused":true,"clients":null}`, `{"paused":true,"providers":null}`, `{"paused":true,"all":null}`, `{"paused":true,"new":null}`,
@@ -129,7 +129,7 @@ func (w *pauseBlockedWriter) WriteString(s string) (int, error) { return w.Write
 
 func TestPauseEditDoesNotWaitForQueuedClientWrite(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	p.SetPaused(true)
+	p.applyHolds([]persistedPause{{All: true}})
 	id := p.PauseSnapshot()["holds"].([]map[string]any)[0]["id"].(string)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`)).WithContext(ctx)
@@ -165,5 +165,5 @@ func TestPauseEditDoesNotWaitForQueuedClientWrite(t *testing.T) {
 	cancel()
 	close(w.unblock)
 	<-requestDone
-	p.SetPaused(false)
+	p.applyHolds(nil)
 }

@@ -626,10 +626,11 @@ func reloadConfig() ([]string, error) {
 	// is the single source of that classification.
 	skipped := config.StartupBoundChanges(bootCfg, fresh)
 	// A changed provider_aliases map rewrites stored history through the
-	// single-conn write pool (same serialization PurgeWhere relies on). Run
-	// before the snapshot swap so a failed rename keeps the running config.
-	// Records already in the in-memory ring keep their old label until they
-	// age out or the process restarts; new requests re-key immediately.
+	// single-conn write pool (same serialization a filtered Clear relies
+	// on). Run before the snapshot swap so a failed rename keeps the
+	// running config. Records already in the in-memory ring keep their old
+	// label until they age out or the process restarts; new requests
+	// re-key immediately.
 	if liveStore != nil && !maps.Equal(liveCfg.ProviderAliases, fresh.ProviderAliases) {
 		if _, err := liveStore.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
 			err = fmt.Errorf("provider_aliases: %w", err)

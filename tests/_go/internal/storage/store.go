@@ -88,7 +88,7 @@ func TestDataVersionTracksAllCommittedWriters(t *testing.T) {
 	if got := version(); got != before {
 		t.Fatalf("read-only query changed revision: %d -> %d", before, got)
 	}
-	if _, err := s.PurgeWhere(t.Context(), PurgeFilter{Provider: "new.example"}); err != nil {
+	if _, err := s.Clear(t.Context(), &PurgeFilter{Provider: "new.example"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	changed()
@@ -145,53 +145,6 @@ func TestDataVersionConnectionAndCancellation(t *testing.T) {
 	}
 }
 
-func TestStreamRowsOldestFirstEarlyStop(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "test.db"), testOpts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	now := time.Now()
-	for _, c := range []struct {
-		id  string
-		age time.Duration
-	}{{"newest", time.Minute}, {"oldest", time.Hour}, {"middle", 30 * time.Minute}} {
-		s.Record(&metrics.Record{ID: c.id, Start: now.Add(-c.age), StatusCode: 200})
-	}
-	waitRows(t, s, 3)
-	stop := errors.New("first row found")
-	count := 0
-	err = s.StreamRows(t.Context(), "id", "", nil, true, func(rows *sql.Rows) error {
-		count++
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return err
-		}
-		if id != "oldest" {
-			t.Fatalf("first row = %q, want oldest", id)
-		}
-		return stop
-	})
-	if !errors.Is(err, stop) || count != 1 {
-		t.Fatalf("early stop = %v after %d rows, want callback error after one", err, count)
-	}
-	var last int64
-	err = s.StreamRows(t.Context(), "started_at", "", nil, true, func(rows *sql.Rows) error {
-		var at int64
-		if err := rows.Scan(&at); err != nil {
-			return err
-		}
-		if at < last {
-			t.Fatalf("timestamps out of order: %d < %d", at, last)
-		}
-		last = at
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 // TestPurgeRebuildNeverLosesConcurrentCommits is the regression test for the
 // fixed races: a purge + totals rebuild running WHILE the writer keeps
 // committing must leave totals exactly equal to the final row count. Before
@@ -221,7 +174,7 @@ func TestPurgeRebuildNeverLosesConcurrentCommits(t *testing.T) {
 		}
 		close(done)
 	}()
-	if err := s.Purge(context.Background()); err != nil {
+	if _, err := s.Clear(context.Background(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done
@@ -750,12 +703,12 @@ func TestMigratePreAttemptsRowsKeepErrorPurgeWorking(t *testing.T) {
 	}
 
 	// The errors-only purge must delete exactly the 500 row.
-	deleted, err := s.PurgeWhere(t.Context(), PurgeFilter{HasError: true})
+	result, err := s.Clear(t.Context(), &PurgeFilter{HasError: true}, nil)
 	if err != nil {
 		t.Fatalf("errors-only purge on pre-attempts rows: %v", err)
 	}
-	if deleted != 1 {
-		t.Errorf("errors-only purge deleted %d rows, want 1", deleted)
+	if result.Deleted != 1 {
+		t.Errorf("errors-only purge deleted %d rows, want 1", result.Deleted)
 	}
 	remaining := map[string]bool{}
 	recs, err = s.LoadRecent(t.Context(), 10)
@@ -1398,7 +1351,7 @@ func TestPurgeEmptiesStore(t *testing.T) {
 	if len(before) != 3 {
 		t.Fatalf("before purge: %d records, want 3", len(before))
 	}
-	if err := s2.Purge(t.Context()); err != nil {
+	if _, err := s2.Clear(t.Context(), nil, nil); err != nil {
 		t.Fatalf("purge: %v", err)
 	}
 	after, _ := s2.LoadRecent(t.Context(), 100)
@@ -1462,10 +1415,10 @@ func seedPurgeStore(t *testing.T, s *Store) {
 	}
 }
 
-// TestPurgeWhereEmptyFilterRejected pins the deny-by-default invariant: an
-// empty filter must error and delete nothing, so a malformed filter can never
+// TestClearEmptyFilterRejected pins the deny-by-default invariant: an empty
+// filter must error and delete nothing, so a malformed filter can never
 // silently become a full wipe.
-func TestPurgeWhereEmptyFilterRejected(t *testing.T) {
+func TestClearEmptyFilterRejected(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "purge-empty.db")
 	s, err := Open(path, testOpts)
 	if err != nil {
@@ -1474,8 +1427,8 @@ func TestPurgeWhereEmptyFilterRejected(t *testing.T) {
 	defer s.Close()
 	seedPurgeStore(t, s)
 
-	if _, err := s.PurgeWhere(t.Context(), PurgeFilter{}); err == nil {
-		t.Fatal("PurgeWhere(empty) = nil error, want rejection")
+	if _, err := s.Clear(t.Context(), &PurgeFilter{}, nil); err == nil {
+		t.Fatal("Clear(empty filter) = nil error, want rejection")
 	}
 	n, err := s.CountWhere(t.Context(), PurgeFilter{})
 	if err != nil {
@@ -1486,9 +1439,9 @@ func TestPurgeWhereEmptyFilterRejected(t *testing.T) {
 	}
 }
 
-// TestPurgeWhereFiltersRows verifies a filtered purge deletes exactly the
+// TestClearFiltersRows verifies a filtered purge deletes exactly the
 // matching rows and leaves the rest.
-func TestPurgeWhereFiltersRows(t *testing.T) {
+func TestClearFiltersRows(t *testing.T) {
 	cases := []struct {
 		name     string
 		filter   PurgeFilter
@@ -1536,12 +1489,12 @@ func TestPurgeWhereFiltersRows(t *testing.T) {
 			defer s.Close()
 			seedPurgeStore(t, s)
 
-			deleted, err := s.PurgeWhere(t.Context(), tc.filter)
+			result, err := s.Clear(t.Context(), &tc.filter, nil)
 			if err != nil {
-				t.Fatalf("PurgeWhere: %v", err)
+				t.Fatalf("filtered Clear: %v", err)
 			}
-			if int(deleted) != len(tc.wantGone) {
-				t.Errorf("deleted = %d, want %d", deleted, len(tc.wantGone))
+			if result.Deleted != int64(len(tc.wantGone)) {
+				t.Errorf("deleted = %d, want %d", result.Deleted, len(tc.wantGone))
 			}
 			remaining, err := s.LoadRecent(t.Context(), 100)
 			if err != nil {
@@ -1565,10 +1518,10 @@ func TestPurgeWhereFiltersRows(t *testing.T) {
 	}
 }
 
-// TestPurgeWhereMatchRecordParity pins SQL and in-memory purge predicates to
+// TestPurgeFilterMatchRecordParity pins SQL and in-memory purge predicates to
 // the same result set, so the live ring and the database can never disagree
 // about what a filter deletes.
-func TestPurgeWhereMatchRecordParity(t *testing.T) {
+func TestPurgeFilterMatchRecordParity(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "purge-parity.db")
 	s, err := Open(path, testOpts)
 	if err != nil {

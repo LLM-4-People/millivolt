@@ -158,7 +158,7 @@ func TestWaitSendHonorHoldUntilUnpause(t *testing.T) {
 	case <-time.After(40 * time.Millisecond):
 	}
 
-	holds := s.HoldsList()
+	holds := s.policy.Load().list()
 	if len(holds) != 1 {
 		t.Fatalf("holds = %d, want 1", len(holds))
 	}
@@ -187,7 +187,7 @@ func TestWaitSendRetryAfterRemainingAcrossPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(80 * time.Millisecond) // window opens during pause
-	holds := s.HoldsList()
+	holds := s.policy.Load().list()
 	s.RemoveHold(holds[0].ID)
 
 	start := time.Now()
@@ -211,7 +211,7 @@ func TestWaitSendRetryAfterRemainingAfterShortPause(t *testing.T) {
 	// Wall-clock pacing: the pause consumes 40ms of the 200ms window, so the
 	// remaining ~160ms must still be waited after unpause.
 	time.Sleep(40 * time.Millisecond)
-	s.RemoveHold(s.HoldsList()[0].ID)
+	s.RemoveHold(s.policy.Load().list()[0].ID)
 	start := time.Now()
 	if _, err := s.WaitSend(ctx, "k", WaiterHooks{Client: "c"}, true, true); err != nil {
 		t.Fatal(err)
@@ -253,19 +253,21 @@ func TestWaitSendKeysIsolated(t *testing.T) {
 	}
 }
 
-func TestSetRateLimitDoesNotShrinkWindow(t *testing.T) {
+// TestTripDoesNotShrinkWindow pins extendWindow's fail-closed guard (Trip's
+// path): a shorter follow-up must never shrink a longer pacing window.
+func TestTripDoesNotShrinkWindow(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	s.SetRateLimit("k", 200*time.Millisecond)
-	s.SetRateLimit("k", 20*time.Millisecond)
+	s.Trip("k", 200*time.Millisecond)
+	s.Trip("k", 20*time.Millisecond)
 	start := time.Now()
-	rel, err := s.Acquire(ctx, "k", 0)
+	rel, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rel(0)
 	if elapsed := time.Since(start); elapsed < 150*time.Millisecond {
-		t.Errorf("Acquire returned in %v; shorter SetRateLimit shrank the window", elapsed)
+		t.Errorf("Acquire returned in %v; shorter Trip shrank the window", elapsed)
 	}
 }
 
@@ -327,20 +329,41 @@ func TestWaitSendCancelDoesNotReleaseOwner(t *testing.T) {
 func TestFailSendDoublesRequestBackoff(t *testing.T) {
 	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: 400 * time.Millisecond})
 	s.FailSend("k", false)
-	if got := s.RequestBackoff("k"); got != 80*time.Millisecond {
+	if _, got := groupBackoffState(s, "k"); got != 80*time.Millisecond {
 		t.Fatalf("first fail backoff = %v, want 80ms", got)
 	}
 	s.FailSend("k", false)
-	if got := s.RequestBackoff("k"); got != 160*time.Millisecond {
+	if _, got := groupBackoffState(s, "k"); got != 160*time.Millisecond {
 		t.Fatalf("second fail backoff = %v, want 160ms", got)
 	}
 	s.FailSend("k", false)
-	if got := s.RequestBackoff("k"); got != 320*time.Millisecond {
+	if _, got := groupBackoffState(s, "k"); got != 320*time.Millisecond {
 		t.Fatalf("third fail backoff = %v, want 320ms", got)
 	}
 	s.FailSend("k", false)
-	if got := s.RequestBackoff("k"); got != 400*time.Millisecond {
+	if _, got := groupBackoffState(s, "k"); got != 400*time.Millisecond {
 		t.Fatalf("capped fail backoff = %v, want 400ms", got)
+	}
+}
+
+// TestFailSendOwnClearsAttemptBackoff pins the own=true half of FailSend: the
+// finished owner's attempt streak is wiped so the next request's adaptive
+// backoff starts from base, while a sibling failure must not touch it (the
+// sibling half is TestFailSendSiblingKeepsOwnerAttemptBackoff below).
+func TestFailSendOwnClearsAttemptBackoff(t *testing.T) {
+	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: time.Second})
+	if d := s.BackoffFor("k", 0); d <= 0 {
+		t.Fatal("expected attempt backoff")
+	}
+	if attempt, _ := groupBackoffState(s, "k"); attempt != 80*time.Millisecond {
+		t.Fatalf("attempt backoff = %v, want 80ms", attempt)
+	}
+	s.FailSend("k", true)
+	if attempt, _ := groupBackoffState(s, "k"); attempt != 0 {
+		t.Fatalf("owner FailSend kept attempt backoff = %v, want 0", attempt)
+	}
+	if d := s.BackoffFor("k", 0); d < 60*time.Millisecond || d > 100*time.Millisecond {
+		t.Fatalf("post-owner backoff = %v, want ~base 80ms (streak must restart)", d)
 	}
 }
 
@@ -360,15 +383,15 @@ func TestEndSendResetsRequestBackoff(t *testing.T) {
 	s := New(Options{BaseBackoff: 80 * time.Millisecond, MaxBackoff: 200 * time.Millisecond})
 	s.FailSend("k", false)
 	s.FailSend("k", false)
-	if s.RequestBackoff("k") == 0 {
+	if _, request := groupBackoffState(s, "k"); request == 0 {
 		t.Fatal("expected leftover request backoff")
 	}
 	if !s.Trip("k", time.Millisecond) {
 		t.Fatal("expected to own")
 	}
 	s.EndSend("k", true) // recovered after retries
-	if got := s.RequestBackoff("k"); got != 0 {
-		t.Fatalf("request backoff after success = %v, want 0", got)
+	if _, request := groupBackoffState(s, "k"); request != 0 {
+		t.Fatalf("request backoff after success = %v, want 0", request)
 	}
 	start := time.Now()
 	if _, err := s.WaitSend(context.Background(), "k", WaiterHooks{}, false, false); err != nil {
@@ -378,17 +401,17 @@ func TestEndSendResetsRequestBackoff(t *testing.T) {
 		t.Fatalf("probe after recovered request waited %v, want immediate", elapsed)
 	}
 	s.FailSend("k", false)
-	if got := s.RequestBackoff("k"); got != 80*time.Millisecond {
-		t.Fatalf("fail after success = %v, want base 80ms not leftover 2^n", got)
+	if _, request := groupBackoffState(s, "k"); request != 80*time.Millisecond {
+		t.Fatalf("fail after success = %v, want base 80ms not leftover 2^n", request)
 	}
 }
 
 func TestFailSendDoesNotShrinkExistingWindow(t *testing.T) {
 	s := New(Options{BaseBackoff: 20 * time.Millisecond, MaxBackoff: 20 * time.Millisecond})
-	s.SetRateLimit("k", 120*time.Millisecond)
+	s.Trip("k", 120*time.Millisecond)
 	s.FailSend("k", false)
 	start := time.Now()
-	rel, err := s.Acquire(context.Background(), "k", 0)
+	rel, err := s.AcquireWith(context.Background(), "k", 0, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +447,7 @@ func TestWaitSendOnHoldCallbacks(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("OnHold not fired")
 	}
-	s.RemoveHold(s.HoldsList()[0].ID)
+	s.RemoveHold(s.policy.Load().list()[0].ID)
 	done2 := make(chan struct{})
 	go func() { unheld.Wait(); close(done2) }()
 	select {
@@ -485,7 +508,7 @@ func TestFailSendSiblingKeepsOwnerAttemptBackoff(t *testing.T) {
 	if d := s.BackoffFor("k", 0); d <= 0 {
 		t.Fatal("expected attempt backoff")
 	}
-	want := s.Backoff("k")
+	want, _ := groupBackoffState(s, "k")
 	if want != 80*time.Millisecond {
 		t.Fatalf("attempt backoff = %v, want 80ms", want)
 	}
@@ -493,7 +516,7 @@ func TestFailSendSiblingKeepsOwnerAttemptBackoff(t *testing.T) {
 		t.Fatal("expected to own")
 	}
 	s.FailSend("k", false)
-	if got := s.Backoff("k"); got != want {
+	if got, _ := groupBackoffState(s, "k"); got != want {
 		t.Fatalf("sibling FailSend wiped owner attempt backoff: %v, want %v", got, want)
 	}
 	g := s.groupFor("k", 0)

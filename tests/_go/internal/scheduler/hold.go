@@ -47,7 +47,7 @@ func TestAddHoldRejectsOverlap(t *testing.T) {
 	if err := s.AddHold(Hold{Clients: []string{"client-b"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.HoldsList(); len(got) != 2 {
+	if got := s.policy.Load().list(); len(got) != 2 {
 		t.Fatalf("holds = %d, want 2", len(got))
 	}
 }
@@ -86,7 +86,7 @@ func TestPauseByProviderDoesNotBlockOtherProvider(t *testing.T) {
 		t.Fatal("alpha.example request granted while provider held")
 	case <-time.After(40 * time.Millisecond):
 	}
-	s.RemoveHold(s.HoldsList()[0].ID)
+	s.RemoveHold(s.policy.Load().list()[0].ID)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -103,9 +103,9 @@ func TestRemoveOneHoldLeavesTheOther(t *testing.T) {
 	if err := s.AddHold(Hold{Clients: []string{"b"}}); err != nil {
 		t.Fatal(err)
 	}
-	holds := s.HoldsList()
+	holds := s.policy.Load().list()
 	if len(holds) != 2 {
-		t.Fatalf("holds = %d", len(holds))
+		t.Fatalf("holds = %d, want 2", len(holds))
 	}
 	var idA string
 	for _, h := range holds {
@@ -159,21 +159,7 @@ func TestPauseQueueCapRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	rel(0)
-	s.SetPaused(false)
-}
-
-func TestSetHoldsRejectsOverlappingList(t *testing.T) {
-	s := New(Options{})
-	err := s.SetHolds([]Hold{
-		{Clients: []string{"a"}},
-		{Providers: []string{"p"}},
-	})
-	if !errors.Is(err, ErrOverlap) {
-		t.Fatalf("err = %v, want ErrOverlap", err)
-	}
-	if s.Paused() {
-		t.Fatal("rejected SetHolds must not apply")
-	}
+	s.RestoreHolds(nil)
 }
 
 func TestUntilWakesHeldWaiter(t *testing.T) {
@@ -226,7 +212,7 @@ func TestConcurrentAddHoldKeepsBoth(t *testing.T) {
 			_ = s.AddHold(Hold{Clients: []string{"b"}})
 		}()
 		wg.Wait()
-		if n := len(s.HoldsList()); n != 2 {
+		if n := len(s.policy.Load().list()); n != 2 {
 			t.Fatalf("iter %d: holds = %d, want 2", i, n)
 		}
 		if !s.Holds("a") || !s.Holds("b") {
@@ -249,7 +235,7 @@ func TestConcurrentRemoveHoldClearsBoth(t *testing.T) {
 		go func() { defer wg.Done(); s.RemoveHold("ha") }()
 		go func() { defer wg.Done(); s.RemoveHold("hb") }()
 		wg.Wait()
-		if n := len(s.HoldsList()); n != 0 {
+		if n := len(s.policy.Load().list()); n != 0 {
 			t.Fatalf("iter %d: holds = %d, want 0", i, n)
 		}
 	}
@@ -297,7 +283,7 @@ func TestAlreadyQueuedExceedsCap(t *testing.T) {
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("new acquire err = %v, want ErrQueueFull", err)
 	}
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	rel(0)
 }
 
@@ -327,7 +313,7 @@ func TestMaxQueuedZeroUnlimited(t *testing.T) {
 	if parked.Load() != 3 {
 		t.Fatalf("unlimited cap parked = %d, want 3", parked.Load())
 	}
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 }
 
 func TestPairHoldANDMatch(t *testing.T) {
@@ -361,7 +347,7 @@ func TestPairHoldANDMatch(t *testing.T) {
 		t.Fatal("pair hold granted the matching request")
 	case <-time.After(40 * time.Millisecond):
 	}
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -377,7 +363,7 @@ func TestTwoProviderHoldsAllowed(t *testing.T) {
 	if err := s.AddHold(Hold{Providers: []string{"beta.example"}}); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(s.HoldsList()); n != 2 {
+	if n := len(s.policy.Load().list()); n != 2 {
 		t.Fatalf("holds = %d, want 2", n)
 	}
 }
@@ -447,7 +433,7 @@ func TestHeldCancelDoesNotUnderCountInFlight(t *testing.T) {
 		t.Fatal("cancel did not return")
 	}
 	rel(0)
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	select {
 	case <-got:
 	case <-time.After(time.Second):
@@ -482,8 +468,9 @@ func TestReplaceHoldKeepsIDAndWaiters(t *testing.T) {
 	if err := s.ReplaceHold(Hold{ID: "h1", Clients: []string{"c"}, MaxQueued: 4}); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(s.HoldsList()); n != 1 || s.HoldsList()[0].ID != "h1" {
-		t.Fatalf("holds after replace = %+v", s.HoldsList())
+	holds := s.policy.Load().list()
+	if len(holds) != 1 || holds[0].ID != "h1" {
+		t.Fatalf("holds after replace = %+v", holds)
 	}
 	select {
 	case <-got:
@@ -522,7 +509,7 @@ func TestReplaceHoldRejectsOverlapAndMissing(t *testing.T) {
 func TestAddHoldWakesCapWaiter(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +552,7 @@ func TestAddHoldWakesCapWaiter(t *testing.T) {
 func TestReplaceHoldWakesCapWaiter(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -610,7 +597,7 @@ func TestReplaceHoldWakesCapWaiter(t *testing.T) {
 func TestReplaceHoldOnHoldDuringOnWait(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +640,7 @@ func TestReplaceHoldOnHoldDuringOnWait(t *testing.T) {
 func TestAddHoldSeedsMaxQueuedBeforeAdopt(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,14 +662,14 @@ func TestAddHoldSeedsMaxQueuedBeforeAdopt(t *testing.T) {
 	if !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("new acquire err = %v, want ErrQueueFull (count seeded at AddHold)", err)
 	}
-	holds := s.HoldsList()
+	holds := s.policy.Load().list()
 	if len(holds) != 1 {
 		t.Fatalf("holds = %d, want 1", len(holds))
 	}
 	if got := s.HoldQueued(holds[0].ID); got != 1 {
 		t.Fatalf("HoldQueued = %d, want 1 (seed×adopt must not double-count)", got)
 	}
-	s.SetPaused(false)
+	s.RestoreHolds(nil)
 	rel(0)
 }
 
@@ -737,7 +724,7 @@ func TestAdoptHoldExactlyOnceConcurrent(t *testing.T) {
 func TestHoldQueuedEqualsWaitersAfterSeedAndAdopt(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,7 +770,7 @@ func TestHoldQueuedEqualsWaitersAfterSeedAndAdopt(t *testing.T) {
 func TestAddHoldSeedsWhenOnWaitBlocked(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +823,7 @@ func TestAddHoldSeedsWhenOnWaitBlocked(t *testing.T) {
 func TestReplaceHoldDoesNotLeakQueuedCount(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -925,7 +912,7 @@ func TestReplaceHoldDoesNotLeakQueuedCount(t *testing.T) {
 func TestSeedNeverAdoptsDepartedWaiter(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
-	rel, err := s.Acquire(ctx, "k", 1)
+	rel, err := s.AcquireWith(ctx, "k", 1, WaiterHooks{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1010,7 @@ func TestSeedNeverAdoptsDepartedWaiter(t *testing.T) {
 	departure(w2Done, "w2")
 	departure(w1Done, "w1")
 	w2Departed.Store(true)
-	holds := s.HoldsList()
+	holds := s.policy.Load().list()
 	if len(holds) != 1 {
 		t.Fatalf("holds = %d, want 1", len(holds))
 	}
@@ -1180,7 +1167,7 @@ func TestSeedDepartureRaceStressNoLeak(t *testing.T) {
 		var cancels []context.CancelFunc
 		var wDones []chan error
 		for g := 0; g < groups; g++ {
-			rel, err := s.Acquire(ctx, fmt.Sprintf("k%d", g), 1)
+			rel, err := s.AcquireWith(ctx, fmt.Sprintf("k%d", g), 1, WaiterHooks{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1222,7 +1209,7 @@ func TestSeedDepartureRaceStressNoLeak(t *testing.T) {
 				t.Fatalf("iter %d: waiter %d did not return after cancel", i, g)
 			}
 		}
-		holds := s.HoldsList()
+		holds := s.policy.Load().list()
 		if len(holds) != 1 {
 			t.Fatalf("iter %d: holds = %d, want 1", i, len(holds))
 		}

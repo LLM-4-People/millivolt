@@ -159,7 +159,7 @@ func TestThrottleClearUnblocksWaiters(t *testing.T) {
 	// The waiter must be parked on the concurrency cap before the clear, so
 	// the clear truly exercises the wakeup of a parked waiter.
 	waitFor(t, func() bool { return s.Stats().Queued >= 1 }, "throttled waiter to queue")
-	s.ClearThrottle("p")
+	s.SetThrottle(Throttle{Provider: "p"})
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -216,8 +216,8 @@ func TestThrottleOnThrottleHook(t *testing.T) {
 	// Clearing the cap is the observable lift: kickThrottles (pauseMu, never
 	// holdCountMu) wakes the parked waiter and its wait loop re-checks
 	// throttleBlocked → OnUnthrottle must fire before the grant returns.
-	s.ClearThrottle("p")
-	waitFor(t, func() bool { return !throttled.Load() }, "OnUnthrottle to fire after ClearThrottle")
+	s.SetThrottle(Throttle{Provider: "p"})
+	waitFor(t, func() bool { return !throttled.Load() }, "OnUnthrottle to fire after the cap clear")
 	select {
 	case <-done:
 	case <-time.After(time.Second):
@@ -282,10 +282,17 @@ func TestThrottleListAndRestore(t *testing.T) {
 		ts = append(ts, inf.Throttle)
 	}
 	s2.RestoreThrottles(ts)
-	if s2.ThrottleFor("b.com").Limit.Concurrency != 2 {
+	restored := func(provider string) Throttle {
+		g := s2.gate(provider)
+		g.mu.Lock()
+		cur := g.throttle
+		g.mu.Unlock()
+		return cur
+	}
+	if restored("b.com").Limit.Concurrency != 2 {
 		t.Fatal("restore missed concurrency")
 	}
-	if s2.ThrottleFor("a.com").Limit.Requests != 10 {
+	if restored("a.com").Limit.Requests != 10 {
 		t.Fatal("restore missed requests")
 	}
 }

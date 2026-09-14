@@ -812,15 +812,6 @@ func (s *Store) Totals() Totals {
 	return s.totals
 }
 
-// IsWritten reports whether a record id is among the recently committed rows -
-// the exact dedupe boundary for ring/stored merges.
-func (s *Store) IsWritten(id string) bool {
-	s.aggMu.Lock()
-	defer s.aggMu.Unlock()
-	_, ok := s.written[id]
-	return ok
-}
-
 // MarkWritten primes the written-id set with ids that were persisted BEFORE
 // this process started (the startup ring backfill). Without it a fresh
 // process would treat every backfilled record as "not yet written" and the
@@ -1390,12 +1381,6 @@ func (s *Store) Flush() error {
 	}
 }
 
-// Purge explicitly clears all durable history through the writer boundary.
-func (s *Store) Purge(ctx context.Context) error {
-	_, err := s.Clear(ctx, nil, nil)
-	return err
-}
-
 // purgeableColumns is the allowlist of columns a filtered purge may target.
 // Deny by default: only these exact columns may appear in a purge WHERE clause,
 // and they are always bound as parameters (never interpolated), so a purge can
@@ -1466,8 +1451,8 @@ func (f PurgeFilter) Validate() error {
 
 // MatchRecord is the in-memory predicate equivalent of the SQL filter: it
 // reports whether a buffered record matches every set constraint. Used to drop
-// the same records from the live ring buffer that PurgeWhere deletes from the
-// database, so the two never disagree.
+// the same records from the live ring buffer that a filtered Clear deletes
+// from the database, so the two never disagree.
 func (f PurgeFilter) MatchRecord(r *metrics.Record) bool {
 	if r == nil {
 		return false
@@ -1571,21 +1556,13 @@ func (f PurgeFilter) build() (string, []any) {
 	return strings.Join(where, " AND "), args
 }
 
-// PurgeWhere deletes only the rows matching the filter, returning the count
-// deleted. An empty filter is rejected (callers must use Purge for a full wipe)
-// so a filtered purge can never accidentally become a delete-everything.
-func (s *Store) PurgeWhere(ctx context.Context, f PurgeFilter) (int64, error) {
-	result, err := s.Clear(ctx, &f, nil)
-	return result.Deleted, err
-}
-
 // RenameProviders merges provider labels in stored history: every row whose
 // provider matches an alias key is rewritten to its canonical label. Driven by
 // config (provider_aliases) - a label split by a naming-scheme change is
 // repaired generically, never with provider-specific code. Serialization with
 // the writer goroutine comes from the single-connection write pool (the same
-// shape PurgeWhere relies on); totals are label-independent, so no rebuild is
-// needed. Malformed pairs are skipped (config Validate already rejects them -
+// shape a filtered Clear relies on); totals are label-independent, so no
+// rebuild is needed. Malformed pairs are skipped (config Validate already rejects them -
 // this is the last-chance deny), and each UPDATE is parameterized.
 func (s *Store) RenameProviders(ctx context.Context, aliases map[string]string) (int64, error) {
 	if s == nil || len(aliases) == 0 {
@@ -1678,36 +1655,6 @@ func (s *Store) StreamProjection(ctx context.Context, columns string, cursor Pro
 	}
 	next.Ready = true
 	return next, full, nil
-}
-
-// StreamRows runs a SELECT (column list chosen by the caller - the dashboard
-// aggregator) on the read pool and feeds each row to fn. Rows are scanned in
-// caller-defined column order; fn must consume before the next call.
-// orderByStart selects the existing timestamp index's oldest-first order,
-// allowing a caller to stop after its first matching row without a full scan.
-// Bounded by withQueryTimeout like LoadRecent/CountWhere (a 0 fail-closes);
-// callers that already pass queryCtx nest safely.
-func (s *Store) StreamRows(ctx context.Context, columns, where string, args []any, orderByStart bool, fn func(*sql.Rows) error) error {
-	ctx, cancel := s.withQueryTimeout(ctx)
-	defer cancel()
-	q := "SELECT " + columns + " FROM requests"
-	if where != "" {
-		q += " WHERE " + where
-	}
-	if orderByStart {
-		q += " ORDER BY started_at ASC"
-	}
-	rows, err := s.rdb.QueryContext(ctx, q, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		if err := fn(rows); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
 }
 
 // DataVersion identifies committed database content for aggregate memoization.
