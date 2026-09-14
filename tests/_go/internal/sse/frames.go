@@ -1,6 +1,9 @@
 package sse
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 // The frame primitives are the single owner of the proxy's client-facing SSE
 // wire bytes. These tests pin the exact bytes so a change to the envelope,
@@ -64,5 +67,18 @@ func TestDataPayload(t *testing.T) {
 		if ok != c.ok || (ok && string(payload) != c.payload) {
 			t.Fatalf("DataPayload(%q) = (%q, %v), want (%q, %v)", c.line, payload, ok, c.payload, c.ok)
 		}
+	}
+}
+
+// The marshal-failure arm of the emit pipeline: an unmarshalable payload
+// surfaces the marshal error and writes nothing - no empty or partial frame
+// ever reaches the wire.
+func TestEmitFrameMarshalFailureWritesNothing(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitFrame(&buf, nil, map[string]any{"x": make(chan int)}); err == nil {
+		t.Fatal("unmarshalable payload: EmitFrame returned nil, want the marshal error")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("buffer = %q, want nothing written on marshal failure", buf.String())
 	}
 }

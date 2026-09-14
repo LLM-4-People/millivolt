@@ -57,10 +57,11 @@ func extractToolResults(body []byte) []cursorToolResult {
 }
 
 // flattenContent renders one OpenAI message content field as plain text:
-// a bare string stays itself, an array of {type:"text"} parts is joined,
-// and any other shape reports false. The tool-result reader, the
-// input-token estimate and the relay's non-streaming answer-content walk
-// share it so the content walks cannot drift.
+// a bare string stays itself, an array of parts joins the text field of
+// every part that carries one (whatever its type), and any other shape
+// reports false. The tool-result reader, the input-token estimate and the
+// relay's non-streaming answer-content walk share it so the content walks
+// cannot drift.
 func flattenContent(raw json.RawMessage) (string, bool) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {

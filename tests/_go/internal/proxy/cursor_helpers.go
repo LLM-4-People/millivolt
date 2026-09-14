@@ -83,7 +83,10 @@ func TestFlattenContentRows(t *testing.T) {
 // The relay's non-streaming answer-content leg reads flattenContent too
 // (HadAnswerContent and the gated response preview both derive from it): a
 // mixed parts answer counts as content with only its text parts carrying
-// text, and an all-non-text parts body carries no text at all.
+// text, an all-non-text parts body carries no text at all, and a part with
+// a non-string type still contributes its text - the canonical decode reads
+// only the text field, so the old hand-rolled twin's strict type decode is
+// gone for good.
 func TestRelayAnswerContentWalksPartsThroughFlattenContent(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -93,6 +96,7 @@ func TestRelayAnswerContentWalksPartsThroughFlattenContent(t *testing.T) {
 	}{
 		{"mixed parts keep only their text", `[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"audio","audio":{}}]`, true, "a"},
 		{"all-non-text parts carry no text", `[{"type":"image_url","image_url":{"url":"x"}}]`, false, ""},
+		{"non-string type part still contributes text", `[{"type":123,"text":"odd"}]`, true, "odd"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"choices":[{"message":{"role":"assistant","content":` + tc.content + `}}]}`)

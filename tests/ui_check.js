@@ -4998,7 +4998,7 @@ async function main() {
     try {
       await sleep(60);
 
-      // recordIsError mirrors metrics.Record.IsError. The 21 rows mirror the
+      // recordIsError mirrors metrics.Record.IsError. The 22 rows mirror the
       // semantics of tests/_go/internal/metrics/iserror_corpus.go (the Go
       // suite owns the corpus); the JS predicate must agree on every row.
       const corpus = [
@@ -5014,6 +5014,7 @@ async function main() {
         ['recovered after absorbed 500 (the >= 500 boundary)', {status_code: 200, attempts: [{status_code: 500}]}, true],
         ['recovered after absorbed 429 only', {status_code: 200, attempts: [{status_code: 429, error_type: 'rate_limit'}]}, false],
         ['final 429 after an absorbed 5xx', {status_code: 429, attempts: [{status_code: 503}]}, true],
+        ['429 after an absorbed 500 still counts (flow-arm boundary)', {status_code: 429, rate_limited: true, attempts: [{status_code: 500}]}, true],
         ['queue wait is not429', {status_code: 200}, false],
         ['typed final429 without broad flag', {status_code: 429, error_type: 'insufficient_quota'}, false],
         ['recovered429 twice', {status_code: 200, attempts: [{status_code: 429}, {status_code: 429}]}, false],
@@ -5025,7 +5026,7 @@ async function main() {
         ['cancel after429', {status_code: 499, attempts: [{status_code: 429}]}, false],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 21-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 22-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate.go on

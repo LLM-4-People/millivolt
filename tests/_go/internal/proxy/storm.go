@@ -161,6 +161,10 @@ func TestStormQueueRejectionOnQualityResendRecordsDecidedStatus(t *testing.T) {
 	cfg.MaxRetries = 0      // request 1 surfaces its 503 without any retry
 	cfg.StormMaxRetries = 0 // no storm-budget retry either: the 503 surfaces, the storm stays tripped
 	cfg.QualityRetries = 1
+	// The second Retry-After fixture leg: this rejection must render THIS
+	// config's whole-second value (7), distinct from the "5" the queue-timeout
+	// storm suite pins, so a hard-coded Retry-After cannot pass every leg.
+	cfg.QueueRetryAfter = 7 * time.Second
 	// Request 2's first send waits one backoff (15ms <= 20ms max) and passes;
 	// the absorb's quality-failure observation doubles the backoff (30ms), so
 	// the QUALITY RE-SEND's wait is the one that exceeds the max wait.
@@ -178,8 +182,8 @@ func TestStormQueueRejectionOnQualityResendRecordsDecidedStatus(t *testing.T) {
 	// The upstream serves the degenerate 200 on call 2; the re-send never
 	// reaches it.
 	w = stormRequest(t, s, up.URL, "model-a", "key-a")
-	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
-		t.Fatalf("quality re-send must be rejected with 429: status=%d body=%s", w.Code, w.Body.String())
+	if w.Code != 429 || w.Header().Get("Retry-After") != "7" {
+		t.Fatalf("quality re-send must be rejected with 429: status=%d retry-after=%q body=%s", w.Code, w.Header().Get("Retry-After"), w.Body.String())
 	}
 	rows := buf.Snapshot()
 	if len(rows) != 2 {

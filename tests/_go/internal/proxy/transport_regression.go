@@ -86,6 +86,30 @@ func TestRegressionSplitTerminalUsage(t *testing.T) {
 	if rec.Usage.InputTokens != 100 || rec.Usage.OutputTokens != 50 || rec.Cost != 0.02 {
 		t.Fatalf("fragmented terminal usage: input=%d output=%d cost=%g finish=%q body=%q", rec.Usage.InputTokens, rec.Usage.OutputTokens, rec.Cost, rec.FinishReason, w.Body.String())
 	}
+
+	// The provider-key legs of analyzerFor: a provider configured with
+	// usage_keys/cost_keys must be read through its own paths (both below sit
+	// outside every built-in candidate list, so dropping the wiring reddens
+	// here instead of silently falling back to auto-detection).
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{
+		"p": {
+			CostKeys:  []string{"billing.amount"},
+			UsageKeys: map[string]string{"input_tokens": "x.inputTokens"},
+		},
+	}
+	pwire := terminalReadChunks{
+		`data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}` + "\n\n" +
+			`data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"x":{"inputTokens":100},"completion_tokens":50,"total_tokens":150},"billing":{"amount":0.03}}` + "\n\n" +
+			`data: [DONE]` + "\n\n",
+	}
+	pp := New(cfg, nil)
+	prec := &metrics.Record{Provider: "p"}
+	pw := httptest.NewRecorder()
+	pp.streamBody(context.Background(), pw, &pwire, prec, false)
+	if prec.Usage.InputTokens != 100 || prec.Usage.OutputTokens != 50 || prec.Cost != 0.03 {
+		t.Fatalf("provider-keyed terminal usage: input=%d output=%d cost=%g body=%q", prec.Usage.InputTokens, prec.Usage.OutputTokens, prec.Cost, pw.Body.String())
+	}
 }
 
 func TestRegressionAnalyzerOwnsUsage(t *testing.T) {

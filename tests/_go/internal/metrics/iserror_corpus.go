@@ -31,6 +31,7 @@ var isErrorCorpus = []isErrorRow{
 	{"recovered after absorbed 500 (the >= 500 boundary)", Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 500}}}, true, false},
 	{"recovered after absorbed 429 only", Record{StatusCode: 200, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 429, ErrorType: "rate_limit"}}}, false, true},
 	{"final 429 after an absorbed 5xx", Record{StatusCode: 429, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 503}}}, true, true},
+	{"429 after an absorbed 500 still counts (flow-arm boundary)", Record{StatusCode: 429, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 500}}}, true, true},
 	{"queue wait is not429", Record{StatusCode: 200, QueueWaitMs: 10, RateLimited: true}, false, false},
 	{"typed final429 without broad flag", Record{StatusCode: 429, ErrorType: "insufficient_quota"}, false, true},
 	{"recovered429 twice", Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 429}, {StatusCode: 429}}}, false, true},

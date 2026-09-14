@@ -852,15 +852,8 @@ func usageChunk(w http.ResponseWriter, id, model string, includeUsage bool, prom
 		return err
 	}
 	obj := sse.Chunk(id, time.Now().Unix(), model, []map[string]any{}, map[string]any{"usage": usageWire(counts)})
-	if b, err := json.Marshal(obj); err == nil {
-		if _, werr := w.Write(sse.DataFrame(b)); werr != nil {
-			return werr
-		}
-	}
-	if f, ok := w.(http.Flusher); ok {
-		f.Flush()
-	}
-	return nil
+	flusher, _ := w.(http.Flusher)
+	return sse.EmitFrame(w, flusher, obj)
 }
 
 // serveRunJSON drives a fresh run's turn and writes a single chat.completion.
