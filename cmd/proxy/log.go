@@ -153,14 +153,17 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if hasBody {
 			filter = &f
 		}
-		var result storage.PurgeResult
 		if store != nil {
-			result, err = store.Clear(r.Context(), filter, buffer)
+			// The deletion counts are storage.PurgeResult, the store-level
+			// contract; no wire consumer reads them (the dashboard confirms
+			// from the count preview and bootstraps after), so the response
+			// carries ok only.
+			_, err = store.Clear(r.Context(), filter, buffer)
 		} else if err = r.Context().Err(); err == nil {
 			if filter == nil {
 				buffer.Reset()
 			} else {
-				result.BufferRemoved = buffer.RemoveWhere(filter.MatchRecord)
+				buffer.RemoveWhere(filter.MatchRecord)
 			}
 		}
 		if err != nil {
@@ -169,10 +172,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(struct {
-			OK bool `json:"ok"`
-			storage.PurgeResult
-		}{true, result})
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	})
 	mux.HandleFunc("/admin/purge/count", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {

@@ -267,8 +267,8 @@ func (rs *restarter) status() map[string]any {
 }
 
 // statusLocked builds the status document; caller holds rs.mu. The extra
-// fields drive the dashboard's step tracker: phase_ms is when the current
-// phase started, drain_timeout_ms/elapsed_ms render the live drain window.
+// fields drive the dashboard's step tracker: drain_timeout_ms/elapsed_ms
+// render the live drain window.
 func (rs *restarter) statusLocked() map[string]any {
 	st := map[string]any{
 		"ok":         true,
@@ -278,7 +278,6 @@ func (rs *restarter) statusLocked() map[string]any {
 		"started_at": rs.bootAt.UnixMilli(),
 		"available":  rs.available(),
 		"reason":     rs.availReason(),
-		"phase_ms":   rs.phaseAt.UnixMilli(),
 		"rank":       phaseRank(rs.phase),
 	}
 	if rs.deps != nil && rs.deps.drainTimeout != nil {

@@ -153,6 +153,8 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			restart = append(restart, "db_path")
 		}
 	}
+	// ok is the operator action plane's shared success marker (the dashboard
+	// trusts the HTTP status; the restore tests pin it, tests/_go/cmd/proxy/backup.go).
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
 }
@@ -349,9 +351,10 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 }
 
 func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive, stageDir string) {
+	// ok is the operator action plane's shared success marker (the dashboard
+	// trusts the HTTP status; the inspect tests pin it, tests/_go/cmd/proxy/backup.go).
 	out := map[string]any{
 		"ok":      true,
-		"inspect": true,
 		"created": arch.Created.UTC().Format(time.RFC3339),
 	}
 	if len(arch.Config) > 0 {
@@ -431,10 +434,9 @@ func backupStatus() map[string]any {
 		requests = store.Totals().Requests
 	}
 	return map[string]any{
-		"config":               path != "",
-		"database":             store != nil,
-		"pending_database":     pending,
-		"restart_for_database": true,
-		"requests":             requests,
+		"config":           path != "",
+		"database":         store != nil,
+		"pending_database": pending,
+		"requests":         requests,
 	}
 }

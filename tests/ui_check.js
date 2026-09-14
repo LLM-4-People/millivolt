@@ -173,7 +173,7 @@ const pageOptions = {
       if (u.includes('/admin/restart')) {
         if (opts && opts.method === 'POST') {
           restartState.postCount++;
-          const response = () => { restartState.restarted = true; return { ok: true, json: async () => ({ ok: true, phase: 'building', rank: 0, phase_ms: Date.now(), drain_timeout_ms: 600000, error: '' }) }; };
+          const response = () => { restartState.restarted = true; return { ok: true, json: async () => ({ ok: true, phase: 'building', rank: 0, drain_timeout_ms: 600000, error: '' }) }; };
           return restartState.postGate ? restartState.postGate.then(response) : Promise.resolve(response());
         }
         const status = { ok: true, phase: 'idle', rank: -1, error: '', pid: restartState.restarted ? 424243 : 424242, started_at: restartState.restarted ? 2000 : 1000, available: true, reason: '', ...restartState.status };
@@ -1066,7 +1066,7 @@ async function main() {
       if (u.includes('/admin/restore')) {
         if (u.includes('inspect=1')) {
           return Promise.resolve({ ok: true, json: async () => ({
-            ok: true, inspect: true, created: '2026-09-07T12:00:00Z',
+            ok: true, created: '2026-09-07T12:00:00Z',
             config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
             database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
           }) });
@@ -1084,7 +1084,7 @@ async function main() {
       calls.some(c => c.u.includes('/admin/backup') && c.auth === 'Bearer op-token'));
     calls.length = 0;
     const inspectPayload = {
-      ok: true, inspect: true, created: '2026-09-07T12:00:00Z',
+      ok: true, created: '2026-09-07T12:00:00Z',
       config: { present: true, bytes: 2048, values: { backup_max_bytes: '2GiB' }, modified: ['backup_max_bytes'], vs_live: ['backup_max_bytes'] },
       database: { present: true, bytes: 4096, requests: 4, debug: 0, overlap: 1, oldest_ms: Date.parse('2026-08-16T11:00:00Z'), newest_ms: Date.parse('2026-09-07T12:00:00Z') },
     };

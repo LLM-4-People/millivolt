@@ -331,7 +331,6 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 	type evDoc struct {
 		Phase          string `json:"phase"`
 		Rank           int    `json:"rank"`
-		PhaseMs        int64  `json:"phase_ms"`
 		DrainTimeoutMs int64  `json:"drain_timeout_ms"`
 		DrainElapsedMs int64  `json:"drain_elapsed_ms"`
 	}
@@ -369,8 +368,8 @@ func TestRestartWatchStreamsPhases(t *testing.T) {
 			}
 		}
 	}
-	if first := readEvent("idle"); first.DrainTimeoutMs != 90000 || first.PhaseMs == 0 {
-		t.Fatalf("initial snapshot = %+v; want drain_timeout_ms 90000 and phase_ms set", first)
+	if first := readEvent("idle"); first.Rank != phaseRank(restartIdle) || first.DrainTimeoutMs != 90000 {
+		t.Fatalf("initial snapshot = %+v; want idle rank and drain_timeout_ms 90000", first)
 	}
 	rs.setPhase(restartBuilding, "")
 	if ev := readEvent("building"); ev.Rank != phaseRank(restartBuilding) {

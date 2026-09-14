@@ -163,7 +163,6 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := h.state(file)
-	result["ok"] = reloadErr == nil
 	result["saved"] = true
 	if h.ReloadStatus != nil {
 		if s := h.ReloadStatus(); s != nil {
