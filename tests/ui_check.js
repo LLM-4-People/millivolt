@@ -2262,6 +2262,45 @@ async function main() {
         chartFetchURLs().length === fetchesBeforeReject);
   }
 
+  // W43 pin: the real chart select wirings in live.js. The rows above prove
+  // setChartWindow and setChartPreset behave as functions, but no row drove
+  // the dropdown elements themselves (mutation-proven: dropping either
+  // select's addEventListener line left every suite green), so a dead select
+  // could ship without reddening anything. Drive the real selects through
+  // change events. The window path must persist, fetch and apply; a preset
+  // change deliberately re-renders from the live payload with no refetch
+  // (commitChartView's contract - only a window switch needs new buckets).
+  {
+    const savedView = () => JSON.parse(w.eval('storage.get("dash.chart")') || 'null');
+    const chartFetchURLs = () => initialFetches.filter(u => u.includes('/metrics/agg/chart'));
+    // '60', not another '15': the chart request gate dedupes a re-issued
+    // 'reuse' key (requestGate in core.js), so repeating the window the
+    // previous block just fetched would issue no fetch at all.
+    const windowSelect = d.getElementById('chart-window');
+    const fetchesBeforeWindowWiring = chartFetchURLs().length;
+    windowSelect.value = '60';
+    windowSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('the window dropdown wiring persists the merged view and issues the window-keyed fetch',
+      w.eval('chartView.window') === '60' &&
+        savedView() && savedView().window === '60' && savedView().pct === 99 &&
+        savedView().preset === 'latency' &&
+        chartFetchURLs().length === fetchesBeforeWindowWiring + 1 &&
+        chartFetchURLs().at(-1).includes('window=60'));
+    await sleep(30);
+    check('the window dropdown wiring applies the fetched window payload',
+      w.eval('chartAgg && chartAgg.now_ms') === chartPayload.now_ms);
+    const presetSelect = d.getElementById('chart-preset');
+    const fetchesBeforePresetWiring = chartFetchURLs().length;
+    presetSelect.value = 'traffic';
+    presetSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('the preset dropdown wiring persists the merged view and re-renders without a refetch',
+      w.eval('chartView.preset') === 'traffic' &&
+        savedView() && savedView().preset === 'traffic' &&
+        savedView().window === w.eval('chartView.window') &&
+        savedView().pct === 99 && d.getElementById('chart-pct').hidden === true &&
+        chartFetchURLs().length === fetchesBeforePresetWiring);
+  }
+
   // Axis callbacks survive setData changing between timestamp and compacted
   // slots. Reusing the original options is deliberate: legend/window changes
   // update data without constructing a new plot.
