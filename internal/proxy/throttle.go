@@ -462,12 +462,12 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 			TokWindow   *string `json:"token_window"`
 		}
 		if err := adminjson.Decode(w, r, &body); err != nil {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		provider := strings.TrimSpace(body.Provider)
 		if provider == "" {
-			http.Error(w, `{"error":"provider required"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, "provider required")
 			return
 		}
 		if body.Clear {
@@ -478,7 +478,7 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Concurrency == nil && body.Requests == nil && body.Tokens == nil &&
 			body.ReqWindow == nil && body.TokWindow == nil {
-			http.Error(w, `{"error":"concurrency, requests, or tokens required"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, "concurrency, requests, or tokens required")
 			return
 		}
 		var next scheduler.Limit
@@ -568,7 +568,7 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 			}
 		})
 		if updateErr != nil {
-			http.Error(w, `{"error":"`+updateErr.Error()+`"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, updateErr.Error())
 			return
 		}
 		log.Printf("throttle set (%s conc=%d req=%d/%s tok=%d/%s)", provider,

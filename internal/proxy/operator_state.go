@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 )
 
 // Runtime policy already changed before durable I/O. It cannot safely be
@@ -21,7 +23,7 @@ func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr 
 	enc, err := json.Marshal(state)
 	if err != nil {
 		log.Printf("operator state: encode failed: %v", err)
-		http.Error(w, `{"error":"could not encode operator state"}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, "could not encode operator state")
 		return
 	}
 	w.Write(enc)

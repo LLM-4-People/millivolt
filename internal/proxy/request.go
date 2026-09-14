@@ -112,7 +112,8 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 // (the cursor x-request-id idiom) and {{platform}} renders the rust-style
 // "os; arch" pair of the machine the proxy runs on. Every configured header
 // is set, never deleted: empty values are rejected at config load
-// (validHeaderValue), so there is no delete feature - deny by default.
+// (config.ValidHeaderValue plus the mapping's non-empty rule), so there is no
+// delete feature - deny by default.
 func (s *Server) applyProviderHeaders(h http.Header, provider string) {
 	ov, ok := s.cfg().Providers[provider]
 	if !ok || len(ov.Headers) == 0 {
@@ -215,7 +216,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		// The prefix is concatenated into the upstream auth header value, so it
 		// must be a valid header value - reject invalid bytes at the boundary
 		// rather than fail later as an opaque transport error.
-		if !isValidHeaderValue(p) {
+		if !config.ValidHeaderValue(p) {
 			return nil, fmt.Errorf("invalid %s value", hdrAuthPrefix)
 		}
 		t.authPrefix = p
@@ -260,7 +261,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 				return nil, fmt.Errorf("invalid %s header name %q", hdrHeaders, k)
 			}
 			for _, v := range vs {
-				if !isValidHeaderValue(v) {
+				if !config.ValidHeaderValue(v) {
 					return nil, fmt.Errorf("invalid %s value for header %q", hdrHeaders, k)
 				}
 			}
@@ -324,22 +325,6 @@ func isValidAuthHeader(h string) bool {
 		return false
 	}
 	if isHopByHop(h) || isProxyControlHeader(h) || strings.EqualFold(h, "host") {
-		return false
-	}
-	return true
-}
-
-// isValidHeaderValue reports whether s is a legal HTTP header field value
-// (RFC 7230: visible ASCII, horizontal tab, space, and obs-text; no NUL/CR/LF
-// or other control bytes). Used to validate client-supplied header material
-// (auth prefix, X-Proxy-Headers values) at the routing boundary.
-func isValidHeaderValue(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		// Allow HTAB(9), SP(32), VCHAR(33-126), and obs-text(128-255).
-		if c == 9 || (c >= 32 && c != 127) {
-			continue
-		}
 		return false
 	}
 	return true
@@ -477,23 +462,38 @@ func headerPresent(r *http.Request, name string) bool {
 	return ok
 }
 
-// isProxyControlHeader covers every client-consumed routing header so none of
-// them can leak upstream - neither via header passthrough nor via an
-// X-Proxy-Headers injection map. ("x-proxy-provider" is not read; it is
-// stripped defensively so a client can never spoof a provider identity.
-// "x-proxy-access-token" is not a request routing header. It is stripped
-// defensively so a stale or echoed token can never ride upstream.)
-func isProxyControlHeader(h string) bool {
-	switch strings.ToLower(h) {
-	case "authorization", "cookie", "x-proxy-base-url", "x-proxy-auth-header",
-		"x-proxy-auth-prefix", "x-proxy-path", "x-proxy-query", "x-proxy-headers",
-		"x-proxy-provider", "x-proxy-key", "x-proxy-refresh-token",
-		"x-proxy-access-token", "x-proxy-timeout-ms", "x-proxy-format",
-		"x-proxy-max-concurrency", "x-proxy-session", "x-proxy-parent-session", "x-proxy-client",
-		"x-proxy-limit-concurrency", "x-proxy-limit-requests", "x-proxy-limit-tokens":
-		return true
+// proxyControlHeaders is the authoritative strip set for the routing
+// boundary: every client-consumed routing/control header name, built from
+// the named constants (lowercased for the case-insensitive predicate) plus
+// the documented defensive entries. isProxyControlHeader consults it so
+// none of these names can leak upstream - neither via header passthrough
+// nor via an X-Proxy-Headers injection map. A new routing header is one
+// named constant plus one line in this set; the routing-header drift test
+// fails when the two halves diverge.
+var proxyControlHeaders = func() map[string]bool {
+	names := []string{
+		hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
+		hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
+		hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
+		hdrParentSession, hdrClient,
+		hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
+		// authorization and cookie are defensive strips without routing
+		// constants: the upstream key rides only the provider's auth header,
+		// rebuilt from the extracted key in buildUpstreamRequest, so the
+		// client's raw Authorization (which may carry the operator-plane
+		// credential) must never pass through; a client's cookies are this
+		// proxy origin's browser state, never provider credentials.
+		"authorization", "cookie",
 	}
-	return false
+	m := make(map[string]bool, len(names))
+	for _, name := range names {
+		m[strings.ToLower(name)] = true
+	}
+	return m
+}()
+
+func isProxyControlHeader(h string) bool {
+	return proxyControlHeaders[strings.ToLower(h)]
 }
 
 func copyResponseHeaders(dst, src http.Header) {

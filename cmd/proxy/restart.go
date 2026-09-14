@@ -709,8 +709,7 @@ func (rs *restarter) handleRestart(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		ok, why := rs.request()
 		if !ok {
-			w.Header().Set("Content-Type", "application/json")
-			http.Error(w, `{"error":`+strconv.Quote("restart refused: "+why)+`}`, http.StatusConflict)
+			denyOperator(w, http.StatusConflict, "restart refused: "+why)
 			return
 		}
 		// The full status document: the dashboard seeds its step tracker
@@ -718,9 +717,7 @@ func (rs *restarter) handleRestart(w http.ResponseWriter, r *http.Request) {
 		rs.writeStatus(w)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Type", "application/json")
-		http.Error(w, `{"error":"GET or POST only"}`, http.StatusMethodNotAllowed)
+		denyOperator(w, http.StatusMethodNotAllowed, "GET or POST only")
 	}
 }
 

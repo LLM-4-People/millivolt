@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -40,6 +41,19 @@ const (
 	// hdrClient optionally names the calling app for the dashboard's client
 	// dimension (falls back to x-stainless-*/User-Agent sniffing).
 	hdrClient = "X-Proxy-Client"
+)
+
+// Reserved x-proxy-* names the proxy never reads as routing input. They are
+// stripped defensively at the routing boundary (isProxyControlHeader):
+const (
+	// hdrProvider is not a routing header: the provider label is derived
+	// from the base URL (providerFromURL), so stripping the name means a
+	// client can never spoof a provider identity upstream.
+	hdrProvider = "X-Proxy-Provider"
+	// hdrAccessToken is the operator-plane session credential, not a request
+	// routing header; stripping it means a stale or echoed token can never
+	// ride upstream.
+	hdrAccessToken = "X-Proxy-Access-Token"
 )
 
 const (
@@ -207,7 +221,7 @@ func rejectUnlessGetPost(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	w.Header().Set("Allow", "GET, POST")
-	http.Error(w, `{"error":"GET or POST"}`, http.StatusMethodNotAllowed)
+	adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET or POST")
 	return false
 }
 

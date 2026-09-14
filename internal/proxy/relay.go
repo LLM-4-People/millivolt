@@ -681,6 +681,26 @@ func (b *prefixRemainderBody) Read(p []byte) (int, error) {
 
 func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 
+// quota429Peek is the single owner of the bounded durable-quota peek on a 429
+// response: it reads at most maxErrBodyBytes+1 bytes of the error body and
+// classifies the in-cap envelope through the canonical parser
+// (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). An in-cap body is
+// closed and reported together with its durable classification; an overflowed
+// body (longer than maxErrBodyBytes) is deliberately left OPEN and
+// unclassified (durable=false, leftOpen=true) - the classification stays
+// bounded by the cap. Each transport then applies its own overflow policy at
+// the call site: the generic relay re-serves prefix + live remainder verbatim,
+// the cursor transport closes and re-wraps only the truncated prefix.
+func quota429Peek(resp *http.Response) (durable bool, peeked []byte, leftOpen bool) {
+	peeked, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
+	if len(peeked) > maxErrBodyBytes {
+		return false, peeked, true
+	}
+	resp.Body.Close()
+	typ, code, _ := metrics.ParseErrorEnvelope(peeked)
+	return isNonRetryableQuotaErr(typ, code), peeked, false
+}
+
 // withSendTimeout derives the per-attempt upstream send context: the
 // X-Proxy-Timeout-Ms routing header bounds ONE send (upstream headers + that
 // body's relay phase), so a fresh deadline anchors at each attempt's Do -
@@ -805,37 +825,31 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// A 429 is normally transient flow control, but a 429 can also be the
 		// provider announcing a durable account condition (quota/credits/spend
 		// limits) that waiting can never clear. Only the body's structured
-		// error type/code tells them apart, so peek the bounded envelope
-		// BEFORE the retry decision: a durable 429 is surfaced to the client
-		// immediately - no retry budget burned, no pacing of the group, the
-		// absorbed-attempt log stays clean (nothing was absorbed).
+		// error type/code tells them apart, so the bounded envelope peek
+		// (quota429Peek) runs BEFORE the retry decision: a durable 429 is
+		// surfaced to the client immediately - no retry budget burned, no
+		// pacing of the group, the absorbed-attempt log stays clean (nothing
+		// was absorbed).
 		//
-		// A peek that OVERFLOWS the cap (len > maxErrBodyBytes) leaves the
-		// body open: the final relay must serve prefix + live remainder
-		// verbatim, and an oversized 429 keeps normal retry semantics. The
-		// quota classification deliberately stays bounded by the cap - a
-		// >64 KiB "quota envelope" is pathological (real quota envelopes are
-		// tiny JSON).
+		// This relay's overflow policy: a peek that OVERFLOWS the cap leaves
+		// the body open (peekLeftOpen), so the final relay can serve
+		// prefix + live remainder verbatim and an oversized 429 keeps normal
+		// retry semantics.
 		var errBody []byte
 		peekLeftOpen := false
 		if resp.StatusCode == http.StatusTooManyRequests {
-			errBody, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
-			if len(errBody) <= maxErrBodyBytes {
-				resp.Body.Close()
-				typ, code, _ := metrics.ParseErrorEnvelope(errBody)
-				if isNonRetryableQuotaErr(typ, code) {
-					permit.Cancel()
-					if attempt > 0 {
-						rec.FinalAttemptAt = attemptStart
-					}
-					end(false)
-					// Re-serve the captured bytes so the client still gets the
-					// full error body verbatim.
-					resp.Body = io.NopCloser(bytes.NewReader(errBody))
-					return resp, attemptCancel, nil
+			var durable bool
+			durable, errBody, peekLeftOpen = quota429Peek(resp)
+			if durable {
+				permit.Cancel()
+				if attempt > 0 {
+					rec.FinalAttemptAt = attemptStart
 				}
-			} else {
-				peekLeftOpen = true
+				end(false)
+				// Re-serve the captured bytes so the client still gets the
+				// full error body verbatim.
+				resp.Body = io.NopCloser(bytes.NewReader(errBody))
+				return resp, attemptCancel, nil
 			}
 		}
 

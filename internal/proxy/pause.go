@@ -370,16 +370,16 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		// Surface the strict decoder's cause; io.EOF is the empty-body
 		// command, which falls through to the requirement message below.
 		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if body.Paused == nil {
-			http.Error(w, `{"error":"paused boolean required"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, "paused boolean required")
 			return
 		}
 		id, err := adminjson.OptionalID(body.ID)
 		if err != nil {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if !*body.Paused {
@@ -471,14 +471,14 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if errors.Is(err, scheduler.ErrOverlap) {
-				http.Error(w, `{"error":"pause overlaps existing hold"}`, http.StatusConflict)
+				adminjson.WriteError(w, http.StatusConflict, "pause overlaps existing hold")
 				return
 			}
 			if errors.Is(err, scheduler.ErrHoldNotFound) {
-				http.Error(w, `{"error":"pause hold not found"}`, http.StatusNotFound)
+				adminjson.WriteError(w, http.StatusNotFound, "pause hold not found")
 				return
 			}
-			http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if hasPrev {

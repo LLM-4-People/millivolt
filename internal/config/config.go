@@ -884,7 +884,10 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("providers.%s.headers: %w", label, err)
 		}
 		for _, name := range names {
-			if !validHeaderValue(p.Headers[name]) {
+			// An empty mapping value is meaningless and would silently send
+			// nothing: the non-empty rule is this mapping's policy, not part
+			// of the shared grammar below.
+			if value := p.Headers[name]; value == "" || !ValidHeaderValue(value) {
 				return fmt.Errorf("providers.%s.headers: %s: value must be a single-line printable header value", label, name)
 			}
 		}
@@ -913,17 +916,19 @@ func ValidateHeaderNames(names []string) error {
 	return nil
 }
 
-// validHeaderValue reports value as a single-line header value: printable
-// ASCII plus tab (an RFC 7230 field-value), never empty - an empty mapping
-// is meaningless and would silently send nothing.
-func validHeaderValue(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, r := range value {
-		if r == '\r' || r == '\n' || r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
-			return false
+// ValidHeaderValue is the shared RFC 7230 field-value grammar check for
+// configuration and per-request routing controls: horizontal tab, space,
+// visible ASCII and obs-text (bytes 128..255) - never NUL/CR/LF or other
+// control bytes. It deliberately accepts the empty string: whether an empty
+// value is meaningful is the caller's policy (a mapped provider header must
+// be non-empty; an X-Proxy-Auth-Prefix may legitimately be "").
+func ValidHeaderValue(value string) bool {
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c == 9 || (c >= 32 && c != 127) {
+			continue
 		}
+		return false
 	}
 	return true
 }

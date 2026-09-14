@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 )
 
 // The operator plane is the whole embedded dashboard, standardized as the
@@ -361,11 +363,6 @@ func (l *authLimiter) success(ip string) {
 // other denial is JSON, no-store, identical in shape.
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
 	sameOrigin := http.NewCrossOriginProtection().Handler(next)
-	deny := func(w http.ResponseWriter, code int, message string) {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
-		http.Error(w, `{"error":"`+message+`"}`, code)
-	}
 	mint := func(w http.ResponseWriter) {
 		cookie, err := gate.mintSessionCookie()
 		if err != nil {
@@ -396,7 +393,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			return
 		}
 		if !gate.armed {
-			deny(w, http.StatusForbidden, "operator plane is disabled: set "+operatorTokenEnv+" to enable it")
+			denyOperator(w, http.StatusForbidden, "operator plane is disabled: set "+operatorTokenEnv+" to enable it")
 			return
 		}
 		ip := clientIP(r)
@@ -416,10 +413,8 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			return
 		}
 		if locked, retryIn := gate.limiter.locked(ip, time.Now()); locked {
-			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 			w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
-			http.Error(w, `{"error":"too many rejected credentials; try again later"}`, http.StatusTooManyRequests)
+			denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
 			return
 		}
 		if hasBearer {
@@ -437,8 +432,20 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			return
 		}
 		w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
-		deny(w, http.StatusUnauthorized, "operator token required")
+		denyOperator(w, http.StatusUnauthorized, "operator token required")
 	})
+}
+
+// denyOperator is the single denial writer for the operator plane: it owns
+// the Cache-Control: no-store and frame-ancestors CSP denial headers and the
+// flat JSON error body (adminjson.WriteError), so every denial - method
+// gate, unarmed plane, malformed handshake, lockout, missing credential -
+// carries the same no-store, unframeable shape. Extra headers (Allow,
+// Retry-After, WWW-Authenticate) stay at the call sites that own them.
+func denyOperator(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	adminjson.WriteError(w, status, msg)
 }
 
 // handleAdminSession is POST /admin/session: the one open operator-plane
@@ -450,13 +457,11 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, `{"error":"POST only"}`, http.StatusMethodNotAllowed)
+		denyOperator(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
 	if !g.armed {
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, `{"error":"operator plane is disabled: set `+operatorTokenEnv+` to enable it"}`, http.StatusForbidden)
+		denyOperator(w, http.StatusForbidden, "operator plane is disabled: set "+operatorTokenEnv+" to enable it")
 		return
 	}
 	ip := clientIP(r)
@@ -475,14 +480,12 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		// transport that cannot set deadlines proceeds byte-bounded only.
 		if err := http.NewResponseController(w).SetReadDeadline(time.Now().Add(sessionBodyReadTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
 			log.Printf("operator session: read deadline: %v", err)
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, `{"error":"unsupported connection"}`, http.StatusInternalServerError)
+			denyOperator(w, http.StatusInternalServerError, "unsupported connection")
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, sessionFormBodyMax)
 		if err := r.ParseForm(); err != nil {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, `{"error":"invalid form body"}`, http.StatusBadRequest)
+			denyOperator(w, http.StatusBadRequest, "invalid form body")
 			return
 		}
 		credential = r.PostForm.Get("token")
@@ -500,7 +503,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 			// no explanation. The only source is crypto/rand, which cannot
 			// fail on this toolchain; this is contract hygiene.
 			log.Printf("operator session: mint cookie: %v", err)
-			http.Error(w, `{"error":"session unavailable"}`, http.StatusInternalServerError)
+			denyOperator(w, http.StatusInternalServerError, "session unavailable")
 			return
 		}
 		http.SetCookie(w, cookie)
@@ -515,17 +518,18 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 	// request that crosses the threshold still gets its own denial shape,
 	// and only the NEXT one is locked out.
 	if locked, retryIn := g.limiter.locked(ip, time.Now()); locked {
-		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
-		http.Error(w, `{"error":"too many rejected credentials; try again later"}`, http.StatusTooManyRequests)
+		denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
 		return
 	}
 	if presented {
 		g.limiter.failure(ip, time.Now())
 	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	if form {
+		// The HTML login-page rejection keeps its own body (the page, not a
+		// JSON error) but the same denial headers as denyOperator.
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 		w.WriteHeader(http.StatusUnauthorized)
 		if presented {
 			_, _ = w.Write([]byte(loginPageRejectedHTML))
@@ -537,7 +541,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
-	http.Error(w, `{"error":"operator token required"}`, http.StatusUnauthorized)
+	denyOperator(w, http.StatusUnauthorized, "operator token required")
 }
 
 // loginPageHTML is the whole pre-auth surface: self-contained (the gated

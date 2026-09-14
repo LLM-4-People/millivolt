@@ -910,6 +910,26 @@ func TestProviderHeaders(t *testing.T) {
 	}
 }
 
+// ValidHeaderValue owns the RFC 7230 field-value grammar alone: the empty
+// string passes the grammar (an X-Proxy-Auth-Prefix may legitimately be "";
+// the provider-header mapping rejects empty as its own policy, pinned by
+// the "empty value" row above), and control bytes never pass.
+func TestValidHeaderValueGrammar(t *testing.T) {
+	if !ValidHeaderValue("") {
+		t.Error("empty string must pass the grammar: emptiness is caller policy")
+	}
+	for _, v := range []string{"v", "Bearer ", "tab\tvalue", "caf\xc3\xa9 unicode", "obs-text \xff"} {
+		if !ValidHeaderValue(v) {
+			t.Errorf("ValidHeaderValue(%q) = false, want true", v)
+		}
+	}
+	for _, v := range []string{"one\ntwo", "one\rtwo", "nul\x00byte", "ctl\x01byte", "del\x7fbyte"} {
+		if ValidHeaderValue(v) {
+			t.Errorf("ValidHeaderValue(%q) = true, want false", v)
+		}
+	}
+}
+
 // cost_keys entries are dotted JSON paths resolved by metrics.DigJSON; a
 // malformed path is a cost key that can never resolve, so it is rejected at
 // the load boundary with a clear error (deny by default), never silently

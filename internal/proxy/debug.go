@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -450,16 +449,16 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		// Surface the strict decoder's cause; io.EOF is the empty-body
 		// command, which falls through to the requirement message below.
 		if err := adminjson.Decode(w, r, &body); err != nil && !errors.Is(err, io.EOF) {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if body.Enabled == nil {
-			http.Error(w, `{"error":"enabled boolean required"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, "enabled boolean required")
 			return
 		}
 		id, err := adminjson.OptionalID(body.ID)
 		if err != nil {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if !*body.Enabled {
@@ -515,14 +514,14 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if errors.Is(err, errDebugOverlap) {
-				http.Error(w, `{"error":"debug session overlaps existing session"}`, http.StatusConflict)
+				adminjson.WriteError(w, http.StatusConflict, "debug session overlaps existing session")
 				return
 			}
 			if errors.Is(err, errDebugNotFound) {
-				http.Error(w, `{"error":"debug session not found"}`, http.StatusNotFound)
+				adminjson.WriteError(w, http.StatusNotFound, "debug session not found")
 				return
 			}
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if hasPrev {
@@ -627,16 +626,16 @@ func (s *Server) DebugSnapshot() map[string]any {
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
-		http.Error(w, `{"error":"GET"}`, http.StatusMethodNotAllowed)
+		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
-		http.Error(w, `{"error":"id required"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "id required")
 		return
 	}
 	if s.pause.persist == nil {
-		http.Error(w, `{"error":"no durable store"}`, http.StatusNotFound)
+		adminjson.WriteError(w, http.StatusNotFound, "no durable store")
 		return
 	}
 	ctx, cancel := s.storeQueryCtx()
@@ -644,11 +643,11 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	raw, err := s.pause.persist.LoadDebugCapture(ctx, id)
 	if err != nil {
 		log.Printf("debug: load capture %s: %v", id, err)
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if len(raw) == 0 {
-		http.Error(w, `{"error":"debug capture not found"}`, http.StatusNotFound)
+		adminjson.WriteError(w, http.StatusNotFound, "debug capture not found")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

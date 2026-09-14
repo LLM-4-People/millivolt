@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt"
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
@@ -50,7 +51,7 @@ func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
 		return true
 	}
 	w.Header().Set("Allow", method)
-	http.Error(w, `{"error":"`+method+` only"}`, http.StatusMethodNotAllowed)
+	adminjson.WriteError(w, http.StatusMethodNotAllowed, method+" only")
 	return false
 }
 
@@ -292,7 +293,7 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		skipped, err := reloadConfig()
 		if err != nil {
-			http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", *configPath, strings.Join(skipped, ","))

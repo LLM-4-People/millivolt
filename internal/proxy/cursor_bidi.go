@@ -295,11 +295,11 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	rec.StatusCode = resp.StatusCode
-	rec.ResponseHeaders = captureHeaders(resp.Header, t.authHeader)
-	rec.ProviderRequestID = firstNonEmpty(
-		resp.Header.Get("X-Request-Id"),
-		resp.Header.Get("Request-Id"),
-	)
+	// captureUpstreamHeaders is the single owner of upstream header capture:
+	// the cursor path records the same metadata set as the generic relay
+	// (redacted audit headers, request-id aliases, server, processing time,
+	// echoed model, rate-limit state).
+	captureUpstreamHeaders(resp, rec, t.authHeader)
 	if resp.StatusCode >= 400 {
 		// Connect streaming is HTTP 200 + envelopes. A 4xx/5xx means the
 		// Run never started - do not drive it as a live bidi body.
@@ -470,18 +470,19 @@ func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
 }
 
 // cursorSendFailed reports whether this Cursor HTTP outcome should FailSend.
-// Quota 429s and non-retryable 4xx do not trip the group. A peeked 429
-// body is re-wrapped onto resp.Body so the caller can still relay it.
+// Quota 429s and non-retryable 4xx do not trip the group. The shared
+// quota429Peek classifies the bounded envelope; this transport's overflow
+// policy is applied here: an oversized 429 body is closed and re-wrapped as
+// only the truncated prefix (the cursor path synthesizes its own envelope for
+// the final error renderer), keeping normal retry semantics.
 func cursorSendFailed(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
-		resp.Body.Close()
-		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-		if len(errBody) <= maxErrBodyBytes {
-			typ, code, _ := metrics.ParseErrorEnvelope(errBody)
-			return !isNonRetryableQuotaErr(typ, code)
+		durable, errBody, leftOpen := quota429Peek(resp)
+		if leftOpen {
+			resp.Body.Close()
 		}
-		return true
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		return !durable
 	}
 	return isRetryable(resp.StatusCode)
 }
