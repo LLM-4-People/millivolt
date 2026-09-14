@@ -1078,8 +1078,10 @@ async function main() {
       visBtn.title === visTpl.querySelector('.mr-vis').title);
     visBtn.click();
     visTpl.innerHTML = w.modelRuleRowHTML({ mode: 'pattern', from: 'x(?=y)', disabled: true });
-    check('parking re-titles the control exactly like the freshly-rendered parked template',
-      visBtn.title === visTpl.querySelector('.mr-vis').title);
+    check('parking re-renders title, glyph and aria-pressed exactly like the freshly-rendered parked template',
+      visBtn.title === visTpl.querySelector('.mr-vis').title &&
+      visBtn.textContent === visTpl.querySelector('.mr-vis').textContent &&
+      visBtn.getAttribute('aria-pressed') === visTpl.querySelector('.mr-vis').getAttribute('aria-pressed'));
     wrap.querySelectorAll('.mr-row')[1].querySelector('[data-mr-vis]').click();
     const gate2 = w.validateModelRulesDraft(wrap);
     check('parking broken rules clears the save gate',
@@ -2381,6 +2383,49 @@ async function main() {
   check('a queued bar disp callback keeps live geometry in the sticky-compacted cleared state',
     liveCompactedSafe && stickyCompactedSafe && stickyCompactedGeom === liveCompactedGeom &&
     stickyCompactedGeom !== '{"offset":0,"size":0}');
+
+  // The stale-_vis window: the rebuild takes its blank-state early return
+  // BEFORE the _vis/_compacted update, so a shorter non-null payload
+  // swapped in through that window leaves _vis indexing the previous,
+  // longer payload (chartAgg itself is never nulled after boot). A queued
+  // x-values draw then resolves a stale out-of-range bucket index - the
+  // same queued-draw family as the chartYTicks and chartBarGeometry rows
+  // above.
+  w.eval(`
+    chartAgg = window.__aggKeep;
+    chartAgg.buckets.forEach((b, i) => { b.req = i === 3 || i === 7 ? 1 : 0; });
+    chartView.preset = 'traffic'; chartData();
+  `);
+  const shortAgg = mkChart();
+  shortAgg.now_ms = CHART_FROM + 2 * BUCKET_MS;
+  shortAgg.buckets = shortAgg.buckets.slice(0, 2); // shorter, non-null
+  // Every bucket fails the traffic keep filter, so this rebuild takes the
+  // blank-state early return and leaves _vis/_compacted untouched.
+  const staleEarlyReturn = w.eval(`chartAgg = ${JSON.stringify(shortAgg)}; chartData() === null`);
+  const staleVisState = w.eval('JSON.stringify([_vis, _compacted])');
+  let staleXSafe = true, staleXLabels = '';
+  try { staleXLabels = JSON.stringify(compactOpts.axes[0].values({}, [0.5, 1.5])); }
+  catch { staleXSafe = false; }
+  // The same drive as an uncaught page error: the throw a real queued draw
+  // surfaces must reach the harness-start jsdomError listener (failures
+  // plus stderr), not only this row's caught flag.
+  w.eval(`
+    const w39drive = () => { upOpts(600, 180).axes[0].values({}, [0.5, 1.5]); };
+    window.addEventListener('w39-stale-x', w39drive);
+    window.dispatchEvent(new Event('w39-stale-x'));
+    window.removeEventListener('w39-stale-x', w39drive);
+  `);
+  w.eval(`
+    chartAgg = window.__aggKeep;
+    chartAgg.buckets.forEach((b, i) => { b.req = i === 3 || i === 7 ? 1 : 0; });
+    chartData();
+  `);
+  let liveXLabels = null;
+  try { liveXLabels = compactOpts.axes[0].values({}, [0.5]); } catch { liveXLabels = null; }
+  check('a queued x-values callback blanks stale ticks instead of dereferencing the swapped payload',
+    staleEarlyReturn === true && staleVisState === '[[3,7],true]' &&
+    staleXSafe && staleXLabels === '["",""]' &&
+    Array.isArray(liveXLabels) && liveXLabels[0] === w.chartXTick(CHART_FROM + 3 * BUCKET_MS));
 
   // ---- test 11f: dash.chart restore (deny by default) ----
   // A legacy FLAT hidden array is discarded wholesale (the old shape carried

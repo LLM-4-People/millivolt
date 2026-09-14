@@ -403,7 +403,16 @@ function chartXValues(u, splits) {
   if (!chartAgg) return splits.map(() => '');
   return splits.map(v => {
     const i = _compacted ? _vis?.[Math.round(v - 0.5)] : null;
-    return chartXTick(i == null ? v : chartAgg.buckets[i].t);
+    if (i == null) return chartXTick(v);
+    // A queued draw (uPlot queues redraws as microtasks and destroy() does
+    // not cancel them) can run while _vis still indexes the previous,
+    // longer payload: the blank-state rebuild returns before _vis and
+    // _compacted update, and chartAgg is never nulled after boot, so a
+    // shorter payload swapped in through that window leaves the resolved
+    // index out of range. Deny by default: blank the stale tick, never
+    // clamp to a wrong bucket.
+    const b = chartAgg.buckets[i];
+    return b == null ? '' : chartXTick(b.t);
   });
 }
 
@@ -430,12 +439,13 @@ function chartYTicks(u, ai, min, max) {
   const ticks = asinhTickLadder(max);
   if (max > 0 && ticks[ticks.length - 1] < max / 2) ticks.push(max);
   // A queued draw (uPlot queues redraws as microtasks and destroy() does
-  // not cancel them) can run after restart teardown cleared the payload or
-  // after a tiles-only preset replaced the plan: no plotted left axis
-  // exists then. Deny by default, the !chartAgg guard shape the x callbacks
-  // use, applied to this callback's absent dependency: return the same
-  // decade ladder a guarded draw computes instead of dereferencing the
-  // missing axis (the screen-space filter needs a live valToPos anyway).
+  // not cancel them) can run while module state belongs to a newer
+  // rebuild: chartAgg is never nulled after boot, but a tiles-only preset
+  // replaces the plan, so no plotted left axis exists then. Deny by
+  // default, the !chartAgg guard shape the x callbacks use, applied to
+  // this callback's absent dependency: return the same decade ladder a
+  // guarded draw computes instead of dereferencing the missing axis (the
+  // screen-space filter needs a live valToPos anyway).
   if (!axis) return ticks;
   const kept = [];
   let lastPos = null, lastLabel = null;
@@ -458,12 +468,13 @@ function chartYTicks(u, ai, min, max) {
 // cannot separate three bars.
 function chartBarGeometry(si) {
   // A queued draw (uPlot queues redraws as microtasks and destroy() does
-  // not cancel them) can run after restart teardown cleared the payload or
-  // after a tiles-only preset replaced the plan: no plan row - or, with the
-  // plan still live, no payload - exists then. Deny by default, the
-  // !chartAgg guard shape the x callbacks use, applied to this callback's
-  // absent dependencies: return the hidden-series contract (a bar that
-  // draws nothing) instead of dereferencing the missing plan row or the
+  // not cancel them) can run while module state belongs to a newer
+  // rebuild: chartAgg is never nulled after boot, but a tiles-only preset
+  // replaces the plan, so no plan row - or, before the first payload
+  // arrives, no payload - exists then. Deny by default, the !chartAgg
+  // guard shape the x callbacks use, applied to this callback's absent
+  // dependencies: return the hidden-series contract (a bar that draws
+  // nothing) instead of dereferencing the missing plan row or the
   // missing bucket_ms.
   const m = _plan?.meta[si - 1];
   if (!m || m.hidden || (!_compacted && !chartAgg)) return { offset: 0, size: 0 };
