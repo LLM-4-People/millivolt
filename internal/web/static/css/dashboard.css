@@ -1071,10 +1071,13 @@
      language (panel2 fill, hairline border, hover accent; height pinned to
      the native select box the row's shared font and padding produce) so the
      control reads as one of the chart controls, with the registry chevron
-     flipping open. The menu mirrors the provider picker's panel: absolute
-     under the trigger, mono rows with a fixed-width check slot - checked
-     rows carry the accent check and full text, unchecked rows dim to
-     muted, so the current selection reads at a glance. */
+     flipping open. The menu mirrors the provider picker's panel - absolute
+     under the trigger, mono rows - but with no fixed width floor: the
+     provider menu's min-width exists for its input row, and this menu has
+     only rows, so it shrink-wraps its longest entry. Rows carry a
+     fixed-width check slot - checked rows keep the accent check and full
+     text, unchecked rows dim to muted, so the current selection reads at a
+     glance. */
   .metrics-pick { position: relative; }
   .metrics-pick[hidden] { display: none; }
   #chart-metrics-btn {
@@ -1091,7 +1094,7 @@
   #chart-metrics-btn .mp-count { color: var(--muted); font-variant-numeric: tabular-nums; }
   .metrics-menu {
     position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
-    min-width: 300px; padding: 8px; display: flex; flex-direction: column; gap: 2px;
+    padding: 8px; display: flex; flex-direction: column; gap: 2px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(0,0,0,.5); font-family: var(--mono);
   }
