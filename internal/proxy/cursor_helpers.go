@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -194,6 +195,15 @@ func pacerOf(w http.ResponseWriter) *ssePacer {
 // an in-band SSE error+[DONE] if the idle pacer already committed 200.
 func writeClientError(w http.ResponseWriter, rec *metrics.Record, typ, msg string, code int) {
 	writeClientErrorHdr(w, rec, typ, msg, code, nil)
+}
+
+// retryAfterHeader builds the single extra-header shape shared by every 429
+// the proxy writes for its own queueing: Retry-After in whole seconds from
+// the operator-tuned base. The denial type and message stay with each caller.
+func (s *Server) retryAfterHeader() http.Header {
+	h := http.Header{}
+	h.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
+	return h
 }
 
 func writeClientErrorHdr(w http.ResponseWriter, rec *metrics.Record, typ, msg string, code int, extra http.Header) {

@@ -393,7 +393,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			return
 		}
 		if !gate.armed {
-			denyOperator(w, http.StatusForbidden, "operator plane is disabled: set "+operatorTokenEnv+" to enable it")
+			denyOperator(w, http.StatusForbidden, operatorPlaneDisabledMsg)
 			return
 		}
 		ip := clientIP(r)
@@ -412,9 +412,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			sameOrigin.ServeHTTP(w, r)
 			return
 		}
-		if locked, retryIn := gate.limiter.locked(ip, time.Now()); locked {
-			w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
-			denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
+		if gate.denyLockedOut(w, ip) {
 			return
 		}
 		if hasBearer {
@@ -431,21 +429,48 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 			_, _ = w.Write([]byte(loginPageHTML))
 			return
 		}
-		w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
-		denyOperator(w, http.StatusUnauthorized, "operator token required")
+		gate.denyBearer(w)
 	})
 }
+
+// operatorPlaneDisabledMsg is the unarmed-plane denial message shared by the
+// request gate and the session handshake: both answer 403 with it when no
+// operator credential is configured.
+const operatorPlaneDisabledMsg = "operator plane is disabled: set " + operatorTokenEnv + " to enable it"
 
 // denyOperator is the single denial writer for the operator plane: it owns
 // the Cache-Control: no-store and frame-ancestors CSP denial headers and the
 // flat JSON error body (adminjson.WriteError), so every denial - method
 // gate, unarmed plane, malformed handshake, lockout, missing credential -
-// carries the same no-store, unframeable shape. Extra headers (Allow,
-// Retry-After, WWW-Authenticate) stay at the call sites that own them.
+// carries the same no-store, unframeable shape. Extra headers stay at the
+// call sites that own them: Allow at the method gate, Retry-After inside
+// denyLockedOut, WWW-Authenticate inside denyBearer.
 func denyOperator(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	adminjson.WriteError(w, status, msg)
+}
+
+// denyLockedOut answers a locked-out source IP with the shared lockout
+// denial: Retry-After rounded up to whole seconds (never understating the
+// remaining window) plus the flat 429 body. ok=false when ip is not locked
+// out, so the caller keeps its flow control; both the request gate and the
+// session handshake must run this check before counting a failure.
+func (g *operatorGate) denyLockedOut(w http.ResponseWriter, ip string) bool {
+	locked, retryIn := g.limiter.locked(ip, time.Now())
+	if !locked {
+		return false
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
+	denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
+	return true
+}
+
+// denyBearer answers a non-form request without a valid credential with the
+// challenge shape: the Bearer realm header plus the flat 401 body.
+func (g *operatorGate) denyBearer(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
+	denyOperator(w, http.StatusUnauthorized, "operator token required")
 }
 
 // handleAdminSession is POST /admin/session: the one open operator-plane
@@ -461,7 +486,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if !g.armed {
-		denyOperator(w, http.StatusForbidden, "operator plane is disabled: set "+operatorTokenEnv+" to enable it")
+		denyOperator(w, http.StatusForbidden, operatorPlaneDisabledMsg)
 		return
 	}
 	ip := clientIP(r)
@@ -517,9 +542,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 	// The lockout check precedes failure counting, matching the gate: the
 	// request that crosses the threshold still gets its own denial shape,
 	// and only the NEXT one is locked out.
-	if locked, retryIn := g.limiter.locked(ip, time.Now()); locked {
-		w.Header().Set("Retry-After", strconv.Itoa(int(max(retryIn/time.Second, 1))))
-		denyOperator(w, http.StatusTooManyRequests, "too many rejected credentials; try again later")
+	if g.denyLockedOut(w, ip) {
 		return
 	}
 	if presented {
@@ -540,8 +563,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 		}
 		return
 	}
-	w.Header().Set("WWW-Authenticate", `Bearer realm="millivolt-operator"`)
-	denyOperator(w, http.StatusUnauthorized, "operator token required")
+	g.denyBearer(w)
 }
 
 // loginPageHTML is the whole pre-auth surface: self-contained (the gated

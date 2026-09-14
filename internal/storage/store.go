@@ -748,6 +748,18 @@ func (s *Store) writer() {
 	}
 }
 
+// markWrittenLocked records id as durably written, evicting the oldest
+// tracked id once the cap is reached so the written set stays bounded. The
+// caller must hold s.aggMu; duplicate guards stay with each caller.
+func (s *Store) markWrittenLocked(id string) {
+	if s.writtenCap > 0 && len(s.writtenOrder) >= s.writtenCap {
+		delete(s.written, s.writtenOrder[0])
+		s.writtenOrder = s.writtenOrder[1:]
+	}
+	s.written[id] = struct{}{}
+	s.writtenOrder = append(s.writtenOrder, id)
+}
+
 // account folds a committed batch into the written-id set and totals. Called
 // by the single writer goroutine, so it never races another account().
 func (s *Store) account(records []*metrics.Record) {
@@ -762,12 +774,7 @@ func (s *Store) account(records []*metrics.Record) {
 	for _, r := range records {
 		s.totals.Add(r)
 		if _, ok := s.written[r.ID]; !ok {
-			if s.writtenCap > 0 && len(s.writtenOrder) >= s.writtenCap {
-				delete(s.written, s.writtenOrder[0])
-				s.writtenOrder = s.writtenOrder[1:]
-			}
-			s.written[r.ID] = struct{}{}
-			s.writtenOrder = append(s.writtenOrder, r.ID)
+			s.markWrittenLocked(r.ID)
 		}
 	}
 }
@@ -829,12 +836,7 @@ func (s *Store) MarkWritten(ids []string) {
 		if _, ok := s.written[id]; ok {
 			continue
 		}
-		if s.writtenCap > 0 && len(s.writtenOrder) >= s.writtenCap {
-			delete(s.written, s.writtenOrder[0])
-			s.writtenOrder = s.writtenOrder[1:]
-		}
-		s.written[id] = struct{}{}
-		s.writtenOrder = append(s.writtenOrder, id)
+		s.markWrittenLocked(id)
 	}
 }
 

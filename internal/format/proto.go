@@ -226,28 +226,35 @@ func subFields(f *protoField) ([]protoField, error) {
 	return parseProtoFields(f.raw)
 }
 
-// decodeStringValueMapEntry decodes a map<string, bytes> entry (field 1 = key
-// string, field 2 = value bytes), then decodes the value bytes as a
-// google.protobuf.Value shim. Returns the key and the decoded Go value.
-func decodeStringValueMapEntry(entry []byte) (string, any, bool) {
-	fields, err := parseProtoFields(entry)
+// decodeMapEntry splits one map<string, bytes> entry message: field 1
+// carries the key string, field 2 the value bytes. ok=false when the entry
+// is malformed or the key is empty, so each caller keeps its own skip or
+// fail policy.
+func decodeMapEntry(raw []byte) (key string, val []byte, ok bool) {
+	fields, err := parseProtoFields(raw)
 	if err != nil {
 		return "", nil, false
 	}
-	var key string
-	var valBytes []byte
 	for _, f := range fields {
 		if f.num == 1 {
 			key = string(f.raw)
 		} else if f.num == 2 {
-			valBytes = f.raw
+			val = f.raw
 		}
 	}
-	if key == "" {
+	return key, val, key != ""
+}
+
+// decodeStringValueMapEntry decodes a map<string, bytes> entry, then decodes
+// the value bytes as a google.protobuf.Value shim. Returns the key and the
+// decoded Go value.
+func decodeStringValueMapEntry(entry []byte) (string, any, bool) {
+	key, valBytes, ok := decodeMapEntry(entry)
+	if !ok {
 		return "", nil, false
 	}
-	v, ok := decodeProtoValue(valBytes, 0)
-	return key, v, ok
+	v, valid := decodeProtoValue(valBytes, 0)
+	return key, v, valid
 }
 
 // decodeProtoValue decodes the google.protobuf.Value shim:
@@ -306,26 +313,15 @@ func decodeProtoStruct(b []byte, depth int) (map[string]any, bool) {
 			continue
 		}
 		// each entry: map<string, Value> with field 1 = key, field 2 = Value
-		entry, err := parseProtoFields(f.raw)
-		if err != nil {
+		k, vb, ok := decodeMapEntry(f.raw)
+		if !ok {
 			continue
 		}
-		var k string
-		var vb []byte
-		for _, e := range entry {
-			if e.num == 1 {
-				k = string(e.raw)
-			} else if e.num == 2 {
-				vb = e.raw
-			}
+		v, vok := decodeProtoValue(vb, depth)
+		if !vok {
+			return nil, false
 		}
-		if k != "" {
-			v, ok := decodeProtoValue(vb, depth)
-			if !ok {
-				return nil, false
-			}
-			out[k] = v
-		}
+		out[k] = v
 	}
 	return out, true
 }

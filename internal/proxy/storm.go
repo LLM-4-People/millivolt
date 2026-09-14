@@ -196,9 +196,7 @@ func (s *Server) writeStormQueueError(w http.ResponseWriter, rec *metrics.Record
 	if !ok {
 		return false
 	}
-	header := http.Header{}
-	header.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
-	writeClientErrorHdr(w, rec, typ, msg, http.StatusTooManyRequests, header)
+	writeClientErrorHdr(w, rec, typ, msg, http.StatusTooManyRequests, s.retryAfterHeader())
 	return true
 }
 

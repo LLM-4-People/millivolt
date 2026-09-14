@@ -539,9 +539,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		rec.ErrorType = "queue_full"
 		rec.ErrorMsg = err.Error()
-		extra := http.Header{}
-		extra.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))
-		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, extra)
+		writeClientErrorHdr(w, rec, "rate_limit_error", "proxy queue full or wait exceeded; retry later", http.StatusTooManyRequests, s.retryAfterHeader())
 		return
 	}
 	rec.QueueWaitMs += time.Since(queueStart).Milliseconds()

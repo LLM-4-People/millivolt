@@ -25,6 +25,18 @@ type debugBody struct {
 	Truncated bool   `json:"truncated"`
 }
 
+// sanitizeDebugBody builds the retained debug view of a captured body: the
+// bytes are sanitized to valid UTF-8 for JSON display, and the caller's
+// observed size and truncation flag ride along unchanged. Cap and truncation
+// policies stay with the callers.
+func sanitizeDebugBody(b []byte, size int, trunc bool) debugBody {
+	raw := string(b)
+	if !utf8.Valid(b) {
+		raw = string(bytes.ToValidUTF8(b, []byte("\uFFFD")))
+	}
+	return debugBody{Raw: raw, Bytes: size, Truncated: trunc}
+}
+
 type cappedWriter struct {
 	buf       []byte
 	limit     int
@@ -53,11 +65,7 @@ func (c *cappedWriter) Write(p []byte) (int, error) {
 }
 
 func (c *cappedWriter) body() debugBody {
-	raw := string(c.buf)
-	if !utf8.Valid(c.buf) {
-		raw = string(bytes.ToValidUTF8(c.buf, []byte("\uFFFD")))
-	}
-	return debugBody{Raw: raw, Bytes: c.seen, Truncated: c.truncated || c.seen > len(c.buf)}
+	return sanitizeDebugBody(c.buf, c.seen, c.truncated || c.seen > len(c.buf))
 }
 
 func capBytes(b []byte, limit int64) debugBody {
@@ -67,11 +75,7 @@ func capBytes(b []byte, limit int64) debugBody {
 		b = b[:limit]
 		trunc = true
 	}
-	raw := string(b)
-	if !utf8.Valid(b) {
-		raw = string(bytes.ToValidUTF8(b, []byte("\uFFFD")))
-	}
-	return debugBody{Raw: raw, Bytes: n, Truncated: trunc}
+	return sanitizeDebugBody(b, n, trunc)
 }
 
 func redactHeaderName(name, authHeader string) bool {
