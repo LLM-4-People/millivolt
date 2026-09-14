@@ -67,6 +67,21 @@ func FormatByteSize(n int64) string {
 	return strconv.FormatInt(n, 10) + byteSizeUnits[len(byteSizeUnits)-1].name
 }
 
+// byteValueString renders a KindBytes value in its canonical string form:
+// ByteSize, int64 and int all coerce to the formatted byte size. ok is false
+// for any other dynamic type; each caller owns its fallback for that case.
+func byteValueString(v any) (string, bool) {
+	switch n := v.(type) {
+	case ByteSize:
+		return FormatByteSize(int64(n)), true
+	case int64:
+		return FormatByteSize(n), true
+	case int:
+		return FormatByteSize(int64(n)), true
+	}
+	return "", false
+}
+
 func parseByteSize(v any) (int64, error) {
 	switch t := v.(type) {
 	case ByteSize:

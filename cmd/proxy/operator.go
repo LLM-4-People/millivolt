@@ -652,7 +652,7 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, `{"error":"GET or HEAD only"}`, http.StatusMethodNotAllowed)
+		adminjson.WriteErrorJSON(w, http.StatusMethodNotAllowed, "GET or HEAD only")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")

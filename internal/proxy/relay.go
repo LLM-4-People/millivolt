@@ -207,6 +207,21 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 	}
 }
 
+// commitSpooledBody writes a fully spooled non-stream body verbatim: response
+// headers, the status line, the bytes, then the shared non-stream analysis.
+// A failed client write marks the disconnect and stops before the analysis.
+// The gates that choose this epilogue (the in-band error envelope passthrough
+// and the healthy commit) stay at their call sites.
+func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record) {
+	copyResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if _, werr := w.Write(spooled); werr != nil {
+		markClientGone(rec)
+		return
+	}
+	analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+}
+
 // serveNonStreaming relays a non-streaming response with quality handling. A
 // 200 whose body classifies degenerate (metrics.ClassifyNonStreamBody -
 // same predicate as the streaming paths) triggers a transparent retry BEFORE
@@ -339,13 +354,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// classification instead of riding this verbatim path as a
 			// silently-empty success.
 			if typ, _, _ := metrics.ParseErrorEnvelope(spooled); typ != "" {
-				copyResponseHeaders(w.Header(), resp.Header)
-				w.WriteHeader(resp.StatusCode)
-				if _, werr := w.Write(spooled); werr != nil {
-					markClientGone(rec)
-					return
-				}
-				analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+				s.commitSpooledBody(w, resp, spooled, rec)
 				return
 			}
 		}
@@ -415,13 +424,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 
 		// Healthy: commit the spooled body verbatim.
-		copyResponseHeaders(w.Header(), resp.Header)
-		w.WriteHeader(resp.StatusCode)
-		if _, werr := w.Write(spooled); werr != nil {
-			markClientGone(rec)
-			return
-		}
-		analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+		s.commitSpooledBody(w, resp, spooled, rec)
 		return
 	}
 }

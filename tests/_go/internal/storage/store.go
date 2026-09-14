@@ -391,6 +391,8 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	if r.AnswerTokens != 30 {
 		t.Errorf("AnswerTokens = %d, want 30", r.AnswerTokens)
 	}
+	// GenTokens + HadAnswerContent: the gen_tps numerator and its content-
+	// presence gate must survive the restart (the dashboard recomputes nothing).
 	if r.GenTokens != 50 {
 		t.Errorf("GenTokens = %d, want 50 (reasoning 20 + answer 30, derived by Finalize)", r.GenTokens)
 	}
@@ -400,22 +402,8 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	if !r.FirstAnswerAt.Equal(now.Add(800 * time.Millisecond)) {
 		t.Errorf("FirstAnswerAt = %v, want %v", r.FirstAnswerAt, now.Add(800*time.Millisecond))
 	}
-	// GenTokens + HadAnswerContent: the gen_tps numerator and its content-
-	// presence gate must survive the restart (the dashboard recomputes nothing).
-	if r.GenTokens != 50 {
-		t.Errorf("GenTokens = %d, want 50 (reasoning 20 + answer 30, derived by Finalize)", r.GenTokens)
-	}
-	if !r.HadAnswerContent {
-		t.Error("HadAnswerContent lost across restart")
-	}
 	if r.DecodeTPS == 0 || r.OverallTPS == 0 {
 		t.Errorf("TPS fields lost: DecodeTPS=%v OverallTPS=%v", r.DecodeTPS, r.OverallTPS)
-	}
-	if r.GenTokens != 50 {
-		t.Errorf("GenTokens = %d, want 50 (reasoning 20 + answer 30, derived by Finalize)", r.GenTokens)
-	}
-	if !r.HadAnswerContent {
-		t.Error("HadAnswerContent lost across restart")
 	}
 	if r.Method != "POST" || r.Path != "/v1/chat/completions" {
 		t.Errorf("Method/Path = %q %q", r.Method, r.Path)

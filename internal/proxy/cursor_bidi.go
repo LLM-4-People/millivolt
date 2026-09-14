@@ -312,16 +312,9 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		writeClientError(w, rec, typ, msg, resp.StatusCode)
 		return
 	}
-	// Build the resumable run over the live stream. closeFn cancels the upstream
-	// request and closes the body pipe (only when the run truly ends). The
-	// heartbeat cadence comes from the live config snapshot (a reload applies
-	// to the next run) - the canonical default lives in config.Default().
-	run := providerformat.NewCursorRun(pw, resp.Body, blobs, func() {
-		upstreamCancel()
-		pw.Close()
-		resp.Body.Close()
-	}, s.cfg().CursorHeartbeatInterval)
-	run.Start()
+	// Build and start the resumable run over the live stream
+	// (startCursorRun owns the cleanup closure and heartbeat cadence).
+	run := s.startCursorRun(pw, resp.Body, blobs, upstreamCancel)
 
 	// The one-shot re-ask: when the resume-action turn voids (0 output), the
 	// turn driver may transparently re-drive the SAME request as a fresh user
@@ -506,13 +499,7 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 		resp.Body.Close()
 		return nil, fmt.Errorf("%s", detail)
 	}
-	run := providerformat.NewCursorRun(pw, resp.Body, blobs, func() {
-		upstreamCancel()
-		pw.Close()
-		resp.Body.Close()
-	}, s.cfg().CursorHeartbeatInterval)
-	run.Start()
-	return run, nil
+	return s.startCursorRun(pw, resp.Body, blobs, upstreamCancel), nil
 }
 
 // setCursorIdentity applies the agent.v1 auth + protocol headers shared by

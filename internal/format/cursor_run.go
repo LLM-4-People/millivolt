@@ -506,6 +506,26 @@ func (r *CursorRun) pump() {
 	}
 }
 
+// pushInteractionDelta decodes one text-family InteractionUpdate arm (text or
+// thinking): when the arm's field is present it decodes the inner text and
+// pushes the matching SSE delta key. ok reports whether the arm's field was
+// present - a present arm terminates update handling (its decode error, if
+// any, is returned), an absent one falls through to the next arm.
+func pushInteractionDelta(upd []protoField, deltaField, textField int, key string, push func(runEvent) bool) (bool, error) {
+	f := firstField(upd, deltaField)
+	if f == nil {
+		return false, nil
+	}
+	td, err := subFields(f)
+	if err != nil {
+		return true, err
+	}
+	if t := firstField(td, textField); t != nil && len(t.raw) > 0 {
+		push(runEvent{kind: evDelta, delta: map[string]any{key: string(t.raw)}})
+	}
+	return true, nil
+}
+
 // handleInteractionUpdate decodes one InteractionUpdate: accumulates usage and
 // pushes text/thinking deltas as events.
 func (r *CursorRun) handleInteractionUpdate(iu *protoField, push func(runEvent) bool) error {
@@ -513,25 +533,11 @@ func (r *CursorRun) handleInteractionUpdate(iu *protoField, push func(runEvent) 
 	if err != nil {
 		return err
 	}
-	if f := firstField(upd, fInteractionUpdateTextDelta); f != nil {
-		td, err := subFields(f)
-		if err != nil {
-			return err
-		}
-		if t := firstField(td, fTextDeltaText); t != nil && len(t.raw) > 0 {
-			push(runEvent{kind: evDelta, delta: map[string]any{"content": string(t.raw)}})
-		}
-		return nil
+	if ok, err := pushInteractionDelta(upd, fInteractionUpdateTextDelta, fTextDeltaText, "content", push); ok {
+		return err
 	}
-	if f := firstField(upd, fInteractionUpdateThinkingDelta); f != nil {
-		td, err := subFields(f)
-		if err != nil {
-			return err
-		}
-		if t := firstField(td, fThinkingDeltaText); t != nil && len(t.raw) > 0 {
-			push(runEvent{kind: evDelta, delta: map[string]any{"reasoning_content": string(t.raw)}})
-		}
-		return nil
+	if ok, err := pushInteractionDelta(upd, fInteractionUpdateThinkingDelta, fThinkingDeltaText, "reasoning_content", push); ok {
+		return err
 	}
 	if f := firstField(upd, fInteractionUpdateTokenDelta); f != nil {
 		td, err := subFields(f)

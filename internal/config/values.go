@@ -137,16 +137,10 @@ func exportValue(f Field, v any) any {
 		}
 		return FormatDuration(0)
 	case KindBytes:
-		switch n := v.(type) {
-		case ByteSize:
-			return FormatByteSize(int64(n))
-		case int64:
-			return FormatByteSize(n)
-		case int:
-			return FormatByteSize(int64(n))
-		default:
-			return FormatByteSize(0)
+		if s, ok := byteValueString(v); ok {
+			return s
 		}
+		return FormatByteSize(0)
 	case KindStrings:
 		ss, _ := v.([]string)
 		out := make([]string, len(ss))

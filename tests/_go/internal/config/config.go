@@ -733,6 +733,18 @@ func TestDefaultValidates(t *testing.T) {
 	}
 }
 
+// The dash_log_rows rejection wording is a pinned contract (the errRange
+// owner, shared with the schema bounds): byte-exact, with the integer band
+// rendered without formatting drift.
+func TestDashLogRowsValidateWording(t *testing.T) {
+	c := Default()
+	c.DashLogRows = DashLogRowsMax + 1
+	err := c.Validate()
+	if err == nil || err.Error() != "dash_log_rows: must be 10..500, got 501" {
+		t.Fatalf("Validate error = %v, want the exact errRange wording", err)
+	}
+}
+
 // TestApplyProviderAliases pins the Settings-sheet path for provider_aliases:
 // the JSON map coerces into the Go field, a malformed pair fails the Apply,
 // and Map() round-trips the map so the editor cannot silently drop it.

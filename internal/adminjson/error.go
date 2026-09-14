@@ -35,9 +35,11 @@ func WriteError(w http.ResponseWriter, status int, msg string) {
 // surfaces whose error contract is an application/json body: cmd/proxy's
 // /metrics and /admin log/backup routes (export, purge, purge/count, backup,
 // restore), which answered application/json before the body gained one
-// marshaling owner. Same shape, same single encoding owner (ErrorBody); the
-// Content-Type is the only difference from WriteError. The trailing newline
-// matches json.Encoder's, which these routes used previously.
+// marshaling owner, and the /healthz method gate, whose hand-spliced JSON
+// body http.Error previously mislabeled as text/plain. Same shape, same
+// single encoding owner (ErrorBody); the Content-Type is the only difference
+// from WriteError. The trailing newline matches json.Encoder's, which these
+// routes used previously.
 func WriteErrorJSON(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

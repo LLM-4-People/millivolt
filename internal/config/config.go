@@ -728,7 +728,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("sse_keepalive_interval: must be %s, got %s", heartbeatRange(), FormatDuration(c.SSEKeepaliveInterval))
 	}
 	if c.DashLogRows < DashLogRowsMin || c.DashLogRows > DashLogRowsMax {
-		return fmt.Errorf("dash_log_rows: must be %d..%d, got %d", DashLogRowsMin, DashLogRowsMax, c.DashLogRows)
+		return errRange("dash_log_rows",
+			strconv.FormatInt(int64(DashLogRowsMin), 10), strconv.FormatInt(int64(DashLogRowsMax), 10), strconv.FormatInt(int64(c.DashLogRows), 10))
 	}
 	if c.DashPollInterval <= 0 {
 		return fmt.Errorf("dash_poll_interval: must be > %s", FormatDuration(0))
@@ -1240,9 +1241,9 @@ func (c *Config) RetryAfterSeconds() int {
 // errRange is the shared wording for a validated field outside its allowed
 // range; callers render min/max/got in the field's own unit (byte sizes,
 // durations, integers, or the schema-typed bound). The byte-size, duration
-// and storm validators and the models_discovery_max_pages /
-// storage_query_max_rows integer pair all route through this one owner, so
-// the phrasing cannot drift between them.
+// and storm validators, the models_discovery_max_pages /
+// storage_query_max_rows integer pair, and dash_log_rows all route through
+// this one owner, so the phrasing cannot drift between them.
 func errRange(key, min, max, got string) error {
 	return fmt.Errorf("%s: must be %s..%s, got %s", key, min, max, got)
 }

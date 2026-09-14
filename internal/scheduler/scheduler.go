@@ -296,6 +296,19 @@ func (g *group) kickSendLocked() {
 	g.sendKick = make(chan struct{})
 }
 
+// waitKickOrDone parks a WaitSend caller on its freshly snapshotted wake
+// channels until a group kick, a send kick, or context cancellation; the
+// cancellation is returned so the caller can return its retry token.
+func waitKickOrDone(ctx context.Context, kick, sendKick <-chan struct{}) error {
+	select {
+	case <-kick:
+	case <-sendKick:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return nil
+}
+
 // WaitSend blocks until this caller may hit upstream. honorHold parks on an
 // operator pause (retries - a new send). First-attempt callers pass false so
 // an already-acquired in-flight request still finishes. own is the token
@@ -372,11 +385,8 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 		now := time.Now()
 		if now.Before(g.nextAllowedAt) {
 			g.mu.Unlock()
-			select {
-			case <-kick:
-			case <-sendKick:
-			case <-ctx.Done():
-				return own, ctx.Err()
+			if err := waitKickOrDone(ctx, kick, sendKick); err != nil {
+				return own, err
 			}
 			continue
 		}
@@ -386,11 +396,8 @@ func (s *Scheduler) WaitSend(ctx context.Context, key string, hooks WaiterHooks,
 		}
 		if g.probing {
 			g.mu.Unlock()
-			select {
-			case <-kick:
-			case <-sendKick:
-			case <-ctx.Done():
-				return own, ctx.Err()
+			if err := waitKickOrDone(ctx, kick, sendKick); err != nil {
+				return own, err
 			}
 			continue
 		}

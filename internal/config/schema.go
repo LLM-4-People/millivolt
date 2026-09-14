@@ -414,13 +414,8 @@ func typeLineDefault(f Field, def any) string {
 			return FormatDuration(d)
 		}
 	case KindBytes:
-		switch n := def.(type) {
-		case ByteSize:
-			return FormatByteSize(int64(n))
-		case int64:
-			return FormatByteSize(n)
-		case int:
-			return FormatByteSize(int64(n))
+		if s, ok := byteValueString(def); ok {
+			return s
 		}
 	}
 	return fmt.Sprint(def)

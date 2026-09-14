@@ -29,9 +29,14 @@ func (r liveRecorder) PublishLive(phase string, record *metrics.Record) {
 	r.buffer.PublishLive(phase, record)
 }
 
+// PurgeResult carries the store-level deletion counts Clear returns: durable
+// rows deleted and live-ring records removed. Purely internal - the purge
+// response dropped its wire keys ({"ok": true} only, pinned by the strict
+// response decoder), and the fields are the store-level contract the storage
+// tests assert against.
 type PurgeResult struct {
-	Deleted       int64 `json:"deleted"`
-	BufferRemoved int   `json:"buffer_removed"`
+	Deleted       int64
+	BufferRemoved int
 }
 
 type purgeOutcome struct {

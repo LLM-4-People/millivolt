@@ -1,11 +1,12 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -57,7 +58,13 @@ func chromeMenuSource(t *testing.T) []byte {
 	}
 }
 
-// menuDeclStatement extracts one `const NAME = ...;` statement's text.
+// menuDeclStatement extracts one `const NAME = ...;` statement's text. The
+// cut at the first ";\n" is the boundary the real chrome.js statements
+// satisfy; its documented blind spot: a label containing a semicolon
+// followed by a raw newline could only be spelled as a backtick template
+// literal ('...' and "..." literals cannot carry raw newlines), which these
+// one-line menus never use. Covering that would need a real JS parser -
+// out of scope for source pins.
 func menuDeclStatement(t *testing.T, src []byte, name string) string {
 	t.Helper()
 	decl := "const " + name + " = "
@@ -73,12 +80,105 @@ func menuDeclStatement(t *testing.T, src []byte, name string) string {
 	return rest[:end]
 }
 
-// menuDurationTokens collects every duration token a menu statement offers:
-// the first element of each ['token', 'label'] pair literal plus every
-// durationPairs('a', 'b', ...) argument. Duplicates collapse; an empty
-// statement fails loudly.
-func menuDurationTokens(t *testing.T, stmt string) []string {
-	t.Helper()
+// isJSStringDelimiter reports whether c opens a JS string literal the menu
+// statements can use: '...', "..." or `...` (a style widening to backticks
+// must keep its tokens pinned, not let them slip past the acceptance checks).
+func isJSStringDelimiter(c byte) bool {
+	return c == '\'' || c == '"' || c == '`'
+}
+
+// scanJSString scans one JS string literal starting at the delimiter s[i].
+// It returns the literal's raw content (source bytes between the delimiters,
+// escape sequences kept verbatim - unescaping is not the extractor's job;
+// tokens carrying escapes simply fail the acceptance surfaces loudly) and the
+// index just past the closing delimiter. ok is false when the literal never
+// terminates; callers fail loudly rather than guess at a truncated token.
+func scanJSString(s string, i int) (content string, next int, ok bool) {
+	q := s[i]
+	var b strings.Builder
+	for j := i + 1; j < len(s); j++ {
+		c := s[j]
+		if c == '\\' && j+1 < len(s) {
+			b.WriteByte(c)
+			b.WriteByte(s[j+1])
+			j++
+			continue
+		}
+		if c == q {
+			return b.String(), j + 1, true
+		}
+		b.WriteByte(c)
+	}
+	return "", 0, false
+}
+
+// scanParenGroup scans a parenthesized group starting at s[i] == '(', skipping
+// string literals so quotes and unbalanced ')' inside tokens cannot cut the
+// group short. It returns the group's inner text and the index just past its
+// matching ')'.
+func scanParenGroup(s string, i int) (inner string, next int, err error) {
+	depth := 0
+	for j := i; j < len(s); j++ {
+		c := s[j]
+		if isJSStringDelimiter(c) {
+			_, after, ok := scanJSString(s, j)
+			if !ok {
+				return "", 0, fmt.Errorf("unterminated string literal at offset %d in: %s", j, s)
+			}
+			j = after - 1
+			continue
+		}
+		if c == '(' {
+			depth++
+			continue
+		}
+		if c == ')' {
+			depth--
+			if depth == 0 {
+				return s[i+1 : j], j + 1, nil
+			}
+		}
+	}
+	return "", 0, fmt.Errorf("unterminated parenthesized group at offset %d in: %s", i, s)
+}
+
+// scanBracketGroup scans from just past a pair literal's first element through
+// the pair's closing ']', skipping string literals so labels containing
+// brackets or quotes cannot end the pair early.
+func scanBracketGroup(s string, i int) (next int, err error) {
+	depth := 0
+	for j := i; j < len(s); j++ {
+		c := s[j]
+		if isJSStringDelimiter(c) {
+			_, after, ok := scanJSString(s, j)
+			if !ok {
+				return 0, fmt.Errorf("unterminated string literal at offset %d in: %s", j, s)
+			}
+			j = after - 1
+			continue
+		}
+		if c == '[' {
+			depth++
+			continue
+		}
+		if c == ']' {
+			if depth == 0 {
+				return j + 1, nil
+			}
+			depth--
+		}
+	}
+	return 0, fmt.Errorf("unterminated pair literal at offset %d in: %s", i, s)
+}
+
+// menuDurationTokensErr collects every duration token a menu statement
+// offers: the first element of each ['token', 'label'] pair literal plus
+// every string literal inside a durationPairs(...) call, in statement order
+// with duplicates collapsed. The whole statement is scanned by the escape-,
+// quote- and bracket-aware primitives above, so a widened quote style, a
+// backtick literal, an embedded quote or a paren inside a token either
+// extracts exactly or reports an error - nothing truncates silently.
+func menuDurationTokensErr(stmt string) ([]string, error) {
 	seen := map[string]bool{}
 	var toks []string
 	add := func(tok string) {
@@ -87,18 +187,75 @@ func menuDurationTokens(t *testing.T, stmt string) []string {
 			toks = append(toks, tok)
 		}
 	}
-	// Quote-style agnostic: a pair literal may widen to double quotes,
-	// and a mixed widening must not let tokens slip past the pin.
-	for _, m := range regexp.MustCompile(`\[['"]([^'"]*)["']`).FindAllStringSubmatch(stmt, -1) {
-		add(m[1])
-	}
-	for _, m := range regexp.MustCompile(`durationPairs\(([^)]*)\)`).FindAllStringSubmatch(stmt, -1) {
-		for _, q := range regexp.MustCompile(`['"]([^'"]*)["']`).FindAllStringSubmatch(m[1], -1) {
-			add(q[1])
+	skipSpace := func(s string, i int) int {
+		for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+			i++
 		}
+		return i
+	}
+	collect := func(s string) error {
+		for i := 0; i < len(s); {
+			if isJSStringDelimiter(s[i]) {
+				content, next, ok := scanJSString(s, i)
+				if !ok {
+					return fmt.Errorf("unterminated string literal at offset %d in: %s", i, s)
+				}
+				add(content)
+				i = next
+				continue
+			}
+			i++
+		}
+		return nil
+	}
+	i := 0
+	for i < len(stmt) {
+		if strings.HasPrefix(stmt[i:], "durationPairs") {
+			j := skipSpace(stmt, i+len("durationPairs"))
+			if j < len(stmt) && stmt[j] == '(' {
+				args, after, err := scanParenGroup(stmt, j)
+				if err != nil {
+					return nil, err
+				}
+				if err := collect(args); err != nil {
+					return nil, err
+				}
+				i = after
+				continue
+			}
+		}
+		if stmt[i] == '[' {
+			k := skipSpace(stmt, i+1)
+			if k < len(stmt) && isJSStringDelimiter(stmt[k]) {
+				content, after, ok := scanJSString(stmt, k)
+				if !ok {
+					return nil, fmt.Errorf("unterminated string literal at offset %d in: %s", k, stmt)
+				}
+				add(content)
+				next, err := scanBracketGroup(stmt, after)
+				if err != nil {
+					return nil, err
+				}
+				i = next
+				continue
+			}
+		}
+		i++
 	}
 	if len(toks) == 0 {
-		t.Fatalf("no duration tokens found in: %s", stmt)
+		return nil, fmt.Errorf("no duration tokens found in: %s", stmt)
+	}
+	return toks, nil
+}
+
+// menuDurationTokens is the test-facing wrapper around menuDurationTokensErr:
+// any extraction failure is a loud test failure, never a silently narrowed
+// token set. An empty statement fails loudly.
+func menuDurationTokens(t *testing.T, stmt string) []string {
+	t.Helper()
+	toks, err := menuDurationTokensErr(stmt)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return toks
 }
@@ -112,23 +269,40 @@ func quoteJSON(tok string) string {
 }
 
 // TestMenuDurationTokensAcceptEitherQuoteStyle pins the extractor's
-// quote-agnosticism: chrome.js pair literals may widen to double quotes,
-// and a mixed widening must not let tokens slip past the server-
-// acceptance pins. Single- and double-quoted spellings of the same
-// statement must extract identical token lists.
+// robustness: single- and double-quoted spellings of the same statement
+// must extract identical token lists, an embedded or escaped quote must not
+// truncate its token into plausible fragments, backtick template literals
+// extract exactly (a style widening stays pinned), and a paren inside a
+// quoted token cannot cut the durationPairs group short. Malformed input
+// fails loudly instead of extracting a truncated token.
 func TestMenuDurationTokensAcceptEitherQuoteStyle(t *testing.T) {
 	single := "const X = [['', 'I resume'], durationPairs('15m', '1 hour')];"
 	double := `const X = [["", "I resume"], durationPairs("15m", "1 hour")];`
-	want := []string{"", "15m", "1 hour"}
-	for name, stmt := range map[string]string{"single": single, "double": double} {
-		got := menuDurationTokens(t, stmt)
-		if len(got) != len(want) {
-			t.Fatalf("%s-quoted statement extracted %v, want %v", name, got, want)
+	rows := []struct {
+		name string
+		stmt string
+		want []string
+	}{
+		{"single", single, []string{"", "15m", "1 hour"}},
+		{"double", double, []string{"", "15m", "1 hour"}},
+		{"embedded quote", `const X = durationPairs("15m", "worker's hour");`, []string{"15m", "worker's hour"}},
+		{"escaped quote", "const X = durationPairs('15m', 'it\\'s an hour');", []string{"15m", `it\'s an hour`}},
+		{"backticks", "const X = durationPairs(`15m`, `1 hour`);", []string{"15m", "1 hour"}},
+		{"paren token", `const X = durationPairs('15m', '1 hour (and change)');`, []string{"15m", "1 hour (and change)"}},
+		{"unbalanced paren token", `const X = durationPairs('15m', 'half ) hour');`, []string{"15m", "half ) hour"}},
+	}
+	for _, row := range rows {
+		got := menuDurationTokens(t, row.stmt)
+		if !reflect.DeepEqual(got, row.want) {
+			t.Errorf("%s: extracted %v, want %v", row.name, got, row.want)
 		}
-		for i := range want {
-			if got[i] != want[i] {
-				t.Fatalf("%s-quoted statement extracted %v, want %v", name, got, want)
-			}
+	}
+	for _, bad := range []struct{ name, stmt string }{
+		{"unterminated literal", `const X = durationPairs('15m', 'oops);`},
+		{"unterminated group", `const X = durationPairs('15m', '1 hour'`},
+	} {
+		if _, err := menuDurationTokensErr(bad.stmt); err == nil {
+			t.Errorf("%s: extraction succeeded, want a loud failure", bad.name)
 		}
 	}
 }

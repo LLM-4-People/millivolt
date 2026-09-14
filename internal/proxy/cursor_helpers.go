@@ -4,6 +4,7 @@ package proxy
 // (tool results) and the OpenAI SSE/JSON emitters that render a turn's deltas.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -93,6 +94,22 @@ func cursorToolResultMap(results []cursorToolResult) map[string]providerformat.T
 		m[tr.toolCallID] = providerformat.ToolResult{Text: tr.content}
 	}
 	return m
+}
+
+// startCursorRun builds and starts the resumable run over a live bidi
+// stream: closeFn cancels the upstream request and closes the body pipe
+// (only when the run truly ends), and the heartbeat cadence comes from the
+// live config snapshot (a reload applies to the next run) - the canonical
+// default lives in config.Default(). Callers keep resp/pw/upstreamCancel
+// ownership outside the run: its Close is the only trigger.
+func (s *Server) startCursorRun(pw *io.PipeWriter, body io.ReadCloser, blobs *providerformat.KVBlobStore, upstreamCancel context.CancelFunc) *providerformat.CursorRun {
+	run := providerformat.NewCursorRun(pw, body, blobs, func() {
+		upstreamCancel()
+		pw.Close()
+		body.Close()
+	}, s.cfg().CursorHeartbeatInterval)
+	run.Start()
+	return run
 }
 
 // writeSSEHeaders writes the SSE response headers + status for a cursor stream.
