@@ -63,23 +63,28 @@ func markClientGone(rec *metrics.Record) {
 	}
 }
 
+// errStreamRead is the persisted error-type vocabulary member for a failure
+// reading or translating an upstream body stream: markStreamErr's record
+// stamp, and the in-band type the cursor turn error surface emits.
+const errStreamRead = "stream_read_error"
+
 // markStreamErr classifies an error from an upstream body copy/scan loop: when
 // the LOCAL client disconnected (its request context canceled) the loop failed
 // because the proxy's relay to the client died - that is the client's own
 // cancellation, recorded as a client disconnect (the 499/cancel bucket when no
 // error outcome was decided yet; a decided error status stays, per
 // markClientGone) and NOT as an error. Anything else is genuine upstream
-// trouble (or a translation failure) and gets the given error type stamped
-// (the already-committed upstream status stays on the record). The single
-// choke point for every relay loop; Cursor paths keep their own documented
-// exception (TurnResult.ClientAbort in cursor_bidi.go - the upstream DID
-// answer, so the 200 stays).
-func markStreamErr(ctx context.Context, rec *metrics.Record, err error, errType string) {
+// trouble (or a translation failure) and gets the stream-read error type
+// stamped (the already-committed upstream status stays on the record). The
+// single choke point for every relay loop; Cursor paths keep their own
+// documented exception (TurnResult.ClientAbort in cursor_bidi.go - the
+// upstream DID answer, so the 200 stays).
+func markStreamErr(ctx context.Context, rec *metrics.Record, err error) {
 	if ctx.Err() == context.Canceled {
 		markClientGone(rec)
 		return
 	}
-	rec.ErrorType = errType
+	rec.ErrorType = errStreamRead
 	rec.ErrorMsg = err.Error()
 }
 
@@ -132,7 +137,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 		}
 		if err != nil {
 			if err != io.EOF {
-				markStreamErr(ctx, rec, err, "stream_read_error")
+				markStreamErr(ctx, rec, err)
 			}
 			break
 		}
@@ -228,7 +233,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			w.WriteHeader(resp.StatusCode)
 			if isEventStream(resp.Header.Get("Content-Type")) {
 				if _, cerr := io.Copy(disconnectWriter{w, rec}, resp.Body); cerr != nil {
-					markStreamErr(ctx, rec, cerr, "stream_read_error")
+					markStreamErr(ctx, rec, cerr)
 				}
 				// The relaying copy above may abort early on a client
 				// disconnect, leaving the real upstream body unread. It is
@@ -254,7 +259,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		if t.format != "" && t.format != "openai" {
 			full, rerr := io.ReadAll(io.LimitReader(resp.Body, maxTranslateBodyBytes+1))
 			if rerr != nil {
-				markStreamErr(ctx, rec, rerr, "stream_read_error")
+				markStreamErr(ctx, rec, rerr)
 				if rec.ClientDisconnected {
 					return
 				}
@@ -314,7 +319,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 		if spoolErr != nil && spoolErr != io.EOF {
-			markStreamErr(ctx, rec, spoolErr, "stream_read_error")
+			markStreamErr(ctx, rec, spoolErr)
 			copyResponseHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			if _, werr := w.Write(spooled); werr != nil {
@@ -1142,7 +1147,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 		// dedicated bidirectional handler (serveCursorBidi), bypassing
 		// doWithRetry/transformResponse entirely.
 		if _, err := io.Copy(disconnectWriter{w, rec}, resp.Body); err != nil {
-			markStreamErr(ctx, rec, err, "stream_read_error")
+			markStreamErr(ctx, rec, err)
 		}
 		return
 	}
@@ -1156,7 +1161,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, flusher http.Flusher) {
 	if flusher == nil {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
-			markStreamErr(ctx, rec, err, "stream_read_error")
+			markStreamErr(ctx, rec, err)
 		}
 		return
 	}
@@ -1185,7 +1190,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	// stays race-free with the deferred record finalize. markStreamErr keeps a
 	// client-disconnect-induced pipe close out of the error fields.
 	if err := scanner.Err(); err != nil {
-		markStreamErr(ctx, rec, err, "stream_read_error")
+		markStreamErr(ctx, rec, err)
 	}
 	a.Fill(rec)
 	if err := scanner.Err(); errors.Is(err, metrics.ErrMetricRange) {
@@ -1222,7 +1227,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
-			markStreamErr(ctx, rec, err, "stream_read_error")
+			markStreamErr(ctx, rec, err)
 		}
 		return false
 	}
@@ -1387,7 +1392,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// A real read failure is the transport's own error - release
 				// the held bytes verbatim (byte preservation) and never
 				// substitute a synthetic outcome on top.
-				markStreamErr(ctx, rec, err, "stream_read_error")
+				markStreamErr(ctx, rec, err)
 				if holding {
 					if _, werr := w.Write(hold); werr != nil {
 						markClientGone(rec)

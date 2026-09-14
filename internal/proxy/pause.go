@@ -116,6 +116,22 @@ func pauseDurationError() error {
 	return fmt.Errorf("duration must be %s, or empty", strings.Join(keys, ", "))
 }
 
+// resolveHoldDuration resolves an operator-hold duration: the request's
+// optional body override (whitespace-trimmed), else the previous hold's
+// duration, then the pauseDurations allowlist lookup. ok reports whether
+// dur is an allowlist member; the caller maps the rejection to its own
+// pauseDurationError return shape.
+func resolveHoldDuration(body *string, hasPrev bool, prevDur string) (string, time.Duration, bool) {
+	dur := ""
+	if body != nil {
+		dur = strings.TrimSpace(*body)
+	} else if hasPrev {
+		dur = prevDur
+	}
+	wait, ok := pauseDurations[dur]
+	return dur, wait, ok
+}
+
 // mergeUntil owns the deadline merge shared by the pause and debug edit
 // transactions: an edit that omits duration keeps the previous deadline
 // untouched; a stated duration re-anchors a fresh window now, except the same
@@ -328,13 +344,7 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 	hasPrev := id != ""
 	var snap persistedPause
 	err = s.editPersisted(id, func(prev persistedPause) (persistedPause, error) {
-		dur := ""
-		if body.Duration != nil {
-			dur = strings.TrimSpace(*body.Duration)
-		} else if hasPrev {
-			dur = prev.Duration
-		}
-		wait, ok := pauseDurations[dur]
+		dur, wait, ok := resolveHoldDuration(body.Duration, hasPrev, prev.Duration)
 		if !ok {
 			return prev, pauseDurationError()
 		}

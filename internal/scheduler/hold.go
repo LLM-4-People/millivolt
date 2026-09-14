@@ -679,6 +679,33 @@ func (s *Scheduler) reserveHold(w *waiter, h *holdSnap) bool {
 	return true
 }
 
+// fireHoldLocked walks the false→true holding edge: sets the flag and
+// invokes OnHold exactly once per edge. Callers hold holdCountMu, which makes
+// the edge atomic and serializes hook dispatch with every other hold
+// transition (the ordering half of adoptHold's contract).
+func (w *waiter) fireHoldLocked() {
+	if !w.holding {
+		w.holding = true
+		if w.onHold != nil {
+			w.onHold()
+		}
+	}
+}
+
+// fireUnholdLocked walks the true→false holding edge: clears the flag and
+// invokes OnUnhold exactly once per edge. Callers hold holdCountMu for the
+// same serialized-dispatch contract, except dropHold's nil-scheduler
+// fallback: no scheduler means no shared state and no concurrent transition
+// to serialize against, so no lock exists to hold.
+func (w *waiter) fireUnholdLocked() {
+	if w.holding {
+		w.holding = false
+		if w.onUnhold != nil {
+			w.onUnhold()
+		}
+	}
+}
+
 func (w *waiter) adoptHold(s *Scheduler, h *holdSnap) {
 	if s == nil {
 		return
@@ -700,12 +727,7 @@ func (w *waiter) adoptHold(s *Scheduler, h *holdSnap) {
 	// lifecycle publication satisfies this; socket writes belong to OnWait).
 	s.holdCountMu.Lock()
 	s.moveHoldCountLocked(w, h)
-	if !w.holding {
-		w.holding = true
-		if w.onHold != nil {
-			w.onHold()
-		}
-	}
+	w.fireHoldLocked()
 	s.holdCountMu.Unlock()
 }
 
@@ -721,22 +743,12 @@ func (w *waiter) syncUnhold(s *Scheduler) bool {
 	h := s.matchingHold(w.client, w.provider)
 	if h != nil {
 		s.moveHoldCountLocked(w, h)
-		if !w.holding {
-			w.holding = true
-			if w.onHold != nil {
-				w.onHold()
-			}
-		}
+		w.fireHoldLocked()
 		s.holdCountMu.Unlock()
 		return true
 	}
 	s.clearHoldCountLocked(w)
-	if w.holding {
-		w.holding = false
-		if w.onUnhold != nil {
-			w.onUnhold()
-		}
-	}
+	w.fireUnholdLocked()
 	s.holdCountMu.Unlock()
 	return false
 }
@@ -753,19 +765,10 @@ func (w *waiter) dropHold(s *Scheduler) {
 		// non-blocking and never re-enter the scheduler.
 		s.holdCountMu.Lock()
 		s.clearHoldCountLocked(w)
-		if w.holding {
-			w.holding = false
-			if w.onUnhold != nil {
-				w.onUnhold()
-			}
-		}
+		w.fireUnholdLocked()
 		s.holdCountMu.Unlock()
 		return
 	}
-	if w.holding {
-		w.holding = false
-		if w.onUnhold != nil {
-			w.onUnhold()
-		}
-	}
+	// Nil scheduler: no lock exists to take (see fireUnholdLocked).
+	w.fireUnholdLocked()
 }

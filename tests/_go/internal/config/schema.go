@@ -227,8 +227,15 @@ func TestWriteYAMLRoundTripDefault(t *testing.T) {
 
 func TestApplyUnknownKeyRejected(t *testing.T) {
 	c := Default()
-	if err := c.Apply(map[string]any{"not_a_key": 1}); err == nil {
+	err := c.Apply(map[string]any{"not_a_key": 1})
+	if err == nil {
 		t.Fatal("expected reject unknown key")
+	}
+	// The rejection wording is a pinned contract (the errUnknownKey owner,
+	// shared by Settings Apply and the YAML overlay path): byte-exact, with
+	// the key rendered via %q.
+	if err.Error() != `unknown config key "not_a_key"` {
+		t.Fatalf("Apply error = %q, want the exact unknown-key wording", err.Error())
 	}
 }
 

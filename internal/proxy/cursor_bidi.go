@@ -610,6 +610,22 @@ func openCursorStream(w http.ResponseWriter, rec *metrics.Record, id, model stri
 	return emit
 }
 
+// reaskAfterVoid tears down a voided resume-action run and re-opens a fresh
+// one, absorbing the void into the record. It returns the new run with the
+// per-turn metrics already reset for its turn, or nil when the re-ask opener
+// failed; the caller owns its surface's divergent re-drive tail.
+func (s *Server) reaskAfterVoid(run *providerformat.CursorRun, rec *metrics.Record, reask func() (*providerformat.CursorRun, error)) *providerformat.CursorRun {
+	s.cursorRuns.drop(run)
+	run.Close()
+	s.absorbCursorVoid(rec)
+	next, err := reask()
+	if err != nil || next == nil {
+		return nil
+	}
+	resetTurnMetrics(rec)
+	return next
+}
+
 // serveRunStream drives a fresh run's turn, writing OpenAI SSE. When a
 // resume-action turn voids (0 output tokens) and a re-ask opener is available,
 // the void is absorbed as one transparent re-ask: a NEW run opens with the
@@ -630,12 +646,7 @@ func (s *Server) serveRunStream(ctx context.Context, w http.ResponseWriter, run 
 		// Absorb the void: close the voided run and re-drive as a fresh user
 		// turn on a new run. The re-ask turn remains void-eligible (a fresh
 		// turn that ALSO produced nothing is the same failure surface).
-		s.cursorRuns.drop(run)
-		run.Close()
-		s.absorbCursorVoid(rec)
-		next, err := reask()
-		if err == nil && next != nil {
-			resetTurnMetrics(rec)
+		if next := s.reaskAfterVoid(run, rec, reask); next != nil {
 			result = next.RunTurn(ctx, emitDeltas)
 			s.finishRunTurn(w, next, result, emit, rec, id, rr, true) // re-ask turn: void surfaces
 			return
@@ -649,17 +660,7 @@ func (s *Server) serveRunStream(ctx context.Context, w http.ResponseWriter, run 
 func (s *Server) serveResumeStream(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, results []cursorToolResult, steerText string, id string, rec *metrics.Record, rr cursorTurnRender) {
 	emit := openCursorStream(w, rec, id, rr.model)
 
-	m := map[string]struct {
-		Text    string
-		IsError bool
-	}{}
-	for _, tr := range results {
-		m[tr.toolCallID] = struct {
-			Text    string
-			IsError bool
-		}{tr.content, false}
-	}
-	result := run.ResumeTurn(ctx, m, steerText, func(delta map[string]any) error {
+	result := run.ResumeTurn(ctx, cursorToolResultMap(results), steerText, func(delta map[string]any) error {
 		cursorTrackDelta(rec, delta)
 		return emit(delta, nil)
 	})
@@ -772,9 +773,9 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			rec.ClientDisconnected = true
 			return
 		}
-		rec.ErrorType = "stream_read_error"
+		rec.ErrorType = errStreamRead
 		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markGone(emitErrorSSE(w, id, "stream_read_error", fmt.Sprint(result.Err)))
+		markGone(emitErrorSSE(w, id, errStreamRead, fmt.Sprint(result.Err)))
 		return
 
 	case providerformat.TurnParked:
@@ -878,12 +879,7 @@ func (s *Server) serveRunJSON(ctx context.Context, w http.ResponseWriter, run *p
 	}
 	result := run.RunTurn(ctx, accumulate)
 	if cursorVoidTurn(resumeRequest, result) && reask != nil {
-		s.cursorRuns.drop(run)
-		run.Close()
-		s.absorbCursorVoid(rec)
-		next, err := reask()
-		if err == nil && next != nil {
-			resetTurnMetrics(rec)
+		if next := s.reaskAfterVoid(run, rec, reask); next != nil {
 			content.Reset()
 			toolCalls = toolCalls[:0]
 			result = next.RunTurn(ctx, accumulate)
@@ -898,17 +894,7 @@ func (s *Server) serveRunJSON(ctx context.Context, w http.ResponseWriter, run *p
 func (s *Server) serveResumeJSON(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, results []cursorToolResult, steerText string, id string, rec *metrics.Record, rr cursorTurnRender) {
 	var content strings.Builder
 	var toolCalls []map[string]any
-	m := map[string]struct {
-		Text    string
-		IsError bool
-	}{}
-	for _, tr := range results {
-		m[tr.toolCallID] = struct {
-			Text    string
-			IsError bool
-		}{tr.content, false}
-	}
-	result := run.ResumeTurn(ctx, m, steerText, func(delta map[string]any) error {
+	result := run.ResumeTurn(ctx, cursorToolResultMap(results), steerText, func(delta map[string]any) error {
 		cursorTrackDelta(rec, delta)
 		accumulateJSONDelta(&content, &toolCalls, delta)
 		return nil

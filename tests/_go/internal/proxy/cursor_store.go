@@ -194,10 +194,7 @@ func TestCursorRunPumpExitMarksClosed(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	// A resume against the dead run fails cleanly instead of hitting the pipe.
-	res := run.ResumeTurn(t.Context(), map[string]struct {
-		Text    string
-		IsError bool
-	}{"call-x": {"ok", false}}, "", func(map[string]any) error { return nil })
+	res := run.ResumeTurn(t.Context(), map[string]format.ToolResult{"call-x": {Text: "ok"}}, "", func(map[string]any) error { return nil })
 	if res.Outcome != format.TurnErrored {
 		t.Fatalf("resume on a dead run = %v, want TurnErrored", res.Outcome)
 	}

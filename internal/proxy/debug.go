@@ -444,13 +444,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 	hasPrev := id != ""
 	var snap persistedDebug
 	err = s.editDebug(id, func(prev persistedDebug) (persistedDebug, error) {
-		dur := ""
-		if body.Duration != nil {
-			dur = strings.TrimSpace(*body.Duration)
-		} else if hasPrev {
-			dur = prev.Duration
-		}
-		wait, ok := pauseDurations[dur]
+		dur, wait, ok := resolveHoldDuration(body.Duration, hasPrev, prev.Duration)
 		if !ok {
 			return prev, pauseDurationError()
 		}

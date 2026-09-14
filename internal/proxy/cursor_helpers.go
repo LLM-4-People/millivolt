@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
@@ -82,6 +83,16 @@ func toolResultIDs(results []cursorToolResult) []string {
 		ids = append(ids, tr.toolCallID)
 	}
 	return ids
+}
+
+// cursorToolResultMap converts a request's decoded tool results into the
+// ResumeTurn map keyed by tool_call_id. Shared by both resume drivers.
+func cursorToolResultMap(results []cursorToolResult) map[string]providerformat.ToolResult {
+	m := make(map[string]providerformat.ToolResult, len(results))
+	for _, tr := range results {
+		m[tr.toolCallID] = providerformat.ToolResult{Text: tr.content}
+	}
+	return m
 }
 
 // writeSSEHeaders writes the SSE response headers + status for a cursor stream.

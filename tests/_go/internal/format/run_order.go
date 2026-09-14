@@ -187,10 +187,7 @@ func TestResumeOwnsUsageResetBeforeWritingResults(t *testing.T) {
 	t.Cleanup(r.Close)
 	r.usagePrompt, r.usageDeltaSum = 111, 99
 	r.pending["call"] = CursorToolCall{CallID: "call", Name: "tool"}
-	result := r.ResumeTurn(t.Context(), map[string]struct {
-		Text    string
-		IsError bool
-	}{"call": {Text: "result"}}, "", nil)
+	result := r.ResumeTurn(t.Context(), map[string]ToolResult{"call": {Text: "result"}}, "", nil)
 	if result.Outcome != TurnFinished || result.Output != 7 || result.Prompt != 222 {
 		t.Fatalf("continuation retained past-turn usage or erased new usage: %+v", result)
 	}
@@ -326,10 +323,7 @@ func TestResumeClearsPreviousCompletionMarker(t *testing.T) {
 			t.Cleanup(r.Close)
 			r.handleInteractionUpdate(&protoField{wire: wireBytes, raw: appendMessage(nil, fInteractionUpdateTurnEnded, nil)}, func(runEvent) bool { return true })
 			r.pending["call"] = CursorToolCall{CallID: "call", Name: "tool"}
-			result := r.ResumeTurn(t.Context(), map[string]struct {
-				Text    string
-				IsError bool
-			}{"call": {Text: "result"}}, "", nil)
+			result := r.ResumeTurn(t.Context(), map[string]ToolResult{"call": {Text: "result"}}, "", nil)
 			if currentMarker {
 				if result.Outcome != TurnFinished || result.Err != nil {
 					t.Fatalf("current-turn completion marker lost: %+v", result)

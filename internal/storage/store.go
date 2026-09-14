@@ -24,6 +24,7 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
+	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -1032,36 +1033,17 @@ func migrate(db *sql.DB) error {
 	return nil
 }
 
-// tableColumnSet reads one table's column-name set through PRAGMA table_info.
-// schema may name an ATTACHed backup schema ("" reads the main database); the
-// caller owns the allowlist guards on both arguments before calling, because
-// the query is built by concatenation (migrate passes its own table literal;
-// the snapshot paths reject unknown schemas and tables first).
+// tableColumnSet reads one table's column-name set through PRAGMA table_info,
+// delegating the read to backup.TableColumnSet (the shared reader; backup's
+// own snapshot inspector reads through it too). schema may name an ATTACHed
+// backup schema ("" reads the main database); the caller owns the allowlist
+// guards on both arguments before calling, because the query is built by
+// concatenation (migrate passes its own table literal; the snapshot paths
+// reject unknown schemas and tables first).
 func tableColumnSet(ctx context.Context, q interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }, schema, table string) (map[string]struct{}, error) {
-	query := "PRAGMA table_info(" + table + ")"
-	if schema != "" {
-		query = "PRAGMA " + schema + ".table_info(" + table + ")"
-	}
-	rows, err := q.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	cols := make(map[string]struct{})
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notnull int
-		var dflt any
-		var pk int
-		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
-			return nil, err
-		}
-		cols[name] = struct{}{}
-	}
-	return cols, rows.Err()
+	return backup.TableColumnSet(ctx, q, schema, table)
 }
 
 // LoadRecent returns the most recent n records from the database, ordered by

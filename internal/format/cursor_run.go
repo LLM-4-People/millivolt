@@ -281,6 +281,13 @@ func (r *CursorRun) finish(outcome TurnOutcome, calls []CursorToolCall, err erro
 	return TurnResult{Outcome: outcome, ToolCalls: calls, Prompt: prompt, Output: output, Reasoning: reasoning, Err: err}
 }
 
+// ToolResult is one client-supplied answer for a parked tool call, keyed by
+// tool_call_id in the ResumeTurn map.
+type ToolResult struct {
+	Text    string
+	IsError bool
+}
+
 // ResumeTurn writes tool results into the parked stream and drives the
 // continuation. results maps tool_call_id -> (result text, isError). It
 // returns an error if any id isn't pending (the proxy cold-starts instead).
@@ -292,18 +299,12 @@ func (r *CursorRun) finish(outcome TurnOutcome, calls []CursorToolCall, err erro
 // the proxy silently dropping it. Without this the resume path only forwards
 // the tool result and the user's typed text never reaches the model (the
 // "message ignored mid-turn" bug).
-func (r *CursorRun) ResumeTurn(ctx context.Context, results map[string]struct {
-	Text    string
-	IsError bool
-}, steerText string, emitDelta func(delta map[string]any) error,
+func (r *CursorRun) ResumeTurn(ctx context.Context, results map[string]ToolResult, steerText string, emitDelta func(delta map[string]any) error,
 ) TurnResult {
 	return r.activeTurn(ctx, func() TurnResult { return r.resumeTurn(results, steerText, emitDelta) })
 }
 
-func (r *CursorRun) resumeTurn(results map[string]struct {
-	Text    string
-	IsError bool
-}, steerText string, emitDelta func(delta map[string]any) error) TurnResult {
+func (r *CursorRun) resumeTurn(results map[string]ToolResult, steerText string, emitDelta func(delta map[string]any) error) TurnResult {
 	r.mu.Lock()
 	if r.closed {
 		r.mu.Unlock()

@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -144,24 +145,48 @@ func inspectSQLiteFile(path string) (SnapshotCounts, error) {
 	return info, nil
 }
 
-func sqliteHasColumn(db *sql.DB, name string) (bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(requests)`)
+// TableColumnSet reads one table's column-name set through PRAGMA table_info.
+// schema may name an ATTACHed schema ("" reads the main database); the caller
+// owns the allowlist guards on both arguments before calling, because the
+// query is built by concatenation. Shared by storage's migration/snapshot
+// paths (through its tableColumnSet wrapper, which keeps the allowlist
+// guards) and this package's snapshot inspector.
+func TableColumnSet(ctx context.Context, q interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}, schema, table string) (map[string]struct{}, error) {
+	query := "PRAGMA table_info(" + table + ")"
+	if schema != "" {
+		query = "PRAGMA " + schema + ".table_info(" + table + ")"
+	}
+	rows, err := q.QueryContext(ctx, query)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	defer rows.Close()
+	cols := make(map[string]struct{})
 	for rows.Next() {
 		var cid int
-		var col, ctype string
+		var name, ctype string
 		var notnull int
 		var dflt any
 		var pk int
-		if err := rows.Scan(&cid, &col, &ctype, &notnull, &dflt, &pk); err != nil {
-			return false, err
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return nil, err
 		}
-		if col == name {
-			return true, rows.Err()
-		}
+		cols[name] = struct{}{}
 	}
-	return false, rows.Err()
+	return cols, rows.Err()
+}
+
+// sqliteHasColumn reports whether the staged snapshot's requests table has the
+// named column (the started_at marker of a migrated database). One membership
+// check over the shared PRAGMA reader: table_info is a schema-page scan on a
+// database that already passed integrity_check.
+func sqliteHasColumn(db *sql.DB, name string) (bool, error) {
+	cols, err := TableColumnSet(context.Background(), db, "", "requests")
+	if err != nil {
+		return false, err
+	}
+	_, ok := cols[name]
+	return ok, nil
 }
