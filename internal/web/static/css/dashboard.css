@@ -65,6 +65,19 @@
        literal where they sit (the storm dialog's heavier urgent scrim, the
        drawer's lighter pass-through). */
     --veil: rgba(16,14,11,.72);
+    /* The four one-off tints that also stay literal: for each, no
+       color-mix(in srgb, var(--token) P%, white or transparent) equals the
+       hand-picked hex byte-for-byte at any percentage (channel arithmetic,
+       not rounding). The solid danger hover's #ff7d7d needs red at 255,
+       above --err's 240, while its green and blue already match an 80.2%
+       mix of --err toward white - the 0% mix that reaches red 255 is pure
+       white. The accent hover's #7aa0ff would need 81.1% of --accent for
+       its red but 82.6% for its green. The model-rules error line's
+       #ff7d72 splits green (125) from blue (114), while --err and white
+       keep them equal at every mix. The model-rules warn line's #d9a343
+       is darker than --warn on every channel, and mixing toward white
+       only lightens while transparent only fades alpha. A palette rebrand
+       retunes these four by hand. */
     /* Chart gridline alpha: core.js blends this onto --border2 for the
        axes' faint warm grid. */
     --chart-grid-a: 0.5;

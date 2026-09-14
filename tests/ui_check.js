@@ -2278,6 +2278,13 @@ async function main() {
     // previous block just fetched would issue no fetch at all.
     const windowSelect = d.getElementById('chart-window');
     const fetchesBeforeWindowWiring = chartFetchURLs().length;
+    // The W41 rows above already fetched and applied this same chartPayload,
+    // so chartAgg starts equal to it: without a delta the apply check below
+    // passes against the stale W41 state even if the wiring never fetches
+    // or never applies anything (mutation-proven: a dropped window listener
+    // left it green). Bump now_ms with a unique delta so only applying the
+    // window drive's own fetched payload can satisfy it.
+    chartPayload.now_ms += 4000;
     windowSelect.value = '60';
     windowSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('the window dropdown wiring persists the merged view and issues the window-keyed fetch',
@@ -2291,6 +2298,16 @@ async function main() {
       w.eval('chartAgg && chartAgg.now_ms') === chartPayload.now_ms);
     const presetSelect = d.getElementById('chart-preset');
     const fetchesBeforePresetWiring = chartFetchURLs().length;
+    // The no-refetch conjunct below is otherwise masked by the chart request
+    // gate's dedupe: a regressed setChartPreset that called fetchChart()
+    // would re-issue the pinned window=60 key and issue no fetch at all, so
+    // the count could never redden (mutation-proven). Shift the in-memory
+    // window without fetching or saving first, so the pinned key differs and
+    // a regressed refetch becomes a real fetch. The preset drive's save then
+    // persists the shifted window, keeping the saved-view conjunct comparing
+    // like with like; no later row reads chartView.window before test 11f
+    // re-seeds the view wholesale.
+    w.eval("chartView.window = '30'");
     presetSelect.value = 'traffic';
     presetSelect.dispatchEvent(new w.Event('change', { bubbles: true }));
     check('the preset dropdown wiring persists the merged view and re-renders without a refetch',
