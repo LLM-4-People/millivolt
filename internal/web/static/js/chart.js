@@ -75,6 +75,12 @@ const pctOrdinal = p => p + (PCT_SUFFIX[p % 100] || 'th');
 // The big chart waits for a fourth point and paints the blank meanwhile -
 // the totals tiles and their sparklines still carry the story.
 const CHART_MIN_POINTS = 4;
+// The smallest box (CSS pixels) the big chart measures before it paints:
+// below this the canvas stays untouched. A sub-minimum dashboard cell must
+// show nothing rather than a clipped or misread plot. The blank-state
+// branch uses the same two thresholds.
+const CHART_MIN_W = 80;
+const CHART_MIN_H = 40;
 // Reuse locale formatters; cursor movement must not create one per readout.
 const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -145,7 +151,7 @@ const CHART_SERIES = [
   { id: 'req',     label: 'requests',   color: 'accent',  fmt: fmt,      bar: true },
   { id: 'err',     label: 'errors',     color: 'err',     fmt: fmt,      bar: true },
   { id: 'rl',      label: 'rate limited', color: 'rl',    fmt: fmt,
-    title: 'Requests with final or retried HTTP 429; each request counted once. A rate limit is not an error.' },
+    title: X429_COUNTING_RULE + '. A rate limit is not an error.' },
   { id: 'inTok',   label: 'tokens in',  color: 'accent2', fmt: fmt,      bar: true },
   { id: 'outTok',  label: 'tokens out', color: 'ok',      fmt: fmt,      bar: true },
   { id: 'reason',  label: 'reasoning',  color: 'cyan',    fmt: fmt,      bar: true },
@@ -886,10 +892,10 @@ function renderChart() {
   const w = canMeasure ? Math.round(box.clientWidth) : 0;
   const h = canMeasure ? Math.round(box.clientHeight) : 0;
   const points = data ? data[0].length : 0;
-  const canRender = canMeasure && data && !chartIsEmpty() && points >= CHART_MIN_POINTS && w >= 80 && h >= 40;
+  const canRender = canMeasure && data && !chartIsEmpty() && points >= CHART_MIN_POINTS && w >= CHART_MIN_W && h >= CHART_MIN_H;
   if (!canRender) {
     if (_up) { _up.destroy(); _up = null; _upKey = ''; }
-    if (canMeasure && w >= 80 && h >= 40) {
+    if (canMeasure && w >= CHART_MIN_W && h >= CHART_MIN_H) {
       const { ctx } = setupCanvas(box);
       ctx.clearRect(0, 0, w, h);
       // Three honest blanks, in priority order: no traffic at all, traffic
@@ -932,25 +938,31 @@ function chartLegendSync() {
   updateSection('traffic-legend', html);
 }
 
-function toggleChartSeries(id) {
-  const preset = activePreset();
-  if (!preset.series || !preset.series.some(([seriesId]) => seriesId === id)) return;
-  const cur = chartView.hidden[preset.id] || [];
-  chartView.hidden[preset.id] = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
+// toggleHiddenMember is the one flip contract for chart visibility: a
+// member is validated against the surface's own list, toggled in its
+// hidden-map key, persisted in dash.chart, and re-rendered. Legend series
+// key by preset id; summary tiles key under 'overview'.
+function toggleHiddenMember(key, id, validList) {
+  if (!validList.includes(id)) return;
+  const cur = chartView.hidden[key] || [];
+  chartView.hidden[key] = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
   saveChartView();
   renderChart();
 }
 
+function toggleChartSeries(id) {
+  const preset = activePreset();
+  if (!preset.series) return;
+  toggleHiddenMember(preset.id, id, preset.series.map(([seriesId]) => seriesId));
+}
+
 // toggleSummaryTile flips one summary tile - the same contract as a legend
 // toggle, over tile ids: validated against the preset's tile list, persisted
-// in dash.chart, re-rendered in place.
+// in dash.chart under the overview key, re-rendered in place.
 function toggleSummaryTile(id) {
   const preset = activePreset();
-  if (!preset.tilesOnly || !preset.tiles.includes(id)) return;
-  const cur = chartView.hidden.overview || [];
-  chartView.hidden.overview = cur.includes(id) ? cur.filter(x => x !== id) : cur.concat(id);
-  saveChartView();
-  renderChart();
+  if (!preset.tilesOnly) return;
+  toggleHiddenMember('overview', id, preset.tiles);
 }
 
 function setChartPreset(v) {

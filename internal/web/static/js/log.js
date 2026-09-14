@@ -359,14 +359,19 @@ function turnsCell(r) {
   return counts + dir + media;
 }
 
-// liveStatusCell is the one owner of the in-flight status pill (log row +
-// drawer). Classification is statusClass(); retry badges stay outside so
-// reqRow can concatenate them. Drawer kv uses this helper with no badge.
+// debugBadge renders the dbg pill marking a request captured by a debug
+// session; liveStatusCell and finalizedStatusPill both concatenate it, so it
+// appears in the log rows and the drawer's status row alike. In the log row
+// the pill opens the capture's session for editing.
 function debugBadge(r) {
   if (!r || !r.debug) return '';
   return ` <span class="pill debug" data-edit-debug title="full debug capture - click to edit the session">dbg</span>`;
 }
 
+// liveStatusCell is the one owner of the in-flight status pill (log row +
+// drawer). Classification is statusClass(); the retry badge stays outside so
+// reqRow can concatenate it - the drawer's status row carries no retry badge,
+// only the debug pill above. Drawer kv uses this helper directly.
 function liveStatusCell(r) {
   const sc = statusClass(r);
   if (sc === 'paused') {

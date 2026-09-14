@@ -102,11 +102,18 @@ const storage = {
 // streamLive is the SSE/poll connection; pauseState owns the operator holds
 // (in-flight finish, new requests queue). They are independent - pausing
 // the proxy must not freeze the dashboard (you'd miss in-flight completing).
+// The known_* field names are the server's wire vocabulary for the
+// seen-name lists every operator menu offers; one constant each so no
+// access site can drift a letter. Same string values as before - the
+// properties themselves are unchanged.
+const KNOWN_CLIENTS_KEY = 'known_clients';
+const KNOWN_PROVIDERS_KEY = 'known_providers';
+const KNOWN_MODELS_KEY = 'known_models';
 let streamLive = false;
-let pauseState = { paused: false, clients: [], providers: [], holds: [], known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0 };
+let pauseState = { paused: false, clients: [], providers: [], holds: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], until: null, queued: 0, default_max_queued: 0 };
 let pauseEditID = '';
-let throttleState = { throttles: [], known_providers: [], active: false };
-let debugState = { enabled: false, sessions: [], known_clients: [], known_providers: [], known_models: [], until: null, ttl: '', max_bytes: '' };
+let throttleState = { throttles: [], [KNOWN_PROVIDERS_KEY]: [], active: false };
+let debugState = { enabled: false, sessions: [], [KNOWN_CLIENTS_KEY]: [], [KNOWN_PROVIDERS_KEY]: [], [KNOWN_MODELS_KEY]: [], until: null, ttl: '', max_bytes: '' };
 let debugEditID = '';
 // localStorage key for the persisted status filter. One owner: the write
 // path in chrome.js (doFilter) references the same constant.
@@ -175,6 +182,17 @@ document.addEventListener('error', e => {
   const img = e.target;
   if (img instanceof HTMLImageElement && img.classList.contains('favicon')) faviconErr(img, img.dataset.origin);
 }, true);
+// X429_COUNTING_RULE is the one counting-rule sentence every ×429 signal
+// tooltip carries (the chart's rate-limited series and the explorer node
+// badge): a request counts once whether the 429 was its final status or an
+// absorbed retry. The chart's series title appends its doctrine clause on
+// top of this shared sentence.
+const X429_COUNTING_RULE = 'Requests with final or retried HTTP 429; each request counted once';
+
+// MAGNITUDES is the one compact-scale ladder (divisor + suffix) every large
+// number formatter walks down: 1e9 → B, 1e6 → M, 1e3 → K, largest first.
+// fmt and fmtMoney share it; their rounding and unit styling stay their own.
+const MAGNITUDES = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
 // fmt is the single compact number formatter for the whole dashboard: exact
 // below 1000, then K/M/B with up to 2 decimals (698479531 → "698.48M"). Every
 // surface uses it, so big counts never overflow a tile; vt() tooltips carry the
@@ -184,13 +202,12 @@ const fmt = n => {
   const neg = n < 0 ? '-' : '';
   const a = Math.abs(Number(n));
   if (a < 1000) return neg + a.toLocaleString();
-  const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
-  for (const [div, suf] of units) {
+  for (const [div, suf] of MAGNITUDES) {
     if (a >= div) {
       let v = a / div;
       v = Math.round(v * 100) / 100; // 2 decimals
       if (v >= 1000 && div < 1e9) { v = Math.round((v / 1000) * 100) / 100; // roll 1000K → 1M
-        return neg + v.toString() + units[units.findIndex(u => u[0] === div) - 1][1]; }
+        return neg + v.toString() + MAGNITUDES[MAGNITUDES.findIndex(u => u[0] === div) - 1][1]; }
       return neg + v.toString() + suf;
     }
   }
@@ -236,8 +253,7 @@ const fmtMoney = x => {
   };
   if (cents) return trim(a * 100);
   if (a < 1000) return trim(a);
-  const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
-  for (const [div, suf] of units) {
+  for (const [div, suf] of MAGNITUDES) {
     if (a >= div) return trim(Math.round((a / div) * 100) / 100) + suf;
   }
   return trim(a);

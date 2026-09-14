@@ -31,6 +31,20 @@
     --hdr-btn: 32px;
     /* Graduated-scale tick color (the shell's signature motif). */
     --tick: rgba(232,228,222,.07);
+    /* --tick-major paints the minor graph-paper gridlines shared by the
+       sparklines and chart plots (a touch stronger than --tick's faint
+       micro grid): one value so six surfaces cannot drift apart. */
+    --tick-major: rgba(232,228,222,.11);
+    /* Focus-ring glows are one design: a 3px soft accent halo at input
+       focus strength, and a stronger halo for hover feedback on pressed or
+       accent-filled controls. Derived from --accent so theme drifts once. */
+    --focus-ring: color-mix(in srgb, var(--accent) 12%, transparent);
+    --focus-ring-strong: color-mix(in srgb, var(--accent) 14%, transparent);
+    /* Full-screen veils behind modal surfaces: one warm near-black scrim
+       keyed to the palette's base tone. The deliberate exceptions stay
+       literal where they sit (the storm dialog's heavier urgent scrim, the
+       drawer's lighter pass-through). */
+    --veil: rgba(16,14,11,.72);
     /* Chart gridline alpha: core.js blends this onto --border2 for the
        axes' faint warm grid. */
     --chart-grid-a: 0.5;
@@ -84,7 +98,7 @@
     content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--rail-tick); pointer-events: none;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.11) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
     mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
   }
@@ -151,7 +165,9 @@
   .pause-known-one { grid-template-columns: 1fr; }
   .pause-known-hd { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; margin: 0 0 4px; }
   .pause-clients { max-height: 110px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding: 4px 0; }
-  .pause-clients:empty::after { content: 'none yet - they appear as requests arrive'; color: var(--muted); font-size: 10px; }
+  /* The checklist builders emit the none-yet note as an element; this only
+     paints its muted look. CSS :empty would hide later text nodes. */
+  .pause-clients .pause-none { color: var(--muted); font-size: 10px; }
   .pause-disabled { opacity: .45; pointer-events: none; }
   .pause-cap-row { grid-template-columns: 1fr; margin-top: 10px; }
   .pause-holds { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
@@ -168,7 +184,7 @@
   #btn-pause[aria-pressed="true"] { color: var(--warn); border-color: var(--warn); }
   #btn-pause[aria-pressed="true"]:hover { color: var(--warn); border-color: var(--warn); box-shadow: 0 0 0 3px rgba(244,193,77,.14); }
   #btn-limits[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
-  #btn-limits[aria-pressed="true"]:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,.14); }
+  #btn-limits[aria-pressed="true"]:hover { color: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   #limits-menu { width: 380px; }
   #restart-menu { width: 340px; }
   .restart-description { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
@@ -231,7 +247,7 @@
     font-family: var(--mono);
     transition: color .16s ease, border-color .16s ease, background .16s ease, box-shadow .16s ease;
   }
-  .btn:hover { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .btn:hover { color: var(--text); border-color: var(--accent); box-shadow: 0 0 0 3px var(--focus-ring); }
   /* Danger variants come AFTER .btn so the cascade (equal single-class
      specificity, later wins) always beats the neutral base skin. Weight goes
      with impact: delete-matching = light red tint; the "everything"
@@ -246,7 +262,7 @@
   /* Accent-filled primary action (settings Apply, restart Restart now) -
      after .btn so the cascade beats the neutral base skin. */
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
-  .btn-accent:not(:disabled):hover { background: #7aa0ff; border-color: #7aa0ff; color: var(--bg); box-shadow: 0 0 0 3px rgba(91,140,255,.14); }
+  .btn-accent:not(:disabled):hover { background: #7aa0ff; border-color: #7aa0ff; color: var(--bg); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   .btn:disabled, .btn:disabled:hover {
     opacity: .45; cursor: default; color: var(--muted);
     border-color: var(--border2); background: var(--panel2); box-shadow: none;
@@ -271,6 +287,8 @@
   .storm-detail { color: var(--muted); margin-top: 2px; }
   .storm-heading > *, .storm-detail > * { min-width: 0; overflow-wrap: anywhere; }
   .storm-open-hint { margin-left: auto; color: var(--muted); }
+  /* Deliberately NOT --veil: the storm dialog is the one surface that must
+     feel urgent and absolute, so its scrim is a heavier pure black. */
   .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.6); }
   .storm-dialog[hidden] { display: none; }
   .storm-dialog-panel { width: min(580px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; border: 1px solid var(--border2); background: var(--panel); }
@@ -284,7 +302,7 @@
     position: fixed; inset: 0; z-index: 80; display: grid; place-items: center;
     padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right))
       max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
-    background: rgba(16,14,11,.72); overflow: auto;
+    background: var(--veil); overflow: auto;
   }
   .operator-dialog[hidden] { display: none; }
   .operator-dialog-panel {
@@ -303,7 +321,7 @@
     font: 13px var(--mono); color: var(--text); background: var(--rail);
     border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
   }
-  .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .operator-dialog input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .operator-dialog-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .operator-dialog-actions .btn { width: 100%; min-height: 42px; }
   .storm-resolution { margin: 12px 0 0; color: var(--text); }
@@ -341,7 +359,7 @@
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.12) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
   }
@@ -449,17 +467,30 @@
      lets it shrink below its content height, and overflow-y:auto scrolls the
      dimension list instead of clipping the last item (Error) at the bottom. */
   .xp-rail { display: flex; flex-direction: column; gap: 4px; min-height: 0; overflow-y: auto; scrollbar-width: thin; }
-  .xp-rail::-webkit-scrollbar { width: 5px; }
-  .xp-rail::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-  .xp-rail-item {
+  /* The internal-scroll surfaces share one slim overlay scrollbar (5px
+     thumb, muted border tone, softly rounded); grouped so the feel cannot
+     drift between rails, the gallery, and the shared .scroll helper. The
+     drawer and settings field lists use the roomier 6px variant grouped
+     at the drawer below. */
+  .xp-rail::-webkit-scrollbar, .xp-gallery::-webkit-scrollbar, .st-rail::-webkit-scrollbar, .scroll::-webkit-scrollbar { width: 5px; }
+  .xp-rail::-webkit-scrollbar-thumb, .xp-gallery::-webkit-scrollbar-thumb, .st-rail::-webkit-scrollbar-thumb, .scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  /* Rail rows are one design shared by the explorer dimension rail and the
+     settings rail: grouped selectors own the common row chrome, hover,
+     active base, focus ring, and count style. Each family keeps only its
+     deviations next to its own section below. */
+  .xp-rail-item, .st-rail-item {
     display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
     background: none; border: 1px solid transparent; border-left: 2px solid transparent;
     border-radius: 7px; padding: 6px 8px; cursor: pointer; color: var(--text); font: inherit;
   }
-  .xp-rail-item:hover { background: var(--panel2); }
-  .xp-rail-item.active { background: var(--panel2); border-color: var(--border2); border-left-color: var(--ent); }
-  .xp-rail-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
-  .xp-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; text-align: right; }
+  .xp-rail-item:hover, .st-rail-item:hover { background: var(--panel2); }
+  .xp-rail-item.active, .st-rail-item.active { background: var(--panel2); border-color: var(--border2); }
+  .xp-rail-item:focus-visible, .st-rail-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .xp-rail-item .rail-n, .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; }
+  /* Explorer family deviation: the active edge keys to the entity color and
+     counts right-align (they sit alone at the row's end). */
+  .xp-rail-item.active { border-left-color: var(--ent); }
+  .xp-rail-item .rail-n { text-align: right; }
   /* Gallery: one node-card per value of the active dimension. It fills the
      explorer box (flex:1 within .xp-main) and scrolls internally in whole rows
      when there are more cards than fit - cards always render at full height,
@@ -478,8 +509,6 @@
        row is a snap point; rows are aligned, so one point covers the row. */
     scroll-snap-type: y mandatory; }
   .xp-node { scroll-snap-align: start; }
-  .xp-gallery::-webkit-scrollbar { width: 5px; }
-  .xp-gallery::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
   .xp-node {
     display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 7px; align-content: start;
     background: var(--panel2); border: 1px solid var(--border);
@@ -558,6 +587,8 @@
   }
 
   /* ---- detail slide-over drawer ---- */
+  /* Deliberately NOT --veil: the drawer sits beside live log rows that must
+     stay readable through the scrim, so it is the lightest of the three. */
   .drawer-veil {
     position: fixed; inset: 0; background: rgba(0,0,0,.55); opacity: 0; pointer-events: none;
     transition: opacity .18s; z-index: 60;
@@ -577,12 +608,12 @@
   .drawer-hd h3 { margin: 0; font: 650 12px var(--sans); letter-spacing: .03em; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .drawer-hd .nav-btns { display: flex; gap: 4px; }
   .drawer-body { overflow-y: auto; padding: 14px 18px 28px; font-family: var(--mono); font-size: 11px; flex: 1; }
-  .drawer-body::-webkit-scrollbar { width: 6px; }
-  .drawer-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  .drawer-body::-webkit-scrollbar, .st-fields::-webkit-scrollbar { width: 6px; }
+  .drawer-body::-webkit-scrollbar-thumb, .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
   /* ---- settings instrument sheet (explorer topology, not a form dump) ---- */
   .st-veil {
-    position: fixed; inset: 0; background: rgba(16,14,11,.72); opacity: 0; pointer-events: none;
+    position: fixed; inset: 0; background: var(--veil); opacity: 0; pointer-events: none;
     transition: opacity .18s ease; z-index: 70;
   }
   .st-veil.open { opacity: 1; pointer-events: auto; }
@@ -607,7 +638,7 @@
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 7px; pointer-events: none;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.11) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.55), transparent);
   }
@@ -617,7 +648,7 @@
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
     font: 11px var(--mono); padding: 6px 10px; border-radius: 8px;
   }
-  .st-hd input[type="search"]:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .st-hd input[type="search"]:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .st-body { display: grid; grid-template-columns: 220px 1fr; gap: 0; min-height: 0; flex: 1; }
   .st-side {
     display: flex; flex-direction: column; min-height: 0; min-width: 0;
@@ -627,18 +658,12 @@
     display: flex; flex-direction: column; gap: 2px; padding: 10px 8px;
     overflow-y: auto; min-height: 0; flex: 1;
   }
-  .st-rail::-webkit-scrollbar { width: 5px; }
-  .st-rail::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-  .st-rail-item {
-    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
-    background: none; border: 1px solid transparent; border-left: 2px solid transparent;
-    border-radius: 7px; padding: 6px 8px; cursor: pointer; color: var(--text); font: inherit;
-  }
-  .st-rail-item:hover { background: var(--panel2); }
-  .st-rail-item.active { background: var(--panel2); border-color: var(--border2); border-left-color: var(--ent, var(--accent)); }
-  .st-rail-item:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+  /* The settings rail's row chrome is the shared design grouped with
+     .xp-rail-item in the explorer section above; only the family's
+     deviations live here: the entity-accent fallback for the active edge,
+     the label that pushes counts out, and the search-hit/miss states. */
+  .st-rail-item.active { border-left-color: var(--ent, var(--accent)); }
   .st-rail-item .ent { flex: 1; }
-  .st-rail-item .rail-n { color: var(--muted); font-size: 10px; font-family: var(--mono); margin-left: auto; font-variant-numeric: tabular-nums; }
   .st-rail-item.has-hit .rail-n { color: var(--accent); }
   .st-rail-item.is-miss { opacity: .4; }
   .st-live {
@@ -654,8 +679,6 @@
   .st-pane-hd p { margin: 0; font: 11px/1.45 var(--sans); color: var(--muted); max-width: 62ch; }
   .st-banner { margin-top: 8px; font: 10px/1.4 var(--mono); color: var(--warn); }
   .st-fields { overflow-y: auto; flex: 1; min-height: 0; padding: 4px 14px 22px; }
-  .st-fields::-webkit-scrollbar { width: 6px; }
-  .st-fields::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
   .st-row {
     display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 300px);
     gap: 6px 28px; align-items: center; padding: 9px 8px;
@@ -680,7 +703,7 @@
     width: 100%; font: 12px var(--mono); padding: 6px 10px; border-radius: 8px;
     background: var(--panel2); border: 1px solid var(--border2); color: var(--text);
   }
-  .st-ctl input:focus, .st-ctl textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .st-ctl input:focus, .st-ctl textarea:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .st-ctl input:disabled, .st-ctl textarea:disabled { opacity: .5; cursor: not-allowed; }
   .st-ctl textarea { min-height: 64px; resize: vertical; }
   .st-hint { font: 10px var(--mono); color: var(--muted); }
@@ -716,14 +739,17 @@
     border-bottom: 1px solid var(--border);
     cursor: pointer; /* the band toggles collapse; its inputs keep their own */
   }
-  .prov-ic { color: #0072B2; font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px rgba(0,114,178,.5)); }
+  /* The provider icon rides the entity system: both emitters (the provider
+     card header and the picker menu) set --ent to the provider entity
+     color, so the icon and its glow rekey with the entity palette. */
+  .prov-ic { color: var(--ent); font-size: 12px; flex-shrink: 0; filter: drop-shadow(0 0 7px color-mix(in srgb, var(--ent) 50%, transparent)); }
   .prov-hd .sp-label {
     flex: 1; min-width: 0; background: transparent; border-color: transparent;
     font: 600 12px var(--mono); color: var(--text); padding: 4px 8px; border-radius: 7px;
     cursor: text;
   }
   .prov-hd .sp-label:hover { border-color: var(--border2); }
-  .prov-hd .sp-label:focus { background: var(--rail); border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .prov-hd .sp-label:focus { background: var(--rail); border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   /* Nesting: the body is indented under a hairline tree-guide so everything
      in it visibly belongs to the provider above. */
   .prov-body {
@@ -743,7 +769,7 @@
     padding: 5px 9px; width: auto;
   }
   .prov-sec input::placeholder { color: var(--muted); opacity: .75; }
-  .prov-sec input:focus, .prov-sec select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .prov-sec input:focus, .prov-sec select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 1px; }
   .prov-chips:empty { display: none; }
   .prov-chip {
@@ -846,7 +872,7 @@
   .prov-menu-item .prov-ic { font-size: 11px; }
   .prov-menu-custom { display: flex; gap: 5px; align-items: center; border-top: 1px solid var(--border); padding-top: 10px; }
   .prov-menu-custom input { flex: 1; min-width: 0; font: 11px var(--mono); color: var(--text); background: var(--rail); border: 1px solid var(--border); border-radius: 7px; padding: 5px 9px; }
-  .prov-menu-custom input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.12); }
+  .prov-menu-custom input:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .prov-chev {
     border: none; background: none; color: var(--muted); cursor: pointer;
     padding: 3px; border-radius: 6px; flex-shrink: 0; display: inline-flex; margin-left: auto;
@@ -878,7 +904,7 @@
     content: ''; position: absolute; left: 0; right: 0; top: 0; height: 7px; pointer-events: none;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.11) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
     mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent);
   }
@@ -1148,7 +1174,7 @@
     flex: 1; height: 7px; min-width: 40px;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.11) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
     mask-image: linear-gradient(to right, rgba(0,0,0,.85), transparent);
   }
@@ -1167,8 +1193,6 @@
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
 
   .scroll { max-height: 380px; overflow-y: auto; overflow-x: auto; }
-  .scroll::-webkit-scrollbar { width: 5px; }
-  .scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
   .empty { color: var(--muted); text-align: center; padding: 36px; font-family: var(--mono); font-size: 12px; }
 
   /* Status-line footer: a slim instrument rail (vim/tmux-style), not a link
@@ -1185,7 +1209,7 @@
     content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--rail-tick); pointer-events: none;
     background:
       repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 7px),
-      repeating-linear-gradient(90deg, rgba(232,228,222,.11) 0 1px, transparent 1px 35px);
+      repeating-linear-gradient(90deg, var(--tick-major) 0 1px, transparent 1px 35px);
     -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
     mask-image: linear-gradient(to top, rgba(0,0,0,.7), transparent);
   }

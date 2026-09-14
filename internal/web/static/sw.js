@@ -5,7 +5,11 @@
 // Cached shell keys share CACHE_PREFIX; the stamped version completes it.
 const CACHE_PREFIX = 'millivolt-shell-';
 const CACHE = CACHE_PREFIX + '__DASHBOARD_VERSION__';
-const SHELL = [
+// One list of the exact shell assets: the install-time precache array and
+// shellPath's exact-name check both derive from it, so the two cannot drift.
+// The prefix rules stay separate (shellPath accepts /dash/ paths and any
+// /icon- size the precache does not enumerate).
+const SHELL_ASSETS = [
   '/favicon.ico',
   '/favicon.svg',
   '/apple-touch-icon.png',
@@ -27,8 +31,7 @@ function livePath(pathname) {
 
 function shellPath(pathname) {
   return pathname.startsWith('/dash/') ||
-    pathname === '/favicon.ico' || pathname === '/favicon.svg' ||
-    pathname === '/apple-touch-icon.png' || pathname === '/manifest.webmanifest' ||
+    SHELL_ASSETS.includes(pathname) ||
     pathname.startsWith('/icon-');
 }
 
@@ -42,7 +45,7 @@ function offlinePage() {
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
-    await cache.addAll(SHELL);
+    await cache.addAll(SHELL_ASSETS);
     await self.skipWaiting();
   })());
 });

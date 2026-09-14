@@ -924,22 +924,29 @@ async function main() {
   }
   check('there is no browser executor for saved pattern rules', typeof w.compileModelRules === 'undefined');
   {
-    // Templates + restore-defaults: the shipped pipeline is one click.
-    // Restore reads the server-provided defaults doc (no client mirror),
-    // so seed settingsDoc like a real /admin/config GET would - and put
-    // it back afterwards: later backup tests run with no settings doc.
+    // Templates + restore-defaults: the shipped pipeline is one click. The
+    // menu derives its shipped entries from the server-provided defaults doc
+    // at RENDER time (no client-side rule copy), so seed settingsDoc like a
+    // real /admin/config GET would before building the editor - and put it
+    // back afterwards: later backup tests run with no settings doc.
     const mrWrap = d.createElement('div');
-    mrWrap.innerHTML = w.modelRulesEditorHTML([{ mode: 'lower' }]);
-    d.getElementById('settings-fields').appendChild(mrWrap);
     w.__mrDefaultsDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__mrDefaultsDoc');
+    mrWrap.innerHTML = w.modelRulesEditorHTML([{ mode: 'lower' }]);
+    d.getElementById('settings-fields').appendChild(mrWrap);
     const wrap = mrWrap;
     const tpl = wrap.querySelector('.mr-tpl');
+    const tplLabels = [...tpl.options].map(o => o.textContent).join(',');
+    check('the template menu derives the five shipped rules plus the custom starters',
+      tpl.options.length === 8 && tplLabels === 'add from template…,lowercase fold,strip vendor/ prefix,strip :tag suffix,strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…),unify . and - between digits,exact merge…,custom pattern…');
     tpl.value = '1';
     tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
     const rows = [...wrap.querySelectorAll('.mr-row')];
     check('a template appends its pre-filled rule',
       rows.length === 2 && rows[1].querySelector('.mr-from').value === '^[a-z0-9][a-z0-9._-]*/');
+    check('a shipped template carries the server doc payload, not a client copy',
+      rows[1].querySelector('.mr-mode').value === 'pattern' && rows[1].querySelector('.mr-to').value === '' &&
+      JSON.stringify(w.eval('settingsDoc.defaults.model_rules[1]')) === JSON.stringify({ mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' }));
     wrap.querySelector('[data-mr-restore]').click();
     const defRows = [...wrap.querySelectorAll('.mr-row')];
     check('restore-defaults replaces the draft with the shipped pipeline',
@@ -947,7 +954,15 @@ async function main() {
     check('the rule count line tracks the rows',
       wrap.querySelector('.mr-count').textContent === '5 / 64 rules');
     mrWrap.remove();
+    // Deny by default: without the server doc the menu offers only the
+    // custom starters - never a stale client-side copy of the pipeline.
+    const bareWrap = d.createElement('div');
     w.eval('settingsDoc = null');
+    bareWrap.innerHTML = w.modelRulesEditorHTML([{ mode: 'lower' }]);
+    d.getElementById('settings-fields').appendChild(bareWrap);
+    check('without the settings doc the template menu offers only the custom starters',
+      [...bareWrap.querySelector('.mr-tpl').options].map(o => o.textContent).join(',') === 'add from template…,exact merge…,custom pattern…');
+    bareWrap.remove();
   }
   {
     // last_reload settings section: the live snapshot renders the server's
@@ -1981,6 +1996,24 @@ async function main() {
     w.eval('chartView.preset === "latency" && chartView.pct === 99 && chartView.window === "10080" && chartView.hidden.latency.join() === "ttft"'));
   w.toggleChartSeries('dur');
   check('unknown or obsolete series cannot enter hidden state', w.eval('chartView.hidden.latency.join() === "ttft"'));
+  // Both toggle paths share one flip contract, each writing its own
+  // hidden-map key: legend series under the active preset id, summary
+  // tiles under 'overview' - never cross-contaminated - with persistence
+  // through dash.chart on every flip.
+  w.toggleChartSeries('ttft');
+  check('a legend toggle flips its series under the preset key and persists',
+    w.eval('chartView.hidden.latency.join() === ""') &&
+    (JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden || {}).latency !== undefined);
+  w.toggleChartSeries('ttft');
+  check('toggling again restores the series and re-persists',
+    w.eval('chartView.hidden.latency.join() === "ttft"') &&
+    JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden.latency.join() === 'ttft');
+  w.eval("chartView.preset = 'overview'; chartView.hidden = {};");
+  w.toggleSummaryTile('cost');
+  check('a tile toggle hides its tile under the overview key, not the preset id',
+    w.eval('chartView.hidden.overview.join() === "cost"') &&
+    (JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden || {}).overview.join() === 'cost');
+  w.eval("chartView.hidden = {}; chartView.preset = 'traffic';");
   w.eval("chartView.hidden = {}; chartView.window = 'all'; chartView.pct = 95; fillChartControls()");
   for (const preset of ['traffic', 'tokens', 'errors', 'cost', 'latency', 'overview']) {
     w.eval(`chartView.preset = '${preset}'`);
@@ -2492,6 +2525,13 @@ async function main() {
   check('remove is a recycle-bin icon', !!card.querySelector('[data-prov-rm] svg'));
   topBtn.click();
   check('add menu opens; already-added providers are not offered', !menu.hidden && !!menu.querySelector('[data-prov-pick="p"]') && !menu.querySelector('[data-prov-pick="epsilon.example"]'));
+  // Both provider-icon emitters carry the entity color through --ent, so
+  // the icon and its glow ride the entity palette instead of a hardcoded
+  // hex in the stylesheet.
+  check('the card icon keys its color to the provider entity token',
+    card.querySelector('.prov-hd .prov-ic').getAttribute('style') === '--ent:#0072B2');
+  check('the picker icon keys its color to the provider entity token',
+    menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2');
   menu.querySelector('.prov-new-label').value = 'gamma.example';
   menu.querySelector('[data-prov-add]').click();
   check('new provider card collects with empty maps', JSON.stringify(w.collectSettingsValues().providers['gamma.example']) === JSON.stringify({ cost_keys: [], usage_keys: {}, models_path: '', models_keys: {}, headers: {} }));

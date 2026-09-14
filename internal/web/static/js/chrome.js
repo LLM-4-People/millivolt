@@ -220,6 +220,55 @@ function operatorJson(url, options = {}) {
   return operatorFetch(url, options).then(r => r.ok ? r.json() : Promise.reject());
 }
 
+// operatorErrorBody is the shared failure read for an operator JSON call:
+// it drains the response body and rejects with its error field, falling
+// back to the caller's message. The fallback may be a function of the
+// response when the message needs the status code. The rejection carries
+// the operatorBody marker so a caller with its own transport handling (the
+// restart control) can tell the server's answer from a network failure.
+async function operatorErrorBody(r, fallback) {
+  let msg = typeof fallback === 'function' ? fallback(r) : fallback;
+  try { msg = (await r.json()).error || msg; } catch (e) {}
+  const err = new Error(msg);
+  err.operatorBody = true;
+  throw err;
+}
+
+// operatorJsonBody is the fetch-and-parse owner for operator JSON calls
+// that must read the failure body: it resolves the parsed document only
+// for a 2xx response and otherwise rejects through operatorErrorBody
+// (the server's error field, or the caller's fallback). A malformed 2xx
+// body resolves to {} so the caller's shape checks reject it with their
+// designed message instead of a parser's.
+async function operatorJsonBody(url, options = {}, fallback = '') {
+  const r = await operatorFetch(url, options);
+  if (!r.ok) return operatorErrorBody(r, fallback);
+  return r.json().catch(() => ({}));
+}
+
+// JSON_HEADERS is the one JSON content-type header pair for operator JSON
+// POSTs. operatorFetch copies options.headers per call, so one shared
+// object instance cannot be mutated by a caller.
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+// brandLogoSVG clones the header's brand mark for a second surface (the
+// operator sign-in dialog): the mark's geometry stays authored once, in
+// index.html. The clone's gradient gets a fresh id - two identical ids in
+// one document would be invalid, and the trace stroke must reference the
+// clone's own defs.
+function brandLogoSVG(gradientId) {
+  const svg = document.querySelector('header .brand-logo svg');
+  if (!svg) return '';
+  const clone = svg.cloneNode(true);
+  const grad = clone.querySelector('linearGradient');
+  if (grad && grad.id) {
+    const old = grad.id;
+    grad.id = gradientId;
+    clone.querySelectorAll(`[stroke="url(#${old})"]`).forEach(el => el.setAttribute('stroke', `url(#${gradientId})`));
+  }
+  return clone.outerHTML;
+}
+
 // Single-flight credential prompt: concurrent gated calls share one dialog
 // and one resolution. Resolves '' on cancel or dismiss. A prompt after a
 // rejected attempt says so instead of repeating the intro line.
@@ -228,7 +277,7 @@ function askOperatorToken() {
   operatorPrompt = new Promise(resolve => {
     let dialog = $('operator-dialog');
     if (!dialog) {
-      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><g stroke="var(--scale-tick)" stroke-width="1" opacity=".55" stroke-linecap="round"><path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/></g><path d="M1.5 12.8H16.5" stroke="var(--scale-base)" stroke-width="1" opacity=".5" stroke-linecap="round"/><path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="url(#mv-login)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="mv-login" x1="1.5" y1="9" x2="16.5" y2="9" gradientUnits="userSpaceOnUse"><stop stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/></linearGradient></defs></svg></div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
+      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true">${brandLogoSVG('mv-login')}</div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
       wireDialogDismiss(dialog, () => operatorDismiss(''));
     }
     const input = $('operator-dialog-input');
@@ -312,15 +361,15 @@ async function mutateOperator(kind, body, after) {
   if (count) delete count.dataset.err;
   gate.sync();
   let confirmed;
+  const fail = 'could not change ' + kind;
   try {
-    const response = await operatorFetch('/admin/' + kind, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body),
-    });
-    const st = await response.json();
-    if (!response.ok || !gate.valid(st)) throw new Error(st?.error || 'could not change ' + kind);
+    const st = await operatorJsonBody('/admin/' + kind, {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body),
+    }, fail);
+    if (!gate.valid(st)) throw new Error(st?.error || fail);
     confirmed = st;
   } catch (err) {
-    operatorError(kind, String(err.message || 'could not change ' + kind));
+    operatorError(kind, String(err.message || fail));
   } finally {
     gate.busy = false;
     ++gate.revision;
@@ -345,8 +394,8 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     clients: Array.isArray(st.clients) ? st.clients : [],
     providers: Array.isArray(st.providers) ? st.providers : [],
     holds: Array.isArray(st.holds) ? st.holds : [],
-    known_clients: Array.isArray(st.known_clients) ? st.known_clients : [],
-    known_providers: Array.isArray(st.known_providers) ? st.known_providers : [],
+    [KNOWN_CLIENTS_KEY]: Array.isArray(st[KNOWN_CLIENTS_KEY]) ? st[KNOWN_CLIENTS_KEY] : [],
+    [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
     until: st.until || null,
     queued: typeof st.queued === 'number' ? st.queued : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
@@ -361,7 +410,7 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   if (!acceptOperator('throttle', st, revision)) return;
   throttleState = {
     throttles: Array.isArray(st.throttles) ? st.throttles : [],
-    known_providers: Array.isArray(st.known_providers) ? st.known_providers : [],
+    [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
     active: !!st.active,
   };
   const btn = $('btn-limits');
@@ -400,22 +449,52 @@ function visibleHeaderControl() {
   return $('btn-settings');
 }
 
-function closeNavMenu(restoreFocus = false) {
-  const nav = $('hdr-actions'), btn = $('btn-nav');
-  if (!nav?.classList.contains('is-open')) return false;
-  nav.classList.remove('is-open');
-  btn?.setAttribute('aria-expanded', 'false');
-  if (restoreFocus) btn?.focus();
+// Class-based menu lifecycle, shared by the header nav flyout (mobile) and
+// the explorer dimension rail. One descriptor names the menu container, its
+// trigger button, and the open class; the three helpers own the rest.
+const NAV_CLASS_MENU = { id: 'hdr-actions', btn: 'btn-nav', cls: 'is-open' };
+const DIM_CLASS_MENU = { id: 'xp-rail', btn: 'xp-dim-trigger', cls: 'open' };
+
+// setClassMenuOpen flips the open class and the trigger's aria-expanded
+// together: the two must never disagree. Deny by default - a missing
+// container or trigger means no menu to act on.
+function setClassMenuOpen(menu, open) {
+  const el = $(menu.id), btn = $(menu.btn);
+  if (!el || !btn) return;
+  el.classList.toggle(menu.cls, open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// classMenuClose closes only if it was open and reports whether it did.
+// afterClose runs after a real close (focus restoration lives there).
+function classMenuClose(menu, afterClose) {
+  const el = $(menu.id);
+  if (!el || !el.classList.contains(menu.cls)) return false;
+  setClassMenuOpen(menu, false);
+  if (afterClose) afterClose();
   return true;
+}
+
+// classMenuToggle flips and reports the new state; onOpen runs before the
+// open lands (close-competitive menus, use-once guards).
+function classMenuToggle(menu, onOpen) {
+  const el = $(menu.id), btn = $(menu.btn);
+  if (!el || !btn) return false;
+  const open = !el.classList.contains(menu.cls);
+  if (open && onOpen) onOpen();
+  setClassMenuOpen(menu, open);
+  return open;
+}
+
+function closeNavMenu(restoreFocus = false) {
+  return classMenuClose(NAV_CLASS_MENU, () => {
+    if (restoreFocus) $(NAV_CLASS_MENU.btn)?.focus();
+  });
 }
 function toggleNavMenu(e) {
   e.stopPropagation();
-  const nav = $('hdr-actions'), btn = $('btn-nav');
-  if (!nav || !btn) return;
-  const open = !nav.classList.contains('is-open');
-  if (open) closeHeaderMenus();
-  nav.classList.toggle('is-open', open);
-  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // Opening the nav flyout closes the competing header menus first.
+  classMenuToggle(NAV_CLASS_MENU, closeHeaderMenus);
 }
 function hideHdrMenu(id) {
   const el = $(id);
@@ -598,10 +677,10 @@ function toggleSettings(e) {
 function fetchSettings(discard = false) {
   const req = ++settingsReq;
   const draft = settingsFingerprint();
-  return operatorFetch('/admin/config')
-    .then(async r => {
-      const doc = await r.json();
-      if (!r.ok || !Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || 'could not load config');
+  const fail = 'could not load config';
+  return operatorJsonBody('/admin/config', {}, fail)
+    .then(doc => {
+      if (!Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || fail);
       return doc;
     })
     .then(doc => {
@@ -946,11 +1025,7 @@ function runBackupDownload() {
   backupSetBusy(true);
   settingsStatus('building backup');
   operatorFetch('/admin/backup?' + q).then(async r => {
-    if (!r.ok) {
-      let msg = 'backup failed';
-      try { msg = (await r.json()).error || msg; } catch (e) {}
-      throw new Error(msg);
-    }
+    if (!r.ok) return operatorErrorBody(r, 'backup failed');
     const blob = await r.blob();
     const dispo = r.headers.get('Content-Disposition') || '';
     const m = /filename="([^"]+)"/.exec(dispo);
@@ -969,14 +1044,12 @@ function runBackupRestore(ev) {
   const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('checking backup');
-  operatorFetch('/admin/restore?inspect=1', {
+  operatorJsonBody('/admin/restore?inspect=1', {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
-  }).then(async r => {
+  }, 'restore failed').then(j => {
     if (req !== backupReq) return;
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = { file, data: j };
     backupIncludeConfig = true;
     backupIncludeDatabase = true;
@@ -1009,14 +1082,12 @@ function runBackupApply() {
   const req = ++backupReq;
   backupSetBusy(true);
   settingsStatus('restoring');
-  operatorFetch('/admin/restore?' + q, {
+  operatorJsonBody('/admin/restore?' + q, {
     method: 'POST',
     headers: { 'Content-Type': 'application/octet-stream' },
     body: backupInspect.file,
-  }).then(async r => {
+  }, 'restore failed').then(j => {
     if (req !== backupReq) return;
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = null;
     backupSetBusy(false);
     const restart = settingsRestartNotice(j);
@@ -1190,7 +1261,7 @@ function providerCardHTML(label, p) {
   // into each other (the models section once rendered nested inside usage
   // keys).
   return `<div class="st-prov">` +
-    `<div class="prov-hd"><span class="prov-ic" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${PROV_TRASH_SVG}</button></div>` +
+    `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${PROV_TRASH_SVG}</button></div>` +
     `<div class="prov-body">` +
     `<div class="prov-sec"><div class="prov-lb"><span>cost keys</span><span class="prov-sub">dotted JSON path from the response root - e.g. usage.cost</span></div>` +
     `<div class="prov-chips">${costs.map(costChipHTML).join('')}</div>` +
@@ -1200,7 +1271,7 @@ function providerCardHTML(label, p) {
     (free.length ? `<div class="prov-add prov-add-u"><select class="sp-ufield-new" aria-label="canonical token field">${free.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-usage aria-label="add usage mapping">+ map</button></div>` : '') +
     `</div>` +
     `<div class="prov-sec"><div class="prov-lb"><span>models enrichment</span><span class="prov-sub">metadata endpoint merged into this provider's /v1/models list</span></div>` +
-    `<div class="prov-add prov-add-mp"><input class="sp-mpath" value="${escapeHtml(modelsPath)}" placeholder="metadata path - e.g. /language-models" aria-label="models metadata path"></div>` +
+    `<div class="prov-add"><input class="sp-mpath" value="${escapeHtml(modelsPath)}" placeholder="metadata path - e.g. /language-models" aria-label="models metadata path"></div>` +
     `<div class="prov-mmap">${Object.entries(modelsKeys).map(([f, path]) => modelRowHTML(f, path, mfields)).join('')}</div>` +
     (mfree.length ? `<div class="prov-add prov-add-m"><select class="sp-mfield-new" aria-label="canonical model field">${mfree.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-model aria-label="add model mapping">+ map</button></div>` : '') +
     `</div>` +
@@ -1267,15 +1338,34 @@ const MODEL_RULE_MODES = [['exact', 'exact'], ['pattern', 'pattern'], ['lower', 
 const MR_MODE_TITLES = { exact: 'exact - merge one whole spelling', pattern: 'pattern - regex replace-all (RE2 syntax, $1 refs)', lower: 'lower - lowercase fold' };
 // Mirrors config.ModelRulesMax (64) - the count line and add-gate use it.
 const MODEL_RULES_MAX = 64;
-const MR_TEMPLATES = [
-  ['lowercase fold', { mode: 'lower' }],
-  ['strip vendor/ prefix', { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' }],
-  ['strip :tag suffix', { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' }],
-  ['strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…)', { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' }],
-  ['unify . and - between digits', { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' }],
+// The template menu's labels for the shipped pipeline rules: presentation
+// text, paired to settingsDoc.defaults.model_rules BY POSITION - the menu
+// offers "the shipped pipeline" in its authored order, and the rule payloads
+// themselves come from the server doc (mrTemplates below), never a copy
+// here. A defaults list longer than the label table still offers every
+// rule, labeled by position.
+const MR_SHIPPED_LABELS = [
+  'lowercase fold',
+  'strip vendor/ prefix',
+  'strip :tag suffix',
+  'strip architecture/quant suffix (fp4, nvfp4, int8, q4_k_m…)',
+  'unify . and - between digits',
+];
+// The custom starters: manual rows a shipped rule cannot express.
+const MR_CUSTOM_TEMPLATES = [
   ['exact merge…', { mode: 'exact' }],
   ['custom pattern…', { mode: 'pattern' }],
 ];
+// mrTemplates derives the editor's template menu at render time: the
+// shipped entries ride in from the settings doc (defaults.model_rules - the
+// same source the restore-defaults control reads), so their payloads cannot
+// drift from the server. Deny by default: without a server doc only the
+// custom starters are offered.
+function mrTemplates() {
+  const shipped = Array.isArray(settingsDoc?.defaults?.model_rules) ? settingsDoc.defaults.model_rules : [];
+  return shipped.map((r, i) => [MR_SHIPPED_LABELS[i] || 'shipped rule ' + (i + 1), r])
+    .concat(MR_CUSTOM_TEMPLATES);
+}
 
 function mrModeSelectHTML(sel) {
   return `<select class="mr-mode" title="${MR_MODE_TITLES[sel] || MR_MODE_TITLES.exact}" aria-label="rule mode">` +
@@ -1429,7 +1519,7 @@ function modelRulesEditorHTML(val) {
   return `<div class="prov-sec mr-wrap">` +
     `<div class="mr-hint">rules apply top→bottom to each stored model name · exact merges a whole spelling · pattern is a regex replace-all (RE2, $1 refs) · lower folds case · ◉ parks a rule</div>` +
     `<div class="mr-tools">` +
-    `<select class="mr-tpl" aria-label="add a rule from a template"><option value="">add from template…</option>${MR_TEMPLATES.map((t, i) => `<option value="${i}">${escapeHtml(t[0])}</option>`).join('')}</select>` +
+    `<select class="mr-tpl" aria-label="add a rule from a template"><option value="">add from template…</option>${mrTemplates().map((t, i) => `<option value="${i}">${escapeHtml(t[0])}</option>`).join('')}</select>` +
     `<button type="button" class="mr-restore" data-mr-restore title="replace the draft with the shipped five-rule pipeline">↺ default pipeline</button>` +
     `<span class="mr-count muted"></span>` +
     `</div>` +
@@ -1627,14 +1717,16 @@ function addModelRuleRow(addRow) {
 }
 
 // mrApplyTemplate appends one pre-filled rule from the templates select -
-// the common cases are one click (Cloudflare-style rule templates).
+// the common cases are one click (Cloudflare-style rule templates). The
+// payloads come from mrTemplates (the server doc for shipped rules).
 function mrApplyTemplate(sel) {
   const idx = parseInt(sel.value, 10);
   sel.value = '';
-  if (!Number.isInteger(idx) || !MR_TEMPLATES[idx]) return;
+  const templates = mrTemplates();
+  if (!Number.isInteger(idx) || !templates[idx]) return;
   const wrap = sel.closest('.mr-wrap');
   if (wrap.querySelectorAll('.mr-row').length >= MODEL_RULES_MAX) return;
-  const t = MR_TEMPLATES[idx][1];
+  const t = templates[idx][1];
   wrap.querySelector('.mr-rows').insertAdjacentHTML('beforeend', modelRuleRowHTML(t));
   const rows = wrap.querySelectorAll('.mr-row');
   const row = rows[rows.length - 1];
@@ -1696,8 +1788,8 @@ function syncProvMenuList(row) {
   const list = row && row.querySelector('.prov-menu-list');
   if (!list) return;
   const taken = new Set([...row.querySelectorAll('.st-prov .sp-label')].map(l => l.value.trim()));
-  const known = (typeof pauseState === 'object' && pauseState && Array.isArray(pauseState.known_providers)) ? pauseState.known_providers : [];
-  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" aria-hidden="true">☁</span>${escapeHtml(p)}</button>`).join('');
+  const known = (typeof pauseState === 'object' && pauseState && Array.isArray(pauseState[KNOWN_PROVIDERS_KEY])) ? pauseState[KNOWN_PROVIDERS_KEY] : [];
+  list.innerHTML = known.filter(p => !taken.has(p)).map(p => `<button type="button" class="prov-menu-item" data-prov-pick="${escapeHtml(p)}" role="menuitem"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span>${escapeHtml(p)}</button>`).join('');
 }
 
 // INPUT_FLASH_MS is the invalid-input red flash: long enough to register,
@@ -2157,7 +2249,7 @@ function applySettings() {
   ++settingsReq;
   return operatorFetch('/admin/config', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: JSON_HEADERS,
     body: JSON.stringify({ values, revision: settingsDoc.revision }),
   }).then(async r => {
     const j = await r.json();
@@ -2208,9 +2300,9 @@ function applyDebugState(st, revision = operatorState.debug.revision) {
   debugState = {
     enabled: !!st.enabled,
     sessions: Array.isArray(st.sessions) ? st.sessions : [],
-    known_clients: Array.isArray(st.known_clients) ? st.known_clients : [],
-    known_providers: Array.isArray(st.known_providers) ? st.known_providers : [],
-    known_models: Array.isArray(st.known_models) ? st.known_models : [],
+    [KNOWN_CLIENTS_KEY]: Array.isArray(st[KNOWN_CLIENTS_KEY]) ? st[KNOWN_CLIENTS_KEY] : [],
+    [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
+    [KNOWN_MODELS_KEY]: Array.isArray(st[KNOWN_MODELS_KEY]) ? st[KNOWN_MODELS_KEY] : [],
     until: st.until || null,
     ttl: st.ttl || '',
     max_bytes: st.max_bytes == null || st.max_bytes === '' ? '' : String(st.max_bytes),
@@ -2307,16 +2399,37 @@ function updatePauseApplyEnabled() {
   btn.textContent = pauseEditID ? 'Update' : 'Pause';
 }
 
-function fillPauseChecks(box, names, picked) {
+// NONE_YET_NOTE is the one empty-state sentence for the operator menus'
+// known-name surfaces: the pause/debug checklists render it when nothing is
+// known yet, and the limits provider select carries it as its empty option.
+// JS owns the text; the stylesheet only paints its muted look (.pause-none).
+const NONE_YET_NOTE = 'none yet - they appear as requests arrive';
+const noneYetNoteHTML = () => `<div class="pause-none">${NONE_YET_NOTE}</div>`;
+
+// fillCheckRows is the one builder for the operator checklist rows (pause
+// clients/providers and debug clients/providers/models): one labeled
+// checkbox per known name, checked from the caller's picked set, disabled
+// when the name is already taken by another hold or session (policy.taken)
+// or the surface is busy (policy.busy), with the caller's change hook. An
+// empty list renders the shared none-yet note instead.
+function fillCheckRows(box, names, picked, policy) {
   if (!box) return;
   const keep = picked instanceof Set ? picked : new Set();
+  const taken = policy.taken || (() => false);
   box.innerHTML = (names || []).map(c => {
-    // Overlap is a client×provider predicate, owned by the scheduler. Greying
-    // individual names here prevents valid disjoint combinations and makes
-    // polling silently erase the operator's selected draft.
-    return `<label class="pause-check"><input type="checkbox" value="${escapeHtml(c)}" ${keep.has(c)?'checked':''}> ${escapeHtml(c)}</label>`;
-  }).join('');
-  box.querySelectorAll('input').forEach(el => { el.onchange = updatePauseApplyEnabled; });
+    const isTaken = taken(c);
+    const on = keep.has(c) && !isTaken;
+    return `<label class="pause-check${isTaken?' taken':''}"><input type="checkbox" value="${escapeHtml(c)}" ${on?'checked':''} ${isTaken || policy.busy ? 'disabled' : ''}> ${escapeHtml(c)}</label>`;
+  }).join('') || noneYetNoteHTML();
+  box.querySelectorAll('input').forEach(el => { el.onchange = policy.onchange; });
+}
+
+function fillPauseChecks(box, names, picked) {
+  // Pause holds never disable names - overlap is a client×provider
+  // predicate, owned by the scheduler. Greying individual names here would
+  // prevent valid disjoint combinations and make polling silently erase
+  // the operator's selected draft.
+  fillCheckRows(box, names, picked, { onchange: updatePauseApplyEnabled });
 }
 
 function holdScopeLabel(h) {
@@ -2360,8 +2473,8 @@ function knownNames(state, key, ...extra) {
 function refreshPauseKnownLists() {
   const pickedC = new Set(selectedCheckboxValues('pf-clients'));
   const pickedP = new Set(selectedCheckboxValues('pf-providers'));
-  const knownC = knownNames(pauseState, 'known_clients', pauseState.clients, pickedC);
-  const knownP = knownNames(pauseState, 'known_providers', pauseState.providers, pickedP);
+  const knownC = knownNames(pauseState, KNOWN_CLIENTS_KEY, pauseState.clients, pickedC);
+  const knownP = knownNames(pauseState, KNOWN_PROVIDERS_KEY, pauseState.providers, pickedP);
   fillPauseChecks($('pf-clients'), knownC, pickedC);
   fillPauseChecks($('pf-providers'), knownP, pickedP);
   onPauseScopeChange();
@@ -2410,8 +2523,8 @@ function resetPauseMenuForm() {
   if (cap) cap.value = '';
   const count = $('pause-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillPauseChecks($('pf-clients'), knownNames(pauseState, 'known_clients', pauseState.clients), new Set());
-  fillPauseChecks($('pf-providers'), knownNames(pauseState, 'known_providers', pauseState.providers), new Set());
+  fillPauseChecks($('pf-clients'), knownNames(pauseState, KNOWN_CLIENTS_KEY, pauseState.clients), new Set());
+  fillPauseChecks($('pf-providers'), knownNames(pauseState, KNOWN_PROVIDERS_KEY, pauseState.providers), new Set());
   onPauseScopeChange();
 }
 
@@ -2476,8 +2589,8 @@ function editPauseHold(id) {
   if (cap) cap.value = typeof h.max_queued === 'number' ? String(h.max_queued) : '';
   const count = $('pause-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  const knownC = knownNames(pauseState, 'known_clients', h.clients);
-  const knownP = knownNames(pauseState, 'known_providers', h.providers);
+  const knownC = knownNames(pauseState, KNOWN_CLIENTS_KEY, h.clients);
+  const knownP = knownNames(pauseState, KNOWN_PROVIDERS_KEY, h.providers);
   fillPauseChecks($('pf-clients'), knownC, new Set(h.clients || []));
   fillPauseChecks($('pf-providers'), knownP, new Set(h.providers || []));
   onPauseScopeChange();
@@ -2535,14 +2648,17 @@ const PAUSE_SCOPES = [
   ['all', 'all requests'],
   ['new', 'new clients'],
 ];
-const PAUSE_DURS = [
-  ['', 'I resume'],
-  ['15m', '15 min'],
-  ['1h', '1 hour'],
-  ['6h', '6 hours'],
-  ['12h', '12 hours'],
-  ['24h', '24 hours'],
-];
+// DURATION_LABELS is the one label vocabulary for time-window dropdown
+// values, so every surface spells the same span the same way ('15 minutes',
+// never '15 min'). Surfaces keep their own value sets; only the wording
+// is shared. Ages beyond a day stay context-specific ('1 day', '1 week').
+const DURATION_LABELS = {
+  '15m': '15 minutes', '1h': '1 hour', '6h': '6 hours',
+  '12h': '12 hours', '24h': '24 hours',
+};
+// durationPairs builds [value, label] select pairs from DURATION_LABELS.
+const durationPairs = (...vals) => vals.map(v => [v, DURATION_LABELS[v]]);
+const PAUSE_DURS = [['', 'I resume']].concat(durationPairs('15m', '1h', '6h', '12h', '24h'));
 function pauseScopeText(val) {
   const hit = PAUSE_SCOPES.find(([v]) => v === val);
   return hit ? hit[1] : '';
@@ -2633,11 +2749,11 @@ function fillDebugChecks(box, names, picked, kind) {
   if (!box) return;
   const keep = picked instanceof Set ? picked : new Set();
   if (kind === 'model') {
-    // Grouped display (see debugModelGroupOf): one checkbox per spelling
-    // group, value = the group's display name; the raw variants are carried
-    // in dbgModelGroups and expanded by selectedDebugModels when the session
-    // is applied. `keep` may hold raw names (edit path) or display names
-    // (refresh path) - either marks the group checked.
+    // Grouped display (dbgGroupedModels builds the groups; dbgModelGroups
+    // carries them): one checkbox per spelling group, value = the group's
+    // display name; the raw variants are expanded by selectedDebugModels
+    // when the session is applied. `keep` may hold raw names (edit path) or
+    // display names (refresh path) - either marks the group checked.
     dbgModelGroups = dbgGroupedModels(names);
     box.innerHTML = dbgModelGroups.map(g => {
       const taken = g.variants.some(v => debugNameTaken('model', v));
@@ -2645,15 +2761,11 @@ function fillDebugChecks(box, names, picked, kind) {
       const extra = g.variants.length > 1
         ? ` <span style="color:var(--muted)" aria-hidden="true">+${g.variants.length - 1}</span>` : '';
       return `<label class="pause-check${taken?' taken':''}" title="${escapeHtml(g.variants.join(' · '))}"><input type="checkbox" value="${escapeHtml(g.display)}" ${on?'checked':''} ${taken || operatorState.debug.busy ? 'disabled' : ''}> ${escapeHtml(g.display)}${extra}</label>`;
-    }).join('');
+    }).join('') || noneYetNoteHTML();
+    box.querySelectorAll('input').forEach(el => { el.onchange = updateDebugApplyEnabled; });
   } else {
-    box.innerHTML = (names || []).map(c => {
-      const taken = debugNameTaken(kind, c);
-      const on = keep.has(c) && !taken;
-      return `<label class="pause-check${taken?' taken':''}"><input type="checkbox" value="${escapeHtml(c)}" ${on?'checked':''} ${taken || operatorState.debug.busy ? 'disabled' : ''}> ${escapeHtml(c)}</label>`;
-    }).join('');
+    fillCheckRows(box, names, picked, { taken: c => debugNameTaken(kind, c), busy: operatorState.debug.busy, onchange: updateDebugApplyEnabled });
   }
-  box.querySelectorAll('input').forEach(el => { el.onchange = updateDebugApplyEnabled; });
 }
 
 function debugScopeLabel(h) {
@@ -2665,13 +2777,20 @@ function debugScopeLabel(h) {
   return bits.join(' + ') || 'session';
 }
 
-function debugRanLabel(h) {
-  const ms = typeof h.ran_ms === 'number' ? h.ran_ms : 0;
-  if (ms <= 0) return '';
-  const m = Math.max(1, Math.round(ms / 60000));
+// hmBreakdown is the one compact H/M breakdown for remaining-time labels:
+// whole minutes below an hour, hours plus remaining minutes above. Callers
+// own the rounding of their minute count and any suffix - pause holds say
+// "N left" from a ceil, debug sessions report whole minutes from a round.
+function hmBreakdown(m) {
   if (m < 60) return m + 'm';
   const hr = Math.floor(m / 60), rem = m % 60;
   return rem ? hr + 'h ' + rem + 'm' : hr + 'h';
+}
+
+function debugRanLabel(h) {
+  const ms = typeof h.ran_ms === 'number' ? h.ran_ms : 0;
+  if (ms <= 0) return '';
+  return hmBreakdown(Math.max(1, Math.round(ms / 60000)));
 }
 
 function renderDebugSessions() {
@@ -2699,9 +2818,9 @@ function refreshDebugKnownLists() {
   const pickedC = new Set(selectedCheckboxValues('df-clients'));
   const pickedP = new Set(selectedCheckboxValues('df-providers'));
   const pickedM = new Set(selectedCheckboxValues('df-models'));
-  const knownC = knownNames(debugState, 'known_clients', pickedC);
-  const knownP = knownNames(debugState, 'known_providers', pickedP);
-  const knownM = knownNames(debugState, 'known_models', pickedM);
+  const knownC = knownNames(debugState, KNOWN_CLIENTS_KEY, pickedC);
+  const knownP = knownNames(debugState, KNOWN_PROVIDERS_KEY, pickedP);
+  const knownM = knownNames(debugState, KNOWN_MODELS_KEY, pickedM);
   fillDebugChecks($('df-clients'), knownC, pickedC, 'client');
   fillDebugChecks($('df-providers'), knownP, pickedP, 'provider');
   fillDebugChecks($('df-models'), knownM, pickedM, 'model');
@@ -2746,9 +2865,9 @@ function resetDebugMenuForm() {
   if ($('df-dur')) $('df-dur').value = '';
   const count = $('debug-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillDebugChecks($('df-clients'), knownNames(debugState, 'known_clients'), new Set(), 'client');
-  fillDebugChecks($('df-providers'), knownNames(debugState, 'known_providers'), new Set(), 'provider');
-  fillDebugChecks($('df-models'), knownNames(debugState, 'known_models'), new Set(), 'model');
+  fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY), new Set(), 'client');
+  fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY), new Set(), 'provider');
+  fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY), new Set(), 'model');
   updateDebugApplyEnabled();
 }
 
@@ -2787,9 +2906,9 @@ function editDebugSession(id) {
   fillSelectPairs($('df-dur'), DEBUG_DURS, h.duration || '');
   const count = $('debug-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillDebugChecks($('df-clients'), knownNames(debugState, 'known_clients', h.clients), new Set(h.clients || []), 'client');
-  fillDebugChecks($('df-providers'), knownNames(debugState, 'known_providers', h.providers), new Set(h.providers || []), 'provider');
-  fillDebugChecks($('df-models'), knownNames(debugState, 'known_models', h.models), new Set(h.models || []), 'model');
+  fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY, h.clients), new Set(h.clients || []), 'client');
+  fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY, h.providers), new Set(h.providers || []), 'provider');
+  fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY, h.models), new Set(h.models || []), 'model');
   syncDebugMenuState();
 }
 
@@ -2813,11 +2932,12 @@ function stopDebugMenu() {
 
 // LIMIT_WINDOWS is the single owner of the Limits ▾ request/token window
 // dropdown. Both selects are filled from this list (never a second HTML copy).
+// Spans shared with other surfaces borrow DURATION_LABELS' wording; the
+// sub-minute entries are limits-specific.
 const LIMIT_WINDOWS = [
   ['1s', '1 second'], ['10s', '10 seconds'], ['30s', '30 seconds'],
-  ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'],
-  ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'],
-];
+  ['1m', '1 minute'], ['5m', '5 minutes'],
+].concat(durationPairs('15m', '1h', '6h', '24h'));
 // The fallback window when a limit carries none (fillLimitWindows' default
 // and the apply body's missing-select fallback): '1m', named once.
 const LIMIT_WINDOW_DEFAULT = '1m';
@@ -2827,12 +2947,12 @@ function fillLimitWindows(sel, value) {
 
 function syncLimitsMenuState() {
   document.querySelectorAll('#limits-menu input, #limits-menu select').forEach(el => { el.disabled = operatorState.throttle.busy; });
-  const known = knownNames(throttleState, 'known_providers',
+  const known = knownNames(throttleState, KNOWN_PROVIDERS_KEY,
     (throttleState.throttles || []).map(t => t.provider).filter(Boolean));
   const sel = $('lim-provider');
   const keep = sel ? sel.value : '';
   if (sel) {
-    const empty = known.length ? '' : '<option value="">none yet - they appear as requests arrive</option>';
+    const empty = known.length ? '' : `<option value="">${NONE_YET_NOTE}</option>`;
     sel.innerHTML = empty + known.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
     if (keep && known.includes(keep)) sel.value = keep;
   }
@@ -2956,15 +3076,14 @@ function pauseUntilLabel(until) {
   if (!until) return '';
   const ms = new Date(until).getTime() - Date.now();
   if (!Number.isFinite(ms) || ms <= 0) return '';
-  const m = Math.ceil(ms / 60000);
-  if (m < 60) return m + 'm left';
-  const h = Math.floor(m / 60), rem = m % 60;
-  return rem ? h + 'h ' + rem + 'm left' : h + 'h left';
+  return hmBreakdown(Math.ceil(ms / 60000)) + ' left';
 }
 
 // setFooterLive mirrors SSE connectivity. refreshFooterState combines that
-// with the operator pause so the footer can say "paused" for a hold
-// and "offline" when the live stream drops.
+// with every other footer input: the operator surfaces (a hold reads as
+// "paused", a debug session as "debug", each with scope and remaining
+// time), the storage health footnotes (durable drops, a degraded boot
+// scan), and "offline" when the live stream drops.
 function setFooterLive(live) {
   streamLive = !!live;
   refreshFooterState();
@@ -3064,7 +3183,9 @@ document.addEventListener('click', e => {
 // set (shared by the Clear and Logs menus - same options, same values).
 const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
-const FILTER_AGES = [['', '-'], ['1h', '1 hour'], ['24h', '1 day'], ['168h', '1 week']];
+// Filter ages reuse the shared hour wording for '1h'; the longer spans are
+// deliberately day/week wording in the age context, not clock arithmetic.
+const FILTER_AGES = [['', '-'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
 
 function populateFilterMenu(prefix) {
   const recs = lastData?.records || [];
@@ -3154,10 +3275,9 @@ async function updateFilterCount(prefix, elId, btnId, phrase) {
   if (!clearFilterActive(f)) { el.textContent = ''; return; }
   el.textContent = 'counting…';
   try {
-    const res = await operatorFetch('/admin/purge/count', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(f) });
-    const d = await res.json();
+    const d = await operatorJsonBody('/admin/purge/count', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(f) }, 'count unavailable');
     if (_filterPreviews.get(prefix) !== preview || preview.selection !== filterSelection(prefix)) return;
-    if (!res.ok || !Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || 'count unavailable');
+    if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || 'count unavailable');
     preview.count = d.count;
     el.textContent = phrase(d.count);
     $(btnId).disabled = d.count === 0 || prefix === 'cf' && _purgeBusy;
@@ -3199,10 +3319,9 @@ async function purgeMetrics(filter) {
   document.querySelectorAll('#clear-menu select').forEach(el => { el.disabled = true; });
   try {
     const options = {method: 'POST'};
-    if (filter) { options.headers = {'Content-Type': 'application/json'}; options.body = JSON.stringify(filter); }
-    const response = await operatorFetch('/admin/purge', options);
-    const result = await response.json();
-    if (!response.ok || result.ok !== true) throw new Error(result.error || 'could not delete records');
+    if (filter) { options.headers = JSON_HEADERS; options.body = JSON.stringify(filter); }
+    const result = await operatorJsonBody('/admin/purge', options, 'could not delete records');
+    if (result.ok !== true) throw new Error(result.error || 'could not delete records');
     _filterPreviews.clear();
     $('btn-logs-filtered').disabled = true;
     hideHdrMenu('clear-menu');
@@ -3450,9 +3569,17 @@ async function restartProxy() {
     // Apply each NDJSON line as it arrives (do not wait for the stream to
     // end - that hid draining behind "building" for the whole drain).
     watchRestart(st => { if (!watcher.signal.aborted) applyRestartEvent(st); }, watcher.signal);
-    const r = await operatorFetch('/admin/restart', { method: 'POST' });
-    const doc = await r.json().catch(() => ({}));
-    if (!r.ok) { setRestartStatus(doc.error || 'restart failed (' + r.status + ')', true); return; }
+    let doc;
+    try {
+      doc = await operatorJsonBody('/admin/restart', { method: 'POST' }, r => 'restart failed (' + r.status + ')');
+    } catch (err) {
+      // The server answered with a refusal: show its message as the status
+      // line, exactly as every other restart status reads. Transport
+      // failures rethrow and take the generic prefix in the outer catch.
+      if (!err || err.operatorBody !== true) throw err;
+      setRestartStatus(err.message, true);
+      return;
+    }
     if (restartFailed) return;
     applyRestartEvent(doc);
     // A fast failed build can already be idle in the POST response, before

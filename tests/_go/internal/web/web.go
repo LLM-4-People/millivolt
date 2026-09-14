@@ -278,14 +278,26 @@ func TestPWAInstallability(t *testing.T) {
 			t.Errorf("livePath function missing %s", needle)
 		}
 	}
-	start := strings.Index(sw, "const SHELL = [")
+	start := strings.Index(sw, "const SHELL_ASSETS = [")
 	end := strings.Index(sw[start+1:], "];")
 	if start < 0 || end < 0 {
-		t.Fatal("service worker missing SHELL list")
+		t.Fatal("service worker missing SHELL_ASSETS list")
 	}
 	shell := sw[start : start+1+end]
 	if strings.Contains(shell, "'/'") || strings.Contains(shell, `"/"`) {
 		t.Fatal("service worker must not precache gated /")
+	}
+	// The offline fallback page is authored inside offlinePage() as raw
+	// string data. Its palette mirrors the dashboard's :root tokens
+	// (#1b1826 = --well-lo, #141210 = --bg, #e8e4de = --text); these pins
+	// catch a palette drift that a stylesheet can no longer equalize.
+	for _, needle := range []string{
+		`<meta name="theme-color" content="#1b1826">`,
+		"background:#141210",
+	} {
+		if !strings.Contains(sw, needle) {
+			t.Errorf("service worker offline page missing %s", needle)
+		}
 	}
 }
 

@@ -194,7 +194,7 @@ function applyModelCanon(mc, authoritative = false) {
 function pruneModelNames() {
   const keep = new Set();
   for (const records of [lastData?.records || [], logArchive]) for (const r of records) if (r) keep.add(r.model || '');
-  for (const name of debugState.known_models || []) keep.add(name);
+  for (const name of debugState[KNOWN_MODELS_KEY] || []) keep.add(name);
   for (const session of debugState.sessions || []) for (const name of session.models || []) keep.add(name);
   for (const raw of modelNames.keys()) if (!keep.has(raw)) modelNames.delete(raw);
 }
@@ -284,22 +284,15 @@ function dimMenuUsed() {
   const t = $('xp-dim-trigger');
   return !!(t && getComputedStyle(t).display !== 'none');
 }
+// The dimension rail menu shares chrome.js's class-based menu lifecycle
+// (DIM_CLASS_MENU): same open class + aria-expanded contract as the header
+// nav flyout. The use-once guard is explorer-specific and stays here.
 function closeDimMenu() {
-  const rail = $('xp-rail');
-  const trig = $('xp-dim-trigger');
-  const open = !!(rail && rail.classList.contains('open'));
-  if (rail) rail.classList.remove('open');
-  if (trig) trig.setAttribute('aria-expanded', 'false');
-  return open;
+  return classMenuClose(DIM_CLASS_MENU);
 }
 function toggleDimMenu() {
   if (!dimMenuUsed()) return;
-  const rail = $('xp-rail');
-  const trig = $('xp-dim-trigger');
-  if (!rail || !trig) return;
-  const open = !rail.classList.contains('open');
-  rail.classList.toggle('open', open);
-  trig.setAttribute('aria-expanded', open ? 'true' : 'false');
+  classMenuToggle(DIM_CLASS_MENU);
 }
 
 // renderGallery: one node-card per value of the active dimension, from the
@@ -479,7 +472,7 @@ function xpNodeCard(st, e, payload) {
   // Error-dimension headlines still count failure events.
   const signals = [
     e.err_final > 0 ? `<span class="xp-node-err" title="Requests with a genuine failure, including recovered failures; 429 is not an error">${fmt(e.err_final)} err</span>` : '',
-    e.rate_limit_requests > 0 ? `<span class="xp-node-rate" title="Requests with final or retried HTTP 429; each request counted once">${fmt(e.rate_limit_requests)} ×429</span>` : '',
+    e.rate_limit_requests > 0 ? `<span class="xp-node-rate" title="${escapeHtml(X429_COUNTING_RULE)}">${fmt(e.rate_limit_requests)} ×429</span>` : '',
   ].filter(Boolean).join('<span aria-hidden="true"> · </span>');
   const headN = dim === 'error' ? (e.err_events || 0) : e.n;
   const headUnit = dim === 'error' ? 'err' : 'req';
