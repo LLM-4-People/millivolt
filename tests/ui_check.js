@@ -2799,6 +2799,30 @@ async function main() {
       first.style.getPropertyValue('border-left') === '0px' &&
       strip.style.getPropertyValue('background') === 'var(--tick-strip)';
   })());
+  // Uniform-tile pin: every summary tile is ONE fixed size whatever it
+  // carries (spark or not, sub-row or not, skeleton or data - the no-jump
+  // skeleton swap is exact by construction). The 92px floor fits the
+  // tallest structure (label + value + sub-row + spark, line-height-1
+  // rows) and the spark refuses to flex-shrink, so an oversized tile clips
+  // visibly for the browser gate instead of silently crushing the spark -
+  // the failure mode the 72px attempt exposed. The band sits at its natural
+  // rows height (the old flex-basis-0 stretch both bloated tiles on the
+  // locked desktop pair and collapsed the strip to a sliver on
+  // content-height cards), and the card opts out of the pair's stretch so
+  // the summary never paints a hollow tall card.
+  check('summary tiles keep one fixed size on a content-height band', (() => {
+    const tile = firstCSSRule('.traffic-card.tiles-only .chart-total');
+    const strip = firstCSSRule('.traffic-card.tiles-only .chart-totals');
+    const card = firstCSSRule('.traffic-card.tiles-only');
+    const spark = firstCSSRule('.traffic-card.tiles-only .chart-total .spark');
+    return !!tile && !!strip && !!card && !!spark &&
+      tile.style.getPropertyValue('height') === '92px' &&
+      spark.style.getPropertyValue('flex-shrink') === '0' &&
+      strip.style.getPropertyValue('flex') === '' &&
+      strip.style.getPropertyValue('min-height') === '' &&
+      strip.style.getPropertyValue('grid-auto-rows') === '' &&
+      card.style.getPropertyValue('align-self') === 'start';
+  })());
   // Pill alpha pin: the status pills' tinted backgrounds share one ladder -
   // --pill-tint at rest, --pill-tint-strong once a pill flags an
   // operator-visible state (paused, throttled, debug) - and the live pill's

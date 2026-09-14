@@ -274,11 +274,14 @@ async def check(base, screenshot):
                 # (v-ttft / v-tps halves). Each tile carries ONE sparkline
                 # with one self-scaled line per metric half in the half's
                 # color, spanning only traffic-bearing buckets - the same
-                # empty-bucket removal the plots apply. Tiles toggle like
-                # legend buttons: click hides a tile to a label-only stub
-                # (grid cell kept), persists in dash.chart, and a reload
-                # restores the selection. No percentile selector, no visible
-                # pXX label.
+                # empty-bucket removal the plots apply. Every tile keeps one
+                # fixed size (uniform heights, no vertical clip, the spark
+                # full-height and pinned to the tile's bottom padding,
+                # nothing reaching past the card), checked at both viewports.
+                # The picker owns what shows: a row flip drops the tile
+                # from the band, persists in dash.chart, and a reload
+                # restores the selection. No percentile selector, no
+                # visible pXX label.
                 await page.select_option('#chart-preset', 'overview')
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
@@ -301,10 +304,16 @@ async def check(base, screenshot):
                         const kept = full.buckets.filter(b => b.req > 0).length;
                         const reqPath = document.querySelector('#chart-totals .chart-total[title^="requests / tokens"] svg.spark path');
                         const sparkCmds = reqPath ? (reqPath.getAttribute('d').match(/[ML]/g) || []).length : 0;
+                        const tileList = [...document.querySelectorAll('#chart-totals .chart-total')];
+                        const cardRect = card.getBoundingClientRect();
                         return {tilesOnly: card.classList.contains('tiles-only'),
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
                                 wrapHidden: getComputedStyle(document.getElementById('chart-traffic')).display === 'none',
                                 overflow, rlTotal, errTotal,
+                                uniformTiles: tileList.length === 5 && tileList.every(t => t.offsetHeight === tileList[0].offsetHeight),
+                                noVClip: tileList.every(t => t.scrollHeight <= t.clientHeight + 1),
+                                sparkPinned: tileList.every(t => { const s = t.querySelector('svg.spark'); return !s || (s.getBoundingClientRect().height >= 13 && t.getBoundingClientRect().bottom - s.getBoundingClientRect().bottom >= 9); }),
+                                insideCard: tileList.every(t => t.getBoundingClientRect().bottom <= cardRect.bottom + 1),
                                 errors0:errV && errV.textContent === '0',
                                 rateLimited2:rlV && rlV.textContent === '2',
                                 reqTokensPair:!!reqPair,
@@ -327,6 +336,8 @@ async def check(base, screenshot):
                     require(state['sparks'] == 5, state)
                     require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
+                    require(state['uniformTiles'] and state['noVClip'], state)
+                    require(state['sparkPinned'] and state['insideCard'], state)
                     require(state['tiles'] == 5, state)
                     require(state['pctHidden'] and state['metricsPick'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)

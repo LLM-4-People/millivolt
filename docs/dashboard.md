@@ -59,7 +59,10 @@ apply - so window padding never squeezes the data into a corner. The
 metrics picker in the card head chooses what shows: one dropdown of
 checkable rows, checked metrics render and unchecked ones leave the band
 (it reflows), and the selection persists per browser like every chart
-view. Only the time-range control applies. This preset has
+view. Every tile keeps one fixed size whatever it carries - spark or not,
+sub-row or not, and the no-data skeleton swaps in without moving the
+card - and the band sits at its natural height at the top of the card.
+Only the time-range control applies. This preset has
 no static capture yet; the gallery images below predate it.
 
 ### Traffic

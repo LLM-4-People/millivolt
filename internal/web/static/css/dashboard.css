@@ -985,17 +985,30 @@
      directly on the card's panel separated by the same faint left hairline
      (first cell open, like the KPI band), and the band closes with the
      shared graduated-scale tick strip instead of a hard rule. The tiles are
-     plain readouts; the metrics picker in the card head owns what shows
+     plain readouts; the metrics picker at the card head owns what shows
      (the same dash.chart hidden set the legend uses), hidden metrics leave
      the band and the auto-fit grid reflows, and the spark keeps each
      tile's color voice, so cells carry no per-metric leading tick. Tracks
-     floor at 160px so tiles run WIDER than tall. */
+     floor at 160px so tiles run WIDER than tall.
+     Sizing: every tile is ONE fixed height (92px fits the tallest content -
+     label 10 + value 15 + sub-row 10 + spark 14 + three 6px gaps + 20px
+     padding, all line-height-1 rows so the number is typeface-independent)
+     with breathing room, so a tile is the same size whatever it carries:
+     spark or no spark, sub-row or not, and the no-data skeleton swaps to
+     data without moving the card. The spark is flex-shrink: 0 - it never
+     acts as the overflow shock absorber; an oversized tile must clip
+     visibly (the browser gate catches it), never silently crush the spark.
+     The band sits at its natural rows height - it never stretches to fill
+     the card (the old flex-basis-0 stretch collapsed the strip to a sliver
+     on content-height cards and clipped the sparks) - and the card itself
+     opts out of the pair's column stretch, so the summary never paints a
+     hollow tall card: what you see is what the metrics need. */
+  .traffic-card.tiles-only { align-self: start; }
   .traffic-card.tiles-only .chart-wrap,
   .traffic-card.tiles-only .chart-axes,
   .traffic-card.tiles-only #traffic-legend { display: none; }
   .traffic-card.tiles-only .chart-totals {
     position: relative;
-    flex: 1 1 0; min-height: 0; grid-auto-rows: 1fr;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
     margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
   }
@@ -1007,9 +1020,10 @@
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 12px;
+    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 92px;
     background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
+  .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
   .traffic-card.tiles-only .chart-total:first-child { border-left: 0; }
   /* Merged in/out pair: one wrapped line whose halves mirror the token
      bars' colors (input purple, output green) over a thin muted separator -
