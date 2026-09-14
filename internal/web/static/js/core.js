@@ -86,8 +86,12 @@ function hexA(hex, a) {
   const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
   return m ? `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})` : hex;
 }
-// Faint warm gridline (translucent panel border) for chart axes.
-COLORS.grid = hexA(COLORS.border2, 0.5);
+// Faint warm gridline (translucent panel border) for chart axes. The alpha
+// is owned by the dashboard token --chart-grid-a; the literal is the
+// fallback when the token is unreadable (jsdom never resolves stylesheet
+// custom properties, and a failed CSS load must not break the axes).
+const chartGridA = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chart-grid-a'));
+COLORS.grid = hexA(COLORS.border2, Number.isFinite(chartGridA) ? chartGridA : 0.5);
 
 // localStorage throws in privacy mode - keep the dashboard alive regardless.
 const storage = {

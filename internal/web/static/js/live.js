@@ -61,8 +61,7 @@ function fetchChart(mode = 'reuse') {
   const q = 'window=' + win + (scope ? '&' + scope : '');
   chartRequest(q, (accept, signal) => {
     _lastChartFetch = Date.now();
-    operatorFetch('/metrics/agg/chart?' + q, {signal})
-      .then(r => r.ok ? r.json() : Promise.reject())
+    operatorJson('/metrics/agg/chart?' + q, {signal})
       .then(p => accept(p, true)).catch(() => accept(null, false));
   }, p => {
     chartAgg = p;
@@ -86,8 +85,7 @@ function fetchExplorer(mode = 'reuse') {
   // all other dims' filters - computed server-side over all history since
   // inception (the filter set is a scoping signal, never a client record set).
   explorerRequest(q, (accept, signal) => {
-    operatorFetch('/metrics/agg/explorer?' + q, {signal})
-      .then(r => r.ok ? r.json() : Promise.reject())
+    operatorJson('/metrics/agg/explorer?' + q, {signal})
       .then(p => accept(p, true)).catch(() => accept(null, false));
   }, p => {
     // Hash state can change before its navigation event dispatches.
@@ -817,7 +815,7 @@ function fetchBootstrap(mode, after) {
   }
   const embedded = mode === 'full' ? takeEmbeddedBootstrap() : null;
   const response = embedded ? Promise.resolve(embedded)
-    : operatorFetch('/metrics/bootstrap' + (q.length ? '?' + q.join('&') : '')).then(r => r.ok ? r.json() : Promise.reject());
+    : operatorJson('/metrics/bootstrap' + (q.length ? '?' + q.join('&') : ''));
   const request = response.then(p => {
       if (dashboardReloading) return;
       if (my === _bootReq) {

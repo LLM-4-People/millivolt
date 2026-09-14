@@ -676,7 +676,13 @@ func TestStaticFreshnessContract(t *testing.T) {
 	if !strings.Contains(body, "millivolt-shell-") {
 		t.Fatal("served sw.js does not name its shell cache")
 	}
-	version := strings.TrimPrefix(strings.SplitN(strings.SplitN(body, "millivolt-shell-", 2)[1], "'", 2)[0], "millivolt-shell-")
+	// sw.js builds its cache name from the prefix const plus the stamped
+	// dashboard version; parse that concatenation for the content identity.
+	cacheName := regexp.MustCompile(`CACHE = CACHE_PREFIX \+ '([^']+)'`).FindStringSubmatch(body)
+	if cacheName == nil {
+		t.Fatal("served sw.js does not build its shell cache from the stamped version")
+	}
+	version := cacheName[1]
 	if len(version) < 8 {
 		t.Fatalf("served sw.js cache version = %q, want a content identity hash", version)
 	}

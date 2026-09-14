@@ -112,6 +112,20 @@ let chartPayload = {
 };
 let restartState = { restarted: false, postCount: 0, statusGate: null, postGate: null, status: {} };
 let cfgFetches = 0;
+// Default model canonicalization pipeline - the ui_check mirror of
+// config.DefaultModelRules, kept in lockstep with the Go table. It seeds
+// the harness like a real boot (the bootstrap payload's model_canon.rules,
+// so every grouped consumer below - debug checklist, explorer scope,
+// Clear/Logs optgroups - sees variants merged) and rides cfgDoc.defaults
+// .model_rules, the server-provided shape the restore-defaults control
+// reads in Settings.
+const DEF_RULES = [
+  { mode: 'lower' },
+  { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' },
+  { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' },
+  { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' },
+  { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' },
+];
 // Providers editor fixture: the server-owned canonical usage fields plus one
 // mapped provider (neutral fixture label).
 const cfgDoc = {
@@ -122,7 +136,7 @@ const cfgDoc = {
   ],
   categories: [{ id: 'providers', label: 'Providers', help: 'Per-provider usage/cost JSON field-name maps.' }],
   values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
-  defaults: { providers: {} },
+  defaults: { providers: {}, model_rules: DEF_RULES },
   effective: {},
   overrides: {},
   writable: true,
@@ -613,18 +627,6 @@ async function main() {
   check('opening debug closes logs', logsMenu.hidden);
   w.toggleDebugMenu({ stopPropagation() {} });
   check('debug menu closes on second toggle', debugMenu.hidden);
-  // Default model canonicalization pipeline - the ui_check mirror of
-  // config.DefaultModelRules, kept in lockstep with the Go table. The
-  // harness seeds it like a real boot (the bootstrap payload's
-  // model_canon.rules) so every grouped consumer below (debug checklist,
-  // explorer scope, Clear/Logs optgroups) sees variants merged.
-  const DEF_RULES = [
-    { mode: 'lower' },
-    { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' },
-    { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' },
-    { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' },
-    { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' },
-  ];
   const canonCases = [
     ['glm-5.3', 'glm-5-3'], ['glm-5-3', 'glm-5-3'], ['GLM-5.3', 'glm-5-3'],
     ['moonshotai/kimi-k3', 'kimi-k3'], ['moonshotai/kimi-k3:nube', 'kimi-k3'],
@@ -858,9 +860,14 @@ async function main() {
   check('there is no browser executor for saved pattern rules', typeof w.compileModelRules === 'undefined');
   {
     // Templates + restore-defaults: the shipped pipeline is one click.
+    // Restore reads the server-provided defaults doc (no client mirror),
+    // so seed settingsDoc like a real /admin/config GET would - and put
+    // it back afterwards: later backup tests run with no settings doc.
     const mrWrap = d.createElement('div');
     mrWrap.innerHTML = w.modelRulesEditorHTML([{ mode: 'lower' }]);
     d.getElementById('settings-fields').appendChild(mrWrap);
+    w.__mrDefaultsDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__mrDefaultsDoc');
     const wrap = mrWrap;
     const tpl = wrap.querySelector('.mr-tpl');
     tpl.value = '1';
@@ -875,6 +882,36 @@ async function main() {
     check('the rule count line tracks the rows',
       wrap.querySelector('.mr-count').textContent === '5 / 64 rules');
     mrWrap.remove();
+    w.eval('settingsDoc = null');
+  }
+  {
+    // last_reload settings section: the live snapshot renders the server's
+    // last-apply report, deny-by-default when the server has none (the
+    // cfgDoc fixture below carries no last_reload, like a fresh process).
+    w.__lrOk = JSON.parse(JSON.stringify(cfgDoc));
+    w.__lrOk.last_reload = { ok: true, error: '', dropped_keys: [], restart_required: ['db_path'], at: 1757777777000 };
+    w.eval('fillSettingsLive(window.__lrOk)');
+    let live = d.getElementById('settings-live').textContent;
+    check('the live snapshot renders last_reload with the restart vocabulary',
+      /last apply/.test(live) && /restart needed for: db_path/.test(live) && !/failed/.test(live));
+    w.__lrBad = JSON.parse(JSON.stringify(cfgDoc));
+    w.__lrBad.last_reload = { ok: false, error: 'settings saved, but reload failed: bad yaml', dropped_keys: ['limits'], restart_required: [], at: 1757777777000 };
+    w.eval('fillSettingsLive(window.__lrBad)');
+    live = d.getElementById('settings-live').textContent;
+    const badVal = d.querySelector('#settings-live .st-live-row:last-child .v');
+    check('a failed reload reads as failed with its dropped keys and error',
+      /last apply/.test(live) && /failed/.test(live) && /dropped 1/.test(live) && !/restart needed/.test(live) &&
+      /reload failed/.test(badVal.getAttribute('title')));
+    w.__lrNone = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('fillSettingsLive(window.__lrNone)');
+    live = d.getElementById('settings-live').textContent;
+    check('no last_reload row renders before the first server apply',
+      !/last apply/.test(live) && /listen/.test(live) && /store/.test(live) && /write/.test(live));
+    w.__lrJunk = JSON.parse(JSON.stringify(cfgDoc));
+    w.__lrJunk.last_reload = { ok: true, at: 'not-a-time' };
+    w.eval('fillSettingsLive(window.__lrJunk)');
+    check('a malformed last_reload arrival time renders nothing',
+      !/last apply/.test(d.getElementById('settings-live').textContent));
   }
   {
     // The preview bench: step trace + before→after over the request log's
@@ -1506,6 +1543,9 @@ async function main() {
         return ['requests / tokens','tokens in/out/cached','cost','errors / 429','avg latency / speed']
           .every(l => s.includes('tl">' + l + '</span> -'));
       })()`));
+    check('percentile ordinals keep the teens and centuries right (111th, not 111st)',
+      w.eval('[0,1,2,3,11,12,13,21,95,111,112,113,121].map(p => pctOrdinal(p)).join()') ===
+      '0th,1st,2nd,3rd,11th,12th,13th,21st,95th,111th,112th,113th,121st');
     w.eval("chartView.preset = 'traffic'");
   }
 
@@ -3428,6 +3468,13 @@ async function main() {
         sw.recordMatchesDim(state.records[0], 'time', 'night') && !sw.recordMatchesDim({...state.records[0], time_bucket: 'work'}, 'time', 'night'));
       check('durable storage drops are discoverable in the existing footer',
         sd.getElementById('f-state').textContent.includes('3 storage drops') && sd.getElementById('f-state').title.includes('not saved durably'));
+      sw.applyBootstrapState({...state, storage: {enabled: true, dropped: 0, totals_degraded: true}});
+      check('a degraded boot scan is discoverable in the footer as totals degraded',
+        sd.getElementById('f-state').textContent.includes('totals degraded') &&
+        sd.getElementById('f-state').title.includes('startup history scan failed'));
+      sw.applyBootstrapState({...state, storage: {enabled: true, dropped: 0}});
+      check('a clean storage signal renders no degraded footnote',
+        !sd.getElementById('f-state').textContent.includes('totals degraded') && !sd.getElementById('f-state').title);
       const banner = sd.getElementById('storm-banner');
       check('embedded bootstrap exposes compact actionable provider storm summaries',
         banner && !banner.hidden && banner.getAttribute('role') === 'status' && banner.getAttribute('aria-live') === 'polite' &&

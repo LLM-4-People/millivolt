@@ -55,25 +55,40 @@ function applyStormState(st) {
   renderStormDetails();
 }
 
+// buildModalDialog is the one modal-frame constructor: every overlay
+// dialog builds the same inert-while-hidden, focusable section and
+// appends it to the body exactly once.
+function buildModalDialog(id, className, labelledBy, innerHTML) {
+  const dialog = document.createElement('section');
+  dialog.id = id;
+  dialog.className = className;
+  dialog.hidden = true;
+  dialog.tabIndex = -1;
+  dialog.setAttribute('inert', '');
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', labelledBy);
+  dialog.innerHTML = innerHTML;
+  document.body.appendChild(dialog);
+  return dialog;
+}
+
+// wireDialogDismiss attaches the two dismiss paths every modal frame
+// shares: a click on the frame itself and the Escape key. The dismiss
+// callback owns what closing means for its dialog.
+function wireDialogDismiss(dialog, dismiss) {
+  dialog.addEventListener('click', e => { if (e.target === dialog) dismiss(e); });
+  dialog.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(e); }
+  });
+}
+
 function openStormDetails(key) {
   if (!stormSnapshot.enabled || !stormSnapshot.storms.some(s => stormIncidentKey(s) === key)) return;
   let dialog = $('storm-dialog');
   if (!dialog) {
-    dialog = document.createElement('section');
-    dialog.id = 'storm-dialog';
-    dialog.className = 'storm-dialog';
-    dialog.hidden = true;
-    dialog.tabIndex = -1;
-    dialog.setAttribute('inert', '');
-    dialog.setAttribute('role', 'dialog');
-    dialog.setAttribute('aria-modal', 'true');
-    dialog.setAttribute('aria-labelledby', 'storm-dialog-title');
-    dialog.innerHTML = `<div class="storm-dialog-panel"><div class="drawer-hd"><h3 id="storm-dialog-title">Error storm details</h3><button class="btn" type="button" data-operator="storm-close" aria-label="Close error storm details">Close</button></div><div class="storm-dialog-body" id="storm-dialog-body"></div></div>`;
-    dialog.addEventListener('click', e => { if (e.target === dialog) closeStormDetails(); });
-    dialog.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeStormDetails(); }
-    });
-    document.body.appendChild(dialog);
+    dialog = buildModalDialog('storm-dialog', 'storm-dialog', 'storm-dialog-title', `<div class="storm-dialog-panel"><div class="drawer-hd"><h3 id="storm-dialog-title">Error storm details</h3><button class="btn" type="button" data-operator="storm-close" aria-label="Close error storm details">Close</button></div><div class="storm-dialog-body" id="storm-dialog-body"></div></div>`);
+    wireDialogDismiss(dialog, () => closeStormDetails());
   }
   closeHeaderMenus();
   closeNavMenu();
@@ -135,6 +150,10 @@ let operatorCredentialEpoch = 0;
 // says so instead of silently asking the same question again.
 let operatorRejected = false;
 let operatorPrompt = null;
+// The operator dialog frame's dismiss paths dispatch through this hook;
+// every prompt's executor re-points it at its own finish() so a reused
+// frame always closes the prompt that opened it.
+let operatorDismiss = () => {};
 
 function storeOperatorCredential(value) {
   operatorCredential = value;
@@ -194,6 +213,13 @@ async function operatorFetch(url, options = {}) {
   return response;
 }
 
+// operatorJson is the one GET-and-parse owner for operator-state JSON
+// fetches: it resolves the parsed document only for a 2xx response and
+// rejects otherwise, so every caller shares one failure contract.
+function operatorJson(url, options = {}) {
+  return operatorFetch(url, options).then(r => r.ok ? r.json() : Promise.reject());
+}
+
 // Single-flight credential prompt: concurrent gated calls share one dialog
 // and one resolution. Resolves '' on cancel or dismiss. A prompt after a
 // rejected attempt says so instead of repeating the intro line.
@@ -202,17 +228,8 @@ function askOperatorToken() {
   operatorPrompt = new Promise(resolve => {
     let dialog = $('operator-dialog');
     if (!dialog) {
-      dialog = document.createElement('section');
-      dialog.id = 'operator-dialog';
-      dialog.className = 'operator-dialog';
-      dialog.hidden = true;
-      dialog.tabIndex = -1;
-      dialog.setAttribute('inert', '');
-      dialog.setAttribute('role', 'dialog');
-      dialog.setAttribute('aria-modal', 'true');
-      dialog.setAttribute('aria-labelledby', 'operator-dialog-title');
-      dialog.innerHTML = `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><g stroke="var(--scale-tick)" stroke-width="1" opacity=".55" stroke-linecap="round"><path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/></g><path d="M1.5 12.8H16.5" stroke="var(--scale-base)" stroke-width="1" opacity=".5" stroke-linecap="round"/><path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="url(#mv-login)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="mv-login" x1="1.5" y1="9" x2="16.5" y2="9" gradientUnits="userSpaceOnUse"><stop stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/></linearGradient></defs></svg></div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`;
-      document.body.appendChild(dialog);
+      dialog = buildModalDialog('operator-dialog', 'operator-dialog', 'operator-dialog-title', `<div class="operator-dialog-panel"><div class="operator-dialog-brand"><div class="brand-logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 18 18" fill="none"><g stroke="var(--scale-tick)" stroke-width="1" opacity=".55" stroke-linecap="round"><path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/></g><path d="M1.5 12.8H16.5" stroke="var(--scale-base)" stroke-width="1" opacity=".5" stroke-linecap="round"/><path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="url(#mv-login)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="mv-login" x1="1.5" y1="9" x2="16.5" y2="9" gradientUnits="userSpaceOnUse"><stop stop-color="var(--accent)"/><stop offset="1" stop-color="var(--accent2)"/></linearGradient></defs></svg></div><h3 id="operator-dialog-title">millivolt</h3></div><p class="operator-dialog-note">This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value. It stays in this browser tab for the session.</p><form id="operator-dialog-form"><input id="operator-dialog-input" type="password" autocomplete="current-password" spellcheck="false" aria-label="Operator token" placeholder="operator token"><div class="operator-dialog-actions"><button class="btn" type="button" data-operator-auth="cancel">Cancel</button><button class="btn btn-accent" type="submit">Sign in</button></div></form></div>`);
+      wireDialogDismiss(dialog, () => operatorDismiss(''));
     }
     const input = $('operator-dialog-input');
     const note = dialog.querySelector('.operator-dialog-note');
@@ -239,8 +256,7 @@ function askOperatorToken() {
       resolve(value);
     };
     observer.observe(dialog, { attributes: true, attributeFilter: ['hidden'] });
-    dialog.onclick = e => { if (e.target === dialog) finish(''); };
-    dialog.onkeydown = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(''); } };
+    operatorDismiss = finish;
     dialog.querySelector('[data-operator-auth="cancel"]').onclick = () => finish('');
     $('operator-dialog-form').onsubmit = e => {
       e.preventDefault();
@@ -909,6 +925,20 @@ function wireBackupPane() {
   backupSetBusy(backupBusy);
 }
 
+// triggerDownload is the one anchor-click download path (log exports and
+// backups): one owner for the download attribute contract - an empty
+// string defers the filename to the server's Content-Disposition - and
+// for revoking a passed object URL once the click landed.
+function triggerDownload(href, download, revoke) {
+  const a = document.createElement('a');
+  a.href = href;
+  a.download = download;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  if (revoke) URL.revokeObjectURL(href);
+}
+
 function runBackupDownload() {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
@@ -924,13 +954,7 @@ function runBackupDownload() {
     const blob = await r.blob();
     const dispo = r.headers.get('Content-Disposition') || '';
     const m = /filename="([^"]+)"/.exec(dispo);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = (m && m[1]) || 'millivolt-backup.mvb';
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(a.href);
+    triggerDownload(URL.createObjectURL(blob), (m && m[1]) || 'millivolt-backup.mvb', true);
     const n = backupBytes(blob.size);
     settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
   }).catch(err => settingsStatus(String(err.message || err)))
@@ -995,9 +1019,7 @@ function runBackupApply() {
     if (!r.ok) throw new Error(j.error || 'restore failed');
     backupInspect = null;
     backupSetBusy(false);
-    const restart = Array.isArray(j.restart_required) && j.restart_required.length
-      ? 'restart needed for: ' + j.restart_required.join(', ')
-      : '';
+    const restart = settingsRestartNotice(j);
     settingsStatus(restart ? 'restored · ' + restart : 'restored', restart ? '' : 'ok');
     return fetchSettings(true);
   }).catch(err => {
@@ -1019,6 +1041,19 @@ function runBackupCancel() {
   settingsStatus('');
 }
 
+// settingsReloadDetail renders the server's last_reload report as one
+// compact line: when, whether the reload failed, how many keys were
+// dropped, and the restart-affected keys (the shared settingsRestartNotice
+// vocabulary).
+function settingsReloadDetail(lr) {
+  const bits = [new Date(lr.at).toLocaleString()];
+  if (lr.ok === false) bits.push('failed');
+  if (Array.isArray(lr.dropped_keys) && lr.dropped_keys.length) bits.push('dropped ' + lr.dropped_keys.length);
+  const restart = settingsRestartNotice(lr);
+  if (restart) bits.push(restart);
+  return bits.join(' · ');
+}
+
 function fillSettingsLive(doc) {
   const el = $('settings-live');
   if (!el) return;
@@ -1028,10 +1063,19 @@ function fillSettingsLive(doc) {
   const listen = ovr.listen || eff.listen || '';
   const db = ovr.db_path || eff.db_path || '';
   const persist = doc.writable ? 'yaml' : 'memory';
+  // last_reload reports the latest Settings apply the server completed;
+  // the server omits it before the first one. Deny by default: only a
+  // safe-integer arrival time renders. The title carries the server's
+  // failure text when the reload failed.
+  const lr = doc.last_reload;
+  const lastApply = lr && Number.isSafeInteger(lr.at)
+    ? `<div class="st-live-row"><span class="k">last apply</span><span class="v" title="${escapeHtml(String(lr.error || settingsReloadDetail(lr)))}">${escapeHtml(settingsReloadDetail(lr))}</span></div>`
+    : '';
   el.innerHTML =
     `<div class="st-live-row"><span class="k">listen</span><span class="v" title="${escapeHtml(String(listen))}">${escapeHtml(String(listen))}</span></div>` +
     `<div class="st-live-row"><span class="k">store</span><span class="v" title="${escapeHtml(String(db))}">${escapeHtml(String(db || 'ring'))}</span></div>` +
-    `<div class="st-live-row"><span class="k">write</span><span class="v">${escapeHtml(persist)}</span></div>`;
+    `<div class="st-live-row"><span class="k">write</span><span class="v">${escapeHtml(persist)}</span></div>` +
+    lastApply;
 }
 
 function settingsFieldHTML(f, val, def, override) {
@@ -1223,15 +1267,6 @@ const MODEL_RULE_MODES = [['exact', 'exact'], ['pattern', 'pattern'], ['lower', 
 const MR_MODE_TITLES = { exact: 'exact - merge one whole spelling', pattern: 'pattern - regex replace-all (RE2 syntax, $1 refs)', lower: 'lower - lowercase fold' };
 // Mirrors config.ModelRulesMax (64) - the count line and add-gate use it.
 const MODEL_RULES_MAX = 64;
-// The shipped pipeline, offered back as one-click templates + as the
-// "default pipeline" restore (pure data - identical to DefaultModelRules).
-const MR_DEFAULTS = [
-  { mode: 'lower' },
-  { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' },
-  { mode: 'pattern', from: ':[a-z0-9._-]+$', to: '' },
-  { mode: 'pattern', from: '-(?:[a-z]{0,2}fp\\d+|bf\\d+|int\\d+|nf\\d+|[a-z]?q\\d+(?:_[0-9a-z]+)*)$', to: '' },
-  { mode: 'pattern', from: '(\\d)\\.(\\d)', to: '$1-$2' },
-];
 const MR_TEMPLATES = [
   ['lowercase fold', { mode: 'lower' }],
   ['strip vendor/ prefix', { mode: 'pattern', from: '^[a-z0-9][a-z0-9._-]*/', to: '' }],
@@ -1610,10 +1645,14 @@ function mrApplyTemplate(sel) {
   if (from && !from.value) from.focus();
 }
 
-// mrRestoreDefaults replaces the draft with the shipped pipeline - cheap
-// to try: nothing is committed until Apply.
+// mrRestoreDefaults replaces the draft with the shipped pipeline exactly
+// as the server reports it (the config defaults doc - no client-side
+// mirror to drift). Nothing is committed until Apply; with no server
+// defaults in reach it refuses instead of emptying the draft.
 function mrRestoreDefaults(wrap) {
-  wrap.querySelector('.mr-rows').innerHTML = MR_DEFAULTS.map(modelRuleRowHTML).join('');
+  const rules = settingsDoc?.defaults?.model_rules;
+  if (!Array.isArray(rules)) return;
+  wrap.querySelector('.mr-rows').innerHTML = rules.map(modelRuleRowHTML).join('');
   markSettingsDirty();
   validateModelRulesDraft(wrap);
   mrPreview(wrap);
@@ -1764,12 +1803,17 @@ function toggleProvCollapse(card) {
   if (chev) chev.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
 }
 
+// setProvMenuOpen is the one open-state writer for the provider picker
+// menus: the menu's visibility and its toggle's aria-expanded always move
+// together, on every open and close path.
+function setProvMenuOpen(menu, open) {
+  menu.hidden = !open;
+  const btn = menu.parentElement && menu.parentElement.querySelector('[data-prov-menu-toggle]');
+  if (btn) btn.setAttribute('aria-expanded', String(!!open));
+}
+
 function closeProvMenus(scope) {
-  (scope || document).querySelectorAll('.prov-menu:not([hidden])').forEach(m => {
-    m.hidden = true;
-    const btn = m.parentElement && m.parentElement.querySelector('[data-prov-menu-toggle]');
-    if (btn) btn.setAttribute('aria-expanded', 'false');
-  });
+  (scope || document).querySelectorAll('.prov-menu:not([hidden])').forEach(m => setProvMenuOpen(m, false));
 }
 
 function providersEditorClick(e) {
@@ -1811,8 +1855,8 @@ function providersEditorClick(e) {
       // Re-sync the picker at open time: providers added or removed since the
       // last render must be reflected (already-added ones never offered).
       if (menu.hidden) syncProvMenuList(t.closest('.st-row'));
-      menu.hidden = !menu.hidden;
-      t.closest('[data-prov-menu-toggle]').setAttribute('aria-expanded', menu.hidden ? 'false' : 'true');
+      // The pre-flip hidden value is the new open state.
+      setProvMenuOpen(menu, menu.hidden);
     }
     return;
   }
@@ -2121,6 +2165,9 @@ function applySettings() {
     if (r.ok || j.saved) {
       const unchanged = settingsFingerprint() === submitted;
       settingsDoc = { ...settingsDoc, values: j.values, effective: j.effective, revision: j.revision, restart_required: j.restart_required };
+      // The POST result carries the fresh last_reload report; adopt it so
+      // the live snapshot names the apply the operator just made.
+      if (j.last_reload) settingsDoc.last_reload = j.last_reload;
       applyDashValues(j.effective || j.values);
       if (unchanged) fillSettingsForm(settingsDoc);
       else settingsSnap = submitted; // typing during the save remains unsaved
@@ -2174,12 +2221,26 @@ function applyDebugState(st, revision = operatorState.debug.revision) {
   if (lastData) scheduleRenderLive();
 }
 
-function togglePauseMenu(e) {
+// toggleHdrMenu is the one header-menu toggle branch: stop the event,
+// close every other header menu, run the caller's pre-open and post-open
+// syncs around the hidden flip, and publish the shared expanded state.
+// The named wrappers stay as the onclick surface every button names.
+function toggleHdrMenu(e, menuId, prepare, after) {
   e.stopPropagation();
-  const m = $('pause-menu');
-  if (m.hidden) { closeHeaderMenus('pause-menu'); resetPauseMenuForm(); syncPauseMenuState(); m.hidden = false; }
-  else m.hidden = true;
+  const m = $(menuId);
+  if (m.hidden) {
+    closeHeaderMenus(menuId);
+    if (prepare) prepare();
+    m.hidden = false;
+    if (after) after();
+  } else {
+    m.hidden = true;
+  }
   syncHdrMenuExpanded();
+}
+
+function togglePauseMenu(e) {
+  toggleHdrMenu(e, 'pause-menu', () => { resetPauseMenuForm(); syncPauseMenuState(); });
 }
 
 function holdLive(h) {
@@ -2286,11 +2347,21 @@ function renderPauseHolds() {
   }).join('');
 }
 
+// knownNames is the one known-name derivation for the pause/debug/limits
+// menus: the operator state's canonical list unioned with any extra name
+// collections (an active hold's names, the operator's picked checkboxes),
+// deduped and sorted once.
+function knownNames(state, key, ...extra) {
+  const out = new Set(state?.[key] || []);
+  for (const names of extra) for (const n of names || []) out.add(n);
+  return [...out].sort();
+}
+
 function refreshPauseKnownLists() {
   const pickedC = new Set(selectedCheckboxValues('pf-clients'));
   const pickedP = new Set(selectedCheckboxValues('pf-providers'));
-  const knownC = [...new Set([...(pauseState.known_clients || []), ...(pauseState.clients || []), ...pickedC])].sort();
-  const knownP = [...new Set([...(pauseState.known_providers || []), ...(pauseState.providers || []), ...pickedP])].sort();
+  const knownC = knownNames(pauseState, 'known_clients', pauseState.clients, pickedC);
+  const knownP = knownNames(pauseState, 'known_providers', pauseState.providers, pickedP);
   fillPauseChecks($('pf-clients'), knownC, pickedC);
   fillPauseChecks($('pf-providers'), knownP, pickedP);
   onPauseScopeChange();
@@ -2339,8 +2410,8 @@ function resetPauseMenuForm() {
   if (cap) cap.value = '';
   const count = $('pause-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillPauseChecks($('pf-clients'), [...new Set([...(pauseState.known_clients || []), ...(pauseState.clients || [])])].sort(), new Set());
-  fillPauseChecks($('pf-providers'), [...new Set([...(pauseState.known_providers || []), ...(pauseState.providers || [])])].sort(), new Set());
+  fillPauseChecks($('pf-clients'), knownNames(pauseState, 'known_clients', pauseState.clients), new Set());
+  fillPauseChecks($('pf-providers'), knownNames(pauseState, 'known_providers', pauseState.providers), new Set());
   onPauseScopeChange();
 }
 
@@ -2362,16 +2433,23 @@ function holdMatchesRecord(h, r) {
   return !!provider && providers.includes(provider);
 }
 
+// openHdrMenuForEdit is the one open-for-edit sequence: record-driven
+// edits open their header menu exactly like a toggle does, without
+// stomping the edit-in-progress form.
+function openHdrMenuForEdit(menuId) {
+  closeHeaderMenus(menuId);
+  const m = $(menuId);
+  if (m) m.hidden = false;
+  syncHdrMenuExpanded();
+}
+
 function editHoldForRecord(r) {
   const holds = liveHolds();
   if (!holds.length || !r) return;
   const named = holds.find(h => !h.all && holdMatchesRecord(h, r));
   const h = named || holds.find(h => h.all);
   if (!h) return;
-  closeHeaderMenus('pause-menu');
-  const m = $('pause-menu');
-  if (m) m.hidden = false;
-  syncHdrMenuExpanded();
+  openHdrMenuForEdit('pause-menu');
   editPauseHold(h.id);
 }
 
@@ -2398,8 +2476,8 @@ function editPauseHold(id) {
   if (cap) cap.value = typeof h.max_queued === 'number' ? String(h.max_queued) : '';
   const count = $('pause-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  const knownC = [...new Set([...(pauseState.known_clients || []), ...(h.clients || [])])].sort();
-  const knownP = [...new Set([...(pauseState.known_providers || []), ...(h.providers || [])])].sort();
+  const knownC = knownNames(pauseState, 'known_clients', h.clients);
+  const knownP = knownNames(pauseState, 'known_providers', h.providers);
   fillPauseChecks($('pf-clients'), knownC, new Set(h.clients || []));
   fillPauseChecks($('pf-providers'), knownP, new Set(h.providers || []));
   onPauseScopeChange();
@@ -2418,7 +2496,7 @@ function applyPauseMenu() {
   if (pauseEditID) body.id = pauseEditID;
   const cap = pauseMenuCap();
   if (Number.isNaN(cap)) {
-    pauseMutationError('queue cap must be a non-negative whole number');
+    operatorError('pause', 'queue cap must be a non-negative whole number');
     return;
   }
   if (cap !== null) body.max_queued = cap;
@@ -2435,17 +2513,8 @@ function resumePauseMenu() {
   return mutateOperator('pause', { paused: false }, () => hideHdrMenu('pause-menu'));
 }
 
-function pauseMutationError(message) {
-  const count = $('pause-count');
-  if (count) { count.textContent = message; count.dataset.err = '1'; }
-}
-
 function toggleLimitsMenu(e) {
-  e.stopPropagation();
-  const m = $('limits-menu');
-  if (m.hidden) { closeHeaderMenus('limits-menu'); syncLimitsMenuState(); onLimitProviderChange(); m.hidden = false; }
-  else m.hidden = true;
-  syncHdrMenuExpanded();
+  toggleHdrMenu(e, 'limits-menu', () => { syncLimitsMenuState(); onLimitProviderChange(); });
 }
 
 function limitByProvider(name) {
@@ -2486,11 +2555,7 @@ function fillPauseControls() {
 const DEBUG_DURS = [['', 'I stop']].concat(PAUSE_DURS.slice(1));
 
 function toggleDebugMenu(e) {
-  e.stopPropagation();
-  const m = $('debug-menu');
-  if (m.hidden) { closeHeaderMenus('debug-menu'); resetDebugMenuForm(); syncDebugMenuState(); m.hidden = false; }
-  else m.hidden = true;
-  syncHdrMenuExpanded();
+  toggleHdrMenu(e, 'debug-menu', () => { resetDebugMenuForm(); syncDebugMenuState(); });
 }
 
 function liveDebugSessions() {
@@ -2634,9 +2699,9 @@ function refreshDebugKnownLists() {
   const pickedC = new Set(selectedCheckboxValues('df-clients'));
   const pickedP = new Set(selectedCheckboxValues('df-providers'));
   const pickedM = new Set(selectedCheckboxValues('df-models'));
-  const knownC = [...new Set([...(debugState.known_clients || []), ...pickedC])].sort();
-  const knownP = [...new Set([...(debugState.known_providers || []), ...pickedP])].sort();
-  const knownM = [...new Set([...(debugState.known_models || []), ...pickedM])].sort();
+  const knownC = knownNames(debugState, 'known_clients', pickedC);
+  const knownP = knownNames(debugState, 'known_providers', pickedP);
+  const knownM = knownNames(debugState, 'known_models', pickedM);
   fillDebugChecks($('df-clients'), knownC, pickedC, 'client');
   fillDebugChecks($('df-providers'), knownP, pickedP, 'provider');
   fillDebugChecks($('df-models'), knownM, pickedM, 'model');
@@ -2681,9 +2746,9 @@ function resetDebugMenuForm() {
   if ($('df-dur')) $('df-dur').value = '';
   const count = $('debug-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillDebugChecks($('df-clients'), [...new Set(debugState.known_clients || [])].sort(), new Set(), 'client');
-  fillDebugChecks($('df-providers'), [...new Set(debugState.known_providers || [])].sort(), new Set(), 'provider');
-  fillDebugChecks($('df-models'), [...new Set(debugState.known_models || [])].sort(), new Set(), 'model');
+  fillDebugChecks($('df-clients'), knownNames(debugState, 'known_clients'), new Set(), 'client');
+  fillDebugChecks($('df-providers'), knownNames(debugState, 'known_providers'), new Set(), 'provider');
+  fillDebugChecks($('df-models'), knownNames(debugState, 'known_models'), new Set(), 'model');
   updateDebugApplyEnabled();
 }
 
@@ -2705,10 +2770,7 @@ function editDebugForRecord(r) {
   const stamped = r.debug_session_id && holds.find(x => x.id === r.debug_session_id);
   const h = stamped || holds.find(x => debugMatchesRecord(x, r));
   if (!h) return;
-  closeHeaderMenus('debug-menu');
-  const m = $('debug-menu');
-  if (m) m.hidden = false;
-  syncHdrMenuExpanded();
+  openHdrMenuForEdit('debug-menu');
   editDebugSession(h.id);
 }
 
@@ -2725,9 +2787,9 @@ function editDebugSession(id) {
   fillSelectPairs($('df-dur'), DEBUG_DURS, h.duration || '');
   const count = $('debug-count');
   if (count) { count.textContent = ''; delete count.dataset.err; }
-  fillDebugChecks($('df-clients'), [...new Set([...(debugState.known_clients || []), ...(h.clients || [])])].sort(), new Set(h.clients || []), 'client');
-  fillDebugChecks($('df-providers'), [...new Set([...(debugState.known_providers || []), ...(h.providers || [])])].sort(), new Set(h.providers || []), 'provider');
-  fillDebugChecks($('df-models'), [...new Set([...(debugState.known_models || []), ...(h.models || [])])].sort(), new Set(h.models || []), 'model');
+  fillDebugChecks($('df-clients'), knownNames(debugState, 'known_clients', h.clients), new Set(h.clients || []), 'client');
+  fillDebugChecks($('df-providers'), knownNames(debugState, 'known_providers', h.providers), new Set(h.providers || []), 'provider');
+  fillDebugChecks($('df-models'), knownNames(debugState, 'known_models', h.models), new Set(h.models || []), 'model');
   syncDebugMenuState();
 }
 
@@ -2756,16 +2818,17 @@ const LIMIT_WINDOWS = [
   ['1m', '1 minute'], ['5m', '5 minutes'], ['15m', '15 minutes'],
   ['1h', '1 hour'], ['6h', '6 hours'], ['24h', '24 hours'],
 ];
+// The fallback window when a limit carries none (fillLimitWindows' default
+// and the apply body's missing-select fallback): '1m', named once.
+const LIMIT_WINDOW_DEFAULT = '1m';
 function fillLimitWindows(sel, value) {
-  fillSelectPairs(sel, LIMIT_WINDOWS, value || '1m');
+  fillSelectPairs(sel, LIMIT_WINDOWS, value || LIMIT_WINDOW_DEFAULT);
 }
 
 function syncLimitsMenuState() {
   document.querySelectorAll('#limits-menu input, #limits-menu select').forEach(el => { el.disabled = operatorState.throttle.busy; });
-  const known = [...new Set([
-    ...(throttleState.known_providers || []),
-    ...(throttleState.throttles || []).map(t => t.provider).filter(Boolean),
-  ])].sort();
+  const known = knownNames(throttleState, 'known_providers',
+    (throttleState.throttles || []).map(t => t.provider).filter(Boolean));
   const sel = $('lim-provider');
   const keep = sel ? sel.value : '';
   if (sel) {
@@ -2837,9 +2900,9 @@ function applyLimitsMenu() {
     provider,
     concurrency: conc,
     requests: req,
-    request_window: req > 0 ? ($('lim-reqw') ? $('lim-reqw').value : '1m') : '',
+    request_window: req > 0 ? ($('lim-reqw') ? $('lim-reqw').value : LIMIT_WINDOW_DEFAULT) : '',
     tokens: tok,
-    token_window: tok > 0 ? ($('lim-tokw') ? $('lim-tokw').value : '1m') : '',
+    token_window: tok > 0 ? ($('lim-tokw') ? $('lim-tokw').value : LIMIT_WINDOW_DEFAULT) : '',
   };
   return mutateOperator('throttle', body);
 }
@@ -2884,10 +2947,7 @@ function editLimitProvider(name) {
 
 function editLimitForRecord(r) {
   if (!r || !r.provider) return;
-  closeHeaderMenus('limits-menu');
-  const m = $('limits-menu');
-  if (m) m.hidden = false;
-  syncHdrMenuExpanded();
+  openHdrMenuForEdit('limits-menu');
   syncLimitsMenuState();
   editLimitProvider(r.provider);
 }
@@ -2952,10 +3012,18 @@ function refreshFooterState() {
     } else {
       state.textContent = streamLive ? 'live' : 'offline';
     }
+    // Storage health footnotes share the warning styling: durable drops,
+    // and a degraded boot scan (since-inception totals incomplete).
     const dropped = storageState?.enabled ? storageState.dropped : 0;
-    state.classList.toggle('storage-warning', dropped > 0);
-    state.title = dropped > 0 ? 'Records not saved durably since this process started (queue overflow, closed store, or write failure). Some may remain in the live ring.' : '';
+    const degraded = storageState?.totals_degraded === true;
+    state.classList.toggle('storage-warning', dropped > 0 || degraded);
+    state.title = dropped > 0
+      ? 'Records not saved durably since this process started (queue overflow, closed store, or write failure). Some may remain in the live ring.'
+      : degraded
+        ? 'The startup history scan failed, so since-inception totals only count rows committed since this process started.'
+        : '';
     if (dropped > 0) state.textContent += ' · ' + fmt(dropped) + ' storage drops';
+    if (degraded) state.textContent += ' · totals degraded';
   }
 }
 
@@ -2978,11 +3046,7 @@ function doFilter() {
 // the same backend count endpoint) for choosing exactly what to download.
 
 function toggleFilterMenu(e, menuId, prefix, refresh) {
-  e.stopPropagation();
-  const m = $(menuId);
-  if (m.hidden) { closeHeaderMenus(menuId); populateFilterMenu(prefix); m.hidden = false; refresh(); }
-  else m.hidden = true;
-  syncHdrMenuExpanded();
+  toggleHdrMenu(e, menuId, () => populateFilterMenu(prefix), refresh);
 }
 function toggleClearMenu(e) { toggleFilterMenu(e, 'clear-menu', 'cf', updateClearCount); }
 // Use the dispatch path: a delegated action may replace/detach its target
@@ -3214,18 +3278,12 @@ function updateLogsCount() {
 function downloadLogsFiltered() {
   const preview = previewedFilter('lf');
   if (!preview) return updateLogsCount();
-  const a = document.createElement('a');
-  a.href = logsExportURL(preview.filter);
-  a.download = '';
-  document.body.appendChild(a); a.click(); a.remove();
+  triggerDownload(logsExportURL(preview.filter), '');
   hideHdrMenu('logs-menu');
 }
 
 function downloadLogsAll() {
-  const a = document.createElement('a');
-  a.href = '/metrics/export';
-  a.download = '';
-  document.body.appendChild(a); a.click(); a.remove();
+  triggerDownload('/metrics/export', '');
   hideHdrMenu('logs-menu');
 }
 
@@ -3315,11 +3373,7 @@ function renderRestartSteps(st) {
 }
 
 function toggleRestartMenu(e) {
-  e.stopPropagation();
-  const m = $('restart-menu');
-  if (m.hidden) { closeHeaderMenus('restart-menu'); m.hidden = false; fetchRestartStatus(); }
-  else m.hidden = true;
-  syncHdrMenuExpanded();
+  toggleHdrMenu(e, 'restart-menu', null, fetchRestartStatus);
 }
 
 function setRestartStatus(text, err) {

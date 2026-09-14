@@ -52,12 +52,24 @@ const CHART_TILE_PCT = 95;
 const CHART_TILE_PCT_IDX = CHART_PCTS.indexOf(CHART_TILE_PCT);
 // pctOrdinal names a percentile ordinally ('50th', '95th', '99th') for the
 // timing tile's tooltip, from CHART_TILE_PCT - the text can never claim a
-// percentile the spark lines do not draw.
-const pctOrdinal = p => {
-  const suffixes = ['th', 'st', 'nd', 'rd'];
-  const v = p % 100;
-  return p + (suffixes[(v - 20) % 10] || suffixes[v] || suffixes[0]);
-};
+// percentile the spark lines do not draw. The suffix table is literal for
+// p % 100 so the teens are visible rather than derived: 111th, 112th,
+// 113th read from rows 11-13, not from a last-digit rule (the audited
+// "111st" bug class). An out-of-table index (a negative input) falls back
+// to 'th' exactly like the previous suffix chain.
+const PCT_SUFFIX = [
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'th', 'th', 'th', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+  'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
+];
+const pctOrdinal = p => p + (PCT_SUFFIX[p % 100] || 'th');
 // A sparse window cannot fill the plot width honestly: one to three plotted
 // buckets strand a lone bar or a short line in dead space on both sides.
 // The big chart waits for a fourth point and paints the blank meanwhile -
@@ -208,10 +220,13 @@ const chartRowBar = (id, rend) => (rend ? rend === 'bar' : !!chartSpec(id).bar);
 // Hidden series are per-preset: { presetId: [series ids] }.
 // An old flat array (previous shape) is discarded - fresh default.
 let chartView = { window: CHART_WINDOWS[0][0], pct: 95, preset: 'traffic', hidden: {} };
+// localStorage key for the persisted chart view. One owner: the load and
+// save paths below reference the same constant.
+const CHART_VIEW_STORAGE_KEY = 'dash.chart';
 // saveChartView is the one persistence path for the chart view (preset,
 // window, percentile, hidden sets): every validated change goes through it.
 function saveChartView() {
-  storage.set('dash.chart', JSON.stringify(chartView));
+  storage.set(CHART_VIEW_STORAGE_KEY, JSON.stringify(chartView));
 }
 // loadChartView applies the persisted dash.chart payload onto chartView.
 // Deny by default: each field lands only when its saved shape validates
@@ -219,7 +234,7 @@ function saveChartView() {
 // legacy or garbage payload can never smuggle in an unknown value.
 function loadChartView() {
   try {
-    const saved = JSON.parse(storage.get('dash.chart') || '{}');
+    const saved = JSON.parse(storage.get(CHART_VIEW_STORAGE_KEY) || '{}');
     if (CHART_WINDOWS.some(([v]) => v === String(saved.window))) chartView.window = String(saved.window);
     const p = Number(saved.pct);
     if (CHART_PCTS.includes(p)) chartView.pct = p;
@@ -640,6 +655,19 @@ const sparkLines = (kept, specs) =>
 // tileSpark routes each half's spark line through its registered palette key.
 const tileSpark = (kept, halves) => sparkLines(kept, halves.map(([cls, pick]) => [TILE_HALVES[cls], pick]));
 
+// TILE_LABELS is the one owner of the overview tiles' labels: the
+// skeleton strip maps the preset's tile order through it and the
+// data-filled tiles read theirs from it, so the two can never drift
+// (ui_check pins them label for label). Ids match the data-tile toggle
+// contract.
+const TILE_LABELS = {
+  req: 'requests / tokens',
+  tokens: 'tokens in/out/cached',
+  cost: 'cost',
+  health: 'errors / 429',
+  timing: 'avg latency / speed',
+};
+
 // Placeholder strip for the no-data state: the active preset's tile skeleton
 // at full tile height, so the first payload swaps text and the card below the
 // strip never moves. Tile COUNTS must match the data-filled strip per preset
@@ -649,7 +677,7 @@ function chartTotalsSkeleton() {
   const ph = label =>
     `<span class="chart-total"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
-    return ['requests / tokens', 'tokens in/out/cached', 'cost', 'errors / 429', 'avg latency / speed'].map(l => ph(l)).join('  ');
+    return p.tiles.map(id => ph(TILE_LABELS[id])).join('  ');
   }
   return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
     + (p.id === 'traffic' ? '  ' + ph('rate') : '');
@@ -746,7 +774,7 @@ function chartTotals() {
       // buckets enter the spark - the same empty-bucket removal the plots
       // apply - so ladder padding never squeezes the data into a corner.
       const kept = chartAgg.buckets.filter(b => b.req > 0);
-      parts.push(tile('req', 'requests / tokens',
+      parts.push(tile('req', TILE_LABELS.req,
         'Request count over the blended token volume (input plus output), as a pair.',
         'accent',
         tilePair([['v-req', fmt(req)], ['v-tok', fmt(tot)]]) +
@@ -755,18 +783,17 @@ function chartTotals() {
       // volume and the cached share of input, both through the shareText
       // owner (pct/pctCap) so a sub-100 ratio can never round to a false 100%.
       const shares = [shareText(tin, tot, 'in'), shareText(tcache, tin, 'of in')].filter(Boolean).join(' · ');
-      parts.push(tile('tokens', 'tokens in/out/cached',
+      parts.push(tile('tokens', TILE_LABELS.tokens,
         'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
         'cyan',
         tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)], ['v-cache', fmt(tcache)]]) +
         (shares ? `<span class="chart-sub">${shares}</span>` : '') +
         tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
-      parts.push(tile('cost', costSpec.label, costSpec.title || '', costSpec.color,
+      parts.push(tile('cost', TILE_LABELS.cost, costSpec.title || '', costSpec.color,
         fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
-      const health = { label: 'errors / 429',
-        title: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.' };
-      parts.push(tile('health', health.label, health.title, 'err',
+      parts.push(tile('health', TILE_LABELS.health,
+        'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.', 'err',
         tilePair([['v-err', fmt(err)], ['v-rl', fmt(rl)]]) +
         (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
         tileSpark(kept, [['v-err', b => b.err], ['v-rl', b => b.rl || 0]])));
@@ -790,7 +817,7 @@ function chartTotals() {
         return `${shared ? String(lo).slice(0, -unitOf(lo).length) : lo}-${hi}${unit}`;
       };
       const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
-      parts.push(tile('timing', 'avg latency / speed',
+      parts.push(tile('timing', TILE_LABELS.timing,
         'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
         'accent',
         tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', ps ? fmt(ps[0]) : '-']]) +

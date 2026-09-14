@@ -223,8 +223,11 @@ function sparklineMulti(specs, w, h) {
   return sparkFrame(w, h, lines.join(''));
 }
 
+// sparklineSVG's fallback stroke when a caller passes no color.
+const SPARK_DEFAULT_COLOR = 'var(--accent)';
+
 function sparklineSVG(series, errs, w, h, color) {
-  if (!color) color = 'var(--accent)';
+  if (!color) color = SPARK_DEFAULT_COLOR;
   const line = sparkPath(series, w, h);
   if (!line) {
     return sparkFrame(w, h, '');

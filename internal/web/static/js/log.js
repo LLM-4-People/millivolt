@@ -813,21 +813,23 @@ function renderDrawer() {
   if (r.debug) fillDrawerDebug(r.id);
 }
 
-function debugKV(k, v) {
+// debugKV is the one debug key-value row builder. An empty value renders
+// no row (deny by default); callers pass v pre-escaped, k is escaped here.
+// color optionally tints the key span (capture headers use --accent2).
+function debugKV(k, v, color) {
   if (v == null || v === '') return '';
-  return `<div class="detail-kv"><span class="k">${escapeHtml(k)}</span><span class="v">${v}</span></div>`;
+  return `<div class="detail-kv"><span class="k"${color ? ` style="color:${color}"` : ''}>${escapeHtml(k)}</span><span class="v">${v}</span></div>`;
 }
 
 function debugHeaderRows(list) {
   if (!Array.isArray(list) || !list.length) return '';
-  return list.map(h => `<div class="detail-kv"><span class="k" style="color:var(--accent2)">${escapeHtml(h.name || '')}</span><span class="v">${escapeHtml(h.value || '')}</span></div>`).join('');
+  return list.map(h => debugKV(h.name || '', escapeHtml(h.value || ''), 'var(--accent2)')).join('');
 }
 
 function fillDrawerDebug(id) {
   const box = $('drawer-debug-body');
   if (!box) return;
-  operatorFetch('/admin/debug/capture?id=' + encodeURIComponent(id))
-    .then(r => r.ok ? r.json() : Promise.reject())
+  operatorJson('/admin/debug/capture?id=' + encodeURIComponent(id))
     .then(d => {
       if (drawerId !== id) return;
       const ident = d.identity || {};

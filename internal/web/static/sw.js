@@ -2,7 +2,9 @@
 // dashboard content identity so a rebuild drops the previous shell.
 // The worker never caches live HTML or operator/inference APIs: / is
 // operator-gated (login vs bootstrap) and /metrics /admin /v1 stream.
-const CACHE = 'millivolt-shell-__DASHBOARD_VERSION__';
+// Cached shell keys share CACHE_PREFIX; the stamped version completes it.
+const CACHE_PREFIX = 'millivolt-shell-';
+const CACHE = CACHE_PREFIX + '__DASHBOARD_VERSION__';
 const SHELL = [
   '/favicon.ico',
   '/favicon.svg',
@@ -48,7 +50,7 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter((k) => k.startsWith('millivolt-shell-') && k !== CACHE).map((k) => caches.delete(k)));
+    await Promise.all(keys.filter((k) => k.startsWith(CACHE_PREFIX) && k !== CACHE).map((k) => caches.delete(k)));
     await self.clients.claim();
   })());
 });
