@@ -2763,29 +2763,6 @@ async function main() {
     return keys.length === 9 && Object.keys(halves).length === 9 && consumed &&
       strokes.length > 0 && strokes.every(s => Object.values(declared).includes(s));
   })());
-  // Hover-contract pin: the explorer tile and the summary chart tile claim
-  // one shared hover reaction ("every clickable tile reacts identically",
-  // dashboard.css's summary-preset comment), and the two :hover rules carry
-  // byte-identical bodies. They are deliberately NOT grouped into one
-  // selector (grouping would couple the explorer and chart sections), so
-  // the contract needs a pin: both rules must exist and keep declaring the
-  // same border-color, transform and box-shadow, non-vacuously. jsdom's
-  // CSSOM exposes each rule's declared values, so a renamed property,
-  // a dropped declaration or a one-sided edit all redden here.
-  check('the explorer and chart tiles declare one identical hover contract', (() => {
-    const find = sel => {
-      const rules = [];
-      const visit = list => { for (const r of list) { if (r.selectorText === sel) rules.push(r); if (r.cssRules && r.cssRules.length) visit(r.cssRules); } };
-      for (const sheet of d.styleSheets) visit(sheet.cssRules);
-      return rules.length === 1 ? rules[0] : null;
-    };
-    const xp = find('.xp-node:hover'), ct = find('.chart-total[role="button"]:hover');
-    const props = ['border-color', 'transform', 'box-shadow'];
-    return !!xp && !!ct && props.every(p => {
-      const a = xp.style.getPropertyValue(p), b = ct.style.getPropertyValue(p);
-      return a !== '' && a === b;
-    });
-  })());
   // Shared CSSOM reader for the declared-value pins below: the FIRST rule
   // matching a selector (media overrides later in the sheet - e.g. the
   // reduced-motion .pill.live animation reset - must not shadow the
@@ -2795,6 +2772,30 @@ async function main() {
     for (const sheet of d.styleSheets) { const got = visit(sheet.cssRules); if (got) return got; }
     return null;
   };
+  // Summary-blend pin: the tiles-only preset replaces the boxed tile chrome
+  // with the KPI band's cell language (the old explorer-style card + lift
+  // contract for these tiles is retired with that change; the explorer
+  // category tile keeps its own card language). The override must (a)
+  // declare the exact wash .kpi:hover declares - one hover reaction across
+  // the top band and the summary tiles, (b) keep the per-tile box gone
+  // (background none, hairline left border, first cell open) so cells read
+  // as blended readouts, not nested cards, and (c) close the band through
+  // the shared tick strip like the KPI band instead of a hard rule.
+  check('the summary tiles blend into the card like the KPI band cells', (() => {
+    const ov = firstCSSRule('.traffic-card.tiles-only .chart-total[role="button"]:hover');
+    const kpi = firstCSSRule('.kpi:hover');
+    const flat = firstCSSRule('.traffic-card.tiles-only .chart-total');
+    const first = firstCSSRule('.traffic-card.tiles-only .chart-total:first-child');
+    const strip = firstCSSRule('.traffic-card.tiles-only .chart-totals::after');
+    return !!ov && !!kpi && !!flat && !!first && !!strip &&
+      ov.style.getPropertyValue('background') !== '' &&
+      ov.style.getPropertyValue('background') === kpi.style.getPropertyValue('background') &&
+      flat.style.getPropertyValue('background') === 'none' &&
+      flat.style.getPropertyValue('border-radius') === '0px' &&
+      flat.style.getPropertyValue('border-left') !== '' &&
+      first.style.getPropertyValue('border-left') === '0px' &&
+      strip.style.getPropertyValue('background') === 'var(--tick-strip)';
+  })());
   // Pill alpha pin: the status pills' tinted backgrounds share one ladder -
   // --pill-tint at rest, --pill-tint-strong once a pill flags an
   // operator-visible state (paused, throttled, debug) - and the live pill's
@@ -2815,14 +2816,14 @@ async function main() {
       ['.pill.live', '15%, transparent'],
     ].every(([sel, want]) => bg(sel).includes(want));
   })());
-  // Tick-strip pin: the six graduated-scale edges (header and footer rails,
-  // KPI band, section head and foot, day rule) all paint the signature
-  // motif through --tick-strip - the one authored gradient pair. A site
-  // reverting to a hand-written gradient (or a plain rule) once went
-  // green; the declared-value pin makes each site exact.
-  check('the six graduated-scale edges all paint through the --tick-strip token', (() => {
-    const sites = ['header::after', '.kpis::after', '.st-hd::after', '.st-ft::before', '.day-rule', 'footer::before'];
-    return sites.length === 6 && sites.every(sel => {
+  // Tick-strip pin: the seven graduated-scale edges (header and footer
+  // rails, KPI band, summary tiles band, section head and foot, day rule)
+  // all paint the signature motif through --tick-strip - the one authored
+  // gradient pair. A site reverting to a hand-written gradient (or a plain
+  // rule) once went green; the declared-value pin makes each site exact.
+  check('the seven graduated-scale edges all paint through the --tick-strip token', (() => {
+    const sites = ['header::after', '.kpis::after', '.traffic-card.tiles-only .chart-totals::after', '.st-hd::after', '.st-ft::before', '.day-rule', 'footer::before'];
+    return sites.length === 7 && sites.every(sel => {
       const r = firstCSSRule(sel);
       return !!r && r.style.getPropertyValue('background') === 'var(--tick-strip)';
     });

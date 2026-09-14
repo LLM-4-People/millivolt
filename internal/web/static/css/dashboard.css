@@ -979,30 +979,40 @@
      bottom-pinned whatever the tile carries. */
   .chart-total { display: flex; flex-direction: column; gap: 2px; min-height: 58px; min-width: 0; white-space: nowrap; }
   .chart-totals .tl { color: var(--muted); font-size: 10px; }
-  /* The summary preset: no plot, the tiles ARE the surface. They take the
-     card and read as one clickable card each, with the explorer category
-     tile's exact card language - panel surface, 1px border, rounded
-     corners, and the same hover lift (brighter border, translateY(-1px),
-     soft drop shadow) so every clickable tile in the dashboard reacts
-     identically. A persistent corner toggle glyph (× hides, + restores)
-     accents on hover; content spreads vertically: label top, metric
-     center, spark bottom. Tracks floor at 160px so tiles run WIDER than
-     tall. A hidden tile keeps its grid cell as a dimmed dashed stub, so
-     toggling a metric never rewraps the strip or shifts anything. */
+  /* The summary preset: no plot, the tiles ARE the surface. They borrow the
+     KPI band's blended cell language instead of stacking a second box layer
+     inside the card: no per-tile panel, border or radius - cells sit
+     directly on the card's panel separated by the same faint left hairline
+     (first cell open, like the KPI band), hover is the same text wash, and
+     the band closes with the shared graduated-scale tick strip instead of a
+     hard rule. The corner toggle glyph (× hides, + restores) alone carries
+     the click affordance, accenting on hover; content spreads vertically:
+     label top, metric center, spark bottom - the spark keeps each tile's
+     color voice, so cells carry no per-metric leading tick. Tracks floor at
+     160px so tiles run WIDER than tall. A hidden tile keeps its grid cell,
+     dimmed like the plotted strip's stub, so toggling a metric never
+     rewraps the strip or shifts anything. */
   .traffic-card.tiles-only .chart-wrap,
   .traffic-card.tiles-only .chart-axes,
   .traffic-card.tiles-only #traffic-legend { display: none; }
   .traffic-card.tiles-only .chart-totals {
+    position: relative;
     flex: 1 1 0; min-height: 0; grid-auto-rows: 1fr;
     grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
-    margin-bottom: 10px; padding-bottom: 6px;
+    margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
+  }
+  .traffic-card.tiles-only .chart-totals::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
+    background: var(--tick-strip);
+    -webkit-mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
+    mask-image: linear-gradient(to top, rgba(0,0,0,.8), transparent);
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
     justify-content: space-between; gap: 6px; padding: 10px 12px;
-    background: var(--panel2); border: 1px solid var(--border); border-radius: 11px;
-    transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease;
+    background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
+  .traffic-card.tiles-only .chart-total:first-child { border-left: 0; }
   .traffic-card.tiles-only .chart-total::after {
     content: '×';
     position: absolute; top: 5px; right: 9px;
@@ -1011,11 +1021,12 @@
   }
   .traffic-card.tiles-only .chart-total.off {
     justify-content: flex-start; opacity: .55;
-    border-style: dashed; border-color: var(--border2);
   }
   .traffic-card.tiles-only .chart-total.off::after { content: '+'; }
+  .traffic-card.tiles-only .chart-total[role="button"]:hover {
+    background: color-mix(in srgb, var(--text) 2%, transparent);
+  }
   .chart-total[role="button"] { cursor: pointer; }
-  .chart-total[role="button"]:hover { border-color: var(--border2); transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.26); }
   .chart-total[role="button"]:hover::after,
   .chart-total[role="button"]:focus-visible::after { opacity: 1; color: var(--accent); }
   .chart-total[role="button"]:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
