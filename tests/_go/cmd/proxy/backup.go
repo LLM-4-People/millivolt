@@ -83,12 +83,18 @@ func TestRestoreRejectsCorruptArchive(t *testing.T) {
 	}
 }
 
-func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
+// openLiveStoreFixture is the shared live-store prologue of the four
+// restore tests below: it saves liveCfg/liveStore for cleanup restore,
+// makes the temp dir, derives the storage options from config.Default(),
+// opens the store at <dir>/live.db, and owns its Close cleanup. It returns
+// the opened store, the options (a site's second store reuses them), the
+// store path, and the temp dir; every per-site extra stays at its site.
+func openLiveStoreFixture(t *testing.T) (store *storage.Store, opts storage.Options, path, dir string) {
+	t.Helper()
 	oldCfg, oldStore := liveCfg, liveStore
 	t.Cleanup(func() { liveCfg, liveStore = oldCfg, oldStore })
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "live.db")
-	opts := storage.Options{
+	dir = t.TempDir()
+	opts = storage.Options{
 		WriteChanCap:  8,
 		BatchCap:      4,
 		FlushInterval: config.Default().StorageFlushInterval,
@@ -96,11 +102,17 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
 		QueryMaxRows:  config.Default().StorageQueryMaxRows,
 	}
-	src, err := storage.Open(dbPath, opts)
+	path = filepath.Join(dir, "live.db")
+	store, err := storage.Open(path, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { src.Close() })
+	t.Cleanup(func() { store.Close() })
+	return store, opts, path, dir
+}
+
+func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
+	src, _, dbPath, dir := openLiveStoreFixture(t)
 	data, err := src.Snapshot(t.Context())
 	if err != nil {
 		t.Fatal(err)
@@ -130,23 +142,7 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 }
 
 func TestRestoreStagesDatabaseFromEncodedArchive(t *testing.T) {
-	oldCfg, oldStore := liveCfg, liveStore
-	t.Cleanup(func() { liveCfg, liveStore = oldCfg, oldStore })
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "live.db")
-	opts := storage.Options{
-		WriteChanCap:  8,
-		BatchCap:      4,
-		FlushInterval: config.Default().StorageFlushInterval,
-		QueryTimeout:  config.Default().StorageQueryTimeout,
-		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
-		QueryMaxRows:  config.Default().StorageQueryMaxRows,
-	}
-	src, err := storage.Open(dbPath, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { src.Close() })
+	src, _, dbPath, dir := openLiveStoreFixture(t)
 	src.Record(&metrics.Record{ID: "via-http", Provider: "neutral.example", Model: "n", StatusCode: 200})
 	if err := src.Flush(); err != nil {
 		t.Fatal(err)
@@ -394,23 +390,7 @@ func TestRestoreInspectAndConfigMerge(t *testing.T) {
 }
 
 func TestRestoreInspectDatabase(t *testing.T) {
-	oldCfg, oldStore := liveCfg, liveStore
-	t.Cleanup(func() { liveCfg, liveStore = oldCfg, oldStore })
-	dir := t.TempDir()
-	opts := storage.Options{
-		WriteChanCap:  8,
-		BatchCap:      4,
-		FlushInterval: config.Default().StorageFlushInterval,
-		QueryTimeout:  config.Default().StorageQueryTimeout,
-		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
-		QueryMaxRows:  config.Default().StorageQueryMaxRows,
-	}
-	livePath := filepath.Join(dir, "live.db")
-	live, err := storage.Open(livePath, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { live.Close() })
+	live, opts, livePath, dir := openLiveStoreFixture(t)
 	oldAt := time.Date(2026, 8, 16, 11, 0, 0, 0, time.UTC)
 	newAt := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
 	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200, Start: oldAt})
@@ -470,23 +450,7 @@ func TestRestoreInspectDatabase(t *testing.T) {
 }
 
 func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
-	oldCfg, oldStore := liveCfg, liveStore
-	t.Cleanup(func() { liveCfg, liveStore = oldCfg, oldStore })
-	dir := t.TempDir()
-	opts := storage.Options{
-		WriteChanCap:  8,
-		BatchCap:      4,
-		FlushInterval: config.Default().StorageFlushInterval,
-		QueryTimeout:  config.Default().StorageQueryTimeout,
-		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
-		QueryMaxRows:  config.Default().StorageQueryMaxRows,
-	}
-	livePath := filepath.Join(dir, "live.db")
-	live, err := storage.Open(livePath, opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { live.Close() })
+	live, opts, livePath, dir := openLiveStoreFixture(t)
 	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
 	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
 	if err := live.Flush(); err != nil {

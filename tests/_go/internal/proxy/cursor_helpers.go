@@ -56,7 +56,9 @@ func TestCursorStreamSSEHeadersFromSharedTriple(t *testing.T) {
 // input estimate and the relay's non-streaming answer-content walk (where
 // HadAnswerContent and the gated response preview both read it). Rows: a
 // bare string stays itself, a multi-part text array joins, a mixed array
-// keeps only its text parts, and any other shape reports false.
+// keeps only its text parts, a JSON null decodes as the empty string, a
+// part whose text is not a string fails the parts array, and any other
+// shape reports false.
 func TestFlattenContentRows(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -70,6 +72,8 @@ func TestFlattenContentRows(t *testing.T) {
 		{"object is neither string nor parts", `{"text":"nope"}`, "", false},
 		{"number is neither string nor parts", `42`, "", false},
 		{"array of scalars is not a parts array", `[1,2]`, "", false},
+		{"JSON null decodes as the empty string", `null`, "", true},
+		{"non-string part text fails the parts array", `[{"text":123}]`, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := flattenContent(json.RawMessage(tc.raw))

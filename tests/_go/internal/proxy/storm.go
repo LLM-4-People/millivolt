@@ -141,8 +141,10 @@ func TestStormQueueTimeoutAndCancellation(t *testing.T) {
 // TestStormQueueRejectionOnQualityResendRecordsDecidedStatus: the quality
 // loop's storm rejection - the one path where the absorbed attempt's 200 used
 // to masquerade as the final record status while the wire carried a real 429 -
-// records the decided 429: rate-limit class (HasRateLimit true, IsError false,
-// 429 alone is not an error), identical to every other storm-queue rejection.
+// records the decided 429. The two storm-queue rejections share the rate-limit
+// class (HasRateLimit true) but differ in IsError: the queue-timeout sibling
+// is an error through its absorbed 503, while this rejection is not because
+// its only absorbed attempt is the degenerate 200 (429 alone is not an error).
 func TestStormQueueRejectionOnQualityResendRecordsDecidedStatus(t *testing.T) {
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

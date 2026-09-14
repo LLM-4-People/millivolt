@@ -709,13 +709,18 @@ func recordCursorTools(rec *metrics.Record, calls []providerformat.CursorToolCal
 // non-streaming error body.
 const cursorVoidMsg = "cursor returned an empty turn for a resume-action continuation (0 output tokens, finish stop) - there was nothing to resume upstream"
 
+// cursorEmptyTurn is the void's error identity: the record's error type
+// and code and the wire-facing error envelopes all spell the one domain
+// fact - an empty assistant turn.
+const cursorEmptyTurn = "empty_turn"
+
 func cursorVoidTurn(resume bool, r providerformat.TurnResult) bool {
 	return resume && r.Outcome == providerformat.TurnFinished && r.Output == 0 && !r.ClientAbort
 }
 
 func stampCursorVoid(rec *metrics.Record) {
-	rec.ErrorType = "empty_turn"
-	rec.ErrorCode = "empty_turn"
+	rec.ErrorType = cursorEmptyTurn
+	rec.ErrorCode = cursorEmptyTurn
 	rec.ErrorMsg = cursorVoidMsg
 }
 
@@ -724,7 +729,7 @@ func stampCursorVoid(rec *metrics.Record) {
 func (s *Server) absorbCursorVoid(rec *metrics.Record) {
 	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
 		StatusCode: rec.StatusCode,
-		ErrorType:  "empty_turn",
+		ErrorType:  cursorEmptyTurn,
 		ErrorMsg:   cursorVoidMsg,
 		At:         time.Now(),
 	})
@@ -807,7 +812,7 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			// holding. Flag the record (dashboard error row + error dimension)
 			// and surface a real failure in-band instead of an empty stop.
 			stampCursorVoid(rec)
-			if b, mErr := sse.ErrorEnvelope("", sse.TypeUpstreamError, "empty_turn", cursorVoidMsg); mErr == nil {
+			if b, mErr := sse.ErrorEnvelope("", sse.TypeUpstreamError, cursorEmptyTurn, cursorVoidMsg); mErr == nil {
 				_, wErr := w.Write(sse.DataFrame(b))
 				markPostCommitGone(rec, wErr)
 			}
@@ -945,7 +950,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		// written yet, so surface it with a real HTTP error status + body.
 		stampCursorVoid(rec)
 		rec.FinishReason = "stop"
-		markPostCommitGone(rec, emitHTTPError(w, errJSON("empty_turn", cursorVoidMsg), http.StatusBadGateway))
+		markPostCommitGone(rec, emitHTTPError(w, errJSON(cursorEmptyTurn, cursorVoidMsg), http.StatusBadGateway))
 		return
 	}
 

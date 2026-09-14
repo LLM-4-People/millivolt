@@ -6,9 +6,10 @@ import (
 )
 
 // The frame primitives are the single owner of the proxy's client-facing SSE
-// wire bytes. These tests pin the exact bytes so a change to the envelope,
-// the frame wrapper, or the terminal marker can never drift silently: the
-// values below are the bytes clients see today.
+// data frames (envelope, frame wrapper, terminal marker). These tests pin
+// the exact bytes so a change to the envelope, the frame wrapper, or the
+// terminal marker can never drift silently: the values below are the bytes
+// clients see today.
 
 func TestDoneFrameBytes(t *testing.T) {
 	if DoneFrame != "data: [DONE]\n\n" {
@@ -80,5 +81,19 @@ func TestEmitFrameMarshalFailureWritesNothing(t *testing.T) {
 	}
 	if buf.Len() != 0 {
 		t.Fatalf("buffer = %q, want nothing written on marshal failure", buf.String())
+	}
+}
+
+// The nil-flusher arm of EmitFrame, pinned directly (the emitters otherwise
+// cover it only transitively through recorders that always flush): a valid
+// payload with a nil flusher writes the frame bytes to the writer, attempts
+// no flush, never panics, and returns nil.
+func TestEmitFrameNilFlusherWritesFrameWithoutFlush(t *testing.T) {
+	var buf bytes.Buffer
+	if err := EmitFrame(&buf, nil, map[string]any{"a": 1}); err != nil {
+		t.Fatalf("EmitFrame with a nil flusher = %v, want nil error", err)
+	}
+	if got := buf.String(); got != "data: {\"a\":1}\n\n" {
+		t.Fatalf("buffer = %q, want the exact data frame", got)
 	}
 }
