@@ -342,6 +342,27 @@ func stormAdd(a, b int64) int64 {
 	return a + b
 }
 
+// foldCounters applies one paired bucket+cached adjustment, keeping a bucket
+// slot and the window-wide cached mirror in step. Positive deltas saturate
+// at MaxInt64 on both sides (stormAdd). A negative delta unfolds one
+// previously recorded observation: it runs only while the bucket side still
+// holds it (a recycled or reset bucket has already left the window or
+// generation) and floors both sides at zero, so an unfold can never drive
+// either counter negative.
+func foldCounters(bucket, cached *int64, n int64) {
+	if n >= 0 {
+		*bucket = stormAdd(*bucket, n)
+		*cached = stormAdd(*cached, n)
+		return
+	}
+	if *bucket > 0 {
+		*bucket--
+		if *cached > 0 {
+			*cached--
+		}
+	}
+}
+
 func (s *stormScope) totals(now time.Time, window time.Duration) (samples, failures int64) {
 	epoch := stormEpoch(now, window)
 	if s.cachedEpoch == epoch {
@@ -369,18 +390,14 @@ func (s *stormScope) observeRequest(now time.Time, window time.Duration, observa
 				return
 			}
 			previous := &s.buckets[slot.epoch%stormBucketCount]
-			if slot.epoch > epoch-stormBucketCount && previous.epoch == slot.epoch && previous.errorRequests > 0 {
-				previous.errorRequests--
-				if s.cachedErrorRequests > 0 {
-					s.cachedErrorRequests--
-				}
+			if slot.epoch > epoch-stormBucketCount && previous.epoch == slot.epoch {
+				foldCounters(&previous.errorRequests, &s.cachedErrorRequests, -1)
 			}
 		}
 		*slot = stormObservationSlot{scope: s, reset: s.reset, epoch: epoch}
 	}
 	bucket := &s.buckets[epoch%stormBucketCount]
-	bucket.errorRequests = stormAdd(bucket.errorRequests, 1)
-	s.cachedErrorRequests = stormAdd(s.cachedErrorRequests, 1)
+	foldCounters(&bucket.errorRequests, &s.cachedErrorRequests, 1)
 }
 
 func (s *stormScope) resetSamples() {
@@ -398,11 +415,9 @@ func (s *stormScope) sample(now time.Time, window time.Duration, failed bool) {
 	if bucket.epoch != epoch {
 		*bucket = stormBucket{epoch: epoch}
 	}
-	bucket.samples = stormAdd(bucket.samples, 1)
-	s.cachedSamples = stormAdd(s.cachedSamples, 1)
+	foldCounters(&bucket.samples, &s.cachedSamples, 1)
 	if failed {
-		bucket.failures = stormAdd(bucket.failures, 1)
-		s.cachedFailures = stormAdd(s.cachedFailures, 1)
+		foldCounters(&bucket.failures, &s.cachedFailures, 1)
 	}
 	s.lastActivity = now
 }
@@ -412,11 +427,27 @@ func (s *stormScope) threshold(now time.Time, opts StormOptions) bool {
 	return samples >= int64(opts.MinSamples) && samples > 0 && failures > 0 && 100*float64(failures)/float64(samples) >= float64(opts.ErrorPercent)
 }
 
+// modelFold classifies one scope for the model folds: active reports a
+// model gate with activity inside the detection window, and affected
+// reports that its rolling failure rate then crosses the error threshold.
+// The per-provider promotion test (affectedModels) and the snapshot's
+// per-provider counts (StormSnapshot) share this one predicate pair so the
+// two folds cannot drift.
+func (s *stormState) modelFold(scope *stormScope, now time.Time) (active, affected bool) {
+	if !scope.key.modelScope || now.Sub(scope.lastActivity) >= s.opts.Window {
+		return false, false
+	}
+	return true, scope.threshold(now, s.opts)
+}
+
 func (s *stormState) affectedModels(provider string, now time.Time) (active, affected int) {
 	for key, scope := range s.scopes {
-		if key.modelScope && key.provider == provider && now.Sub(scope.lastActivity) < s.opts.Window {
+		if key.provider != provider {
+			continue
+		}
+		if isActive, isAffected := s.modelFold(scope, now); isActive {
 			active++
-			if scope.threshold(now, s.opts) {
+			if isAffected {
 				affected++
 			}
 		}
@@ -596,10 +627,10 @@ func (s *Scheduler) StormSnapshot() []StormStatus {
 	type modelCounts struct{ active, affected int }
 	counts := make(map[string]modelCounts)
 	for key, scope := range state.scopes {
-		if key.modelScope && now.Sub(scope.lastActivity) < state.opts.Window {
+		if isActive, isAffected := state.modelFold(scope, now); isActive {
 			count := counts[key.provider]
 			count.active++
-			if scope.threshold(now, state.opts) {
+			if isAffected {
 				count.affected++
 			}
 			counts[key.provider] = count

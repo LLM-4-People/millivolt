@@ -190,23 +190,27 @@ func (g *providerGate) resetBuckets(l Limit, now time.Time) {
 	g.tok.reset(l.Tokens, l.TokWindow, now)
 }
 
-func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.Duration) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+// blocked reports whether this gate refuses a request estimated at est
+// tokens right now, and how long until the blocking dimension could admit
+// (0 when the concurrency cap blocks: that waits for a release, not a
+// timer). The caller must hold g.mu: the bucket refills it performs are
+// the same mutations an admitting caller then relies on. tryAdmit applies
+// its reservation only after this returns false; throttleBlocked only
+// tests.
+func (g *providerGate) blocked(est int64) (bool, time.Duration) {
 	if !g.throttle.Limit.Active() {
-		return true, admission{}, 0
+		return false, 0
 	}
 	now := time.Now()
 	g.req.refill(now)
 	g.tok.refill(now)
 	lim := g.throttle.Limit
 	if lim.Concurrency > 0 && g.inFlight >= lim.Concurrency {
-		return false, admission{}, 0 // wait for release, not a timer
+		return true, 0 // wait for release, not a timer
 	}
 	if g.req.enabled && g.req.tokens < 1 {
-		return false, admission{}, g.req.waitFor(1)
+		return true, g.req.waitFor(1)
 	}
-	var reserved int64
 	if g.tok.enabled {
 		need := float64(est)
 		switch {
@@ -214,20 +218,39 @@ func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.
 			// No estimate: don't reserve. Block only when already empty
 			// (settle will debit actual usage after the fact).
 			if g.tok.tokens <= 0 {
-				return false, admission{}, g.tok.waitFor(1)
+				return true, g.tok.waitFor(1)
 			}
 		case need > g.tok.capacity:
 			// One request larger than the window cannot be fragmented.
 			// Allow it if we are not already in debt; it exhausts the bucket.
 			if g.tok.tokens <= 0 {
-				return false, admission{}, g.tok.waitFor(1)
+				return true, g.tok.waitFor(1)
 			}
-			reserved = est
 		case g.tok.tokens < need:
-			return false, admission{}, g.tok.waitFor(need)
-		default:
-			reserved = est
+			return true, g.tok.waitFor(need)
 		}
+	}
+	return false, 0
+}
+
+func (g *providerGate) tryAdmit(est int64) (ok bool, lease admission, wait time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	// An inactive limit admits with NO gate bookkeeping at all (nil lease,
+	// no occupancy) - distinct from active-and-admitted below, so this fork
+	// cannot fold into blocked.
+	if !g.throttle.Limit.Active() {
+		return true, admission{}, 0
+	}
+	if blocked, wait := g.blocked(est); blocked {
+		return false, admission{}, wait
+	}
+	// Admitted with a positive estimate: reserve it. The token switch above
+	// already let an oversize request out of debt - it exhausts the bucket
+	// here. A zero estimate reserves nothing (settle debits actual usage).
+	var reserved int64
+	if g.tok.enabled && est > 0 {
+		reserved = est
 	}
 	g.inFlight++
 	if g.req.enabled {
@@ -431,34 +454,8 @@ func (s *Scheduler) throttleBlocked(provider string, est int64) bool {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.throttle.Limit.Active() {
-		return false
-	}
-	now := time.Now()
-	g.req.refill(now)
-	g.tok.refill(now)
-	if g.throttle.Limit.Concurrency > 0 && g.inFlight >= g.throttle.Limit.Concurrency {
-		return true
-	}
-	if g.req.enabled && g.req.tokens < 1 {
-		return true
-	}
-	if g.tok.enabled {
-		need := float64(est)
-		switch {
-		case need <= 0:
-			if g.tok.tokens <= 0 {
-				return true
-			}
-		case need > g.tok.capacity:
-			if g.tok.tokens <= 0 {
-				return true
-			}
-		case g.tok.tokens < need:
-			return true
-		}
-	}
-	return false
+	blocked, _ := g.blocked(est)
+	return blocked
 }
 
 // finish settles and frees the gate captured at admission, never a fresh
@@ -528,10 +525,7 @@ func (s *Scheduler) drainProvider(provider string) {
 
 func (s *Scheduler) kickThrottles() {
 	s.pauseMu.Lock()
-	if s.kick != nil {
-		close(s.kick)
-		s.kick = make(chan struct{})
-	}
+	s.kickPolicyLocked()
 	s.pauseMu.Unlock()
 	s.drainAll()
 }

@@ -455,14 +455,7 @@ func (s *Scheduler) AddHold(h Hold) error {
 	nextHolds = append(nextHolds, cur...)
 	nextHolds = append(nextHolds, h)
 	next := snapFromHolds(nextHolds)
-	changed := s.commitPolicyLocked(next)
-	s.pauseMu.Unlock()
-	if !changed {
-		return nil
-	}
-	s.pruneHoldCounts(next)
-	s.seedQueuedHolds()
-	s.drainAll()
+	s.commitHolds(next, true)
 	return nil
 }
 
@@ -502,14 +495,7 @@ func (s *Scheduler) ReplaceHold(h Hold) error {
 	}
 	nextHolds = append(nextHolds, h)
 	next := snapFromHolds(nextHolds)
-	changed := s.commitPolicyLocked(next)
-	s.pauseMu.Unlock()
-	if !changed {
-		return nil
-	}
-	s.pruneHoldCounts(next)
-	s.seedQueuedHolds()
-	s.drainAll()
+	s.commitHolds(next, true)
 	return nil
 }
 
@@ -537,13 +523,7 @@ func (s *Scheduler) RemoveHold(id string) {
 		return
 	}
 	next := snapFromHolds(nextHolds)
-	changed := s.commitPolicyLocked(next)
-	s.pauseMu.Unlock()
-	if !changed {
-		return
-	}
-	s.pruneHoldCounts(next)
-	s.drainAll()
+	s.commitHolds(next, false)
 }
 
 func (s *Scheduler) replaceHolds(holds []Hold, checkOverlap bool) error {
@@ -552,15 +532,29 @@ func (s *Scheduler) replaceHolds(holds []Hold, checkOverlap bool) error {
 	}
 	next := snapFromHolds(holds)
 	s.pauseMu.Lock()
+	s.commitHolds(next, true)
+	return nil
+}
+
+// commitHolds finishes a policy transition: it publishes the prepared
+// snapshot, releases pauseMu, and runs the post-commit epilogue (hold-count
+// pruning, queued-waiter seeding, drain). The caller must hold pauseMu -
+// its reads, overlap checks, and snapshot build run under the same lock so
+// a concurrent transition cannot interleave - and must not touch pauseMu
+// after this returns. seedQueued is false only for RemoveHold: removal
+// drops a scope, it never widens one, so waiters parked by the surviving
+// holds stay correctly attributed and a seed pass has nothing to adopt.
+func (s *Scheduler) commitHolds(next *policySnap, seedQueued bool) {
 	changed := s.commitPolicyLocked(next)
 	s.pauseMu.Unlock()
 	if !changed {
-		return nil
+		return
 	}
 	s.pruneHoldCounts(next)
-	s.seedQueuedHolds()
+	if seedQueued {
+		s.seedQueuedHolds()
+	}
 	s.drainAll()
-	return nil
 }
 
 func (s *Scheduler) commitPolicyLocked(next *policySnap) bool {
@@ -571,9 +565,22 @@ func (s *Scheduler) commitPolicyLocked(next *policySnap) bool {
 		return false
 	}
 	s.policy.Store(next)
-	close(s.kick)
-	s.kick = make(chan struct{})
+	s.kickPolicyLocked()
 	return true
+}
+
+// kickPolicyLocked closes and replaces the global policy kick channel so
+// every policy-edge waiter (the hold select loops) re-evaluates its
+// predicate. The caller must hold pauseMu. This owns the policy kick only:
+// the group send gate (sendKick under g.mu) and the storm state kick
+// (stormState.kick under its own mu) are separate channels with their own
+// wake paths. kick is built in New, so the nil guard is defensive only -
+// kept from the two former inline call sites.
+func (s *Scheduler) kickPolicyLocked() {
+	if s.kick != nil {
+		close(s.kick)
+	}
+	s.kick = make(chan struct{})
 }
 
 func (s *Scheduler) pruneHoldCounts(next *policySnap) {

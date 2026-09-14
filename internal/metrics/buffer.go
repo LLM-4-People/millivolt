@@ -202,18 +202,9 @@ func (b *Buffer) Record(r *Record) {
 	b.mu.Unlock()
 
 	// Push to any live subscribers (dashboard) non-blockingly.
-	for ch := range b.subs {
-		select {
-		case ch <- RingEvent{Record: r, Seq: seq, feedID: feed}:
-		default:
-			// A later ID must never advance past this lost event. Retire only
-			// this slow subscriber; reconnect replays from its last delivered ID.
-			delete(b.subs, ch)
-			close(ch)
-		}
-	}
+	fanout(b.subs, RingEvent{Record: r, Seq: seq, feedID: feed})
 	if ended != nil {
-		b.publishLiveLocked(ended)
+		fanout(b.liveSubs, ended)
 	}
 	b.subsMu.Unlock()
 }
@@ -223,51 +214,72 @@ func (b *Buffer) Record(r *Record) {
 // guardrail, not user-tunable.
 const subChanCap = 256
 
-// Subscribe returns a channel that receives new records (with their feed
-// sequence numbers) as they arrive. The channel is buffered (subChanCap) and
-// never blocks the writer.
-func (b *Buffer) Subscribe() chan RingEvent {
-	ch := make(chan RingEvent, subChanCap)
-	b.subsMu.Lock()
-	if b.subs == nil {
-		b.subs = make(map[chan RingEvent]struct{})
+// fanout delivers ev to every subscriber, retiring any whose buffered
+// channel is already full: a slow consumer must never block the hot-path
+// publish, and its reconnect restores whatever it missed - a retired ring
+// subscriber replays from its last delivered id (a later id must never
+// advance past the lost event), a retired lifecycle subscriber resnapshots
+// the pending registry. Callers hold subsMu so publication stays ordered
+// with subscription lifetime.
+func fanout[T any](subs map[chan T]struct{}, ev T) {
+	for ch := range subs {
+		select {
+		case ch <- ev:
+		default:
+			delete(subs, ch)
+			close(ch)
+		}
 	}
-	b.subs[ch] = struct{}{}
+}
+
+// subscribeChan registers one buffered subscriber channel in registry,
+// creating the registry on first use (a memory-only instance may never
+// subscribe). The fan-out's retire-on-overflow policy is symmetric: both
+// registries hand out the same buffered channels.
+func subscribeChan[T any](b *Buffer, registry *map[chan T]struct{}) chan T {
+	ch := make(chan T, subChanCap)
+	b.subsMu.Lock()
+	if *registry == nil {
+		*registry = make(map[chan T]struct{})
+	}
+	(*registry)[ch] = struct{}{}
 	b.subsMu.Unlock()
 	return ch
 }
 
-// Unsubscribe removes a subscription channel.
-func (b *Buffer) Unsubscribe(ch chan RingEvent) {
+// unsubscribeChan removes and closes a registered subscriber channel. An
+// unknown channel is a no-op: a deferred Unsubscribe can race the fan-out
+// retiring (and already closing) the same slow channel.
+func unsubscribeChan[T any](b *Buffer, registry map[chan T]struct{}, ch chan T) {
 	b.subsMu.Lock()
-	if _, ok := b.subs[ch]; ok {
-		delete(b.subs, ch)
+	if _, ok := registry[ch]; ok {
+		delete(registry, ch)
 		close(ch)
 	}
 	b.subsMu.Unlock()
+}
+
+// Subscribe returns a channel that receives new records (with their feed
+// sequence numbers) as they arrive. The channel is buffered (subChanCap) and
+// never blocks the writer.
+func (b *Buffer) Subscribe() chan RingEvent {
+	return subscribeChan(b, &b.subs)
+}
+
+// Unsubscribe removes a subscription channel.
+func (b *Buffer) Unsubscribe(ch chan RingEvent) {
+	unsubscribeChan(b, b.subs, ch)
 }
 
 // SubscribeLive registers for per-request lifecycle events (begin/update/end).
 // Overflow closes the buffered channel so reconnect restores the pending state.
 func (b *Buffer) SubscribeLive() chan *LiveEvent {
-	ch := make(chan *LiveEvent, subChanCap)
-	b.subsMu.Lock()
-	if b.liveSubs == nil {
-		b.liveSubs = make(map[chan *LiveEvent]struct{})
-	}
-	b.liveSubs[ch] = struct{}{}
-	b.subsMu.Unlock()
-	return ch
+	return subscribeChan(b, &b.liveSubs)
 }
 
 // UnsubscribeLive removes a lifecycle subscription channel.
 func (b *Buffer) UnsubscribeLive(ch chan *LiveEvent) {
-	b.subsMu.Lock()
-	if _, ok := b.liveSubs[ch]; ok {
-		delete(b.liveSubs, ch)
-		close(ch)
-	}
-	b.subsMu.Unlock()
+	unsubscribeChan(b, b.liveSubs, ch)
 }
 
 // PublishLive publishes begin/update snapshots. Record atomically owns end,
@@ -322,20 +334,8 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 	ev := &LiveEvent{Phase: phase, Record: &snap, InFlight: b.inFlight.Load(), PendingRevision: b.pendingRevision, feedID: b.feedID}
 	b.mu.Unlock()
 	b.subsMu.Lock()
-	b.publishLiveLocked(ev)
+	fanout(b.liveSubs, ev)
 	b.subsMu.Unlock()
-}
-
-func (b *Buffer) publishLiveLocked(ev *LiveEvent) {
-	for ch := range b.liveSubs {
-		select {
-		case ch <- ev:
-		default:
-			// Reconnect snapshots restore the current ephemeral pending state.
-			delete(b.liveSubs, ch)
-			close(ch)
-		}
-	}
 }
 
 // Counters returns the current live process-wide counters.
