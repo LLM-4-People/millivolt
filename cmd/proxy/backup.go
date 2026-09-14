@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -30,12 +31,12 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	wantConfig, wantDB, err := parseBackupParts(r.URL.Query())
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	arch, err := buildBackup(r.Context(), wantConfig, wantDB)
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// A database member is staged for the self-check: capacity must follow
@@ -45,7 +46,7 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	if wantDB {
 		dir, err := dbStageDir()
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		stageDir = dir
@@ -53,11 +54,11 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	raw, err := backup.Encode(stageDir, arch)
 	if err != nil {
 		log.Printf("backup: encode failed: %v", err)
-		logHTTPError(w, err.Error(), http.StatusInternalServerError)
+		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if int64(len(raw)) > backupCap() {
-		logHTTPError(w, "backup exceeds backup_max_bytes", http.StatusRequestEntityTooLarge)
+		adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 		return
 	}
 	name := "millivolt-backup-" + time.Now().UTC().Format("20060102-150405") + ".mvb"
@@ -75,22 +76,22 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	inspect, err := queryFlag(q, "inspect")
 	if err != nil {
-		logHTTPError(w, "inspect: "+err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())
 		return
 	}
 	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	configMode, err := parseRestoreMode(q, "config_mode")
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	dbMode, err := parseRestoreMode(q, "database_mode")
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	cap := backupCap()
@@ -98,12 +99,12 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	defer body.Close()
 	raw, err := io.ReadAll(body)
 	if err != nil {
-		logHTTPError(w, "backup exceeds backup_max_bytes", http.StatusRequestEntityTooLarge)
+		adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 		return
 	}
 	arch, err := backup.Decode(raw)
 	if err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// Inspect and validation stage a database member next to the live
@@ -112,13 +113,13 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if len(arch.Database) > 0 {
 		dir, err := dbStageDir()
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		stageDir = dir
 	}
 	if err := backup.Validate(stageDir, arch); err != nil {
-		logHTTPError(w, err.Error(), http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if inspect {
@@ -126,18 +127,18 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if wantConfig && len(arch.Config) == 0 {
-		logHTTPError(w, "archive has no config member", http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no config member")
 		return
 	}
 	if wantDB && len(arch.Database) == 0 {
-		logHTTPError(w, "archive has no database member", http.StatusBadRequest)
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no database member")
 		return
 	}
 	restart := []string{}
 	if wantConfig {
 		skipped, err := restoreConfig(arch.Config, configMode)
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		restart = append(restart, skipped...)
@@ -145,7 +146,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if wantDB {
 		needRestart, err := restoreDatabase(r.Context(), arch.Database, dbMode)
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if needRestart {
@@ -230,7 +231,7 @@ func dbStageDir() (string, error) {
 	cfg := liveCfg
 	liveMu.Unlock()
 	if cfg == nil || cfg.DBPath == "" {
-		return "", fmt.Errorf("durable storage is disabled")
+		return "", storage.ErrStorageDisabled
 	}
 	return filepath.Dir(cfg.DBPath), nil
 }
@@ -259,7 +260,7 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 		store := liveStore
 		liveMu.Unlock()
 		if store == nil {
-			return backup.Archive{}, fmt.Errorf("durable storage is disabled")
+			return backup.Archive{}, storage.ErrStorageDisabled
 		}
 		data, err := store.Snapshot(ctx)
 		if err != nil {
@@ -335,11 +336,11 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 	store := liveStore
 	liveMu.Unlock()
 	if cfg == nil || cfg.DBPath == "" {
-		return false, fmt.Errorf("durable storage is disabled")
+		return false, storage.ErrStorageDisabled
 	}
 	if mode == "merge" {
 		if store == nil {
-			return false, fmt.Errorf("durable storage is disabled")
+			return false, storage.ErrStorageDisabled
 		}
 		_, _, err := store.MergeSnapshot(ctx, raw)
 		return false, err
@@ -356,7 +357,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 	if len(arch.Config) > 0 {
 		cfg, skipped, err := config.LoadBytes(arch.Config)
 		if err != nil || len(skipped) > 0 {
-			logHTTPError(w, "backup config is invalid", http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, "backup config is invalid")
 			return
 		}
 		liveMu.Lock()
@@ -381,7 +382,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 	if len(arch.Database) > 0 {
 		info, err := backup.InspectDatabase(stageDir, arch.Database)
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		db := map[string]any{
@@ -398,7 +399,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 		if store != nil {
 			n, err := store.SnapshotOverlap(r.Context(), arch.Database)
 			if err != nil {
-				logHTTPError(w, err.Error(), http.StatusBadRequest)
+				adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			db["overlap"] = n

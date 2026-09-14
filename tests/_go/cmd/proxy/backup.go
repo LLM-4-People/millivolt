@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -542,5 +543,41 @@ func TestBackupStatusJSON(t *testing.T) {
 	st := backupStatus()
 	if st["config"] != true || st["database"] != false {
 		t.Fatalf("%v", st)
+	}
+}
+
+// Every backup/restore refusal for a missing durable store carries the one
+// storage.ErrStorageDisabled identity (each surface keeps its own HTTP
+// status), so callers classify with errors.Is instead of matching wording.
+func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
+	oldCfg, oldStore, oldPath := liveCfg, liveStore, liveConfigPath
+	t.Cleanup(func() { liveCfg, liveStore, liveConfigPath = oldCfg, oldStore, oldPath })
+	liveCfg, liveStore, liveConfigPath = nil, nil, ""
+
+	if _, err := dbStageDir(); !errors.Is(err, storage.ErrStorageDisabled) {
+		t.Errorf("dbStageDir: %v, want ErrStorageDisabled", err)
+	}
+	if _, err := buildBackup(t.Context(), false, true); !errors.Is(err, storage.ErrStorageDisabled) {
+		t.Errorf("buildBackup database member: %v, want ErrStorageDisabled", err)
+	}
+	if _, err := restoreDatabase(t.Context(), nil, "replace"); !errors.Is(err, storage.ErrStorageDisabled) {
+		t.Errorf("restoreDatabase without db_path: %v, want ErrStorageDisabled", err)
+	}
+
+	// A configured db_path with no live store still refuses a merge with
+	// the same identity.
+	liveCfg = config.Default()
+	liveCfg.DBPath = filepath.Join(t.TempDir(), "live.db")
+	if _, err := restoreDatabase(t.Context(), nil, "merge"); !errors.Is(err, storage.ErrStorageDisabled) {
+		t.Errorf("restoreDatabase merge without store: %v, want ErrStorageDisabled", err)
+	}
+
+	// The HTTP surface keeps its 400 action-plane status.
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?database=1", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("backup without storage: status=%d body=%s, want 400", rr.Code, rr.Body.String())
 	}
 }

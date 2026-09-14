@@ -272,7 +272,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// History travels content-addressed, so recall never depends on the id.
 	clientMessage, blobs, resumeRequest, err := providerformat.TranslateCursorRunRequestWithConversation(body, "")
 	if err != nil {
-		writeClientError(w, rec, "invalid_request_error", err.Error(), http.StatusBadRequest)
+		writeClientError(w, rec, typeInvalidRequestError, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -814,7 +814,7 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			// holding. Flag the record (dashboard error row + error dimension)
 			// and surface a real failure in-band instead of an empty stop.
 			stampCursorVoid(rec)
-			if b, mErr := sse.ErrorEnvelope("", "upstream_error", "empty_turn", cursorVoidMsg); mErr == nil {
+			if b, mErr := sse.ErrorEnvelope("", sse.TypeUpstreamError, "empty_turn", cursorVoidMsg); mErr == nil {
 				_, wErr := w.Write(sse.DataFrame(b))
 				markGone(wErr)
 			}
@@ -834,6 +834,22 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 	}
 }
 
+// usageWire is the ONE renderer of the OpenAI usage object for both cursor
+// surfaces: the streaming usage chunk and the non-streaming completion.
+// OpenAI carries completion_tokens_details.reasoning_tokens on both, so the
+// detail is rendered whenever the turn reported reasoning tokens.
+func usageWire(u metrics.Usage) map[string]any {
+	usage := map[string]any{
+		"prompt_tokens":     u.InputTokens,
+		"completion_tokens": u.OutputTokens,
+		"total_tokens":      u.TotalTokens,
+	}
+	if u.ReasoningTokens > 0 {
+		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": u.ReasoningTokens}
+	}
+	return usage
+}
+
 // usageChunk emits the final usage chunk (OpenAI stream_options shape).
 // The returned error is the client-write failure, if any: a cursor stream's
 // committed upstream 200 stays the status (the documented exception), so the
@@ -846,18 +862,7 @@ func usageChunk(w http.ResponseWriter, id, model string, includeUsage bool, prom
 	if err != nil {
 		return err
 	}
-	usage := map[string]any{
-		"prompt_tokens":     prompt,
-		"completion_tokens": output,
-		"total_tokens":      counts.TotalTokens,
-	}
-	if reasoning > 0 {
-		usage["completion_tokens_details"] = map[string]any{"reasoning_tokens": reasoning}
-	}
-	obj := map[string]any{
-		"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(),
-		"model": model, "choices": []map[string]any{}, "usage": usage,
-	}
+	obj := sse.Chunk(id, time.Now().Unix(), model, []map[string]any{}, map[string]any{"usage": usageWire(counts)})
 	if b, err := json.Marshal(obj); err == nil {
 		if _, werr := w.Write(sse.DataFrame(b)); werr != nil {
 			return werr
@@ -989,20 +994,8 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		finish = "tool_calls"
 	}
 	rec.FinishReason = finish
-	message := map[string]any{"role": "assistant", "content": content}
-	if len(toolCalls) > 0 {
-		message["tool_calls"] = toolCalls
-	}
-	out := map[string]any{
-		"id": id, "object": "chat.completion", "created": time.Now().Unix(),
-		"model":   rr.model,
-		"choices": []map[string]any{{"index": 0, "message": message, "finish_reason": finish}},
-		"usage": map[string]any{
-			"prompt_tokens":     rec.Usage.InputTokens,
-			"completion_tokens": rec.Usage.OutputTokens,
-			"total_tokens":      rec.Usage.TotalTokens,
-		},
-	}
+	out := sse.Completion(id, time.Now().Unix(), rr.model,
+		sse.AssistantMessage(content, toolCalls), finish, usageWire(rec.Usage))
 	w.Header().Set("Content-Type", "application/json")
 	// A failed write here means the LOCAL client disconnected before the
 	// completion was delivered (markGone, above: flag only, upstream 200 stays).

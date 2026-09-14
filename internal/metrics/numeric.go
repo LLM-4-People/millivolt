@@ -27,6 +27,30 @@ func SumCounts(values ...int64) (int64, error) {
 	return sum, nil
 }
 
+// Term pairs one running accumulator with the contribution to fold into it.
+type Term struct {
+	Dst   *int64
+	Value int64
+}
+
+// SumTerms folds each term into its accumulator with SumCounts' checked
+// arithmetic, stopping at the first value a fold must reject and discarding
+// that accumulator (0), never leaving it holding a partial or wrapped value.
+// It is the one owner of the per-record term-list pattern (ring aggregate,
+// durable totals, chart and explorer folds): a new accumulator renders
+// through a Term instead of hand-writing another checked += loop.
+func SumTerms(terms ...Term) error {
+	for _, t := range terms {
+		sum, err := SumCounts(*t.Dst, t.Value)
+		if err != nil {
+			*t.Dst = 0
+			return err
+		}
+		*t.Dst = sum
+	}
+	return nil
+}
+
 // SumValues is the finite, nonnegative counterpart for costs and rates.
 func SumValues(values ...float64) (float64, error) {
 	var sum float64

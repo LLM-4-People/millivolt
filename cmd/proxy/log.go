@@ -81,12 +81,6 @@ type exportWriter struct {
 	started bool
 }
 
-func logHTTPError(w http.ResponseWriter, message string, status int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
-}
-
 func (w *exportWriter) Write(p []byte) (int, error) {
 	w.started = true
 	return w.ResponseWriter.Write(p)
@@ -104,12 +98,12 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		}
 		q, err := url.ParseQuery(r.URL.RawQuery)
 		if err != nil {
-			logHTTPError(w, "invalid query", http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 			return
 		}
 		f, err := exportLogFilter(q)
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -131,7 +125,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			log.Printf("metrics export failed: %v", err)
 			if !ew.started {
 				w.Header().Del("Content-Disposition")
-				logHTTPError(w, err.Error(), http.StatusInternalServerError)
+				adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			} else {
 				// Do not complete a successful 200 download after a read failure.
 				// net/http aborts the connection/stream without a panic stack.
@@ -152,7 +146,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			err = errors.New("empty purge filter; send no body to delete everything")
 		}
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		var filter *storage.PurgeFilter
@@ -171,7 +165,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		}
 		if err != nil {
 			log.Printf("purge failed: %v", err)
-			logHTTPError(w, err.Error(), http.StatusInternalServerError)
+			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -186,7 +180,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		}
 		f, _, err := decodeLogFilter(w, r)
 		if err != nil {
-			logHTTPError(w, err.Error(), http.StatusBadRequest)
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		var n int64
@@ -201,7 +195,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		}
 		if err != nil {
 			log.Printf("count failed: %v", err)
-			logHTTPError(w, err.Error(), http.StatusInternalServerError)
+			adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

@@ -25,14 +25,12 @@ func DataFrame(payload []byte) []byte {
 }
 
 // ErrorEnvelope marshals the client-facing OpenAI error object carried
-// in-band on an SSE stream: {"error":{"message":...,"type":...,"param":null,
-// "code":...}} with the request id at the root when set. code is nil or a
-// provider error code string. Callers render it with DataFrame and close
-// with DoneFrame; each site keeps its own write, flush and error handling.
+// in-band on an SSE stream: {"error":{...}} with the request id at the root
+// when set. The error object itself is ErrorObject's shape. Callers render it
+// with DataFrame and close with DoneFrame; each site keeps its own write,
+// flush and error handling.
 func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error) {
-	obj := map[string]any{"error": map[string]any{
-		"message": msg, "type": typ, "param": nil, "code": code,
-	}}
+	obj := map[string]any{"error": ErrorObject(typ, code, msg)}
 	if id != "" {
 		obj["id"] = id
 	}

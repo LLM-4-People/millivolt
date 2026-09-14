@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -62,7 +61,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.servePost(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, `{"error":"GET or POST only"}`, http.StatusMethodNotAllowed)
+		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET or POST only")
 	}
 }
 
@@ -71,7 +70,7 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	defer h.mu.Unlock()
 	file, err := h.fileConfig()
 	if err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	body := h.state(file)
@@ -103,7 +102,7 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 	b, err := json.Marshal(body)
 	if err != nil {
 		log.Printf("admin config: encode failed: %v", err)
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Write(append(b, '\n'))
@@ -111,7 +110,7 @@ func (h *Handler) serveGet(w http.ResponseWriter) {
 
 func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 	if h.Path == "" {
-		http.Error(w, `{"error":"no config file; start with -config to persist settings"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "no config file; start with -config to persist settings")
 		return
 	}
 	var body struct {
@@ -119,22 +118,22 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 		Revision string         `json:"revision"`
 	}
 	if err := adminjson.Decode(w, r, &body); err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if body.Values == nil || body.Revision == "" {
-		http.Error(w, `{"error":"values object and revision required"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "values object and revision required")
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	cur, err := h.fileConfig()
 	if err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if body.Revision != configRevision(cur) {
-		http.Error(w, `{"error":"settings changed since they were loaded; revert to reload before applying"}`, http.StatusConflict)
+		adminjson.WriteError(w, http.StatusConflict, "settings changed since they were loaded; revert to reload before applying")
 		return
 	}
 	// CLI-overridden keys are never taken from the form - writing the
@@ -143,15 +142,15 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 		delete(body.Values, k)
 	}
 	if err := cur.Apply(body.Values); err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := cur.Validate(); err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if err := WriteFile(h.Path, cur); err != nil {
-		http.Error(w, `{"error":`+strconv.Quote(err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	var reloadErr error
@@ -160,7 +159,7 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 	}
 	file, err := h.fileConfig()
 	if err != nil {
-		http.Error(w, `{"error":`+strconv.Quote("settings saved, but reading them back failed: "+err.Error())+`}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, "settings saved, but reading them back failed: "+err.Error())
 		return
 	}
 	result := h.state(file)

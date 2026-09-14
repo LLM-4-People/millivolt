@@ -41,6 +41,33 @@ func TestSettingsStrictSaveBoundary(t *testing.T) {
 	}
 }
 
+// TestSettingsControlByteLabelErrorStaysDecodable is the L6 regression: a
+// provider_aliases key carrying a control byte reaches the operator error
+// body through Validate's label echo. The old body spliced the message with
+// strconv.Quote, whose \xNN escapes are not valid JSON escapes, so the
+// dashboard received an undecodable 400. The body must decode as JSON and
+// name the offending label (its control byte, escaped by encoding/json as
+// \u0001, survives the round trip).
+func TestSettingsControlByteLabelErrorStaysDecodable(t *testing.T) {
+	h := &Handler{Path: filepath.Join(t.TempDir(), "config.yaml")}
+	rr := settingsPost(h, configRevision(Default()), `{"provider_aliases":{"\u0001":"\u0001"}}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(h.Path); !os.IsNotExist(err) {
+		t.Fatalf("rejected alias map wrote a file")
+	}
+	var decoded struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("control-byte label error body is not valid JSON: %v (%q)", err, rr.Body.String())
+	}
+	if !strings.Contains(decoded.Error, "cannot alias a label to itself") || !strings.Contains(decoded.Error, "\x01") {
+		t.Fatalf("error %q must name the offending label", decoded.Error)
+	}
+}
+
 func TestSettingsInvalidAllowlistCannotDisableRestriction(t *testing.T) {
 	for _, list := range []string{`[""]`, `[" "]`, `["https://safe.example", ""]`, `[null]`} {
 		t.Run(list, func(t *testing.T) {

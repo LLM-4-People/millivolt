@@ -321,12 +321,12 @@ func (s *Server) Reload(cfg *config.Config) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
-		http.Error(w, errJSON("invalid_request_error", err.Error()), http.StatusBadRequest)
+		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 		return
 	}
 	session, parentSession, err := requestConversation(r.Header)
 	if err != nil {
-		http.Error(w, errJSON("invalid_request_error", err.Error()), http.StatusBadRequest)
+		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 		return
 	}
 
@@ -335,7 +335,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// for Anthropic, and served from Cursor's GetUsableModels for cursor - so any
 	// provider's models are listable through the standard OpenAI route.
 	if err := s.applyThrottleHeaders(r, t.provider, classifyClient(r)); err != nil {
-		http.Error(w, errJSON("invalid_request_error", err.Error()), http.StatusBadRequest)
+		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 		return
 	}
 
@@ -353,7 +353,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &overflow) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		http.Error(w, errJSON("invalid_request_error", err.Error()), status)
+		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), status)
 		return
 	}
 	// Deny a hostile token cap at the trust boundary: the decoded value
@@ -382,7 +382,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if t.format != "" && t.format != "openai" && t.format != "cursor" {
 		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens)
 		if err != nil {
-			http.Error(w, errJSON("invalid_request_error", err.Error()), http.StatusBadRequest)
+			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 			return
 		}
 		body = translated
@@ -476,7 +476,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// silently defaulted (same contract as X-Proxy-Timeout-Ms).
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			http.Error(w, errJSON("invalid_request_error",
+			http.Error(w, errJSON(typeInvalidRequestError,
 				fmt.Sprintf("invalid %s %q", hdrMaxConcurrency, v)), http.StatusBadRequest)
 			return
 		}

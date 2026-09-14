@@ -593,6 +593,11 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// typeInvalidRequestError is the OpenAI error type the request trust
+// boundaries stamp on client-side rejections (routing headers, body decode,
+// token caps). One constant owns the spelling across every 400 surface.
+const typeInvalidRequestError = "invalid_request_error"
+
 func errJSON(typ, msg string) string {
 	b, _ := json.Marshal(map[string]any{
 		"error": map[string]any{"message": msg, "type": typ},
@@ -746,7 +751,7 @@ func hostileTokenCap(v *int) bool {
 // envelope. Both ServeHTTP enforcement sites use it, so the two trust
 // boundaries can never drift in status, type or wording.
 func writeHostileTokenCap(w http.ResponseWriter) {
-	http.Error(w, errJSON("invalid_request_error",
+	http.Error(w, errJSON(typeInvalidRequestError,
 		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
 }
 

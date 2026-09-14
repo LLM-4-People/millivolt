@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -678,17 +679,13 @@ func (f *chartFold) fold(c *contrib) error {
 	if c.has429 {
 		b.rl++
 	}
-	for _, term := range [...]struct {
-		dst   *int64
-		value int64
-	}{
-		{&b.in, c.in}, {&b.out, c.out}, {&b.cache, c.cacheR}, {&b.reason, c.reason},
-	} {
-		var err error
-		*term.dst, err = metrics.SumCounts(*term.dst, term.value)
-		if err != nil {
-			return err
-		}
+	if err := metrics.SumTerms(
+		metrics.Term{&b.in, c.in},
+		metrics.Term{&b.out, c.out},
+		metrics.Term{&b.cache, c.cacheR},
+		metrics.Term{&b.reason, c.reason},
+	); err != nil {
+		return err
 	}
 	var err error
 	b.cost, err = metrics.SumValues(b.cost, c.cost)
@@ -782,12 +779,12 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 	}
 	winMin, ok := windowParam(r)
 	if !ok {
-		http.Error(w, `{"error":"invalid window"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid window")
 		return
 	}
 	fs, statusCode, ok := parseScope(r)
 	if !ok {
-		http.Error(w, `{"error":"invalid filter"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid filter")
 		return
 	}
 	ctx, cancel := a.queryCtx(r)
@@ -796,7 +793,7 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 	payload, err := a.chart(ctx, winMin, fs, statusCode, time.Now().UnixMilli())
 	if err != nil {
 		log.Printf("agg chart: %v", err)
-		http.Error(w, `{"error":"aggregate failed"}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}
 	writeJSON(w, payload)
@@ -1376,16 +1373,14 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*ent
 			return nil, err
 		}
 	}
-	for _, term := range [...]struct {
-		dst   *int64
-		value int64
-	}{
-		{&g.in, c.in}, {&g.out, c.out}, {&g.cacheR, c.cacheR}, {&g.reason, c.reason}, {&g.tools, c.tools},
-	} {
-		*term.dst, err = metrics.SumCounts(*term.dst, term.value)
-		if err != nil {
-			return nil, err
-		}
+	if err := metrics.SumTerms(
+		metrics.Term{&g.in, c.in},
+		metrics.Term{&g.out, c.out},
+		metrics.Term{&g.cacheR, c.cacheR},
+		metrics.Term{&g.reason, c.reason},
+		metrics.Term{&g.tools, c.tools},
+	); err != nil {
+		return nil, err
 	}
 	if firstRequest {
 		if c.isErr {
@@ -1529,12 +1524,12 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 	}
 	dim := r.URL.Query().Get("dim")
 	if !validDims[dim] {
-		http.Error(w, `{"error":"invalid dim"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid dim")
 		return
 	}
 	allFS, statusCode, ok := parseScope(r)
 	if !ok {
-		http.Error(w, `{"error":"invalid filter"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid filter")
 		return
 	}
 	ctx, cancel := a.queryCtx(r)
@@ -1543,7 +1538,7 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 	payload, err := a.explorer(ctx, dim, allFS, statusCode)
 	if err != nil {
 		log.Printf("agg explorer: %v", err)
-		http.Error(w, `{"error":"aggregate failed"}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, "aggregate failed")
 		return
 	}
 	writeJSON(w, payload)
@@ -1605,7 +1600,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err != nil {
 		log.Printf("agg encode: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"aggregate cannot be represented"}`))
+		w.Write(adminjson.ErrorBody("aggregate cannot be represented"))
 		return
 	}
 	w.Write(append(data, '\n'))
@@ -1628,7 +1623,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	}
 	fs, statusCode, ok := parseScope(r)
 	if !ok {
-		http.Error(w, `{"error":"invalid scope"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid scope")
 		return
 	}
 	mcz := a.canonizer()
@@ -1637,25 +1632,25 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	ms, hasMs := q["before_ms"]
 	ids, hasID := q["before_id"]
 	if hasMs != hasID || (hasMs && (len(ms) != 1 || len(ids) != 1)) {
-		http.Error(w, `{"error":"before_ms and before_id must appear together once"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "before_ms and before_id must appear together once")
 		return
 	}
 	if hasMs {
 		n, err := strconv.ParseInt(ms[0], 10, 64)
 		if err != nil {
-			http.Error(w, `{"error":"invalid before_ms"}`, http.StatusBadRequest)
+			adminjson.WriteError(w, http.StatusBadRequest, "invalid before_ms")
 			return
 		}
 		cursor = &storage.LogCursor{StartMs: n, ID: ids[0]}
 	}
 	v := r.URL.Query().Get("limit")
 	if v == "" || len(q["limit"]) != 1 {
-		http.Error(w, `{"error":"limit required"}`, http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, "limit required")
 		return
 	}
 	limit, err := strconv.Atoi(v)
 	if err != nil || limit < config.DashLogRowsMin || limit > config.DashLogRowsMax {
-		http.Error(w, fmt.Sprintf(`{"error":"limit must be %d..%d"}`, config.DashLogRowsMin, config.DashLogRowsMax), http.StatusBadRequest)
+		adminjson.WriteError(w, http.StatusBadRequest, fmt.Sprintf("limit must be %d..%d", config.DashLogRowsMin, config.DashLogRowsMax))
 		return
 	}
 	ctx, cancel := a.queryCtx(r)
@@ -1676,7 +1671,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			rows, err := a.store.QueryBefore(ctx, cursor, batch)
 			if err != nil {
 				log.Printf("agg log page: %v", err)
-				http.Error(w, `{"error":"log page failed"}`, http.StatusInternalServerError)
+				adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
 				return
 			}
 			if len(rows) == 0 {

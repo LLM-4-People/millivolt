@@ -55,3 +55,28 @@ and tab	plus unicode caf é‾ ∧`,
 		t.Errorf("static body = %q, want the exact hand-written literal", w.Body.String())
 	}
 }
+
+// WriteErrorJSON is the application/json transport variant the cmd/proxy
+// /metrics and /admin action routes render through. It must keep their exact
+// observable contract: the same flat body, the same trailing newline the
+// json.Encoder wrote, and the application/json Content-Type - the one
+// documented difference from WriteError's text/plain transport.
+func TestWriteErrorJSONKeepsApplicationJSONTransport(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteErrorJSON(w, http.StatusRequestEntityTooLarge, `backup "too" big`)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content type = %q, want application/json", ct)
+	}
+	if w.Body.String() != "{\"error\":\"backup \\\"too\\\" big\"}\n" {
+		t.Errorf("body = %q, want the encoder-shaped flat error plus newline", w.Body.String())
+	}
+	var decoded struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(w.Body.String()), &decoded); err != nil || decoded.Error != `backup "too" big` {
+		t.Fatalf("body did not round-trip: %v (%q)", err, w.Body.String())
+	}
+}

@@ -37,7 +37,7 @@ func (s *Store) stageDir() string {
 // snapshot (no free pages); it is not a file copy of an open DB.
 func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	if s == nil {
-		return nil, fmt.Errorf("storage is disabled")
+		return nil, ErrStorageDisabled
 	}
 	if err := s.Flush(); err != nil {
 		return nil, fmt.Errorf("flush before backup: %w", err)
@@ -121,7 +121,7 @@ func removeIfExists(path string) error {
 // in the live store. Used by restore inspect.
 func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error) {
 	if s == nil {
-		return 0, fmt.Errorf("storage is disabled")
+		return 0, ErrStorageDisabled
 	}
 	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
 		return 0, err
@@ -156,7 +156,7 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 // replaced; no restart is required.
 func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipped int64, err error) {
 	if s == nil {
-		return 0, 0, fmt.Errorf("storage is disabled")
+		return 0, 0, ErrStorageDisabled
 	}
 	info, err := backup.InspectDatabase(s.stageDir(), data)
 	if err != nil {

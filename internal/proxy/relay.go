@@ -423,7 +423,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		// content-bearing reached the client, so this is a safe re-send.
 		rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
 			StatusCode: resp.StatusCode,
-			ErrorType:  "upstream_error",
+			ErrorType:  sse.TypeUpstreamError,
 			ErrorCode:  metrics.CodeTruncated,
 			ErrorMsg:   metrics.DegenerateMessage(metrics.CodeTruncated),
 			At:         time.Now(),
@@ -1377,7 +1377,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 // the degenerate classes + their messages). A failed write to the (already
 // dying) client still marks client-disconnected on the record.
 func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, code string, rec *metrics.Record) {
-	if b, err := sse.ErrorEnvelope("", "upstream_error", code, metrics.DegenerateMessage(code)); err == nil {
+	if b, err := sse.ErrorEnvelope("", sse.TypeUpstreamError, code, metrics.DegenerateMessage(code)); err == nil {
 		line := sse.DataFrame(b)
 		a.Feed(line[:len(line)-2], now)
 		if _, werr := w.Write(line); werr != nil {

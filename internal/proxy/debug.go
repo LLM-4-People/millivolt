@@ -14,6 +14,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 var (
@@ -576,7 +577,10 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.pause.persist == nil {
-		adminjson.WriteError(w, http.StatusNotFound, "no durable store")
+		// 404, not 503: with no store wired there is no capture to fetch.
+		// The message is the one storage-disabled sentinel's canonical text
+		// (constant-only import; the persist seam itself stays an interface).
+		adminjson.WriteError(w, http.StatusNotFound, storage.ErrStorageDisabled.Error())
 		return
 	}
 	ctx, cancel := s.storeQueryCtx()

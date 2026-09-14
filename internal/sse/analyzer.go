@@ -1,6 +1,7 @@
 // Package sse provides minimal, allocation-conscious parsers for extracting
 // metrics from OpenAI-compatible SSE chat completion streams, plus the
-// client-facing frame primitives (frames.go) the proxy renders through.
+// client-facing frame primitives and completion envelopes (frames.go,
+// envelope.go) the proxy and its format bridges render through.
 // Ordinary text chunks are analyzed without allocations; structured metadata
 // is decoded only when needed.
 //

@@ -574,18 +574,13 @@ func Aggregate(records []*Record) *AggResult {
 		if r.TTFTMs > 0 {
 			a.ByProvider[r.Provider] = append(a.ByProvider[r.Provider], r.TTFTMs)
 		}
-		for _, term := range [...]struct {
-			dst   *int64
-			value int64
-		}{
-			{&a.TotalInput, r.Usage.InputTokens}, {&a.TotalOutput, r.Usage.OutputTokens},
-			{&a.TotalCache, r.Usage.CacheReadTokens}, {&a.ToolCalls, int64(r.ToolCalls)},
-		} {
-			var err error
-			*term.dst, err = SumCounts(*term.dst, term.value)
-			if err != nil {
-				a.Err = err
-			}
+		if err := SumTerms(
+			Term{&a.TotalInput, r.Usage.InputTokens},
+			Term{&a.TotalOutput, r.Usage.OutputTokens},
+			Term{&a.TotalCache, r.Usage.CacheReadTokens},
+			Term{&a.ToolCalls, int64(r.ToolCalls)},
+		); err != nil {
+			a.Err = err
 		}
 		if r.IsError() {
 			a.ErrorCount++

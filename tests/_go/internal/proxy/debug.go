@@ -25,6 +25,28 @@ func TestHandleDebugRequiresEnabledField(t *testing.T) {
 	}
 }
 
+// Without a durable store there is no capture to fetch: the drawer keeps its
+// 404, and its body names the one storage-disabled cause with the sentinel's
+// canonical message (the old hand-written "no durable store" wording drifted
+// from every other surface).
+func TestHandleDebugCaptureWithoutStoreReportsSentinelText(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	rr := httptest.NewRecorder()
+	p.HandleDebugCapture(rr, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=x", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 with no store wired", rr.Code)
+	}
+	var decoded struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("capture 404 body is not valid JSON: %v (%q)", err, rr.Body.String())
+	}
+	if decoded.Error != storage.ErrStorageDisabled.Error() {
+		t.Fatalf("capture 404 body = %q, want the storage-disabled sentinel message", decoded.Error)
+	}
+}
+
 func TestDebugSnapshotIncludesObserverNamesForKnownAndScopedModels(t *testing.T) {
 	s := New(config.Default(), metrics.Noop{})
 	s.debug.sessions = []persistedDebug{{ID: "scope", Models: []string{"ScopedModel"}}}

@@ -43,26 +43,36 @@ func extractToolResults(body []byte) []cursorToolResult {
 		}
 		tr := cursorToolResult{toolCallID: m.ToolCallID, name: m.Name}
 		// content may be a string or an array of {type:"text",text} parts.
-		var s string
-		if json.Unmarshal(m.Content, &s) == nil {
+		if s, ok := flattenContent(m.Content); ok {
 			tr.content = s
-		} else {
-			var parts []struct {
-				Text string `json:"text"`
-			}
-			if json.Unmarshal(m.Content, &parts) == nil {
-				var sb strings.Builder
-				for _, p := range parts {
-					sb.WriteString(p.Text)
-				}
-				tr.content = sb.String()
-			}
 		}
 		if tr.toolCallID != "" {
 			out = append(out, tr)
 		}
 	}
 	return out
+}
+
+// flattenContent renders one OpenAI message content field as plain text:
+// a bare string stays itself, an array of {type:"text"} parts is joined,
+// and any other shape reports false. The tool-result reader and the
+// input-token estimate share it so the two content walks cannot drift.
+func flattenContent(raw json.RawMessage) (string, bool) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, true
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Text)
+		}
+		return sb.String(), true
+	}
+	return "", false
 }
 
 // toolResultIDs returns the tool_call_ids of a request's role:"tool" messages.
@@ -80,9 +90,7 @@ func writeSSEHeaders(w http.ResponseWriter, status int) {
 		status = http.StatusOK
 	}
 	hdr := make(http.Header, 3)
-	hdr.Set("Content-Type", "text/event-stream")
-	hdr.Set("Cache-Control", "no-cache")
-	hdr.Set("Connection", "keep-alive")
+	metrics.SetStreamHeaders(hdr)
 	if p := pacerOf(w); p != nil {
 		p.applyUpstream(hdr, status)
 		return
@@ -93,13 +101,13 @@ func writeSSEHeaders(w http.ResponseWriter, status int) {
 
 // sseEmitter returns a function that emits one OpenAI chunk (delta + optional
 // finish_reason) as an SSE frame to w, flushing after each. model stamps the
-// request model on every chunk (OpenAI echoes it; clients may log it).
+// request model on every chunk (OpenAI echoes it; clients may log it); the
+// created timestamp is stamped per chunk, the cursor bridge's policy - the
+// Anthropic bridge pins one per stream instead.
 func sseEmitter(w http.ResponseWriter, id, model string, flusher http.Flusher) func(delta map[string]any, finish any) error {
 	return func(delta map[string]any, finish any) error {
-		obj := map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": time.Now().Unix(),
-			"model": model, "choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": finish}},
-		}
+		obj := sse.Chunk(id, time.Now().Unix(), model,
+			[]map[string]any{sse.DeltaChoice(delta, finish)}, nil)
 		b, err := json.Marshal(obj)
 		if err != nil {
 			return err
@@ -123,7 +131,7 @@ func sseEmitter(w http.ResponseWriter, id, model string, flusher http.Flusher) f
 // markClientGone's 499), the passthrough paths markClientGone.
 func emitErrorSSE(w http.ResponseWriter, id, typ, msg string) error {
 	if typ == "" {
-		typ = "upstream_error"
+		typ = sse.TypeUpstreamError
 	}
 	var wErr error
 	if b, mErr := sse.ErrorEnvelope(id, typ, nil, msg); mErr == nil {
@@ -219,18 +227,9 @@ func estimateInputTokens(body []byte) int64 {
 	}
 	var chars int64
 	for _, m := range in.Messages {
-		var s string
-		if json.Unmarshal(m.Content, &s) == nil {
+		if s, ok := flattenContent(m.Content); ok {
 			chars += int64(len(s))
 			continue
-		}
-		var parts []struct {
-			Text string `json:"text"`
-		}
-		if json.Unmarshal(m.Content, &parts) == nil {
-			for _, p := range parts {
-				chars += int64(len(p.Text))
-			}
 		}
 	}
 	return int64(len(in.Messages)) + chars/4 + cursorAgentContextBaseTokens

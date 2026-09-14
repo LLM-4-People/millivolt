@@ -80,6 +80,13 @@ var errNotSelect = errors.New("only a single SELECT statement is allowed")
 // ErrQueryLimit rejects the entire result; callers must never serve a prefix.
 var ErrQueryLimit = errors.New("query result exceeds its byte, row, or column limit")
 
+// ErrStorageDisabled is the one sentinel answering "no durable store is
+// available" (a nil *Store, or no db_path): every surface that refuses an
+// operation for that reason returns or wraps it, so callers classify with
+// errors.Is instead of matching drifted wordings. Each surface keeps its own
+// status code; only the identity and the canonical message are shared.
+var ErrStorageDisabled = errors.New("durable storage is disabled")
+
 // withQueryTimeout is the single choke point that bounds a dashboard SELECT
 // by QueryTimeout. Validate requires QueryTimeout > 0; a 0 fail-closes
 // (deadline already expired) rather than running unbounded.
@@ -296,8 +303,6 @@ type Totals struct {
 	OutputTok int64   `json:"output_tokens"`
 	CacheRead int64   `json:"cache_read_tokens"`
 	Reasoning int64   `json:"reasoning_tokens"`
-	Answer    int64   `json:"answer_tokens"`
-	ToolCalls int64   `json:"tool_calls"`
 	TTFTSum   int64   `json:"-"`
 	TTFTN     int64   `json:"-"`
 	TPSSum    float64 `json:"-"`
@@ -355,18 +360,14 @@ func (t *Totals) Add(r *metrics.Record) {
 			return
 		}
 	}
-	for _, term := range [...]struct {
-		dst   *int64
-		value int64
-	}{
-		{&t.InputTok, r.Usage.InputTokens}, {&t.OutputTok, r.Usage.OutputTokens},
-		{&t.CacheRead, r.Usage.CacheReadTokens}, {&t.Reasoning, r.Usage.ReasoningTokens},
-		{&t.Answer, r.AnswerTokens}, {&t.ToolCalls, int64(r.ToolCalls)},
-	} {
-		*term.dst, t.err = metrics.SumCounts(*term.dst, term.value)
-		if t.err != nil {
-			return
-		}
+	if err := metrics.SumTerms(
+		metrics.Term{&t.InputTok, r.Usage.InputTokens},
+		metrics.Term{&t.OutputTok, r.Usage.OutputTokens},
+		metrics.Term{&t.CacheRead, r.Usage.CacheReadTokens},
+		metrics.Term{&t.Reasoning, r.Usage.ReasoningTokens},
+	); err != nil {
+		t.err = err
+		return
 	}
 	// TTFTMs == 0 means "absent", not "0 ms" - no-token requests must not
 	// dilute the mean (same gate as the client's truthy r.ttft_ms).
@@ -867,8 +868,8 @@ func readTotals(ctx context.Context, db interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }) (Totals, error) {
 	rows, err := db.QueryContext(ctx, `SELECT started_at, status_code, error_type, attempts,
-		input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, answer_tokens,
-		tool_calls, cost, ttft_ms, duration_ms, overall_tps, gen_tps
+		input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
+		cost, ttft_ms, duration_ms, overall_tps, gen_tps
 		FROM requests`)
 	if err != nil {
 		return Totals{}, err
@@ -879,10 +880,10 @@ func readTotals(ctx context.Context, db interface {
 		var startedAt, status, ttft, dur int64
 		var errorType string
 		var attemptsJSON []byte
-		var in, out, cacheR, reason, answer, tools int64
+		var in, out, cacheR, reason int64
 		var cost, overall, gen float64
 		if err := rows.Scan(&startedAt, &status, &errorType, &attemptsJSON,
-			&in, &out, &cacheR, &reason, &answer, &tools, &cost, &ttft, &dur, &overall, &gen); err != nil {
+			&in, &out, &cacheR, &reason, &cost, &ttft, &dur, &overall, &gen); err != nil {
 			return Totals{}, err
 		}
 		atts, err := DecodeAttemptsColumn(attemptsJSON)
@@ -896,8 +897,6 @@ func readTotals(ctx context.Context, db interface {
 		r.Usage.OutputTokens = out
 		r.Usage.CacheReadTokens = cacheR
 		r.Usage.ReasoningTokens = reason
-		r.AnswerTokens = answer
-		r.ToolCalls = int(tools)
 		r.Cost = cost
 		t.Add(&r)
 	}
@@ -1918,7 +1917,7 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s == nil {
-		fail(http.StatusServiceUnavailable, "durable storage is disabled")
+		fail(http.StatusServiceUnavailable, ErrStorageDisabled.Error())
 		return
 	}
 	q := r.URL.Query().Get("q")

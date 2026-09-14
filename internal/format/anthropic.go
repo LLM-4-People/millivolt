@@ -5,7 +5,6 @@ package format
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 const (
@@ -21,9 +21,6 @@ const (
 	// Safety guardrail against pathological lines, not user-tunable.
 	sseLineBufInit = 64 * 1024
 	sseLineBufMax  = 1024 * 1024
-	// sseFrameCap pre-sizes the reusable emit buffer to a typical single SSE
-	// frame; it grows as needed.
-	sseFrameCap = 512
 )
 
 // TranslateRequest converts an OpenAI Chat Completions request body into the
@@ -323,28 +320,8 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 		}
 	}
 
-	message := map[string]any{
-		"role":    "assistant",
-		"content": content,
-	}
-	if len(toolCalls) > 0 {
-		message["tool_calls"] = toolCalls
-	}
-
-	out := map[string]any{
-		"id":      in.ID,
-		"object":  "chat.completion",
-		"created": time.Now().Unix(),
-		"model":   in.Model,
-		"choices": []map[string]any{
-			{
-				"index":         0,
-				"message":       message,
-				"finish_reason": mapFinishReason(in.StopReason),
-			},
-		},
-		"usage": usage,
-	}
+	out := sse.Completion(in.ID, time.Now().Unix(), in.Model,
+		sse.AssistantMessage(content, toolCalls), mapFinishReason(in.StopReason), usage)
 	return json.Marshal(out)
 }
 
@@ -428,18 +405,14 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		sawMessageStop bool
 		sawError       bool
 	)
-	// frame is reused across emits: one buffer build, one Write per chunk.
-	frame := bytes.NewBuffer(make([]byte, 0, sseFrameCap))
+	// frame emission routes through the sse frames owner: one marshal, one
+	// DataFrame render, one Write per chunk.
 	emit := func(obj any) error {
 		b, err := json.Marshal(obj)
 		if err != nil {
 			return err
 		}
-		frame.Reset()
-		frame.WriteString("data: ")
-		frame.Write(b)
-		frame.WriteString("\n\n")
-		if _, err := dst.Write(frame.Bytes()); err != nil {
+		if _, err := dst.Write(sse.DataFrame(b)); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -448,7 +421,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		return nil
 	}
 	writeDone := func() error {
-		if _, err := io.WriteString(dst, "data: [DONE]\n\n"); err != nil {
+		if _, err := io.WriteString(dst, sse.DoneFrame); err != nil {
 			return err
 		}
 		if flusher != nil {
@@ -458,10 +431,8 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		return nil
 	}
 	emitTool := func(call map[string]any) error {
-		return emit(map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": created, "model": model,
-			"choices": []map[string]any{{"index": 0, "delta": map[string]any{"tool_calls": []map[string]any{call}}, "finish_reason": nil}},
-		})
+		return emit(sse.Chunk(id, created, model,
+			[]map[string]any{sse.DeltaChoice(map[string]any{"tool_calls": []map[string]any{call}}, nil)}, nil))
 	}
 
 	var event string
@@ -471,10 +442,13 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			event = strings.TrimPrefix(strings.TrimPrefix(line, "event:"), " ")
 			continue
 		}
-		if !strings.HasPrefix(line, "data:") {
+		// Payload extraction is the frames owner's DataPayload: the full
+		// "data:" prefix is required, one optional leading space is consumed,
+		// ordinary payload bytes stay verbatim.
+		payload, ok := sse.DataPayload([]byte(line))
+		if !ok {
 			continue
 		}
-		payload := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 
 		if event == "" {
 			// Some Anthropic-compatible gateways omit the event: line and
@@ -482,7 +456,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			var probe struct {
 				Type string `json:"type"`
 			}
-			if json.Unmarshal([]byte(payload), &probe) == nil {
+			if json.Unmarshal(payload, &probe) == nil {
 				event = probe.Type
 			}
 		}
@@ -496,7 +470,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		// Costs belong to the source usage-bearing/terminal document, not a
 		// transformed content token. Observation never decodes every token.
 		if observe != nil && (ev == "message_start" || ev == "message_delta" || ev == "message_stop" || ev == "error") {
-			observe([]byte(payload))
+			observe(payload)
 		}
 
 		switch ev {
@@ -508,7 +482,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 					Usage nativeUsage `json:"usage"`
 				} `json:"message"`
 			}
-			if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			if err := json.Unmarshal(payload, &m); err != nil {
 				return fmt.Errorf("native message start: %w", err)
 			}
 			id = m.Message.ID
@@ -517,10 +491,8 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			if _, err := usage.openAI(); err != nil {
 				return err
 			}
-			if err := emit(map[string]any{
-				"id": id, "object": "chat.completion.chunk", "created": created,
-				"model": model, "choices": []map[string]any{{"index": 0, "delta": map[string]any{"role": role, "content": ""}, "finish_reason": nil}},
-			}); err != nil {
+			if err := emit(sse.Chunk(id, created, model,
+				[]map[string]any{sse.DeltaChoice(map[string]any{"role": role, "content": ""}, nil)}, nil)); err != nil {
 				return err
 			}
 		case "content_block_start":
@@ -533,7 +505,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				} `json:"content_block"`
 				Index int `json:"index"`
 			}
-			if json.Unmarshal([]byte(payload), &c) == nil {
+			if json.Unmarshal(payload, &c) == nil {
 				if c.ContentBlock.Type == "tool_use" {
 					if _, exists := toolCalls[c.Index]; exists {
 						return fmt.Errorf("duplicate native tool index %d", c.Index)
@@ -561,7 +533,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				} `json:"delta"`
 				Index int `json:"index"`
 			}
-			if json.Unmarshal([]byte(payload), &d) != nil {
+			if json.Unmarshal(payload, &d) != nil {
 				continue
 			}
 			delta := map[string]any{}
@@ -583,10 +555,8 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			default:
 				continue
 			}
-			if err := emit(map[string]any{
-				"id": id, "object": "chat.completion.chunk", "created": created,
-				"model": model, "choices": []map[string]any{{"index": 0, "delta": delta, "finish_reason": nil}},
-			}); err != nil {
+			if err := emit(sse.Chunk(id, created, model,
+				[]map[string]any{sse.DeltaChoice(delta, nil)}, nil)); err != nil {
 				return err
 			}
 		case "message_delta":
@@ -596,7 +566,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				} `json:"delta"`
 				Usage json.RawMessage `json:"usage"`
 			}
-			if json.Unmarshal([]byte(payload), &d) != nil {
+			if json.Unmarshal(payload, &d) != nil {
 				continue
 			}
 			var wireUsage map[string]any
@@ -615,21 +585,14 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			if d.Delta.StopReason != "" {
 				sawStop = true
 			}
-			fr := mapFinishReason(d.Delta.StopReason)
-			if err := emit(map[string]any{
-				"id": id, "object": "chat.completion.chunk", "created": created,
-				"model": model, "choices": []map[string]any{{"index": 0, "delta": map[string]any{}, "finish_reason": fr}},
-			}); err != nil {
+			if err := emit(sse.Chunk(id, created, model,
+				[]map[string]any{sse.DeltaChoice(map[string]any{}, mapFinishReason(d.Delta.StopReason))}, nil)); err != nil {
 				return err
 			}
 			// Emit a final usage chunk. Anthropic provides input_tokens in
 			// message_start and output_tokens in message_delta.
 			if wireUsage != nil {
-				if err := emit(map[string]any{
-					"id": id, "object": "chat.completion.chunk", "created": created,
-					"model": model, "choices": []map[string]any{},
-					"usage": wireUsage,
-				}); err != nil {
+				if err := emit(sse.Chunk(id, created, model, []map[string]any{}, map[string]any{"usage": wireUsage})); err != nil {
 					return err
 				}
 			}
@@ -637,7 +600,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			var c struct {
 				Index int `json:"index"`
 			}
-			if json.Unmarshal([]byte(payload), &c) == nil {
+			if json.Unmarshal(payload, &c) == nil {
 				if tc := toolCalls[c.Index]; tc != nil && !tc.arguments {
 					if err := emitTool(map[string]any{"index": tc.index, "function": map[string]any{"arguments": tc.initial}}); err != nil {
 						return err
@@ -660,17 +623,14 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 					Message string `json:"message"`
 				} `json:"error"`
 			}
-			if err := json.Unmarshal([]byte(payload), &e); err != nil {
+			if err := json.Unmarshal(payload, &e); err != nil {
 				continue
 			}
 			if e.Error.Type != "" || e.Error.Message != "" {
 				sawError = true
 			}
-			if err := emit(map[string]any{
-				"id": id, "object": "chat.completion.chunk", "created": created,
-				"model": model, "choices": []map[string]any{},
-				"error": map[string]string{"type": e.Error.Type, "message": e.Error.Message},
-			}); err != nil {
+			if err := emit(sse.Chunk(id, created, model, []map[string]any{},
+				map[string]any{"error": map[string]string{"type": e.Error.Type, "message": e.Error.Message}})); err != nil {
 				return err
 			}
 		}
@@ -686,16 +646,9 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 	// without stop_reason, is the SERVER closing the turn - never flagged; an
 	// error event is the provider's own failure - never stacked on.
 	if !doneSent && !sawError && !sawStop && !sawMessageStop {
-		if err := emit(map[string]any{
-			"id": id, "object": "chat.completion.chunk", "created": created,
-			"model": model, "choices": []map[string]any{},
-			"error": map[string]any{
-				"message": metrics.DegenerateMessage(metrics.CodeTruncated),
-				"type":    "upstream_error",
-				"param":   nil,
-				"code":    metrics.CodeTruncated,
-			},
-		}); err != nil {
+		if err := emit(sse.Chunk(id, created, model, []map[string]any{},
+			map[string]any{"error": sse.ErrorObject(sse.TypeUpstreamError, metrics.CodeTruncated,
+				metrics.DegenerateMessage(metrics.CodeTruncated))})); err != nil {
 			return err
 		}
 	}

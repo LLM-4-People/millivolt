@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 )
 
 // sseHeartbeat keeps idle SSE connections alive through proxies that drop
@@ -24,8 +26,20 @@ func RejectUnlessGet(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	w.Header().Set("Allow", metricsAllow)
-	http.Error(w, `{"error":"GET only"}`, http.StatusMethodNotAllowed)
+	adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET only")
 	return false
+}
+
+// SetStreamHeaders writes the SSE response header triple shared by every
+// server-sent stream the process serves: the dashboard live feed here and
+// the cursor bridge's OpenAI SSE (internal/proxy). One owner, so a header
+// can never drift between the surfaces. It lives here rather than
+// internal/sse because that package already imports this one (the stream
+// analyzer); importing it back would be a cycle.
+func SetStreamHeaders(h http.Header) {
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
 }
 
 // cursorParam resolves the resume cursor for a live-feed request - the ONE
@@ -89,9 +103,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	SetStreamHeaders(w.Header())
 	// The dashboard is same-origin. Do not grant unrelated browser origins
 	// read access to private metrics; non-browser callers still need network
 	// access controls because this endpoint does not provide authentication.
@@ -110,7 +122,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	snap, err := json.Marshal(ObserveSnapshot(snapshot, b.observerModels(true, snapshot.Records, snapshot.InFlightRecords)))
 	if err != nil {
 		log.Printf("metrics: encode snapshot: %v", err)
-		http.Error(w, `{"error":"serialize"}`, http.StatusInternalServerError)
+		adminjson.WriteError(w, http.StatusInternalServerError, "serialize")
 		return
 	}
 	if _, err := w.Write([]byte("event: snapshot\ndata: " + string(snap) + "\n\n")); err != nil {
