@@ -166,6 +166,29 @@ func (b *Buffer) feedChan() <-chan struct{} {
 	return b.feedDone
 }
 
+// pushLocked counts and stores one record in the ring: it bumps the
+// cumulative totals, assigns the next sequence, advances head/size, and
+// returns the record's sequence with the current feed epoch. Callers hold mu
+// (Record additionally holds subsMu first, so sequence assignment stays
+// ordered with publication); the helper takes no locks itself. The nil-record
+// guard is caller-owned.
+func (b *Buffer) pushLocked(r *Record) (int64, string) {
+	b.totalReq.Add(1)
+	if r.IsError() {
+		b.totalErr.Add(1)
+	}
+	b.nextSeq++
+	b.finalRevision++
+	seq := b.nextSeq
+	b.buf[b.head] = r
+	b.seqs[b.head] = seq
+	b.head = (b.head + 1) % b.maxSize
+	if b.size < b.maxSize {
+		b.size++
+	}
+	return seq, b.feedID
+}
+
 // Record is the hot-path append. The existing subscriber lock orders sequence
 // assignment with publication; otherwise concurrent callers could publish N+1
 // before N and a reconnect at N+1 would silently skip N. Lock order is subsMu
@@ -176,20 +199,7 @@ func (b *Buffer) Record(r *Record) {
 	}
 	b.subsMu.Lock()
 	b.mu.Lock()
-	b.totalReq.Add(1)
-	if r.IsError() {
-		b.totalErr.Add(1)
-	}
-	b.nextSeq++
-	b.finalRevision++
-	seq := b.nextSeq
-	feed := b.feedID
-	b.buf[b.head] = r
-	b.seqs[b.head] = seq
-	b.head = (b.head + 1) % b.maxSize
-	if b.size < b.maxSize {
-		b.size++
-	}
+	seq, feed := b.pushLocked(r)
 	// Completion and pending retirement share the purge fence. Publishing end
 	// separately after Record could resurrect a deleted final as a pending row
 	// or tag its delayed end with a replacement feed epoch.
@@ -396,7 +406,9 @@ func (b *Buffer) Revisions() (finalized, pending uint64) {
 // filtered purge) symmetrically subtracts purged records from those tallies,
 // so a purge can never drive them negative against records this process never
 // counted (a shipped bug: backfilled history was purged without ever being
-// counted, leaving total_requests/total_errors negative).
+// counted, leaving total_requests/total_errors negative). The ring push
+// itself is shared with Record (pushLocked), so a backfilled record is
+// sequenced and stored exactly like a live one.
 func (b *Buffer) Backfill(records []*Record) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -404,18 +416,7 @@ func (b *Buffer) Backfill(records []*Record) {
 		if r == nil {
 			continue // never store a nil record
 		}
-		b.totalReq.Add(1)
-		if r.IsError() {
-			b.totalErr.Add(1)
-		}
-		b.nextSeq++
-		b.finalRevision++
-		b.buf[b.head] = r
-		b.seqs[b.head] = b.nextSeq
-		b.head = (b.head + 1) % b.maxSize
-		if b.size < b.maxSize {
-			b.size++
-		}
+		b.pushLocked(r)
 	}
 }
 

@@ -251,16 +251,10 @@ func (s *Scheduler) extendWindow(key string, d time.Duration, claim bool) bool {
 	g := s.groupForLocked(key, 0, false)
 	g.mu.Lock()
 	owned := false
-	// A non-positive duration means "no new wait" - never let it erase an
-	// existing pacing window (fail closed). Claiming still trips so
-	// siblings queue even when the owner can retry immediately.
-	if d > 0 {
-		until := time.Now().Add(d)
-		if until.After(g.nextAllowedAt) {
-			g.nextAllowedAt = until
-			g.pacer.arm(until, false)
-		}
-	}
+	// A non-positive duration still trips below so siblings queue even when
+	// the owner can retry immediately; the pacing window itself is guarded
+	// by armPacingLaterLocked (fail closed).
+	g.armPacingLaterLocked(d)
 	if d > 0 || claim {
 		g.tripped = true
 		g.kickSendLocked()
@@ -294,6 +288,20 @@ func (g *group) kickSendLocked() {
 	}
 	close(g.sendKick)
 	g.sendKick = make(chan struct{})
+}
+
+// armPacingLaterLocked pushes the group's pacing window out by d when that
+// lands after the current allowance, arming the pacer; an earlier existing
+// window is never shrunk. A non-positive d is a no-op: it must never erase an
+// existing pacing window (fail closed). Callers hold g.mu.
+func (g *group) armPacingLaterLocked(d time.Duration) {
+	if d > 0 {
+		until := time.Now().Add(d)
+		if until.After(g.nextAllowedAt) {
+			g.nextAllowedAt = until
+			g.pacer.arm(until, false)
+		}
+	}
 }
 
 // waitKickOrDone parks a WaitSend caller on its freshly snapshotted wake
@@ -484,13 +492,7 @@ func (s *Scheduler) FailSend(key string, own bool) {
 	}
 	g.requestBackoff = growBackoff(g.requestBackoff, opts.BaseBackoff, opts.MaxBackoff)
 	d := jitterBackoff(g.requestBackoff)
-	if d > 0 {
-		until := time.Now().Add(d)
-		if until.After(g.nextAllowedAt) {
-			g.nextAllowedAt = until
-			g.pacer.arm(until, false)
-		}
-	}
+	g.armPacingLaterLocked(d)
 	g.tripped = true
 	g.kickSendLocked()
 	g.mu.Unlock()

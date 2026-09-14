@@ -186,6 +186,19 @@ func encodeKvSetBlobAck(id uint64) []byte {
 	return appendMessage(nil, fAgentClientMessageKvClientMessage, kv)
 }
 
+// wrapExecClient wraps one exec reply payload in
+// AgentClientMessage{ exec_client_message=2 ExecClientMessage{ id, exec_id?, field payload } }:
+// the correlation id echoes the request's; execID rides only when present.
+func wrapExecClient(id uint64, execID []byte, field int, payload []byte) []byte {
+	var ex []byte
+	ex = appendUint32(ex, fExecMessageID, uint32(id))
+	if len(execID) > 0 {
+		ex = appendBytes(ex, fExecMessageExecID, execID)
+	}
+	ex = appendMessage(ex, field, payload)
+	return appendMessage(nil, fAgentClientMessageExecClientMessage, ex)
+}
+
 // encodeMcpResult builds the reply that delivers a real tool result into a
 // parked turn:
 // AgentClientMessage{ exec_client_message=2 { id, exec_id?, mcp_result=11 McpResult } }.
@@ -205,13 +218,7 @@ func encodeMcpResult(id uint64, execID []byte, result string, isError bool) []by
 		// is_error = 2 stays false (omitted).
 		mcpResult = appendMessage(nil, 1, success) // McpResult.success = 1
 	}
-	var ex []byte
-	ex = appendUint32(ex, fExecMessageID, uint32(id))
-	if len(execID) > 0 {
-		ex = appendBytes(ex, fExecMessageExecID, execID)
-	}
-	ex = appendMessage(ex, fExecClientMcpResult, mcpResult)
-	return appendMessage(nil, fAgentClientMessageExecClientMessage, ex)
+	return wrapExecClient(id, execID, fExecClientMcpResult, mcpResult)
 }
 
 // encodeRequestContextResult builds
@@ -221,13 +228,7 @@ func encodeMcpResult(id uint64, execID []byte, result string, isError bool) []by
 func encodeRequestContextResult(id uint64, execID []byte) []byte {
 	success := appendMessage(nil, fRequestContextSuccessInner, nil) // empty RequestContext{}
 	result := appendMessage(nil, fRequestContextResultSucc, success)
-	var ex []byte
-	ex = appendUint32(ex, fExecMessageID, uint32(id))
-	if len(execID) > 0 {
-		ex = appendBytes(ex, fExecMessageExecID, execID)
-	}
-	ex = appendMessage(ex, fExecClientRequestContext, result)
-	return appendMessage(nil, fAgentClientMessageExecClientMessage, ex)
+	return wrapExecClient(id, execID, fExecClientRequestContext, result)
 }
 
 // handleKvServerMessage answers a server's KV get/set request on the request stream.

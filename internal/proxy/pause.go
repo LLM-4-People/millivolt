@@ -445,9 +445,7 @@ func (s *Server) applyHolds(holds []persistedPause) error {
 		sh = append(sh, toSchedHold(h))
 	}
 	s.scheduler.RestoreHolds(sh)
-	snap, gen := s.finishPauseLocked()
-	s.pause.mu.Unlock()
-	return s.persistLatest(snap, gen)
+	return s.commitPause()
 }
 
 // editPersisted owns the read/merge/check/commit transaction for both adding
@@ -491,9 +489,7 @@ func (s *Server) editPersisted(id string, edit func(persistedPause) (persistedPa
 	} else {
 		s.pause.holds = append(s.pause.holds, h)
 	}
-	snap, gen := s.finishPauseLocked()
-	s.pause.mu.Unlock()
-	return s.persistLatest(snap, gen)
+	return s.commitPause()
 }
 
 // A timer may already be executing when stopped/rearmed. expectedUntil pins
@@ -523,9 +519,7 @@ func (s *Server) removePause(id string, expectedUntil time.Time) error {
 		}
 	}
 	s.pause.holds = append([]persistedPause(nil), kept...)
-	snap, gen := s.finishPauseLocked()
-	s.pause.mu.Unlock()
-	return s.persistLatest(snap, gen)
+	return s.commitPause()
 }
 
 func (s *Server) finishPauseLocked() ([]persistedPause, uint64) {
@@ -541,6 +535,16 @@ func (s *Server) finishPauseLocked() ([]persistedPause, uint64) {
 	s.rearmTimersLocked()
 	s.pause.persistGen++
 	return append([]persistedPause(nil), s.pause.holds...), s.pause.persistGen
+}
+
+// commitPause finishes a committed policy transition - finalizing the hold
+// set, releasing pause.mu, and persisting the accepted snapshot. The caller
+// holds pauseMu and must not touch it after this returns; the same lock
+// discipline as commitHolds applies.
+func (s *Server) commitPause() error {
+	snap, gen := s.finishPauseLocked()
+	s.pause.mu.Unlock()
+	return s.persistLatest(snap, gen)
 }
 
 func (s *Server) persistHolds(holds []persistedPause) error {

@@ -727,6 +727,16 @@ func (s *Server) absorbCursorVoid(rec *metrics.Record) {
 	s.publishUpdate(rec)
 }
 
+// markPostCommitGone records a post-commit client-write failure on a cursor
+// run surface as a local disconnect: flag only, never markClientGone's 499 -
+// the committed upstream 200 stays the record's status. The call sites own
+// their per-path contract comments.
+func markPostCommitGone(rec *metrics.Record, err error) {
+	if err != nil {
+		rec.ClientDisconnected = true
+	}
+}
+
 // finishRunTurn renders the outcome (finish chunk + usage + [DONE], or an
 // in-band error) and parks or closes the run accordingly. When Cursor's exact
 // usage summary hasn't arrived yet (a parked turn ends before the summary
@@ -741,10 +751,15 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 	// mid-turn. Cursor's documented exception: the committed upstream 200
 	// stays the record's status - mark the disconnect flag only, never
 	// markClientGone's 499 (that is the passthrough paths' contract).
-	markGone := func(err error) {
-		if err != nil {
-			rec.ClientDisconnected = true
-		}
+	// emitFinal is the shared choreography for the parked and finished
+	// branches, which differ only in the finish reason; the void branch
+	// between them writes an error frame instead and stays inline.
+	emitFinal := func(reason string) {
+		eErr := emit(map[string]any{}, reason)
+		markPostCommitGone(rec, eErr)
+		markPostCommitGone(rec, usageChunk(w, id, rr.model, rr.includeUsage, rec.Usage.InputTokens, result.Output, result.Reasoning))
+		_, dErr := io.WriteString(w, sse.DoneFrame)
+		markPostCommitGone(rec, dErr)
 	}
 	recordCursorTools(rec, result.ToolCalls)
 	switch result.Outcome {
@@ -762,7 +777,7 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 		}
 		rec.ErrorType = errStreamRead
 		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markGone(emitErrorSSE(w, id, errStreamRead, fmt.Sprint(result.Err)))
+		markPostCommitGone(rec, emitErrorSSE(w, id, errStreamRead, fmt.Sprint(result.Err)))
 		return
 
 	case providerformat.TurnParked:
@@ -775,19 +790,13 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			log.Printf("cursor-run: PARKED %d calls (%s…)", len(result.ToolCalls), shortID(result.ToolCalls[len(result.ToolCalls)-1].CallID))
 		}
 		rec.FinishReason = "tool_calls"
-		prompt := rec.Usage.InputTokens
-		eErr := emit(map[string]any{}, "tool_calls")
-		markGone(eErr)
-		markGone(usageChunk(w, id, rr.model, rr.includeUsage, prompt, result.Output, result.Reasoning))
-		_, dErr := io.WriteString(w, sse.DoneFrame)
-		markGone(dErr)
+		emitFinal("tool_calls")
 		return
 
 	default: // TurnFinished
 		s.cursorRuns.drop(run)
 		run.Close()
 		rec.FinishReason = "stop"
-		prompt := rec.Usage.InputTokens
 		if cursorVoidTurn(resumeRequest, result) {
 			// The void: an empty resume against a conversation the server is not
 			// holding. Flag the record (dashboard error row + error dimension)
@@ -795,20 +804,16 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			stampCursorVoid(rec)
 			if b, mErr := sse.ErrorEnvelope("", sse.TypeUpstreamError, "empty_turn", cursorVoidMsg); mErr == nil {
 				_, wErr := w.Write(sse.DataFrame(b))
-				markGone(wErr)
+				markPostCommitGone(rec, wErr)
 			}
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 			_, dErr := io.WriteString(w, sse.DoneFrame)
-			markGone(dErr)
+			markPostCommitGone(rec, dErr)
 			return
 		}
-		eErr := emit(map[string]any{}, "stop")
-		markGone(eErr)
-		markGone(usageChunk(w, id, rr.model, rr.includeUsage, prompt, result.Output, result.Reasoning))
-		_, dErr := io.WriteString(w, sse.DoneFrame)
-		markGone(dErr)
+		emitFinal("stop")
 		return
 	}
 }
@@ -915,11 +920,6 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 	// record's status - mark the disconnect flag only, never markClientGone's
 	// 499 (writeRunJSON only runs past a committed 2xx upstream handshake;
 	// a 4xx/5xx Run returns before the turn is ever driven).
-	markGone := func(err error) {
-		if err != nil {
-			rec.ClientDisconnected = true
-		}
-	}
 	recordCursorTools(rec, result.ToolCalls)
 	if result.Outcome == providerformat.TurnErrored {
 		s.cursorRuns.drop(run)
@@ -932,7 +932,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		}
 		rec.ErrorType = "transform_error"
 		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markGone(emitHTTPError(w, errJSON(typeAPIError, fmt.Sprint(result.Err)), http.StatusBadGateway))
+		markPostCommitGone(rec, emitHTTPError(w, errJSON(typeAPIError, fmt.Sprint(result.Err)), http.StatusBadGateway))
 		return
 	}
 	if result.Outcome == providerformat.TurnParked && !s.cursorRuns.park(rr.scope, run) {
@@ -947,7 +947,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		// written yet, so surface it with a real HTTP error status + body.
 		stampCursorVoid(rec)
 		rec.FinishReason = "stop"
-		markGone(emitHTTPError(w, errJSON("empty_turn", cursorVoidMsg), http.StatusBadGateway))
+		markPostCommitGone(rec, emitHTTPError(w, errJSON("empty_turn", cursorVoidMsg), http.StatusBadGateway))
 		return
 	}
 
@@ -960,8 +960,9 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		sse.AssistantMessage(content, toolCalls), finish, usageWire(rec.Usage))
 	w.Header().Set("Content-Type", "application/json")
 	// A failed write here means the LOCAL client disconnected before the
-	// completion was delivered (markGone, above: flag only, upstream 200 stays).
-	markGone(json.NewEncoder(w).Encode(out))
+	// completion was delivered (markPostCommitGone, above: flag only,
+	// upstream 200 stays).
+	markPostCommitGone(rec, json.NewEncoder(w).Encode(out))
 }
 
 // cursorUsage owns checked totals for both record and wire rendering. The

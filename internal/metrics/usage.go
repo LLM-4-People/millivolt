@@ -143,25 +143,28 @@ func ParseUsage(usageObj any, overrides map[string]string) Usage {
 		return int64(f), true
 	}
 	set := func(field string, dst *int64) {
-		// provider override path first
-		if p, ok := overrides[field]; ok && p != "" {
+		// tryPath stores the count at one candidate path when it resolves to
+		// an accepted value; false falls through to the next candidate.
+		tryPath := func(p string) bool {
 			if v, ok := DigJSON(usageObj, p); ok {
 				if f, ok := asFloat(v); ok {
 					if n, ok := accept(f); ok {
 						*dst = n
-						return
+						return true
 					}
 				}
 			}
+			return false
+		}
+		// provider override path first
+		if p, ok := overrides[field]; ok && p != "" {
+			if tryPath(p) {
+				return
+			}
 		}
 		for _, p := range usageKeyPaths[field] {
-			if v, ok := DigJSON(usageObj, p); ok {
-				if f, ok := asFloat(v); ok {
-					if n, ok := accept(f); ok {
-						*dst = n
-						return
-					}
-				}
+			if tryPath(p) {
+				return
 			}
 		}
 	}

@@ -36,6 +36,17 @@ func (s *Store) LoadMeta(ctx context.Context, key string) (string, error) {
 	return v, err
 }
 
+// loadMetaDoc returns one persisted operator document, or nil when the key
+// is absent. A read failure returns the error with a nil doc. Shared by the
+// Load* wrappers; the Save* wrappers stay one-liners over SaveMeta.
+func (s *Store) loadMetaDoc(ctx context.Context, key string) ([]byte, error) {
+	v, err := s.LoadMeta(ctx, key)
+	if err != nil || v == "" {
+		return nil, err
+	}
+	return []byte(v), nil
+}
+
 // SavePause persists operator-pause JSON. Implements proxy.pausePersist.
 func (s *Store) SavePause(ctx context.Context, raw []byte) error {
 	return s.SaveMeta(ctx, pauseMetaKey, string(raw))
@@ -43,11 +54,7 @@ func (s *Store) SavePause(ctx context.Context, raw []byte) error {
 
 // LoadPause returns persisted operator-pause JSON, or nil if none.
 func (s *Store) LoadPause(ctx context.Context) ([]byte, error) {
-	v, err := s.LoadMeta(ctx, pauseMetaKey)
-	if err != nil || v == "" {
-		return nil, err
-	}
-	return []byte(v), nil
+	return s.loadMetaDoc(ctx, pauseMetaKey)
 }
 
 // SaveThrottle persists provider-throttle JSON. Implements proxy.pausePersist.
@@ -57,11 +64,7 @@ func (s *Store) SaveThrottle(ctx context.Context, raw []byte) error {
 
 // LoadThrottle returns persisted provider-throttle JSON, or nil if none.
 func (s *Store) LoadThrottle(ctx context.Context) ([]byte, error) {
-	v, err := s.LoadMeta(ctx, throttleMetaKey)
-	if err != nil || v == "" {
-		return nil, err
-	}
-	return []byte(v), nil
+	return s.loadMetaDoc(ctx, throttleMetaKey)
 }
 
 // ListClients returns distinct non-empty Record.Client values from history.
@@ -86,11 +89,7 @@ func (s *Store) SaveDebugSessions(ctx context.Context, raw []byte) error {
 
 // LoadDebugSessions returns persisted operator-debug session JSON, or nil if none.
 func (s *Store) LoadDebugSessions(ctx context.Context) ([]byte, error) {
-	v, err := s.LoadMeta(ctx, debugMetaKey)
-	if err != nil || v == "" {
-		return nil, err
-	}
-	return []byte(v), nil
+	return s.loadMetaDoc(ctx, debugMetaKey)
 }
 
 func (s *Store) listDistinct(ctx context.Context, q string) ([]string, error) {

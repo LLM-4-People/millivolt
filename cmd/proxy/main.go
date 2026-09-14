@@ -399,6 +399,18 @@ func main() {
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
+	// drainStore is the shared close before every loop exit (serve failure,
+	// clean return, signal shutdown): write-channel drain plus final flush,
+	// log.Printf - never Fatalf - so a close failure still lets the exit
+	// path run.
+	drainStore := func() {
+		if store != nil {
+			if err := store.Close(); err != nil {
+				log.Printf("storage close: %v", err)
+			}
+		}
+	}
+
 	// Loop so SIGHUP reloads config without exiting; SIGINT/SIGTERM break out to
 	// a graceful shutdown. A serve error exits immediately (store drained first).
 	var shutdownSig os.Signal
@@ -420,20 +432,12 @@ loop:
 				// same guarantee the signal path gives) - log.Printf, not
 				// Fatalf, so the drain actually runs before we exit nonzero.
 				log.Printf("serve: %v", err)
-				if store != nil {
-					if cerr := store.Close(); cerr != nil {
-						log.Printf("storage close: %v", cerr)
-					}
-				}
+				drainStore()
 				os.Exit(1)
 			}
 			// Serve returned cleanly without a signal (e.g. listener closed).
 			// Drain the store before exiting so no buffered metrics are lost.
-			if store != nil {
-				if cerr := store.Close(); cerr != nil {
-					log.Printf("storage close: %v", cerr)
-				}
-			}
+			drainStore()
 			return
 		case sig := <-sigc:
 			if sig == syscall.SIGHUP {
@@ -479,11 +483,7 @@ loop:
 	}
 	// In-flight requests have completed (or been aborted); safe to close the
 	// store, which drains its write channel regardless of the HTTP outcome.
-	if store != nil {
-		if err := store.Close(); err != nil {
-			log.Printf("storage close: %v", err)
-		}
-	}
+	drainStore()
 }
 
 func logDroppedConfigKeys(path string, skipped []string) {

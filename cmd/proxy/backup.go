@@ -42,14 +42,9 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	// A database member is staged for the self-check: capacity must follow
 	// the database volume, not a generic /tmp sized independently of
 	// backup_max_bytes.
-	stageDir := ""
-	if wantDB {
-		dir, err := dbStageDir()
-		if err != nil {
-			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		stageDir = dir
+	stageDir, ok := stageDirOr400(w, wantDB)
+	if !ok {
+		return
 	}
 	raw, err := backup.Encode(stageDir, arch)
 	if err != nil {
@@ -109,14 +104,9 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	// Inspect and validation stage a database member next to the live
 	// database; a config-only archive never touches the database volume.
-	stageDir := ""
-	if len(arch.Database) > 0 {
-		dir, err := dbStageDir()
-		if err != nil {
-			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		stageDir = dir
+	stageDir, ok := stageDirOr400(w, len(arch.Database) > 0)
+	if !ok {
+		return
 	}
 	if err := backup.Validate(stageDir, arch); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -236,6 +226,21 @@ func dbStageDir() (string, error) {
 		return "", storage.ErrStorageDisabled
 	}
 	return filepath.Dir(cfg.DBPath), nil
+}
+
+// stageDirOr400 stages a database member for the self-check when one is
+// requested, answering a staging failure with the endpoint's 400 JSON error.
+// ok is false when the response is complete.
+func stageDirOr400(w http.ResponseWriter, stage bool) (string, bool) {
+	if !stage {
+		return "", true
+	}
+	dir, err := dbStageDir()
+	if err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return "", false
+	}
+	return dir, true
 }
 
 func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, error) {

@@ -364,11 +364,7 @@ func (s *Scheduler) AddHold(h Hold) error {
 			return ErrOverlap
 		}
 	}
-	nextHolds := make([]Hold, 0, len(cur)+1)
-	nextHolds = append(nextHolds, cur...)
-	nextHolds = append(nextHolds, h)
-	next := snapFromHolds(nextHolds)
-	s.commitHolds(next, true)
+	s.commitAppendedHolds(cur, h)
 	return nil
 }
 
@@ -383,19 +379,7 @@ func (s *Scheduler) ReplaceHold(h Hold) error {
 		return nil
 	}
 	s.pauseMu.Lock()
-	cur := s.policy.Load()
-	nextHolds := make([]Hold, 0)
-	found := false
-	if cur != nil {
-		for _, sh := range cur.holds {
-			hh := sh.hold()
-			if hh.ID == h.ID {
-				found = true
-				continue
-			}
-			nextHolds = append(nextHolds, hh)
-		}
-	}
+	nextHolds, found := holdsWithoutID(s.policy.Load(), h.ID)
 	if !found {
 		s.pauseMu.Unlock()
 		return ErrHoldNotFound
@@ -406,9 +390,7 @@ func (s *Scheduler) ReplaceHold(h Hold) error {
 			return ErrOverlap
 		}
 	}
-	nextHolds = append(nextHolds, h)
-	next := snapFromHolds(nextHolds)
-	s.commitHolds(next, true)
+	s.commitAppendedHolds(nextHolds, h)
 	return nil
 }
 
@@ -418,25 +400,41 @@ func (s *Scheduler) RemoveHold(id string) {
 		return
 	}
 	s.pauseMu.Lock()
-	cur := s.policy.Load()
-	nextHolds := make([]Hold, 0)
-	found := false
-	if cur != nil {
-		for _, h := range cur.holds {
-			hh := h.hold()
-			if hh.ID == id {
-				found = true
-				continue
-			}
-			nextHolds = append(nextHolds, hh)
-		}
-	}
+	nextHolds, found := holdsWithoutID(s.policy.Load(), id)
 	if !found {
 		s.pauseMu.Unlock()
 		return
 	}
 	next := snapFromHolds(nextHolds)
 	s.commitHolds(next, false)
+}
+
+// holdsWithoutID projects the loaded policy's holds minus the one with id.
+// found reports whether id was present; a nil snapshot projects an empty set.
+func holdsWithoutID(cur *policySnap, id string) (next []Hold, found bool) {
+	next = make([]Hold, 0)
+	if cur != nil {
+		for _, sh := range cur.holds {
+			hh := sh.hold()
+			if hh.ID == id {
+				found = true
+				continue
+			}
+			next = append(next, hh)
+		}
+	}
+	return next, found
+}
+
+// commitAppendedHolds commits the accepted set with h appended: it snapshots,
+// then commits with queued-waiter seeding (both hold-addition paths - a fresh
+// add and a same-id replace - seed). The caller holds pauseMu, has already
+// overlap-checked, and delegates the rest of the lock discipline to
+// commitHolds.
+func (s *Scheduler) commitAppendedHolds(nextHolds []Hold, h Hold) {
+	nextHolds = append(nextHolds, h)
+	next := snapFromHolds(nextHolds)
+	s.commitHolds(next, true)
 }
 
 // replaceHolds installs a whole hold set as-is (RestoreHolds' mechanism):

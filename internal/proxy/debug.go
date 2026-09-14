@@ -216,9 +216,7 @@ func (s *Server) applyDebug(sessions []persistedDebug) error {
 	}
 	s.debug.mu.Lock()
 	s.debug.sessions = append([]persistedDebug(nil), sessions...)
-	snap, gen := s.finishDebugLocked()
-	s.debug.mu.Unlock()
-	return s.persistDebugLatest(snap, gen)
+	return s.commitDebug()
 }
 
 // editDebug owns the read/merge/check/commit transaction for both adding and
@@ -267,9 +265,7 @@ func (s *Server) editDebug(id string, edit func(persistedDebug) (persistedDebug,
 	} else {
 		s.debug.sessions = append(s.debug.sessions, d)
 	}
-	snap, gen := s.finishDebugLocked()
-	s.debug.mu.Unlock()
-	return s.persistDebugLatest(snap, gen)
+	return s.commitDebug()
 }
 
 // A timer already waiting on mu may outlive Stop. It can retire only the
@@ -297,9 +293,7 @@ func (s *Server) removeDebug(id string, expectedUntil time.Time) (bool, error) {
 		}
 	}
 	s.debug.sessions = append([]persistedDebug(nil), kept...)
-	snap, gen := s.finishDebugLocked()
-	s.debug.mu.Unlock()
-	return true, s.persistDebugLatest(snap, gen)
+	return true, s.commitDebug()
 }
 
 func (s *Server) finishDebugLocked() ([]persistedDebug, uint64) {
@@ -315,6 +309,16 @@ func (s *Server) finishDebugLocked() ([]persistedDebug, uint64) {
 	s.rearmDebugTimersLocked()
 	s.debug.persistGen++
 	return append([]persistedDebug(nil), s.debug.sessions...), s.debug.persistGen
+}
+
+// commitDebug finishes a committed policy transition - finalizing the
+// session set, releasing debug.mu, and persisting the accepted snapshot. The
+// caller holds debug.mu and must not touch it after this returns; the same
+// lock discipline as commitPause applies.
+func (s *Server) commitDebug() error {
+	snap, gen := s.finishDebugLocked()
+	s.debug.mu.Unlock()
+	return s.persistDebugLatest(snap, gen)
 }
 
 func (s *Server) persistDebugSessions(sessions []persistedDebug) error {

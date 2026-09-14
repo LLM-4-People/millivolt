@@ -231,29 +231,15 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 		}
 	}
 	if hasR {
-		n, win, off, err := parseLimitRate(r.Header.Get(hdrLimitRequests), maxLimitRequests)
-		if err != nil {
-			return errInvalidHeader(hdrLimitRequests, r.Header.Get(hdrLimitRequests))
-		}
-		if off {
-			next.Requests = 0
-			next.ReqWindow = 0
-		} else {
-			next.Requests = n
-			next.ReqWindow = win
+		if err := applyRateLimit(r.Header.Get(hdrLimitRequests), hdrLimitRequests,
+			maxLimitRequests, &next.Requests, &next.ReqWindow); err != nil {
+			return err
 		}
 	}
 	if hasT {
-		n, win, off, err := parseLimitRate(r.Header.Get(hdrLimitTokens), maxLimitTokens)
-		if err != nil {
-			return errInvalidHeader(hdrLimitTokens, r.Header.Get(hdrLimitTokens))
-		}
-		if off {
-			next.Tokens = 0
-			next.TokWindow = 0
-		} else {
-			next.Tokens = n
-			next.TokWindow = win
+		if err := applyRateLimit(r.Header.Get(hdrLimitTokens), hdrLimitTokens,
+			maxLimitTokens, &next.Tokens, &next.TokWindow); err != nil {
+			return err
 		}
 	}
 	if err := validateLimit(next); err != nil {
@@ -276,6 +262,24 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 		t.UpdatedAt = time.Time{}
 		return t
 	})
+	return nil
+}
+
+// applyRateLimit parses one rate-dimension header (X-Proxy-Limit-Requests or
+// -Tokens) into its count/window pair: "off" zeroes both dimensions, a
+// malformed value rejects as an invalid header carrying the raw value.
+// applyThrottleHeaders applies the whole patch atomically, so a rejected
+// dimension discards the others too.
+func applyRateLimit(raw, name string, max int64, count *int64, window *time.Duration) error {
+	n, win, off, err := parseLimitRate(raw, max)
+	if err != nil {
+		return errInvalidHeader(name, raw)
+	}
+	if off {
+		*count, *window = 0, 0
+	} else {
+		*count, *window = n, win
+	}
 	return nil
 }
 
