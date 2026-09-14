@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -230,5 +231,90 @@ func TestCursorReaskDisabledByConfig(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("upstream Run calls = %d, want 1 (re-ask disabled)", n)
+	}
+}
+
+// TestCursorVoidReaskResetsTurnMetrics pins resetTurnMetrics's effect through
+// reaskAfterVoid: the voided first turn streams a text delta (so the record
+// carries a first-turn FirstTokenAt/LastTokenAt) but NO token delta (Output
+// stays 0, keeping the void classification), then the re-ask runs. The
+// finalized record must report only the second turn: TTFT measured from the
+// re-ask's first delta (the first delta is separated from it by a fixed
+// 200ms gap in the fixture, so a stale kept timestamp cannot pass) and the
+// re-ask's token count.
+func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
+	const voidGap = 200 * time.Millisecond
+	var firstDeltaAt time.Time
+	var calls atomic.Int32
+	h2s := &http2.Server{}
+	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := r.Body
+		w.Header().Set("Content-Type", "application/connect+proto")
+		fl := w.(http.Flusher)
+		w.WriteHeader(200)
+
+		// 1. Read the run_request envelope.
+		readFrame(t, body)
+		// 2. KV pull → answer; request-context handshake → answer.
+		kvGet := cmsg(4, append(cvint(1, 7), cmsg(2, cstr(1, "\x01\x02\x03"))...))
+		w.Write(cframe(kvGet))
+		fl.Flush()
+		readFrame(t, body)
+		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...))
+		w.Write(cframe(execReq))
+		fl.Flush()
+		readFrame(t, body)
+
+		if calls.Add(1) == 1 {
+			// The void: one tokenless text delta (the timing footprint the
+			// reset must erase), a fixed gap, then turn end with zero tokens.
+			firstDeltaAt = time.Now()
+			w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "tokenless fragment")))))
+			fl.Flush()
+			time.Sleep(voidGap)
+			w.Write(cframe(cmsg(1, cmsg(14, nil))))
+			w.Write(cend("{}"))
+			fl.Flush()
+			return
+		}
+		// The re-ask answers with its own delta and token count.
+		w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "finally an answer")))))
+		w.Write(cframe(cmsg(1, cmsg(8, cvint(1, 3)))))
+		w.Write(cframe(cmsg(1, cmsg(14, nil))))
+		w.Write(cend("{}"))
+		fl.Flush()
+	}), h2s))
+	upstream.EnableHTTP2 = true
+	upstream.Start()
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	resp, err := http.DefaultClient.Do(cursorVoidRequest(srv, upstream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(b), `"content":"finally an answer"`) {
+		t.Fatalf("re-ask answer missing: %s", b)
+	}
+
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.Usage.OutputTokens != 3 {
+		t.Fatalf("output tokens = %d, want the re-ask's 3 (per-turn usage window)", rec.Usage.OutputTokens)
+	}
+	// TTFT must come from the re-ask's first delta: the voided turn's delta
+	// landed a full voidGap earlier, so a FirstTokenAt kept from it sits well
+	// before firstDeltaAt + half the gap.
+	if rec.FirstTokenAt.Before(firstDeltaAt.Add(voidGap / 2)) {
+		t.Fatalf("FirstTokenAt = %v, want it re-stamped by the re-ask (after %v); the voided turn's delta landed at %v",
+			rec.FirstTokenAt, firstDeltaAt.Add(voidGap/2), firstDeltaAt)
+	}
+	if rec.LastTokenAt.Before(rec.FirstTokenAt) {
+		t.Fatalf("LastTokenAt %v before FirstTokenAt %v", rec.LastTokenAt, rec.FirstTokenAt)
 	}
 }

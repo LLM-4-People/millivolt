@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -1585,6 +1586,18 @@ func TestCanonicalModelScopeAppliesEverywhere(t *testing.T) {
 	}
 }
 
+// kpiWireKeys is the ONE test-side owner of the KPI wire key set.
+// TestBootstrapWireKeysStrict asserts the served bootstrap kpi section
+// equals it, and the live.js EMPTY_KPI mirror pin (js_mirrors.go) asserts
+// the dashboard's pre-aggregation fallback carries the same set, so the
+// served decoder and the JS mirror can never drift apart.
+var kpiWireKeys = []string{
+	"requests", "errors", "in_flight", "cost",
+	"cost_per_req", "cost_per_mtok",
+	"input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens",
+	"avg_ttft_ms", "avg_tps",
+}
+
 // TestBootstrapWireKeysStrict pins the dashboard bootstrap payload's exact
 // wire key set with a DisallowUnknownFields decoder through the real
 // handler and marshaling path. The W15 drop removed the KPI's answer_tokens
@@ -1592,7 +1605,10 @@ func TestCanonicalModelScopeAppliesEverywhere(t *testing.T) {
 // mutation round proved a re-added or renamed key went unnoticed. Nested
 // records stay raw (their key set is the record contract, pinned by the
 // storage/log suites); the envelope keys and the KPI section are the pinned
-// surface. The same decode also pins the two identity widths the browser
+// surface. The kpi section is decoded raw and its key set asserted equal to
+// kpiWireKeys (exact equality - stricter than DisallowUnknownFields, which
+// alone would not notice a missing key), then typed for the value checks.
+// The same decode also pins the two identity widths the browser
 // regexes assert: dashboard_version is 16 lowercase hex (web.go etagHex,
 // mirrored by live.js DASHBOARD_VERSION_RE) and the model_canon revision
 // is 64 lowercase hex (aggregate_observer.go sha256, mirrored by
@@ -1625,21 +1641,8 @@ func TestBootstrapWireKeysStrict(t *testing.T) {
 		Incremental      bool            `json:"incremental"`
 		ModelCanon       json.RawMessage `json:"model_canon"`
 		DashboardVersion string          `json:"dashboard_version"`
-		KPI              struct {
-			Requests    int64    `json:"requests"`
-			Errors      int64    `json:"errors"`
-			InFlight    int64    `json:"in_flight"`
-			Cost        float64  `json:"cost"`
-			CostPerReq  *float64 `json:"cost_per_req"`
-			CostPerMTok *float64 `json:"cost_per_mtok"`
-			InputTok    int64    `json:"input_tokens"`
-			OutputTok   int64    `json:"output_tokens"`
-			CacheRead   int64    `json:"cache_read_tokens"`
-			Reasoning   int64    `json:"reasoning_tokens"`
-			AvgTTFT     *float64 `json:"avg_ttft_ms"`
-			AvgTPS      *float64 `json:"avg_tps"`
-		} `json:"kpi"`
-		Storage struct {
+		KPI              json.RawMessage `json:"kpi"`
+		Storage          struct {
 			Enabled        bool   `json:"enabled"`
 			Dropped        uint64 `json:"dropped"`
 			TotalsDegraded bool   `json:"totals_degraded"`
@@ -1650,17 +1653,48 @@ func TestBootstrapWireKeysStrict(t *testing.T) {
 	if err := dec.Decode(&wire); err != nil {
 		t.Fatalf("strict decode: %v\n%s", err, rec.Body.String())
 	}
-	if wire.KPI.Requests != 1 || wire.KPI.InputTok != 10 || wire.KPI.OutputTok != 5 || wire.KPI.Cost != 0.5 {
-		t.Fatalf("kpi = %+v, want the folded ring record", wire.KPI)
+	var kpiObj map[string]json.RawMessage
+	if err := json.Unmarshal(wire.KPI, &kpiObj); err != nil {
+		t.Fatalf("kpi section is not a JSON object: %v (%s)", err, wire.KPI)
 	}
-	if wire.KPI.CostPerReq == nil || *wire.KPI.CostPerReq != 0.5 {
-		t.Fatalf("kpi cost_per_req = %v, want the folded 0.5 blended rate", wire.KPI.CostPerReq)
+	served := make([]string, 0, len(kpiObj))
+	for k := range kpiObj {
+		served = append(served, k)
 	}
-	if wire.KPI.AvgTTFT == nil || *wire.KPI.AvgTTFT != 10 {
-		t.Fatalf("kpi avg_ttft_ms = %v, want the folded 10ms mean", wire.KPI.AvgTTFT)
+	slices.Sort(served)
+	want := slices.Clone(kpiWireKeys)
+	slices.Sort(want)
+	if !slices.Equal(served, want) {
+		t.Fatalf("bootstrap kpi keys = %v, want the pinned wire set %v", served, want)
 	}
-	if wire.KPI.AvgTPS != nil {
-		t.Fatalf("kpi avg_tps = %v, want nil with no captured throughput sample", wire.KPI.AvgTPS)
+	var kpi struct {
+		Requests    int64    `json:"requests"`
+		Errors      int64    `json:"errors"`
+		InFlight    int64    `json:"in_flight"`
+		Cost        float64  `json:"cost"`
+		CostPerReq  *float64 `json:"cost_per_req"`
+		CostPerMTok *float64 `json:"cost_per_mtok"`
+		InputTok    int64    `json:"input_tokens"`
+		OutputTok   int64    `json:"output_tokens"`
+		CacheRead   int64    `json:"cache_read_tokens"`
+		Reasoning   int64    `json:"reasoning_tokens"`
+		AvgTTFT     *float64 `json:"avg_ttft_ms"`
+		AvgTPS      *float64 `json:"avg_tps"`
+	}
+	if err := json.Unmarshal(wire.KPI, &kpi); err != nil {
+		t.Fatalf("kpi value decode: %v (%s)", err, wire.KPI)
+	}
+	if kpi.Requests != 1 || kpi.InputTok != 10 || kpi.OutputTok != 5 || kpi.Cost != 0.5 {
+		t.Fatalf("kpi = %+v, want the folded ring record", kpi)
+	}
+	if kpi.CostPerReq == nil || *kpi.CostPerReq != 0.5 {
+		t.Fatalf("kpi cost_per_req = %v, want the folded 0.5 blended rate", kpi.CostPerReq)
+	}
+	if kpi.AvgTTFT == nil || *kpi.AvgTTFT != 10 {
+		t.Fatalf("kpi avg_ttft_ms = %v, want the folded 10ms mean", kpi.AvgTTFT)
+	}
+	if kpi.AvgTPS != nil {
+		t.Fatalf("kpi avg_tps = %v, want nil with no captured throughput sample", kpi.AvgTPS)
 	}
 	if !hexRe16.MatchString(wire.DashboardVersion) {
 		t.Fatalf("dashboard_version = %q, want 16 lowercase hex (web.go etagHex width; live.js DASHBOARD_VERSION_RE mirrors it)", wire.DashboardVersion)

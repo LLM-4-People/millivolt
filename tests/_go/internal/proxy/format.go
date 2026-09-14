@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,53 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
+
+// TestFormatParseOpenAIBodyIsAWire400 pins the shared errParseOpenAIBody wrap
+// on its two live adapter paths: a client body that is not JSON must surface
+// as 400 invalid_request_error with the "parse openai body: " prefix (the
+// single wording owner in format/models.go), never an opaque 502 - through
+// the anthropic request translator (translateRequest) and the cursor run
+// translator (serveCursorBidi) alike. The upstream is never contacted: both
+// adapters decode before any upstream send.
+func TestFormatParseOpenAIBodyIsAWire400(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		format string
+	}{
+		{"anthropic", "anthropic"},
+		{"cursor", "cursor"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(config.Default(), metrics.Noop{})
+			r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions",
+				strings.NewReader(`{"messages":[`))
+			r.Header.Set("Authorization", "Bearer sk-k")
+			r.Header.Set("X-Proxy-Base-URL", "http://127.0.0.1:9")
+			r.Header.Set("X-Proxy-Format", tc.format)
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, r)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+			}
+			var doc struct {
+				Error struct {
+					Message string `json:"message"`
+					Type    string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("400 body is not the OpenAI error envelope: %v (%s)", err, rec.Body.String())
+			}
+			if doc.Error.Type != typeInvalidRequestError {
+				t.Fatalf("error type = %q, want %q", doc.Error.Type, typeInvalidRequestError)
+			}
+			const wrap = "parse openai body: "
+			if !strings.HasPrefix(doc.Error.Message, wrap) || len(doc.Error.Message) == len(wrap) {
+				t.Fatalf("message = %q, want the %q wrap carrying the decode cause", doc.Error.Message, wrap)
+			}
+		})
+	}
+}
 
 func TestAnthropicFormatTranslation(t *testing.T) {
 	// Mock upstream speaks native Anthropic Messages.

@@ -173,6 +173,30 @@ func staticJSLiteralCount(t *testing.T, literal string) int {
 	return count
 }
 
+// TestLiveEmptyKPIKeysMatchBootstrapWireKeys pins live.js's EMPTY_KPI (the
+// kpiNow fallback document rendered before any aggregate has arrived) to
+// kpiWireKeys, the same test-side list TestBootstrapWireKeysStrict asserts
+// against the served bootstrap kpi section. The fallback was previously
+// hand-spelled with zero test references, so a dropped, added, or renamed
+// key drifted silently in both directions.
+func TestLiveEmptyKPIKeysMatchBootstrapWireKeys(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/live.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := jsObjectKeys(jsObjectBlock(t, src, "EMPTY_KPI"))
+	if len(got) == 0 {
+		t.Fatal("EMPTY_KPI declares no keys")
+	}
+	sorted := slices.Clone(got)
+	slices.Sort(sorted)
+	want := slices.Clone(kpiWireKeys)
+	slices.Sort(want)
+	if !slices.Equal(sorted, want) {
+		t.Fatalf("live.js EMPTY_KPI keys = %v, want the bootstrap kpi wire set %v", sorted, want)
+	}
+}
+
 // TestDashFiltersStorageKeySingleton: core.js FILTERS_STORAGE_KEY owns the
 // saved-views storage key. A raw 'dash.filters' literal appearing anywhere
 // else in the static JS would be a second authority (a key spelled by hand

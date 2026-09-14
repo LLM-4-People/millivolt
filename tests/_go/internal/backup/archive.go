@@ -103,6 +103,16 @@ func TestValidateRejectsInvalidMembers(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsEmptyArchive pins Validate's no-member door: the same
+// named ErrEmptyArchive Encode returns, classified via errors.Is, so a caller
+// can tell an empty archive apart from invalid members. Encode's door is
+// pinned by the corruption suite; Validate's had no coverage.
+func TestValidateRejectsEmptyArchive(t *testing.T) {
+	if err := Validate("", Archive{}); !errors.Is(err, ErrEmptyArchive) {
+		t.Fatalf("Validate on an empty archive = %v, want ErrEmptyArchive", err)
+	}
+}
+
 func TestCheckDatabaseDistinguishesInvalidFromIO(t *testing.T) {
 	stage := t.TempDir()
 	if err := CheckDatabase(stage, []byte("not sqlite")); !errors.Is(err, ErrInvalidSnapshot) {

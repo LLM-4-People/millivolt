@@ -247,3 +247,48 @@ func TestModelsUnparseableVerbatim(t *testing.T) {
 		t.Errorf("status %d body %s, want verbatim relay", resp.StatusCode, raw)
 	}
 }
+
+// TestModelsRefusedUpstreamSurfacesAPIErrorEnvelope pins writeModelsError's
+// failure surface: a discovery fetch that dies on transport (here: a closed
+// upstream, so every dial is refused) answers 502 with the uniform
+// {"error":{"message","type":"api_error"}} JSON envelope carrying the
+// "upstream error: " transport wrap - never a bare status line, never an
+// empty list.
+func TestModelsRefusedUpstreamSurfacesAPIErrorEnvelope(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	upstream.Close() // dead address: every dial is refused, no server process left
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Authorization", "Bearer sk-test")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for a refused upstream", resp.StatusCode)
+	}
+	var doc struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	raw, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("502 body is not the api_error JSON envelope: %v (%s)", err, raw)
+	}
+	if doc.Error.Type != "api_error" {
+		t.Fatalf("error type = %q, want api_error", doc.Error.Type)
+	}
+	const wrap = "upstream error: "
+	if !strings.HasPrefix(doc.Error.Message, wrap) || len(doc.Error.Message) == len(wrap) {
+		t.Fatalf("message = %q, want the %q transport wrap", doc.Error.Message, wrap)
+	}
+}

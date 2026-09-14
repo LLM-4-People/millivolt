@@ -297,6 +297,63 @@ func TestThrottleListAndRestore(t *testing.T) {
 	}
 }
 
+// TestThrottleQueuedAttributionPerProvider pins throttleQueued's per-provider
+// attribution: ListThrottles' Queued occupancy (the wire `queued` field) must
+// count each provider's own parked waiters and only those. Two waiters queue
+// on provider p's concurrency cap while provider q's equally active gate has
+// none, so a misattributed or global count cannot pass.
+func TestThrottleQueuedAttributionPerProvider(t *testing.T) {
+	s := New(Options{})
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 1}})
+	s.SetThrottle(Throttle{Provider: "q", Limit: Limit{Concurrency: 1}})
+	ctx := context.Background()
+	r1, err := s.AcquireWith(ctx, "p|k", 0, WaiterHooks{Provider: "p"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r1(0)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer wg.Done()
+			r, err := s.AcquireWith(ctx, "p|kx", 0, WaiterHooks{Provider: "p"})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			r(0)
+		}()
+	}
+	// Both waiters must be parked on the cap before the attribution read.
+	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "two throttled waiters to queue")
+
+	for _, ti := range s.ListThrottles() {
+		switch ti.Provider {
+		case "p":
+			if ti.Queued != 2 {
+				t.Fatalf("provider p queued = %d, want 2 (its own parked waiters)", ti.Queued)
+			}
+		case "q":
+			if ti.Queued != 0 {
+				t.Fatalf("provider q queued = %d, want 0 (no waiters parked on it)", ti.Queued)
+			}
+		default:
+			t.Fatalf("unexpected provider %q in ListThrottles", ti.Provider)
+		}
+	}
+
+	s.SetThrottle(Throttle{Provider: "p", Limit: Limit{Concurrency: 8}})
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("loosened cap did not grant waiters")
+	}
+}
+
 func TestThrottleOversizeRequestAdmitted(t *testing.T) {
 	// A single request larger than the window is allowed (can't fragment it);
 	// it exhausts the bucket so the next admit waits.

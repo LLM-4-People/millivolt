@@ -16,8 +16,27 @@ let chartAgg = null;
 let explorerAgg = null;
 let _pendingRevision = -1; // server lifecycle revision, scoped to the accepted feed
 
+// EMPTY_KPI is the pre-aggregation KPI document: the same wire key set the
+// bootstrap kpi section serves, with the zero and never-measured values the
+// band renders before any aggregate has arrived. The key set is pinned to
+// the server contract by the Go-side mirror test.
+const EMPTY_KPI = {
+  requests: 0,
+  errors: 0,
+  in_flight: 0,
+  cost: 0,
+  cost_per_req: null,
+  cost_per_mtok: null,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_tokens: 0,
+  reasoning_tokens: 0,
+  avg_ttft_ms: null,
+  avg_tps: null,
+};
+
 function kpiNow() {
-  return kpiAgg || { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null };
+  return kpiAgg || EMPTY_KPI;
 }
 function kpiInFlight() {
   // 0 is a live value - do not fall through to a stale /metrics/agg gauge.

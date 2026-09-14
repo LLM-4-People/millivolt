@@ -185,6 +185,69 @@ func TestHandleDebugEmptyScope400(t *testing.T) {
 	}
 }
 
+// debugSessionOf posts a HandleDebug body and returns the single session the
+// state document reports, failing on any non-200 or a missing/ambiguous
+// session list.
+func debugSessionOf(t *testing.T, p *Server, body string) map[string]any {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug", strings.NewReader(body)))
+	if rr.Code != 200 {
+		t.Fatalf("HandleDebug %s = %d %s", body, rr.Code, rr.Body.String())
+	}
+	var st struct {
+		Sessions []map[string]any `json:"sessions"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &st); err != nil {
+		t.Fatalf("debug state is not JSON: %v (%s)", err, rr.Body.String())
+	}
+	if len(st.Sessions) != 1 {
+		t.Fatalf("sessions = %v, want exactly 1", st.Sessions)
+	}
+	return st.Sessions[0]
+}
+
+// TestHandleDebugReplaceMergesUntil pins mergeUntil's edit merge on the debug
+// surface, mirroring the pause replace rows: restating the SAME duration while
+// the previous window is still live keeps the previous deadline (an
+// extend-in-place edit must not reset the clock), while a NEW duration
+// re-anchors a fresh window from now. The deadline comparisons run on the
+// stored persistedDebug.Until (nanosecond time.Time): the served document
+// renders RFC 3339 at second precision, which would hide a sub-second
+// re-anchor from a string comparison.
+func TestHandleDebugReplaceMergesUntil(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+
+	// Same duration restated: until must not move.
+	seed := debugSessionOf(t, p, `{"enabled":true,"clients":["client-a"],"duration":"1h"}`)
+	id, _ := seed["id"].(string)
+	if id == "" {
+		t.Fatalf("seed session has no id: %v", seed)
+	}
+	if seed["until"] == nil {
+		t.Fatalf("seed session has no until despite duration 1h: %v", seed)
+	}
+	seedUntil := p.debug.sessions[0].Until
+	if seedUntil.IsZero() {
+		t.Fatal("seed session stored a zero Until despite duration 1h")
+	}
+	debugSessionOf(t, p, `{"enabled":true,"id":"`+id+`","clients":["client-a"],"duration":"1h"}`)
+	if kept := p.debug.sessions[0].Until; !kept.Equal(seedUntil) {
+		t.Fatalf("same-duration edit reset until %v -> %v, want the previous window kept", seedUntil, kept)
+	}
+
+	// New duration: until must re-anchor from now (15m lands before the old
+	// 1h window, so a stale kept deadline cannot pass as a fresh one).
+	fresh := debugSessionOf(t, p, `{"enabled":true,"id":"`+id+`","clients":["client-a"],"duration":"15m"}`)
+	if fresh["duration"] != "15m" {
+		t.Fatalf("edited duration = %v, want 15m", fresh["duration"])
+	}
+	freshUntil := p.debug.sessions[0].Until
+	if freshUntil.Equal(seedUntil) || !freshUntil.Before(seedUntil) {
+		t.Fatalf("new-duration edit kept until %v, want a re-anchored window before the old %v", freshUntil, seedUntil)
+	}
+}
+
 func TestHandleDebugOverlap409(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
 	rr := httptest.NewRecorder()

@@ -17,6 +17,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
 const voidBody = `{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`
@@ -713,6 +714,130 @@ func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
 	recs := waitForRecord(t, buf, 1)
 	if !recs[0].IsError() || recs[0].ErrorType != "overloaded_error" || recs[0].ErrorCode == metrics.CodeTruncated {
 		t.Fatalf("record must carry the provider's envelope: %+v", recs[0])
+	}
+}
+
+// TestStreamRetryClientCancelWhileResendParksIsDisconnect pins
+// classifyResendFailure's clientGone arm on the streaming re-send site: the
+// LOCAL client cancelling while the quality re-send is parked in WaitSend
+// (here: on an operator hold, armed from inside the absorbed attempt's
+// handler before the truncating EOF can exist, so the park is guaranteed)
+// keeps disconnect semantics - 499, ClientDisconnected, no error marks, the
+// absorbed attempt logged - never a 502 upstream_unreachable.
+func TestStreamRetryClientCancelWhileResendParksIsDisconnect(t *testing.T) {
+	buf := metrics.NewBuffer(100)
+	p := New(config.Default(), buf)
+	holdArmed := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		// Truncated-empty stream: role chunk, then the connection stays
+		// open while the handler arms the hold, so the proxy cannot see
+		// the truncating EOF before the hold exists.
+		w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"))
+		w.(http.Flusher).Flush()
+		if err := p.scheduler.AddHold(scheduler.Hold{All: true}); err != nil {
+			t.Errorf("AddHold: %v", err)
+		}
+		close(holdArmed)
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(p)
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-holdArmed
+	cancel()
+	resp.Body.Close()
+
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.ClientDisconnected {
+		t.Errorf("ClientDisconnected = false, want true (the client cancelled the parked re-send)")
+	}
+	if rec.StatusCode != metrics.StatusClientClosedRequest {
+		t.Errorf("StatusCode = %d, want %d (committed 200 re-stamped by markClientGone)", rec.StatusCode, metrics.StatusClientClosedRequest)
+	}
+	if rec.IsError() || rec.ErrorType != "" || rec.ErrorCode != "" || rec.ErrorMsg != "" {
+		t.Errorf("client cancel must leave no error marks: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
+		t.Errorf("absorbed truncated attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestNonStreamRetryTransportFailureIs502APIError pins
+// classifyResendFailure's transport default on the non-streaming re-send
+// site: a re-send that dies on transport after a degenerate 200 was absorbed
+// answers the still-open status line with 502 + the api_error JSON envelope,
+// and the record carries the 502 + upstream_unreachable stamps.
+func TestNonStreamRetryTransportFailureIs502APIError(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(voidBody))
+			return
+		}
+		// The re-send dies at the transport level: accept the connection
+		// and close it without a response.
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	cfg := config.Default()
+	cfg.MaxRetries = 0 // the transport failure must surface immediately, not after the retry ladder
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for a re-send that died on transport", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"type":"api_error"`) {
+		t.Fatalf("502 body must carry the api_error envelope: %s", body)
+	}
+	if !strings.Contains(string(body), "upstream error: ") {
+		t.Fatalf("502 body must carry the transport wrap: %s", body)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (void absorbed + failed re-send)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() {
+		t.Fatalf("record must flag the failed re-send: %+v", rec)
+	}
+	if rec.ErrorType != typeUpstreamUnreachable || rec.StatusCode != http.StatusBadGateway {
+		t.Fatalf("record stamps = type %q status %d, want upstream_unreachable/502", rec.ErrorType, rec.StatusCode)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorType != metrics.CodeEmptyCompletion {
+		t.Fatalf("absorbed void attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
 	}
 }
 
