@@ -43,6 +43,46 @@ func cmsg(field int, inner []byte) []byte {
 	return append(b, inner...)
 }
 
+// cfield is one decoded test-side proto field: num is the field number, wire
+// the wire type (0 varint, 2 length-delimited - the only two the agent.v1
+// exchange uses), val the varint value, raw the delimited payload. Mirror of
+// the format package's wire decoders for the nested-message assertions.
+type cfield struct {
+	num  int
+	wire int
+	val  uint64
+	raw  []byte
+}
+
+// cparse walks one proto message's fields, returning nil-truncating on any
+// malformed input (the replies under test are well-formed by construction).
+func cparse(b []byte) []cfield {
+	var out []cfield
+	for len(b) > 0 {
+		tag := int(b[0])
+		b = b[1:]
+		f := cfield{num: tag >> 3, wire: tag & 7}
+		switch f.wire {
+		case 0:
+			v, n := binary.Uvarint(b)
+			if n <= 0 {
+				return out
+			}
+			f.val, b = v, b[n:]
+		case 2:
+			l, n := binary.Uvarint(b)
+			if n <= 0 || uint64(len(b)-n) < l {
+				return out
+			}
+			f.raw, b = b[n:n+int(l)], b[n+int(l):]
+		default:
+			return out
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // readFrame reads one Connect envelope from r.
 func readFrame(t *testing.T, r io.Reader) (flags byte, payload []byte) {
 	t.Helper()
@@ -168,15 +208,39 @@ func TestCursorBidiTranslation(t *testing.T) {
 			sawKvAnswer = true
 		}
 
-		// 4. Send the request_context handshake (exec_server_message id=9, field 10).
-		execReq := cmsg(2, append(cvint(1, 9), cmsg(10, nil)...)) // exec_server_message{ id:9, request_context_args{} }
+		// 4. Send the request_context handshake (exec_server_message id=9,
+		// exec_id, field 10) and flush.
+		execReq := cmsg(2, append(cvint(1, 9), append(cstr(15, "exec-9"), cmsg(10, nil)...)...)) // exec_server_message{ id:9, exec_id, request_context_args{} }
 		w.Write(cframe(execReq))
 		fl.Flush()
 
-		// 5. Read the client's exec_client_message reply.
+		// 5. Read the client's exec_client_message reply and parse the nested
+		// ExecClientMessage (the wrapExecClient contract): the correlation id
+		// echoes the request's (fExecMessageID=1), the exec id rides back when
+		// the request carried one (fExecMessageExecID=15), and the handshake
+		// payload field is answered in kind (request_context_result=10).
 		_, reply2 := readFrame(t, body)
-		if len(reply2) == 0 || reply2[0] != byte(2<<3|2) {
-			t.Errorf("expected exec_client_message (field 2) reply, got %x", reply2)
+		execEcho, execRide, execPayload := uint64(0), "", false
+		if len(reply2) > 0 && reply2[0] == byte(2<<3|2) {
+			if outer := cparse(reply2); len(outer) == 1 && outer[0].num == 2 && outer[0].wire == 2 {
+				for _, f := range cparse(outer[0].raw) {
+					switch f.num {
+					case 1:
+						if f.wire == 0 {
+							execEcho = f.val
+						}
+					case 15:
+						if f.wire == 2 {
+							execRide = string(f.raw)
+						}
+					case 10:
+						execPayload = true
+					}
+				}
+			}
+		}
+		if execEcho != 9 || execRide != "exec-9" || !execPayload {
+			t.Errorf("exec reply must echo id=9, ride exec_id and answer request_context_result (field 10), got %x", reply2)
 		} else {
 			sawCtxAnswer = true
 		}

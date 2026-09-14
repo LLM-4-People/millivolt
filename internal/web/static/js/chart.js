@@ -457,8 +457,16 @@ function chartYTicks(u, ai, min, max) {
 // x already omits empty intervals). disp.x0 is the left edge; align alone
 // cannot separate three bars.
 function chartBarGeometry(si) {
-  const m = _plan.meta[si - 1];
-  if (m.hidden) return { offset: 0, size: 0 };
+  // A queued draw (uPlot queues redraws as microtasks and destroy() does
+  // not cancel them) can run after restart teardown cleared the payload or
+  // after a tiles-only preset replaced the plan: no plan row - or, with the
+  // plan still live, no payload - exists then. Deny by default, the
+  // !chartAgg guard shape the x callbacks use, applied to this callback's
+  // absent dependencies: return the hidden-series contract (a bar that
+  // draws nothing) instead of dereferencing the missing plan row or the
+  // missing bucket_ms.
+  const m = _plan?.meta[si - 1];
+  if (!m || m.hidden || (!_compacted && !chartAgg)) return { offset: 0, size: 0 };
   const step = _compacted ? 1 : chartAgg.bucket_ms;
   return { offset: m.offset * step, size: m.size * step };
 }

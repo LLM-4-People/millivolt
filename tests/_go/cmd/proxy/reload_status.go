@@ -249,6 +249,11 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", ct)
 		}
+		// The success path never sends nosniff (only the WriteError failure
+		// transport does, via http.Error) - the recorded position per row.
+		if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "" {
+			t.Errorf("X-Content-Type-Options = %q, want unset on success", xcto)
+		}
 		if got, want := w.Body.String(), `{"ok":true,"restart_required":["history_size"]}`; got != want {
 			t.Errorf("success body = %q, want %q", got, want)
 		}
@@ -260,10 +265,19 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		// the read, the endpoint keeps the running config and answers with
 		// the flat operator error body. The failure transport is
 		// adminjson.WriteError (http.Error), whose Go 1.26 contract resets
-		// Content-Type to text/plain even though the handler set
+		// Content-Type to text/plain even though the handler declared
 		// application/json first - the body stays the flat JSON error
-		// either way. Pinned as it stands: the W30 batch owns no second
-		// behavior change.
+		// either way. This declare-JSON-then-WriteError reset is the whole
+		// admin mutation family's contract, not a reload quirk: ~40 pinned
+		// sites across the operator plane answer the same way, with
+		// config/admin.go's settings handler the closest twin, and
+		// adminjson.WriteErrorJSON is reserved for the surfaces that
+		// answered application/json before W13 plus the /healthz method
+		// gate. Changing the family is one owner-wide decision at
+		// internal/adminjson (all pinned contracts change together),
+		// recorded with the nosniff record-accept in the wave-6 L3
+		// reload-transport decision - a reload-only switch would be the
+		// per-caller patch that decision declined.
 		if err := os.Mkdir(liveConfigPath, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -273,6 +287,11 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		}
 		if ct := w.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
 			t.Errorf("Content-Type = %q, want http.Error's text/plain reset (observed transport)", ct)
+		}
+		// WriteError goes through http.Error, which always sets nosniff -
+		// the recorded position, asserted so the transport cannot drift.
+		if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+			t.Errorf("X-Content-Type-Options = %q, want nosniff (http.Error's contract)", xcto)
 		}
 		var doc struct {
 			Error string `json:"error"`

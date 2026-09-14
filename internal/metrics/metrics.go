@@ -285,6 +285,21 @@ func (r *Record) GenThroughput() float64 {
 // cancellation never inflates the error rate.
 const StatusClientClosedRequest = 499
 
+// absorbedServerFailure is the one owner of the absorbed-5xx meaning: whether
+// any transparently-retried attempt saw a genuine upstream server failure.
+// A recovered retry still counts (the upstream did fail, even if a later
+// attempt succeeded); a 429 attempt is flow control and never does. IsError
+// relies on it in both of its arms, so the health counts cannot disagree
+// with themselves.
+func absorbedServerFailure(attempts []RetryAttempt) bool {
+	for _, a := range attempts {
+		if a.StatusCode >= 500 {
+			return true
+		}
+	}
+	return false
+}
+
 // Use it everywhere instead of re-deriving the predicate so the live counter,
 // the aggregates, and the dashboard never disagree. The purge SQL predicate
 // (storage.store.go's HasError clause) must stay semantically identical to
@@ -298,12 +313,7 @@ func (r *Record) IsError() bool {
 	if r.StatusCode == 429 || r.StatusCode == StatusClientClosedRequest {
 		// Still honor an absorbed 5xx from an earlier attempt (a request that
 		// saw a genuine server failure before the client gave up on it).
-		for _, a := range r.Attempts {
-			if a.StatusCode >= 500 {
-				return true
-			}
-		}
-		return false
+		return absorbedServerFailure(r.Attempts)
 	}
 	// A structured error classified by the proxy (queue_full,
 	// upstream_unreachable, stream_read_error, transform_error, or the
@@ -317,12 +327,7 @@ func (r *Record) IsError() bool {
 	}
 	// Absorbed retry attempts: a 5xx that a later retry masked still counts as
 	// an upstream failure (a 429 attempt is flow control and does not).
-	for _, a := range r.Attempts {
-		if a.StatusCode >= 500 {
-			return true
-		}
-	}
-	return false
+	return absorbedServerFailure(r.Attempts)
 }
 
 // HasRateLimit reports whether this request received HTTP 429, either as its

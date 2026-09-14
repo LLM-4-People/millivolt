@@ -129,8 +129,11 @@ func TestSettingsCategoryRefKeysMatchGoCategories(t *testing.T) {
 // literals ValidateModelRules switches on, so they are the complete Go
 // vocabulary). The editor's mode dropdown and the draft fallback both read
 // this table; previously only a ui_check hand list guarded it, so a Go-side
-// mode rename or removal drifted silently. The label half of each pair stays
-// presentation-only and unpinned.
+// mode rename or removal drifted silently. The label half of each pair is
+// not presentation-only: mrModeSelectHTML renders it as the option's value
+// attribute and collectModelRules sends that select value as the wire mode,
+// so ui_check pins the rendered option values (the labels-as-values order)
+// while this Go pin owns the declared value half's sequence.
 func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 	src, err := staticFS.ReadFile("static/js/chrome.js")
 	if err != nil {

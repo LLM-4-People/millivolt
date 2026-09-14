@@ -1146,7 +1146,7 @@
   .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
   .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }
   /* Client-cancelled row: warm muted gray - an outcome of its own, not a failure. */
-  .pill.cancel { background: rgba(168,160,150,.13); color: var(--muted); }
+  .pill.cancel { background: color-mix(in srgb, rgb(168,160,150) var(--pill-tint), transparent); color: var(--muted); }
   /* In-flight request pill: the accent "live" pulse for a row still streaming. */
   .pill.live { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
   /* Operator hold: parked, not in flight. Muted, no pulse. Click opens the hold editor. */

@@ -24,6 +24,7 @@ import (
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
@@ -1901,8 +1902,7 @@ func isAlphaNum(c byte) bool {
 func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	fail := func(status int, message string) {
-		w.WriteHeader(status)
-		fmt.Fprintf(w, "{\"error\":%s}\n", jsonString(message))
+		adminjson.WriteErrorJSON(w, status, message)
 	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -1985,10 +1985,4 @@ func timeToMilli(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixMilli()
-}
-
-func jsonString(s string) string {
-	// Marshal of a plain string cannot fail.
-	b, _ := json.Marshal(s)
-	return string(b)
 }

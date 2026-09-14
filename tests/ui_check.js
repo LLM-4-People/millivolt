@@ -263,6 +263,20 @@ const dom = dashboardDOM(html, pageOptions);
 
 const w = dom.window;
 const d = w.document;
+// jsdom reports uncaught page errors and its own not-implemented navigation
+// through virtualConsole jsdomError events; the default console forwarding
+// only prints them to stderr, where a green run can hide an uncaught
+// thrower. Install the counting listener at harness start, before any test
+// runs: a not-implemented navigation counts as the reload signal the
+// reload-boundary test reads (jsdomReloads); every other error fails the
+// run while still printing. Installed previously at the reload test, too
+// late to count throwers from earlier scenarios.
+let jsdomReloads = 0;
+dom.virtualConsole.removeAllListeners('jsdomError');
+dom.virtualConsole.on('jsdomError', error => {
+  if (error.type === 'not-implemented' && /navigation/.test(error.message)) jsdomReloads++;
+  else { failures.push(error.message); console.error(error); }
+});
 for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
   'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
   'bad_label.example', '-host.example', 'host-.example', 'host..example']) {
@@ -2287,11 +2301,55 @@ async function main() {
   const yStub = { valToPos: v => -v * 1000 }; // decades land >= CHART_Y_TICK_PX apart, so a guarded draw keeps the whole ladder
   let clearedY;
   try { clearedY = compactOpts.axes[1].splits(yStub, 1, 0, 100, 28, 1); } catch { resetAxisSafe = false; }
+  // uPlot draws series after axes in one queued pass, so the same cleared
+  // window also reaches a bar series' disp callbacks: disp.x0.values and
+  // disp.size.values both route through chartBarGeometry, which reads the
+  // live module state at call time. Drive the builder through a minimal
+  // plot stub (the builder needs mode/series/_data/scales/bbox plus the two
+  // valToPos callbacks; all-null series values skip the raster loop after
+  // the disp calls), then pin the geometry the cleared state must answer
+  // with: the hidden-series contract, same as a toggled-off bar.
+  const barU = {
+    mode: 1,
+    data: [[0.5, 1.5], [null, null]],
+    _data: [[0.5, 1.5], [null, null]],
+    bbox: { left: 0, top: 0, width: 500, height: 140 },
+    scales: { x: { ori: 0, dir: 1, distr: 1 }, y: { ori: 0, dir: 1, distr: 1 } },
+    series: [{ scale: 'x' }, { scale: 'y', width: 0, min: 0, max: 100, fillTo: () => 0, pxRound: Math.round }],
+    valToPosH: (v, k, dim, off) => off + dim * v / 100,
+    valToPosV: (v, k, dim, off) => off + dim * (1 - v / 100),
+  };
+  let resetBarSafe = true, clearedBarGeom = '';
+  try {
+    compactOpts.series[1].paths(barU, 1, 0, 1);
+    clearedBarGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
+  } catch { resetBarSafe = false; }
   w.eval('chartAgg = window.__aggKeep; chartView.preset = "traffic"; chartData()');
   const guardedY = compactOpts.axes[1].splits(yStub, 1, 0, 100, 28, 1);
+  // The live plan through the same builder proves the drive is real: a
+  // visible grouped bar must answer with its slot geometry, never the
+  // degenerate contract (the stub cannot vacuously "pass" the cleared
+  // drives below).
+  let guardedBarSafe = true, guardedBarGeom = '';
+  try {
+    compactOpts.series[1].paths(barU, 1, 0, 1);
+    guardedBarGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
+  } catch { guardedBarSafe = false; }
   w.eval('chartAgg = null');
+  // The payload-cleared window with the plan still live: the deref shape
+  // the overview state never reaches (chartAgg.bucket_ms read on a null
+  // payload, with the traffic plan's meta row present and visible).
+  let clearedPayloadBarSafe = true, clearedPayloadBarGeom = '';
+  try {
+    compactOpts.series[1].paths(barU, 1, 0, 1);
+    clearedPayloadBarGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
+  } catch { clearedPayloadBarSafe = false; }
   check('a queued axis callback tolerates chart state being cleared for restart',
     resetAxisSafe && JSON.stringify(clearedY) === JSON.stringify(guardedY));
+  check('a queued bar disp callback tolerates chart state being cleared for restart',
+    resetBarSafe && clearedPayloadBarSafe && guardedBarSafe &&
+    clearedBarGeom === '{"offset":0,"size":0}' && clearedPayloadBarGeom === '{"offset":0,"size":0}' &&
+    guardedBarGeom !== '{"offset":0,"size":0}');
 
   // ---- test 11f: dash.chart restore (deny by default) ----
   // A legacy FLAT hidden array is discarded wholesale (the old shape carried
@@ -2561,6 +2619,47 @@ async function main() {
     return !!xp && !!ct && props.every(p => {
       const a = xp.style.getPropertyValue(p), b = ct.style.getPropertyValue(p);
       return a !== '' && a === b;
+    });
+  })());
+  // Shared CSSOM reader for the declared-value pins below: the FIRST rule
+  // matching a selector (media overrides later in the sheet - e.g. the
+  // reduced-motion .pill.live animation reset - must not shadow the
+  // top-level declaration the pin reads).
+  const firstCSSRule = sel => {
+    const visit = list => { for (const r of list) { if (r.selectorText === sel) return r; if (r.cssRules && r.cssRules.length) { const got = visit(r.cssRules); if (got) return got; } } };
+    for (const sheet of d.styleSheets) { const got = visit(sheet.cssRules); if (got) return got; }
+    return null;
+  };
+  // Pill alpha pin: the status pills' tinted backgrounds share one ladder -
+  // --pill-tint at rest, --pill-tint-strong once a pill flags an
+  // operator-visible state (paused, throttled, debug) - and the live pill's
+  // 15% is its documented one-off mid tint (dashboard.css's token block).
+  // Assert the DECLARED values: a pill re-stating its strength as a literal
+  // (the .pill.cancel rgba regression) or drifting to the other tier redds
+  // here without a browser.
+  check('every status pill derives its background alpha from the shared tint ladder', (() => {
+    const bg = sel => firstCSSRule(sel)?.style.getPropertyValue('background') || '';
+    return [
+      ['.pill.ok', 'var(--pill-tint)'],
+      ['.pill.err', 'var(--pill-tint)'],
+      ['.pill.warn', 'var(--pill-tint)'],
+      ['.pill.cancel', 'var(--pill-tint)'],
+      ['.pill.paused', 'var(--pill-tint-strong)'],
+      ['.pill.throttled', 'var(--pill-tint-strong)'],
+      ['.pill.debug', 'var(--pill-tint-strong)'],
+      ['.pill.live', '15%, transparent'],
+    ].every(([sel, want]) => bg(sel).includes(want));
+  })());
+  // Tick-strip pin: the six graduated-scale edges (header and footer rails,
+  // KPI band, section head and foot, day rule) all paint the signature
+  // motif through --tick-strip - the one authored gradient pair. A site
+  // reverting to a hand-written gradient (or a plain rule) once went
+  // green; the declared-value pin makes each site exact.
+  check('the six graduated-scale edges all paint through the --tick-strip token', (() => {
+    const sites = ['header::after', '.kpis::after', '.st-hd::after', '.st-ft::before', '.day-rule', 'footer::before'];
+    return sites.length === 6 && sites.every(sel => {
+      const r = firstCSSRule(sel);
+      return !!r && r.style.getPropertyValue('background') === 'var(--tick-strip)';
     });
   })());
   check('the summary hides the bucket-cadence context row',
@@ -3609,17 +3708,12 @@ async function main() {
   }
 
   // Frontend changes reload through the existing bootstrap boundary only.
-  // jsdom reports navigation as not implemented; count that actual reload
-  // signal while keeping unexpected errors visible. Chromium verifies the
+  // jsdom reports navigation as not implemented; the harness-start
+  // jsdomError listener counts that actual reload signal (jsdomReloads)
+  // while every other error fails the run. Chromium verifies the
   // resulting new document separately.
   {
     w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
-    let reloads = 0;
-    dom.virtualConsole.removeAllListeners('jsdomError');
-    dom.virtualConsole.on('jsdomError', error => {
-      if (error.type === 'not-implemented' && /navigation/.test(error.message)) reloads++;
-      else { failures.push(error.message); console.error(error); }
-    });
     const originalFetch = w.fetch;
     const newVersion = '0000000000000002';
     const payload = (version, requests = 37) => ({
@@ -3638,7 +3732,7 @@ async function main() {
     w.fetchBootstrap('resume');
     await sleep(20);
     check('unchanged frontend updates data without navigation or extra version requests',
-      reloads === 0 && calls === 1 && w.eval('kpiAgg.requests') === 37);
+      jsdomReloads === 0 && calls === 1 && w.eval('kpiAgg.requests') === 37);
 
     // An unexpected full response to a resume request is re-captured behind
     // the full/SSE barrier. The accepted full carries its own state/version.
@@ -3646,7 +3740,7 @@ async function main() {
     calls = 0;
     w.fetchBootstrap('resume');
     await sleep(20);
-    check('same-assets restart re-captures an unexpected full response without a page reload', reloads === 0 && calls === 2);
+    check('same-assets restart re-captures an unexpected full response without a page reload', jsdomReloads === 0 && calls === 2);
 
     // Do not start expensive scans that a changed-frontend reload would
     // immediately throw away. An SSE restart first checks the bootstrap.
@@ -3668,7 +3762,7 @@ async function main() {
       w.fetchBootstrap('resume');
       await sleep(10);
     }
-    check('missing or malformed asset versions never create a reload loop', reloads === 0);
+    check('missing or malformed asset versions never create a reload loop', jsdomReloads === 0);
 
     const pending = [];
     w.fetch = () => new Promise(resolve => pending.push(resolve));
@@ -3679,14 +3773,14 @@ async function main() {
     pending[0]({ok: true, json: async () => payload(newVersion, 999)});
     await sleep(10);
     check('a superseded bootstrap cannot reload the page using an outdated version',
-      reloads === 0 && w.eval('kpiAgg.requests') === 39);
+      jsdomReloads === 0 && w.eval('kpiAgg.requests') === 39);
 
     let afterRan = false;
     setResponse(payload(newVersion, 999));
     w.fetchBootstrap('resume', () => { afterRan = true; });
     await sleep(20);
     check('changed frontend requests one reload before applying state or boot callbacks',
-      reloads === 1 && !afterRan && w.eval('kpiAgg.requests') === 39);
+      jsdomReloads === 1 && !afterRan && w.eval('kpiAgg.requests') === 39);
     sweeps = 0;
     const callsBeforeReload = calls;
     w.refreshAfterRestart();
@@ -3694,7 +3788,7 @@ async function main() {
     w.fetchBootstrap('full');
     await sleep(10);
     check('reload in progress suppresses duplicate navigation and bootstrap work',
-      reloads === 1 && calls === callsBeforeReload && sweeps === 0);
+      jsdomReloads === 1 && calls === callsBeforeReload && sweeps === 0);
     w.fetch = originalFetch;
     w.refreshAggregates = originalAggregates;
     w.fetchSettings = originalSettings;
@@ -5015,7 +5109,7 @@ async function main() {
         wrap.querySelector('[data-mr-add]').click();
         check('a disabled add control adds no row',
           wrap.querySelectorAll('.mr-row').length === 64);
-        check('the mode select offers exactly the Go rule vocabulary',
+        check('the mode select renders its options in the vocabulary\'s order with labels as values',
           JSON.stringify([...wrap.querySelector('.mr-row .mr-mode').options].map(o => o.value)) ===
           JSON.stringify(['exact', 'pattern', 'lower']));
         wrap.remove();

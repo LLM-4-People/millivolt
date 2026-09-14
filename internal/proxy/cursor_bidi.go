@@ -282,10 +282,11 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 		// the doWithRetry error path: the client's own cancellation is 499 +
 		// client-disconnected, never an upstream error. (The base request ctx
 		// is what distinguishes a client cancel from a fired per-send budget:
-		// the wait deadline cancels only the upstream request.)
+		// the wait deadline cancels only the upstream request. rec.StatusCode
+		// is still 0 here - openCursorHTTP failed - so markClientGone's
+		// status guard stamps exactly the 499.)
 		if r.Context().Err() == context.Canceled {
-			rec.StatusCode = metrics.StatusClientClosedRequest
-			rec.ClientDisconnected = true
+			markClientGone(rec)
 			return
 		}
 		s.writeTransportFailure(w, rec, err)

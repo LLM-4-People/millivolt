@@ -14,9 +14,10 @@ import (
 // set and the application/json error transport, GET serves the exact
 // liveness JSON, and HEAD keeps GET's headers with an empty body (the HTTP
 // layer strips it - a recorder would only show the handler's pre-strip
-// write). The 405 carries no X-Content-Type-Options: the nosniff position is
-// record-accepted at the transport owner (adminjson.WriteErrorJSON's doc);
-// the pin documents the header set as it stands.
+// write). Every row also asserts the recorded nosniff position: the 405
+// carries NO X-Content-Type-Options (the record-accept decision at the
+// transport owner, adminjson.WriteErrorJSON's doc) and the 200 rows never
+// sent it, so a transport change cannot drift the position silently.
 func TestHealthzMethodGateAndBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(handleHealthz))
 	defer srv.Close()
@@ -24,13 +25,14 @@ func TestHealthzMethodGateAndBody(t *testing.T) {
 		name, method                        string
 		wantStatus                          int
 		wantCT, wantCC, wantAllow, wantBody string
+		wantXCTO                            string
 	}{
 		{"POST is method-gated", http.MethodPost, http.StatusMethodNotAllowed,
-			"application/json", "no-store", "GET, HEAD", "{\"error\":\"GET or HEAD only\"}\n"},
+			"application/json", "no-store", "GET, HEAD", "{\"error\":\"GET or HEAD only\"}\n", ""},
 		{"GET serves the liveness body", http.MethodGet, http.StatusOK,
-			"application/json", "no-store", "", "{\"ok\":true}\n"},
+			"application/json", "no-store", "", "{\"ok\":true}\n", ""},
 		{"HEAD serves liveness with an empty body", http.MethodHead, http.StatusOK,
-			"application/json", "no-store", "", ""},
+			"application/json", "no-store", "", "", ""},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			req, err := http.NewRequest(row.method, srv.URL, nil)
@@ -57,6 +59,9 @@ func TestHealthzMethodGateAndBody(t *testing.T) {
 			}
 			if allow := resp.Header.Get("Allow"); allow != row.wantAllow {
 				t.Errorf("%s: Allow = %q, want %q", row.method, allow, row.wantAllow)
+			}
+			if xcto := resp.Header.Get("X-Content-Type-Options"); xcto != row.wantXCTO {
+				t.Errorf("%s: X-Content-Type-Options = %q, want %q (the recorded nosniff position)", row.method, xcto, row.wantXCTO)
 			}
 			if string(body) != row.wantBody {
 				t.Errorf("%s: body = %q, want %q", row.method, body, row.wantBody)
