@@ -6,7 +6,9 @@ package main
 // authentication attempt may be cached) and the frame-ancestors CSP (a
 // denial must never be frameable). Before denyOperator owned the shape, most
 // of these sites set no-store but skipped the CSP; this drives every
-// drivable denial path and pins both headers.
+// drivable denial path and pins both headers, plus the flat denial body
+// byte-exactly on the three message-owning rows (disabled plane, bearer
+// challenge, lockout).
 
 import (
 	"errors"
@@ -30,7 +32,10 @@ func (brokenDeadlineWriter) SetReadDeadline(time.Time) error {
 
 func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 	const token = "operator-fixture-credential-long"
-	assertDenial := func(t *testing.T, name string, w *httptest.ResponseRecorder, wantStatus int) {
+	// wantBody pins the flat {"error":"..."} body byte-exactly (WriteError's
+	// http.Error trailing newline included) on the rows that own a message;
+	// "" skips the body leg (page-shaped and prose-denial rows).
+	assertDenial := func(t *testing.T, name string, w *httptest.ResponseRecorder, wantStatus int, wantBody string) {
 		t.Helper()
 		if w.Code != wantStatus {
 			t.Errorf("%s: status = %d, want %d", name, w.Code, wantStatus)
@@ -41,13 +46,16 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		if csp := w.Header().Get("Content-Security-Policy"); csp != "frame-ancestors 'none'" {
 			t.Errorf("%s: Content-Security-Policy = %q, want frame-ancestors 'none'", name, csp)
 		}
+		if wantBody != "" && w.Body.String() != wantBody {
+			t.Errorf("%s: body = %q, want %q", name, w.Body.String(), wantBody)
+		}
 	}
 
 	t.Run("wrong method", func(t *testing.T) {
 		gate := newOperatorGate(token)
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/admin/session", nil))
-		assertDenial(t, "405", w, http.StatusMethodNotAllowed)
+		assertDenial(t, "405", w, http.StatusMethodNotAllowed, "")
 	})
 
 	t.Run("unarmed plane", func(t *testing.T) {
@@ -56,7 +64,8 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+token)
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "403", w, http.StatusForbidden)
+		assertDenial(t, "403", w, http.StatusForbidden,
+			"{\"error\":\"operator plane is disabled: set MILLIVOLT_OPERATOR_TOKEN to enable it\"}\n")
 	})
 
 	t.Run("wrong credential bearer", func(t *testing.T) {
@@ -65,7 +74,8 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+token+"-wrong")
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "401 json", w, http.StatusUnauthorized)
+		assertDenial(t, "401 json", w, http.StatusUnauthorized,
+			"{\"error\":\"operator token required\"}\n")
 	})
 
 	t.Run("wrong credential form", func(t *testing.T) {
@@ -75,7 +85,7 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "401 login page", w, http.StatusUnauthorized)
+		assertDenial(t, "401 login page", w, http.StatusUnauthorized, "")
 	})
 
 	t.Run("oversized form body", func(t *testing.T) {
@@ -85,7 +95,7 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "400 oversized", w, http.StatusBadRequest)
+		assertDenial(t, "400 oversized", w, http.StatusBadRequest, "")
 	})
 
 	t.Run("unsupported connection deadline", func(t *testing.T) {
@@ -95,7 +105,7 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		w := brokenDeadlineWriter{httptest.NewRecorder()}
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "500 deadline", w.ResponseRecorder, http.StatusInternalServerError)
+		assertDenial(t, "500 deadline", w.ResponseRecorder, http.StatusInternalServerError, "")
 	})
 
 	t.Run("lockout after repeated rejections", func(t *testing.T) {
@@ -113,6 +123,7 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+token+"-wrong")
 		w := httptest.NewRecorder()
 		gate.handleAdminSession(w, r)
-		assertDenial(t, "429 lockout", w, http.StatusTooManyRequests)
+		assertDenial(t, "429 lockout", w, http.StatusTooManyRequests,
+			"{\"error\":\"too many rejected credentials; try again later\"}\n")
 	})
 }

@@ -28,6 +28,7 @@ var isErrorCorpus = []isErrorRow{
 	{"final 400 (4xx other than 429)", Record{StatusCode: 400}, true, false},
 	{"structured error, status 0", Record{StatusCode: 0, ErrorType: "upstream_unreachable"}, true, false},
 	{"recovered after absorbed 5xx", Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 502}}}, true, false},
+	{"recovered after absorbed 500 (the >= 500 boundary)", Record{StatusCode: 200, Attempts: []RetryAttempt{{StatusCode: 500}}}, true, false},
 	{"recovered after absorbed 429 only", Record{StatusCode: 200, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 429, ErrorType: "rate_limit"}}}, false, true},
 	{"final 429 after an absorbed 5xx", Record{StatusCode: 429, RateLimited: true, Attempts: []RetryAttempt{{StatusCode: 503}}}, true, true},
 	{"queue wait is not429", Record{StatusCode: 200, QueueWaitMs: 10, RateLimited: true}, false, false},

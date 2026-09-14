@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -555,11 +554,15 @@ func extractUsageBytes(body []byte, rec *metrics.Record, usageKeys map[string]st
 		}
 		// Content presence drives the tool-call-only detection in FinalizeRecord
 		// (a content:null tool_calls response bills only tool args). Non-streaming
-		// never sets FirstAnswerAt, so flag content directly. Content is either a
-		// string or an array of parts - any non-null, non-empty value counts.
-		contentStr := messageContentText(raw.Choices[0].Message.Content)
-		if contentStr != "" {
+		// never sets FirstAnswerAt, so flag content directly through the shared
+		// flattenContent walk: any non-empty string or parts text counts.
+		if s, ok := flattenContent(raw.Choices[0].Message.Content); ok && s != "" {
 			rec.HadAnswerContent = true
+			// Response preview: a bounded rune-safe prefix of the text content,
+			// stored only when capture_body_preview is enabled (off by default).
+			if preview && rec.ResponsePreview == "" {
+				rec.ResponsePreview = metrics.TruncatePreview(s)
+			}
 		}
 		if n := len(raw.Choices[0].Message.ToolCalls); n > 0 {
 			rec.ToolCalls = n
@@ -571,42 +574,7 @@ func extractUsageBytes(body []byte, rec *metrics.Record, usageKeys map[string]st
 			}
 			rec.ToolNames = names
 		}
-		// Response preview: a bounded rune-safe prefix of the text content,
-		// stored only when capture_body_preview is enabled (off by default).
-		if preview {
-			if contentStr != "" && rec.ResponsePreview == "" {
-				rec.ResponsePreview = metrics.TruncatePreview(contentStr)
-			}
-		}
 	}
-}
-
-// messageContentText extracts text content from a chat message's content field,
-// which OpenAI serializes either as a plain string or as an array of parts
-// ([{"type":"text","text":"..."}]). Returns "" for null/empty. Used only to
-// detect content presence and (when preview is enabled) build a bounded preview
-// - never stores full content.
-func messageContentText(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	// Array-of-parts shape: concatenate the text parts.
-	var parts []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &parts) == nil {
-		var b strings.Builder
-		for _, p := range parts {
-			b.WriteString(p.Text)
-		}
-		return b.String()
-	}
-	return ""
 }
 
 // parseErrorBody extracts the provider's structured error detail (type, code,

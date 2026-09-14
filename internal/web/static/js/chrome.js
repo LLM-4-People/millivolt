@@ -693,13 +693,16 @@ function toggleSettings(e) {
   });
 }
 
+// The settings-load failure copy, shared by the fetcher and the form
+// builder (both render the same unavailable-config state).
+const SETTINGS_LOAD_FAIL = 'could not load config';
+
 function fetchSettings(discard = false) {
   const req = ++settingsReq;
   const draft = settingsFingerprint();
-  const fail = 'could not load config';
-  return operatorJsonBody('/admin/config', {}, fail)
+  return operatorJsonBody('/admin/config', {}, SETTINGS_LOAD_FAIL)
     .then(doc => {
-      if (!Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || fail);
+      if (!Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || SETTINGS_LOAD_FAIL);
       return doc;
     })
     .then(doc => {
@@ -730,7 +733,7 @@ function fillSettingsForm(doc) {
     rail.innerHTML = '';
     if (hd) hd.innerHTML = '';
     fillSettingsLive(null);
-    settingsStatus('could not load config');
+    settingsStatus(SETTINGS_LOAD_FAIL);
     updateSettingsActions();
     return;
   }
@@ -1534,6 +1537,11 @@ function validateModelRulesDraft(wrap) {
   return { ok: !firstBad, firstBad };
 }
 
+// The park/visibility button's title pair, shared by the row template and
+// the toggle handler so the two spellings of the same states cannot drift.
+const MR_VIS_TITLE_PARKED = 'un-park this rule';
+const MR_VIS_TITLE_ACTIVE = 'park this rule - keep it without applying it';
+
 function modelRuleRowHTML(r) {
   r = r || {};
   const mode = MODEL_RULE_MODES.some(([v]) => v === r.mode) ? r.mode : 'exact';
@@ -1545,7 +1553,7 @@ function modelRuleRowHTML(r) {
     `<input class="mr-from" value="${escapeHtml(r.from || '')}" placeholder="from - spelling (exact) or regex (pattern)"${dead} aria-label="from">` +
     `<span class="prov-arrow" aria-hidden="true">→</span>` +
     `<input class="mr-to" value="${escapeHtml(r.to || '')}" placeholder="to - empty removes the match"${dead} aria-label="to">` +
-    `<span class="mr-move"><button type="button" class="mr-vis" data-mr-vis aria-pressed="${off}" title="${off ? 'un-park this rule' : 'park this rule - keep it without applying it'}">${off ? '◌' : '◉'}</button><button type="button" data-mr-up aria-label="move rule up" title="move up">▲</button><button type="button" data-mr-dn aria-label="move rule down" title="move down">▼</button></span>` +
+    `<span class="mr-move"><button type="button" class="mr-vis" data-mr-vis aria-pressed="${off}" title="${off ? MR_VIS_TITLE_PARKED : MR_VIS_TITLE_ACTIVE}">${off ? '◌' : '◉'}</button><button type="button" data-mr-up aria-label="move rule up" title="move up">▲</button><button type="button" data-mr-dn aria-label="move rule down" title="move down">▼</button></span>` +
     `<button type="button" class="prov-x" data-mr-rm aria-label="remove rule" title="remove">✕</button>` +
     `<div class="mr-err" aria-live="polite"></div>` +
     `</div>`;
@@ -1971,7 +1979,11 @@ function providersEditorClick(e) {
     const lower = mode.value === 'lower';
     btn.textContent = off ? '◉' : '◌';
     btn.setAttribute('aria-pressed', String(!off));
-    btn.title = off ? 'un-park this rule' : 'park this rule - keep it without applying it';
+    // off is the PRE-toggle state (the row flip above already applied the
+    // new one), so the title ternary from the template does not transplant
+    // verbatim: the post-toggle title must match what a fresh render of
+    // the new state shows (a parked row offers un-parking).
+    btn.title = !off ? MR_VIS_TITLE_PARKED : MR_VIS_TITLE_ACTIVE;
     mode.disabled = !off;
     row.querySelector('.mr-from').disabled = !off || lower;
     row.querySelector('.mr-to').disabled = !off || lower;
@@ -2283,7 +2295,7 @@ function applySettings() {
       settingsStatus('model rules - fix the highlighted rule first');
       const f = gate.firstBad.querySelector('.mr-from');
       if (f) { f.focus(); flashBadInput(f); }
-      gate.firstBad.scrollIntoView({ block: 'center' });
+      if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
       return;
     }
   }
@@ -3295,6 +3307,7 @@ function previewedFilter(prefix) {
   return preview && preview.count > 0 && preview.selection === filterSelection(prefix) ? preview : null;
 }
 async function updateFilterCount(prefix, elId, btnId, phrase) {
+  const fail = 'count unavailable';
   const f = filterFromUI(prefix);
   const el = $(elId);
   const preview = {filter: f, selection: filterSelection(prefix), count: null};
@@ -3303,15 +3316,15 @@ async function updateFilterCount(prefix, elId, btnId, phrase) {
   if (!clearFilterActive(f)) { el.textContent = ''; return; }
   el.textContent = 'counting…';
   try {
-    const d = await operatorJsonBody('/admin/purge/count', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(f) }, 'count unavailable');
+    const d = await operatorJsonBody('/admin/purge/count', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(f) }, fail);
     if (_filterPreviews.get(prefix) !== preview || preview.selection !== filterSelection(prefix)) return;
-    if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || 'count unavailable');
+    if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || fail);
     preview.count = d.count;
     el.textContent = phrase(d.count);
     $(btnId).disabled = d.count === 0 || prefix === 'cf' && _purgeBusy;
   } catch (e) {
     if (_filterPreviews.get(prefix) === preview && preview.selection === filterSelection(prefix)) {
-      el.textContent = String(e.message || 'count unavailable');
+      el.textContent = String(e.message || fail);
     }
   }
 }
@@ -3340,6 +3353,7 @@ async function clearAll() {
 // Confirmed success is the only path that clears UI state. The same gate
 // handles full/filtered deletion, disables repeat submits, and reports failures.
 async function purgeMetrics(filter) {
+  const fail = 'could not delete records';
   if (_purgeBusy) return;
   _purgeBusy = true;
   $('btn-clear-filtered').disabled = true;
@@ -3348,8 +3362,8 @@ async function purgeMetrics(filter) {
   try {
     const options = {method: 'POST'};
     if (filter) { options.headers = JSON_HEADERS; options.body = JSON.stringify(filter); }
-    const result = await operatorJsonBody('/admin/purge', options, 'could not delete records');
-    if (result.ok !== true) throw new Error(result.error || 'could not delete records');
+    const result = await operatorJsonBody('/admin/purge', options, fail);
+    if (result.ok !== true) throw new Error(result.error || fail);
     _filterPreviews.clear();
     $('btn-logs-filtered').disabled = true;
     hideHdrMenu('clear-menu');
@@ -3360,7 +3374,7 @@ async function purgeMetrics(filter) {
     refreshAggregates();
     fetchBootstrap('full');
   } catch (err) {
-    $('clear-count').textContent = String(err.message || 'could not delete records');
+    $('clear-count').textContent = String(err.message || fail);
   } finally {
     _purgeBusy = false;
     $('btn-clear-all').disabled = false;

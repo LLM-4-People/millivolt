@@ -325,6 +325,12 @@ func TestOperatorNamespaceOwned(t *testing.T) {
 		if w.Code != http.StatusUnauthorized || hit != "" {
 			t.Errorf("unauthenticated namespace root %s: status=%d hit=%q want=401", target, w.Code, hit)
 		}
+		// The JSON 401 is a Bearer challenge: the realm header tells API
+		// clients which credential realm to present, on the gate surface
+		// itself (not just the session handshake).
+		if got := w.Header().Get("WWW-Authenticate"); got != `Bearer realm="millivolt-operator"` {
+			t.Errorf("unauthenticated namespace root %s: WWW-Authenticate = %q, want the Bearer realm challenge", target, got)
+		}
 	}
 }
 

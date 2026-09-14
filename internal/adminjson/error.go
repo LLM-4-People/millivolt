@@ -34,9 +34,10 @@ func WriteError(w http.ResponseWriter, status int, msg string) {
 // WriteErrorJSON is the sanctioned transport variant for the operator
 // surfaces whose error contract is an application/json body: cmd/proxy's
 // /metrics and /admin log/backup routes (export, purge, purge/count, backup,
-// restore), which answered application/json before the body gained one
-// marshaling owner, and the /healthz method gate, whose hand-spliced JSON
-// body http.Error previously mislabeled as text/plain. Same shape, same
+// restore), storage's /metrics/query (the bounded SELECT reader), which
+// answered application/json before the body gained one marshaling owner,
+// and the /healthz method gate, whose hand-spliced JSON body http.Error
+// previously mislabeled as text/plain. Same shape, same
 // single encoding owner (ErrorBody); the Content-Type is the only difference
 // from WriteError. The trailing newline matches json.Encoder's, which these
 // routes used previously.

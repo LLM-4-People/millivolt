@@ -551,3 +551,36 @@ func TestRedactHeaderName(t *testing.T) {
 		}
 	}
 }
+
+// The debug body cap policy: capBytes keeps the ORIGINAL observed byte count
+// and an explicit truncation flag when the limit cuts the body; the
+// cappedWriter reports the total it saw (seen), not the retained prefix;
+// and a limit that cuts mid-rune surfaces the U+FFFD replacement - the
+// retained view is always valid UTF-8 for JSON display, while Bytes and
+// Truncated stay the caller's own facts, never recomputed by the sanitize.
+func TestSanitizeDebugBodyPolicyRows(t *testing.T) {
+	over := capBytes([]byte("abcdef"), 3)
+	if over.Raw != "abc" || over.Bytes != 6 || !over.Truncated {
+		t.Fatalf("capBytes over-limit = %+v, want {Raw:abc Bytes:6 Truncated:true}", over)
+	}
+	atLimit := capBytes([]byte("abc"), 3)
+	if atLimit.Raw != "abc" || atLimit.Bytes != 3 || atLimit.Truncated {
+		t.Fatalf("capBytes at-limit = %+v, want {Raw:abc Bytes:3 Truncated:false}", atLimit)
+	}
+	cw := &cappedWriter{limit: 4}
+	for _, chunk := range []string{"1234", "5678"} {
+		if _, err := cw.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seen := cw.body()
+	if seen.Raw != "1234" || seen.Bytes != 8 || !seen.Truncated {
+		t.Fatalf("cappedWriter over-cap = %+v, want {Raw:1234 Bytes:8 Truncated:true}", seen)
+	}
+	// The limit lands mid-rune: the invalid half-rune becomes the U+FFFD
+	// replacement while the original size and truncation flag ride unchanged.
+	cut := capBytes([]byte("a\xc3\xa9b"), 2)
+	if cut.Raw != "a\ufffd" || cut.Bytes != 4 || !cut.Truncated {
+		t.Fatalf("mid-rune cut = %+v, want {Raw:a\\uFFFD Bytes:4 Truncated:true}", cut)
+	}
+}

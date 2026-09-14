@@ -275,7 +275,7 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		// answered application/json before W13 plus the /healthz method
 		// gate. Changing the family is one owner-wide decision at
 		// internal/adminjson (all pinned contracts change together),
-		// recorded with the nosniff record-accept in the wave-6 L3
+		// recorded with the W30 nosniff record-accept and the R11 L3
 		// reload-transport decision - a reload-only switch would be the
 		// per-caller patch that decision declined.
 		if err := os.Mkdir(liveConfigPath, 0o755); err != nil {

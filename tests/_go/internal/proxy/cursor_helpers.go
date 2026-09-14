@@ -2,9 +2,10 @@ package proxy
 
 // Pins for the cursor_helpers owners: writeSSEHeaders (the cursor surface of
 // the shared metrics.SetStreamHeaders triple), flattenContent (the one
-// content walker shared by the tool-result reader and the input estimate),
-// and sseEmitter's per-chunk created stamping (the cursor bridge's policy -
-// the Anthropic bridge pins one per stream instead).
+// content walker shared by the tool-result reader, the input estimate and
+// the relay's non-streaming answer-content walk), and sseEmitter's
+// per-chunk created stamping (the cursor bridge's policy - the Anthropic
+// bridge pins one per stream instead).
 
 import (
 	"encoding/json"
@@ -51,10 +52,11 @@ func TestCursorStreamSSEHeadersFromSharedTriple(t *testing.T) {
 	}
 }
 
-// flattenContent owns one content walk for the tool-result reader and the
-// input estimate. Rows: a bare string stays itself, a multi-part text array
-// joins, a mixed array keeps only its text parts, and any other shape
-// reports false.
+// flattenContent owns one content walk for the tool-result reader, the
+// input estimate and the relay's non-streaming answer-content walk (where
+// HadAnswerContent and the gated response preview both read it). Rows: a
+// bare string stays itself, a multi-part text array joins, a mixed array
+// keeps only its text parts, and any other shape reports false.
 func TestFlattenContentRows(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -73,6 +75,34 @@ func TestFlattenContentRows(t *testing.T) {
 			got, ok := flattenContent(json.RawMessage(tc.raw))
 			if ok != tc.ok || got != tc.want {
 				t.Fatalf("flattenContent(%s) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// The relay's non-streaming answer-content leg reads flattenContent too
+// (HadAnswerContent and the gated response preview both derive from it): a
+// mixed parts answer counts as content with only its text parts carrying
+// text, and an all-non-text parts body carries no text at all.
+func TestRelayAnswerContentWalksPartsThroughFlattenContent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		answer  bool
+		preview string
+	}{
+		{"mixed parts keep only their text", `[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"x"}},{"type":"audio","audio":{}}]`, true, "a"},
+		{"all-non-text parts carry no text", `[{"type":"image_url","image_url":{"url":"x"}}]`, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"choices":[{"message":{"role":"assistant","content":` + tc.content + `}}]}`)
+			rec := &metrics.Record{StatusCode: 200}
+			extractUsageBytes(body, rec, nil, true)
+			if rec.HadAnswerContent != tc.answer {
+				t.Fatalf("HadAnswerContent = %v, want %v", rec.HadAnswerContent, tc.answer)
+			}
+			if rec.ResponsePreview != tc.preview {
+				t.Fatalf("ResponsePreview = %q, want %q (non-text parts carry no text)", rec.ResponsePreview, tc.preview)
 			}
 		})
 	}

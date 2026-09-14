@@ -58,8 +58,9 @@ func extractToolResults(body []byte) []cursorToolResult {
 
 // flattenContent renders one OpenAI message content field as plain text:
 // a bare string stays itself, an array of {type:"text"} parts is joined,
-// and any other shape reports false. The tool-result reader and the
-// input-token estimate share it so the two content walks cannot drift.
+// and any other shape reports false. The tool-result reader, the
+// input-token estimate and the relay's non-streaming answer-content walk
+// share it so the content walks cannot drift.
 func flattenContent(raw json.RawMessage) (string, bool) {
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
@@ -199,7 +200,12 @@ func writeClientError(w http.ResponseWriter, rec *metrics.Record, typ, msg strin
 
 // retryAfterHeader builds the single extra-header shape shared by every 429
 // the proxy writes for its own queueing: Retry-After in whole seconds from
-// the operator-tuned base. The denial type and message stay with each caller.
+// the operator-tuned base. The denial type and message stay with each
+// caller, and so do the record stamps: the queue-admission arm stamps
+// queue_full plus the AcquireWith error text before its write, and the
+// storm arm stamps the decided 429 class through stormQueueErrorRecord
+// (the envelope owner) - folding record semantics into a header helper
+// would weld each arm's classification to a transport detail.
 func (s *Server) retryAfterHeader() http.Header {
 	h := http.Header{}
 	h.Set("Retry-After", strconv.Itoa(s.cfg().RetryAfterSeconds()))

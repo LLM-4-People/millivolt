@@ -1,6 +1,7 @@
 package format
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -140,5 +141,66 @@ func TestProtoStructValueDoor(t *testing.T) {
 	}
 	if got := m["k"]; got != "deep" {
 		t.Errorf("struct_value[\"k\"] = %#v, want \"deep\"", got)
+	}
+}
+
+// mcpArgValueString wraps a string as google.protobuf.Value.string_value
+// (field 3), the way an mcp_args entry carries it.
+func mcpArgValueString(s string) []byte {
+	b := appendTag(nil, 3, wireBytes)
+	b = appendVarint(b, uint64(len(s)))
+	return append(b, s...)
+}
+
+// mcpArgValueBool wraps a bool as google.protobuf.Value.bool_value (field 4).
+func mcpArgValueBool(v bool) []byte {
+	b := appendTag(nil, 4, wireVarint)
+	if v {
+		return append(b, 1)
+	}
+	return append(b, 0)
+}
+
+// mcpArgsEntry builds one map<string, bytes(Value)> entry exactly like the
+// mcp_args wire: field 1 key, field 2 Value bytes. An empty key is the
+// documented hostile shape decodeMapEntry must refuse.
+func mcpArgsEntry(key string, value []byte) []byte {
+	entry := appendTag(nil, 1, wireBytes)
+	entry = appendVarint(entry, uint64(len(key)))
+	entry = append(entry, key...)
+	entry = appendTag(entry, 2, wireBytes)
+	entry = appendVarint(entry, uint64(len(value)))
+	return append(entry, value...)
+}
+
+// TestParseMcpArgsSkipsHostileArgEntries pins the consumer leg of the
+// mcp_args map: parseMcpArgs must keep every good entry and silently skip
+// hostile ones (an empty-key entry decodes ok=false and is dropped), so one
+// malformed entry can neither blank the whole argument map nor smuggle an
+// empty-named key into it.
+func TestParseMcpArgsSkipsHostileArgEntries(t *testing.T) {
+	msg := appendString(nil, fMcpArgsName, "lookup")
+	msg = appendString(msg, fMcpArgsToolCallID, "call-9")
+	msg = appendMessage(msg, fMcpArgsArgs, mcpArgsEntry("file", mcpArgValueString("main.go")))
+	msg = appendMessage(msg, fMcpArgsArgs, mcpArgsEntry("dry_run", mcpArgValueBool(true)))
+	msg = appendMessage(msg, fMcpArgsArgs, mcpArgsEntry("", mcpArgValueString("hostile")))
+	outer := appendMessage(nil, 1, msg)
+	fields, err := parseProtoFields(outer)
+	if err != nil {
+		t.Fatalf("fixture mcp_args frame: %v", err)
+	}
+	if len(fields) != 1 {
+		t.Fatalf("fixture frame fields = %d, want 1", len(fields))
+	}
+	call := parseMcpArgs(&fields[0])
+	if call.Name != "lookup" || call.CallID != "call-9" {
+		t.Fatalf("name = %q callID = %q, want lookup/call-9", call.Name, call.CallID)
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(call.Args), &args); err != nil {
+		t.Fatalf("Args = %q: %v", call.Args, err)
+	}
+	if len(args) != 2 || args["file"] != "main.go" || args["dry_run"] != true {
+		t.Fatalf("args = %#v, want the two good entries only (hostile entry skipped)", args)
 	}
 }

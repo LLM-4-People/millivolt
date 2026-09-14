@@ -1067,8 +1067,19 @@ async function main() {
     const steps = w.mrDraftSteps(wrap);
     check('error and info rows are skipped by the browser preview pipeline',
       steps.length === 2 && steps.every(st => st.label === 'glm-5-3'));
-    // park both broken rows: the gate clears without deleting work
-    wrap.querySelectorAll('.mr-row')[0].querySelector('[data-mr-vis]').click();
+    // park both broken rows: the gate clears without deleting work. The
+    // park control's title must equal the freshly-rendered template's
+    // title for the same state before and after the toggle (the template
+    // and the toggle handler share one title pair).
+    const visBtn = wrap.querySelectorAll('.mr-row')[0].querySelector('[data-mr-vis]');
+    const visTpl = d.createElement('div');
+    visTpl.innerHTML = w.modelRuleRowHTML({ mode: 'pattern', from: 'x(?=y)' });
+    check('the park control title starts as the template renders it (active rule)',
+      visBtn.title === visTpl.querySelector('.mr-vis').title);
+    visBtn.click();
+    visTpl.innerHTML = w.modelRuleRowHTML({ mode: 'pattern', from: 'x(?=y)', disabled: true });
+    check('parking re-titles the control exactly like the freshly-rendered parked template',
+      visBtn.title === visTpl.querySelector('.mr-vis').title);
     wrap.querySelectorAll('.mr-row')[1].querySelector('[data-mr-vis]').click();
     const gate2 = w.validateModelRulesDraft(wrap);
     check('parking broken rules clears the save gate',
@@ -2350,6 +2361,26 @@ async function main() {
     resetBarSafe && clearedPayloadBarSafe && guardedBarSafe &&
     clearedBarGeom === '{"offset":0,"size":0}' && clearedPayloadBarGeom === '{"offset":0,"size":0}' &&
     guardedBarGeom !== '{"offset":0,"size":0}');
+  // The sticky-_compacted window: a queued draw can also land after a
+  // hole-bucket compaction armed _vis/_compacted and restart teardown
+  // cleared the payload. The guard's (!_compacted && !chartAgg) arm must
+  // NOT fire: the compacted step is 1 with no payload read, so the bar
+  // answers with its live compacted geometry, never the hidden contract.
+  w.eval('chartAgg = window.__aggKeep; chartAgg.buckets.forEach((b, i) => { b.req = i === 3 || i === 7 ? 1 : 0; }); chartData()');
+  let liveCompactedSafe = true, liveCompactedGeom = '';
+  try {
+    compactOpts.series[1].paths(barU, 1, 0, 1);
+    liveCompactedGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
+  } catch { liveCompactedSafe = false; }
+  w.eval('chartAgg = null');
+  let stickyCompactedSafe = true, stickyCompactedGeom = '';
+  try {
+    compactOpts.series[1].paths(barU, 1, 0, 1);
+    stickyCompactedGeom = w.eval('JSON.stringify(chartBarGeometry(1))');
+  } catch { stickyCompactedSafe = false; }
+  check('a queued bar disp callback keeps live geometry in the sticky-compacted cleared state',
+    liveCompactedSafe && stickyCompactedSafe && stickyCompactedGeom === liveCompactedGeom &&
+    stickyCompactedGeom !== '{"offset":0,"size":0}');
 
   // ---- test 11f: dash.chart restore (deny by default) ----
   // A legacy FLAT hidden array is discarded wholesale (the old shape carried
@@ -2660,6 +2691,31 @@ async function main() {
     return sites.length === 6 && sites.every(sel => {
       const r = firstCSSRule(sel);
       return !!r && r.style.getPropertyValue('background') === 'var(--tick-strip)';
+    });
+  })());
+  // Focus-contract pin: the focusable editor surfaces - the operator
+  // dialog's input, the settings search, the settings rows, the provider
+  // card header, the provider section inputs and the picker's custom-label
+  // input - declare the SAME accessible focus trio (accent border-color,
+  // outline: none, the 3px focus ring). The groups are deliberately NOT
+  // merged into one selector (each section stays decoupled, the W32
+  // hover-contract precedent), so a one-sided edit could drift silently;
+  // the declared-value pin makes every group exact and non-vacuous.
+  check('every focusable editor surface declares one identical focus contract', (() => {
+    const sels = [
+      '.operator-dialog input:focus',
+      '.st-hd input[type="search"]:focus',
+      '.st-ctl input:focus, .st-ctl textarea:focus',
+      '.prov-hd .sp-label:focus',
+      '.prov-sec input:focus, .prov-sec select:focus',
+      '.prov-menu-custom input:focus',
+    ];
+    const rules = sels.map(sel => firstCSSRule(sel));
+    if (rules.length !== 6 || rules.some(r => !r)) return false;
+    const props = ['border-color', 'outline', 'box-shadow'];
+    return props.every(p => {
+      const v = rules[0].style.getPropertyValue(p);
+      return v !== '' && rules.every(r => r.style.getPropertyValue(p) === v);
     });
   })());
   check('the summary hides the bucket-cadence context row',
@@ -3158,6 +3214,40 @@ async function main() {
     w.closeSettings(true);
     delete w.__settingsTestDoc;
     delete w.__mrDirtyDoc;
+  }
+
+  // The blocked-Apply drive: an invalid model-rules draft must stop the
+  // POST, name the fix on the status line and focus the first offender
+  // without a scrollIntoView crash on DOMs whose Element omits it (jsdom
+  // 30 does; the provider add-row guards the same call). The
+  // harness-start jsdomError listener fails the whole run on an uncaught
+  // page throw; the row also snapshots failures so the pin is self-contained.
+  {
+    const doc = JSON.parse(JSON.stringify(cfgDoc));
+    doc.fields.push({ key: 'model_rules', category: 'providers', label: 'Model rules', kind: 'model_rules', hot_reload: true });
+    doc.values.model_rules = [{ mode: 'pattern', from: 'a-b', to: 'a.b' }];
+    w.__mrGateDoc = doc;
+    w.eval('settingsDoc = window.__mrGateDoc; fillSettingsForm(settingsDoc)');
+    d.getElementById('settings-sheet').hidden = false;
+    const mrSettingsWrap = d.querySelector('#settings-fields [data-kind="model_rules"]');
+    // install the bad row the way a real typo does: type an RE2-invalid
+    // pattern into a live row (input-path validation reddens it).
+    const fromIn = mrSettingsWrap.querySelector('.mr-row .mr-from');
+    fromIn.value = 'x(?=y)';
+    fromIn.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('typing an invalid pattern reddens the row and arms Apply',
+      mrSettingsWrap.querySelector('.mr-row').dataset.mrState === 'error' &&
+        !d.getElementById('btn-settings-apply').disabled);
+    const failuresBefore = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with an invalid model-rules draft blocks the save without an uncaught TypeError',
+      failures.length === failuresBefore &&
+        d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first');
+    w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__settingsTestDoc;
+    delete w.__mrGateDoc;
   }
 
   // ---- test 12: chart preset registry - ids unique, dropdown follows ----
@@ -4908,7 +4998,7 @@ async function main() {
     try {
       await sleep(60);
 
-      // recordIsError mirrors metrics.Record.IsError. The 20 rows mirror the
+      // recordIsError mirrors metrics.Record.IsError. The 21 rows mirror the
       // semantics of tests/_go/internal/metrics/iserror_corpus.go (the Go
       // suite owns the corpus); the JS predicate must agree on every row.
       const corpus = [
@@ -4921,6 +5011,7 @@ async function main() {
         ['final 400 (4xx other than 429)', {status_code: 400}, true],
         ['structured error, status 0', {status_code: 0, error_type: 'upstream_unreachable'}, true],
         ['recovered after absorbed 5xx', {status_code: 200, attempts: [{status_code: 502}]}, true],
+        ['recovered after absorbed 500 (the >= 500 boundary)', {status_code: 200, attempts: [{status_code: 500}]}, true],
         ['recovered after absorbed 429 only', {status_code: 200, attempts: [{status_code: 429, error_type: 'rate_limit'}]}, false],
         ['final 429 after an absorbed 5xx', {status_code: 429, attempts: [{status_code: 503}]}, true],
         ['queue wait is not429', {status_code: 200}, false],
@@ -4934,7 +5025,7 @@ async function main() {
         ['cancel after429', {status_code: 499, attempts: [{status_code: 429}]}, false],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 20-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 21-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate.go on

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -105,11 +106,18 @@ func TestStormQueueTimeoutAndCancellation(t *testing.T) {
 	cfg.StormInitialBackoff = time.Second
 	cfg.StormMaxBackoff = time.Second
 	cfg.StormMaxWait = 20 * time.Millisecond
+	cfg.QueueRetryAfter = 5 * time.Second
 	buf := metrics.NewBuffer(10)
 	s := New(cfg, buf)
 	w := stormRequest(t, s, up.URL, "model-a", "key-a")
-	if w.Code != 429 || calls.Load() != 1 || w.Header().Get("Retry-After") == "" {
+	if w.Code != 429 || calls.Load() != 1 {
 		t.Fatalf("expected local bounded-queue rejection after one upstream send: %d calls=%d body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+	// The Retry-After hint is the operator-tuned queue_retry_after rendered
+	// in whole seconds through the single conversion - never a duration
+	// string or a hard-coded constant.
+	if got, want := w.Header().Get("Retry-After"), strconv.Itoa(cfg.RetryAfterSeconds()); got != want {
+		t.Fatalf("Retry-After = %q, want %q (queue_retry_after in whole seconds)", got, want)
 	}
 	// The rejection record carries the DECIDED status (429 - the status the
 	// proxy sent, or would have sent on a committed socket), never the

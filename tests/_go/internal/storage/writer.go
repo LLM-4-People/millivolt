@@ -167,6 +167,41 @@ func TestWriterRollbackAfterShapePromotion(t *testing.T) {
 	}
 }
 
+// markWrittenLocked evicts by arrival order once the cap is reached: with
+// WriteTrackCap 2 the third distinct id must forget the OLDEST tracked id,
+// never a newer one. Newest-eviction would both resurrect already-durable
+// rows on the ring/stored merge path and drop live ids instead of retired
+// ones - one row discriminates the order.
+func TestWrittenSetEvictsOldestAtCap(t *testing.T) {
+	opts := testOpts
+	opts.WriteTrackCap = 2
+	s, err := Open(filepath.Join(t.TempDir(), "evict.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	s.account([]*metrics.Record{
+		{ID: "oldest", Start: time.Now(), StatusCode: 200},
+		{ID: "middle", Start: time.Now(), StatusCode: 200},
+		{ID: "newest", Start: time.Now(), StatusCode: 200},
+	})
+	written := func(id string) bool {
+		s.aggMu.Lock()
+		defer s.aggMu.Unlock()
+		_, ok := s.written[id]
+		return ok
+	}
+	if written("oldest") {
+		t.Fatal("the oldest id survived the cap: eviction order is wrong")
+	}
+	if !written("middle") || !written("newest") {
+		t.Fatal("a newer id was evicted before the oldest")
+	}
+	if s.Totals().Requests != 3 {
+		t.Fatalf("totals = %+v, want all three rows accounted", s.Totals())
+	}
+}
+
 func TestInsertZeroOnlyElidesExactScalarZeros(t *testing.T) {
 	for _, value := range []any{"", 0, int64(0), float64(0), math.Copysign(0, -1)} {
 		if !insertZero(value) {
