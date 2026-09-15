@@ -66,6 +66,21 @@ type Analyzer struct {
 	// protocol proxied through never gets a synthetic error injected.
 	chatlike bool
 
+	// responsesStream marks a Responses-API-shaped feed (typed "response.*"
+	// events). Those events carry a per-response monotonic sequence_number
+	// used to order the stream, so appending a re-send's restarted event
+	// sequence would break documented ordering: the thinking rescue must
+	// never append after visible Responses events. chat-completions chunks
+	// have no ordering fields and accumulate independently.
+	responsesStream bool
+
+	// answerishSeen marks a delta that carried answer-shaped bytes the
+	// streaming rescue must never append after, even though they are not
+	// metrics content: a refusal message (the official delta field for
+	// refusals) or a deprecated function_call declaration. Rescue-gating
+	// state only - the record's content accounting is unchanged.
+	answerishSeen bool
+
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
 	// chunkCount (every content-bearing chunk: content, reasoning, AND tool
 	// calls) feeds the output-token fallback when the provider sends no usage
@@ -252,9 +267,18 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 			a.chatlike = true
 		}
 	}
+	if strings.HasPrefix(eventType, "response.") {
+		a.responsesStream = true
+	}
 	if responsesTerminalEvent(eventType) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
+	}
+	// Refusal and deprecated function_call deltas are answer-shaped bytes:
+	// a rescue appending a fresh attempt after them would duplicate visible
+	// output-shaped text, so they disqualify the thinking rescue.
+	if tokenHasNonEmpty(payload, "refusal") || tokenHasNonEmpty(payload, "function_call") {
+		a.answerishSeen = true
 	}
 
 	// Capture the model + request id from the first chunk (they're in every
@@ -477,10 +501,15 @@ func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 
 // OutcomeCode classifies the finished stream via the canonical degenerate
 // rules (metrics.ClassifyOutcome - the same predicate every relay path uses).
-// "" = healthy; otherwise the error code to surface (or, on the passthrough
-// path, the code whose in-band error chunk replaces the held terminal event).
+// Answer presence and reasoning presence are separate inputs: reasoning is
+// auxiliary output, so a reasoning-only stop is its own degenerate class
+// (metrics.CodeReasoningOnly), never a healthy completion and never the
+// nothing-at-all void. "" = healthy; otherwise the error code to surface (or,
+// on the passthrough path, the code whose in-band error chunk replaces the
+// held terminal event).
 func (a *Analyzer) OutcomeCode() string {
-	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen, !a.firstTokenAt.IsZero(), a.toolCalls, a.chatlike)
+	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
+		!a.firstAnswerAt.IsZero(), !a.firstReasoningAt.IsZero(), a.toolCalls, a.chatlike)
 }
 
 // RetryableTruncation reports whether the finished stream is a truncation
@@ -500,6 +529,29 @@ func (a *Analyzer) RetryableTruncation() bool {
 	}
 	a.flushEvent()
 	return a.firstTokenAt.IsZero() && a.errType == ""
+}
+
+// RetryableReasoningTruncation reports whether the finished stream is a
+// mid-thinking death the proxy may transparently re-send even though the
+// client already saw reasoning bytes: a chat-completions-shaped stream that
+// hit clean EOF or a read error without any terminal marker, carrying
+// reasoning but NO answer-shaped output (no content delta, no tool call, no
+// refusal or deprecated function_call) and no provider in-band error. The
+// completion contract is answer content and tool calls; reasoning is
+// auxiliary display text, so the fresh attempt's frames append cleanly to the
+// committed SSE connection (chat chunks have no ordering fields and the
+// official SDKs accumulate delta frames independently). Responses-API feeds
+// are excluded: their per-response sequence numbers are documented ordering
+// state, and a re-send would restart them mid-stream. finish_reason length
+// never reaches here (it is a terminator, not a truncation). Client-disconnect
+// gating is the caller's (it owns the record).
+func (a *Analyzer) RetryableReasoningTruncation() bool {
+	if !a.chatlike || a.terminatorSeen || a.errType != "" || a.responsesStream ||
+		a.answerishSeen || a.toolCalls > 0 {
+		return false
+	}
+	a.flushEvent()
+	return !a.firstReasoningAt.IsZero() && a.firstAnswerAt.IsZero()
 }
 
 // extractPreview extracts a bounded prefix (metrics.PreviewMaxBytes) of the

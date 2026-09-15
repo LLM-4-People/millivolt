@@ -1436,3 +1436,385 @@ func TestWriteRunJSONVoidBodyBytes(t *testing.T) {
 		t.Fatalf("void 502 body = %q, want the canonical empty_turn error JSON", got)
 	}
 }
+
+// Thinking-rescue fixtures: the reasoning-only delta frame providers stream
+// (DeepSeek reasoning_content and its spellings), the degenerate reasoning-only
+// stop, and a healthy fresh stream the rescue re-send appends.
+const thinkingRoleFrame = `data: {"id":"A","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n"
+const thinkingFrame = `data: {"id":"A","choices":[{"delta":{"reasoning_content":"thinking hard"}}]}` + "\n\n"
+const thinkingStopFrames = `data: {"id":"A","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+	`data: [DONE]` + "\n\n"
+const freshAnswerFrames = `data: {"id":"B","choices":[{"delta":{"role":"assistant"}}]}` + "\n\n" +
+	`data: {"id":"B","choices":[{"delta":{"content":"hello"}}]}` + "\n\n" +
+	`data: {"id":"B","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
+	`data: [DONE]` + "\n\n"
+
+const thinkingOnlyBody = `{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":null,"reasoning_content":"thought hard"},"finish_reason":"stop"}]}`
+
+// TestStreamThinkingTruncatedRescued: a stream that dies mid-thinking (clean
+// EOF, no terminal marker, only reasoning relayed) is transparently re-sent
+// on the thinking_retries budget: the client keeps the attempt-1 reasoning
+// (auxiliary display text) and receives the fresh stream's answer appended
+// behind it, the record stays a success, and the absorbed attempt is logged
+// as the dashboard's correction flag with the provider-error view.
+func TestStreamThinkingTruncatedRescued(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(thinkingRoleFrame))
+			w.(http.Flusher).Flush()
+			w.Write([]byte(thinkingFrame))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != 200 {
+		t.Fatalf("stream status = %d, want 200", status)
+	}
+	if !strings.Contains(got, `"reasoning_content":"thinking hard"`) {
+		t.Fatalf("attempt-1 reasoning must stay on the wire: %s", got)
+	}
+	if !strings.Contains(got, `"content":"hello"`) || !strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("client must receive the fresh stream's answer: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("rescued request must not surface the truncation: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (mid-thinking truncation absorbed + rescue)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() {
+		t.Fatalf("rescued request must not be an error: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 ||
+		rec.Attempts[0].ErrorType != "upstream_error" || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("absorbed attempt not logged as the provider-error correction: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+	if rec.FinishReason != "stop" || !rec.HadAnswerContent {
+		t.Fatalf("final record must reflect the fresh stream: finish=%q content=%v", rec.FinishReason, rec.HadAnswerContent)
+	}
+}
+
+// TestStreamThinkingStopRescued: a cleanly finished reasoning-only stream (the
+// model thought, stopped, never answered) is rescued while its terminal region
+// is still withheld - the client never sees attempt 1's finish chunk, the
+// re-send's own terminal region takes its place, and the fresh answer lands
+// behind the already-relayed reasoning.
+func TestStreamThinkingStopRescued(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(thinkingRoleFrame + thinkingFrame + thinkingStopFrames))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"reasoning_content":"thinking hard"`) {
+		t.Fatalf("attempt-1 reasoning must stay on the wire: %s", got)
+	}
+	if !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("client must receive the fresh stream's answer: %s", got)
+	}
+	// The withheld void must never surface: exactly one finish chunk (the
+	// fresh attempt's) and exactly one [DONE].
+	if strings.Count(got, `"finish_reason":"stop"`) != 1 {
+		t.Fatalf("exactly one finish chunk expected (the void's was withheld): %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeReasoningOnly+`"`) {
+		t.Fatalf("rescued request must not surface the degenerate error: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (reasoning-only stop absorbed + rescue)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() {
+		t.Fatalf("rescued request must not be an error: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 ||
+		rec.Attempts[0].ErrorType != "upstream_error" || rec.Attempts[0].ErrorCode != metrics.CodeReasoningOnly {
+		t.Fatalf("absorbed attempt not logged as the provider-error correction: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestStreamThinkingStopExhaustedSurfacesProviderError: with the thinking
+// budget disabled (thinking_retries: 0), a reasoning-only stop surfaces the
+// withheld terminal region's replacement in-band, and the record classifies
+// the outcome as a provider error (upstream_error / reasoning_only) so the
+// health counts and the error explorer group it with provider failures.
+func TestStreamThinkingStopExhaustedSurfacesProviderError(t *testing.T) {
+	upstream := streamUpstream(t, thinkingRoleFrame+thinkingFrame+thinkingStopFrames)
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	cfg := config.Default()
+	cfg.ThinkingRetries = 0
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != 200 {
+		t.Fatalf("stream status = %d, want 200 (error must be in-band)", status)
+	}
+	if !strings.Contains(got, `"code":"`+metrics.CodeReasoningOnly+`"`) {
+		t.Fatalf("in-band reasoning_only error missing: %s", got)
+	}
+	if strings.Contains(got, `"finish_reason":"stop"`) {
+		t.Fatalf("the void's finish chunk must be replaced, not relayed: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE] expected: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() {
+		t.Fatalf("an exhausted reasoning-only rescue is a genuine provider failure: %+v", rec)
+	}
+	if rec.ErrorType != "upstream_error" || rec.ErrorCode != metrics.CodeReasoningOnly {
+		t.Fatalf("record must classify as provider error: type=%q code=%q", rec.ErrorType, rec.ErrorCode)
+	}
+}
+
+// TestStreamThinkingLengthNeverRescued: finish_reason length is the client's
+// own token cap - a reasoning-only length finish relays verbatim, is never
+// re-sent, and never classifies as degenerate.
+func TestStreamThinkingLengthNeverRescued(t *testing.T) {
+	upstream := streamUpstream(t,
+		thinkingRoleFrame+thinkingFrame+
+			`data: {"id":"A","choices":[{"delta":{},"finish_reason":"length"}]}`+"\n\n"+
+			`data: [DONE]`+"\n\n")
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"finish_reason":"length"`) {
+		t.Fatalf("the length finish must relay verbatim: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeReasoningOnly+`"`) {
+		t.Fatalf("a length finish is never a degenerate class: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.FinishReason != "length" {
+		t.Fatalf("length is a clean provider signal: %+v", rec)
+	}
+}
+
+// TestStreamThinkingWithAnswerNeverRescued: once answer content reached the
+// client, no rescue may append a second generation - a truncation after the
+// answer began stays client-retryable (in-band error), even when reasoning
+// preceded the answer.
+func TestStreamThinkingWithAnswerNeverRescued(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte(thinkingRoleFrame + thinkingFrame +
+			`data: {"id":"A","choices":[{"delta":{"content":"half "}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("in-band truncated error missing: %s", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (a rescue after answer content is forbidden)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if recs[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("record error code = %q, want truncated", recs[0].ErrorCode)
+	}
+}
+
+// TestStreamThinkingResetRescued: a mid-thinking connection reset (the
+// upstream dropping the socket, not our own deadline) is the same rescuable
+// death as a clean EOF - "dies off mid-thinking for whatever reason".
+func TestStreamThinkingResetRescued(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			w.WriteHeader(200)
+			w.Write([]byte(thinkingRoleFrame))
+			w.(http.Flusher).Flush()
+			w.Write([]byte(thinkingFrame))
+			w.(http.Flusher).Flush()
+			// Drop the connection mid-thinking: the proxy sees a read error,
+			// not a clean EOF.
+			panic("simulated upstream crash mid-thinking")
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequest(t, srv, upstream)
+	if status != 200 {
+		t.Fatalf("stream status = %d, want 200", status)
+	}
+	if !strings.Contains(got, `"reasoning_content":"thinking hard"`) {
+		t.Fatalf("attempt-1 reasoning must stay on the wire: %s", got)
+	}
+	if !strings.Contains(got, `"content":"hello"`) {
+		t.Fatalf("client must receive the fresh stream's answer: %s", got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) || strings.Contains(got, "stream_read_error") {
+		t.Fatalf("the reset must be absorbed by the rescue, not surfaced: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (mid-thinking reset absorbed + rescue)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() {
+		t.Fatalf("rescued request must not be an error: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("absorbed reset not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestNonStreamReasoningOnlyRescued: the non-streaming twin - a
+// reasoning-only 200 body (DeepSeek message.reasoning_content, no answer)
+// is absorbed and re-run on the thinking budget before the status line, and
+// the client sees only the healthy second body.
+func TestNonStreamReasoningOnlyRescued(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(thinkingOnlyBody))
+			return
+		}
+		w.Write([]byte(realBody))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 || string(body) != realBody {
+		t.Fatalf("client must see only the healthy body: status=%d body=%q", resp.StatusCode, body)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (reasoning-only absorbed + rescue)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() {
+		t.Fatalf("rescued request must not be an error: %+v", rec)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 ||
+		rec.Attempts[0].ErrorType != "upstream_error" || rec.Attempts[0].ErrorCode != metrics.CodeReasoningOnly {
+		t.Fatalf("absorbed attempt not logged as the provider-error correction: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestNonStreamReasoningOnlyExhaustedSurfacesProviderError: past the thinking
+// budget the reasoning-only body surfaces as a real 502 carrying the
+// reasoning_only code, and the record classifies it as a provider error
+// (upstream_error / reasoning_only), matching the streaming twin.
+func TestNonStreamReasoningOnlyExhaustedSurfacesProviderError(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(thinkingOnlyBody))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	cfg := config.Default()
+	cfg.ThinkingRetries = 1 // one rescue, then the second reasoning-only body exhausts it
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (a reasoning-only body is a failure, never a silent success)", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"code":"`+metrics.CodeReasoningOnly+`"`) {
+		t.Fatalf("502 body must carry the reasoning_only code: %s", body)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (absorbed rescue + exhausted re-run)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() {
+		t.Fatalf("exhausted reasoning-only rescue is a genuine provider failure: %+v", rec)
+	}
+	if rec.ErrorType != "upstream_error" || rec.ErrorCode != metrics.CodeReasoningOnly {
+		t.Fatalf("record must classify as provider error: type=%q code=%q", rec.ErrorType, rec.ErrorCode)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Fatalf("absorbed rescue not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}

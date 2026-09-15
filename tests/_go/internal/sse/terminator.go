@@ -88,6 +88,27 @@ func TestAnalyzerOutcomeCodes(t *testing.T) {
 		{"truncated with content relayed", []string{
 			`data: {"id":"1","choices":[{"delta":{"content":"half answer"}}]}`,
 		}, metrics.CodeTruncated},
+		{"reasoning-only stop is its own degenerate class", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking hard"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, metrics.CodeReasoningOnly},
+		{"reasoning-only interruption finish is the same class", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning":"hmm"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"insufficient_system_resource"}]}`,
+			`data: [DONE]`,
+		}, metrics.CodeReasoningOnly},
+		{"reasoning then answer is healthy", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, ""},
+		{"reasoning-only length is healthy (client cap)", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"ran out"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"length"}]}`,
+			`data: [DONE]`,
+		}, ""},
 		{"foreign stream stays clean", []string{
 			`data: {"event":"custom","payload":42}`,
 		}, ""},
@@ -149,6 +170,73 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 			feedLines(a, c.lines...)
 			if got := a.RetryableTruncation(); got != c.want {
 				t.Fatalf("RetryableTruncation = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAnalyzerRetryableReasoningTruncation gates the mid-thinking rescue: a
+// truncation after reasoning-only output IS re-sendable (the reasoning the
+// client saw is auxiliary display text, not completion contract), but any
+// answer-shaped byte - content, a tool call, a refusal, a deprecated
+// function_call - or a Responses-shaped feed (per-response sequence numbers
+// would restart mid-stream), a provider in-band error, or a seen terminator
+// disqualifies it. The plain empty truncation stays on the separate quality
+// predicate (TestAnalyzerRetryableTruncation).
+func TestAnalyzerRetryableReasoningTruncation(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"reasoning-only truncation is retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+		}, true},
+		{"every reasoning spelling is retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning":"hmm"}}]}`,
+		}, true},
+		{"reasoning then answer is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"content":"partial answer"}}]}`,
+		}, false},
+		{"reasoning then tool call is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+		}, false},
+		{"reasoning then refusal is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"refusal":"I cannot help"}}]}`,
+		}, false},
+		{"reasoning then deprecated function_call is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}}]}`,
+		}, false},
+		{"empty truncation is not the thinking rescue", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+		}, false},
+		{"seen terminator is not a truncation", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		}, false},
+		{"provider in-band error is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"error":{"message":"overloaded","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"responses-shaped reasoning is never appended to", []string{
+			`data: {"type":"response.created","response":{"id":"r1"}}`,
+			`data: {"type":"response.reasoning_text.delta","delta":"thinking"}`,
+		}, false},
+		{"non-chatlike stream stays out", []string{
+			`data: {"event":"custom","payload":42}`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.RetryableReasoningTruncation(); got != c.want {
+				t.Fatalf("RetryableReasoningTruncation = %v, want %v", got, c.want)
 			}
 		})
 	}

@@ -155,8 +155,10 @@ native-format adapters, and model listing.
 
 Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive
-comments and failure signaling, optional format translation, and constructed
-model lists. This is not an unconditional byte-for-byte or exactly-once contract.
+comments and failure signaling, mid-thinking rescues that append a fresh
+attempt after reasoning-only output, optional format translation, and
+constructed model lists. This is not an unconditional byte-for-byte or
+exactly-once contract.
 
 ## What you get
 

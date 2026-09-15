@@ -154,6 +154,20 @@ type Config struct {
 	// ceiling; 0 disables quality handling entirely.
 	QualityRetries int `yaml:"quality_retries" json:"quality_retries"`
 
+	// ThinkingRetries bounds the transparent rescue of requests that die or
+	// end without an answer during the thinking/reasoning phase: a stream
+	// truncated or reset after reasoning-only output, a cleanly finished
+	// reasoning-only completion (reasoning but no answer, no tool call), and
+	// a non-streaming reasoning-only body. The fresh attempt appends to the
+	// committed SSE connection after the already-relayed reasoning (auxiliary
+	// display text, never the completion contract) - never after answer
+	// content or tool calls, which are never rescuable. finish_reason length
+	// is the client's own token cap and is never rescued. The generic
+	// OpenAI-compatible relay only; the Cursor bridge and translated
+	// Anthropic streams keep their own signaling. Each rescue re-sends the
+	// full request (the upstream bills every attempt); 0 disables.
+	ThinkingRetries int `yaml:"thinking_retries" json:"thinking_retries"`
+
 	// Error storm protection observes eligible upstream attempts in a bounded
 	// rolling window and gates new sends by provider or exact recorded model.
 	// Policy changes reset observations and wake waiters; banner visibility
@@ -427,6 +441,8 @@ const (
 	DashLogRowsMax = 500
 	// QualityRetriesMax is the band for quality_retries (0 disables).
 	QualityRetriesMax = 3
+	// ThinkingRetriesMax is the band for thinking_retries (0 disables).
+	ThinkingRetriesMax = 3
 	// QueueRetryAfterMax is the Retry-After hint cap (HTTP delta-seconds).
 	QueueRetryAfterMax = 24 * time.Hour
 	// Inbound body band (Validate, overlay, Schema).
@@ -494,7 +510,8 @@ func Default() *Config {
 		BaseBackoff:     1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
 		MaxBackoff:      2 * time.Minute,
 
-		QualityRetries: 1,
+		QualityRetries:  1,
+		ThinkingRetries: 1,
 
 		StormEnabled:           false,
 		StormProviderEnabled:   true,
@@ -705,6 +722,9 @@ func (c *Config) Validate() error {
 	}
 	if c.QualityRetries < 0 || c.QualityRetries > QualityRetriesMax {
 		return fmt.Errorf("quality_retries: must be 0..%d, got %d", QualityRetriesMax, c.QualityRetries)
+	}
+	if c.ThinkingRetries < 0 || c.ThinkingRetries > ThinkingRetriesMax {
+		return fmt.Errorf("thinking_retries: must be 0..%d, got %d", ThinkingRetriesMax, c.ThinkingRetries)
 	}
 	if err := checkQueueRetryAfter(c.QueueRetryAfter); err != nil {
 		return err

@@ -129,8 +129,12 @@ incoming query are not used.
 
 A lost park cold-starts from provided history. The quality-retry path may re-ask
 an empty continuation; exhausted/invalid continuations surface errors rather
-than silently completing. This is not exactly-once execution, checkpoint
-persistence, or a guarantee that an upstream keeps a parked stream alive.
+than silently completing. Cursor's wire reports one combined output total with
+no answer/reasoning split, so the generic mid-thinking rescue
+(`thinking_retries`) does not apply here: a Cursor turn that produced nothing
+is the existing empty-turn re-ask's business. This is not exactly-once
+execution, checkpoint persistence, or a guarantee that an upstream keeps a
+parked stream alive.
 
 Output usage comes from validated native counters. Input may use checkpoint
 context occupancy or a documented estimate when unavailable; unreported cache
