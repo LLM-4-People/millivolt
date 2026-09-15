@@ -968,13 +968,13 @@ func TestStreamInBandErrorAfterContentNotRetried(t *testing.T) {
 // classifyResendFailure's clientGone arm on the streaming re-send site: the
 // LOCAL client cancelling while the quality re-send is parked in WaitSend
 // (here: on an operator hold, armed from inside the absorbed attempt's
-// handler before the truncating EOF can exist, so the park is guaranteed)
-// keeps disconnect semantics - 499, ClientDisconnected, no error marks, the
-// absorbed attempt logged - never a 502 upstream_unreachable.
+// handler before the truncating EOF can exist, and the park observed via the
+// scheduler queue before the cancel) keeps disconnect semantics - 499,
+// ClientDisconnected, no error marks, the absorbed attempt logged - never a
+// 502 upstream_unreachable.
 func TestStreamRetryClientCancelWhileResendParksIsDisconnect(t *testing.T) {
 	buf := metrics.NewBuffer(100)
 	p := New(config.Default(), buf)
-	holdArmed := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
@@ -986,7 +986,6 @@ func TestStreamRetryClientCancelWhileResendParksIsDisconnect(t *testing.T) {
 		if err := p.scheduler.AddHold(scheduler.Hold{All: true}); err != nil {
 			t.Errorf("AddHold: %v", err)
 		}
-		close(holdArmed)
 	}))
 	defer upstream.Close()
 	srv := httptest.NewServer(p)
@@ -997,11 +996,43 @@ func TestStreamRetryClientCancelWhileResendParksIsDisconnect(t *testing.T) {
 		strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer sk-k")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	// Subscribe before the request: holdArmed says the upstream handler
+	// armed the hold, not that the proxy consumed the truncating EOF and
+	// parked the re-send. The park's one observable is the live paused edge
+	// (the OnHold hook publishes the record with Paused set): cancel only
+	// after it, so the cancel can never beat the EOF consumption and take
+	// the valid plain-499 relay path with no absorbed attempt - the race
+	// this poll removes.
+	live := buf.SubscribeLive()
+	defer buf.UnsubscribeLive(live)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		cancel()
 		t.Fatal(err)
 	}
-	<-holdArmed
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var parked bool
+		for !parked {
+			select {
+			case ev := <-live:
+				parked = ev.Phase == "update" && ev.Record != nil && ev.Record.Paused
+			default:
+			}
+			if parked || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		if parked {
+			break
+		}
+		// Bail with the parked handler released first: srv.Close() waits for
+		// it, and a parked re-send never wakes without the cancel.
+		cancel()
+		resp.Body.Close()
+		t.Fatal("the re-send never published its paused edge (never parked in WaitSend)")
+	}
 	cancel()
 	resp.Body.Close()
 

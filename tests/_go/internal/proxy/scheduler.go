@@ -740,10 +740,18 @@ func TestClientCancelNotRetried(t *testing.T) {
 
 // TestRetrySerializesSameKey pins the send gate: after a 5xx (same as 429),
 // siblings on the same provider+key wait until the retrying request succeeds
-// or exhausts. Only then do they send.
+// or exhausts. Only then do they send. The upstream parks the owner's retry
+// attempt on a channel: attempt 2's arrival is a deterministic, pollable
+// proof that the group is tripped (a retry send only happens after the
+// absorb + Trip + backoff), and while the attempt stays parked nothing can
+// release the gate - which makes the sibling negative assertion immune to
+// the absorb-latency races that fixed 10ms/20ms windows had under parallel
+// suite load (the 502's close fires at write time, long before the proxy
+// has absorbed it).
 func TestRetrySerializesSameKey(t *testing.T) {
 	var calls, inflight, maxAfter atomic.Int32
 	first := make(chan struct{})
+	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
 		cur := inflight.Add(1)
@@ -760,6 +768,9 @@ func TestRetrySerializesSameKey(t *testing.T) {
 				break
 			}
 		}
+		// The owner's retry stays in flight, so the group stays tripped and
+		// the sibling assertion below observes a gate that cannot release.
+		<-release
 		time.Sleep(30 * time.Millisecond)
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
@@ -793,22 +804,29 @@ func TestRetrySerializesSameKey(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("first 502 never arrived")
 	}
-	// The group's tripped/probing state has no exported observable from this
-	// package (scheduler internals), so a fixed window sequences the Trip
-	// before the siblings arrive.
-	time.Sleep(10 * time.Millisecond) // Trip + WaitSend
+	// Poll for the owner's retry attempt: its arrival proves the Trip
+	// happened (no fixed window can race the proxy's absorb path under
+	// load), and it parks in the handler until the siblings have been
+	// observed.
+	for deadline := time.Now().Add(5 * time.Second); calls.Load() < 2; {
+		if time.Now().After(deadline) {
+			t.Fatal("owner's retry attempt never arrived (the trip did not happen)")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 
 	done2 := make(chan struct{})
 	done3 := make(chan struct{})
 	go func() { do(); close(done2) }()
 	go func() { do(); close(done3) }()
-	// Detection window: a sibling parked inside WaitSend is not observable
-	// from this package, so give them time to (wrongly) send if the send gate
-	// were broken before asserting the negative.
-	time.Sleep(20 * time.Millisecond)
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("upstream calls = %d during 5xx retry; siblings must wait", got)
+	// Detection window: the parked owner attempt keeps the gate closed, so a
+	// broken send gate would let the siblings through within this generous
+	// window; a correct one cannot, deterministically.
+	time.Sleep(100 * time.Millisecond)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d during the parked 5xx retry; siblings must wait", got)
 	}
+	close(release)
 
 	select {
 	case <-done1:
