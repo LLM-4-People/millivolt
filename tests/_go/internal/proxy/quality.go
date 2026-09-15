@@ -251,12 +251,13 @@ func TestQualityRetrySkipsLargeBody(t *testing.T) {
 	}
 }
 
-// TestQualityRetryNeverRetriesInBandError: a 200 with a top-level error
-// envelope is the provider's own failure statement - relayed verbatim, never
-// quality-retried.
-func TestQualityRetryNeverRetriesInBandError(t *testing.T) {
+// TestQualityRetryNonRetryableInBandErrorVerbatim: a non-streaming 200 with a
+// top-level error envelope in a class that is NOT transient
+// (invalid_request_error) is the provider's own final statement - relayed
+// verbatim, never quality-retried.
+func TestQualityRetryNonRetryableInBandErrorVerbatim(t *testing.T) {
 	var calls atomic.Int32
-	errBody := `{"error":{"message":"overloaded","type":"overloaded_error","code":"overload"}}`
+	errBody := `{"error":{"message":"bad request","type":"invalid_request_error","code":"bad_request"}}`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
@@ -289,6 +290,103 @@ func TestQualityRetryNeverRetriesInBandError(t *testing.T) {
 	recs := waitForRecord(t, buf, 1)
 	if !recs[0].IsError() {
 		t.Fatal("record must carry the provider's in-band error")
+	}
+}
+
+// TestQualityRetryRetriesRetryableInBandError: a non-streaming 200 whose body
+// is a top-level error envelope in a transient server-availability class
+// (overloaded_error) is absorbed and the SAME request re-sent before any byte
+// reaches the client - the OpenAI retry semantics applied to the in-band
+// failure. The attempt log carries the provider's own envelope.
+func TestQualityRetryRetriesRetryableInBandError(t *testing.T) {
+	var calls atomic.Int32
+	errBody := `{"error":{"message":"overloaded","type":"overloaded_error","code":"overload"}}`
+	okBody := `{"id":"1","choices":[{"finish_reason":"stop","message":{"content":"hi"}}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(200)
+			w.Write([]byte(errBody))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(okBody))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 || string(body) != okBody {
+		t.Fatalf("re-send must deliver the healthy body verbatim: status %d body %q", resp.StatusCode, body)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Fatalf("recovered record: retries=%d attempts=%d isError=%v", rec.Retries, len(rec.Attempts), rec.IsError())
+	}
+	at := rec.Attempts[0]
+	if at.ErrorType != "overloaded_error" || at.ErrorCode != "overload" || at.ErrorMsg != "overloaded" {
+		t.Fatalf("absorbed attempt must carry the provider's envelope: %+v", at)
+	}
+}
+
+// TestQualityRetryRetryableInBandErrorZeroBudget: with quality_retries spent
+// (0) even a transient in-band error class relays verbatim - the provider's
+// statement is the client's to retry.
+func TestQualityRetryRetryableInBandErrorZeroBudgetVerbatim(t *testing.T) {
+	var calls atomic.Int32
+	errBody := `{"error":{"message":"overloaded","type":"overloaded_error","code":"overload"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		w.Write([]byte(errBody))
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.QualityRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 200 || string(body) != errBody {
+		t.Fatalf("zero budget must relay verbatim: status %d body %q", resp.StatusCode, body)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if !recs[0].IsError() || recs[0].ErrorType != "overloaded_error" {
+		t.Fatalf("record must carry the provider's in-band error: %+v", recs[0])
 	}
 }
 
@@ -684,17 +782,24 @@ func TestStreamTruncatedZeroBudgetKeepsLegacyBehavior(t *testing.T) {
 	}
 }
 
-// TestStreamProviderErrorOnEmptyStreamNotRetried: a provider-sent in-band
-// error on a 200 stream is the provider's own failure statement - even with
-// no content relayed it is never stacked on or re-sent (the error chunk is
-// already on the wire; the record carries the provider's envelope).
-func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
+// TestStreamProviderErrorOnEmptyStreamRetried: a provider-sent in-band error
+// in a transient server-availability class (the coralbricks api_error shape)
+// arriving before any content-bearing frame is dropped before the wire and
+// the SAME request transparently re-sent on the quality budget - the OpenAI
+// retry semantics ("please retry") applied at the only wire state where a
+// re-send cannot duplicate anything. The client never sees the error frame;
+// the attempt log carries the provider's own envelope.
+func TestStreamProviderErrorOnEmptyStreamRetried(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		calls.Add(1)
-		w.Write([]byte("data: {\"error\":{\"message\":\"overloaded\",\"type\":\"overloaded_error\",\"code\":\"overloaded\"}}\n\n"))
+		if calls.Add(1) == 1 {
+			w.Write([]byte("data: {\"error\":{\"message\":\"Coral Bricks is temporarily unavailable. Please retry.\",\"type\":\"api_error\",\"code\":\"internal_error\"}}\n\n"))
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
 
@@ -703,18 +808,93 @@ func TestStreamProviderErrorOnEmptyStreamNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
-	if !strings.Contains(got, `"type":"overloaded_error"`) {
+	if strings.Contains(got, "api_error") {
+		t.Fatalf("the error frame must be dropped before the wire: %s", got)
+	}
+	if got != freshAnswerFrames {
+		t.Fatalf("the fresh attempt's frames must relay verbatim: %q", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Fatalf("recovered record: retries=%d attempts=%d isError=%v", rec.Retries, len(rec.Attempts), rec.IsError())
+	}
+	at := rec.Attempts[0]
+	if at.ErrorType != "api_error" || at.ErrorCode != "internal_error" ||
+		at.ErrorMsg != "Coral Bricks is temporarily unavailable. Please retry." {
+		t.Fatalf("absorbed attempt must carry the provider's envelope: %+v", at)
+	}
+}
+
+// TestStreamProviderErrorNonRetryableNotRetried: a provider in-band error in a
+// class that is not transient (invalid_request_error) relays verbatim even on
+// an empty stream - one call, no synthetic stacking, the record carries the
+// provider's own envelope.
+func TestStreamProviderErrorNonRetryableNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(1)
+		w.Write([]byte("data: {\"error\":{\"message\":\"bad request\",\"type\":\"invalid_request_error\",\"code\":\"bad_request\"}}\n\n"))
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"type":"invalid_request_error"`) {
 		t.Fatalf("provider error must relay verbatim: %s", got)
 	}
 	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
 		t.Fatalf("proxy must not stack its own error on the provider's: %s", got)
 	}
 	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (provider error is never re-sent)", n)
+		t.Fatalf("upstream calls = %d, want 1 (non-retryable class is never re-sent)", n)
 	}
 	recs := waitForRecord(t, buf, 1)
-	if !recs[0].IsError() || recs[0].ErrorType != "overloaded_error" || recs[0].ErrorCode == metrics.CodeTruncated {
-		t.Fatalf("record must carry the provider's envelope: %+v", recs[0])
+	if !recs[0].IsError() || recs[0].ErrorType != "invalid_request_error" || recs[0].Retries != 0 {
+		t.Fatalf("record must carry the provider's envelope, unrescued: %+v", recs[0])
+	}
+}
+
+// TestStreamInBandErrorAfterContentNotRetried: once answer content was
+// relayed, a retryable in-band provider error is the client's to retry - a
+// re-send would duplicate visible bytes, so the frame relays verbatim and the
+// record carries the provider's statement.
+func TestStreamInBandErrorAfterContentNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	contentFrame := `data: {"id":"A","choices":[{"delta":{"content":"partial answer"}}]}` + "\n\n"
+	errChunk := `data: {"error":{"message":"Coral Bricks is temporarily unavailable. Please retry.","type":"api_error","code":"internal_error"}}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(1)
+		w.Write([]byte(contentFrame + errChunk))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if want := contentFrame + errChunk; got != want {
+		t.Fatalf("error after relayed content must relay verbatim: got %q want %q", got, want)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (never re-send behind relayed content)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() || rec.ErrorType != "api_error" || rec.Retries != 0 || len(rec.Attempts) != 0 {
+		t.Fatalf("record must carry the provider's error, unrescued: %+v", rec)
 	}
 }
 
@@ -2114,12 +2294,26 @@ func TestStreamRefusalOnlyTruncationNotRescued(t *testing.T) {
 	}
 }
 
-// TestStreamInBandErrorAfterReasoningNotRescued: the provider's own in-band
-// error statement is relayed verbatim after reasoning - never rescued, never
-// substituted on top of.
-func TestStreamInBandErrorAfterReasoningNotRescued(t *testing.T) {
+// TestStreamInBandErrorAfterReasoningRescuedOnThinkingBudget: a retryable
+// in-band provider error arriving after reasoning-only output is rescued on
+// the thinking budget - reasoning frames are auxiliary display text the
+// fresh attempt appends behind, and the error frame itself never reached the
+// wire (the drop happens before its write, so the client sees only the
+// reasoning followed by the fresh attempt's answer).
+func TestStreamInBandErrorAfterReasoningRescuedOnThinkingBudget(t *testing.T) {
+	var calls atomic.Int32
 	errChunk := `data: {"error":{"message":"overloaded","type":"overloaded_error","code":"overloaded"}}` + "\n\n"
-	upstream := streamUpstream(t, thinkingFrame+errChunk)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(thinkingFrame + errChunk))
+			w.(http.Flusher).Flush()
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(100)
@@ -2127,8 +2321,40 @@ func TestStreamInBandErrorAfterReasoningNotRescued(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
+	if want := thinkingFrame + freshAnswerFrames; got != want {
+		t.Fatalf("reasoning then fresh answer must relay, error frame dropped: got %q want %q", got, want)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Fatalf("recovered record: retries=%d attempts=%d isError=%v", rec.Retries, len(rec.Attempts), rec.IsError())
+	}
+	at := rec.Attempts[0]
+	if at.ErrorType != "overloaded_error" || at.ErrorCode != "overloaded" {
+		t.Fatalf("absorbed attempt must carry the provider's envelope: %+v", at)
+	}
+}
+
+// TestStreamInBandErrorAfterReasoningZeroBudgetVerbatim: with the thinking
+// budget spent (0) the same stream relays the provider's error verbatim after
+// the reasoning - never substituted on top of, and the record carries it.
+func TestStreamInBandErrorAfterReasoningZeroBudgetVerbatim(t *testing.T) {
+	errChunk := `data: {"error":{"message":"overloaded","type":"overloaded_error","code":"overloaded"}}` + "\n\n"
+	upstream := streamUpstream(t, thinkingFrame+errChunk)
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.ThinkingRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
 	if want := thinkingFrame + errChunk; got != want {
-		t.Fatalf("provider error must relay verbatim: got %q want %q", got, want)
+		t.Fatalf("zero budget must relay the provider error verbatim: got %q want %q", got, want)
 	}
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]

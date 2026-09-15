@@ -361,15 +361,69 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 
 		if metrics.HasErrorKey(spooled) {
-			// The provider failed in-band on a 200: its own statement, never
-			// quality-retried - relay verbatim and let the record carry it.
-			// The cheap byte-scan gate is followed by the canonical decode: a
+			// The provider failed in-band on a 200: its own statement. The
+			// cheap byte-scan gate is followed by the canonical decode: a
 			// decoy key (null/empty/numeric error value - ParseErrorEnvelope
 			// returns "" for those, the exact semantics the SSE analyzer uses)
 			// is NOT a failure, so the body falls through to degenerate
 			// classification instead of riding this verbatim path as a
-			// silently-empty success.
-			if typ, _, _ := metrics.ParseErrorEnvelope(spooled); typ != "" {
+			// silently-empty success. A retryable server-availability class
+			// (retryableUpstreamErrorClass, the OpenAI retry semantics) with
+			// quality budget left is absorbed and re-sent before any byte
+			// reaches the client - nothing is written yet on this path, so
+			// the re-send is always wire-safe; every other class, and an
+			// exhausted budget, relays verbatim and lets the record carry it.
+			if typ, code, msg := metrics.ParseErrorEnvelope(spooled); typ != "" {
+				if retryableUpstreamErrorClass(typ, code) && qualityLeft > 0 {
+					qualityLeft--
+					// Absorb the degenerate attempt and retry the SAME
+					// request - nothing was written to the client, so this
+					// is a safe pre-write retry like the 429/5xx attempts.
+					// The attempt log carries the provider's own envelope
+					// (the explorer groups it under the provider's type).
+					at := metrics.RetryAttempt{
+						StatusCode: resp.StatusCode,
+						ErrorType:  typ,
+						ErrorCode:  code,
+						ErrorMsg:   msg,
+						At:         time.Now(),
+					}
+					rec.Attempts = append(rec.Attempts, at)
+					rec.Retries++
+					s.publishUpdate(rec)
+					s.finishStormResponse(ctx, true)
+					resp.Body.Close()
+					// The re-send is a retry: its opening WaitSend honors
+					// operator holds ("a retry is a new send and waits").
+					next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
+					if err != nil {
+						clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+						switch {
+						case clientGone:
+							return
+						case stormQueue:
+							// Already classified: the sink owner stamps the
+							// record and writes the 429 + Retry-After.
+							s.writeStormQueueError(w, rec, err)
+							return
+						}
+						http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+						return
+					}
+					// ServeHTTP's defer still binds the FIRST body (and its
+					// per-send cancel). Own this attempt's body + cancel; LIFO
+					// closes the body, then cancels the send deadline.
+					resp = next
+					defer nextCancel()
+					defer next.Body.Close()
+					rec.StatusCode = resp.StatusCode
+					if resp.StatusCode >= 400 {
+						captureErrorFromResponse(resp, rec)
+					}
+					captureUpstreamHeaders(resp, rec, t.authHeader)
+					rec.FinalAttemptAt = time.Now()
+					continue
+				}
 				s.commitSpooledBody(w, resp, spooled, rec)
 				return
 			}
@@ -474,31 +528,38 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 // streamBodyWithRetry relays a streaming response and transparently re-sends
 // the SAME request when the attempt ended without any completion-contract
 // bytes on the wire - the streaming twin of serveNonStreaming's degenerate-200
-// retry. Two rescue budgets govern the loop: quality_retries owns the
-// empty truncation (clean EOF before any content-bearing chunk), and
-// thinking_retries owns the mid-thinking rescues - a truncation or upstream
-// read error after reasoning-only output, and a cleanly finished
-// reasoning-only stream whose terminal region the hold still withholds
-// (metrics.CodeReasoningOnly). The failed attempt leaves the client at most
-// role/keepalive/reasoning frames (every OpenAI SDK accumulates chat delta
-// frames independently; reasoning is auxiliary display text), so the fresh
-// stream appends cleanly to the committed SSE connection; the idle pacer
-// keeps the socket alive during the re-send's queue/hold/backoff waits.
-// finish_reason length is a clean terminator and never rescued. The absorbed
-// attempt is logged like every other (Retries/Attempts, the dashboard's
-// correction flag) while a rescue that eventually succeeds stays a success
-// record; an exhausted budget surfaces the in-band error exactly as before.
-// Re-send failures are answered in-band: applyUpstream has already committed
-// the status line before this function runs (even for clients that never
-// asked for streaming), so no JSON error can land after relayed event-stream
-// bytes, and the record carries the real error status. Format-translated
-// streams (and Cursor's bidirectional bridge) keep their own signaling and are
-// not re-sent here.
+// retry. Three rescue sources share the loop: quality_retries owns the
+// empty truncation (clean EOF before any content-bearing chunk) and the
+// retryable in-band provider error dropped before the wire
+// (rescueUpstreamError, retryableUpstreamErrorClass's server-availability
+// classes - the OpenAI retry semantics), and thinking_retries owns the
+// mid-thinking rescues - a truncation or upstream read error after
+// reasoning-only output, a cleanly finished reasoning-only stream whose
+// terminal region the hold still withholds (metrics.CodeReasoningOnly), and
+// an in-band error that arrived after reasoning-only output. The failed
+// attempt leaves the client at most role/keepalive/reasoning frames (every
+// OpenAI SDK accumulates chat delta frames independently; reasoning is
+// auxiliary display text), so the fresh stream appends cleanly to the
+// committed SSE connection; the idle pacer keeps the socket alive during the
+// re-send's queue/hold/backoff waits. finish_reason length is a clean
+// terminator and never rescued. The absorbed attempt is logged like every
+// other (Retries/Attempts, the dashboard's correction flag) while a rescue
+// that eventually succeeds stays a success record; an exhausted budget
+// surfaces the in-band error exactly as before, and a provider error that
+// already reached the wire - content was relayed, the class is
+// non-retryable, or the budget is spent - is verbatim relay and the client's
+// to retry. Re-send failures are answered in-band: applyUpstream has
+// already committed the status line before this function runs (even for
+// clients that never asked for streaming), so no JSON error can land after
+// relayed event-stream bytes, and the record carries the real error status.
+// Format-translated streams (and Cursor's bidirectional bridge) keep their
+// own signaling and are not re-sent here.
 func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter, resp *http.Response, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) {
 	qualityLeft := s.cfg().QualityRetries
 	thinkingLeft := s.cfg().ThinkingRetries
 	for {
-		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0)
+		uerr := &upstreamErrorRescue{}
+		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr)
 		if rescue == rescueNone {
 			return
 		}
@@ -512,6 +573,18 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			At:         time.Now(),
 		}
 		switch rescue {
+		case rescueUpstreamError:
+			// The provider's own in-band envelope: the attempt log and the
+			// error explorer group the absorbed attempt under the provider's
+			// error type (api_error and kin), not a synthetic class. The
+			// budget mirrors the truncation twins: reasoning frames already
+			// relayed put the rescue on the thinking budget.
+			if uerr.reasoning {
+				thinkingLeft--
+			} else {
+				qualityLeft--
+			}
+			at.ErrorType, at.ErrorCode, at.ErrorMsg = uerr.typ, uerr.code, uerr.msg
 		case rescueReasoningStop:
 			thinkingLeft--
 			at.ErrorCode = metrics.CodeReasoningOnly
@@ -1260,7 +1333,27 @@ const (
 	// void on the wire; the re-send replaces the withheld finish. The
 	// thinking_retries budget owns this class (metrics.CodeReasoningOnly).
 	rescueReasoningStop
+	// rescueUpstreamError: the provider signaled failure in-band (an error
+	// event streamed inside the 200) in a retryable server-availability
+	// class, while nothing content-bearing had reached the client - the
+	// error frame itself was dropped before the wire, so the re-send is
+	// invisible. The quality_retries budget owns this class;
+	// thinking_retries owns it when only reasoning was relayed. The
+	// upstreamErrorRescue return carries the provider's error envelope for
+	// the absorbed attempt's log entry.
+	rescueUpstreamError
 )
+
+// upstreamErrorRescue carries the provider's in-band error envelope of an
+// absorbed rescueUpstreamError attempt to the re-send loop's bookkeeping
+// (the attempt log shows the provider's own type/code/message - what the
+// error explorer groups it under). reasoning selects the budget exactly like
+// the truncation twins: reasoning frames already relayed are auxiliary
+// display text, so the thinking budget owns the rescue.
+type upstreamErrorRescue struct {
+	typ, code, msg string
+	reasoning      bool
+}
 
 // streamBody forwards an SSE body, preserving bytes exactly, and flushes after
 // each event boundary so TTFT == upstream TTFT. Alongside the copy it scans
@@ -1286,13 +1379,22 @@ const (
 // rescueReasoning* class instead of surfacing an error: the caller owns the
 // re-send and the attempt bookkeeping. A reasoning-only clean stop is equally
 // rescuable (rescueReasoningStop) because its terminal region never left the
-// hold. The returned rescue is only ever reported in those no-contract-bytes
-// states - never after answer content, tool calls, a refusal, an in-band
-// error, or a read error caused by our own context (client gone or the
-// per-send deadline). With the budget spent (rescueNone), the truncation or
-// degenerate class surfaces in-band exactly as before: finish_reason length
-// is a terminator and never rescuable.
-func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool) (rescue streamRescue) {
+// hold. A provider error event streamed in-band on the 200 is the same
+// contract from the other side: while nothing content-bearing was relayed
+// the frame is still unwritten, so a retryable server-availability class
+// (retryableUpstreamErrorClass, the OpenAI retry semantics) is dropped and
+// rescueUpstreamError re-sends - the multi-line flush discovery, a frame
+// after opened content, a non-retryable class, or a spent budget falls back
+// to verbatim relay exactly as before. The returned rescue is only ever
+// reported in those no-contract-bytes states - never after answer content,
+// tool calls, a refusal, an in-band error that reached the wire, or a read
+// error caused by our own context (client gone or the per-send deadline).
+// With the budget spent (rescueNone), the truncation or degenerate class
+// surfaces in-band exactly as before: finish_reason length is a terminator
+// and never rescuable. uerr receives the provider's envelope for a
+// rescueUpstreamError return (the caller's attempt bookkeeping); it is
+// untouched for every other outcome.
+func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue) (rescue streamRescue) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
@@ -1427,6 +1529,25 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						}
 					}
 				default:
+					// A provider error event that just parsed, still unwritten:
+					// a retryable server-availability class with budget left is
+					// dropped here (the client never sees this frame) and the
+					// caller transparently re-sends - the OpenAI retry semantics
+					// the provider asked for ("please retry"), applied at the
+					// only wire state where re-sending cannot duplicate anything.
+					// Flush the complete lines the loop already relayed into the
+					// analyzer (role/keepalive/reasoning) so the wire matches the
+					// record before the fresh attempt appends behind them.
+					// Anything else falls through to verbatim relay.
+					if typ, code, msg, reasoning := a.RetryableUpstreamError(); typ != "" &&
+						retryableUpstreamErrorClass(typ, code) && !rec.ClientDisconnected &&
+						((reasoning && allowThinkingRescue) || (!reasoning && allowTruncationRetry)) {
+						if !writeOut() {
+							return rescueNone
+						}
+						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
+						return rescueUpstreamError
+					}
 					out.Write(line)
 					out.WriteByte('\n')
 				}

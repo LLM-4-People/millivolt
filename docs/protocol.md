@@ -116,7 +116,9 @@ upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for either spelling (`max_tokens` or
 `max_completion_tokens`). Invalid JSON is
 passed through on the nontranslated path. The proxy can retry transient
-transport failures, 429 and 5xx before returning the final response. Durable
+transport failures, 429 and 5xx before returning the final response, and
+retryable in-band error events on an open stream before any generation
+content was relayed. Durable
 quota/billing 429s are not treated as transient. Provider retry hints and
 operator holds can substantially extend total wall time.
 
@@ -126,14 +128,23 @@ in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
 a stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
-the in-band error for the client to retry. Mid-thinking rescues
+the in-band error for the client to retry. A provider error event streamed
+in-band on the 200 is retried the same way while nothing content-bearing was
+relayed: the error classes the OpenAI API documents as retryable (500
+`server_error`, the 503 overloaded/unavailable family, request timeouts, and
+the equivalent Anthropic/gateway spellings) are dropped before the wire and
+the request re-sent, so the client never sees the failure; rate limits in-band
+(no `Retry-After` exists there), durable request/billing classes, unknown
+types, and errors after relayed contract bytes relay verbatim for the client
+to handle. Mid-thinking rescues
 (`thinking_retries`) extend the re-send to requests that die or end without an
 answer during the reasoning phase: a truncation or upstream read error after
-reasoning-only output, and a cleanly finished reasoning-only completion (the
-withheld terminal region is replaced by the fresh attempt). The fresh stream
+reasoning-only output, a cleanly finished reasoning-only completion (the
+withheld terminal region is replaced by the fresh attempt), and a retryable
+in-band error that arrived after reasoning-only output. The fresh stream
 appends behind the already-relayed reasoning, which is auxiliary display text;
 answer content, tool calls, refusals, `finish_reason: length` (the client's
-own token cap), provider in-band errors and Responses-API feeds (per-response
+own token cap) and Responses-API feeds (per-response
 sequence numbers) are never rescued. An exhausted budget surfaces the
 `reasoning_only` class as a provider error (`upstream_error`) on both
 surfaces: in-band on the streaming connection, and as an HTTP 502 error

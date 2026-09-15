@@ -87,6 +87,110 @@ func TestReasoningMarksTTFT(t *testing.T) {
 	}
 }
 
+// TestRetryableUpstreamError pins the wire-safety gates of the in-band error
+// rescue: the report fires ONLY for an error discovered on its event's first
+// data line, with no terminal region, no answer-shaped output, no content and
+// no tool call; reasoning frames on the wire flip it to the thinking variant
+// behind chat-shape gates; and the report is one-shot (a declined rescue can
+// never re-fire on a later line).
+func TestRetryableUpstreamError(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	errFrame := []byte(`data: {"error":{"message":"temporarily unavailable","type":"api_error","code":"internal_error"}}`)
+	// feed runs one event through the analyzer: its data line(s) then the
+	// blank-line boundary, exactly as the relay's line loop delivers them.
+	feed := func(a *Analyzer, lines ...string) {
+		t.Helper()
+		for _, l := range lines {
+			a.Feed([]byte(l), now)
+		}
+		a.Feed([]byte(""), now)
+	}
+
+	// The empty variant: an error-only stream (the provider failing at first
+	// content) is rescuable with no chat-shape gate - nothing was relayed, so
+	// the fresh attempt opens a clean event stream for any SSE protocol.
+	var a Analyzer
+	feed(&a, string(errFrame))
+	typ, code, msg, reasoning := a.RetryableUpstreamError()
+	if typ != "api_error" || code != "internal_error" || msg != "temporarily unavailable" || reasoning {
+		t.Fatalf("error-only stream must report the empty variant: %q %q %q reasoning=%v", typ, code, msg, reasoning)
+	}
+	// One-shot: a second call never re-fires.
+	if typ, _, _, _ = a.RetryableUpstreamError(); typ != "" {
+		t.Fatal("the report must be one-shot (a declined rescue cannot re-fire)")
+	}
+
+	// After relayed content: never rescuable.
+	var b Analyzer
+	feed(&b, `data: {"choices":[{"delta":{"content":"partial"}}]}`)
+	feed(&b, string(errFrame))
+	if typ, _, _, _ = b.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error after relayed content must not report (a re-send would duplicate visible bytes)")
+	}
+
+	// After a refusal (answer-shaped but not metrics content): never rescuable.
+	var c Analyzer
+	feed(&c, `data: {"choices":[{"delta":{"refusal":"no"}}]}`)
+	feed(&c, string(errFrame))
+	if typ, _, _, _ = c.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error after answer-shaped output must not report")
+	}
+
+	// After a tool call: never rescuable.
+	var d Analyzer
+	feed(&d, `data: {"choices":[{"delta":{"tool_calls":[{"id":"1","function":{"name":"f"}}]}}]}`)
+	feed(&d, string(errFrame))
+	if typ, _, _, _ = d.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error after a relayed tool call must not report")
+	}
+
+	// After a terminal marker: never rescuable (the hold owns the region).
+	var e Analyzer
+	feed(&e, `data: {"choices":[{"delta":{},"finish_reason":"stop"}]}`)
+	feed(&e, string(errFrame))
+	if typ, _, _, _ = e.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error inside the terminal region must not report")
+	}
+
+	// After relayed chat reasoning: the thinking variant.
+	var f Analyzer
+	feed(&f, `data: {"id":"A","choices":[{"delta":{"reasoning_content":"thinking hard"}}]}`)
+	feed(&f, string(errFrame))
+	typ, _, _, reasoning = f.RetryableUpstreamError()
+	if typ != "api_error" || !reasoning {
+		t.Fatalf("an error after chat reasoning must report the thinking variant: %q reasoning=%v", typ, reasoning)
+	}
+
+	// After relayed Responses-API reasoning: never rescuable (the fresh
+	// stream would restart per-response sequence numbers mid-stream).
+	var g Analyzer
+	feed(&g, `data: {"type":"response.reasoning_text.delta","delta":"pondering"}`)
+	feed(&g, string(errFrame))
+	if typ, _, _, _ = g.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error after Responses reasoning must not report (sequence numbers)")
+	}
+
+	// A multi-line error frame (discovered at the event-boundary flush, with
+	// its earlier line already parsed as part of the same event): never
+	// rescuable - the first line may already be on the wire.
+	var h Analyzer
+	feed(&h, `data: {"error":{"type":"api_error",`, `data: "code":"internal_error"}}`)
+	if typ, _, _, _ = h.RetryableUpstreamError(); typ != "" {
+		t.Fatal("a multi-line error frame must not report (earlier lines may be relayed)")
+	}
+	if !h.HasInBandError() {
+		t.Fatal("the multi-line error must still be recorded (Fill stamps the record)")
+	}
+
+	// An error on a LATER data line of a multi-line event: never rescuable.
+	var i Analyzer
+	feed(&i, `data: {"choices":[{"delta":{"role":"assistant"}}]}`)
+	feed(&i, `data: {"x":1`, string(errFrame))
+	if typ, _, _, _ = i.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error on a later data line of its event must not report")
+	}
+}
+
 // Whitespace after the colon (a re-serializing gateway emits `"content": "hi"`)
 // must still mark TTFT and must NOT false-fire on an empty value. Regression
 // test for the byte-scan missing space-after-colon payloads.

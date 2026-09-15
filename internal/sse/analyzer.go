@@ -95,6 +95,15 @@ type Analyzer struct {
 	// dashboard shows a clean, empty "success" for a request that failed.
 	errType, errCode, errMsg string
 
+	// errRescuableFrame records that the in-band error registered on a data
+	// line that was the FIRST data line of its SSE event (the single-line
+	// frame shape every OpenAI-compatible provider uses), so at that instant
+	// nothing of the error event was on the wire and the relay may still drop
+	// the frame and transparently re-send. Consumed one-shot by
+	// RetryableUpstreamError; the boundary-flush (multi-line) discovery path
+	// never sets it - earlier lines of such an event may already be relayed.
+	errRescuableFrame bool
+
 	// eventData accumulates the concatenated data: payloads of the CURRENT SSE
 	// event. The SSE spec lets one event's data span several "data:" lines
 	// (joined with "\n") and ends the event at a blank line; providers/gateways
@@ -176,6 +185,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// event (data split across lines per the SSE spec) can be parsed whole at
 	// the boundary. Joined with "\n" per spec; bounded by eventDataMax - past
 	// the cap only per-line lexical scans remain available for accounting.
+	firstDataFrame := len(a.eventData) == 0
 	if len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
 			a.eventData = append(a.eventData, '\n')
@@ -312,7 +322,17 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// only runs on the rare error frame. The gate tolerates whitespace before
 	// the colon ("error" :) - a re-serializing gateway may emit it.
 	if metrics.HasErrorKey(payload) {
+		// A single-line error frame registers here, on its event's first data
+		// line, while nothing of the event is on the wire yet: mark it for
+		// RetryableUpstreamError so the relay may drop the frame and re-send.
+		// A decoy key (null/empty error value) leaves errType empty and no
+		// mark; an error on a LATER data line of a multi-line event never
+		// qualifies either - its earlier bytes may already be relayed.
+		hadErr := a.errType != ""
 		a.captureStreamError(payload)
+		if !hadErr && a.errType != "" && firstDataFrame {
+			a.errRescuableFrame = true
+		}
 	}
 }
 
@@ -574,6 +594,42 @@ func (a *Analyzer) RetryableReasoningTruncation() bool {
 func (a *Analyzer) RetryableReasoningStop() bool {
 	return a.chatlike && a.terminatorSeen && a.errType == "" && !a.responsesStream &&
 		!a.answerishSeen && a.toolCalls == 0
+}
+
+// RetryableUpstreamError reports whether the provider's in-band error was just
+// discovered in a wire state where the relay may still transparently re-send
+// the SAME request: the error registered on a data line that was the first
+// data line of its SSE event (the single-line frame shape every
+// OpenAI-compatible provider uses - the boundary-flush discovery of a
+// multi-line error never qualifies, its earlier lines may already be
+// relayed), the stream's terminal region never opened, and no answer-shaped
+// output, content delta or tool call was relayed. With no reasoning on the
+// wire either, nothing distinguishes the delivered prefix for ANY SSE
+// protocol - the fresh attempt opens a clean new event stream, so no
+// chat-shape gate applies (an error-only stream is exactly the
+// transient-failure shape: the provider failing at first content). With
+// reasoning frames already relayed the fresh attempt appends behind them,
+// which is only clean behind chat-shaped deltas: a Responses-API feed's
+// per-response sequence numbers would restart mid-stream, so that variant
+// keeps RetryableReasoningTruncation's shape gates and reports
+// reasoning=true (the thinking budget owns the rescue, like a reasoning
+// truncation). The report is one-shot: the first call consumes the mark, so
+// a declined rescue (no budget, non-retryable class, client gone) can never
+// re-fire on a later line. Error-class policy, budget and client-state
+// gating stay with the caller, exactly like RetryableTruncation's.
+func (a *Analyzer) RetryableUpstreamError() (typ, code, msg string, reasoning bool) {
+	defer func() { a.errRescuableFrame = false }()
+	if !a.errRescuableFrame || a.terminatorSeen || a.answerishSeen ||
+		a.toolCalls > 0 || !a.firstAnswerAt.IsZero() {
+		return "", "", "", false
+	}
+	if !a.firstReasoningAt.IsZero() {
+		if !a.chatlike || a.responsesStream {
+			return "", "", "", false
+		}
+		return a.errType, a.errCode, a.errMsg, true
+	}
+	return a.errType, a.errCode, a.errMsg, false
 }
 
 // extractPreview extracts a bounded prefix (metrics.PreviewMaxBytes) of the

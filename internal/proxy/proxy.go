@@ -132,6 +132,41 @@ func isNonRetryableQuotaErr(typ, code string) bool {
 	return nonRetryableQuotaClasses[strings.ToLower(typ)] || nonRetryableQuotaClasses[strings.ToLower(code)]
 }
 
+// retryableUpstreamErrorClasses are in-band error type/code strings that denote
+// a TRANSIENT server-availability failure: the classes the OpenAI API
+// documents as retryable (500 server_error "retry your request", the 503
+// overloaded/unavailable family "follow Retry-After, then retry", request
+// timeouts) plus the equivalent Anthropic and common-gateway spellings. When a
+// provider streams one of these inside its 200 SSE (or a non-streaming 200
+// body) instead of the 5xx status the class implies, the proxy may
+// transparently re-send the request while nothing content-bearing has been
+// relayed - the same wire-safety contract as the truncation rescues. The
+// durable and client-fault classes are NOT here and never re-send:
+// rate_limit_error is flow control with no in-band Retry-After (the scheduler
+// owns pacing), invalid_request/authentication/permission/not_found and the
+// nonRetryableQuotaClasses are permanent, and an unknown type fails closed to
+// verbatim relay. Exact match (after lowercasing) against the canonical
+// envelope parser's type AND code fields, never message text.
+var retryableUpstreamErrorClasses = map[string]bool{
+	"server_error":              true, // OpenAI 500
+	"service_unavailable":       true, // OpenAI 503 type spelling
+	"service_unavailable_error": true, // OpenAI 503 type (current docs)
+	"server_is_overloaded":      true, // OpenAI 503 code
+	"api_error":                 true, // Anthropic 500 "unexpected error"
+	"internal_error":            true, // gateway spelling (OpenRouter and others)
+	"internal_server_error":     true, // gateway spelling
+	"overloaded_error":          true, // Anthropic 529
+	"timeout_error":             true, // Anthropic 540
+}
+
+// retryableUpstreamErrorClass reports whether an in-band error's structured
+// type or code is a transient server-availability class the proxy may
+// transparently re-send. Unknown values stay false (fail closed).
+func retryableUpstreamErrorClass(typ, code string) bool {
+	return retryableUpstreamErrorClasses[strings.ToLower(typ)] ||
+		retryableUpstreamErrorClasses[strings.ToLower(code)]
+}
+
 // target is the resolved upstream destination for one request.
 type target struct {
 	baseURL     string
