@@ -389,8 +389,10 @@ function liveStatusCell(r) {
 // final outcome is a 200 - an absorbed 5xx or an in-band error payload inside
 // a 200. The pill still shows the final status; red + the error type reflect
 // the failure (hover carries the provider's message). A client-disconnected
-// record is its own gray 'cancel' pill - not an error. Retry badges stay on
-// the log row only.
+// record with no error is its own gray 'cancel' pill; a 499 carrying the
+// provider's in-band error renders red like its 200 twin (recordIsError),
+// keeping the ✕ marker for the plain cancellation only. Retry badges stay
+// on the log row only.
 function finalizedStatusPill(r) {
   const isErr = recordIsError(r);
   const isCancel = !isErr && !!r.client_disconnected;

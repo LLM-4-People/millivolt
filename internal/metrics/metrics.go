@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -458,6 +459,45 @@ func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 		typ = "provider_error"
 	}
 	return typ, code, TruncatePreview(msg)
+}
+
+// nonRetryableQuotaClasses are provider error type/code strings that, when
+// delivered with HTTP 429, denote a DURABLE account/billing condition - quota
+// or credits exhausted, spend/hard limits, expired plans. Waiting cannot
+// clear them, so nothing may retry one: the 429 absorb path surfaces the
+// response immediately instead of burning its retry budget (and pacing the
+// whole provider+key group) on a retry loop, the error-storm observation
+// excludes them, and the retryable-in-band-error precedence denies them
+// ahead of every operator extension. Transient rate-limit 429s keep their
+// normal retry/backoff behavior. Exact match (after lowercasing) against
+// the canonical envelope parser's type AND code fields, never message text:
+// OpenAI insufficient_quota / *_limit_reached family, Kimi
+// exceeded_current_quota_error, and Z.AI's numeric business codes (1113
+// balance exhausted, 1309/1311/1314/1315 plan/package limits). The single
+// owner: the proxy's 429 absorb path, storm observation and the in-band
+// error precedence, and config's retryable_error_classes validation all
+// consult this one vocabulary.
+var nonRetryableQuotaClasses = map[string]bool{
+	"insufficient_quota":                true,
+	"insufficient_credits":              true,
+	"credit_balance_exhausted":          true,
+	"organization_spend_limit_exceeded": true,
+	"project_spend_limit_exceeded":      true,
+	"organization_usage_limit_exceeded": true,
+	"billing_hard_limit_reached":        true,
+	"billing_not_active":                true,
+	"exceeded_current_quota_error":      true,
+	"1113":                              true,
+	"1309":                              true,
+	"1311":                              true,
+	"1314":                              true,
+	"1315":                              true,
+}
+
+// IsNonRetryableQuotaErr reports whether a structured error's type or code is
+// a durable account/billing condition that a retry can never clear.
+func IsNonRetryableQuotaErr(typ, code string) bool {
+	return nonRetryableQuotaClasses[strings.ToLower(typ)] || nonRetryableQuotaClasses[strings.ToLower(code)]
 }
 
 // TTFT returns the time to first token, or 0 if the response produced no

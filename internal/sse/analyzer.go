@@ -98,7 +98,9 @@ type Analyzer struct {
 	// errRescuableFrame records that the in-band error registered on a data
 	// line that was the FIRST data line of its SSE event (the single-line
 	// frame shape every OpenAI-compatible provider uses), so at that instant
-	// nothing of the error event was on the wire and the relay may still drop
+	// nothing of the error event's DATA was on the wire (field lines like
+	// `event: error` may already have been relayed; the relay closes the
+	// client's pending event before re-sending) and the relay may still drop
 	// the frame and transparently re-send. Consumed one-shot by
 	// RetryableUpstreamError; the boundary-flush (multi-line) discovery path
 	// never sets it - earlier lines of such an event may already be relayed.
@@ -603,28 +605,31 @@ func (a *Analyzer) RetryableReasoningStop() bool {
 // OpenAI-compatible provider uses - the boundary-flush discovery of a
 // multi-line error never qualifies, its earlier lines may already be
 // relayed), the stream's terminal region never opened, and no answer-shaped
-// output, content delta or tool call was relayed. With no reasoning on the
-// wire either, nothing distinguishes the delivered prefix for ANY SSE
-// protocol - the fresh attempt opens a clean new event stream, so no
-// chat-shape gate applies (an error-only stream is exactly the
-// transient-failure shape: the provider failing at first content). With
-// reasoning frames already relayed the fresh attempt appends behind them,
-// which is only clean behind chat-shaped deltas: a Responses-API feed's
-// per-response sequence numbers would restart mid-stream, so that variant
-// keeps RetryableReasoningTruncation's shape gates and reports
-// reasoning=true (the thinking budget owns the rescue, like a reasoning
-// truncation). The report is one-shot: the first call consumes the mark, so
-// a declined rescue (no budget, non-retryable class, client gone) can never
-// re-fire on a later line. Error-class policy, budget and client-state
-// gating stay with the caller, exactly like RetryableTruncation's.
+// output, content delta or tool call was relayed. A Responses-API feed is
+// excluded once any of its events was seen: per-response sequence numbers
+// are documented ordering state, and a re-send would restart them
+// mid-stream (an error as the feed's first-ever frame is still rescuable -
+// nothing was relayed). With no reasoning on the wire either, nothing
+// distinguishes the delivered prefix for any remaining SSE protocol - the
+// fresh attempt opens a clean new event stream, so no chat-shape gate
+// applies (an error-only stream is exactly the transient-failure shape: the
+// provider failing at first content). With reasoning frames already relayed
+// the fresh attempt appends behind them, which is only clean behind
+// chat-shaped deltas, so that variant keeps RetryableReasoningTruncation's
+// shape gates and reports reasoning=true (the thinking budget owns the
+// rescue, like a reasoning truncation). The report is one-shot: the first
+// call consumes the mark, so a declined rescue (no budget, non-retryable
+// class, client gone) can never re-fire on a later line. Error-class
+// policy, budget and client-state gating stay with the caller, exactly like
+// RetryableTruncation's.
 func (a *Analyzer) RetryableUpstreamError() (typ, code, msg string, reasoning bool) {
 	defer func() { a.errRescuableFrame = false }()
-	if !a.errRescuableFrame || a.terminatorSeen || a.answerishSeen ||
-		a.toolCalls > 0 || !a.firstAnswerAt.IsZero() {
+	if !a.errRescuableFrame || a.terminatorSeen || a.responsesStream ||
+		a.answerishSeen || a.toolCalls > 0 || !a.firstAnswerAt.IsZero() {
 		return "", "", "", false
 	}
 	if !a.firstReasoningAt.IsZero() {
-		if !a.chatlike || a.responsesStream {
+		if !a.chatlike {
 			return "", "", "", false
 		}
 		return a.errType, a.errCode, a.errMsg, true

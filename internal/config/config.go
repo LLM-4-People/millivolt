@@ -147,26 +147,43 @@ type Config struct {
 
 	// QualityRetries bounds the transparent re-attempts of a degenerate 200
 	// (an empty completion or tool_calls with zero tool calls), a truncated
-	// stream that relayed no generation content, and the cursor one-shot
-	// fresh-user re-ask: the non-streaming pre-write retry, the streaming
-	// re-send on the committed SSE connection, and the cursor re-ask. Each
-	// re-attempt re-sends the full request, so a small budget is the sane
-	// ceiling; 0 disables quality handling entirely.
+	// stream that relayed no generation content, a retryable in-band provider
+	// error dropped before the wire, and the cursor one-shot fresh-user
+	// re-ask: the non-streaming pre-write retry, the streaming re-send on the
+	// committed SSE connection, and the cursor re-ask. Each re-attempt
+	// re-sends the full request, so a small budget is the sane ceiling;
+	// 0 disables quality handling entirely.
 	QualityRetries int `yaml:"quality_retries" json:"quality_retries"`
 
 	// ThinkingRetries bounds the transparent rescue of requests that die or
 	// end without an answer during the thinking/reasoning phase: a stream
 	// truncated or reset after reasoning-only output, a cleanly finished
-	// reasoning-only completion (reasoning but no answer, no tool call), and
-	// a non-streaming reasoning-only body. The fresh attempt appends to the
-	// committed SSE connection after the already-relayed reasoning (auxiliary
-	// display text, never the completion contract) - never after answer
-	// content or tool calls, which are never rescuable. finish_reason length
-	// is the client's own token cap and is never rescued. The generic
-	// OpenAI-compatible relay only; the Cursor bridge and translated
-	// Anthropic streams keep their own signaling. Each rescue re-sends the
-	// full request (the upstream bills every attempt); 0 disables.
+	// reasoning-only completion (reasoning but no answer, no tool call), a
+	// retryable in-band provider error that arrived after reasoning-only
+	// output, and a non-streaming reasoning-only body. The fresh attempt
+	// appends to the committed SSE connection after the already-relayed
+	// reasoning (auxiliary display text, never the completion contract) -
+	// never after answer content or tool calls, which are never rescuable.
+	// finish_reason length is the client's own token cap and is never
+	// rescued. The generic OpenAI-compatible relay only; the Cursor bridge
+	// and translated Anthropic streams keep their own signaling. Each rescue
+	// re-sends the full request (the upstream bills every attempt); 0
+	// disables.
 	ThinkingRetries int `yaml:"thinking_retries" json:"thinking_retries"`
+
+	// RetryableErrorClasses extends the built-in retryable in-band error
+	// vocabulary (OpenAI server_error / service_unavailable family,
+	// api_error, overloaded_error, timeout_error and the common gateway
+	// spellings) with operator-supplied type or code strings: a gateway that
+	// reports a transient failure under a custom spelling can be re-sent
+	// without a code change. Matched case-insensitively against the parsed
+	// error envelope's type and code fields, never message text. The list is
+	// authoritative over the documented client-fault types (a gateway that
+	// mislabels a transient failure as invalid_request_error can be opted
+	// back in); only durable quota/billing classes are absolutely excluded -
+	// validation rejects them at load. Reload applies to new rescue
+	// decisions.
+	RetryableErrorClasses []string `yaml:"retryable_error_classes" json:"retryable_error_classes"`
 
 	// Error storm protection observes eligible upstream attempts in a bounded
 	// rolling window and gates new sends by provider or exact recorded model.
@@ -408,6 +425,9 @@ func (c *Config) Clone() *Config {
 	}
 	if c.StormStatusCodes != nil {
 		out.StormStatusCodes = append([]string{}, c.StormStatusCodes...)
+	}
+	if c.RetryableErrorClasses != nil {
+		out.RetryableErrorClasses = append([]string{}, c.RetryableErrorClasses...)
 	}
 	if c.Providers != nil {
 		out.Providers = make(map[string]ProviderOverride, len(c.Providers))
@@ -1350,6 +1370,25 @@ func validateStorm(c *Config) error {
 			return fmt.Errorf("storm_status_codes: duplicate %q", code)
 		}
 		seen[code] = true
+	}
+	// retryable_error_classes extends the built-in in-band retry vocabulary;
+	// matching is case-insensitive, so duplicates are compared that way too.
+	// A durable quota/billing class can never become retryable - waiting
+	// cannot restore credits - and is rejected here rather than silently
+	// denied at match time, so the operator gets the feedback at load.
+	classSeen := make(map[string]bool, len(c.RetryableErrorClasses))
+	for _, class := range c.RetryableErrorClasses {
+		if strings.TrimSpace(class) == "" {
+			return fmt.Errorf("retryable_error_classes: %q must not be empty or only whitespace", class)
+		}
+		lower := strings.ToLower(class)
+		if classSeen[lower] {
+			return fmt.Errorf("retryable_error_classes: duplicate %q", class)
+		}
+		classSeen[lower] = true
+		if metrics.IsNonRetryableQuotaErr(class, class) {
+			return fmt.Errorf("retryable_error_classes: %q is a durable quota/billing class and is never retryable", class)
+		}
 	}
 	return nil
 }

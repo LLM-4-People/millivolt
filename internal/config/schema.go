@@ -170,11 +170,14 @@ func Schema() []Field {
 			Help: "Cap on adaptive backoff. Does not clamp a provider Retry-After / rate-limit-reset (daily limits are often 30–60m). Must be > 0.",
 			Kind: KindDuration, HotReload: true},
 		{Key: "quality_retries", Category: "queue", Label: "Quality retries",
-			Help: "Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a truncated stream that relayed no content yet, and Cursor's empty-resume re-ask. 0 disables.",
+			Help: "Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a truncated stream that relayed no content yet, a retryable in-band provider error dropped before the wire, and Cursor's empty-resume re-ask. 0 disables.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(QualityRetriesMax), ZeroMeans: "disabled"},
 		{Key: "thinking_retries", Category: "queue", Label: "Thinking retries",
-			Help: "Transparent rescue of requests that die or end without an answer during thinking: a stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only completion, and a non-streaming reasoning-only body. The fresh attempt appends after the relayed reasoning; answer content and tool calls are never rescued, and finish_reason length never is. Each rescue re-sends the full request (billed). 0 disables.",
+			Help: "Transparent rescue of requests that die or end without an answer during thinking: a stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only completion, a retryable in-band provider error that arrived after reasoning-only output, and a non-streaming reasoning-only body. The fresh attempt appends after the relayed reasoning; answer content and tool calls are never rescued, and finish_reason length never is. Each rescue re-sends the full request (billed). 0 disables.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(ThinkingRetriesMax), ZeroMeans: "disabled"},
+		{Key: "retryable_error_classes", Category: "queue", Label: "Retryable error classes",
+			Help: "Operator extensions to the built-in retryable in-band error vocabulary: exact type or code strings (case-insensitive) that a provider reports inside a 200 and that authorize a transparent re-send while no generation content was relayed. Built-ins already cover server_error, the 503 overloaded/unavailable family, api_error, overloaded_error, timeout_error and common gateway spellings; list custom gateway spellings here. Durable quota/billing classes are rejected at load; in-band rate limits, unknown classes and errors after relayed content stay verbatim. Reload applies to new rescue decisions.",
+			Kind: KindStrings, HotReload: true},
 
 		// ---- storm ----
 		{Key: "storm_enabled", Category: "storm", Label: "Enable protection",

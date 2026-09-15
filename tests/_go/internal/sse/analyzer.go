@@ -170,6 +170,16 @@ func TestRetryableUpstreamError(t *testing.T) {
 		t.Fatal("an error after Responses reasoning must not report (sequence numbers)")
 	}
 
+	// After ANY relayed Responses-API event: never rescuable - the feed's
+	// sequence numbers are documented ordering state a re-send would restart
+	// mid-stream (lifecycle events like response.created included).
+	var j Analyzer
+	feed(&j, `data: {"type":"response.created","sequence_number":0}`)
+	feed(&j, string(errFrame))
+	if typ, _, _, _ = j.RetryableUpstreamError(); typ != "" {
+		t.Fatal("an error after a relayed Responses event must not report (sequence numbers)")
+	}
+
 	// A multi-line error frame (discovered at the event-boundary flush, with
 	// its earlier line already parsed as part of the same event): never
 	// rescuable - the first line may already be on the wire.

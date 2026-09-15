@@ -99,54 +99,30 @@ const (
 	maxTranslateBodyBytes = 32 << 20 // 32 MiB
 )
 
-// nonRetryableQuotaClasses are provider error type/code strings that, when
-// delivered with HTTP 429, denote a DURABLE account/billing condition - quota
-// or credits exhausted, spend/hard limits, expired plans. Waiting cannot clear
-// them, so the proxy surfaces the response immediately instead of burning its
-// retry budget (and pacing the whole provider+key group) on a retry loop.
-// Transient rate-limit 429s keep their normal retry/backoff behavior. Exact
-// match (after lowercasing) against the canonical envelope parser's type AND
-// code fields, never message text: OpenAI insufficient_quota / *_limit_reached
-// family, Kimi exceeded_current_quota_error, and Z.AI's numeric business
-// codes (1113 balance exhausted, 1309/1311/1314/1315 plan/package limits).
-var nonRetryableQuotaClasses = map[string]bool{
-	"insufficient_quota":                true,
-	"insufficient_credits":              true,
-	"credit_balance_exhausted":          true,
-	"organization_spend_limit_exceeded": true,
-	"project_spend_limit_exceeded":      true,
-	"organization_usage_limit_exceeded": true,
-	"billing_hard_limit_reached":        true,
-	"billing_not_active":                true,
-	"exceeded_current_quota_error":      true,
-	"1113":                              true,
-	"1309":                              true,
-	"1311":                              true,
-	"1314":                              true,
-	"1315":                              true,
-}
-
-// isNonRetryableQuotaErr reports whether a 429's structured error type or code
-// is a durable account/billing condition that a retry can never clear.
+// isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota
+// predicate (metrics owns the vocabulary, next to ParseErrorEnvelope): a 429
+// whose structured type or code is a durable account/billing condition never
+// burns a retry.
 func isNonRetryableQuotaErr(typ, code string) bool {
-	return nonRetryableQuotaClasses[strings.ToLower(typ)] || nonRetryableQuotaClasses[strings.ToLower(code)]
+	return metrics.IsNonRetryableQuotaErr(typ, code)
 }
 
-// retryableUpstreamErrorClasses are in-band error type/code strings that denote
-// a TRANSIENT server-availability failure: the classes the OpenAI API
-// documents as retryable (500 server_error "retry your request", the 503
-// overloaded/unavailable family "follow Retry-After, then retry", request
-// timeouts) plus the equivalent Anthropic and common-gateway spellings. When a
-// provider streams one of these inside its 200 SSE (or a non-streaming 200
-// body) instead of the 5xx status the class implies, the proxy may
-// transparently re-send the request while nothing content-bearing has been
-// relayed - the same wire-safety contract as the truncation rescues. The
-// durable and client-fault classes are NOT here and never re-send:
+// retryableUpstreamErrorClasses are the BUILT-IN in-band error type/code
+// strings that denote a TRANSIENT server-availability failure: the classes the
+// OpenAI API documents as retryable (500 server_error "retry your request",
+// the 503 overloaded/unavailable family "follow Retry-After, then retry",
+// request timeouts) plus the equivalent Anthropic and common-gateway
+// spellings. When a provider streams one of these inside its 200 SSE (or a
+// non-streaming 200 body) instead of the 5xx status the class implies, the
+// proxy may transparently re-send the request while nothing content-bearing
+// has been relayed - the same wire-safety contract as the truncation rescues.
+// Operator extensions to this vocabulary come from the
+// retryable_error_classes setting (Server.retryableUpstreamErrorClass); the
+// durable and client-fault classes are never re-sent:
 // rate_limit_error is flow control with no in-band Retry-After (the scheduler
-// owns pacing), invalid_request/authentication/permission/not_found and the
-// nonRetryableQuotaClasses are permanent, and an unknown type fails closed to
-// verbatim relay. Exact match (after lowercasing) against the canonical
-// envelope parser's type AND code fields, never message text.
+// owns pacing), nonRetryableRequestClasses and the durable quota/billing
+// classes (metrics.IsNonRetryableQuotaErr) are
+// permanent, and an unknown type fails closed to verbatim relay.
 var retryableUpstreamErrorClasses = map[string]bool{
 	"server_error":              true, // OpenAI 500
 	"service_unavailable":       true, // OpenAI 503 type spelling
@@ -159,12 +135,53 @@ var retryableUpstreamErrorClasses = map[string]bool{
 	"timeout_error":             true, // Anthropic 540
 }
 
+// nonRetryableRequestClasses are the documented client-fault error types: the
+// request itself is wrong (malformed, unauthorized, forbidden, absent, too
+// large), so a re-send produces the identical failure. They deny even when a
+// co-occurring code string resembles a server class - the type is the
+// authoritative class field, and a provider mixing them is ambiguous, not
+// retryable. Unknown types deny by falling through (fail closed); only this
+// documented vocabulary needs an explicit deny because it is the one set that
+// could plausibly co-occur with a server-class code.
+var nonRetryableRequestClasses = map[string]bool{
+	"invalid_request_error": true,
+	"authentication_error":  true,
+	"permission_error":      true,
+	"not_found_error":       true,
+	"request_too_large":     true,
+}
+
 // retryableUpstreamErrorClass reports whether an in-band error's structured
-// type or code is a transient server-availability class the proxy may
-// transparently re-send. Unknown values stay false (fail closed).
-func retryableUpstreamErrorClass(typ, code string) bool {
-	return retryableUpstreamErrorClasses[strings.ToLower(typ)] ||
-		retryableUpstreamErrorClasses[strings.ToLower(code)]
+// type or code authorizes a transparent re-send. One precedence chain, fail
+// closed at every step:
+//  1. a durable quota/billing class (metrics.IsNonRetryableQuotaErr) never
+//     re-sends - waiting cannot restore credits, and no operator extension
+//     may override a billing condition;
+//  2. the operator's retryable_error_classes extension list is authoritative:
+//     it may authorize any spelling the built-ins do not know, including a
+//     client-fault type a gateway mislabels;
+//  3. a documented client-fault type (nonRetryableRequestClasses) is final
+//     against the built-in vocabulary even when its code strings resemble a
+//     server class - the type is the authoritative class field, and a
+//     provider mixing them is ambiguous, not retryable;
+//  4. the built-in retryableUpstreamErrorClasses vocabulary (the OpenAI
+//     retry semantics) matches the type or the code.
+//
+// Unknown values stay false: verbatim relay, the client's to retry.
+func (s *Server) retryableUpstreamErrorClass(typ, code string) bool {
+	typ, code = strings.ToLower(typ), strings.ToLower(code)
+	if isNonRetryableQuotaErr(typ, code) {
+		return false
+	}
+	for _, v := range s.cfg().RetryableErrorClasses {
+		if strings.EqualFold(v, typ) || strings.EqualFold(v, code) {
+			return true
+		}
+	}
+	if nonRetryableRequestClasses[typ] {
+		return false
+	}
+	return retryableUpstreamErrorClasses[typ] || retryableUpstreamErrorClasses[code]
 }
 
 // target is the resolved upstream destination for one request.

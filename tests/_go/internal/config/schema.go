@@ -195,6 +195,9 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 		if f.Key == "storm_status_codes" {
 			return []any{"500"}
 		}
+		if f.Key == "retryable_error_classes" {
+			return []any{"model_warming_up"}
+		}
 	case KindProviders:
 		return map[string]any{"neutral.example": map[string]any{"cost_keys": []any{"usage.cost"}}}
 	case KindAliases:

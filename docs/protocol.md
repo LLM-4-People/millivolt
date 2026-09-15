@@ -133,10 +133,14 @@ in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
 `server_error`, the 503 overloaded/unavailable family, request timeouts, and
 the equivalent Anthropic/gateway spellings) are dropped before the wire and
-the request re-sent, so the client never sees the failure; rate limits in-band
+the request re-sent, so the client never sees the failure. The
+`retryable_error_classes` setting extends that vocabulary with operator-supplied
+type or code strings for gateway-specific spellings (durable quota/billing
+classes are rejected at load); rate limits in-band
 (no `Retry-After` exists there), durable request/billing classes, unknown
-types, and errors after relayed contract bytes relay verbatim for the client
-to handle. Mid-thinking rescues
+types, Responses-API feeds once any of their events was relayed (per-response
+sequence numbers), and errors after relayed contract bytes relay verbatim for
+the client to handle. Mid-thinking rescues
 (`thinking_retries`) extend the re-send to requests that die or end without an
 answer during the reasoning phase: a truncation or upstream read error after
 reasoning-only output, a cleanly finished reasoning-only completion (the

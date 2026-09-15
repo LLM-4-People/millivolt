@@ -811,8 +811,10 @@ func TestStreamProviderErrorOnEmptyStreamRetried(t *testing.T) {
 	if strings.Contains(got, "api_error") {
 		t.Fatalf("the error frame must be dropped before the wire: %s", got)
 	}
-	if got != freshAnswerFrames {
-		t.Fatalf("the fresh attempt's frames must relay verbatim: %q", got)
+	// The fresh attempt's frames relay verbatim, behind the blank line that
+	// closed the dropped event (the rescue's pending-event close).
+	if got != "\n"+freshAnswerFrames {
+		t.Fatalf("the fresh attempt's frames must relay verbatim behind the event close: %q", got)
 	}
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("upstream calls = %d, want 2", n)
@@ -826,6 +828,70 @@ func TestStreamProviderErrorOnEmptyStreamRetried(t *testing.T) {
 	if at.ErrorType != "api_error" || at.ErrorCode != "internal_error" ||
 		at.ErrorMsg != "Coral Bricks is temporarily unavailable. Please retry." {
 		t.Fatalf("absorbed attempt must carry the provider's envelope: %+v", at)
+	}
+}
+
+// TestStreamOperatorErrorClassExtensionRetried: the retryable_error_classes
+// setting extends the built-in vocabulary - a gateway reporting a transient
+// failure under a custom spelling is rescued exactly like a built-in class,
+// while the same spelling without the extension relays verbatim.
+func TestStreamOperatorErrorClassExtensionRetried(t *testing.T) {
+	var calls atomic.Int32
+	errChunk := `data: {"error":{"message":"model warming up","type":"model_warming_up","code":"warming"}}` + "\n\n"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		if calls.Add(1) == 1 {
+			w.Write([]byte(errChunk))
+			return
+		}
+		w.Write([]byte(freshAnswerFrames))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.RetryableErrorClasses = []string{"model_warming_up"}
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if strings.Contains(got, "model_warming_up") {
+		t.Fatalf("the extended-class error frame must be dropped before the wire: %s", got)
+	}
+	if got != "\n"+freshAnswerFrames {
+		t.Fatalf("the fresh attempt's frames must relay verbatim behind the event close: %q", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Retries != 1 || rec.Attempts[0].ErrorType != "model_warming_up" {
+		t.Fatalf("recovered record must carry the absorbed extension-class attempt: %+v", rec)
+	}
+
+	// Without the extension the same spelling is unknown: fail closed to
+	// verbatim relay on the first attempt.
+	calls2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		calls.Add(-1) // reuse the counter loosely; separate assertions below
+		w.Write([]byte(errChunk))
+		w.(http.Flusher).Flush()
+	}))
+	defer calls2.Close()
+	buf2 := metrics.NewBuffer(100)
+	srv2 := httptest.NewServer(New(config.Default(), buf2))
+	defer srv2.Close()
+	_, got2 := streamRequest(t, srv2, calls2)
+	if got2 != errChunk {
+		t.Fatalf("unknown class must relay verbatim without the extension: %q", got2)
+	}
+	recs2 := waitForRecord(t, buf2, 1)
+	if recs2[0].ErrorType != "model_warming_up" || !recs2[0].IsError() || recs2[0].Retries != 0 {
+		t.Fatalf("unknown-class record must carry the provider's error, unrescued: %+v", recs2[0])
 	}
 }
 
@@ -2321,7 +2387,11 @@ func TestStreamInBandErrorAfterReasoningRescuedOnThinkingBudget(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
-	if want := thinkingFrame + freshAnswerFrames; got != want {
+	// The already-relayed reasoning is preserved on the wire (auxiliary
+	// display text the fresh attempt appends behind), the error frame never
+	// reached the client, and the rescue's pending-event close (the blank
+	// line ending the dropped event) separates the fresh attempt's frames.
+	if want := thinkingFrame + "\n" + freshAnswerFrames; got != want {
 		t.Fatalf("reasoning then fresh answer must relay, error frame dropped: got %q want %q", got, want)
 	}
 	if n := calls.Load(); n != 2 {

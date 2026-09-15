@@ -131,9 +131,11 @@ func TestAggregateToolCallsChecked(t *testing.T) {
 
 // TestAggregateIsErrorSemantics pins the error contract over the shared
 // isErrorCorpus truth table (also feeding the rate-limit suite): 429 (flow
-// control) and 499 (the LOCAL client closed the connection - its own
-// cancellation) never count on their own; a genuine failure counts whether
-// it's the final outcome OR an absorbed retry attempt the client never saw.
+// control) and a plain 499 (the LOCAL client closed the connection - its own
+// cancellation) never count on their own; a 499 carrying a structured error
+// observed the upstream's in-band failure and counts like its 200 twin; a
+// genuine failure counts whether it's the final outcome OR an absorbed retry
+// attempt the client never saw.
 func TestAggregateIsErrorSemantics(t *testing.T) {
 	for _, tc := range isErrorCorpus {
 		if got := tc.rec.IsError(); got != tc.wantErr {

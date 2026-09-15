@@ -233,6 +233,43 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 	analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
 }
 
+// absorbResend books ONE absorbed attempt on the record (Attempts, Retries,
+// the live publish, the storm observation) and re-sends the SAME request -
+// the shared middle of serveNonStreaming's two pre-write absorb sites (the
+// degenerate-200 classes and the retryable in-band error envelope), which
+// differ only in the attempt's error fields and the budget they spend.
+// Nothing has been written to the client on this surface, so the re-send is
+// always wire-safe; its opening WaitSend honors operator holds ("a retry is
+// a new send and waits"). ok=false means the re-send failure was already
+// surfaced on this socket (the client left, the storm queue rejected the
+// retry with a 429 + Retry-After, or the transport failed with a 502) and
+// the request is finished; ok=true returns the adopted attempt's response
+// and its per-send cancel, which the caller defers (function-scoped LIFO
+// ordering) before adopting the record fields.
+func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks, at metrics.RetryAttempt, old *http.Response) (next *http.Response, nextCancel context.CancelFunc, ok bool) {
+	rec.Attempts = append(rec.Attempts, at)
+	rec.Retries++
+	s.publishUpdate(rec)
+	s.finishStormResponse(ctx, true)
+	old.Body.Close()
+	next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
+	if err != nil {
+		clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
+		switch {
+		case clientGone:
+			return nil, nil, false
+		case stormQueue:
+			// Already classified: the sink owner stamps the record and writes
+			// the 429 + Retry-After.
+			s.writeStormQueueError(w, rec, err)
+			return nil, nil, false
+		}
+		http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+		return nil, nil, false
+	}
+	return next, nextCancel, true
+}
+
 // serveNonStreaming relays a non-streaming response with quality handling. A
 // 200 whose body classifies degenerate (metrics.ClassifyNonStreamBody -
 // same predicate as the streaming paths) triggers a transparent retry BEFORE
@@ -240,12 +277,14 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 // HTTP 502 with an OpenAI error envelope - a failure, never a silently empty
 // success (the cursor empty_turn precedent, and 502/5xx is retryable in
 // common API clients). Two budgets govern the loop: quality_retries owns the
-// void classes (empty completion, empty tool_calls), and thinking_retries
-// owns the reasoning-only class (metrics.CodeReasoningOnly) - the
-// non-streaming twin of the streaming mid-thinking rescue, so both surfaces
-// treat the same outcome identically. In-band error envelopes on a 200 are
-// NOT retried: they are the provider's own failure statement and are relayed
-// verbatim. Translated (anthropic) non-streaming bodies are never
+// void classes (empty completion, empty tool_calls) and the retryable
+// in-band error envelope (a transient server-availability class the OpenAI
+// retry semantics cover, re-sent before any byte reaches the client; every
+// other class relays verbatim as the provider's own final statement), and
+// thinking_retries owns the reasoning-only class
+// (metrics.CodeReasoningOnly) - the non-streaming twin of the streaming
+// mid-thinking rescue, so both surfaces treat the same outcome identically.
+// Translated (anthropic) non-streaming bodies are never
 // quality-classified: Anthropic documents legitimate empty end_turn answers
 // and refusals that must not be re-run (and re-running a server_tool_use turn
 // would double-execute tools upstream).
@@ -374,11 +413,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// the re-send is always wire-safe; every other class, and an
 			// exhausted budget, relays verbatim and lets the record carry it.
 			if typ, code, msg := metrics.ParseErrorEnvelope(spooled); typ != "" {
-				if retryableUpstreamErrorClass(typ, code) && qualityLeft > 0 {
+				if s.retryableUpstreamErrorClass(typ, code) && qualityLeft > 0 {
 					qualityLeft--
-					// Absorb the degenerate attempt and retry the SAME
-					// request - nothing was written to the client, so this
-					// is a safe pre-write retry like the 429/5xx attempts.
 					// The attempt log carries the provider's own envelope
 					// (the explorer groups it under the provider's type).
 					at := metrics.RetryAttempt{
@@ -388,26 +424,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 						ErrorMsg:   msg,
 						At:         time.Now(),
 					}
-					rec.Attempts = append(rec.Attempts, at)
-					rec.Retries++
-					s.publishUpdate(rec)
-					s.finishStormResponse(ctx, true)
-					resp.Body.Close()
-					// The re-send is a retry: its opening WaitSend honors
-					// operator holds ("a retry is a new send and waits").
-					next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
-					if err != nil {
-						clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
-						switch {
-						case clientGone:
-							return
-						case stormQueue:
-							// Already classified: the sink owner stamps the
-							// record and writes the 429 + Retry-After.
-							s.writeStormQueueError(w, rec, err)
-							return
-						}
-						http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+					next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
+					if !ok {
 						return
 					}
 					// ServeHTTP's defer still binds the FIRST body (and its
@@ -464,26 +482,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					at.ErrorType = sse.TypeUpstreamError
 					at.ErrorCode = code
 				}
-				rec.Attempts = append(rec.Attempts, at)
-				rec.Retries++
-				s.publishUpdate(rec)
-				s.finishStormResponse(ctx, true)
-				resp.Body.Close()
-				// The re-send is a retry: its opening WaitSend honors operator
-				// holds ("a retry is a new send and waits").
-				next, nextCancel, err := s.doWithRetry(ctx, groupKey, r, t, key, body, rec, hooks, true)
-				if err != nil {
-					clientGone, stormQueue := s.classifyResendFailure(r, rec, err)
-					switch {
-					case clientGone:
-						return
-					case stormQueue:
-						// Already classified: the sink owner stamps the record
-						// and writes the 429 + Retry-After.
-						s.writeStormQueueError(w, rec, err)
-						return
-					}
-					http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
+				next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
+				if !ok {
 					return
 				}
 				// ServeHTTP's defer still binds the FIRST body (and its
@@ -920,7 +920,7 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 // honors operator pause on retries and remaining nextAllowedAt across pause.
 // When retries are exhausted the last upstream response is returned as-is
 // (failures are never masked). A 429 whose error envelope is a durable
-// quota/billing condition (nonRetryableQuotaClasses) is never retried -
+// quota/billing condition (metrics.IsNonRetryableQuotaErr) is never retried -
 // waiting cannot clear it.
 //
 // firstSendIsRetry marks an invocation whose OPENING send is itself a retry
@@ -1535,13 +1535,25 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// caller transparently re-sends - the OpenAI retry semantics
 					// the provider asked for ("please retry"), applied at the
 					// only wire state where re-sending cannot duplicate anything.
-					// Flush the complete lines the loop already relayed into the
-					// analyzer (role/keepalive/reasoning) so the wire matches the
-					// record before the fresh attempt appends behind them.
 					// Anything else falls through to verbatim relay.
 					if typ, code, msg, reasoning := a.RetryableUpstreamError(); typ != "" &&
-						retryableUpstreamErrorClass(typ, code) && !rec.ClientDisconnected &&
+						s.retryableUpstreamErrorClass(typ, code) && !rec.ClientDisconnected &&
+						ctx.Err() == nil &&
 						((reasoning && allowThinkingRescue) || (!reasoning && allowTruncationRetry)) {
+						// Flush the complete lines the loop already fed to the
+						// analyzer (role/keepalive/reasoning) so the wire matches
+						// the record before the fresh attempt appends behind them.
+						if !writeOut() {
+							return rescueNone
+						}
+						// Close the client's pending SSE event: the dropped
+						// frame was its first data line, so field lines of the
+						// same event (an Anthropic-style `event: error`) may have
+						// been relayed and must not type the fresh attempt's
+						// first chunk. A blank line ends that event with no
+						// data - spec parsers discard it - and is a no-op
+						// between complete events.
+						out.WriteByte('\n')
 						if !writeOut() {
 							return rescueNone
 						}

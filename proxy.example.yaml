@@ -213,20 +213,32 @@ base_backoff: 1s
 max_backoff: 2m
 
 # Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a
-# truncated stream that relayed no content yet, and Cursor's empty-resume re-ask. 0
-# disables.
+# truncated stream that relayed no content yet, a retryable in-band provider error dropped
+# before the wire, and Cursor's empty-resume re-ask. 0 disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 quality_retries: 1
 
 # Transparent rescue of requests that die or end without an answer during thinking: a
 # stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only
-# completion, and a non-streaming reasoning-only body. The fresh attempt appends after the
-# relayed reasoning; answer content and tool calls are never rescued, and finish_reason
-# length never is. Each rescue re-sends the full request (billed). 0 disables.
+# completion, a retryable in-band provider error that arrived after reasoning-only output,
+# and a non-streaming reasoning-only body. The fresh attempt appends after the relayed
+# reasoning; answer content and tool calls are never rescued, and finish_reason length
+# never is. Each rescue re-sends the full request (billed). 0 disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1
+
+# Operator extensions to the built-in retryable in-band error vocabulary: exact type or
+# code strings (case-insensitive) that a provider reports inside a 200 and that authorize
+# a transparent re-send while no generation content was relayed. Built-ins already cover
+# server_error, the 503 overloaded/unavailable family, api_error, overloaded_error,
+# timeout_error and common gateway spellings; list custom gateway spellings here. Durable
+# quota/billing classes are rejected at load; in-band rate limits, unknown classes and
+# errors after relayed content stay verbatim. Reload applies to new rescue decisions.
+# Hot-reload: yes.
+#   type: list of string
+retryable_error_classes: []
 
 # ---- Error storm protection ----
 # Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy

@@ -790,9 +790,9 @@ cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
 received and aborted around), and counts as the provider error it is. Zero
-explorer health
-badges are hidden independently. Error-dimension headline counts can count error
-occurrences, so do not treat every displayed error number as the same metric.
+explorer health badges are hidden independently. Error-dimension headline
+counts can count error occurrences, so do not treat every displayed error
+number as the same metric.
 
 ### Snapshots, live feeds and monitoring
 

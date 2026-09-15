@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,14 +193,19 @@ func TestLiveBeginEndEmitted(t *testing.T) {
 }
 
 // A provider can signal a failure IN-BAND: HTTP 200, then an error payload in
-// the SSE stream ({"error":{...}}), then EOF. The client receives the failure
-// verbatim, so the record must be flagged as an error too - previously the
-// bytes passed through untouched, the analyzer ignored the error key, and the
-// dashboard showed a clean, empty 200 (live coralbricks incident: the client
-// displayed "provider overloaded", the proxy logged success).
-func TestInBandStreamErrorRecordedAndRelayedVerbatim(t *testing.T) {
+// the SSE stream ({"error":{...}}), then EOF. In a retryable class the first
+// frame is dropped and the request re-sent (rescueUpstreamError); this test
+// pins the exhausted end of that path - the SAME error on the second attempt,
+// with the budget spent, relays verbatim so the client sees the failure, and
+// the record carries the provider's envelope plus the absorbed attempt
+// (previously the whole incident class showed as a clean, empty 200: live
+// coralbricks case, the client displayed "provider overloaded", the proxy
+// logged success).
+func TestInBandRetryableStreamErrorExhaustedThenVerbatim(t *testing.T) {
+	var calls atomic.Int32
 	errChunk := "data: {\"error\":{\"message\":\"provider overloaded\",\"type\":\"server_error\",\"code\":\"overloaded\"}}\n\n"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
 		w.Write([]byte(errChunk))
@@ -222,9 +228,14 @@ func TestInBandStreamErrorRecordedAndRelayedVerbatim(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
-	// Byte-transparent relay: the client gets EXACTLY the upstream payload.
-	if string(body) != errChunk {
-		t.Errorf("client body = %q, want verbatim %q", body, errChunk)
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (rescue, then the exhausted verbatim attempt)", n)
+	}
+	// The rescued attempt never reached the wire; the exhausted attempt
+	// relays byte-for-byte, behind the blank line that closed the dropped
+	// event (the pending-event close the rescue writes).
+	if string(body) != "\n"+errChunk {
+		t.Errorf("client body = %q, want the blank-line close then verbatim %q", body, errChunk)
 	}
 	if resp.StatusCode != 200 {
 		t.Errorf("client status = %d, want 200 (in-band errors keep the upstream status)", resp.StatusCode)
@@ -243,6 +254,12 @@ func TestInBandStreamErrorRecordedAndRelayedVerbatim(t *testing.T) {
 	}
 	if rec.ErrorMsg != "provider overloaded" {
 		t.Errorf("ErrorMsg = %q, want %q", rec.ErrorMsg, "provider overloaded")
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 {
+		t.Errorf("Retries = %d, attempts = %d, want the one absorbed rescue", rec.Retries, len(rec.Attempts))
+	}
+	if rec.Attempts[0].ErrorType != "server_error" || rec.Attempts[0].ErrorCode != "overloaded" {
+		t.Errorf("absorbed attempt must carry the provider's envelope: %+v", rec.Attempts[0])
 	}
 	if !rec.IsError() {
 		t.Error("record must be flagged as an error")
@@ -488,12 +505,18 @@ func TestMidStreamClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
 }
 
 // Anthropic shape on a byte-transparent stream: event:error + data line with
-// {"type":"error","error":{"type":...}} must be captured the same way.
+// {"type":"error","error":{"type":...}} must be captured the same way. The
+// class is non-retryable (invalid_request_error), so the frame relays
+// verbatim on the first attempt - one upstream call, the event: field line
+// and the data line both byte-preserved, nothing re-sent.
 func TestInBandStreamErrorAnthropicShape(t *testing.T) {
+	var calls atomic.Int32
+	wire := "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"Overloaded\"}}\n\n"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"))
+		w.Write([]byte(wire))
 		w.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
@@ -510,16 +533,23 @@ func TestInBandStreamErrorAnthropicShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	io.Copy(io.Discard, resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
+
+	if string(body) != wire {
+		t.Errorf("client body = %q, want verbatim %q", body, wire)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (non-retryable class is never re-sent)", n)
+	}
 
 	snap := waitForRecord(t, buf, 1)
 	if len(snap) != 1 {
 		t.Fatalf("recorded %d records, want 1", len(snap))
 	}
 	rec := snap[0]
-	if rec.ErrorType != "overloaded_error" {
-		t.Errorf("ErrorType = %q, want overloaded_error", rec.ErrorType)
+	if rec.ErrorType != "invalid_request_error" {
+		t.Errorf("ErrorType = %q, want invalid_request_error", rec.ErrorType)
 	}
 	if rec.ErrorMsg != "Overloaded" {
 		t.Errorf("ErrorMsg = %q, want Overloaded", rec.ErrorMsg)
