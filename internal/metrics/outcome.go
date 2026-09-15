@@ -111,15 +111,16 @@ func ClassifyOutcome(finish string, terminatorSeen bool, hadAnswer, hadReasoning
 // ClassifyNonStreamBody evaluates a fully-buffered non-streaming OpenAI-shaped
 // JSON body (chat completions only) with the same degenerate rules as
 // ClassifyOutcome: answer presence comes from choices[0].message.content,
-// reasoning presence from the message's reasoning field family (the same
-// spellings the streaming analyzer matches - reasoning_content, reasoning,
-// reasoning_details, reasoning_text), finish from
-// choices[0].finish_reason, tools from its tool_calls array. This is the
-// non-streaming twin of the streaming semantics: a reasoning-only body
-// classifies reasoning_only, never empty_completion, so the two surfaces can
-// never disagree about the same outcome. A non-streaming body is never
-// "truncated" (it is complete by transport definition) - only the void,
-// tool-mismatch and reasoning-only classes apply.
+// reasoning presence from the message's chat-completions reasoning field
+// family (reasoning_content, reasoning, reasoning_details, reasoning_text -
+// the spellings that appear on a chat message; the streaming analyzer's
+// additional Anthropic/Gemini shapes never occur in a buffered chat-completions
+// body), finish from choices[0].finish_reason, tools from its tool_calls
+// array. This is the non-streaming twin of the streaming semantics: a
+// reasoning-only body classifies reasoning_only, never empty_completion, so
+// the two surfaces can never disagree about the same outcome. A non-streaming
+// body is never "truncated" (it is complete by transport definition) - only
+// the void, tool-mismatch and reasoning-only classes apply.
 func ClassifyNonStreamBody(body []byte) string {
 	var raw struct {
 		Choices []struct {

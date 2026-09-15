@@ -173,7 +173,7 @@ func Schema() []Field {
 			Help: "Transparent re-attempts of a degenerate 200 (empty completion, empty tool_calls), a truncated stream that relayed no content yet, and Cursor's empty-resume re-ask. 0 disables.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(QualityRetriesMax), ZeroMeans: "disabled"},
 		{Key: "thinking_retries", Category: "queue", Label: "Thinking retries",
-			Help: "Transparent rescue of requests that die or end without an answer during thinking: a stream truncated or reset after reasoning-only output, and a cleanly finished reasoning-only completion. The fresh attempt appends after the relayed reasoning; answer content and tool calls are never rescued, and finish_reason length never is. Each rescue re-sends the full request (billed). 0 disables.",
+			Help: "Transparent rescue of requests that die or end without an answer during thinking: a stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only completion, and a non-streaming reasoning-only body. The fresh attempt appends after the relayed reasoning; answer content and tool calls are never rescued, and finish_reason length never is. Each rescue re-sends the full request (billed). 0 disables.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(ThinkingRetriesMax), ZeroMeans: "disabled"},
 
 		// ---- storm ----

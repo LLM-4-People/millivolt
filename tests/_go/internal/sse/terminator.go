@@ -146,6 +146,12 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 		{"relayed reasoning is not retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning":"hmm"}}]}`,
 		}, false},
+		{"relayed refusal is not retryable (answer-shaped bytes)", []string{
+			`data: {"id":"1","choices":[{"delta":{"refusal":"I cannot help with that"}}]}`,
+		}, false},
+		{"relayed deprecated function_call is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, false},
 		{"relayed tool call is not retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
 		}, false},
@@ -196,21 +202,30 @@ func TestAnalyzerRetryableReasoningTruncation(t *testing.T) {
 		{"every reasoning spelling is retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning":"hmm"}}]}`,
 		}, true},
+		{"reasoning_details spelling is retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_details":[{"type":"thinking","thinking":"hmm"}]}}]}`,
+		}, true},
 		{"reasoning then answer is not retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
 			`data: {"id":"1","choices":[{"delta":{"content":"partial answer"}}]}`,
-		}, false},
-		{"reasoning then tool call is not retryable", []string{
-			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
 		}, false},
 		{"reasoning then refusal is not retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
 			`data: {"id":"1","choices":[{"delta":{"refusal":"I cannot help"}}]}`,
 		}, false},
+		{"reasoning then tool call is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+		}, false},
 		{"reasoning then deprecated function_call is not retryable", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
 			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}}]}`,
+		}, false},
+		{"trailing multi-line error after reasoning is not retryable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			``, // event boundary: the reasoning event flushes before the error's lines accumulate
+			`data: {"error":`,
+			`data: {"message":"died","type":"overloaded_error","code":"overloaded"}}`,
 		}, false},
 		{"empty truncation is not the thinking rescue", []string{
 			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
@@ -237,6 +252,68 @@ func TestAnalyzerRetryableReasoningTruncation(t *testing.T) {
 			feedLines(a, c.lines...)
 			if got := a.RetryableReasoningTruncation(); got != c.want {
 				t.Fatalf("RetryableReasoningTruncation = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAnalyzerRetryableReasoningStop gates the reasoning-only clean-stop
+// rescue (the terminal region is withheld, so a re-send is mechanically
+// possible): answer-shaped bytes the client saw - a refusal or a deprecated
+// function_call delta - and Responses-shaped feeds (per-response sequence
+// numbers would restart mid-stream) must disqualify it, exactly like the
+// truncation twin. The production caller reaches this accessor only after
+// the class gate (OutcomeCode == reasoning_only), so the rows here exercise
+// the accessor's own defense-in-depth gates directly; the classification
+// itself is pinned by TestAnalyzerOutcomeCodes.
+func TestAnalyzerRetryableReasoningStop(t *testing.T) {
+	stopFrame := `data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"reasoning-only stop is rescuable", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			stopFrame,
+			`data: [DONE]`,
+		}, true},
+		{"a refusal behind the reasoning disqualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"refusal":"I cannot help"}}]}`,
+			stopFrame,
+			`data: [DONE]`,
+		}, false},
+		{"a deprecated function_call behind the reasoning disqualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}}]}`,
+			stopFrame,
+			`data: [DONE]`,
+		}, false},
+		{"responses-shaped feeds are never appended to", []string{
+			`data: {"type":"response.created","response":{"id":"r1"}}`,
+			`data: {"type":"response.reasoning_text.delta","delta":"thinking"}`,
+			`data: {"type":"response.completed","response":{}}`,
+		}, false},
+		{"a provider in-band error disqualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"error":{"message":"overloaded","type":"overloaded_error","code":"overloaded"}}`,
+			stopFrame,
+			`data: [DONE]`,
+		}, false},
+		{"a tool call disqualifies (defense in depth: the class gate runs first)", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+			stopFrame,
+			`data: [DONE]`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.RetryableReasoningStop(); got != c.want {
+				t.Fatalf("RetryableReasoningStop = %v, want %v", got, c.want)
 			}
 		})
 	}

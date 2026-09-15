@@ -135,7 +135,9 @@ appends behind the already-relayed reasoning, which is auxiliary display text;
 answer content, tool calls, refusals, `finish_reason: length` (the client's
 own token cap), provider in-band errors and Responses-API feeds (per-response
 sequence numbers) are never rescued. An exhausted budget surfaces the
-`reasoning_only` class in-band as an `upstream_error` on both surfaces.
+`reasoning_only` class as a provider error (`upstream_error`) on both
+surfaces: in-band on the streaming connection, and as an HTTP 502 error
+envelope for non-streaming requests.
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 ### Scheduling and timing

@@ -1355,7 +1355,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		code := a.OutcomeCode()
 		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected {
-			if code == metrics.CodeReasoningOnly && allowThinkingRescue {
+			// The stop rescue requires the terminal region still WITHHELD:
+			// once a finishHold call released it the outcome was already
+			// signed on the wire, and no re-send may append behind it.
+			// RetryableReasoningStop is the analyzer's wire-safety gate (no
+			// refusal/function_call bytes, not a Responses-shaped feed).
+			if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
 				hold = hold[:0]
 				holding = false
 				rescueRequested = rescueReasoningStop
@@ -1464,8 +1469,8 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// line can never be a terminal marker, so it is never withheld.
 			// Its bytes stay in `out` (unflushed) until the outcome below
 			// decides whether to write them - a rescue drops them, so the
-			// client never sees an unterminated line the fresh attempt will
-			// re-emit in full.
+			// client never sees an unterminated line; the fresh attempt
+			// opens a clean new event stream.
 			if lineBuf.Len() > 0 {
 				b := lineBuf.Bytes()
 				a.Feed(b, now)
@@ -1480,12 +1485,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// A mid-thinking death by read error (connection reset,
 				// unexpected EOF from the upstream) is the same rescuable
 				// truncation as clean EOF - but only when only reasoning was
-				// relayed, and never when our own context caused the failure
-				// (the client is gone, or the per-send deadline fired: a
-				// re-send would start a fresh deadline the client did not ask
-				// for). The unflushed partial line above already fed the
-				// analyzer, so answer-shaped bytes disqualify the rescue.
+				// relayed, and never when our own context caused the failure:
+				// the client is gone (the outer context is canceled), or the
+				// per-send deadline fired. The deadline lives on a CHILD
+				// context (doWithRetry's withSendTimeout), so the outer ctx
+				// stays clean when it kills the read - reject the deadline
+				// sentinel itself (and any error wrapping it): a re-send
+				// would mint a fresh deadline the client did not ask for.
 				if allowThinkingRescue && ctx.Err() == nil &&
+					!errors.Is(err, context.DeadlineExceeded) &&
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 					return rescueReasoningTruncation
 				}

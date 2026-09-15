@@ -515,16 +515,21 @@ func (a *Analyzer) OutcomeCode() string {
 // RetryableTruncation reports whether the finished stream is a truncation
 // (metrics.CodeTruncated) the proxy may transparently re-send: a chatlike
 // stream that hit clean EOF without any terminal marker while the client had
-// received NO content-bearing chunk (no content, reasoning, or tool call) and
-// no provider in-band error. The trailing event is flushed first so a final
-// multi-line error frame that never saw its blank-line boundary is still
-// caught. Anything the client already saw - generation content or the
-// provider's own error - makes a re-send duplicate visible bytes and stays
-// client-side. Client-disconnect gating is the caller's (it owns the record).
-// When this reports true the terminal region was never opened (holding
-// requires a seen terminator), so no withheld bytes are pending.
+// received NO content-bearing chunk (no content, reasoning, or tool call)
+// and no answer-shaped bytes (a refusal or deprecated function_call delta is
+// visible output even though it is not metrics content) and no provider
+// in-band error. The trailing event is flushed first so a final multi-line
+// error frame that never saw its blank-line boundary is still caught.
+// Anything the client already saw - generation content or the provider's own
+// error - makes a re-send duplicate visible bytes and stays client-side.
+// Client-disconnect gating is the caller's (it owns the record). When this
+// reports true the terminal region was never opened (holding requires a seen
+// terminator), so no withheld bytes are pending.
 func (a *Analyzer) RetryableTruncation() bool {
-	if !a.chatlike || a.terminatorSeen {
+	// answerishSeen (a refusal or deprecated function_call delta) is
+	// answer-shaped output the client saw: no rescue may append behind it,
+	// even though it is not metrics content.
+	if !a.chatlike || a.terminatorSeen || a.answerishSeen {
 		return false
 	}
 	a.flushEvent()
@@ -546,12 +551,29 @@ func (a *Analyzer) RetryableTruncation() bool {
 // never reaches here (it is a terminator, not a truncation). Client-disconnect
 // gating is the caller's (it owns the record).
 func (a *Analyzer) RetryableReasoningTruncation() bool {
-	if !a.chatlike || a.terminatorSeen || a.errType != "" || a.responsesStream ||
+	if !a.chatlike || a.terminatorSeen || a.responsesStream ||
 		a.answerishSeen || a.toolCalls > 0 {
 		return false
 	}
+	// Flush the trailing event BEFORE the in-band-error gate: a multi-line
+	// provider error that never saw its blank-line boundary is discovered
+	// only by the flush, and the provider's own failure statement must
+	// disqualify the rescue (mirrors RetryableTruncation's ordering).
 	a.flushEvent()
-	return !a.firstReasoningAt.IsZero() && a.firstAnswerAt.IsZero()
+	return !a.firstReasoningAt.IsZero() && a.firstAnswerAt.IsZero() && a.errType == ""
+}
+
+// RetryableReasoningStop reports whether a classified reasoning-only clean
+// stop (the caller has already seen metrics.CodeReasoningOnly) may be
+// transparently re-sent while its terminal region is still withheld. This is
+// the stop twin of RetryableReasoningTruncation's wire-safety gates: a
+// refusal or deprecated function_call delta is answer-shaped output the
+// client saw, and a Responses-API feed carries per-response sequence numbers
+// a re-send would restart mid-stream - neither may ever be appended behind.
+// The still-withheld check (the relay's hold state) is the caller's.
+func (a *Analyzer) RetryableReasoningStop() bool {
+	return a.chatlike && a.terminatorSeen && a.errType == "" && !a.responsesStream &&
+		!a.answerishSeen && a.toolCalls == 0
 }
 
 // extractPreview extracts a bounded prefix (metrics.PreviewMaxBytes) of the

@@ -220,10 +220,10 @@ max_backoff: 2m
 quality_retries: 1
 
 # Transparent rescue of requests that die or end without an answer during thinking: a
-# stream truncated or reset after reasoning-only output, and a cleanly finished
-# reasoning-only completion. The fresh attempt appends after the relayed reasoning; answer
-# content and tool calls are never rescued, and finish_reason length never is. Each rescue
-# re-sends the full request (billed). 0 disables.
+# stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only
+# completion, and a non-streaming reasoning-only body. The fresh attempt appends after the
+# relayed reasoning; answer content and tool calls are never rescued, and finish_reason
+# length never is. Each rescue re-sends the full request (billed). 0 disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1

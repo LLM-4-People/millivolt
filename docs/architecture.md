@@ -63,8 +63,9 @@ a request-ID map. No storm observation scans metrics history or waits for SQLite
 
 [proxy/storm.go](../internal/proxy/storm.go) maps config once into scheduler
 options and bridges existing relay/native send outcomes. A 2xx permit settles
-after relay or before an existing quality re-ask, preventing double samples and
-stream replay. Safe protocol-level reason labels carry no provider error bodies.
+after relay or before an existing quality re-ask or thinking rescue re-send,
+preventing double samples and stream replay. Safe protocol-level reason labels
+carry no provider error bodies.
 The banner uses the canonical bootstrap builder and browser apply/render gates,
 with no client-side event arithmetic. Storm scheduler/proxy/config regressions
 and the shared UI/browser suite cover these boundaries.

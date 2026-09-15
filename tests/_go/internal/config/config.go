@@ -282,6 +282,9 @@ func TestWriteYAMLExplicitZerosSurviveLoadFile(t *testing.T) {
 	if got.QualityRetries != 0 {
 		t.Errorf("quality_retries = %d, want 0", got.QualityRetries)
 	}
+	if got.ThinkingRetries != 0 {
+		t.Errorf("thinking_retries = %d, want 0", got.ThinkingRetries)
+	}
 	if got.UpstreamTimeout != 0 {
 		t.Errorf("upstream_timeout = %v, want 0", got.UpstreamTimeout)
 	}
@@ -360,6 +363,30 @@ func TestQualityRetriesExplicitZero(t *testing.T) {
 	}
 	if c2.QualityRetries != 1 {
 		t.Errorf("absent quality_retries = %d, want default 1", c2.QualityRetries)
+	}
+}
+
+// thinking_retries is the third explicitly-zero-meaningful int (0 disables
+// the mid-thinking rescues); the same absent-vs-explicit pin as its sibling.
+func TestThinkingRetriesExplicitZero(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "c.yaml")
+	if err := os.WriteFile(p, []byte("thinking_retries: 0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ThinkingRetries != 0 {
+		t.Errorf("explicit thinking_retries: 0 = %d, want 0 (disabled)", c.ThinkingRetries)
+	}
+	c2, err := LoadFile(filepath.Join(dir, "absent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.ThinkingRetries != 1 {
+		t.Errorf("absent thinking_retries = %d, want default 1", c2.ThinkingRetries)
 	}
 }
 
@@ -568,6 +595,8 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"queue_retry_after integer", "queue_retry_after: 2"},
 		{"quality_retries negative", "quality_retries: -1"},
 		{"quality_retries too high", "quality_retries: 7"},
+		{"thinking_retries negative", "thinking_retries: -1"},
+		{"thinking_retries too high", "thinking_retries: 4"},
 		{"sse keepalive zero", "sse_keepalive_interval: 0s"},
 		{"dash_log_rows too small", "dash_log_rows: 1"},
 		{"dash_poll zero", "dash_poll_interval: 0s"},
