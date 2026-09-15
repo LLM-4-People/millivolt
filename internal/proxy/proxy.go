@@ -368,8 +368,49 @@ func (s *Server) Reload(cfg *config.Config) {
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)
 }
 
+// clientRetryDirective is the outermost ResponseWriter on the LLM relay
+// surface (ServeHTTP's catch-all; dashboard, metrics and admin routes are
+// separate mux entries and are never wrapped). While suppress_client_retries
+// is enabled it stamps `x-should-retry: false` - the exact lowercase value the
+// official OpenAI SDKs compare case-sensitively - on every error status
+// before the status line commits, making the proxy the client's sole retry
+// authority: the python/node/go/ruby SDKs honor the header over their
+// 408/409/429/5xx auto-retry defaults and over any Retry-After, including a
+// provider `x-should-retry: true` hint the relay already copied verbatim
+// (Set replaces it). Success responses are untouched, and a mid-stream SSE
+// error cannot carry new headers - official SDKs never auto-retry those
+// anyway. Transport-level failures happen below HTTP: no response exists to
+// carry the directive, and clients that ignore the header keep their own
+// policy. Flush and Unwrap keep the inner writers (SSE pacer, debug tap,
+// translation) and net/http's ResponseController working through the wrap.
+type clientRetryDirective struct {
+	http.ResponseWriter
+	srv *Server
+}
+
+func (c *clientRetryDirective) WriteHeader(status int) {
+	if status >= 400 && c.srv.cfg().SuppressClientRetries {
+		c.Header().Set("X-Should-Retry", "false")
+	}
+	c.ResponseWriter.WriteHeader(status)
+}
+
+func (c *clientRetryDirective) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (c *clientRetryDirective) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The retry directive rides the outermost writer so every error sink on
+	// the relay surface (relayed upstream statuses, the retry ladder's
+	// terminal 429/502, validation 4xx, storm queue 429s) carries it through
+	// one owner instead of per-sink calls.
+	w = &clientRetryDirective{ResponseWriter: w, srv: s}
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)

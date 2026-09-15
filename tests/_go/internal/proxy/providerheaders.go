@@ -57,7 +57,10 @@ func captureUpstream(t *testing.T, body string) (*httptest.Server, *headerCaptur
 	return srv, cap
 }
 
-func postChat(t *testing.T, srvURL, upstreamURL string, extra func(*http.Request)) {
+// postChat sends one chat-completions POST through the proxy and returns the
+// response (headers and status remain readable after the helper closes the
+// body; callers that need the body must not use it).
+func postChat(t *testing.T, srvURL, upstreamURL string, extra func(*http.Request)) *http.Response {
 	t.Helper()
 	req, _ := http.NewRequest("POST", srvURL+"/v1/chat/completions",
 		strings.NewReader(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`))
@@ -72,6 +75,7 @@ func postChat(t *testing.T, srvURL, upstreamURL string, extra func(*http.Request
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+	return resp
 }
 
 func TestProviderHeadersAppliedToUpstream(t *testing.T) {

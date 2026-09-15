@@ -178,6 +178,9 @@ func Schema() []Field {
 		{Key: "retryable_error_classes", Category: "queue", Label: "Retryable error classes",
 			Help: "Operator extensions to the built-in retryable in-band error vocabulary: exact type or code strings (case-insensitive) that a provider reports inside a 200 and that authorize a transparent re-send while no generation content was relayed. Built-ins already cover server_error, the 503 overloaded/unavailable family, api_error, overloaded_error, timeout_error and common gateway spellings; list custom gateway spellings here. Durable quota/billing classes are rejected at load; in-band rate limits, unknown classes and errors after relayed content stay verbatim. Reload applies to new rescue decisions.",
 			Kind: KindStrings, HotReload: true},
+		{Key: "suppress_client_retries", Category: "queue", Label: "Suppress client retries",
+			Help: "Make the proxy the clients' sole retry authority: stamp x-should-retry: false on every LLM-relay error response. The official OpenAI SDKs (python/node/go/ruby) honor it over their 408/409/429/5xx auto-retry and over Retry-After, including relayed provider hints; the proxy's own retry ladder has already run by then. Cannot suppress transport-level failures, and clients that ignore the header (the Vercel AI SDK / opencode stack) keep their own policy.",
+			Kind: KindBool, HotReload: true},
 
 		// ---- storm ----
 		{Key: "storm_enabled", Category: "storm", Label: "Enable protection",

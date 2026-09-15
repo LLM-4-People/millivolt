@@ -240,6 +240,16 @@ thinking_retries: 1
 #   type: list of string
 retryable_error_classes: []
 
+# Make the proxy the clients' sole retry authority: stamp x-should-retry: false on every
+# LLM-relay error response. The official OpenAI SDKs (python/node/go/ruby) honor it over
+# their 408/409/429/5xx auto-retry and over Retry-After, including relayed provider hints;
+# the proxy's own retry ladder has already run by then. Cannot suppress transport-level
+# failures, and clients that ignore the header (the Vercel AI SDK / opencode stack) keep
+# their own policy.
+# Hot-reload: yes.
+#   type: bool · default false
+suppress_client_retries: false
+
 # ---- Error storm protection ----
 # Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy
 # changes clear observations and wake waiters. Banner visibility changes do not reset

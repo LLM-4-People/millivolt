@@ -120,7 +120,18 @@ transport failures, 429 and 5xx before returning the final response, and
 retryable in-band error events on an open stream before any generation
 content was relayed. Durable
 quota/billing 429s are not treated as transient. Provider retry hints and
-operator holds can substantially extend total wall time.
+operator holds can substantially extend total wall time. With
+`suppress_client_retries` the proxy declares itself the client's sole retry
+authority: every error response the relay returns then carries
+`x-should-retry: false`, the official OpenAI SDK convention (python, node,
+go and ruby honor it from source), which overrides the SDKs'
+408/409/429/5xx auto-retry defaults and any `Retry-After`, including a
+provider hint that would otherwise relay verbatim. No response exists to
+carry the directive on transport-level failures, clients that ignore the
+header (the Vercel AI SDK / opencode stack, whose retry policy is status- and
+body-text driven) keep their own policy, and mid-stream SSE errors never
+auto-retry in official SDKs and cannot carry new headers. Success responses
+are untouched, and the setting hot-reloads for new responses.
 
 SSE pacing may insert comment keepalives. A known queue/hold wait may commit HTTP
 200 before the final upstream outcome, so a subsequent failure must be signaled

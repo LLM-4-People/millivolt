@@ -185,6 +185,22 @@ type Config struct {
 	// decisions.
 	RetryableErrorClasses []string `yaml:"retryable_error_classes" json:"retryable_error_classes"`
 
+	// SuppressClientRetries makes the proxy the clients' sole retry
+	// authority: while enabled, every error response the LLM relay returns
+	// carries `x-should-retry: false` - the official OpenAI SDK convention
+	// (python, node, go, ruby all honor it from source), which overrides the
+	// SDKs' 408/409/429/5xx auto-retry defaults and any Retry-After,
+	// including provider hints the relay would otherwise forward verbatim.
+	// The proxy's own retry ladder has already run by the time the client
+	// sees the error, so a client-side retry only duplicates upstream work
+	// and billing. No response exists to carry the directive on
+	// transport-level failures, and clients that ignore the header (e.g.
+	// the Vercel AI SDK / opencode stack, whose retry policy is status- and
+	// body-text driven) keep their own policy; mid-stream SSE errors never
+	// auto-retry in official SDKs and cannot carry new headers. Success
+	// responses are untouched. Reload applies to new responses.
+	SuppressClientRetries bool `yaml:"suppress_client_retries" json:"suppress_client_retries"`
+
 	// Error storm protection observes eligible upstream attempts in a bounded
 	// rolling window and gates new sends by provider or exact recorded model.
 	// Policy changes reset observations and wake waiters; banner visibility
