@@ -160,7 +160,10 @@ USD in storage/API; missing/unreportable data must not become fabricated prices.
 
 `Record.IsError` and `HasRateLimit` deliberately differ. Final/retried 429
 counts once per affected request, not via the broad pacing flag. A real failure
-and 429 may overlap. The shared first-membership gate keeps duplicate tool/error
+and 429 may overlap. A plain 499 (the local client's own abort) is a flow
+event; a 499 carrying a structured error observed the upstream's in-band
+failure before the client left and counts like its 200 twin. The shared
+first-membership gate keeps duplicate tool/error
 occurrences from duplicating these health counts without changing event/sample
 multiplicity. Tests cover raw/projected/durable/ring/pending parity.
 

@@ -272,17 +272,25 @@ func (r *Record) GenThroughput() float64 {
 // a 5xx response or a structured error - at ANY point: as the final outcome
 // OR as an absorbed retry attempt (the upstream still failed, even if a later
 // retry recovered). A 429 is flow control, not an error, and never counts -
-// neither as the final status nor as an absorbed attempt; the same holds for
-// 499: the LOCAL client closed the connection (its own cancellation - a relay
-// write failed on broken pipe), which is recorded as ClientDisconnected, never
-// as an upstream failure. (503 is retried as a rate limit but is still a
-// server error, so it counts.)
+// neither as the final status nor as an absorbed attempt. The same holds for
+// a 499 WITHOUT a structured error: the LOCAL client closed the connection
+// (its own cancellation - a relay write failed on broken pipe), recorded as
+// ClientDisconnected. A 499 WITH a structured error is different: the error
+// was observed on the wire before or while the client left (a provider
+// in-band stream error, or a translation failure), so the upstream failure
+// must not vanish from the error rate - it counts exactly like its 200 twin
+// (the committed status line a client abort cannot rewrite). (503 is retried
+// as a rate limit but is still a server error, so it counts.)
 //
 // StatusClientClosedRequest is the status recorded when the LOCAL client
 // disconnected before the proxy delivered a final response (nginx's "client
-// closed request" convention). It is a flow event like 429: IsError treats it
-// as a non-error (unless an absorbed 5xx attempt was seen), so a user's own
-// cancellation never inflates the error rate.
+// closed request" convention). It is a flow event like 429 - IsError treats a
+// plain one as a non-error (unless an absorbed 5xx attempt was seen), so a
+// user's own cancellation never inflates the error rate. One exception: a 499
+// that carries a structured error type observed the upstream's own failure
+// statement (most commonly a provider error event streamed in-band on the
+// committed 200, which the client then aborted around); that failure counts
+// as an error like its 200 twin.
 const StatusClientClosedRequest = 499
 
 // absorbedServerFailure is the one owner of the absorbed-5xx meaning: whether
@@ -311,6 +319,15 @@ func (r *Record) IsError() bool {
 	// rate_limit_error/provider_error). Rate limiting is surfaced separately
 	// through HasRateLimit; client disconnects via ClientDisconnected.
 	if r.StatusCode == 429 || r.StatusCode == StatusClientClosedRequest {
+		// A 499 carrying a structured error observed the upstream's failure
+		// before the client left (an in-band stream error on the committed
+		// 200, or a translation failure): the client aborted around a real
+		// provider failure, which counts exactly like the 200 twin. A plain
+		// 429 keeps its flow-control meaning even when its body classifies
+		// it.
+		if r.StatusCode == StatusClientClosedRequest && r.ErrorType != "" {
+			return true
+		}
 		// Still honor an absorbed 5xx from an earlier attempt (a request that
 		// saw a genuine server failure before the client gave up on it).
 		return absorbedServerFailure(r.Attempts)

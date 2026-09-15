@@ -1352,6 +1352,14 @@ func seedPurgeStore(t *testing.T, s *Store) {
 			r.Attempts = []metrics.RetryAttempt{{StatusCode: 502, ErrorType: "provider_error", At: time.Now()}}
 			return r
 		}(),
+		// 499 with a structured error: the provider failed in-band on the
+		// stream (the error event reached the record) and the client aborted
+		// around it - a genuine provider failure, not a plain cancellation.
+		func() *metrics.Record {
+			r := mk("cancel-err", "alpha", metrics.StatusClientClosedRequest, "api_error")
+			r.ClientDisconnected = true
+			return r
+		}(),
 	}
 	if err := s.insertBatch(recs); err != nil {
 		t.Fatalf("seed: %v", err)
@@ -1377,8 +1385,8 @@ func TestClearEmptyFilterRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 9 {
-		t.Errorf("after rejected purge: %d rows, want 9 (nothing deleted)", n)
+	if n != 10 {
+		t.Errorf("after rejected purge: %d rows, want 10 (nothing deleted)", n)
 	}
 }
 
@@ -1394,32 +1402,34 @@ func TestClearFiltersRows(t *testing.T) {
 		{
 			name:     "by provider",
 			filter:   PurgeFilter{Provider: "alpha"},
-			wantGone: []string{"ok-1", "ok-2", "rl-1", "ret-5xx", "ret-429", "cancel-1", "cancel-5xx"},
+			wantGone: []string{"ok-1", "ok-2", "rl-1", "ret-5xx", "ret-429", "cancel-1", "cancel-5xx", "cancel-err"},
 			wantKept: []string{"err-2", "err-3"},
 		},
 		{
 			name:     "by status code",
 			filter:   PurgeFilter{StatusCode: 200},
 			wantGone: []string{"ok-1", "ok-2", "err-3", "ret-5xx", "ret-429"},
-			wantKept: []string{"rl-1", "err-2", "cancel-1", "cancel-5xx"},
+			wantKept: []string{"rl-1", "err-2", "cancel-1", "cancel-5xx", "cancel-err"},
 		},
 		{
 			// HasError must match exactly the records IsError() flags - 429
 			// (rl-1), an absorbed 429 (ret-429), and a plain 499 client-close
 			// (cancel-1) are flow events, NOT errors; 500 (err-2), a structured
-			// error_type (err-3), an absorbed 5xx (ret-5xx), and a 499 that
-			// came after an absorbed 5xx (cancel-5xx - the upstream still
-			// failed) ARE. This pins the SQL predicate to the canonical Go one.
+			// error_type (err-3), an absorbed 5xx (ret-5xx), and the 499s that
+			// carry a failure - after an absorbed 5xx (cancel-5xx) or with the
+			// in-band error observed before the client left (cancel-err - the
+			// upstream still failed) - ARE. This pins the SQL predicate to the
+			// canonical Go one.
 			name:     "has error matches IsError",
 			filter:   PurgeFilter{HasError: true},
-			wantGone: []string{"err-2", "err-3", "ret-5xx", "cancel-5xx"},
+			wantGone: []string{"err-2", "err-3", "ret-5xx", "cancel-5xx", "cancel-err"},
 			wantKept: []string{"ok-1", "ok-2", "rl-1", "ret-429", "cancel-1"},
 		},
 		{
 			name:     "combined provider+status",
 			filter:   PurgeFilter{Provider: "alpha", StatusCode: 200},
 			wantGone: []string{"ok-1", "ok-2", "ret-5xx", "ret-429"},
-			wantKept: []string{"rl-1", "err-2", "err-3", "cancel-1", "cancel-5xx"},
+			wantKept: []string{"rl-1", "err-2", "err-3", "cancel-1", "cancel-5xx", "cancel-err"},
 		},
 	}
 	for _, tc := range cases {
@@ -1516,23 +1526,23 @@ func TestExportWhereFiltersAndStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	seedPurgeStore(t, s) // 9 rows: see the purge tests for the fixture's shape
+	seedPurgeStore(t, s) // 10 rows: see the purge tests for the fixture's shape
 
-	// Full export: all 9 rows, valid JSON, records round-trip.
+	// Full export: all 10 rows, valid JSON, records round-trip.
 	var all bytes.Buffer
 	n, err := s.ExportWhere(t.Context(), PurgeFilter{}, &all)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 9 {
-		t.Errorf("full export = %d rows, want 9", n)
+	if n != 10 {
+		t.Errorf("full export = %d rows, want 10", n)
 	}
 	var recs []metrics.Record
 	if err := json.Unmarshal(all.Bytes(), &recs); err != nil {
 		t.Fatalf("export is not a JSON array of records: %v\n%s", err, all.String()[:min(len(all.String()), 200)])
 	}
-	if len(recs) != 9 {
-		t.Errorf("full export decoded %d records, want 9", len(recs))
+	if len(recs) != 10 {
+		t.Errorf("full export decoded %d records, want 10", len(recs))
 	}
 
 	// Filtered export: same predicate as CountWhere/MatchRecord.
@@ -1561,8 +1571,8 @@ func TestExportWhereFiltersAndStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n != 4 {
-		t.Errorf("errors export = %d rows, want 4 (err-2, err-3, ret-5xx, cancel-5xx)", n)
+	if n != 5 {
+		t.Errorf("errors export = %d rows, want 5 (err-2, err-3, ret-5xx, cancel-5xx, cancel-err)", n)
 	}
 
 	debugRec := &metrics.Record{

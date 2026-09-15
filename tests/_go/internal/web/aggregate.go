@@ -854,7 +854,8 @@ func TestExplorerLiveStatusClasses(t *testing.T) {
 }
 
 func TestErrorEntriesSemantics(t *testing.T) {
-	// 429 final = no error entry (flow control); 499 = none (client cancel).
+	// 429 final = no error entry (flow control); a plain 499 = none (client
+	// cancel).
 	r := &metrics.Record{StatusCode: 429, ErrorType: "rate_limit_error", Start: time.Now()}
 	if n := len(errorEntries(r)); n != 0 {
 		t.Fatalf("429 → %d entries, want 0 (flow control is never an error event)", n)
@@ -863,9 +864,16 @@ func TestErrorEntriesSemantics(t *testing.T) {
 	if n := len(errorEntries(r)); n != 0 {
 		t.Fatalf("499 → %d entries, want 0", n)
 	}
+	// A 499 carrying a structured error is the provider's in-band failure
+	// the client aborted around - an entry exactly like its 200 twin.
+	r = &metrics.Record{StatusCode: 499, ClientDisconnected: true, ErrorType: "api_error", ErrorCode: "internal_error", ErrorMsg: "temporarily unavailable", Start: time.Now()}
+	ents := errorEntries(r)
+	if len(ents) != 1 || ents[0].typ != "api_error" || ents[0].code != "internal_error" {
+		t.Fatalf("499 with in-band error → %v", ents)
+	}
 	// A provider in-band error on 200 IS an entry.
 	r = &metrics.Record{StatusCode: 200, ErrorType: "provider_overloaded", ErrorMsg: "x", Start: time.Now()}
-	ents := errorEntries(r)
+	ents = errorEntries(r)
 	if len(ents) != 1 || ents[0].typ != "provider_overloaded" {
 		t.Fatalf("in-band → %v", ents)
 	}

@@ -786,7 +786,11 @@ splits depend on what the upstream actually reports.
 Errors count affected requests with a genuine failure, including recovered
 upstream failures. HTTP 429 counts requests that encountered a final or retried
 429; the two signals can overlap, but 429 alone is not an error. Client-local
-cancellation is likewise distinct from an upstream failure. Zero explorer health
+cancellation is likewise distinct from an upstream failure - except a 499 whose
+record carries a structured error type: that observed the provider's in-band
+stream failure before the client left (typically an error event the client
+received and aborted around), and counts as the provider error it is. Zero
+explorer health
 badges are hidden independently. Error-dimension headline counts can count error
 occurrences, so do not treat every displayed error number as the same metric.
 

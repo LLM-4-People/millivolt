@@ -1522,17 +1522,24 @@ func (f PurgeFilter) build() (string, []any) {
 		// Must stay semantically identical to metrics.Record.IsError (the
 		// canonical error predicate) so a filtered purge deletes exactly the
 		// rows the live view considers errors:
-		//   - 429 (rate limit) and 499 (local client closed the connection -
-		//     its own cancellation) are flow events, never errors on their own;
+		//   - 429 (rate limit) is a flow event, never an error on its own;
+		//   - a plain 499 (local client closed the connection - its own
+		//     cancellation) is a flow event too, but a 499 carrying a
+		//     structured error_type observed the upstream's own failure
+		//     (an in-band stream error the client aborted around) and counts;
 		//   - any other error status (>= 400) or a structured error_type counts;
 		//   - an absorbed retry attempt that hit a genuine 5xx counts even when
 		//     the final outcome recovered (the upstream still failed).
 		// The attempts column is a JSON array; json_each scans it for a 5xx.
 		where = append(where, `(
-			(status_code IN (429, 499) AND EXISTS (
+			(status_code = 429 AND EXISTS (
 				SELECT 1 FROM json_each(requests.attempts)
 				WHERE json_extract(value, '$.status_code') >= 500
 			))
+			OR (status_code = 499 AND (error_type != '' OR EXISTS (
+				SELECT 1 FROM json_each(requests.attempts)
+				WHERE json_extract(value, '$.status_code') >= 500
+			)))
 			OR (status_code NOT IN (429, 499) AND (error_type != '' OR status_code >= 400))
 			OR (status_code < 400 AND EXISTS (
 				SELECT 1 FROM json_each(requests.attempts)

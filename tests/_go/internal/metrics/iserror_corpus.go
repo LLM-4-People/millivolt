@@ -6,7 +6,10 @@ package metrics
 // over the same request outcomes, so one corpus feeds both the buffer suite's
 // error-contract test and the rate-limit suite's affected-request test.
 // The contract it pins: 429 is flow control and 499 is the LOCAL client's own
-// cancellation, so neither counts as an error on its own; a genuine failure
+// cancellation, so neither counts as an error on its own; the one 499
+// exception is a structured error observed on the wire before the client left
+// (an in-band stream error the client aborted around), which counts exactly
+// like its 200 twin; a genuine failure
 // counts whether it is the final outcome OR an absorbed retry attempt the
 // client never saw; a rate limit reaches the metric from the final status or
 // any attempt, never from RateLimited alone (queue waits and 503 pacing set
@@ -41,4 +44,6 @@ var isErrorCorpus = []isErrorRow{
 	{"final500 after429", Record{StatusCode: 500, Attempts: []RetryAttempt{{StatusCode: 429}}}, true, true},
 	{"pending after429", Record{Attempts: []RetryAttempt{{StatusCode: 429}}}, false, true},
 	{"cancel after429", Record{StatusCode: 499, Attempts: []RetryAttempt{{StatusCode: 429}}}, false, true},
+	{"final 499 with in-band error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "api_error", ErrorCode: "internal_error"}, true, false},
+	{"final 499 with in-band rate limit error", Record{StatusCode: StatusClientClosedRequest, ClientDisconnected: true, ErrorType: "rate_limit_error"}, true, false},
 }

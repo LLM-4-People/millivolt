@@ -2,13 +2,18 @@
 // recordIsError mirrors the backend metrics.Record.IsError exactly (single
 // canonical definition, both sides): a request saw an upstream failure if it
 // has a structured error_type, or a final error status other than 429/499, or
-// an absorbed retry attempt that hit a 5xx. 429 (rate limit) and 499 (local
-// client closed the connection - its own cancellation) are flow events, never
-// errors. Used for log scope and status pills;
+// an absorbed retry attempt that hit a 5xx. 429 (rate limit) is a flow event,
+// never an error. A plain 499 (local client closed the connection - its own
+// cancellation) is a flow event too, EXCEPT when it carries a structured
+// error_type: that observed the upstream's own failure (an in-band stream
+// error the client aborted around) and counts exactly like its 200 twin.
+// Used for log scope and status pills;
 // every numeric surface renders the server-side aggregate (same definition in Go).
 function recordIsError(r) {
   const s = r.status_code || 0;
   if (s === 429 || s === 499) {
+    // A structured error on a 499 is a genuine provider failure.
+    if (s === 499 && r.error_type) return true;
     // Flow events: only an absorbed 5xx from an earlier attempt makes one a
     // genuine failure.
     return (r.attempts || []).some(a => (a.status_code || 0) >= 500);
@@ -307,12 +312,14 @@ function recordTools(r) {
 // consume it so what a card counts and what clicking it filters to cannot drift.
 function recordErrorEntries(r) {
   const out = [];
-  // Final (client-visible) failure - but 429 (rate limit) and 499 (local
+  // Final (client-visible) failure - 429 (rate limit) and a plain 499 (local
   // client closed the connection) are flow events, not errors, so they
-  // produce no error-group entry. Genuine failures: a structured error_type,
-  // or an error status other than 429/499.
+  // produce no error-group entry. A 499 carrying a structured error_type
+  // observed the upstream's own failure (an in-band stream error the client
+  // aborted around): it produces one exactly like its 200 twin. Genuine
+  // failures: a structured error_type, or an error status other than 429/499.
   const finStatus = r.status_code || 0;
-  if (finStatus !== 429 && finStatus !== 499 && (r.error_type || finStatus >= 400)) {
+  if (finStatus !== 429 && !(finStatus === 499 && !r.error_type) && (r.error_type || finStatus >= 400)) {
     const code = r.error_code || (finStatus ? String(finStatus) : '');
     out.push({ type: r.error_type || 'http_' + finStatus, code, msg: r.error_msg, provider: r.provider, absorbed: false, at: r.start });
   }

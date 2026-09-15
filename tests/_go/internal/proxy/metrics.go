@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -421,6 +422,68 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 	}
 	if rec.ErrorType == "" {
 		t.Error("ErrorType = empty, want the decided error detail to survive the disconnect")
+	}
+}
+
+// TestMidStreamClientAbortAfterInBandErrorCountsAsError pins the incident
+// regression: a provider that fails IN-BAND on a committed 200 stream (an
+// error event after already-relayed content) and a client that then aborts
+// produce 499 + client_disconnected + the provider's error fields. The
+// provider's failure must count as an error exactly like the same stream
+// whose client had stayed - before the fix, IsError's unconditional 499
+// short-circuit erased the failure from the error rate, the error explorer
+// and the errors-only purge, and the outage surfaced only as client cancels.
+func TestMidStreamClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
+	upstream := testMidStreamAbortUpstream(t, "text/event-stream", []string{
+		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n" +
+			"data: {\"error\":{\"message\":\"Coral Bricks is temporarily unavailable. Please retry.\",\"type\":\"api_error\",\"code\":\"internal_error\"}}\n\n",
+		"data: [DONE]\n\n",
+	})
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(10)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Read until the provider's in-band error frame has been relayed (the
+	// client abort must happen after the failure reached it, as in the
+	// incident), then abort mid-stream.
+	got := make([]byte, 0, 4096)
+	deadline := time.Now().Add(5 * time.Second)
+	for !bytes.Contains(got, []byte("api_error")) && time.Now().Before(deadline) {
+		b := make([]byte, 512)
+		n, rerr := resp.Body.Read(b)
+		got = append(got, b[:n]...)
+		if rerr != nil {
+			break
+		}
+	}
+	if !bytes.Contains(got, []byte("api_error")) {
+		t.Fatalf("the in-band error frame never reached the client: %q", got)
+	}
+	resp.Body.Close() // the LOCAL client aborts mid-stream
+
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.StatusCode != metrics.StatusClientClosedRequest {
+		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
+	}
+	if !rec.ClientDisconnected {
+		t.Error("ClientDisconnected = false, want true")
+	}
+	if rec.ErrorType != "api_error" || rec.ErrorCode != "internal_error" {
+		t.Errorf("record must carry the provider's in-band error: type=%q code=%q", rec.ErrorType, rec.ErrorCode)
+	}
+	if !rec.IsError() {
+		t.Errorf("a provider in-band failure the client aborted around IS an error: %+v", rec)
 	}
 }
 

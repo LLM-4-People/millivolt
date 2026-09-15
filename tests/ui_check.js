@@ -5194,7 +5194,7 @@ async function main() {
     try {
       await sleep(60);
 
-      // recordIsError mirrors metrics.Record.IsError. The 22 rows mirror the
+      // recordIsError mirrors metrics.Record.IsError. The 24 rows mirror the
       // semantics of tests/_go/internal/metrics/iserror_corpus.go (the Go
       // suite owns the corpus); the JS predicate must agree on every row.
       const corpus = [
@@ -5220,9 +5220,11 @@ async function main() {
         ['final500 after429', {status_code: 500, attempts: [{status_code: 429}]}, true],
         ['pending after429', {attempts: [{status_code: 429}]}, false],
         ['cancel after429', {status_code: 499, attempts: [{status_code: 429}]}, false],
+        ['final 499 with in-band error', {status_code: 499, error_type: 'api_error', error_code: 'internal_error'}, true],
+        ['final 499 with in-band rate limit error', {status_code: 499, error_type: 'rate_limit_error'}, true],
       ];
       const errorMisses = corpus.filter(([, rec, want]) => sw.recordIsError(rec) !== want).map(([name]) => name);
-      check('recordIsError agrees with the 22-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
+      check('recordIsError agrees with the 24-row Go IsError corpus' + (errorMisses.length ? ' (missed: ' + errorMisses.join(', ') + ')' : ''),
         errorMisses.length === 0);
 
       // statusClass mirrors contribStatusClass/statusClass in aggregate.go on
@@ -5260,8 +5262,10 @@ async function main() {
         sw.recordMatchesStatusFilter({status_code: 429}, '200') === false &&
         sw.recordMatchesStatusFilter({status_code: 200}, '') === true);
 
-      // recordErrorEntries mirrors errorEntries (aggregate.go): 429/499
-      // finals produce no entry, an in-band provider error on a 200 does, and
+      // recordErrorEntries mirrors errorEntries (aggregate.go): 429 and a
+      // plain 499 final produce no entry, a 499 carrying the provider's
+      // in-band error does (the client aborted around a real failure), an
+      // in-band provider error on a 200 does, and
       // absorbed attempts keep genuine failures (5xx, typed, 4xx) while
       // skipping flow control and bare non-failures. errorKey mirrors the Go
       // type|code|msg identity the explorer error dimension filters by.
@@ -5283,9 +5287,12 @@ async function main() {
           ['dial_failed', '', true, '2026-09-14T00:00:00Z'],
           ['http_401', '401', true, '2026-09-14T00:00:00Z'],
         ]));
-      check('final 429 and 499 produce no error entry (flow events)',
+      check('final 429 and a plain 499 produce no error entry (flow events)',
         sw.recordErrorEntries({status_code: 429, error_type: 'rate_limit_error'}).length === 0 &&
         sw.recordErrorEntries({status_code: 499}).length === 0);
+      check('a 499 carrying the provider in-band error produces an entry like its 200 twin',
+        JSON.stringify(sw.recordErrorEntries({status_code: 499, error_type: 'api_error', error_code: 'internal_error', error_msg: 'temporarily unavailable'}).map(e => [e.type, e.code, e.msg])) ===
+        JSON.stringify([['api_error', 'internal_error', 'temporarily unavailable']]));
       check('an in-band provider error on a 200 is still a final error entry',
         JSON.stringify(sw.recordErrorEntries({status_code: 200, error_type: 'provider_overloaded', error_msg: 'x'}).map(e => [e.type, e.code, e.msg])) ===
         JSON.stringify([['provider_overloaded', '200', 'x']]));

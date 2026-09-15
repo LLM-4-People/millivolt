@@ -354,7 +354,12 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 func errorEntries(r *metrics.Record) []errEnt {
 	var out []errEnt
 	fin := r.StatusCode
-	if fin != 429 && fin != 499 && (r.ErrorType != "" || fin >= 400) {
+	// A final 429 is flow control and a plain final 499 is the client's own
+	// cancellation - neither produces an error-group entry. A 499 carrying a
+	// structured error_type, however, observed the upstream's own failure
+	// (an in-band stream error the client aborted around): it produces one
+	// exactly like its 200 twin.
+	if fin != 429 && !(fin == 499 && r.ErrorType == "") && (r.ErrorType != "" || fin >= 400) {
 		typ := r.ErrorType
 		if typ == "" {
 			typ = "http_" + strconv.Itoa(fin)
