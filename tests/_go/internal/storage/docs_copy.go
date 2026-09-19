@@ -48,7 +48,10 @@ func TestDocumentationCopyUsesCanonicalSchemaAndSurvivesOpen(t *testing.T) {
 			ResponseHeaders: map[string][]string{"fixture-header": {secret}},
 			ReqMaxTokens:    ptr(0), ReqTemperature: ptr(0.0), ReqParallelTools: ptr(false), ReqSeed: ptr(int64(0)),
 			Attempts: []metrics.RetryAttempt{
-				{StatusCode: 429, ErrorType: "rate_limit", ErrorMsg: secret, RetryAfterMs: 3, At: start},
+				{StatusCode: 429, ErrorType: "rate_limit", ErrorMsg: secret, RetryAfterMs: 3, At: start,
+					ProviderRequestID: secret, ProviderServer: secret, ProviderModel: secret,
+					ProcessingMs: 11, RateLimitRemaining: 7, RateLimitLimit: 9,
+					ResponseHeaders: map[string][]string{"fixture-attempt-header": {secret}}},
 				{StatusCode: 0, ErrorType: "transport", ErrorMsg: secret, At: start},
 			},
 		}

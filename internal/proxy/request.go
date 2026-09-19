@@ -566,18 +566,22 @@ func hashKey(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// headerIntInto parses the first non-empty of the named headers as an integer
-// into dst. Single canonical owner for "read a provider's integer header into a
-// metric field" (processing-time and rate-limit headers share it).
-func headerIntInto(h http.Header, dst *int, names ...string) {
+// headerIntValue parses the first non-empty of the named headers as an
+// integer. Single canonical owner for "read a provider's integer header"
+// (processing-time and rate-limit headers share it): the first present name
+// decides - an unparseable value does not fall through to later names. ok
+// reports whether a value was read.
+func headerIntValue(h http.Header, names ...string) (val int, ok bool) {
 	for _, name := range names {
 		if v := h.Get(name); v != "" {
-			if n, err := strconv.Atoi(v); err == nil {
-				*dst = n
+			n, err := strconv.Atoi(v)
+			if err == nil {
+				return n, true
 			}
-			return
+			return 0, false
 		}
 	}
+	return 0, false
 }
 
 // disconnectWriter wraps a downstream ResponseWriter so a write error records

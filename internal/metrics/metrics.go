@@ -26,6 +26,13 @@ type Usage struct {
 // the proxy retried before returning a final answer to the client. It carries
 // the status and the provider's error detail so the proxy's audit log shows
 // every failure even though the client only ever saw the successful outcome.
+//
+// The upstream-response metadata fields mirror the record's final-response
+// capture exactly (same names, same meaning, same JSON tags): every attempt,
+// absorbed or final, stores the same information, so a provider-side request
+// id can be matched to the exact upstream attempt that produced it.
+// Transport failures have no HTTP response and leave them empty/zero.
+// tests/_go/internal/metrics/attempt_metadata.go pins the field-set parity.
 type RetryAttempt struct {
 	StatusCode   int       `json:"status_code"`
 	ErrorType    string    `json:"error_type,omitempty"`
@@ -33,6 +40,18 @@ type RetryAttempt struct {
 	ErrorMsg     string    `json:"error_msg,omitempty"`
 	RetryAfterMs int       `json:"retry_after_ms,omitempty"`
 	At           time.Time `json:"at"`
+
+	// Upstream-response metadata, the attempt-log twin of the record's
+	// ProviderRequestID/ProviderServer/ProviderModel/ProcessingMs/
+	// RateLimitRemaining/RateLimitLimit/ResponseHeaders fields
+	// (captureUpstreamHeaders owns the capture semantics).
+	ProviderRequestID  string              `json:"provider_request_id,omitempty"`
+	ProviderServer     string              `json:"provider_server,omitempty"`
+	ProviderModel      string              `json:"provider_model,omitempty"`
+	ProcessingMs       int                 `json:"processing_ms"`
+	RateLimitRemaining int                 `json:"rate_limit_remaining,omitempty"`
+	RateLimitLimit     int                 `json:"rate_limit_limit,omitempty"`
+	ResponseHeaders    map[string][]string `json:"response_headers,omitempty"`
 }
 
 // Record is the per-request observability record. Every field is captured at

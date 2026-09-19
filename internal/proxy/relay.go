@@ -424,6 +424,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 						ErrorMsg:   msg,
 						At:         time.Now(),
 					}
+					captureUpstreamMeta(&at, resp, t.authHeader)
 					next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
 					if !ok {
 						return
@@ -482,6 +483,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					at.ErrorType = sse.TypeUpstreamError
 					at.ErrorCode = code
 				}
+				captureUpstreamMeta(&at, resp, t.authHeader)
 				next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
 				if !ok {
 					return
@@ -598,6 +600,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			at.ErrorCode = metrics.CodeTruncated
 			at.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
 		}
+		captureUpstreamMeta(&at, resp, t.authHeader)
 		rec.Attempts = append(rec.Attempts, at)
 		rec.Retries++
 		s.publishUpdate(rec)
@@ -744,6 +747,44 @@ func parseErrorBody(b []byte) (typ, code, msg string) {
 	return "provider_error", "", metrics.TruncatePreview(string(b))
 }
 
+// upstreamMeta is the per-response provider metadata read from response
+// headers. readUpstreamMeta is the single owner of the header-name
+// vocabulary - the request-id aliases, server, processing time, echoed model
+// and rate-limit state - shared by the record's final-response capture and
+// the per-attempt capture, so every attempt stores exactly the same
+// information. The has* flags preserve the record path's only-when-present
+// semantics: a re-capture never zeroes a field the response did not carry.
+type upstreamMeta struct {
+	RequestID          string
+	Server             string
+	Model              string
+	ProcessingMs       int
+	RateLimitRemaining int
+	RateLimitLimit     int
+	hasProcessingMs    bool
+	hasRemaining       bool
+	hasLimit           bool
+}
+
+// readUpstreamMeta extracts one response's upstream metadata (request id,
+// server, processing time, echoed model, rate-limit state) from its headers.
+func readUpstreamMeta(h http.Header) upstreamMeta {
+	m := upstreamMeta{
+		RequestID: firstNonEmpty(
+			h.Get("X-Request-Id"),
+			h.Get("X-Openai-Request-Id"),
+			h.Get("X-Api-Request-Id"),
+			h.Get("Request-Id"),
+		),
+		Server: h.Get("Server"),
+		Model:  h.Get("X-Model"),
+	}
+	m.ProcessingMs, m.hasProcessingMs = headerIntValue(h, "X-Openai-Processing-Ms", "anthropic-processing-ms")
+	m.RateLimitRemaining, m.hasRemaining = headerIntValue(h, "X-Ratelimit-Remaining-Requests", "anthropic-ratelimit-requests-remaining")
+	m.RateLimitLimit, m.hasLimit = headerIntValue(h, "X-Ratelimit-Limit-Requests", "anthropic-ratelimit-requests-limit")
+	return m
+}
+
 // captureUpstreamHeaders refreshes the record's upstream header metadata -
 // the redacted audit headers, provider request id/server/processing time and
 // echoed model, and rate-limit state - from the given response. ServeHTTP
@@ -752,25 +793,37 @@ func parseErrorBody(b []byte) (typ, code, msg string) {
 // client actually received.
 func captureUpstreamHeaders(resp *http.Response, rec *metrics.Record, authHeader string) {
 	rec.ResponseHeaders = captureHeaders(resp.Header, authHeader)
-	// Provider-side metadata: request id, server, processing time, actual model.
-	rec.ProviderRequestID = firstNonEmpty(
-		resp.Header.Get("X-Request-Id"),
-		resp.Header.Get("X-Openai-Request-Id"),
-		resp.Header.Get("X-Api-Request-Id"),
-		resp.Header.Get("Request-Id"),
-	)
-	rec.ProviderServer = resp.Header.Get("Server")
-	// Provider processing time (OpenAI- and Anthropic-style header names).
-	headerIntInto(resp.Header, &rec.ProcessingMs, "X-Openai-Processing-Ms", "anthropic-processing-ms")
-	// Provider-reported model (some providers echo the actual model).
-	if v := resp.Header.Get("X-Model"); v != "" {
-		rec.ProviderModel = v
+	m := readUpstreamMeta(resp.Header)
+	rec.ProviderRequestID = m.RequestID
+	rec.ProviderServer = m.Server
+	if m.Model != "" {
+		rec.ProviderModel = m.Model
 	}
-	// Rate-limit headers (common across OpenAI-compatible providers).
-	headerIntInto(resp.Header, &rec.RateLimitRemaining,
-		"X-Ratelimit-Remaining-Requests", "anthropic-ratelimit-requests-remaining")
-	headerIntInto(resp.Header, &rec.RateLimitLimit,
-		"X-Ratelimit-Limit-Requests", "anthropic-ratelimit-requests-limit")
+	if m.hasProcessingMs {
+		rec.ProcessingMs = m.ProcessingMs
+	}
+	if m.hasRemaining {
+		rec.RateLimitRemaining = m.RateLimitRemaining
+	}
+	if m.hasLimit {
+		rec.RateLimitLimit = m.RateLimitLimit
+	}
+}
+
+// captureUpstreamMeta stores the same upstream-response metadata on an
+// absorbed attempt - the attempt-log twin of captureUpstreamHeaders
+// (readUpstreamMeta owns the vocabulary). The attempt is built fresh for
+// this response, so absent headers stay zero; there is no previous value to
+// preserve and nothing re-captures an attempt later.
+func captureUpstreamMeta(at *metrics.RetryAttempt, resp *http.Response, authHeader string) {
+	at.ResponseHeaders = captureHeaders(resp.Header, authHeader)
+	m := readUpstreamMeta(resp.Header)
+	at.ProviderRequestID = m.RequestID
+	at.ProviderServer = m.Server
+	at.ProviderModel = m.Model
+	at.ProcessingMs = m.ProcessingMs
+	at.RateLimitRemaining = m.RateLimitRemaining
+	at.RateLimitLimit = m.RateLimitLimit
 }
 
 // captureErrorFromResponse reads a bounded portion of an error response body
@@ -887,14 +940,15 @@ func (s *Server) absorbTransportRetry(rec *metrics.Record, groupKey, msg string,
 
 // absorbHTTPRetry books one absorbed retryable HTTP response: the provider
 // retry hint (parseRetryAfter) and the attempt-log entry (status, bounded
-// error-body envelope via parseErrorBody, hint milliseconds), appended with
-// the retry counter. Returns the hint - the pacing floor for the caller's
-// Trip and RetryAfterMs stamp. The bounded body read, per-send cleanup,
-// record stamps and publish order stay per-transport: the generic relay
-// interplays with the durable-quota 429 peek and clears stale error fields
-// after its publish; the cursor driver closes its duplex pipe and stamps
-// before publishing.
-func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte) time.Duration {
+// error-body envelope via parseErrorBody, hint milliseconds, the response's
+// upstream metadata via captureUpstreamMeta), appended with the retry
+// counter. Returns the hint - the pacing floor for the caller's Trip and
+// RetryAfterMs stamp. The bounded body read, per-send cleanup, record
+// stamps and publish order stay per-transport: the generic relay interplays
+// with the durable-quota 429 peek and clears stale error fields after its
+// publish; the cursor driver closes its duplex pipe and stamps before
+// publishing.
+func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBody []byte, authHeader string) time.Duration {
 	retryAfter := parseRetryAfter(resp)
 	at := metrics.RetryAttempt{
 		StatusCode:   resp.StatusCode,
@@ -902,6 +956,7 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 		At:           time.Now(),
 	}
 	at.ErrorType, at.ErrorCode, at.ErrorMsg = parseErrorBody(errBody)
+	captureUpstreamMeta(&at, resp, authHeader)
 	rec.Attempts = append(rec.Attempts, at)
 	rec.Retries++
 	return retryAfter
@@ -1087,7 +1142,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 
 		// Record the absorbed attempt so the dashboard/drawer show the errors
 		// that preceded the final (e.g. 200) outcome.
-		retryAfter := s.absorbHTTPRetry(rec, resp, errBody)
+		retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader)
 		s.publishUpdate(rec)
 		// 429/503 are genuine rate limits; other 5xx are transient upstream
 		// errors. Record the distinction so the dashboard doesn't mislabel a

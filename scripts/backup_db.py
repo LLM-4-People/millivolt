@@ -59,7 +59,17 @@ FIELD_TYPES = {**dict.fromkeys(INTEGER_FIELDS, 'INTEGER'),
 # These code-owned retry classes suppress non-upstream error cards. Replacing
 # them would change aggregate.errorEntries semantics for statuses below 500.
 ERROR_CLASSES = frozenset(('transport', 'rate_limit'))
-ATTEMPT_FIELDS = frozenset(('status_code', 'error_type', 'error_code', 'error_msg', 'retry_after_ms', 'at'))
+# Attempt entries mirror the record's final-response metadata. The numeric
+# trio publishes like its record-level INTEGER_FIELDS twins; provider_model
+# aliases like the record's model; the request id, server and the header map
+# are discarded like their record-level EMPTY_FIELDS twins and must never
+# appear in a served copy.
+ATTEMPT_FIELDS = frozenset(('status_code', 'error_type', 'error_code', 'error_msg', 'retry_after_ms', 'at',
+                            'provider_request_id', 'provider_server', 'provider_model', 'processing_ms',
+                            'rate_limit_remaining', 'rate_limit_limit', 'response_headers'))
+ATTEMPT_METRIC_FIELDS = frozenset(('status_code', 'retry_after_ms', 'processing_ms',
+                                    'rate_limit_remaining', 'rate_limit_limit'))
+ATTEMPT_DROPPED_FIELDS = frozenset(('provider_request_id', 'provider_server', 'response_headers'))
 MARKER_KEY = 'docs_redaction'
 POLICY_VERSION = 1
 ALIAS_NUMBER = r'[1-9][0-9]*'
@@ -192,10 +202,29 @@ def _attempts(value, aliases=None):
         except ValueError:
             raise ValueError('documentation copy: invalid attempt timestamp') from None
         out = dict(attempt)
+        for name in ATTEMPT_DROPPED_FIELDS:
+            if aliases is not None:
+                # The attempt's response metadata follows the record-level
+                # EMPTY_FIELDS policy: validate the source shape, then never
+                # serve it. The request id and server are identifiers; the
+                # header map is retained upstream content.
+                if name == 'response_headers':
+                    headers = attempt.get(name, {})
+                    require(type(headers) is dict and all(
+                        type(key) is str and type(values) is list and all(
+                            type(item) is str for item in values)
+                        for key, values in headers.items()), 'invalid attempt response headers')
+                else:
+                    require(type(attempt.get(name, '')) is str, 'non-text attempt metadata')
+                out.pop(name, None)
+            else:
+                require(name not in attempt, 'unredacted attempt response metadata')
         for key, value in attempt.items():
-            if key in ('status_code', 'retry_after_ms'):
+            if key in ATTEMPT_METRIC_FIELDS:
                 require(type(value) is int and -(1 << 63) <= value < (1 << 63), 'non-integer attempt metric')
-            elif key != 'at':
+            elif key in ATTEMPT_DROPPED_FIELDS or key == 'at':
+                continue
+            else:
                 require(type(value) is str, 'non-text attempt detail')
                 kind = ALIASED_FIELDS[key]
                 if aliases is not None:

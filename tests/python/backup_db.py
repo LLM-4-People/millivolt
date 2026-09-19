@@ -41,13 +41,18 @@ class BackupTest(unittest.TestCase):
                   for name, kind in subject.FIELD_TYPES.items()}
         record.update(id='original-request', started_at=1770000000000, status_code=200,
                       parent_conversation_id='', req_param_presence=-1,
-                      attempts=json.dumps([
-                          {'status_code': 429, 'error_type': 'rate_limit', 'error_msg': SENTINEL,
-                           'retry_after_ms': 123, 'at': '2026-02-02T02:40:00.123456789Z'},
-                          {'status_code': 0, 'error_type': 'transport', 'at': '2026-02-02T02:40:01Z'},
-                          {'status_code': 503, 'error_type': SENTINEL, 'error_code': SENTINEL,
-                           'error_msg': SENTINEL, 'at': '2026-02-02T02:40:02-04:00'},
-                      ]), tool_names=json.dumps([SENTINEL, SENTINEL, 'other-private-tool']))
+                       attempts=json.dumps([
+                           {'status_code': 429, 'error_type': 'rate_limit', 'error_msg': SENTINEL,
+                            'retry_after_ms': 123, 'at': '2026-02-02T02:40:00.123456789Z',
+                            'provider_request_id': SENTINEL, 'provider_server': SENTINEL,
+                            'provider_model': SENTINEL, 'processing_ms': 321,
+                            'rate_limit_remaining': 4, 'rate_limit_limit': 5,
+                            'response_headers': {'X-Request-Id': [SENTINEL]}},
+                           {'status_code': 0, 'error_type': 'transport', 'at': '2026-02-02T02:40:01Z'},
+                           {'status_code': 503, 'error_type': SENTINEL, 'error_code': SENTINEL,
+                            'error_msg': SENTINEL, 'at': '2026-02-02T02:40:02-04:00',
+                            'provider_model': SENTINEL},
+                       ]), tool_names=json.dumps([SENTINEL, SENTINEL, 'other-private-tool']))
         record.update(changes)
         return record
 
@@ -113,6 +118,16 @@ class BackupTest(unittest.TestCase):
             self.assertEqual([a['error_type'] for a in attempts[:2]], ['rate_limit', 'transport'])
             self.assertEqual(attempts[0]['error_msg'], attempts[2]['error_msg'])
             self.assertEqual(attempts[0]['at'], json.loads(before['attempts'])[0]['at'])
+            # Attempt metadata follows the record-level policy: the numeric
+            # trio publishes verbatim, provider_model aliases with the model
+            # kind, and the request id, server and header map are discarded.
+            self.assertEqual((attempts[0]['processing_ms'], attempts[0]['rate_limit_remaining'],
+                              attempts[0]['rate_limit_limit']), (321, 4, 5))
+            self.assertEqual(attempts[0]['provider_model'], attempts[2]['provider_model'])
+            self.assertNotIn('provider_model', attempts[1])
+            for dropped in subject.ATTEMPT_DROPPED_FIELDS:
+                self.assertNotIn(dropped, attempts[0])
+                self.assertNotIn(dropped, attempts[1])
         self.assertEqual(connection.execute('SELECT key_hash FROM requests ORDER BY rowid').fetchone()[0],
                          original[0]['key_hash'])
         second = self.root / 'second.db'
@@ -220,6 +235,19 @@ class BackupTest(unittest.TestCase):
             subject.verify_docs_copy(self.destination)
         self.assertNotIn(SENTINEL, str(caught.exception))
 
+    def test_verifier_rejects_served_attempt_response_metadata(self):
+        connection = self.source_db()
+        self.insert(connection, self.record())
+        self.copy()
+        with closing(sqlite3.connect(self.destination)) as connection:
+            connection.execute('UPDATE requests SET attempts=?',
+                               ('[{"status_code":429,"at":"2026-01-01T00:00:00Z",'
+                                '"provider_request_id":"req_leaked_value"}]',))
+            connection.commit()
+        with self.assertRaisesRegex(ValueError, 'unredacted attempt response metadata') as caught:
+            subject.verify_docs_copy(self.destination)
+        self.assertNotIn('req_leaked_value', str(caught.exception))
+
     def test_unknown_source_columns_including_generated_fail_closed(self):
         for ddl in ('ALTER TABLE requests ADD COLUMN future TEXT',
                     "ALTER TABLE requests ADD COLUMN future TEXT AS ('private-generated')"):
@@ -246,6 +274,9 @@ class BackupTest(unittest.TestCase):
             {'attempts': '[{"status_code":429,"at":"2026-99-01T00:00:00Z"}]'},
             {'attempts': '[{"status_code":429,"at":"secret timestamp"}]'},
             {'attempts': '[{"status_code":429,"at":"2026-01-01T00:00:00Z","error_msg":123}]'},
+            {'attempts': '[{"status_code":429,"at":"2026-01-01T00:00:00Z","processing_ms":"fast"}]'},
+            {'attempts': '[{"status_code":429,"at":"2026-01-01T00:00:00Z","rate_limit_remaining":null}]'},
+            {'attempts': '[{"status_code":429,"at":"2026-01-01T00:00:00Z","response_headers":{"X-Request-Id":[7]}}]'},
             {'tool_names': '{"secret":1}'}, {'tool_names': '[1]'},
         ]
         for changes in cases:

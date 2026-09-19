@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -217,10 +218,18 @@ func TestTransparent5xxRetry(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := atomic.AddInt32(&calls, 1)
 		if n < 3 {
+			// Each attempt answers with its own identity so the test pins the
+			// per-attempt metadata parity: an absorbed attempt stores the same
+			// upstream information the final response does.
+			w.Header().Set("X-Request-Id", fmt.Sprintf("req_5xx_%d", n))
+			w.Header().Set("X-Openai-Processing-Ms", strconv.Itoa(int(n)*7))
+			w.Header().Set("X-Ratelimit-Remaining-Requests", strconv.Itoa(int(10-n)))
+			w.Header().Set("Server", "fixture-502")
 			w.WriteHeader(http.StatusBadGateway) // 502
 			w.Write([]byte(`{"error":{"type":"bad_gateway","message":"upstream overloaded"}}`))
 			return
 		}
+		w.Header().Set("X-Request-Id", "req_final_ok")
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
 	}))
@@ -266,6 +275,39 @@ func TestTransparent5xxRetry(t *testing.T) {
 	}
 	if rec.StatusCode != 200 {
 		t.Errorf("recorded StatusCode = %d, want 200", rec.StatusCode)
+	}
+
+	// Every absorbed attempt stores the same upstream information the final
+	// response carries: its own provider request id (the matching key for a
+	// provider-side failure report), the response's other metadata, and the
+	// redacted response headers. The record-level fields keep describing the
+	// FINAL response only.
+	if len(rec.Attempts) != 2 {
+		t.Fatalf("recorded %d attempts, want 2", len(rec.Attempts))
+	}
+	for i, at := range rec.Attempts {
+		wantID := fmt.Sprintf("req_5xx_%d", i+1)
+		if at.StatusCode != 502 {
+			t.Errorf("attempt %d status = %d, want 502", i, at.StatusCode)
+		}
+		if at.ProviderRequestID != wantID {
+			t.Errorf("attempt %d provider_request_id = %q, want %q", i, at.ProviderRequestID, wantID)
+		}
+		if at.ProviderServer != "fixture-502" {
+			t.Errorf("attempt %d provider_server = %q, want fixture-502", i, at.ProviderServer)
+		}
+		if at.ProcessingMs != (i+1)*7 {
+			t.Errorf("attempt %d processing_ms = %d, want %d", i, at.ProcessingMs, (i+1)*7)
+		}
+		if at.RateLimitRemaining != 10-(i+1) {
+			t.Errorf("attempt %d rate_limit_remaining = %d, want %d", i, at.RateLimitRemaining, 10-(i+1))
+		}
+		if at.ResponseHeaders == nil || at.ResponseHeaders["X-Request-Id"][0] != wantID {
+			t.Errorf("attempt %d response headers missing its X-Request-Id", i)
+		}
+	}
+	if rec.ProviderRequestID != "req_final_ok" {
+		t.Errorf("record provider_request_id = %q, want the final response's req_final_ok", rec.ProviderRequestID)
 	}
 }
 
