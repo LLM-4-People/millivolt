@@ -186,8 +186,11 @@ parameter values are retained instead of treated as missing.
 
 Scroll the same drawer for token splits, timestamps, throughput, reported cost,
 tool information and queue/rate-limit observations. Absorbed retry attempts
-appear when the selected request has them. These captures deliberately omit
-request content and Debug payloads; ordinary opt-in captures remain sensitive.
+appear when the selected request has them, each with its status, provider
+error detail and the attempt's own provider request id - the matching key for
+correlating a provider-side failure report with the exact attempt. These
+captures deliberately omit request content and Debug payloads; ordinary
+opt-in captures remain sensitive.
 
 ![The same request drawer showing token and performance measurements](images/requests/performance.png)
 

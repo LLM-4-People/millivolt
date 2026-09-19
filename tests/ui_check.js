@@ -685,6 +685,34 @@ async function main() {
     w.closeDrawer();
   }
 
+  // ---- test 7e: attempt metadata parity in the drawer ----
+  // Absorbed attempts store the same upstream information as the final
+  // response; the attempt log shows each attempt's own provider request id,
+  // the matching key between a provider-side failure report and the exact
+  // absorbed attempt. Attempts without one (transport failures) render no
+  // empty req span.
+  {
+    const atts = [
+      { status_code: 502, error_type: 'bad_gateway', error_msg: 'upstream overloaded',
+        provider_request_id: 'req_meta_1', at: new Date(1700000104500).toISOString() },
+      { status_code: 0, error_type: 'transport', error_msg: 'connection reset',
+        at: new Date(1700000104800).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-meta', 200, 1700000104000), retries: 2, attempts: atts }, in_flight: 0 });
+    await sleep(20);
+    w.openDrawer('att-meta');
+    const attRows = [...d.querySelectorAll('.attempt-link')];
+    check('the drawer attempt log renders the absorbed attempts with their own provider request ids',
+      d.getElementById('drawer').classList.contains('open') &&
+        attRows.length === 2 &&
+        attRows[0].textContent.includes('502') &&
+        attRows[0].textContent.includes('req req_meta_1') &&
+        attRows[1].textContent.includes('transport'));
+    check('an attempt without a provider request id renders no empty req span',
+      !attRows[1].textContent.includes('· req'));
+    w.closeDrawer();
+  }
+
 
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');

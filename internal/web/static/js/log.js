@@ -744,9 +744,13 @@ function formatDetail(r) {
       if (a.error_msg) parts.push(escapeHtml(a.error_msg));
       const detail = parts.length ? parts.join(' · ') : '<span style="color:var(--muted)">no error body</span>';
       const ra = a.retry_after_ms ? ` <span style="color:var(--muted)">· retry-after ${fmtDur(a.retry_after_ms)}</span>` : '';
+      // Each attempt stores the same upstream metadata as the final
+      // response; the provider request id is the matching key between a
+      // provider-side failure report and the exact absorbed attempt.
+      const rid = a.provider_request_id ? ` <span style="color:var(--muted)">· req ${escapeHtml(a.provider_request_id)}</span>` : '';
       // Each attempt belongs to this same request id; clicking jumps the drawer
       // to that request (and highlights its log row).
-      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" role="button" tabindex="0" title="open this request"><span class="k">#${i+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}</span></div>`;
+      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" role="button" tabindex="0" title="open this request"><span class="k">#${i+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
     }).join('');
     S.push(`<div class="detail-section"><h4>Retry attempts (absorbed, transparent to client)</h4>${items}</div>`);
   }
