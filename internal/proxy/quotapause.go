@@ -21,17 +21,6 @@ func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"
 }
 
-// quotaReason renders the safe protocol token for a durable quota/billing
-// observation: the envelope's error type, else its code (numeric business
-// codes). Gate reasons and hold labels carry this token - a protocol label
-// like the storm reasons, never a provider message.
-func quotaReason(typ, code string) string {
-	if typ != "" {
-		return typ
-	}
-	return code
-}
-
 // quotaPauseArmed reports whether any durable quota/billing reaction is
 // configured. Off keeps every existing behavior: the 429 surfaces verbatim
 // and nothing is parked or retried.

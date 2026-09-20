@@ -326,7 +326,7 @@ function renderGallery(st) {
 // sizeGallery sizes the gallery once per render. In the locked viewport layout
 // the explorer box has a fixed height and the gallery fills it via CSS (flex);
 // otherwise (scrolling page) the gallery compresses to ONE whole row of node
-// cards - the same compact band the locked layout's 240px explorer shows -
+// cards - the same compact band the locked layout's 220px explorer shows -
 // with internal scrolling for the remaining rows. The actual sizing is applied
 // by applyGallerySize, which runs after layout (rAF) and re-runs on any
 // content/box resize (ResizeObserver) - so the first paint, which used to
@@ -343,7 +343,6 @@ function sizeGallery() {
 // gallery never collapses. The cap is the row EXACTLY: the gallery's
 // end-of-scroll breathing lives in scroll-padding (not box padding), so
 // nothing of the next row peeks into the band.
-const XP_GALLERY_ROW_PAD = 12;
 
 // applyGallerySize caps the scrolling-page explorer to ONE whole row of
 // node cards by sizing the BAND (the .xp-body grid box), not the gallery:

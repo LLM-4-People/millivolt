@@ -14,8 +14,8 @@ defines their supported combinations.
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
 | [internal/backup](../internal/backup/archive.go) | Self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256). |
-| [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, native-run ownership, operator state/capture. |
-| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets. |
+| [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, native-run ownership, operator state/capture; the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
+| [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection; client-facing OpenAI SSE frames and completion envelopes. |
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
@@ -148,7 +148,7 @@ writers are not made safe merely by cache invalidation.
 Explorer uses dictionary IDs, scoped predicates and bitsets. Projected metric
 samples stay in shared sorted orders: per-row membership spans preserve
 multi-valued occurrences, selected groups use the same exact rank reader as
-chart buckets, and only top cards derive percentile/spark payloads. Pending
+chart buckets, and only top cards derive percentile payloads. Pending
 dedupe retains only relevant pending IDs, not another history-sized seen set.
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
@@ -160,7 +160,10 @@ USD in storage/API; missing/unreportable data must not become fabricated prices.
 
 `Record.IsError` and `HasRateLimit` deliberately differ. Final/retried 429
 counts once per affected request, not via the broad pacing flag. A real failure
-and 429 may overlap. A plain 499 (the local client's own abort) is a flow
+and 429 may overlap. `metrics.IsNonRetryableQuotaErr` is the fixed durable
+quota/billing classification vocabulary: the retry ladder, storm evidence and
+in-band precedence all consult it, so the account condition never counts as a
+rate limit. A plain 499 (the local client's own abort) is a flow
 event; a 499 carrying a structured error observed the upstream's in-band
 failure before the client left and counts like its 200 twin. The shared
 first-membership gate keeps duplicate tool/error

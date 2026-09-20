@@ -3265,6 +3265,7 @@ document.addEventListener('click', e => {
   if (!inside('.menu-wrap')) closeHeaderMenus();
   if (!inside('#hdr-actions') && !inside('#btn-nav')) closeNavMenu();
   if (!inside('.xp-rail-col')) closeDimMenu();
+  if (!inside('#chart-metrics')) setMetricsMenuOpen(false);
 });
 
 // populateFilterMenu fills a filter menu's dropdowns from the current record

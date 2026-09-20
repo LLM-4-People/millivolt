@@ -514,10 +514,26 @@ var nonRetryableQuotaClasses = map[string]bool{
 	"1315":                              true,
 }
 
+// NonRetryableQuotaClass returns the fixed vocabulary token for a structured
+// error's durable quota/billing condition: the matched type first, else the
+// matched code, lowercased - "" when neither matches. The returned token is
+// a vocabulary entry by construction, so it is the safe protocol label for
+// gate reasons and hold labels: never provider-controlled envelope text.
+func NonRetryableQuotaClass(typ, code string) string {
+	typ, code = strings.ToLower(typ), strings.ToLower(code)
+	if nonRetryableQuotaClasses[typ] {
+		return typ
+	}
+	if nonRetryableQuotaClasses[code] {
+		return code
+	}
+	return ""
+}
+
 // IsNonRetryableQuotaErr reports whether a structured error's type or code is
 // a durable account/billing condition that a retry can never clear.
 func IsNonRetryableQuotaErr(typ, code string) bool {
-	return nonRetryableQuotaClasses[strings.ToLower(typ)] || nonRetryableQuotaClasses[strings.ToLower(code)]
+	return NonRetryableQuotaClass(typ, code) != ""
 }
 
 // TTFT returns the time to first token, or 0 if the response produced no

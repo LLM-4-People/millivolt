@@ -132,6 +132,12 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     if (settingsIsOpen()) { closeSettings(); return; }
     if (closeDimMenu()) return;
+    const metricsMenu = $('chart-metrics-menu');
+    if (metricsMenu && !metricsMenu.hidden) {
+      setMetricsMenuOpen(false);
+      $('chart-metrics-btn').focus();
+      return;
+    }
     if (closeHeaderMenus(undefined, true)) { e.preventDefault(); return; }
     if (closeNavMenu(true)) { e.preventDefault(); return; }
     if (drawerId) closeDrawer();

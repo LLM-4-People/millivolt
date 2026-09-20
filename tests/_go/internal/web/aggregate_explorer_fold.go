@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"reflect"
@@ -103,6 +104,52 @@ func TestExplorerEncodedFoldMatchesRaw(t *testing.T) {
 	}
 	if _, changed := p.dimensions.dict[dimClient].ids["new-client"]; changed {
 		t.Fatal("query mutated projected dictionary")
+	}
+}
+
+// TestExplorerGroupWireKeySet pins the group card's wire shape: the marshaled
+// group carries exactly this key set (plus the conversation dim's lineage
+// block), nothing more. A key re-added to jsonEnt - the dropped reasoning and
+// spark inputs, or any new field - fails here before it drifts into the
+// dashboard unseen.
+func TestExplorerGroupWireKeySet(t *testing.T) {
+	rows := explorerFoldFixtures()
+	for i, dim := range dimensionNames {
+		f := newExplorerFold(dim, "", nil)
+		for j := range rows {
+			if err := f.fold(&rows[j]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		groups := f.payload().Groups
+		if len(groups) == 0 {
+			t.Fatalf("%s: fold produced no groups", dim)
+		}
+		raw, err := json.Marshal(groups[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]bool{
+			"name": true, "n": true, "cost": true, "in": true, "out": true,
+			"cache": true, "err_final": true, "rate_limit_requests": true,
+			"tools": true, "cost_per_mtok": true, "ttft_p50": true,
+			"ttft_p95": true, "tps_p50": true, "tps_p95": true,
+			"err_events": true, "code": true, "last_ms": true,
+		}
+		if i == dimConversation {
+			want["conversation"] = true
+		}
+		got := make(map[string]bool, len(decoded))
+		for k := range decoded {
+			got[k] = true
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s: group wire keys %v, want %v", dim, got, want)
+		}
 	}
 }
 

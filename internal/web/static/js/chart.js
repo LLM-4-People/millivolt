@@ -35,10 +35,10 @@ const CHART_AXIS_SIZE = 48;
 const CHART_POINT_SIZE = 4; // isolated line samples need a visible mark
 const CHART_POINT_RING_WIDTH = 1;
 // Totals-strip sparklines: the per-bucket evolution carried under EVERY
-// tile value (uniform rhythm; decorative like the explorer sparks - the tile
-// value carries the number, the spark carries the shape). The emitted width
-// only sizes the viewBox: each spark stretches with its tile (CSS
-// width:100%), whose tracks floor at 160px in the tiles-only summary grid.
+// tile value (uniform rhythm; decorative - the tile value carries the
+// number, the spark carries the shape). The emitted width only sizes the
+// viewBox: each spark stretches with its tile (CSS width:100%), whose
+// tracks floor at 170px in the tiles-only summary grid.
 const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
 // CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
 // timing tile's value is the server's period average (ttft_stat / tps_stat),
@@ -720,8 +720,6 @@ const TILE_TITLES = {
   timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
 
-// The summary band lives in the narrow chart card, and the wide layout locks
-// the page to the viewport (no page scrolling), so a wrapped second tile row
 // summaryVisibleTiles is the one owner of which summary tiles render: the
 // preset's tile order minus the picker's hidden set - nothing else. Every
 // selected tile always renders; the band's auto-fit grid (dashboard.css)

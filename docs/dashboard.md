@@ -36,7 +36,7 @@ Legend controls show or hide individual series; hover a bucket for its precise
 values and time interval. Counts, sums and percentiles come from the server.
 A window with fewer than four plotted points paints a waiting message instead
 of the chart: one to three buckets cannot fill the plot width, and the totals
-strip with its sparklines still tells the story until a fourth point arrives.
+strip still tells the story until a fourth point arrives.
 
 ### Overview
 
@@ -60,11 +60,14 @@ apply - so window padding never squeezes the data into a corner. The
 metrics picker in the card head chooses what shows: one dropdown of
 checkable rows, checked metrics render and unchecked ones leave the band
 (it reflows), and the selection persists per browser like every chart
-view. In the wide no-scroll layout the band renders at most the tiles that
-fit one row side by side - a narrower window shows fewer, wider tiles
-rather than rows that wrap past the fold, and the picker's count reports
-what is on screen; the narrow scrolling layout renders every selected
-tile. Every tile keeps one fixed size whatever it carries - spark or not,
+view. Every selected tile always renders in both layouts: the band wraps
+into as many whole rows of 170px tracks as the card needs, and the page
+scrolls past them in the base layout; the picker's count reports the
+selection itself, so it can never disagree with the band. The wide layout is
+the 1200x750 one-screen lock: the page locks to the viewport with no
+scrolling, the explorer compresses to one gallery row, and the timeline
+column floors at 572px so the 5-metric selection wraps into at most two
+rows. Every tile keeps one fixed size whatever it carries - spark or not,
 one share line or two, and the no-data skeleton swaps in without moving the
 card - and the band sits at its natural height at the top of the card.
 Only the time-range control applies. This preset has

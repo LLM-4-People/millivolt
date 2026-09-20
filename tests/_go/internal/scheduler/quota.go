@@ -274,3 +274,174 @@ func TestQuotaGateNeverLeaksTheProbeFlag(t *testing.T) {
 		}
 	})
 }
+
+// TestQuotaProbeFlagReleaseIsClaimOwned pins the probe-flag ownership fix:
+// the unique unsettled probe claim owns the flag, so a cross-facet gate
+// opening under an in-flight probe (or the operator release) can neither
+// strand the flag nor mint a competing probe. The epoch guard protects only
+// the gate state; the flag release follows the claim across epoch bumps.
+func TestQuotaProbeFlagReleaseIsClaimOwned(t *testing.T) {
+	quotaMixedFacetOptions := func() StormOptions {
+		opts := quotaTestOptions()
+		opts.Enabled = true
+		opts.ModelEnabled = true
+		opts.ProviderEnabled = true
+		opts.MinSamples = 1
+		opts.ErrorPercent = 1
+		opts.RecoverySuccesses = 1
+		return opts
+	}
+
+	t.Run("threshold open under an in-flight quota probe", func(t *testing.T) {
+		s := newStormTestScheduler(t, quotaMixedFacetOptions())
+		// Two sends admitted before any gate: the first opens the quota
+		// facet, the second (still unsettled) opens the storm facets under
+		// the quota probe claimed in between.
+		preGateA := stormPermit(t, s, "provider.test", "model-a")
+		preGateB := stormPermit(t, s, "provider.test", "model-a")
+		preGateA.ObserveQuota("insufficient_quota", 0)
+		stormDue(s)
+		probe := stormPermit(t, s, "provider.test", "model-a")
+		preGateB.Observe(true, "HTTP 503", 0)
+		scope := quotaScope(s, "provider.test")
+		if !scope.active || !scope.quota {
+			t.Fatalf("mixed gate did not open: active=%v quota=%v", scope.active, scope.quota)
+		}
+		// The probe settles 2xx: its claim still owns the flag release even
+		// though the epoch moved under it.
+		probe.Observe(false, "", 0)
+		scope = quotaScope(s, "provider.test")
+		if scope.probing {
+			t.Fatal("threshold open under the in-flight probe stranded the probing flag")
+		}
+		if !scope.active || !scope.quota || scope.recovered != 0 {
+			t.Fatalf("stale probe mutated the newer gate generation: active=%v quota=%v recovered=%d",
+				scope.active, scope.quota, scope.recovered)
+		}
+		// Recovery continues on the newer generation: the next probe drains
+		// the gate and a following send admits immediately.
+		stormDue(s)
+		stormPermit(t, s, "provider.test", "model-a").Observe(false, "", 0)
+		if rows := s.StormSnapshot(); len(rows) != 0 {
+			t.Fatalf("recovery stuck after the epoch bump: %+v", rows)
+		}
+		stormPermit(t, s, "provider.test", "model-a").Cancel()
+	})
+
+	t.Run("quota open under an in-flight storm probe", func(t *testing.T) {
+		s := newStormTestScheduler(t, quotaMixedFacetOptions())
+		preGate := stormPermit(t, s, "provider.test", "model-a")
+		stormPermit(t, s, "provider.test", "model-a").Observe(true, "HTTP 503", 0)
+		stormDue(s)
+		probe := stormPermit(t, s, "provider.test", "model-a")
+		preGate.ObserveQuota("insufficient_quota", 0)
+		probe.Observe(false, "", 0)
+		scope := quotaScope(s, "provider.test")
+		if scope.probing {
+			t.Fatal("quota open under the in-flight probe stranded the probing flag")
+		}
+		if !scope.active || !scope.quota || scope.recovered != 0 {
+			t.Fatalf("stale probe mutated the newer gate generation: active=%v quota=%v recovered=%d",
+				scope.active, scope.quota, scope.recovered)
+		}
+		stormDue(s)
+		stormPermit(t, s, "provider.test", "model-a").Observe(false, "", 0)
+		if rows := s.StormSnapshot(); len(rows) != 0 {
+			t.Fatalf("recovery stuck after the epoch bump: %+v", rows)
+		}
+		stormPermit(t, s, "provider.test", "model-a").Cancel()
+	})
+
+	t.Run("release keeps the in-flight probe the flag owner", func(t *testing.T) {
+		// A provider-facet-only storm gate: the in-flight probe holds only
+		// the provider scope's flag, so the release's manual clear is the
+		// one difference between a parked and a minted second probe.
+		opts := quotaMixedFacetOptions()
+		opts.ModelEnabled = false
+		s := newStormTestScheduler(t, opts)
+		preGate := stormPermit(t, s, "provider.test", "model-a")
+		stormPermit(t, s, "provider.test", "model-a").Observe(true, "HTTP 503", 0)
+		preGate.ObserveQuota("insufficient_quota", 0)
+		stormDue(s)
+		probe := stormPermit(t, s, "provider.test", "model-a")
+		if !s.ReleaseQuota("provider.test") {
+			t.Fatal("release reported no open gate")
+		}
+		// The storm facet stays open, so the next send must park on the
+		// in-flight probe's flag instead of minting a second probe.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.WaitStorm(ctx, "provider.test", "model-a", nil)
+			done <- err
+		}()
+		waitFor(t, func() bool { return stormQueued(s) == 1 }, "release let a second probe mint while the first was in flight")
+		cancel()
+		if !errors.Is(<-done, context.Canceled) {
+			t.Fatal("parked waiter did not cancel cleanly")
+		}
+		// The in-flight probe's own settle releases the flag it minted and
+		// drains the remaining storm facet.
+		probe.Observe(false, "", 0)
+		scope := quotaScope(s, "provider.test")
+		if scope.probing {
+			t.Fatal("probe settle did not release the flag after the release")
+		}
+		if rows := s.StormSnapshot(); len(rows) != 0 {
+			t.Fatalf("storm facet did not drain after the release: %+v", rows)
+		}
+		stormPermit(t, s, "provider.test", "model-a").Cancel()
+	})
+}
+
+// TestMixedFacetCloseKeepsTheQuotaProbePaced pins the shared cooldown owner:
+// a facet close clears it only when no facet remains open, so a storm facet
+// recovering under an open quota gate never admits an unspaced billed probe.
+func TestMixedFacetCloseKeepsTheQuotaProbePaced(t *testing.T) {
+	opts := quotaTestOptions()
+	opts.Enabled = true
+	opts.ModelEnabled = true
+	opts.ProviderEnabled = true
+	opts.MinSamples = 1
+	opts.ErrorPercent = 1
+	opts.RecoverySuccesses = 1
+	opts.QuotaRecoverySuccesses = 3
+	opts.InitialBackoff = time.Hour
+	opts.MaxBackoff = time.Hour
+	s := newStormTestScheduler(t, opts)
+	preGate := stormPermit(t, s, "provider.test", "model-a")
+	stormPermit(t, s, "provider.test", "model-a").Observe(true, "HTTP 503", 0)
+	preGate.ObserveQuota("insufficient_quota", 0)
+	// Both facets open; one success crosses the storm threshold but not the
+	// quota one (RecoverySuccesses < QuotaRecoverySuccesses).
+	stormDue(s)
+	stormPermit(t, s, "provider.test", "model-a").Observe(false, "", 0)
+	scope := quotaScope(s, "provider.test")
+	if scope.active || !scope.quota {
+		t.Fatalf("storm facet did not close under the open quota facet: active=%v quota=%v", scope.active, scope.quota)
+	}
+	// The next quota probe stays paced by the shared cooldown instead of
+	// admitting unspaced after the storm close.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.WaitStorm(ctx, "provider.test", "model-a", nil)
+		done <- err
+	}()
+	waitFor(t, func() bool { return stormQueued(s) == 1 }, "mixed close admitted an unspaced quota probe")
+	cancel()
+	if !errors.Is(<-done, context.Canceled) {
+		t.Fatal("parked waiter did not cancel cleanly")
+	}
+	// The paced probes close the quota facet across its own threshold.
+	for i := 0; i < 2; i++ {
+		stormDue(s)
+		stormPermit(t, s, "provider.test", "model-a").Observe(false, "", 0)
+	}
+	if rows := s.StormSnapshot(); len(rows) != 0 {
+		t.Fatalf("quota facet did not close after paced recovery: %+v", rows)
+	}
+	stormPermit(t, s, "provider.test", "model-a").Cancel()
+}

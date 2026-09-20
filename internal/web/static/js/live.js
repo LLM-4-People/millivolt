@@ -738,14 +738,6 @@ $('chart-metrics-menu').addEventListener('click', e => {
   const row = e.target.closest('.metrics-row');
   if (row) toggleSummaryMetric(row.dataset.metric);
 });
-document.addEventListener('click', e => {
-  if (!e.target.closest('#chart-metrics')) setMetricsMenuOpen(false);
-});
-document.addEventListener('keydown', e => {
-  if (e.key !== 'Escape' || $('chart-metrics-menu').hidden) return;
-  setMetricsMenuOpen(false);
-  $('chart-metrics-btn').focus();
-});
 
 // Server-state refresh cadence from dashCfg (the bootstrap payload's dash
 // section; GET /admin/config re-pulls it after a restart): the tick polls

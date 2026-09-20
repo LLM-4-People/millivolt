@@ -138,7 +138,10 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 		if n > 0 {
 			if _, werr := w.Write(chunk[:n]); werr != nil {
 				markClientGone(rec)
-				return
+				// Break to the analysis of the captured prefix: the
+				// upstream delivered those bytes, and the disconnect is
+				// recorded without losing their payload.
+				break
 			}
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
@@ -220,15 +223,15 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 
 // commitSpooledBody writes a fully spooled non-stream body verbatim: response
 // headers, the status line, the bytes, then the shared non-stream analysis.
-// A failed client write marks the disconnect and stops before the analysis.
-// The gates that choose this epilogue (the in-band error envelope passthrough
-// and the healthy commit) stay at their call sites.
+// A failed client write marks the disconnect but does not skip the analysis:
+// the upstream delivered and charged the body, so the record keeps its
+// payload. The gates that choose this epilogue (the in-band error envelope
+// passthrough and the healthy commit) stay at their call sites.
 func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, werr := w.Write(spooled); werr != nil {
 		markClientGone(rec)
-		return
 	}
 	analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
 }
@@ -245,7 +248,9 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 // retry with a 429 + Retry-After, or the transport failed with a 502) and
 // the request is finished; ok=true returns the adopted attempt's response
 // and its per-send cancel, which the caller defers (function-scoped LIFO
-// ordering) before adopting the record fields.
+// ordering), with the record adoption (the status, the >=400 error detail,
+// the upstream headers, the final attempt time) already run here - the
+// single owner of the tail both quality loops used to duplicate.
 func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks, at metrics.RetryAttempt, old *http.Response) (next *http.Response, nextCancel context.CancelFunc, ok bool) {
 	rec.Attempts = append(rec.Attempts, at)
 	rec.Retries++
@@ -267,6 +272,12 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 		http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(err)), http.StatusBadGateway)
 		return nil, nil, false
 	}
+	rec.StatusCode = next.StatusCode
+	if next.StatusCode >= 400 {
+		captureErrorFromResponse(next, rec)
+	}
+	captureUpstreamHeaders(next, rec, t.authHeader)
+	rec.FinalAttemptAt = time.Now()
 	return next, nextCancel, true
 }
 
@@ -435,12 +446,6 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					resp = next
 					defer nextCancel()
 					defer next.Body.Close()
-					rec.StatusCode = resp.StatusCode
-					if resp.StatusCode >= 400 {
-						captureErrorFromResponse(resp, rec)
-					}
-					captureUpstreamHeaders(resp, rec, t.authHeader)
-					rec.FinalAttemptAt = time.Now()
 					continue
 				}
 				s.commitSpooledBody(w, resp, spooled, rec)
@@ -494,12 +499,6 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				resp = next
 				defer nextCancel()
 				defer next.Body.Close()
-				rec.StatusCode = resp.StatusCode
-				if resp.StatusCode >= 400 {
-					captureErrorFromResponse(resp, rec)
-				}
-				captureUpstreamHeaders(resp, rec, t.authHeader)
-				rec.FinalAttemptAt = time.Now()
 				continue
 			}
 			// Budget exhausted (or zero): surface a real failure. The
@@ -1096,7 +1095,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			var quotaTyp, quotaCode string
 			durable, quotaTyp, quotaCode, errBody, peekLeftOpen = quota429Peek(resp)
 			if durable {
-				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, quotaReason(quotaTyp, quotaCode), parseRetryAfter(resp)) {
+				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, metrics.NonRetryableQuotaClass(quotaTyp, quotaCode), parseRetryAfter(resp)) {
 					if attempt > 0 {
 						rec.FinalAttemptAt = attemptStart
 					}
@@ -1507,13 +1506,25 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		rescueRequested streamRescue
 	)
 	a := s.analyzerFor(rec)
+	// clientGone records a write-detected abort: the disconnect stamps
+	// the 499, and the analyzer's in-band error - when one reached the
+	// wire - still fills the record, so the abort counts like its 200
+	// twin exactly as the read-detected paths do. Every caller returns
+	// immediately, so the fill runs at most once; a stream without an
+	// in-band error keeps the plain disconnect accounting.
+	clientGone := func() {
+		markClientGone(rec)
+		if a.HasInBandError() {
+			a.Fill(rec)
+		}
+	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
 			return true
 		}
 		o := out.Bytes()
 		if _, werr := w.Write(o); werr != nil {
-			markClientGone(rec)
+			clientGone()
 			return false
 		}
 		if bytes.IndexByte(o, '\n') >= 0 {
@@ -1559,7 +1570,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			emitDegenerateSSE(w, &a, time.Now(), code, rec)
 		} else if len(hold) > 0 {
 			if _, werr := w.Write(hold); werr != nil {
-				markClientGone(rec)
+				clientGone()
 				return false
 			}
 		}
@@ -1661,7 +1672,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
 					if _, werr := w.Write(hold); werr != nil {
-						markClientGone(rec)
+						clientGone()
 						return rescueNone
 					}
 					flusher.Flush()
@@ -1724,7 +1735,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				markStreamErr(ctx, rec, err)
 				if holding {
 					if _, werr := w.Write(hold); werr != nil {
-						markClientGone(rec)
+						clientGone()
 						return rescueNone
 					}
 					hold = hold[:0]

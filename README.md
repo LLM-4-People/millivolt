@@ -206,10 +206,10 @@ editable configuration, not a guarantee of provider access or protocol coverage.
   with their shares, spend with the blended per-Mtok price, the errors / 429
   pair, and average latency / speed over every measured request with each
   metric's low-high sample range - one multi-line sparkline per tile spanning
-  only traffic-bearing buckets. Click a tile to hide or restore it. Choose
-  windows from minutes through All time, toggle individual series on the
-  plotted presets, and select one percentile for both speed and first-token
-  latency.
+  only traffic-bearing buckets. The metrics picker in the card head chooses
+  what shows; the selection persists per browser. Choose windows from minutes
+  through All time, toggle individual series on the plotted presets, and
+  select one percentile for both speed and first-token latency.
 - Inspect provider-reported input/output, cache and reasoning usage. Costs below
   $1 display in cents everywhere; data/API values remain USD. Error and HTTP 429
   counts are distinct, zero badges disappear, and a 429 alone is not an error.

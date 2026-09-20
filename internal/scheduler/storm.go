@@ -77,6 +77,14 @@ type stormScope struct {
 	timer                         wakeTimer
 }
 
+// clearCooldown drops the shared recovery pacing: no facet remains open, so
+// the next send admits immediately instead of inheriting a stale window.
+func (scope *stormScope) clearCooldown() {
+	scope.backoff = 0
+	scope.retryAt = time.Time{}
+	scope.timer.stop()
+}
+
 type stormState struct {
 	mu         sync.Mutex
 	opts       StormOptions
@@ -175,6 +183,9 @@ func (s *stormState) gates(scope *stormScope) bool {
 // threshold storm gate (when its facet is enabled) or an open quota gate.
 // Both facets share one probe flag and one cooldown, so one in-flight probe
 // or an unelapsed recovery delay parks sends for whichever facet is open.
+// The flag is owned by the unique unsettled probe claim: while it holds, no
+// new probe can mint, and the claim's own settle releases it across any
+// epoch bump.
 func (s *stormState) gateHeld(scope *stormScope, now time.Time) bool {
 	if !((s.gates(scope) && scope.active) || scope.quota) {
 		return false
@@ -583,9 +594,9 @@ func (p *StormPermit) settleQuota(reason string, retryAfter time.Duration) {
 		// it, this permit's settle releases the flag. Without this, the
 		// reopen path and cross-facet probes (a storm probe observing a
 		// quota failure) leak probing=true and park the scope forever. The
-		// epoch guard keeps a stale permit from releasing a newer gate
-		// generation's in-flight probe.
-		if claim.probe && claim.epoch == scope.epoch && scope.probing {
+		// settling claim owns the release across epoch bumps; the guard
+		// below protects only the gate state from a stale permit.
+		if claim.probe && scope.probing {
 			scope.probing = false
 			changed = true
 		}
@@ -650,9 +661,15 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 		if !s.gates(scope) && !scope.quota {
 			continue
 		}
-		if claim.probe && claim.epoch == scope.epoch && (scope.active || scope.quota) {
+		// The flag release belongs to the settling probe claim itself: a
+		// cross-facet open can bump the epoch under an in-flight probe, and
+		// a stranded flag would park the scope forever. The state
+		// transitions below keep their epoch/facet guard.
+		if claim.probe && scope.probing {
 			scope.probing = false
 			changed = true
+		}
+		if claim.probe && claim.epoch == scope.epoch && (scope.active || scope.quota) {
 			if observe && failed {
 				scope.recovered = 0
 				scope.reason = strings.Clone(reason)
@@ -666,16 +683,13 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 				}
 				if stormClosed {
 					scope.active = false
-					scope.backoff = 0
-					scope.retryAt = time.Time{}
 					scope.resetSamples()
-					scope.timer.stop()
-				} else if quotaClosed && !scope.active {
-					// A quota-only scope fully recovered: no facet remains.
-					scope.backoff = 0
-					scope.retryAt = time.Time{}
-					scope.timer.stop()
-				} else if scope.active || scope.quota {
+				}
+				if !scope.active && !scope.quota {
+					// Fully recovered: no facet remains open, so the shared
+					// cooldown clears.
+					scope.clearCooldown()
+				} else {
 					// Recovery remains paced until enough clean probes confirm
 					// health; partial recovery must not release a burst.
 					s.delay(scope, now, 0, false)
@@ -733,11 +747,15 @@ type StormStatus struct {
 
 // ReleaseQuota closes a provider's open quota gate without waiting for a
 // recovery probe; parked sends resume immediately. It is the operator resume
-// action for retry-mode quota parking. An in-flight probe's flag dies with
-// the gate: its permit can no longer settle as this gate's probe (the facet
-// is closed), so the release clears the flag here rather than leaking the
-// exclusivity - a quota 429 that probe observes afterwards re-arms the gate
-// as fresh evidence. The report says whether a gate was open.
+// action for retry-mode quota parking. The in-flight probe's own settle
+// releases its flag - the claim owns it, so the release never clears the
+// flag by hand. A pure-quota gate still drains immediately: gateHeld's
+// facet check fails once quota is false, so the parked sends resume without
+// waiting for that probe. A mixed storm+quota gate resumes storm pacing only
+// after the in-flight probe settles, bounded by that send's deadline. A
+// quota 429 the in-flight probe later observes still re-arms the gate as
+// fresh evidence (settleQuota's open branch). The report says whether a
+// gate was open.
 func (s *Scheduler) ReleaseQuota(provider string) bool {
 	state := &s.storms
 	state.mu.Lock()
@@ -747,12 +765,9 @@ func (s *Scheduler) ReleaseQuota(provider string) bool {
 		return false
 	}
 	scope.quota = false
-	scope.probing = false
 	scope.recovered = 0
 	if !scope.active {
-		scope.backoff = 0
-		scope.retryAt = time.Time{}
-		scope.timer.stop()
+		scope.clearCooldown()
 	}
 	state.wakeLocked()
 	return true

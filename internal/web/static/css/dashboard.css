@@ -1012,12 +1012,10 @@
      plain readouts; the metrics picker at the card head owns what shows
      (the same dash.chart hidden set the legend uses), hidden metrics leave
      the band and the auto-fit grid reflows, and the spark keeps each
-      tile's color voice, so cells carry no per-metric leading tick. Tracks
-      floor at 160px - the content fit for the widest tile value (the
-      in/out/cached triple at the base strip's mono plus the tile's 24px
-      padding) - so no tile ever clips its value; the tiles wrap into as
-      many whole rows as the selection needs, and the page scrolls past
-      them, so every selected tile always renders at every viewport.
+      tile's color voice, so cells carry no per-metric leading tick. The
+      tiles wrap into as many whole rows as the selection needs, and the
+      page scrolls past them, so every selected tile always renders at
+      every viewport.
       Sizing: every tile is ONE fixed height (100px fits the tallest content
       - label 10 + value 13 + the tokens tile's two share lines 20 + spark
       14 + three 6px gaps + 20px padding = 95, all line-height-1 rows so
@@ -1043,7 +1041,7 @@
        in/out/cached triple, e.g. "95.21M/392.78K/92.85M" - measures 150px
        at 13px (173px at the strip's 15px, far past a 3-track row's ~160px
        cell). With the 8px tile side padding that needs a 166px track, so
-       the floor is 170px and the lock's pair floor (546px card, below)
+       the floor is 170px and the lock's pair floor (572px card, below)
        keeps three whole tracks in the timeline card at every locked
        window. Extreme values ellipsize (the val-pair rule below), never
        overlap. */

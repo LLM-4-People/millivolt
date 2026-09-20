@@ -16,7 +16,8 @@ import (
 )
 
 // The durable quota/billing 429 family and its canonical envelope, shared by
-// every test in this file.
+// every label-neutral test in this file. Tests that pin the label
+// derivation inline their own envelope spellings.
 const quotaBody = `{"error":{"message":"insufficient credits available in the account","type":"insufficient_quota","code":"insufficient_credits"}}`
 
 func quotaPauseTestConfig(mode string) *config.Config {
@@ -67,15 +68,27 @@ func quotaPollCond(t *testing.T, what string, cond func() bool) {
 
 // TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery pins the confirmed
 // contract: the triggering request absorbs the durable quota 429 and parks on
-// the provider's recovery gate, a sibling parks at admission, and the first
-// send that resolves 2xx closes the gate and drains both with the upstream
-// success.
+// the provider's recovery gate, a sibling parks at admission, and the
+// operator resume closes the gate so both requests drain with the upstream
+// success. The 429 carries a large Retry-After so the parked state is stable:
+// a transient pacing window (~20-40ms) would race the sibling-park poll and
+// the calls==1 guard under load. The resumed trigger re-sends as an ordinary
+// send and resolves (the release already closed the gate, so its 2xx closes
+// nothing), and the time-driven window-elapse path stays covered by
+// TestQuotaPauseRetriesDoNotBurnTransientBudget.
 func TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery(t *testing.T) {
 	var calls atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
+			// A large Retry-After parks the provider for >=29s, so the
+			// parked state below is stable instead of a transient
+			// ~20-40ms pacing window.
+			w.Header().Set("Retry-After", "30")
 			w.WriteHeader(http.StatusTooManyRequests)
-			io.WriteString(w, quotaBody)
+			// A numeric business code (Z.AI 1113, balance exhausted) beside
+			// the generic envelope type: the gate label must derive from
+			// the matched code token.
+			io.WriteString(w, `{"error":{"message":"insufficient credits available in the account","type":"provider_error","code":"1113"}}`)
 			return
 		}
 		io.WriteString(w, `{"choices":[{"message":{"content":"reloaded"}}]}`)
@@ -88,6 +101,12 @@ func TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery(t *testing.T) {
 	triggerDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { triggerDone <- stormRequest(t, s, up.URL, "model-a", "key-a") }()
 	quotaPollCond(t, "trigger never hit upstream", func() bool { return calls.Load() >= 1 })
+	// The gate is open with the hinted floor, so the parked state is stable
+	// for >=29s: the sibling deterministically parks at admission.
+	quotaPollCond(t, "quota gate never opened", func() bool {
+		row, ok := quotaStormRow(s)
+		return ok && !row.RetryAt.IsZero() && time.Until(row.RetryAt) >= 29*time.Second
+	})
 
 	// While the gate is open the sibling parks before admission and never
 	// reaches the exhausted upstream.
@@ -95,14 +114,27 @@ func TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery(t *testing.T) {
 	go func() { siblingDone <- stormRequest(t, s, up.URL, "model-a", "key-b") }()
 	quotaPollCond(t, "sibling never parked on the quota gate", func() bool {
 		row, ok := quotaStormRow(s)
-		return ok && row.Provider == provider && row.Reason == "insufficient_quota" && row.Queued >= 1
+		return ok && row.Provider == provider && row.Queued >= 1
 	})
+	if row, ok := quotaStormRow(s); !ok || row.Reason != "1113" {
+		t.Fatalf("quota gate label = %q, want the matched code token 1113", row.Reason)
+	}
 	if calls.Load() != 1 {
 		t.Fatalf("parked sibling reached upstream early (calls=%d)", calls.Load())
 	}
 
-	// The window elapses, one parked send becomes the recovery probe, and its
-	// 2xx closes the gate: both requests drain with the same success.
+	// The operator resume closes the gate without waiting out the hinted
+	// window: the trigger re-sends as an ordinary send, and both requests
+	// drain with the same upstream success.
+	providerJSON, _ := json.Marshal(provider)
+	rr := httptest.NewRequest(http.MethodPost, "/admin/quota",
+		strings.NewReader(`{"provider":`+string(providerJSON)+`,"resume":true}`))
+	rr.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
+	s.HandleQuotaPause(rw, rr)
+	if rw.Code != 200 {
+		t.Fatalf("resume endpoint status = %d body=%s", rw.Code, rw.Body)
+	}
 	var w, wsib *httptest.ResponseRecorder
 	select {
 	case w = <-triggerDone:
@@ -119,10 +151,10 @@ func TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery(t *testing.T) {
 		t.Fatalf("trigger=%d/%s sibling=%d/%s", w.Code, w.Body, wsib.Code, wsib.Body)
 	}
 	if calls.Load() != 3 {
-		t.Fatalf("upstream calls = %d, want 3 (quota 429 + probe + sibling)", calls.Load())
+		t.Fatalf("upstream calls = %d, want 3 (quota 429 + trigger re-send + sibling)", calls.Load())
 	}
 	if _, ok := quotaStormRow(s); ok {
-		t.Fatal("quota gate stayed open after a 2xx probe")
+		t.Fatal("resume left the quota gate open")
 	}
 
 	// The trigger's record shows the absorbed quota attempt under the final
@@ -135,8 +167,8 @@ func TestQuotaPauseRetryParksTriggerAndSiblingUntilRecovery(t *testing.T) {
 		}
 	}
 	if trigger == nil || trigger.StatusCode != 200 || trigger.Retries != 1 ||
-		len(trigger.Attempts) != 1 || trigger.Attempts[0].ErrorType != "insufficient_quota" ||
-		trigger.Attempts[0].ErrorCode != "insufficient_credits" || trigger.RateLimited {
+		len(trigger.Attempts) != 1 || trigger.Attempts[0].ErrorType != "provider_error" ||
+		trigger.Attempts[0].ErrorCode != "1113" || trigger.RateLimited {
 		t.Fatalf("trigger record = %+v attempts=%+v", trigger, trigger.Attempts)
 	}
 }
@@ -209,14 +241,20 @@ func TestQuotaPauseRetryHonorsRetryAfterAndOperatorRelease(t *testing.T) {
 	if rw.Code != 200 {
 		t.Fatalf("no-op resume status = %d", rw.Code)
 	}
-	// The strict decoder rejects missing or malformed commands.
-	for _, body := range []string{`{}`, `{"provider":"p"}`, `{"resume":true}`, `{"provider":"","resume":true}`, `{"provider":"p","resume":"yes"}`} {
+	// The strict decoder rejects missing, malformed or unknown-field bodies,
+	// and a resume command must carry resume true.
+	for _, body := range []string{
+		`{}`, `{"provider":"p"}`, `{"resume":true}`,
+		`{"provider":"","resume":true}`, `{"provider":"p","resume":"yes"}`,
+		`{"provider":"p","resume":true,"unplanned":1}`,
+		`{"provider":"p","resume":false}`,
+	} {
 		rw = httptest.NewRecorder()
 		rr = httptest.NewRequest(http.MethodPost, "/admin/quota", strings.NewReader(body))
 		rr.Header.Set("Content-Type", "application/json")
 		s.HandleQuotaPause(rw, rr)
 		if rw.Code != 400 {
-			t.Fatalf("malformed resume body %q accepted with %d", body, rw.Code)
+			t.Fatalf("invalid resume body %q accepted with %d", body, rw.Code)
 		}
 	}
 }
@@ -230,7 +268,9 @@ func TestQuotaPauseManualCreatesHoldParksUntilOperatorResume(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if calls.Add(1) == 1 {
 			w.WriteHeader(http.StatusTooManyRequests)
-			io.WriteString(w, quotaBody)
+			// Non-canonical casing: the hold label must carry the
+			// lowercased vocabulary token, never the raw envelope spelling.
+			io.WriteString(w, `{"error":{"message":"insufficient credits available in the account","type":"Insufficient_Quota","code":"insufficient_credits"}}`)
 			return
 		}
 		io.WriteString(w, `{"choices":[{"message":{"content":"reloaded"}}]}`)
@@ -251,12 +291,15 @@ func TestQuotaPauseManualCreatesHoldParksUntilOperatorResume(t *testing.T) {
 		holds, _ := snap["holds"].([]map[string]any)
 		for _, h := range holds {
 			providers, _ := h["providers"].([]string)
-			if len(providers) == 1 && providers[0] == provider && h["reason"] == "insufficient_quota" && h["until"] == nil {
+			if len(providers) == 1 && providers[0] == provider && h["until"] == nil {
 				return true
 			}
 		}
 		return false
 	})
+	if holds, _ := s.PauseSnapshot()["holds"].([]map[string]any); len(holds) != 1 || holds[0]["reason"] != "insufficient_quota" {
+		t.Fatalf("quota hold labels = %+v, want the lowercased vocabulary token", holds)
+	}
 	siblingDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { siblingDone <- stormRequest(t, s, up.URL, "model-a", "key-b") }()
 	quotaPollCond(t, "sibling never parked on the quota hold", func() bool {
@@ -299,8 +342,54 @@ func TestQuotaPauseManualCreatesHoldParksUntilOperatorResume(t *testing.T) {
 		}
 	}
 	if trigger == nil || trigger.StatusCode != 200 || trigger.Retries != 1 ||
-		len(trigger.Attempts) != 1 || trigger.Attempts[0].ErrorType != "insufficient_quota" {
+		len(trigger.Attempts) != 1 || trigger.Attempts[0].ErrorType != "Insufficient_Quota" {
 		t.Fatalf("trigger record = %+v attempts=%+v", trigger, trigger.Attempts)
+	}
+}
+
+// TestQuotaPauseHostileTypeNeverLabelsTheGate pins the label safety contract:
+// a hostile envelope (arbitrary provider-controlled type text beside a
+// vocabulary code) labels the gate with the matched code token, never the
+// raw type - the classification owner bounds every label to the vocabulary.
+func TestQuotaPauseHostileTypeNeverLabelsTheGate(t *testing.T) {
+	hostileType := strings.Repeat("x", 300)
+	var calls atomic.Int32
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"message":"insufficient credits available in the account","type":"`+hostileType+`","code":"1113"}}`)
+			return
+		}
+		io.WriteString(w, `{"choices":[{"message":{"content":"reloaded"}}]}`)
+	}))
+	defer up.Close()
+	s := New(quotaPauseTestConfig(config.QuotaPauseRetry), metrics.Noop{})
+	triggerDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { triggerDone <- stormRequest(t, s, up.URL, "model-a", "key-a") }()
+	quotaPollCond(t, "trigger never hit upstream", func() bool { return calls.Load() >= 1 })
+	quotaPollCond(t, "quota gate never opened", func() bool {
+		_, ok := quotaStormRow(s)
+		return ok
+	})
+	row, _ := quotaStormRow(s)
+	if row.Reason != "1113" {
+		t.Fatalf("quota gate label = %q, want the matched code token 1113", row.Reason)
+	}
+	// The labeled gate still recovers: the parked trigger becomes the probe
+	// and its 2xx closes the gate.
+	select {
+	case w := <-triggerDone:
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "reloaded") {
+			t.Fatalf("resumed trigger = %d/%s", w.Code, w.Body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("trigger never recovered")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (hostile 429 + probe)", calls.Load())
+	}
+	if _, ok := quotaStormRow(s); ok {
+		t.Fatal("quota gate stayed open after a 2xx probe")
 	}
 }
 

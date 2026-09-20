@@ -23,9 +23,12 @@ var attemptMetaFields = []string{
 // TestAttemptMetadataParity pins the storage contract that absorbed
 // intermediate attempts carry exactly the same upstream-response information
 // as the final attempt recorded on the record: every metadata field of one
-// type must exist on the other with an identical JSON tag and type, and no
-// extra metadata field may appear on one side only. A field added to either
-// struct without its twin fails here, so the two field lists cannot drift.
+// type must exist on the other with an identical JSON tag and type, and
+// RetryAttempt - the narrow twin - may carry no metadata-shaped field
+// outside the parity set, so an attempt cannot grow metadata the record's
+// final capture lacks. The reverse stays deliberately unenumerated: Record
+// owns a wide non-metadata surface (identity, timing, usage, request shape)
+// that has no attempt twin by design.
 func TestAttemptMetadataParity(t *testing.T) {
 	recType := reflect.TypeOf(Record{})
 	attType := reflect.TypeOf(RetryAttempt{})
