@@ -4053,9 +4053,9 @@ function doFilter() {
 
 // ---------- safe delete (Clear ▾ menu) ----------
 // The Clear button opens a menu to delete all records or a filtered subset
-// (by provider / model / client / status / errors / age), with a live count
-// preview before anything is deleted. Every request is one self-contained row
-// (retries live in the row's attempts JSON), so a filtered delete can never
+// (by provider / model / client / status / errors / debug / age), with a live
+// count preview before anything is deleted. Every request is one self-contained
+// row (retries live in the row's attempts JSON), so a filtered delete can never
 // leave orphan entries. The Logs ▾ menu reuses the same filter options (and
 // the same backend count endpoint) for choosing exactly what to download.
 
