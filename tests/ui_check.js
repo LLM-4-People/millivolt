@@ -1886,25 +1886,18 @@ async function main() {
     w.eval("chartView.preset = 'traffic'");
   }
 
-  // The one-row tile cap: in the locked no-scroll layout the band renders at
-  // most the tiles that fit side by side (preset order, the picker's
-  // selection intact); the scrolling narrow layout and an unmeasured band
-  // render every selected tile. 175px track + 10px gap: two tiles need 360px,
-  // five need 915px.
+  // Every selected tile always renders: summaryVisibleTiles applies only
+  // the picker's hidden set - the band's auto-fit grid wraps the tiles into
+  // as many whole rows as the card needs, so no viewport can drop a metric
+  // or disagree with the picker's count.
   {
     w.eval("chartView.preset = 'overview'; chartView.hidden.overview = [];");
-    check('the locked layout caps summary tiles to one row of preset order',
-      w.eval('summaryVisibleTiles(activePreset(), 509, true).join()') === 'req,tokens' &&
-        w.eval('summaryVisibleTiles(activePreset(), 365, true).join()') === 'req,tokens' &&
-        w.eval('summaryVisibleTiles(activePreset(), 350, true).join()') === 'req' &&
-        w.eval('summaryVisibleTiles(activePreset(), 1030, true).length') === 5);
-    check('the scrolling layout and unmeasured bands keep every selected tile',
-      w.eval('summaryVisibleTiles(activePreset(), 509, false).length') === 5 &&
-        w.eval('summaryVisibleTiles(activePreset(), 0, true).length') === 5);
-    check('the cap applies after the picker hidden set',
+    check('every selected summary tile renders with no viewport cap',
+      w.eval('summaryVisibleTiles(activePreset()).join()') === 'req,tokens,cost,health,timing');
+    check('the picker hidden set is the only filter',
       w.eval(`(() => { chartView.hidden.overview = ['req'];
-        const vis = summaryVisibleTiles(activePreset(), 509, true);
-        chartView.hidden.overview = []; return vis.join(); })()`) === 'tokens,cost');
+        const vis = summaryVisibleTiles(activePreset());
+        chartView.hidden.overview = []; return vis.join(); })()`) === 'tokens,cost,health,timing');
     w.eval("chartView.preset = 'traffic'");
   }
 
@@ -2832,8 +2825,8 @@ async function main() {
   // Uniform-tile pin: every summary tile is ONE fixed size whatever it
   // carries (spark or not, one share line or the tokens tile's two -
   // skeleton or data - the no-jump skeleton swap is exact by construction).
-  // The 104px floor fits the tallest structure (label + value + two share
-  // rows + spark, line-height-1 rows) and the spark refuses to flex-shrink,
+  // The 100px floor fits the tallest structure (label + value + two share
+  // rows + spark = 95, line-height-1 rows) and the spark refuses to flex-shrink,
   // so an oversized tile clips visibly for the browser gate instead of
   // silently crushing the spark - the failure mode the 72px attempt
   // exposed. The band sits at its natural rows height (the old
@@ -2847,7 +2840,7 @@ async function main() {
     const card = firstCSSRule('.traffic-card.tiles-only');
     const spark = firstCSSRule('.traffic-card.tiles-only .chart-total .spark');
     return !!tile && !!strip && !!card && !!spark &&
-      tile.style.getPropertyValue('height') === '104px' &&
+      tile.style.getPropertyValue('height') === '100px' &&
       spark.style.getPropertyValue('flex-shrink') === '0' &&
       strip.style.getPropertyValue('flex') === '' &&
       strip.style.getPropertyValue('min-height') === '' &&
@@ -4798,14 +4791,33 @@ async function main() {
         drawer.hidden && drawer.hasAttribute('inert') && sd.activeElement===open && !sd.querySelector('main').hasAttribute('inert'));
 
       const gal=sd.getElementById('xp-gallery');
+      const xbody=gal.closest('.xp-body');
       sd.documentElement.style.setProperty('--gallery-locked','');
       Object.defineProperty(gal,'scrollHeight',{configurable:true,value:1000});
+      const firstCard=gal.firstElementChild;
+      Object.defineProperty(firstCard,'offsetTop',{configurable:true,value:7});
+      Object.defineProperty(firstCard,'offsetHeight',{configurable:true,value:148});
+      if (gal.children[1]) {
+        Object.defineProperty(gal.children[1],'offsetTop',{configurable:true,value:165});
+        Object.defineProperty(gal.children[1],'offsetHeight',{configurable:true,value:148});
+      }
       sw.applyGallerySize(gal);
-      const capped=gal.style.height==='340px';
+      // One measured row (148px), EXACTLY - never two, never a sliver of the
+      // next row - applied to the band (the .xp-body box) the tall dimension
+      // rail would otherwise stretch; the gallery itself keeps its natural
+      // height (its end breathing is scroll-padding, not box height).
+      const capped=xbody.style.height==='148px' && gal.style.height==='';
       sd.documentElement.style.setProperty('--gallery-locked','1');
       sw.applyGallerySize(gal);
-      check('gallery sizing follows the CSS-owned lock state, without a second height breakpoint',capped && gal.style.height==='');
+      check('gallery sizing follows the CSS-owned lock state, without a second height breakpoint',
+        capped && xbody.style.height==='' && gal.style.height==='');
       sd.documentElement.style.removeProperty('--gallery-locked');
+      Object.defineProperty(gal,'scrollHeight',{configurable:true,value:148});
+      sw.applyGallerySize(gal);
+      // The band stays one row even when the content fits: a scrollHeight-
+      // conditional "natural" flip was the set-clear-set oscillation.
+      const settled=xbody.style.height==='148px';
+      check('the band stays one row even when the gallery content fits it', settled);
 
       sw.applyBootstrapState({...state, storage:{enabled:true,dropped:0}});
       check('zero durable drops clear the footer warning without a second counter',

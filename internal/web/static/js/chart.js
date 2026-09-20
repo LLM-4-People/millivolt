@@ -722,41 +722,26 @@ const TILE_TITLES = {
 
 // The summary band lives in the narrow chart card, and the wide layout locks
 // the page to the viewport (no page scrolling), so a wrapped second tile row
-// can hang past the fold with no way to reach it. The band therefore caps to
-// the tiles that fit ONE row. TILE_MIN_TRACK is the content fit: the widest
-// tile value (the in/out/cached triple at the band's 13px mono) needs about
-// 146px plus the tile's 24px horizontal padding; TILE_GAP mirrors the grid's
-// 10px gap, and the CSS floor (.traffic-card.tiles-only .chart-totals in
-// dashboard.css) owns the same 175px track minimum. Wider windows show more
-// tiles side by side; the metrics picker keeps the full selection and the
-// trigger's count reports what is on screen. The narrow scrolling layout
-// (under the 1200px media query that unlocks the page) renders every
-// selected tile - the page scrolls, nothing can hang out of reach.
-const TILE_MIN_TRACK = 175, TILE_GAP = 10;
-const TILE_LOCKED_LAYOUT = '(min-width: 1200px)';
-
 // summaryVisibleTiles is the one owner of which summary tiles render: the
-// preset's tile order minus the picker's hidden set, capped to one row's
-// fit in the locked layout. An unmeasured band renders every selected tile
-// (the next render with a measurement applies the cap).
-function summaryVisibleTiles(preset, bandW, locked) {
+// preset's tile order minus the picker's hidden set - nothing else. Every
+// selected tile always renders; the band's auto-fit grid (dashboard.css)
+// wraps the tiles into as many whole rows as the card needs, and the page
+// scrolls past them, so no tile can ever hang out of reach at any viewport.
+function summaryVisibleTiles(preset) {
   const hid = chartView.hidden.overview || [];
-  const sel = preset.tiles.filter(id => !hid.includes(id));
-  if (!locked || !(bandW > 0)) return sel;
-  const cap = Math.max(1, Math.floor((bandW + TILE_GAP) / (TILE_MIN_TRACK + TILE_GAP)));
-  return sel.slice(0, cap);
+  return preset.tiles.filter(id => !hid.includes(id));
 }
 
 // Placeholder strip for the no-data state: the active preset's tile skeleton
 // at full tile height, so the first payload swaps text and the card below the
 // strip never moves. Tile COUNTS must match the data-filled strip per preset
 // (what wraps is rows, not labels) - ui_check pins the equality.
-function chartTotalsSkeleton(bandW, locked) {
+function chartTotalsSkeleton() {
   const p = activePreset();
   const ph = label =>
     `<span class="chart-total"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
-    return summaryVisibleTiles(p, bandW, locked).map(id => ph(TILE_LABELS[id])).join('  ');
+    return summaryVisibleTiles(p).map(id => ph(TILE_LABELS[id])).join('  ');
   }
   return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
     + (p.id === 'traffic' ? '  ' + ph('rate') : '');
@@ -764,14 +749,12 @@ function chartTotalsSkeleton(bandW, locked) {
 
 // chartTotals renders the viewed period's totals (server buckets,
 // always all series - hiding is a visual declutter, the totals stay
-// honest) as the strip at the top of the graph card. bandW/locked feed the
-// summary's one-row tile cap (summaryVisibleTiles); other presets ignore
-// them. Speed/latency totals are period-wide server figures (plotted
-// presets: tps_p / ttft_p percentiles; the summary's timing tile: ttft_stat
-// / tps_stat averages with sample ranges), never an average of bucket
-// percentiles.
-function chartTotals(bandW = 0, locked = false) {
-  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton(bandW, locked);
+// honest) as the strip at the top of the graph card. Speed/latency totals
+// are period-wide server figures (plotted presets: tps_p / ttft_p
+// percentiles; the summary's timing tile: ttft_stat / tps_stat averages
+// with sample ranges), never an average of bucket percentiles.
+function chartTotals() {
+  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton();
   let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
   chartAgg.buckets.forEach((b, i) => {
     req += b.req;
@@ -841,11 +824,11 @@ function chartTotals(bandW = 0, locked = false) {
       // cost-reporting requests only.
       // The metrics picker at the card head owns what shows (the same
       // dash.chart hidden set the legend uses): hidden metrics leave the
-      // band, and in the locked no-scroll layout the band also caps to one
-      // row's fit (summaryVisibleTiles) so tiles never wrap out of reach.
+      // band, the rest wrap into as many whole rows as the card needs, and
+      // the page scrolls past them - every selected tile is always rendered.
       // Each visible tile keeps its registry label plus its TILE_TITLES
       // description as the title.
-      const vis = summaryVisibleTiles(p, bandW, locked);
+      const vis = summaryVisibleTiles(p);
       const tile = (id, color, body) => {
         if (!vis.includes(id)) return '';
         return `<span class="chart-total" style="color:${COLORS[color]}" title="${escapeHtml(TILE_LABELS[id] + '. ' + (TILE_TITLES[id] || ''))}"><span class="tl">${TILE_LABELS[id]}</span> ${body}</span>`;
@@ -949,7 +932,7 @@ function renderChart() {
   chartChromeSync();
   chartLegendSync();
   const strip = $('chart-totals');
-  if (strip) updateSection('chart-totals', chartTotals(strip.clientWidth, window.matchMedia(TILE_LOCKED_LAYOUT).matches));
+  if (strip) updateSection('chart-totals', chartTotals());
   // The summary is metrics-only: the tiles ARE the surface and take the
   // card (the CSS class swaps the layout); no plot ever mounts and no
   // blank canvas paints - the skeleton tiles own the no-data state.
@@ -1044,13 +1027,33 @@ function toggleSummaryMetric(id) {
 
 // setMetricsMenuOpen is the one open-state writer for the summary metrics
 // picker (the prov-menu pattern): the menu's hidden flag and the trigger's
-// aria-expanded always move together.
+// aria-expanded always move together. The menu is position: FIXED and
+// placed by syncMetricsMenuEdge from the trigger's live rect: absolute
+// placement inside the card let the card's overflow: hidden clip a menu
+// taller than the timeline card's remaining space, and it had no defense
+// against the window's bottom edge. Fixed placement escapes every
+// ancestor clip; it right-aligns to the trigger, flips above it when the
+// bottom edge would crop it, and re-anchors on resize and on any scroll
+// (page or inner region - fixed boxes do not follow scrolling ancestors).
+function syncMetricsMenuEdge() {
+  const menu = $('chart-metrics-menu');
+  const btn = $('chart-metrics-btn');
+  if (!menu || menu.hidden || !btn) return;
+  const br = btn.getBoundingClientRect();
+  const mr = menu.getBoundingClientRect();
+  menu.style.right = (innerWidth - br.right) + 'px';
+  menu.style.top = (br.bottom + 6 + mr.height > innerHeight - 8
+    ? br.top - 6 - mr.height : br.bottom + 6) + 'px';
+}
 function setMetricsMenuOpen(open) {
   const menu = $('chart-metrics-menu');
   if (!menu) return;
   menu.hidden = !open;
+  // Offscreen until the placing rAF lands: no one-frame flash at a stale spot.
+  if (open) menu.style.top = '-9999px';
   const btn = $('chart-metrics-btn');
   if (btn) btn.setAttribute('aria-expanded', String(!!open));
+  if (open) requestAnimationFrame(syncMetricsMenuEdge);
 }
 
 // summaryPickerRows builds the menu's checkable rows from the preset's tile
@@ -1066,10 +1069,9 @@ function summaryPickerRows(preset) {
 // only for the tiles-only summary, rows rebuild when the preset changes (not
 // on every live render, so an open menu never loses focus), and every render
 // refreshes row checks, the trigger count and the accessible name in place.
-// The count reports what is ON SCREEN: rows keep the full selection, but in
-// the locked layout the band caps to one row's fit (summaryVisibleTiles), so
-// a narrow window can check more tiles than it shows - the trigger's title
-// says so instead of silently dropping metrics.
+// Every selected tile always renders (the band wraps into whole rows), so
+// the count reports the selection itself and can never disagree with the
+// band.
 let _pickerPreset = null;
 function summaryPickerSync() {
   const wrap = $('chart-metrics');
@@ -1093,17 +1095,10 @@ function summaryPickerSync() {
     const chk = r.querySelector('.mp-check');
     if (chk) chk.textContent = on ? '✓' : '';
   }
-  const band = $('chart-totals');
-  const vis = summaryVisibleTiles(preset, band ? band.clientWidth : 0, window.matchMedia(TILE_LOCKED_LAYOUT).matches);
   const selected = preset.tiles.filter(id => !hid.includes(id)).length;
   const count = $('chart-metrics-count');
-  if (count) count.textContent = vis.length + '/' + preset.tiles.length;
-  if (btn) {
-    btn.setAttribute('aria-label', `Summary metrics: ${vis.length} of ${preset.tiles.length} shown`);
-    btn.title = vis.length < selected
-      ? `The window fits ${vis.length} tiles side by side. Hide a metric or widen the window to see more.`
-      : '';
-  }
+  if (count) count.textContent = selected + '/' + preset.tiles.length;
+  if (btn) btn.setAttribute('aria-label', `Summary metrics: ${selected} of ${preset.tiles.length} shown`);
 }
 
 function setChartPreset(v) {

@@ -614,12 +614,17 @@ function startStream(since, feed) {
 
 // Footer clock is managed by _armClock() below (visibility-aware: paused in
 // hidden tabs, resumed on return). Resize is rAF-gated to avoid per-frame
-// layout thrash.
+// layout thrash. An open metrics menu re-anchors on the same gate - it is
+// fixed-positioned (it must escape the card's overflow clip), so shrinking
+// the window can never crop it. Any scroll re-anchors it too: a fixed box
+// does not follow its trigger through page or inner-region scrolling, and
+// the capture listener sees scrolls of every nested region.
 window.addEventListener('resize', () => {
   if (_resizeRaf) return;
-  _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; if (lastData) renderChart(); });
+  _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; syncMetricsMenuEdge(); if (lastData) renderChart(); });
 });
 let _resizeRaf = 0;
+window.addEventListener('scroll', () => syncMetricsMenuEdge(), true);
 
 // Visibility handling: stop the 5s tick + 1s clock while the tab is hidden
 // (SSE keeps state current; Chrome throttles background timers but doesn't
