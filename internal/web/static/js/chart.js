@@ -659,10 +659,10 @@ function upOpts(w, h) {
   };
 }
 
-// shareText renders a measured part-to-whole share ('60.0% of in') or null
-// when the ratio was never measured (zero denominator) - one owner for the
-// summary's combined share row and the plotted presets' share sub-rows, so
-// every surface renders the same measured-share-or-nothing semantics.
+// shareText renders a measured part-to-whole share ('60.0% of input') or
+// null when the ratio was never measured (zero denominator) - one owner for
+// the summary's combined share row and the plotted presets' share sub-rows,
+// so every surface renders the same measured-share-or-nothing semantics.
 const shareText = (a, b, of) => {
   const p = pct(a, b);
   return p === '-' ? null : p + (of ? ' ' + of : '');
@@ -714,22 +714,49 @@ const TILE_LABELS = {
 // same text, so a tile can never explain itself two different ways.
 const TILE_TITLES = {
   req: 'Request count over the blended token volume (input plus output), as a pair.',
-  tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of the blended volume and the cached share of input underneath.',
+  tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of all tokens and the cache hit share of input underneath.',
   cost: 'Spend over the viewed period in USD (the same figure the KPI band shows, cost-reporting requests only), with the server\'s blended per-Mtok price underneath.',
   health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.',
   timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
 
+// The summary band lives in the narrow chart card, and the wide layout locks
+// the page to the viewport (no page scrolling), so a wrapped second tile row
+// can hang past the fold with no way to reach it. The band therefore caps to
+// the tiles that fit ONE row. TILE_MIN_TRACK is the content fit: the widest
+// tile value (the in/out/cached triple at the band's 13px mono) needs about
+// 146px plus the tile's 24px horizontal padding; TILE_GAP mirrors the grid's
+// 10px gap, and the CSS floor (.traffic-card.tiles-only .chart-totals in
+// dashboard.css) owns the same 175px track minimum. Wider windows show more
+// tiles side by side; the metrics picker keeps the full selection and the
+// trigger's count reports what is on screen. The narrow scrolling layout
+// (under the 1200px media query that unlocks the page) renders every
+// selected tile - the page scrolls, nothing can hang out of reach.
+const TILE_MIN_TRACK = 175, TILE_GAP = 10;
+const TILE_LOCKED_LAYOUT = '(min-width: 1200px)';
+
+// summaryVisibleTiles is the one owner of which summary tiles render: the
+// preset's tile order minus the picker's hidden set, capped to one row's
+// fit in the locked layout. An unmeasured band renders every selected tile
+// (the next render with a measurement applies the cap).
+function summaryVisibleTiles(preset, bandW, locked) {
+  const hid = chartView.hidden.overview || [];
+  const sel = preset.tiles.filter(id => !hid.includes(id));
+  if (!locked || !(bandW > 0)) return sel;
+  const cap = Math.max(1, Math.floor((bandW + TILE_GAP) / (TILE_MIN_TRACK + TILE_GAP)));
+  return sel.slice(0, cap);
+}
+
 // Placeholder strip for the no-data state: the active preset's tile skeleton
 // at full tile height, so the first payload swaps text and the card below the
 // strip never moves. Tile COUNTS must match the data-filled strip per preset
 // (what wraps is rows, not labels) - ui_check pins the equality.
-function chartTotalsSkeleton() {
+function chartTotalsSkeleton(bandW, locked) {
   const p = activePreset();
   const ph = label =>
     `<span class="chart-total"><span class="tl">${label}</span> -<span class="chart-sub">-</span></span>`;
   if (p.id === 'overview') {
-    return p.tiles.map(id => ph(TILE_LABELS[id])).join('  ');
+    return summaryVisibleTiles(p, bandW, locked).map(id => ph(TILE_LABELS[id])).join('  ');
   }
   return p.series.map(([id]) => ph(chartSpec(id).label)).join('  ')
     + (p.id === 'traffic' ? '  ' + ph('rate') : '');
@@ -737,12 +764,14 @@ function chartTotalsSkeleton() {
 
 // chartTotals renders the viewed period's totals (server buckets,
 // always all series - hiding is a visual declutter, the totals stay
-// honest) as the strip at the top of the graph card. Speed/latency totals
-// are period-wide server figures (plotted presets: tps_p / ttft_p
-// percentiles; the summary's timing tile: ttft_stat / tps_stat averages
-// with sample ranges), never an average of bucket percentiles.
-function chartTotals() {
-  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton();
+// honest) as the strip at the top of the graph card. bandW/locked feed the
+// summary's one-row tile cap (summaryVisibleTiles); other presets ignore
+// them. Speed/latency totals are period-wide server figures (plotted
+// presets: tps_p / ttft_p percentiles; the summary's timing tile: ttft_stat
+// / tps_stat averages with sample ranges), never an average of bucket
+// percentiles.
+function chartTotals(bandW = 0, locked = false) {
+  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton(bandW, locked);
   let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
   chartAgg.buckets.forEach((b, i) => {
     req += b.req;
@@ -765,11 +794,12 @@ function chartTotals() {
     const t = shareText(a, b, of);
     return t == null ? '' : `<span class="chart-sub">${t}</span>`;
   };
-  // inOutShare renders the token balance as the input share of the blended
-  // volume. A percentage is bounded and reads identically in every locale;
-  // the old ratio formatter emitted comma decimals ('2,664') that read like
-  // a count. Zero denominator renders no sub-row, never a fabricated share.
-  const inOutShare = (tin, tout) => pctSub(tin, tin + tout, 'in');
+  // inOutShare renders the token balance as the input share of all tokens
+  // (input plus output - cached prompt tokens are part of input). The label
+  // names its denominator so the share never reads as a bare percentage; a
+  // percentage is bounded and reads identically in every locale. Zero
+  // denominator renders no sub-row, never a fabricated share.
+  const inOutShare = (tin, tout) => pctSub(tin, tin + tout, 'of tokens');
   // tokenPair renders the in/out pair in the token bars' colors (input
   // purple, output green) through the shared tilePair owner.
   const tokenPair = (tin, tout) => tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)]]);
@@ -783,10 +813,12 @@ function chartTotals() {
       break;
     case 'tokens': {
       const tot = tin + tout;
-      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot)));
-      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot)));
+      // Each series sub-row names its denominator ('of tokens' / 'of input')
+      // so the shares say what they compare, never a bare percentage.
+      parts.push(seriesSpan(chartSpec('inTok'), tin, pctSub(tin, tot, 'of tokens')));
+      parts.push(seriesSpan(chartSpec('outTok'), tout, pctSub(tout, tot, 'of tokens')));
       parts.push(seriesSpan(chartSpec('reason'), treason));
-      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of in')));
+      parts.push(seriesSpan(chartSpec('cache'), tcache, pctSub(tcache, tin, 'of input')));
       parts.push(span('in:out', tokenPair(tin, tout), inOutShare(tin, tout)));
       break;
     }
@@ -807,13 +839,15 @@ function chartTotals() {
       // in the chart's health colors, and cost carries the server's blended
       // per-Mtok price - the SAME figure the KPI band shows,
       // cost-reporting requests only.
-      // Tiles are plain readouts: the metrics picker at the card head owns
-      // what shows (the same dash.chart hidden set the legend uses), hidden
-      // metrics simply leave the band, and each visible tile keeps its
-      // registry label plus its TILE_TITLES description as the title.
-      const hid = chartView.hidden.overview || [];
+      // The metrics picker at the card head owns what shows (the same
+      // dash.chart hidden set the legend uses): hidden metrics leave the
+      // band, and in the locked no-scroll layout the band also caps to one
+      // row's fit (summaryVisibleTiles) so tiles never wrap out of reach.
+      // Each visible tile keeps its registry label plus its TILE_TITLES
+      // description as the title.
+      const vis = summaryVisibleTiles(p, bandW, locked);
       const tile = (id, color, body) => {
-        if (hid.includes(id)) return '';
+        if (!vis.includes(id)) return '';
         return `<span class="chart-total" style="color:${COLORS[color]}" title="${escapeHtml(TILE_LABELS[id] + '. ' + (TILE_TITLES[id] || ''))}"><span class="tl">${TILE_LABELS[id]}</span> ${body}</span>`;
       };
       const tot = tin + tout;
@@ -827,13 +861,19 @@ function chartTotals() {
       parts.push(tile('req', 'accent',
         tilePair([['v-req', fmt(req)], ['v-tok', fmt(tot)]]) +
         tileSpark(kept, [['v-req', b => b.req], ['v-tok', b => b.in + b.out]])));
-      // One share row for the tokens triple: the input share of the blended
-      // volume and the cached share of input, both through the shareText
-      // owner (pct/pctCap) so a sub-100 ratio can never round to a false 100%.
-      const shares = [shareText(tin, tot, 'in'), shareText(tcache, tin, 'of in')].filter(Boolean).join(' · ');
+      // Two share lines under the tokens triple, each naming both sides of
+      // its comparison: the input share of all tokens, and the cache hit
+      // share of input. Both flow through shareText (pct/pctCap) so a
+      // sub-100 ratio can never round to a false 100%, and an unmeasured
+      // ratio drops its line instead of fabricating one.
+      const inShare = shareText(tin, tot), cacheShare = shareText(tcache, tin);
+      const shareLines = [
+        inShare ? `input ${inShare} of tokens` : '',
+        cacheShare ? `cache hit ${cacheShare} of input` : '',
+      ].filter(Boolean);
       parts.push(tile('tokens', 'cyan',
         tilePair([['v-in', fmt(tin)], ['v-out', fmt(tout)], ['v-cache', fmt(tcache)]]) +
-        (shares ? `<span class="chart-sub">${shares}</span>` : '') +
+        (shareLines.length ? `<span class="chart-sub">${shareLines.join('<br>')}</span>` : '') +
         tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
       parts.push(tile('cost', costSpec.color,
@@ -909,7 +949,7 @@ function renderChart() {
   chartChromeSync();
   chartLegendSync();
   const strip = $('chart-totals');
-  if (strip) updateSection('chart-totals', chartTotals());
+  if (strip) updateSection('chart-totals', chartTotals(strip.clientWidth, window.matchMedia(TILE_LOCKED_LAYOUT).matches));
   // The summary is metrics-only: the tiles ARE the surface and take the
   // card (the CSS class swaps the layout); no plot ever mounts and no
   // blank canvas paints - the skeleton tiles own the no-data state.
@@ -1026,6 +1066,10 @@ function summaryPickerRows(preset) {
 // only for the tiles-only summary, rows rebuild when the preset changes (not
 // on every live render, so an open menu never loses focus), and every render
 // refreshes row checks, the trigger count and the accessible name in place.
+// The count reports what is ON SCREEN: rows keep the full selection, but in
+// the locked layout the band caps to one row's fit (summaryVisibleTiles), so
+// a narrow window can check more tiles than it shows - the trigger's title
+// says so instead of silently dropping metrics.
 let _pickerPreset = null;
 function summaryPickerSync() {
   const wrap = $('chart-metrics');
@@ -1049,10 +1093,17 @@ function summaryPickerSync() {
     const chk = r.querySelector('.mp-check');
     if (chk) chk.textContent = on ? '✓' : '';
   }
-  const shown = preset.tiles.filter(id => !hid.includes(id)).length;
+  const band = $('chart-totals');
+  const vis = summaryVisibleTiles(preset, band ? band.clientWidth : 0, window.matchMedia(TILE_LOCKED_LAYOUT).matches);
+  const selected = preset.tiles.filter(id => !hid.includes(id)).length;
   const count = $('chart-metrics-count');
-  if (count) count.textContent = shown + '/' + preset.tiles.length;
-  if (btn) btn.setAttribute('aria-label', `Summary metrics: ${shown} of ${preset.tiles.length} shown`);
+  if (count) count.textContent = vis.length + '/' + preset.tiles.length;
+  if (btn) {
+    btn.setAttribute('aria-label', `Summary metrics: ${vis.length} of ${preset.tiles.length} shown`);
+    btn.title = vis.length < selected
+      ? `The window fits ${vis.length} tiles side by side. Hide a metric or widen the window to see more.`
+      : '';
+  }
 }
 
 function setChartPreset(v) {

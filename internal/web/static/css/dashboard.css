@@ -989,18 +989,24 @@
      (the same dash.chart hidden set the legend uses), hidden metrics leave
      the band and the auto-fit grid reflows, and the spark keeps each
      tile's color voice, so cells carry no per-metric leading tick. Tracks
-     floor at 160px so tiles run WIDER than tall.
-     Sizing: every tile is ONE fixed height (92px fits the tallest content -
-     label 10 + value 15 + sub-row 10 + spark 14 + three 6px gaps + 20px
-     padding, all line-height-1 rows so the number is typeface-independent)
-     with breathing room, so a tile is the same size whatever it carries:
-     spark or no spark, sub-row or not, and the no-data skeleton swaps to
-     data without moving the card. The spark is flex-shrink: 0 - it never
-     acts as the overflow shock absorber; an oversized tile must clip
-     visibly (the browser gate catches it), never silently crush the spark.
-     The band sits at its natural rows height - it never stretches to fill
-     the card (the old flex-basis-0 stretch collapsed the strip to a sliver
-     on content-height cards and clipped the sparks) - and the card itself
+     floor at 175px - the content fit for the widest tile value (the
+     in/out/cached triple at the band's 13px mono plus the tile's 24px
+     padding) - so no tile ever clips its value; the JS one-row cap
+     (summaryVisibleTiles in chart.js) mirrors this same floor to decide
+     how many tiles fit side by side in the locked no-scroll layout.
+     Sizing: every tile is ONE fixed height (104px fits the tallest content
+     - label 10 + value 13 + the tokens tile's two share lines 20 + spark
+     14 + three 6px gaps + 20px padding, all line-height-1 rows so the
+     number is typeface-independent) with breathing room, so a tile is the
+     same size whatever it carries: spark or no spark, one share line or
+     two, and the no-data skeleton swaps to data without moving the card.
+     The spark is flex-shrink: 0 - it never acts as the overflow shock
+     absorber; an oversized tile must clip visibly (the browser gate
+     catches it), never silently crush the spark. Tile values render at
+     13px so the in/out/cached triple fits the 175px floor. The band sits
+     at its natural rows height - it never stretches to fill the card (the
+     old flex-basis-0 stretch collapsed the strip to a sliver on
+     content-height cards and clipped the sparks) - and the card itself
      opts out of the pair's column stretch, so the summary never paints a
      hollow tall card: what you see is what the metrics need. */
   .traffic-card.tiles-only { align-self: start; }
@@ -1009,8 +1015,9 @@
   .traffic-card.tiles-only #traffic-legend { display: none; }
   .traffic-card.tiles-only .chart-totals {
     position: relative;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(175px, 100%), 1fr));
     margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
+    font-size: 13px;
   }
   .traffic-card.tiles-only .chart-totals::after {
     content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 6px; pointer-events: none;
@@ -1020,7 +1027,7 @@
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 92px;
+    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 104px;
     background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
   .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
