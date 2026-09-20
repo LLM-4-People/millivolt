@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -531,11 +532,13 @@ func TestMidStreamClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
 // twin of TestMidStreamClientAbortAfterInBandErrorCountsAsError: there the
 // abort surfaces at the upstream read (the request context tears the parked
 // read down, and the read-error path fills the record); here the relay is
-// actively writing when the client disappears, so the abort surfaces as a
-// failed client write. The trailing flood is far larger than the socket
-// window: once the client stops reading right after the flushed error frame,
-// the proxy deterministically blocks inside writeOut's socket write, so the
-// abort can only be write-detected. Regression: writeOut's failure arm
+// mid-flight when the client disappears. The trailing flood is UNBOUNDED -
+// a kernel can buffer megabytes of unread socket data (a CI runner absorbed
+// the whole former 2 MiB flood and finalized a clean 200 before the abort
+// landed), so the only premise that holds on every runner is that the stream
+// can never end: the abort must land on a blocked client write, a parked
+// upstream read, or the FIN-race clean EOF finishHold guards, and every one
+// of those paths stamps the disconnect. Regression: writeOut's failure arm
 // returned without Analyzer.Fill, so this timing lost ErrorType and IsError
 // where the read-timed twin kept them.
 func TestWriteDetectedClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
@@ -547,9 +550,11 @@ func TestWriteDetectedClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
 		w.Write([]byte("data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n"))
 		w.Write([]byte("data: {\"error\":{\"message\":\"Coral Bricks is temporarily unavailable. Please retry.\",\"type\":\"api_error\",\"code\":\"internal_error\"}}\n\n"))
 		f.Flush()
-		// The flood keeps the proxy's socket write from ever draining; the
-		// handler exits when the abort tears the connection down.
-		for i := 0; i < 4096; i++ {
+		// The unbounded flood keeps the stream from ever draining: no kernel
+		// socket buffering can absorb it, so the relay can never see the
+		// stream end. The handler exits when the abort tears the connection
+		// down.
+		for {
 			if _, werr := w.Write([]byte(frame)); werr != nil {
 				return
 			}
@@ -585,8 +590,10 @@ func TestWriteDetectedClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
 	if !bytes.Contains(got, []byte("api_error")) {
 		t.Fatalf("the in-band error frame never reached the client: %q", got)
 	}
-	// The flood has filled the socket window by now, so the proxy is blocked
-	// inside a client write; the abort lands on that write, never on a read.
+	// The flood can never finish, so the relay is still mid-flight wherever
+	// the abort lands: a blocked client write, a parked upstream read, or
+	// the FIN-race clean EOF (finishHold's context guard) - all stamp the
+	// disconnect with the in-band error kept.
 	time.Sleep(200 * time.Millisecond)
 	resp.Body.Close() // the LOCAL client aborts mid-stream
 
@@ -646,44 +653,37 @@ func TestStreamCleanEOFAfterRequestCancelStampsDisconnect(t *testing.T) {
 	}
 }
 
+// abortedClientWriter stands in for a response writer whose client is already
+// gone: every write fails exactly like a socket reset by the peer.
+type abortedClientWriter struct {
+	hdr http.Header
+}
+
+func (w *abortedClientWriter) Header() http.Header { return w.hdr }
+func (w *abortedClientWriter) WriteHeader(int)     {}
+func (w *abortedClientWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write tcp 127.0.0.1:1->127.0.0.1:2: write: connection reset by peer")
+}
+
 // TestNonStreamClientAbortMidSpooledWriteKeepsInBandError is the non-streaming
 // row of the write-detected family: a spooled 200 in-band-error body commits
-// with one large write, and a LOCAL client aborting the moment the response
-// starts fails that write mid-body. The headers are the deterministic gate:
-// they are only written inside commitSpooledBody after the spool completed,
-// so the client's Do returning proves the commit write is already in flight
-// (and the ~1 MiB spool is far past what the socket absorbs unread, so the
-// write cannot have finished). Regression: the failed write returned before
-// analyzeNonStreamBytes, erasing the provider's error from the record; the
-// upstream delivered and charged the body, so the analysis must still run.
+// with one large write, and that write failing because the LOCAL client is
+// already gone must stamp the disconnect AND still run the analysis - the
+// upstream delivered and charged the body, so the provider's error survives on
+// the record. The mechanism is driven directly with a failing writer: the
+// former socket variant closed the client right after Do returned, but a
+// kernel can buffer an unread response (a CI runner absorbed the whole spool
+// and finalized a clean 200 before the abort landed), so the mid-write abort
+// itself was not deterministic there. The spool's routing gates stay pinned by
+// the quality suite (TestQualityRetryNonRetryableInBandErrorVerbatim and kin).
+// Regression: the failed write returned before analyzeNonStreamBytes, erasing
+// the provider's error from the record.
 func TestNonStreamClientAbortMidSpooledWriteKeepsInBandError(t *testing.T) {
-	// Under qualitySpoolMax (a full spool commit, not the overflow path),
-	// non-retryable so the in-band envelope commits verbatim on attempt one.
-	errBody := `{"error":{"message":"Coral Bricks rejected this request.","type":"invalid_request_error","code":"bad_request"},"pad":"` +
-		strings.Repeat("x", 1000*1024) + `"}`
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(200)
-		w.Write([]byte(errBody))
-	}))
-	defer upstream.Close()
-
-	buf := metrics.NewBuffer(10)
-	srv := httptest.NewServer(New(config.Default(), buf))
-	defer srv.Close()
-
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
-	req.Header.Set("Authorization", "Bearer sk-key")
-	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close() // the LOCAL client aborts mid-write of the spooled body
-
-	recs := waitForRecord(t, buf, 1)
-	rec := recs[0]
+	s := New(config.Default(), metrics.NewBuffer(10))
+	rec := &metrics.Record{ID: "spool-abort", StatusCode: http.StatusOK, Provider: "provider.example"}
+	spooled := []byte(`{"error":{"message":"Coral Bricks rejected this request.","type":"invalid_request_error","code":"bad_request"}}`)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}}
+	s.commitSpooledBody(&abortedClientWriter{hdr: http.Header{}}, resp, spooled, rec)
 	if rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
 	}
