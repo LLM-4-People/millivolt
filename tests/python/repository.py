@@ -338,6 +338,28 @@ class RepositoryChecks(unittest.TestCase):
                          ["internal/web/static/css/dashboard.css: "
                           "the :root custom-property palette is missing"])
 
+    def test_artifact_gzip_choke_point_detector(self):
+        good = [("cmd/proxy/log.go", '\tzw := proxy.NewArtifactGzipWriter(ew)\n')]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(good), [])
+        # A vanished choke point and a duplicated per-branch wrap are both
+        # drift, never a silent pass; the owner leaving the corpus fails too.
+        removed = [("cmd/proxy/log.go", '\tzw := gzip.NewWriter(ew)\n')]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(removed), [
+            "cmd/proxy/log.go: the NewArtifactGzipWriter export choke point is gone - "
+            "every export shape must cross the one shared gzip artifact writer"])
+        duplicated = [("cmd/proxy/log.go",
+                       '\tzw := proxy.NewArtifactGzipWriter(ew)\n'
+                       '\tzw2 := proxy.NewArtifactGzipWriter(zw)\n')]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(duplicated), [
+            "cmd/proxy/log.go: 2 NewArtifactGzipWriter wraps - "
+            "the export compression gate is one choke point, never a per-branch writer"])
+        self.assertEqual(check.artifact_gzip_choke_point_errors([]),
+                         ["cmd/proxy/log.go: export source is not in the checked corpus"])
+        # The real tree: the export handler crosses the choke point exactly once.
+        self.assertEqual(check.artifact_gzip_choke_point_errors(
+            [("cmd/proxy/log.go",
+              (check.ROOT / "cmd/proxy/log.go").read_text(encoding="utf-8"))]), [])
+
 
 if __name__ == "__main__":
     unittest.main()

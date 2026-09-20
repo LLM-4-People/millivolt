@@ -125,6 +125,14 @@ let filters = (() => {
   catch (e) { return { status: '' }; }
 })();
 let drawerId = null; // id of the record currently shown in the detail drawer
+// The attempt selector beside it: when the drawer shows one absorbed attempt
+// instead of the request, this is its index in drawerId's attempts array.
+// Set only by the attempt open paths; closeDrawer, a plain openDrawer and
+// drawerNav clear it. renderDrawer re-resolves the (id, index) pair at
+// render time - never a captured attempt object - so a record replaced
+// wholesale keeps the view coherent and a dangling index fails closed to
+// the request view.
+let drawerAttempt = null;
 let source = null;
 let lastRender = {}; // dirty-check hashes to avoid re-rendering unchanged sections
 

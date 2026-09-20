@@ -5,7 +5,8 @@ from pathlib import Path
 import re
 from urllib.parse import unquote, urlsplit
 
-from .support import (ROOT, dead_css_class_errors, duplicate_js_function_errors,
+from .support import (ROOT, ARTIFACT_GZIP_OWNER, artifact_gzip_choke_point_errors,
+                      dead_css_class_errors, duplicate_js_function_errors,
                       git_environment, js_template_comment_errors, palette_mirror_errors,
                       removed_vocabulary_errors, source_inventory, spark_height_mirror_errors,
                       static_pairs, test_layout_errors)
@@ -120,8 +121,13 @@ def publication_errors(root, inventory=None):
 
 
 def check(root):
+    root = Path(root).resolve()
     inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
     pairs = static_pairs(inventory[1])
+    # The Go choke-point detector consumes (name, text) pairs like the static
+    # detectors; this is its one corpus read of the export owner.
+    gzip_pairs = [(name, (root / name).read_text(encoding='utf-8'))
+                  for name in inventory[1] if name == ARTIFACT_GZIP_OWNER]
     return (markdown_errors(root, inventory[1]) + publication_errors(root, inventory)
             + test_layout_errors(inventory[1])
             + dead_css_class_errors(pairs)
@@ -129,7 +135,8 @@ def check(root):
             + removed_vocabulary_errors(pairs)
             + js_template_comment_errors(pairs)
             + spark_height_mirror_errors(pairs)
-            + palette_mirror_errors(pairs))
+            + palette_mirror_errors(pairs)
+            + artifact_gzip_choke_point_errors(gzip_pairs))
 
 
 def main():
@@ -141,7 +148,8 @@ def main():
         raise SystemExit("\n".join(errors))
     print("repository checks passed: local Markdown targets, publication ignore rules, "
           "typography, dead stylesheet classes, duplicated helpers, retired vocabulary, "
-          "template comments, spark height mirror, static palette mirror")
+          "template comments, spark height mirror, static palette mirror, "
+          "artifact gzip choke point")
 
 
 if __name__ == "__main__":

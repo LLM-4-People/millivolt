@@ -402,6 +402,15 @@ function finalizedStatusPill(r) {
   return `<span class="pill ${sc}"${errTitle || cancelTitle}>${isCancel ? '✕' : ''}${r.status_code}</span>` + debugBadge(r);
 }
 
+// attemptPill is the one status pill for an absorbed attempt, shared by the
+// drawer's retry list and the attempt view. Transport failures have no HTTP
+// status (0) - a meaningless "0" becomes the transport pill; HTTP failures
+// show their real status.
+function attemptPill(a) {
+  if (!a.status_code) return `<span class="pill err">transport</span>`;
+  return `<span class="pill ${a.status_code >= 500 ? 'err' : 'warn'}">${a.status_code}</span>`;
+}
+
 // reqRow renders one request row for the flat live request log, plus the
 // day-divider row when this row opens a new local calendar day within the
 // visible window (sepLabel carries that day's stamp).
@@ -480,15 +489,15 @@ function reqRow(r, sepLabel) {
     <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
   </tr>`;
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
-  // Sub-rows are clickable like normal request rows - they open the same
-  // request's drawer (the attempts live on the parent record, shown in the
-  // drawer's retry section).
+  // Sub-rows are clickable: data-attempt carries the attempt index, so a
+  // click opens that attempt inside the request's drawer; the request's own
+  // row (no data-attempt) still opens the request detail.
   if (!attempts.length) return sep + main;
   const subs = attempts.map((a, i) => {
     const asc = a.status_code >= 500 ? 'err' : (a.status_code >= 400 ? 'warn' : 'err');
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
-    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
+    return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
       <td style="color:var(--muted)">${when}</td>
       <td colspan="2" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${i + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span style="color:var(--muted)">${escapeHtml(label)}</span></td>
       <td colspan="11" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}">${escapeHtml(a.error_msg || '-')}</td>
@@ -566,10 +575,12 @@ $('tbl-requests').addEventListener('click', e => {
     return;
   }
   // A request row opens its detail drawer. Retry sub-rows carry the parent's
-  // data-id too, so clicking one opens the same request (its attempts are in
-  // the drawer's retry section).
+  // data-id plus data-attempt (the attempt index), so clicking one opens
+  // that exact attempt inside the request's drawer; the request's own row
+  // (no data-attempt) opens the request detail.
   const tr = e.target.closest('.exp-row[data-id]');
-  if (tr) openDrawer(tr.dataset.id);
+  if (tr && tr.dataset.attempt !== undefined) openDrawerAttempt(tr.dataset.id, tr.dataset.attempt);
+  else if (tr) openDrawer(tr.dataset.id);
 });
 // Move the .expanding highlight in place (the class itself is owned by
 // renderRequests; this avoids a full table re-render on drawer nav).
@@ -596,6 +607,18 @@ const fmtT = t => {
 // sec wraps a set of kv rows into a titled detail-drawer section, dropping the
 // section entirely when every row is empty.
 const sec = (title, rows) => (rows && rows.filter(Boolean).length) ? `<div class="detail-section"><h4>${title}</h4>${rows.join('')}</div>` : '';
+
+// detailHeaderRows renders a captured response-header map as sorted key/value
+// rows - the record's own section and the attempt view share the one pattern
+// (multi-value headers get one row per value).
+function detailHeaderRows(headers) {
+  if (!headers || !Object.keys(headers).length) return '';
+  const hrows = [];
+  Object.entries(headers).sort().forEach(([k, vs]) => {
+    vs.forEach(v => hrows.push(`<div class="detail-kv"><span class="k" style="color:var(--accent2)">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`));
+  });
+  return hrows.join('');
+}
 
 // formatDetail renders every captured field for a record, grouped into
 // sections. The only thing intentionally absent is message content (which the
@@ -726,12 +749,10 @@ function formatDetail(r) {
   // order, before the final outcome.
   if (r.attempts && r.attempts.length) {
     const items = r.attempts.map((a, i) => {
-      // Transport failures have no HTTP status (0); show a transport pill
-      // instead of a meaningless "0". HTTP failures show their real status.
+      // Transport failures have no HTTP status (0); the shared attemptPill
+      // shows the transport pill instead of a meaningless "0".
       const isTransport = !a.status_code;
-      const pill = isTransport
-        ? `<span class="pill err">transport</span>`
-        : `<span class="pill ${a.status_code >= 500 ? 'err' : 'warn'}">${a.status_code}</span>`;
+      const pill = attemptPill(a);
       const when = fmtT(a.at);
       // Type, code and message are distinct fields - show each on its own so a
       // code is never conflated with a message (a 502 is not always the same).
@@ -748,9 +769,10 @@ function formatDetail(r) {
       // response; the provider request id is the matching key between a
       // provider-side failure report and the exact absorbed attempt.
       const rid = a.provider_request_id ? ` <span style="color:var(--muted)">· req ${escapeHtml(a.provider_request_id)}</span>` : '';
-      // Each attempt belongs to this same request id; clicking jumps the drawer
-      // to that request (and highlights its log row).
-      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" role="button" tabindex="0" title="open this request"><span class="k">#${i+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
+      // Each attempt belongs to this same request id; data-attempt names its
+      // index, so clicking opens THAT attempt in the drawer (the parent
+      // request stays selected and highlighted).
+      return `<div class="detail-kv attempt-link" data-open-req="${escapeHtml(r.id)}" data-attempt="${i}" role="button" tabindex="0" title="open this request"><span class="k">#${i+1} <span style="color:var(--muted)">${when}</span></span><span class="v">${pill} ${detail}${ra}${rid}</span></div>`;
     }).join('');
     S.push(`<div class="detail-section"><h4>Retry attempts (absorbed, transparent to client)</h4>${items}</div>`);
   }
@@ -763,18 +785,52 @@ function formatDetail(r) {
       kv('message', escapeHtml(r.error_msg) || '-') + `</div>`);
   }
 
-  if (r.response_headers && Object.keys(r.response_headers).length) {
-    const hrows = [];
-    Object.entries(r.response_headers).sort().forEach(([k, vs]) => {
-      vs.forEach(v => hrows.push(`<div class="detail-kv"><span class="k" style="color:var(--accent2)">${escapeHtml(k)}</span><span class="v">${escapeHtml(v)}</span></div>`));
-    });
-    S.push(`<div class="detail-section"><h4>Response headers</h4>${hrows.join('')}</div>`);
-  }
+  const hrows = detailHeaderRows(r.response_headers);
+  if (hrows) S.push(`<div class="detail-section"><h4>Response headers</h4>${hrows}</div>`);
 
   if (r.debug) {
     S.push(`<div class="detail-section" id="drawer-debug">` + debugSectionHead(r.id) + `<div class="preview-box" id="drawer-debug-body">loading capture…</div></div>`);
   }
 
+  return S.join('');
+}
+
+// formatAttemptDetail renders ONE absorbed attempt in the drawer: the
+// per-attempt truth Go retains (RetryAttempt parity - status, timing, error
+// detail, retry-after, upstream response metadata, rate-limit pair, its own
+// response headers) plus the parent identity that keeps the view oriented.
+// Record-level outcomes (usage, cost, TTFT, previews, the debug capture) have
+// no attempt twin and must never appear here; the parent request owns them.
+function formatAttemptDetail(r, i) {
+  const a = r.attempts[i];
+  const isTransport = !a.status_code;
+  const S = [];
+  S.push(sec('Attempt', [
+    kv('request', `<span style="color:var(--muted)">${escapeHtml(r.id)}</span>`),
+    kv('attempt', (i + 1) + ' of ' + r.attempts.length),
+    kv('status', attemptPill(a)),
+    kv('when', fmtT(a.at)),
+    // Type, code and message are distinct fields - one row each, like the
+    // record's Error section. Skip the type text when it merely repeats the
+    // transport pill (the retry-list convention).
+    a.error_type && !(isTransport && a.error_type === 'transport')
+      ? kv('type', escapeHtml(a.error_type), 'var(--err)') : '',
+    a.error_code ? kv('code', escapeHtml(a.error_code), 'var(--err)') : '',
+    a.error_msg ? kv('message', escapeHtml(a.error_msg), 'var(--err)') : '',
+    kv('retry-after', a.retry_after_ms ? fmtDur(a.retry_after_ms) : '', 'var(--warn)'),
+  ]));
+  S.push(sec('Provider', [
+    kv('request id', escapeHtml(a.provider_request_id)),
+    kv('server', escapeHtml(a.provider_server)),
+    kv('model (upstream)', escapeHtml(a.provider_model)),
+    kv('processing', a.processing_ms ? a.processing_ms + ' ms' : ''),
+  ]));
+  S.push(sec('Rate limit', [
+    kv('remaining', a.rate_limit_remaining),
+    kv('limit', a.rate_limit_limit),
+  ]));
+  const hrows = detailHeaderRows(a.response_headers);
+  if (hrows) S.push(`<div class="detail-section"><h4>Response headers</h4>${hrows}</div>`);
   return S.join('');
 }
 
@@ -784,9 +840,15 @@ function escapeHtml(s) {
 }
 
 // ---------- detail drawer ----------
-function openDrawer(id) {
+// drawerShow owns the drawer's open tail: selection state, render, modal
+// lifecycle and the parent row highlight. openDrawer shows the request's own
+// detail; openDrawerAttempt shows one absorbed attempt (drawerId stays the
+// parent record id, so the parent row keeps its highlight and the debug
+// download-status guard stays keyed to the same record).
+function drawerShow(id, attempt) {
   if (settingsIsOpen()) { closeSettings(); if (settingsIsOpen()) return; }
   drawerId = id;
+  drawerAttempt = attempt;
   renderDrawer();
   if (!drawerId) return;
   openModal($('drawer'));
@@ -794,30 +856,76 @@ function openDrawer(id) {
   $('drawer-veil').classList.add('open');
   highlightRow();
 }
+function openDrawer(id) { drawerShow(id, null); }
+
+// openDrawerAttempt opens one absorbed attempt of request id. The index
+// arrives from a DOM dataset, so it is validated here: a malformed index
+// fails closed to the request view. The re-render replaces the clicked
+// control, so the attempt view's first control - the back affordance - takes
+// focus, the same seat openModal gives a fresh open.
+function openDrawerAttempt(id, index) {
+  const i = Number(index);
+  if (!Number.isInteger(i) || i < 0) { openDrawer(id); return; }
+  drawerShow(id, i);
+  const back = $('drawer-back');
+  if (back) back.focus();
+}
+
+// drawerBackToRequest is the attempt view's title affordance: back to the
+// request's own detail. The re-render removes the button, so the drawer's
+// first control takes focus, the same seat a fresh open lands on.
+function drawerBackToRequest() {
+  if (drawerId == null) return;
+  openDrawer(drawerId);
+  const first = modalFocusables($('drawer'))[0];
+  if (first) first.focus();
+}
 function closeDrawer() {
   drawerId = null;
+  drawerAttempt = null;
   if ($('drawer')) { $('drawer').classList.remove('open'); closeModal($('drawer')); }
   $('drawer-veil')?.classList.remove('open');
   highlightRow();
 }
 function drawerNav(dir) {
   // Same set + order as the request log: explorer scope + the grown window.
+  // prev/next navigates requests; the attempt mode does not travel with it.
   const recs = logVisible();
   const i = recs.findIndex(r => r.id === drawerId);
   if (i < 0) return;
   const j = i + dir;
   if (j < 0 || j >= recs.length) return;
   drawerId = recs[j].id;
+  drawerAttempt = null;
   renderDrawer();
   highlightRow();
 }
 function renderDrawer() {
   const r = recordById(drawerId);
   if (!r) { closeDrawer(); return; }
-  $('drawer-title').innerHTML = escapeHtml(`${r.client || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`);
-  $('drawer-body').innerHTML = formatDetail(r);
+  // The attempt key re-resolves on every render from the live record: upserts
+  // replace record objects wholesale and attempts are append-only, so a
+  // captured attempt object would go stale as the array grows. A dangling key
+  // (record left the window, or the index outran the array) fails closed to
+  // the request view, never a throw.
+  const a = drawerAttempt != null && Array.isArray(r.attempts) ? r.attempts[drawerAttempt] : null;
+  if (drawerAttempt != null && !a) drawerAttempt = null;
+  const base = `${r.client || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`;
+  if (a) {
+    // The title carries the attempt identity: index, real status (transport
+    // for status-less failures) and the provider request id that matches a
+    // provider-side failure report to this exact attempt.
+    const status = a.status_code ? String(a.status_code) : 'transport';
+    const ident = ` · attempt ${drawerAttempt + 1} of ${r.attempts.length} · ${status}`
+      + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
+    $('drawer-title').innerHTML = `<button type="button" class="btn" id="drawer-back" onclick="drawerBackToRequest()" title="back to request">‹ request</button> ${escapeHtml(base + ident)}`;
+    $('drawer-body').innerHTML = formatAttemptDetail(r, drawerAttempt);
+  } else {
+    $('drawer-title').innerHTML = escapeHtml(base);
+    $('drawer-body').innerHTML = formatDetail(r);
+    if (r.debug) fillDrawerDebug(r.id);
+  }
   $('drawer-body').scrollTop = 0;
-  if (r.debug) fillDrawerDebug(r.id);
 }
 
 // debugKV is the one debug key-value row builder. An empty value renders
@@ -907,17 +1015,22 @@ function fillDrawerDebug(id) {
     })
     .catch(() => { box.textContent = 'capture unavailable'; });
 }
-// Absorbed retry attempts in the drawer are clickable: they open the drawer on
-// the request they belong to (and highlight its log row). Delegated on the
-// drawer body so re-renders never drop the handler; keyboard-activatable too.
+// Absorbed retry attempts in the drawer are clickable: a link carrying an
+// attempt index opens that attempt in the request's drawer; one without an
+// index (deny by default) opens the request itself. Delegated on the drawer
+// body so re-renders never drop the handler; keyboard-activatable too.
+function openAttemptLink(el) {
+  if (el.dataset.attempt !== undefined) openDrawerAttempt(el.dataset.openReq, el.dataset.attempt);
+  else openDrawer(el.dataset.openReq);
+}
 $('drawer-body').addEventListener('click', e => {
   const el = e.target.closest('.attempt-link[data-open-req]');
-  if (el) openDrawer(el.dataset.openReq);
+  if (el) openAttemptLink(el);
 });
 $('drawer-body').addEventListener('keydown', e => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const el = e.target.closest('.attempt-link[data-open-req]');
-  if (el) { e.preventDefault(); openDrawer(el.dataset.openReq); }
+  if (el) { e.preventDefault(); openAttemptLink(el); }
 });
 // The debug section's Download button: delegated like the attempt links so
 // re-renders never drop it. A native button carries its own keyboard

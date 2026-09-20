@@ -693,6 +693,146 @@ async function main() {
     w.closeDrawer();
   }
 
+  // ---- test 7f: the attempt-detail drawer mode ----
+  // Clicking an absorbed attempt (a drawer attempt link or a log retry-sub
+  // row) must open THAT attempt in the drawer, not the final record: the
+  // attempt view carries only the retained per-attempt truth (Go's
+  // RetryAttempt parity) plus parent context - never the record-level
+  // usage/cost/TTFT/preview sections that have no attempt twin. drawerId
+  // stays the parent record id throughout, so the row highlight and the
+  // debug download-status guard keep their record identity.
+  {
+    const atts = [
+      { status_code: 502, error_type: 'bad_gateway', error_code: 'overloaded',
+        error_msg: 'upstream overloaded', retry_after_ms: 1260,
+        at: new Date(1700000104500).toISOString(),
+        provider_request_id: 'req_meta_1', provider_server: 'srv-a.example',
+        provider_model: 'm-upstream', processing_ms: 45,
+        rate_limit_remaining: 12, rate_limit_limit: 100,
+        response_headers: {'x-request-id': ['req_meta_1'], 'retry-after': ['2']} },
+      { status_code: 429, error_type: 'rate_limit', error_msg: 'slow down',
+        at: new Date(1700000104800).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-open', 200, 1700000104000), retries: 2, attempts: atts,
+      prompt_preview: 'PROMPT-PREVIEW-7F', response_preview: 'RESPONSE-PREVIEW-7F' }, in_flight: 0 });
+    await sleep(20);
+    w.openDrawer('att-open');
+    const title = () => d.getElementById('drawer-title').textContent;
+    const bodyText = () => d.getElementById('drawer-body').textContent;
+    // typeof guard: pre-fix trees have no drawerAttempt at all, and every row
+    // must stay a clean red, never an uncaught ReferenceError.
+    const attemptSel = () => w.eval('typeof drawerAttempt === "undefined" ? "absent" : drawerAttempt');
+    const links = () => [...d.querySelectorAll('.attempt-link[data-open-req]')];
+    const back = () => d.getElementById('drawer-back');
+    check('the drawer attempt links carry their attempt index',
+      links().length === 2 && links()[0].dataset.attempt === '0' && links()[1].dataset.attempt === '1');
+    links()[0].click();
+    check('clicking an attempt link opens THAT attempt in the drawer',
+      d.getElementById('drawer').classList.contains('open') &&
+        title().includes('attempt 1 of 2') && title().includes('502') &&
+        title().includes('req_meta_1') && !!back());
+    check('the attempt view seats focus on its back affordance', d.activeElement === back());
+    const attRow = k => [...d.querySelectorAll('#drawer-body .detail-kv .k')]
+      .find(el => el.textContent === k)?.closest('.detail-kv');
+    check('the attempt view renders the retained attempt truth',
+      attRow('request')?.querySelector('.v')?.textContent === 'att-open' &&
+        attRow('attempt')?.querySelector('.v')?.textContent === '1 of 2' &&
+        attRow('status')?.querySelector('.v')?.textContent === '502' &&
+        !!attRow('when') &&
+        attRow('type')?.querySelector('.v')?.textContent === 'bad_gateway' &&
+        attRow('code')?.querySelector('.v')?.textContent === 'overloaded' &&
+        attRow('message')?.querySelector('.v')?.textContent === 'upstream overloaded' &&
+        attRow('retry-after')?.querySelector('.v')?.textContent === '1.26s' &&
+        attRow('request id')?.querySelector('.v')?.textContent === 'req_meta_1' &&
+        attRow('server')?.querySelector('.v')?.textContent === 'srv-a.example' &&
+        attRow('model (upstream)')?.querySelector('.v')?.textContent === 'm-upstream' &&
+        attRow('processing')?.querySelector('.v')?.textContent === '45 ms' &&
+        attRow('remaining')?.querySelector('.v')?.textContent === '12' &&
+        attRow('limit')?.querySelector('.v')?.textContent === '100');
+    check('the attempt view renders exactly its own sections',
+      JSON.stringify([...d.querySelectorAll('#drawer-body h4')].map(h => h.textContent)) ===
+        JSON.stringify(['Attempt', 'Provider', 'Rate limit', 'Response headers']));
+    check('the attempt response headers render sorted with the shared row pattern', (() => {
+      const sec = [...d.querySelectorAll('#drawer-body .detail-section')]
+        .find(s => s.querySelector('h4')?.textContent === 'Response headers');
+      return !!sec && [...sec.querySelectorAll('.detail-kv .k')].map(k => k.textContent).join() ===
+        'retry-after,x-request-id';
+    })());
+    check('the record-level sections and previews have no attempt twin and never render',
+      !bodyText().includes('PROMPT-PREVIEW-7F') && !bodyText().includes('RESPONSE-PREVIEW-7F') &&
+        !bodyText().includes('ttft') && !bodyText().includes('cost') &&
+        !bodyText().includes('Tokens'));
+    check('the attempt view carries no debug status slot for a stale download to paint',
+      !d.getElementById('drawer-debug-status'));
+    w.eval("debugDownloadStatus('att-open', 'stale download message')");
+    check('a download result cannot paint a stale status into the attempt view',
+      !bodyText().includes('stale download message') && attemptSel() === 0);
+    // Drivers are guarded so a pre-fix tree stays red row by row, never an
+    // uncaught TypeError; each row keeps its own red conjunct.
+    const backBtn = back();
+    if (backBtn) backBtn.click();
+    check('the back affordance returns to the request view with focus on the drawer\'s first control',
+      !!backBtn && !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F') &&
+        d.activeElement === d.querySelector('#drawer .nav-btns button'));
+    // The log retry-sub rows open the same attempt mode (their index rides
+    // data-attempt).
+    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    const sub = () => d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="1"]');
+    check('the retry-sub rows carry their attempt index', !!sub() && !sub().hidden);
+    const subRow = sub();
+    if (subRow) subRow.click();
+    check('clicking a retry-sub row opens that attempt in the drawer',
+      title().includes('attempt 2 of 2') && title().includes('429') && attemptSel() === 1);
+    if (subRow) { subRow.setAttribute('data-attempt', 'not-a-number'); subRow.click(); }
+    check('a malformed attempt index fails closed to the request view',
+      attemptSel() === null && !title().includes('attempt') &&
+        bodyText().includes('PROMPT-PREVIEW-7F'));
+    d.querySelector('#tbl-requests tr.exp-row[data-id="att-open"]:not(.retry-sub)').click();
+    check('clicking the parent row still opens the parent detail',
+      !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F'));
+    // The selection must survive a wholesale record replacement through the
+    // full-resync render: the (id, index) key re-resolves from the fresh
+    // record - attempts are append-only, so the grown array must show in the
+    // title (a captured attempt object would still say 2).
+    links()[0].click();
+    fire('snapshot', { feed_id: 'feedB', seq: 6, incremental: false,
+      records: [mkRec('fresh1', 200, 1700000100000), mkRec('fresh2', 200, 1700000101000),
+        mkRec('fresh3', 200, 1700000102000), mkRec('fresh4', 200, 1700000103000),
+        { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 },
+        { ...mkRec('att-open', 200, 1700000104000), retries: 3,
+          attempts: [...atts.map(a => ({ ...a })),
+            { status_code: 500, error_type: 'server_error', at: new Date(1700000105100).toISOString() }],
+          prompt_preview: 'PROMPT-PREVIEW-7F', response_preview: 'RESPONSE-PREVIEW-7F' }],
+      counters: { in_flight: 0, total_requests: 6, total_errors: 0 } });
+    await sleep(20);
+    check('the attempt selection re-resolves through a wholesale record replacement',
+      title().includes('attempt 1 of 3') && title().includes('502') &&
+        bodyText().includes('req_meta_1') && attemptSel() === 0 &&
+        d.getElementById('drawer').classList.contains('open'));
+    w.eval('drawerAttempt = 99');
+    w.renderDrawer();
+    check('a dangling attempt key fails closed to the parent view',
+      !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F') &&
+        attemptSel() === null);
+    links()[0].click();
+    check('back in attempt mode for the lifecycle rows', title().includes('attempt 1 of 3'));
+    d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
+    check('Escape closes the drawer and clears the attempt mode',
+      d.getElementById('drawer').hidden && w.eval('drawerId') === null && attemptSel() === null);
+    d.querySelector('.retry-toggle[data-retry-for="att-open"]').click();
+    const sub0 = d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="0"]');
+    if (sub0) sub0.click();
+    check('a fresh open from a sub-row click lands in attempt mode',
+      d.getElementById('drawer').classList.contains('open') && title().includes('attempt 1 of 3'));
+    d.querySelector('#drawer .nav-btns button[onclick="drawerNav(1)"]').click();
+    check('drawerNav clears the attempt mode',
+      !title().includes('attempt') && attemptSel() === null &&
+        bodyText().includes('sel-live') && bodyText().includes('999ms'));
+    w.closeDrawer();
+    check('closing the drawer clears the attempt mode',
+      d.getElementById('drawer').hidden && w.eval('drawerId') === null && attemptSel() === null);
+  }
+
 
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');

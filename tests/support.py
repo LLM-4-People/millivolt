@@ -529,3 +529,33 @@ def palette_mirror_errors(pairs):
                 errors.append(f"{name}: hex {literal} is not a :root custom-property "
                               f"value in {PALETTE_OWNER}")
     return errors
+
+
+ARTIFACT_GZIP_OWNER = 'cmd/proxy/log.go'
+ARTIFACT_GZIP_CALL = 'NewArtifactGzipWriter('
+
+
+def artifact_gzip_choke_point_errors(pairs):
+    """cmd/proxy/log.go is the compression gate every metrics export shape
+    crosses: the ring snapshot and the durable store stream both write
+    through the one NewArtifactGzipWriter wrap, so matching, all and
+    debug-only exports inherit the same saved-gzip artifact contract. A
+    second wrap is a per-branch compression gate a new export shape could
+    silently skip; a missing wrap means the artifact contract itself was
+    dropped. Exactly one occurrence keeps the single choke point
+    enforceable."""
+    text = None
+    for name, body in pairs:
+        if name == ARTIFACT_GZIP_OWNER:
+            text = body
+            break
+    if text is None:
+        return [ARTIFACT_GZIP_OWNER + ': export source is not in the checked corpus']
+    wraps = text.count(ARTIFACT_GZIP_CALL)
+    if wraps == 1:
+        return []
+    if wraps == 0:
+        return [ARTIFACT_GZIP_OWNER + ': the NewArtifactGzipWriter export choke point is '
+                'gone - every export shape must cross the one shared gzip artifact writer']
+    return [ARTIFACT_GZIP_OWNER + ': ' + str(wraps) + ' NewArtifactGzipWriter wraps - '
+            'the export compression gate is one choke point, never a per-branch writer']
