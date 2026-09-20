@@ -3584,8 +3584,12 @@ async function main() {
   // page throw; the row also snapshots failures so the pin is self-contained.
   {
     const doc = JSON.parse(JSON.stringify(cfgDoc));
-    doc.fields.push({ key: 'model_rules', category: 'providers', label: 'Model rules', kind: 'model_rules', hot_reload: true });
+    doc.fields.push(
+      { key: 'model_rules', category: 'providers', label: 'Model rules', kind: 'model_rules', hot_reload: true },
+      { key: 'conc_cap', category: 'rate', label: 'Concurrency cap', kind: 'int', hot_reload: true });
+    doc.categories.push({ id: 'rate', label: 'Rate', help: 'rate limits' });
     doc.values.model_rules = [{ mode: 'pattern', from: 'a-b', to: 'a.b' }];
+    doc.values.conc_cap = 4;
     w.__mrGateDoc = doc;
     w.eval('settingsDoc = window.__mrGateDoc; fillSettingsForm(settingsDoc)');
     d.getElementById('settings-sheet').hidden = false;
@@ -3603,6 +3607,26 @@ async function main() {
     check('Apply with an invalid model-rules draft blocks the save without an uncaught TypeError',
       failures.length === failuresBefore &&
         d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first');
+    // The hidden-offender drive (the W53 live-verified bug, the mr leg): the
+    // sheet showing another category hides the rules block's .st-row, so
+    // the gate's focus() and scrollIntoView() were silent no-ops on it -
+    // only the status line moved. The shared reveal must select the
+    // offender's category through the rail machinery before focusing the
+    // bad rule.
+    w.eval("settingsCat = 'rate'; showSettingsCat()");
+    const mrBlockRow = mrSettingsWrap.closest('.st-row');
+    check('switching the sheet to the rate category hides the model-rules block',
+      mrBlockRow.hidden && !d.querySelector('[data-st-cat="providers"]').classList.contains('active'));
+    const mrHiddenFailures = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with a hidden model-rules offender selects its category and focuses it',
+      failures.length === mrHiddenFailures &&
+        d.getElementById('settings-count').textContent === 'model rules - fix the highlighted rule first' &&
+        w.eval('settingsCat') === 'providers' &&
+        d.querySelector('[data-st-cat="providers"]').classList.contains('active') &&
+        d.querySelector('[data-st-cat="providers"]').getAttribute('aria-current') === 'page' &&
+        !mrBlockRow.hidden &&
+        d.activeElement === fromIn && fromIn.classList.contains('prov-bad'));
     w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
     w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
     w.closeSettings(true);
@@ -4043,6 +4067,30 @@ async function main() {
       failures.length === failuresBefore &&
       d.getElementById('settings-count').textContent === 'sub-conversations - fix the highlighted entry first' &&
       d.activeElement === gin() && gin().classList.contains('prov-bad'));
+    gin().value = 'threadId';
+    gin().dispatchEvent(new w.Event('input', { bubbles: true }));
+    // The hidden-offender drive (the W53 bug, the live-verified sc case):
+    // with the sheet showing the providers category the sub-conversations
+    // block is hidden, so the gate's focus() and scrollIntoView() were
+    // silent no-ops on it - only the status line moved. The shared reveal
+    // must select the offender's category through the rail machinery before
+    // focusing the offending param.
+    gin().value = 'ba"d';
+    gin().dispatchEvent(new w.Event('input', { bubbles: true }));
+    w.eval("settingsCat = 'providers'; showSettingsCat()");
+    const scBlockRow = scWrap.closest('.st-row');
+    check('switching the sheet to the providers category hides the sub-conversations block',
+      scBlockRow.hidden && !d.querySelector('[data-st-cat="conversation"]').classList.contains('active'));
+    const scHiddenFailures = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with a hidden sub-conversations offender selects its category and focuses it',
+      failures.length === scHiddenFailures &&
+        d.getElementById('settings-count').textContent === 'sub-conversations - fix the highlighted entry first' &&
+        w.eval('settingsCat') === 'conversation' &&
+        d.querySelector('[data-st-cat="conversation"]').classList.contains('active') &&
+        d.querySelector('[data-st-cat="conversation"]').getAttribute('aria-current') === 'page' &&
+        !scBlockRow.hidden &&
+        d.activeElement === gin() && gin().classList.contains('prov-bad'));
     gin().value = 'threadId';
     gin().dispatchEvent(new w.Event('input', { bubbles: true }));
     // the entry add/remove lifecycle: a fresh card asks for its client,

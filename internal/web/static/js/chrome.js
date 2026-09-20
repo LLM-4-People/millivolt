@@ -3062,6 +3062,26 @@ function filterSettings() {
   showSettingsCat();
 }
 
+// revealSettingsOffender is the one reveal every save gate shares. An
+// offender whose category the sheet is not showing sits inside a hidden
+// .st-row, where focus() and scrollIntoView() are silent no-ops - the
+// operator got only the status line, nothing moved or highlighted. When
+// the offender's row is hidden, activate its category by clicking the
+// rail item the sheet's own delegated handler selects through (it owns
+// settingsCat, the cleared search and showSettingsCat; there is no second
+// selection path), then run the gate's focus + flash + scroll sequence
+// unchanged. A visible offender changes nothing.
+function revealSettingsOffender(firstBad, focusEl) {
+  const row = firstBad.closest('.st-row');
+  if (row && row.hidden && row.dataset.cat) {
+    const rail = $('settings-rail');
+    const btn = rail && [...rail.querySelectorAll('.st-rail-item[data-st-cat]')].find(b => b.dataset.stCat === row.dataset.cat);
+    if (btn) btn.click();
+  }
+  if (focusEl) { focusEl.focus(); flashBadInput(focusEl); }
+  if (firstBad.scrollIntoView) firstBad.scrollIntoView({ block: 'center' });
+}
+
 function applySettings() {
   const btn = $('btn-settings-apply');
   if (!btn || btn.disabled || btn.dataset.busy) return;
@@ -3084,9 +3104,7 @@ function applySettings() {
       delete btn.dataset.busy;
       updateSettingsActions();
       settingsStatus('model rules - fix the highlighted rule first');
-      const f = gate.firstBad.querySelector('.mr-from');
-      if (f) { f.focus(); flashBadInput(f); }
-      if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
+      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.mr-from'));
       return;
     }
   }
@@ -3099,9 +3117,7 @@ function applySettings() {
       delete btn.dataset.busy;
       updateSettingsActions();
       settingsStatus('request overrides - fix the highlighted rule first');
-      const f = gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.ro-client');
-      if (f) { f.focus(); flashBadInput(f); }
-      if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
+      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.ro-client'));
       return;
     }
   }
@@ -3114,9 +3130,7 @@ function applySettings() {
       delete btn.dataset.busy;
       updateSettingsActions();
       settingsStatus('sub-conversations - fix the highlighted entry first');
-      const f = gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.sc-client');
-      if (f) { f.focus(); flashBadInput(f); }
-      if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
+      revealSettingsOffender(gate.firstBad, gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.sc-client'));
       return;
     }
   }
