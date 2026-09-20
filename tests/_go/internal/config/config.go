@@ -162,6 +162,7 @@ func TestExampleProfilesAreIsolated(t *testing.T) {
 	}
 	withoutProfiles := example.Clone()
 	withoutProfiles.Providers = nil
+	withoutProfiles.SubConversations = nil
 	if !reflect.DeepEqual(withoutProfiles.Map(), defaults.Map()) {
 		t.Fatal("example duplicates or changes server defaults")
 	}

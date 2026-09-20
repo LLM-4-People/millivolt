@@ -158,7 +158,9 @@ documented exceptions: bounded request/quality buffering, retries, SSE keepalive
 comments and failure signaling, mid-thinking rescues that append a fresh
 attempt after reasoning-only output, optional format translation,
 operator-configured request overrides (a matching body rule rewrites the
-upstream request bytes), and constructed model lists. This is not an
+upstream request bytes), operator-configured sub-conversation strip (a matching
+client entry removes its tracked fields from the relayed bytes), and
+constructed model lists. This is not an
 unconditional byte-for-byte or exactly-once contract.
 
 ## What you get
@@ -243,7 +245,8 @@ actions, not per-user permissions.
 ### Customize and deploy
 
 - One generated configuration reference covers request limits, upstream pools,
-  queue/retry policy, conversation grouping, adapters, SQLite, dashboard cadence,
+  queue/retry policy, conversation grouping and per-client tracked body params,
+  adapters, SQLite, dashboard cadence,
   model rules, provider field mappings, aliases, templated upstream headers and
   scoped request overrides. Settings and the CLI use the same defaults,
   validation and reload metadata.

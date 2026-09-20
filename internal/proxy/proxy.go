@@ -473,20 +473,41 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		recModel = providerformat.CursorModelBase(recModel)
 	}
 
-	// Scoped request overrides (request_overrides): resolve the matching
+	// Sub-conversation tracking (sub_conversations): resolve the classified
+	// client's configured entry and extract the tracked value from the
+	// buffered bytes BEFORE any rewrite or translation - the strip rewrite
+	// removes the field from the relayed bytes, and the anthropic translator
+	// is an allowlist that would drop it. The value rides the record's
+	// conversation identity; no new storage.
+	subEntry, subValue := resolveSubConversation(s.cfg().SubConversations, client, body)
+
+	// Scoped request overrides (request_overrides) and the sub-conversation
+	// strip share the SINGLE body-rewrite engine: resolve the matching
 	// rules ONCE - provider, classified client and recorded model are all
 	// known now - and rewrite the body before any consumer sees it, so every
 	// relay attempt, quality re-send and cursor re-ask reuses the same
-	// bytes. The rewrite precedes the hostile-cap boundary below: override
-	// values are validated to the cap band at config load, so both token-cap
-	// boundaries and the scheduler reservation read the effective ceiling.
-	// Cursor targets skip the body section (token ceilings have no wire
-	// meaning there) and keep their header rules. A nil resolution - the
-	// feature is off, or nothing matched - leaves the request path
-	// byte-identical.
+	// bytes, and a request whose override body actions and strip both fire
+	// is rewritten once, through one document decode. The rewrite precedes
+	// the hostile-cap boundary below: override values are validated to the
+	// cap band at config load, so both token-cap boundaries and the
+	// scheduler reservation read the effective ceiling. Cursor targets skip
+	// the body section (token ceilings have no wire meaning there) and keep
+	// their header rules. Nil resolutions - both features off, or nothing
+	// matched - leave the request path byte-identical.
 	t.override = resolveRequestOverrides(s.cfg().RequestOverrides, client, t.provider, recModel)
-	if t.override != nil && t.override.body != nil && overrideBodyWireFormat(t.format) {
-		if rewritten, why := overrideRequestBody(body, t.override.body, int64(s.cfg().MaxRequestBytes)); why == "" {
+	var overrideBody *config.OverrideBody
+	if t.override != nil {
+		overrideBody = t.override.body
+	}
+	var stripParams []string
+	if subEntry != nil && subEntry.Strip {
+		// Deny-complete for strict upstreams: every configured param of the
+		// matching entry that is present in the body goes, not only the one
+		// that supplied the tracked value.
+		stripParams = subEntry.Params
+	}
+	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) {
+		if rewritten, why := overrideRequestBody(body, overrideBody, stripParams, int64(s.cfg().MaxRequestBytes)); why == "" {
 			body = rewritten
 			restampReqMaxTokens(body, rec)
 		} else {
@@ -519,7 +540,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// bidirectional, so serveCursorBidi translates the body itself into the
 	// enveloped run_request (and keeps the history blobs for the KV channel).
 	if !isOpenAIWire(t.format) && t.format != "cursor" {
-		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens)
+		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
 		if err != nil {
 			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 			return
@@ -552,12 +573,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.ClientLang = clientLang(r)
 	rec.Stream = stream
 	fillClientMeta(r, t, rec)
-	// Group into a conversation: explicit X-Proxy-Session wins; otherwise
-	// auto-group by turn-count monotonicity within the client+key partition.
+	// Group into a conversation: explicit X-Proxy-Session wins; then the
+	// tracked sub-conversations param (k:); otherwise auto-group by
+	// turn-count monotonicity within the client+key partition.
 	{
 		totalTurns := rec.TurnsUser + rec.TurnsAssistant + rec.TurnsTool
 		rec.ConversationID = s.convos.Assign(rec.Client, rec.KeyHash,
-			session, totalTurns, rec.Start)
+			session, subValue, totalTurns, rec.Start)
 		if parentSession != "" {
 			rec.ParentConversationID = explicitConversationID(parentSession)
 		}

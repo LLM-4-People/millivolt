@@ -88,7 +88,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
-| Conversations | Automatic grouping idle gap and open-conversation cap. |
+| Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
 | Backup | Size cap for one Settings backup download or restore upload. |
@@ -210,6 +210,68 @@ or open Settings, select **Request overrides**, pick **raise the output budget
 for a provider** from the add-a-rule menu, and fill the provider scope; the
 other starter templates seed an empty rule and an upstream header for a
 client.
+
+### Sub-conversation tracking
+
+`sub_conversations` gives requests from one client a conversation identity of
+their own, taken from a value the client already sends in its request body
+(exemplar: opencode's `promptCacheKey`). The default empty list leaves tracking
+fully off, and the feature is deny-by-default per client: an entry applies only
+when its `client` equals the request's classified client label exactly (the same
+leaf the request-overrides `client` scope matches; no wildcard, no case
+folding), and a request from any other client is never inspected, leaving its
+bytes and grouping untouched.
+
+Each entry lists 1..4 exact JSON field names, checked in order; the first one
+present on the request supplies the tracked value. A value is kept only when it
+is non-empty after trimming, valid UTF-8, free of control bytes and at most
+512 bytes, the same bound explicit session declarations satisfy. An absent or
+invalid value is dropped, never a client error: the body is passthrough payload,
+and the request keeps automatic grouping.
+
+The kept value groups the request under a `k:` conversation identity.
+Precedence is the explicit `X-Proxy-Session` header first, then the tracked
+value, then automatic client+key grouping; a request carrying both header and
+tracked value keeps the header identity. `X-Proxy-Parent-Session` still owns
+parent linkage, and declaring a parent still requires the explicit session
+pair, so a tracked identity never carries a parent. In the dashboard a `k:` id
+is an ordinary conversation id: lineage, filters, saved views and the request
+drawer read it like any other.
+
+`strip: true` removes every configured field of the entry that is present in
+the body from the relayed upstream bytes; the default `false` forwards them
+unchanged. The removal rides the same body-rewrite engine and gate as the
+[request overrides](#request-overrides) body section: one document decode when
+both features match one request, the original bytes relayed unchanged when the
+body is not a JSON object or the rewrite would exceed `max_request_bytes`, and
+cursor targets skipping the body section. The client's spelling reaches the
+upstream wire only on OpenAI-wire passthrough.
+
+When a tracked value was extracted and the request translates to the Anthropic
+wire, the translated body gains a top-level `prompt_cache_key` carrying the
+value, Anthropic's native cache field. Injection follows extraction alone:
+`strip` governs the passthrough body, never the injected field.
+
+Validation runs at the load boundary for YAML and Settings saves alike: at most
+16 entries, at most 4 params per entry, param names one JSON key segment each
+(trimmed, non-empty, at most 64 bytes, printable ASCII, no quote, backslash or
+control bytes), and duplicate clients or duplicate params within one entry are
+rejected. The list hot-reloads: changed entries apply to new requests.
+
+The Settings editor lives in the Conversations category and mirrors every check
+live per entry card: classified-client autocomplete from observed clients,
+ordered param rows with add/remove gated at the caps, the strip toggle, a count
+line against the entry cap, the server's exact rejection wording, and an Apply
+blocked on the first invalid card. To track opencode's prompt cache key and
+strip it from the upstream body, write:
+
+```yaml
+sub_conversations:
+  - client: "opencode"
+    params:
+      - "promptCacheKey"
+    strip: true
+```
 
 ## Containers
 
@@ -789,10 +851,11 @@ the capture does not carry a readable `captured_at`.
 response previews in the normal record without starting a Debug session. The
 two features also retain different request bytes: on the passthrough wire
 the record's prompt preview is the client's original body, captured at the
-metadata decode before `request_overrides` rewrite it, while a debug
-capture's request body is the rewritten upstream body sent after overrides;
-on translated targets both follow the translated body. Both
-features can retain sensitive content even when credential headers are redacted.
+metadata decode before `request_overrides` or the sub-conversations strip
+rewrites it, while a debug capture's request body is the rewritten upstream
+body sent after any rewrite; on translated targets both follow the translated
+body. Both features can retain sensitive content even when credential headers
+are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 

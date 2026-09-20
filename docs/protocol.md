@@ -44,7 +44,7 @@ Routing validation and request construction live in
 | `X-Proxy-Timeout-Ms` | Positive milliseconds. HTTP relay: a fresh headers-and-body deadline per attempt, excluding queue/hold/backoff waits. Cursor applies it only to send header waits; model discovery uses its separate configured budget. |
 | `X-Proxy-Format` | Upstream format: `openai` (default relay), `anthropic`, or `cursor`. The client-facing interface remains OpenAI-compatible; see [supported combinations](adapters.md#client-and-upstream-compatibility). |
 | `X-Proxy-Client` | Observability/client label; otherwise inferred from client SDK/User-Agent metadata. |
-| `X-Proxy-Session` | Explicit conversation ID; otherwise automatic grouping applies. |
+| `X-Proxy-Session` | Explicit conversation ID; otherwise a configured tracked body param or automatic grouping applies. |
 | `X-Proxy-Parent-Session` | Direct declared parent; requires an explicit own session on the same request. |
 | `X-Proxy-Max-Concurrency` | Positive provider-plus-key scheduler-group cap. Each admission updates the shared group's policy; later admissions, including headerless ones using config defaults, can replace it. Not the persistent provider-wide control. |
 | `X-Proxy-Limit-Concurrency` | Sticky provider-wide in-flight cap. |
@@ -177,7 +177,9 @@ Before relay or translation, the upstream request is subject to the configured
 `request_overrides` (see [request overrides](operations.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
-OpenAI-wire and translated Anthropic targets, fail closed. Only the upstream request
+OpenAI-wire and translated Anthropic targets, fail closed. A configured
+`sub_conversations` strip also removes tracked body fields before relay
+([tracked body params](#tracked-body-params)). Only the upstream request
 changes; the client-visible contract is unchanged.
 
 ### Scheduling and timing
@@ -312,10 +314,12 @@ do not compare transport framing as a byte-identical contract.
 
 ### Automatic grouping
 
-An explicit `X-Proxy-Session` takes precedence. Without one, the tracker partitions
-requests by client label and credential hash, then compares total user/assistant/
-tool turn counts against its open conversations. A nonexpired conversation with
-the greatest previous count no larger than the new count is the nearest match.
+An explicit `X-Proxy-Session` takes precedence, then a configured tracked body
+param (see [tracked body params](#tracked-body-params)). Without either, the
+tracker partitions requests by client label and credential hash, then compares
+total user/assistant/tool turn counts against its open conversations. A
+nonexpired conversation with the greatest previous count no larger than the new
+count is the nearest match.
 A reset or idle gap can start another conversation, and the configured open-session
 cap evicts the oldest tracked conversation in that partition.
 
@@ -324,6 +328,21 @@ comparison or a universal agent identity. Parallel tasks with similar turn count
 can be ambiguous. Tracker state is process-local, so use explicit session IDs
 when predictable continuity matters and keep the client/key namespace stable.
 Automatic grouping never establishes a parent/child relationship.
+
+### Tracked body params
+
+The request body is client data, and one field can double as the conversation
+identity. When `sub_conversations` names the request's classified client, the
+tracked field the client already sends (exemplar: opencode's `promptCacheKey`)
+supplies that request's identity in the `k:` namespace: behind an explicit
+`X-Proxy-Session`, ahead of automatic grouping. The body is relayed unchanged
+unless the entry sets `strip`, which removes the tracked fields from the
+relayed upstream bytes. A request translated to the Anthropic wire gains a
+top-level `prompt_cache_key` carrying the tracked value. An absent or invalid
+value is dropped, never a client error. A tracked identity never declares a
+parent: `X-Proxy-Parent-Session` still requires its explicit session pair, and
+the session wins identity. The value bound, name grammar, caps and the settings
+surface live in [operations](operations.md#sub-conversation-tracking).
 
 ### Declaring a parent
 

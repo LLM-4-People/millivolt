@@ -323,7 +323,7 @@ func TestRequestMetadataTranslatedBodyOwnership(t *testing.T) {
 	r.Header.Set(hdrFormat, "anthropic")
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, r)
-	want, err := translateRequest("anthropic", []byte(body), cfg.AnthropicDefaultMaxTokens)
+	want, err := translateRequest("anthropic", []byte(body), cfg.AnthropicDefaultMaxTokens, "")
 	if err != nil || !bytes.Equal(upstream, want) || w.Code != http.StatusOK {
 		t.Fatalf("translation changed: code=%d upstream=%s want=%s err=%v", w.Code, upstream, want, err)
 	}

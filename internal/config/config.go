@@ -370,6 +370,18 @@ type Config struct {
 	// order, a later rule winning for the same header or body field.
 	// validateRequestOverrides owns the normalization and validation.
 	RequestOverrides []RequestOverride `yaml:"request_overrides" json:"request_overrides"`
+
+	// SubConversations is the opt-in per-client list of request body fields
+	// whose value identifies a sub-conversation (exemplar: opencode's
+	// promptCacheKey). Default nil: tracking is fully off. Each entry names
+	// one classified client exactly and 1..4 exact JSON field names, checked
+	// in order with the first present field supplying the value; the value
+	// groups the request under a k: conversation identity (after the
+	// X-Proxy-Session header, before automatic client+key grouping), an
+	// absent or invalid value is dropped never rejected, and strip removes
+	// the tracked field from the relayed upstream body.
+	// validateSubConversations owns the normalization and validation.
+	SubConversations []SubConversation `yaml:"sub_conversations" json:"sub_conversations"`
 }
 
 // provPathRE is the dotted JSON path shape every provider field-map value
@@ -494,6 +506,40 @@ type OverrideBody struct {
 // in its row count and add gate.
 const RequestOverridesMax = 64
 
+// SubConversation is one classified client's tracked sub-conversation
+// identity: the client whose requests are tracked, the ordered request body
+// field names whose value supplies the identity (first present wins), and
+// whether the tracked field is stripped from the relayed upstream body.
+type SubConversation struct {
+	// Client matches the request's classified client name exactly: no
+	// wildcard, no case folding. validateSubConversations trims it.
+	Client string `yaml:"client" json:"client"`
+	// Params are exact JSON field names in the client's request body,
+	// checked in order with the first present field supplying the tracked
+	// value. One JSON key segment each (see checkSubConversationParam);
+	// validateSubConversations trims every name.
+	Params []string `yaml:"params" json:"params"`
+	// Strip removes the tracked field from the relayed upstream body for
+	// this client. Default false: the field is forwarded unchanged.
+	Strip bool `yaml:"strip" json:"strip"`
+}
+
+// SubConversationsMax bounds the sub_conversations list and
+// SubConversationParamsMax bounds each entry's params list (internal
+// guardrails, same shape as RequestOverridesMax): the list is consulted on
+// the request path after client classification, and an unbounded operator
+// list would make that walk unbounded. The dashboard editor mirrors both
+// numbers in its row counts and add gates.
+const (
+	SubConversationsMax      = 16
+	SubConversationParamsMax = 4
+)
+
+// subConversationParamMaxBytes bounds one tracked param name (internal
+// safety constant): the name is one JSON object key segment, and the
+// dashboard editor mirrors the bound in its live grammar validation.
+const subConversationParamMaxBytes = 64
+
 // forbiddenOverrideHeaders is the name set of the request-overrides header
 // trust boundary, keyed lowercase (HTTP header names are case-insensitive,
 // so the check is too). Credential headers are denied because the proxy
@@ -592,6 +638,26 @@ func cloneRequestOverrides(rs []RequestOverride) []RequestOverride {
 	return out
 }
 
+// cloneSubConversations deep-copies the entry list with the nested params
+// slice, preserving nil (a nil slice stays nil so "absent" and "empty"
+// never merge into one value). Clone and the Map export share this one
+// copy owner, so a snapshot or an exported payload can never alias a live
+// config.
+func cloneSubConversations(ss []SubConversation) []SubConversation {
+	if ss == nil {
+		return nil
+	}
+	out := make([]SubConversation, len(ss))
+	for i, s := range ss {
+		out[i] = SubConversation{
+			Client: s.Client,
+			Params: append([]string(nil), s.Params...),
+			Strip:  s.Strip,
+		}
+	}
+	return out
+}
+
 // Clone returns a deep copy of c, so a reload can swap in a fully independent
 // snapshot: the Providers map, its nested slices/maps, and the AllowedBaseURLs
 // slice are all copied, never shared with a prior snapshot. The proxy treats
@@ -630,6 +696,7 @@ func (c *Config) Clone() *Config {
 		copy(out.ModelRules, c.ModelRules)
 	}
 	out.RequestOverrides = cloneRequestOverrides(c.RequestOverrides)
+	out.SubConversations = cloneSubConversations(c.SubConversations)
 	return &out
 }
 
@@ -787,14 +854,23 @@ func Default() *Config {
 	}
 }
 
-// Example returns the shipped configuration, reusing every server default and
-// enabling two optional public provider profiles. These noncredential headers
-// are compatibility snapshots, not verified or stable provider API contracts.
+// Example returns the shipped configuration, reusing every server default,
+// enabling two optional public provider profiles, and enabling the opencode
+// sub-conversation tracking exemplar (strip on: the operator's upstream
+// rejects the field with a 400). These noncredential headers are
+// compatibility snapshots, not verified or stable provider API contracts.
 // Operators can edit or remove them in their private config or Settings.
 // Built-in defaults remain provider-neutral; loading no config never adds them.
 func Example() *Config {
 	c := Default()
 	const grokVersion = "1.0.13" // Keep the compatibility identity internally consistent.
+	c.SubConversations = []SubConversation{
+		// opencode identifies its sub-conversations through promptCacheKey in
+		// the request body; the tracked value rides the k: conversation
+		// identity, and the field is stripped because the operator's upstream
+		// rejects it with a 400.
+		{Client: "opencode", Params: []string{"promptCacheKey"}, Strip: true},
+	}
 	c.Providers = map[string]ProviderOverride{
 		"cursor.sh": {
 			UsageKeys:  map[string]string{},
@@ -1067,6 +1143,12 @@ func (c *Config) Validate() error {
 	// (scope, header grammar and ownership, body band, cap) - the same
 	// gate the Settings POST passes through.
 	if err := validateRequestOverrides(c); err != nil {
+		return err
+	}
+	// sub_conversations is normalized and validated at this boundary
+	// (client, params grammar, caps, duplicate clients) - the same gate
+	// the Settings POST passes through.
+	if err := validateSubConversations(c); err != nil {
 		return err
 	}
 	// providers.<label> field maps: models_path must be a clean path
@@ -1497,9 +1579,9 @@ func (c *Config) RetryAfterSeconds() int {
 // and storm validators, the models_discovery_max_pages /
 // storage_query_max_rows integer pair, dash_log_rows, the
 // cursor_heartbeat_interval / sse_keepalive_interval duration pair,
-// quota_pause_recovery_successes, and the request_overrides body ceilings
-// all route through this one owner, so the phrasing cannot drift between
-// them.
+// quota_pause_recovery_successes, the request_overrides body ceilings,
+// and the sub_conversations param byte bound all route through this one
+// owner, so the phrasing cannot drift between them.
 func errRange(key, min, max, got string) error {
 	return fmt.Errorf("%s: must be %s..%s, got %s", key, min, max, got)
 }
@@ -1761,6 +1843,75 @@ func forbiddenOverrideHeaderError(rule int, field, name, reason string) error {
 	}
 }
 
+// validateSubConversations is the load-boundary gate for the whole
+// sub-conversations list (called by Validate, i.e. by YAML load AND the
+// Settings POST). It normalizes safe input before judging it - the client
+// and every param name are trimmed - and then enforces the rules: one
+// entry per classified client (duplicates rejected, exact spellings only,
+// no case folding), 1..4 params per entry, the one JSON-key-segment param
+// grammar, and the entry cap. strip is a plain bool, never normalized. A
+// list that passes is canonical: every stored name is trimmed.
+func validateSubConversations(c *Config) error {
+	if len(c.SubConversations) > SubConversationsMax {
+		return fmt.Errorf("sub_conversations: %d entries exceeds the cap of %d", len(c.SubConversations), SubConversationsMax)
+	}
+	clients := make(map[string]int, len(c.SubConversations))
+	for i := range c.SubConversations {
+		s := &c.SubConversations[i]
+		s.Client = strings.TrimSpace(s.Client)
+		if s.Client == "" {
+			return fmt.Errorf("sub_conversations[%d]: client must not be empty or only whitespace - name the classified client this entry tracks, or remove the entry", i)
+		}
+		if len(s.Params) == 0 {
+			return fmt.Errorf("sub_conversations[%d]: no param set - give the entry a request body field to track, or remove the entry", i)
+		}
+		if len(s.Params) > SubConversationParamsMax {
+			return fmt.Errorf("sub_conversations[%d].params: %d params exceeds the cap of %d", i, len(s.Params), SubConversationParamsMax)
+		}
+		seen := make(map[string]bool, len(s.Params))
+		for j := range s.Params {
+			s.Params[j] = strings.TrimSpace(s.Params[j])
+			if err := checkSubConversationParam(i, j, s.Params[j]); err != nil {
+				return err
+			}
+			if seen[s.Params[j]] {
+				return fmt.Errorf("sub_conversations[%d].params: duplicate %q", i, s.Params[j])
+			}
+			seen[s.Params[j]] = true
+		}
+		if first, dup := clients[s.Client]; dup {
+			return fmt.Errorf("sub_conversations[%d]: duplicate client %q with sub_conversations[%d]; merge the entries or change one client", i, s.Client, first)
+		}
+		clients[s.Client] = i
+	}
+	return nil
+}
+
+// checkSubConversationParam is the single owner of the tracked-param name
+// grammar: one JSON object key segment - non-empty, at most
+// subConversationParamMaxBytes bytes, printable ASCII only, with no quote
+// and no backslash. Deliberately NOT provPathRE (that owns dotted response
+// paths) and deliberately without a regex or case folding: the names are
+// exact wire field names, and legal-but-unusual spellings (a literal dot,
+// an interior space) stay legal because JSON allows them. entry and param
+// locate the value in the error.
+func checkSubConversationParam(entry, param int, name string) error {
+	key := fmt.Sprintf("sub_conversations[%d].params[%d]", entry, param)
+	if name == "" {
+		return fmt.Errorf("%s: must not be empty or only whitespace", key)
+	}
+	for i := 0; i < len(name); i++ {
+		b := name[i]
+		if b < 0x20 || b > 0x7e || b == '"' || b == '\\' {
+			return fmt.Errorf("%s: %q is not a JSON key segment (printable ASCII only, no quote, backslash or control bytes)", key, name)
+		}
+	}
+	if len(name) > subConversationParamMaxBytes {
+		return errRange(key, "1", strconv.Itoa(subConversationParamMaxBytes)+" bytes", strconv.Itoa(len(name)))
+	}
+	return nil
+}
+
 // checkYAMLType is the YAML type gate. Ranges and cross-field rules live in
 // Validate, which keepYAMLKeys runs on the merged overlay. Schema Kind is
 // the type owner; yaml.v3 must not coerce floats, nulls, or 1.1 bool words.
@@ -1842,6 +1993,18 @@ func checkYAMLType(field Field, v any) error {
 	case KindRequestOverrides:
 		switch items := v.(type) {
 		case []RequestOverride:
+		case []any:
+			for _, item := range items {
+				if _, ok := item.(map[string]any); !ok {
+					return fmt.Errorf("%s: every item must be a map", field.Key)
+				}
+			}
+		default:
+			return fmt.Errorf("%s: must be a list", field.Key)
+		}
+	case KindSubConversations:
+		switch items := v.(type) {
+		case []SubConversation:
 		case []any:
 			for _, item := range items {
 				if _, ok := item.(map[string]any); !ok {

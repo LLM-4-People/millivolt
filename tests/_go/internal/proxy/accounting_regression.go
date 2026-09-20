@@ -113,11 +113,11 @@ func TestBridgeClientFailureJoinsSourceObserver(t *testing.T) {
 func TestConversationExpiryRetainsNoPartitionCounters(t *testing.T) {
 	tracker := NewConversationTracker(time.Second, 2)
 	now := time.Now()
-	first := tracker.Assign("client", "first", "", 1, now)
+	first := tracker.Assign("client", "first", "", "", 1, now)
 	for i := 0; i < 1000; i++ {
-		tracker.Assign("client", fmt.Sprint(i), "", 1, now)
+		tracker.Assign("client", fmt.Sprint(i), "", "", 1, now)
 	}
-	second := tracker.Assign("client", "first", "", 1, now.Add(2*time.Second))
+	second := tracker.Assign("client", "first", "", "", 1, now.Add(2*time.Second))
 	if first == second {
 		t.Fatal("expired partition reused a conversation ID")
 	}

@@ -44,8 +44,11 @@ func MergeTokenCaps(maxCompletion, maxTokens *int) *int {
 // the goal is a working translation for the common case, not lossless
 // fidelity. defaultMaxTokens is sent when the client provides neither
 // max_tokens nor max_completion_tokens (Anthropic requires max_tokens); it
-// comes from config.
-func TranslateRequest(openaiBody []byte, defaultMaxTokens int) ([]byte, error) {
+// comes from config. promptCacheKey, when non-empty, is injected as
+// Anthropic's native top-level prompt_cache_key field - the proxy's
+// sub-conversation tracking value, extracted from the client's own spelling
+// before translation (the translator's allowlist would drop that spelling).
+func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, error) {
 	var in struct {
 		Model              string          `json:"model"`
 		Messages           []openaiMessage `json:"messages"`
@@ -117,6 +120,9 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int) ([]byte, error) {
 		if choice := parseToolChoice(in.ToolChoice); choice != nil {
 			out["tool_choice"] = choice
 		}
+	}
+	if promptCacheKey != "" {
+		out["prompt_cache_key"] = promptCacheKey
 	}
 	return json.Marshal(out)
 }

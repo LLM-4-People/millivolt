@@ -414,6 +414,209 @@ func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
 	}
 }
 
+// TestSubConversationEditorWiringsPinnedInSource guards the chrome.js
+// sub-conversations editor wirings jsdom cannot exercise: the client
+// input's datalist association, the generator's matching datalist id, the
+// focus-time refresher's matching selector, the options' shared known-set
+// source, the entry label's routing through the one ordinal owner, and the
+// add gates' and delegated remove branches' routing through the cap
+// constants and the shared click wiring. The list attribute is native
+// browser behavior, so ui_check can only see the rendered datalist and its
+// options, never that the client input is actually associated with it; a
+// hand-spelled generator id renders the same ids today but can drift from
+// the list attribute under every green jsdom row. A dropped or hand-spelled
+// wiring reddens here before the editor can ship a client input without
+// its autocomplete, an entry head whose number drifts from the server's
+// cited index, or an add control that ignores the cap.
+func TestSubConversationEditorWiringsPinnedInSource(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	region := sourceRegion(t, string(src), "function scCardHTML")
+	if !strings.Contains(region, `list="${scDlId()}"`) {
+		t.Error(`scCardHTML's client input lost its datalist wiring "list=\"${scDlId()}\""`)
+	}
+	if !strings.Contains(region, "scEntryLabel(i)") {
+		t.Error("scCardHTML's entry-number label no longer routes through scEntryLabel, the owner shared with scRenumber")
+	}
+	genRegion := sourceRegion(t, string(src), "function scDatalistHTML")
+	if !strings.Contains(genRegion, `id="${scDlId()}"`) {
+		t.Error("scDatalistHTML's datalist id no longer routes through scDlId, the owner shared with the entry cards' list attribute and the focus-time refresher")
+	}
+	syncRegion := sourceRegion(t, string(src), "function scSyncDatalists")
+	if !strings.Contains(syncRegion, `'#' + scDlId()`) {
+		t.Error("scSyncDatalists' datalist selector no longer routes through scDlId, the owner shared with the generator and the entry cards' list attribute")
+	}
+	if !strings.Contains(syncRegion, "scDlOptionsHTML()") {
+		t.Error("scSyncDatalists' option refresh no longer derives through scDlOptionsHTML, the owner shared with the initial render")
+	}
+	// The options source: the same known-set union the request-overrides
+	// scope datalists read seeds this editor's client autocomplete, so a
+	// classified client observed anywhere on the dashboard is offered by
+	// every editor alike.
+	optRegion := sourceRegion(t, string(src), "function scDlOptionsHTML")
+	if !strings.Contains(optRegion, "roKnownOptions('client')") {
+		t.Error("scDlOptionsHTML no longer derives its options from roKnownOptions('client'), the shared known-set source the ro scope datalists read")
+	}
+	addRegion := sourceRegion(t, string(src), "function addScCard")
+	if !strings.Contains(addRegion, ">= SUB_CONVERSATIONS_MAX") {
+		t.Error("addScCard's entry add gate no longer routes through SUB_CONVERSATIONS_MAX")
+	}
+	paramRegion := sourceRegion(t, string(src), "function addScParamRow")
+	if !strings.Contains(paramRegion, ">= SUB_CONVERSATION_PARAMS_MAX") {
+		t.Error("addScParamRow's param add gate no longer routes through SUB_CONVERSATION_PARAMS_MAX")
+	}
+	clickRegion := sourceRegion(t, string(src), "function providersEditorClick")
+	if !strings.Contains(clickRegion, "[data-sc-rm]") {
+		t.Error("providersEditorClick lost the entry-card remove branch [data-sc-rm]")
+	}
+	if !strings.Contains(clickRegion, "[data-sc-p-rm]") {
+		t.Error("providersEditorClick lost the param-row remove branch [data-sc-p-rm]")
+	}
+}
+
+// TestSubConversationParamGrammarMatchGoOwner pins the chrome.js live param
+// grammar to config.checkSubConversationParam, the single owner of the
+// tracked-param name grammar, and the editor's live message vocabulary to
+// the server's exact wording. Both sides are read from their sources (the
+// ForbiddenHeaders-pin precedent): the byte bounds compare pairwise, the
+// quote (0x22) and backslash (0x5c) rejections are identity constants
+// spelled hex on the JS side and as the characters themselves on the Go
+// side, and every shared error fragment must survive on both sides so the
+// editor can never warn about a name the server accepts or accept one the
+// server rejects with different words.
+func TestSubConversationParamGrammarMatchGoOwner(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsSrc := string(src)
+	cfgSrc := configOverrideSource(t)
+
+	jsFn := sourceRegion(t, jsSrc, "function scParamOK")
+	goFn := sourceRegion(t, cfgSrc, "func checkSubConversationParam")
+	// Both sides spell the band in hex bytes (0x20..0x7e); the capture
+	// must take the hex digits, or "0x7e" vs "0x60" would compare their
+	// leading zeros and pass vacuously.
+	goLower := firstSubmatch(t, goFn, `b < 0x([0-9a-fA-F]+)`)
+	jsLower := firstSubmatch(t, jsFn, `c < 0x([0-9a-fA-F]+)`)
+	goUpper := firstSubmatch(t, goFn, `b > 0x([0-9a-fA-F]+)`)
+	jsUpper := firstSubmatch(t, jsFn, `c > 0x([0-9a-fA-F]+)`)
+	if jsLower != goLower || jsUpper != goUpper {
+		t.Errorf("the param byte band differs: chrome.js scParamOK rejects outside %s..%s, config checkSubConversationParam outside %s..%s", jsLower, jsUpper, goLower, goUpper)
+	}
+	if !strings.Contains(jsFn, "c === 0x22") || !strings.Contains(jsFn, "c === 0x5c") {
+		t.Error("chrome.js scParamOK no longer rejects the quote (0x22) and backslash (0x5c) bytes")
+	}
+	if !strings.Contains(goFn, `b == '"'`) || !strings.Contains(goFn, `b == '\\'`) {
+		t.Error("config checkSubConversationParam no longer rejects the quote and backslash bytes")
+	}
+
+	// The live message vocabulary: the sub_conversations[i] key prefix
+	// becomes the card's inline context and %q becomes the quoted name,
+	// but the wording fragments themselves are the server's.
+	jsCard := sourceRegion(t, jsSrc, "function validateScCard")
+	for _, wording := range []string{
+		"is not a JSON key segment (printable ASCII only, no quote, backslash or control bytes)",
+		"must not be empty or only whitespace",
+	} {
+		if !strings.Contains(goFn, wording) {
+			t.Errorf("config checkSubConversationParam no longer carries the wording %q", wording)
+		}
+		if !strings.Contains(jsCard, wording) {
+			t.Errorf("chrome.js validateScCard lost the server wording %q", wording)
+		}
+	}
+	// The byte-bound message: the Go side routes through errRange with the
+	// 1..N bytes shape; the JS side composes the same text from
+	// SUB_CONVERSATION_PARAM_MAX_BYTES, which the caps pin ties to the
+	// same number.
+	if !strings.Contains(goFn, `errRange(key, "1", strconv.Itoa(subConversationParamMaxBytes)+" bytes"`) {
+		t.Error(`config checkSubConversationParam's byte-bound error no longer routes through errRange(key, "1", strconv.Itoa(subConversationParamMaxBytes)+" bytes"`)
+	}
+	if !strings.Contains(jsCard, "must be 1..${SUB_CONVERSATION_PARAM_MAX_BYTES} bytes, got ") {
+		t.Error("chrome.js validateScCard's byte-bound message no longer routes through SUB_CONVERSATION_PARAM_MAX_BYTES with the errRange wording")
+	}
+
+	// The list-level vocabulary: the required client, the required param,
+	// the duplicate-param and duplicate-client rejections.
+	goList := sourceRegion(t, cfgSrc, "func validateSubConversations")
+	listWording := []struct{ goText, jsText, what string }{
+		{"client must not be empty or only whitespace - name the classified client this entry tracks, or remove the entry",
+			"client must not be empty or only whitespace - name the classified client this entry tracks, or remove the entry", "the required-client wording"},
+		{"no param set - give the entry a request body field to track, or remove the entry",
+			"no param set - give the entry a request body field to track, or remove the entry", "the no-param wording"},
+		{"merge the entries or change one client", "merge the entries or change one client", "the duplicate-client remedy"},
+		{`params: duplicate %q`, `params: duplicate '`, "the duplicate-param wording"},
+		{"duplicate client %q with sub_conversations[%d]", `duplicate client '`, "the duplicate-client wording"},
+	}
+	for _, w := range listWording {
+		if !strings.Contains(goList, w.goText) {
+			t.Errorf("config validateSubConversations no longer carries %s %q", w.what, w.goText)
+		}
+		if !strings.Contains(jsCard, w.jsText) {
+			t.Errorf("chrome.js validateScCard lost %s: the server says %q", w.what, w.goText)
+		}
+	}
+}
+
+// TestSubConversationCapsMatchGoOwner pins the three numeric contracts the
+// sub-conversations editor shares with config (the
+// TestRequestOverrideCapAndBandMatchGoOwner precedent): the entry cap
+// (chrome.js SUB_CONVERSATIONS_MAX, the count line and entry add gate,
+// against config.SubConversationsMax, the load-boundary cap), the params
+// cap (chrome.js SUB_CONVERSATION_PARAMS_MAX, the param add gate, against
+// config.SubConversationParamsMax) and the param byte bound (chrome.js
+// SUB_CONVERSATION_PARAM_MAX_BYTES, the live grammar check, against the
+// package-private subConversationParamMaxBytes, readable from source
+// only), plus the count line's own label. Drift would let the editor count
+// entries against a different cap than the load boundary or accept a
+// param list or name the server rejects.
+func TestSubConversationCapsMatchGoOwner(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsSrc := string(src)
+	cfgSrc := configOverrideSource(t)
+
+	jsEntries := firstSubmatch(t, jsSrc, `const SUB_CONVERSATIONS_MAX = (\d+);`)
+	goEntries := firstSubmatch(t, cfgSrc, `SubConversationsMax\s*=\s*(\d+)`)
+	if jsEntries != goEntries {
+		t.Errorf("the entry cap differs: chrome.js SUB_CONVERSATIONS_MAX = %s, config SubConversationsMax = %s", jsEntries, goEntries)
+	}
+	if n, err := strconv.Atoi(goEntries); err != nil || n != config.SubConversationsMax {
+		t.Errorf("config.go's SubConversationsMax literal %q disagrees with the exported config.SubConversationsMax = %d", goEntries, config.SubConversationsMax)
+	}
+
+	jsParams := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAMS_MAX = (\d+);`)
+	goParams := firstSubmatch(t, cfgSrc, `SubConversationParamsMax\s*=\s*(\d+)`)
+	if jsParams != goParams {
+		t.Errorf("the params cap differs: chrome.js SUB_CONVERSATION_PARAMS_MAX = %s, config SubConversationParamsMax = %s", jsParams, goParams)
+	}
+	if n, err := strconv.Atoi(goParams); err != nil || n != config.SubConversationParamsMax {
+		t.Errorf("config.go's SubConversationParamsMax literal %q disagrees with the exported config.SubConversationParamsMax = %d", goParams, config.SubConversationParamsMax)
+	}
+
+	jsBytes := firstSubmatch(t, jsSrc, `const SUB_CONVERSATION_PARAM_MAX_BYTES = (\d+);`)
+	goBytes := firstSubmatch(t, cfgSrc, `const subConversationParamMaxBytes = (\d+)`)
+	if jsBytes != goBytes {
+		t.Errorf("the param byte bound differs: chrome.js SUB_CONVERSATION_PARAM_MAX_BYTES = %s, config subConversationParamMaxBytes = %s", jsBytes, goBytes)
+	}
+
+	// The count line label: "N / 16 entries" names the list's own
+	// vocabulary (the sub_conversations entries), like the ro count line
+	// names its rules; and the add-button gate rides the same constant.
+	countRegion := sourceRegion(t, jsSrc, "function scSyncCount")
+	if label := firstSubmatch(t, countRegion, `\+ SUB_CONVERSATIONS_MAX \+ ' ([a-z]+)'`); label != "entries" {
+		t.Errorf("the count line labels the cards %q, want \"entries\" (the sub_conversations list's own vocabulary)", label)
+	}
+	if !strings.Contains(countRegion, ">= SUB_CONVERSATIONS_MAX") {
+		t.Error("scSyncCount's add-button gate no longer routes through SUB_CONVERSATIONS_MAX")
+	}
+}
+
 // TestShellAssetsEqualBrandPaths pins the sw.js SHELL_ASSETS precache list
 // to the exact Go brand-path set minus the service worker itself (the worker
 // updates independently and never precaches its own URL). The previous

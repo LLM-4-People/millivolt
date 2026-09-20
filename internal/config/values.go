@@ -179,6 +179,12 @@ func exportValue(f Field, v any) any {
 			return []RequestOverride{}
 		}
 		return cloneRequestOverrides(rs)
+	case KindSubConversations:
+		ss, ok := v.([]SubConversation)
+		if !ok || ss == nil {
+			return []SubConversation{}
+		}
+		return cloneSubConversations(ss)
 	default:
 		return v
 	}
@@ -273,6 +279,12 @@ func (c *Config) setField(f Field, v any) error {
 			return err
 		}
 		rv.Set(reflect.ValueOf(ro))
+	case KindSubConversations:
+		sc, err := asSubConversations(v)
+		if err != nil {
+			return err
+		}
+		rv.Set(reflect.ValueOf(sc))
 	default:
 		return fmt.Errorf("unsupported kind %q", f.Kind)
 	}
@@ -460,6 +472,16 @@ func asModelRules(v any) ([]ModelRule, error) {
 func asRequestOverrides(v any) ([]RequestOverride, error) {
 	return strictCoerce(v, []RequestOverride{}, "[]", "want list",
 		"want [{client, provider, model, headers, remove_headers, body}]")
+}
+
+// asSubConversations coerces the Settings POST shape of sub_conversations
+// (ordered list of {client, params, strip}). Field-level shape is checked
+// here so a malformed entry fails the Apply with a clear error; semantic
+// validation (client required, params grammar, caps, duplicate clients)
+// runs in Validate - the same gate the YAML path passes through.
+func asSubConversations(v any) ([]SubConversation, error) {
+	return strictCoerce(v, []SubConversation{}, "[]", "want list",
+		"want [{client, params, strip}]")
 }
 
 // asAliases coerces the JSON shape of provider_aliases (map of old label →

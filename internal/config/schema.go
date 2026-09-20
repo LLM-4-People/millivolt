@@ -23,6 +23,7 @@ const (
 	KindAliases          Kind = "aliases"
 	KindModelRules       Kind = "model_rules"
 	KindRequestOverrides Kind = "request_overrides"
+	KindSubConversations Kind = "sub_conversations"
 )
 
 // Category groups fields in the Settings menu (and in the generated YAML).
@@ -260,6 +261,9 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "conversation_max_open", Category: "conversation", Label: "Max open",
 			Help: "Cap on concurrently-open conversations per client+key. Oldest is evicted past it.",
 			Kind: KindInt, HotReload: true, Min: num(1), Max: num(100000)},
+		{Key: "sub_conversations", Category: "conversation", Label: "Sub-conversation tracking",
+			Help: "Per-client tracking of a request body field that carries a sub-conversation identity, exemplified by opencode's promptCacheKey. Each entry names one classified client exactly (no wildcard, no case folding) plus 1..4 exact JSON field names; the first present field on a request supplies the tracked value, and an absent or invalid value is dropped, never a client error. The value groups the request under a k: conversation identity, after the X-Proxy-Session header (s:) and before automatic client+key grouping; X-Proxy-Parent-Session still owns parent linkage. Requests translated to the Anthropic wire gain a top-level prompt_cache_key carrying the value. strip: true removes the tracked field from the relayed upstream passthrough body; the default false forwards it unchanged. Param names are exact printable-ASCII JSON key segments up to 64 bytes, no quotes or backslashes; duplicate clients and duplicate params within an entry are rejected. Caps: 16 entries, 4 params per entry. Default: an empty list, tracking fully off. Hot-reloads.",
+			Kind: KindSubConversations, HotReload: true},
 
 		// ---- format ----
 		{Key: "anthropic_default_max_tokens", Category: "format", Label: "Anthropic default max tokens",
@@ -399,6 +403,8 @@ func (f Field) TypeLine(def any) string {
 		b.WriteString("ordered list of {mode: exact|pattern|lower, from, to} rewrite rules")
 	case KindRequestOverrides:
 		b.WriteString("ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules")
+	case KindSubConversations:
+		b.WriteString("ordered list of {client, params, strip} per-client tracked body params")
 	default:
 		b.WriteString(string(f.Kind))
 	}

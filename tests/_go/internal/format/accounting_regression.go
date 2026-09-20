@@ -9,7 +9,7 @@ import (
 func TestNativeToolChoiceMapping(t *testing.T) {
 	for _, tt := range []struct{ in, want string }{{"required", "any"}, {"none", "none"}, {"auto", "auto"}} {
 		body := `{"model":"model-a","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":"` + tt.in + `"}`
-		out, err := TranslateRequest([]byte(body), 100)
+		out, err := TranslateRequest([]byte(body), 100, "")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -303,16 +303,19 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 		(authHeader != "" && strings.EqualFold(name, authHeader))
 }
 
-// overrideRequestBody stamps the merged token ceilings onto an OpenAI-wire
-// request body and returns the rewritten bytes: the whole document decodes
-// as raw JSON values, only the named numeric fields are set, and the
-// document re-marshals with every other field's value preserved verbatim -
-// the re-encode sorts keys, compacts whitespace and HTML-escapes <, > and &
-// inside preserved values, so the bytes are not preserved, only the values.
-// Fail closed - why carries the operator-actionable reason and the caller
-// relays the ORIGINAL bytes unchanged - when the body is not a JSON object
-// or the rewritten result would exceed the request byte budget.
-func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (out []byte, why string) {
+// overrideRequestBody rewrites an OpenAI-wire request body through the
+// single body-rewrite engine and returns the new bytes: the whole document
+// decodes as raw JSON values once, the named token ceilings are set, the
+// named strip fields are deleted, and the document re-marshals with every
+// other field's value preserved verbatim - the re-encode sorts keys, compacts
+// whitespace and HTML-escapes <, > and & inside preserved values, so the
+// bytes are not preserved, only the values. ob may be nil (strip only) and
+// strip may be nil (override actions only); when no action changes the
+// document the ORIGINAL bytes come back unchanged - no rewrite happened. Fail
+// closed - why carries the operator-actionable reason and the caller relays
+// the ORIGINAL bytes unchanged - when the body is not a JSON object or the
+// rewritten result would exceed the request byte budget.
+func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, maxBytes int64) (out []byte, why string) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Sprintf("the request body is not a JSON object: %v", err)
@@ -321,11 +324,25 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (
 		// Valid JSON null: not an object, so no field can be set on it.
 		return nil, "the request body is not a JSON object"
 	}
-	if ob.MaxTokens != nil {
-		doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
+	changed := false
+	if ob != nil {
+		if ob.MaxTokens != nil {
+			doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
+			changed = true
+		}
+		if ob.MaxCompletionTokens != nil {
+			doc["max_completion_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxCompletionTokens))
+			changed = true
+		}
 	}
-	if ob.MaxCompletionTokens != nil {
-		doc["max_completion_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxCompletionTokens))
+	for _, name := range strip {
+		if _, ok := doc[name]; ok {
+			delete(doc, name)
+			changed = true
+		}
+	}
+	if !changed {
+		return body, ""
 	}
 	out, err := json.Marshal(doc)
 	if err != nil {
@@ -874,11 +891,13 @@ func errJSONCode(typ, msg, code string) string {
 
 // translateRequest converts an OpenAI Chat Completions body into the target
 // upstream format. Currently only "anthropic" is supported. defaultMaxTokens
-// (from config) is injected when the client sent no token cap.
-func translateRequest(format string, body []byte, defaultMaxTokens int) ([]byte, error) {
+// (from config) is injected when the client sent no token cap. promptCacheKey
+// (the extracted sub-conversations value, "" when untracked) is injected as
+// Anthropic's native prompt_cache_key when non-empty.
+func translateRequest(format string, body []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, error) {
 	switch format {
 	case "anthropic":
-		return providerformat.TranslateRequest(body, defaultMaxTokens)
+		return providerformat.TranslateRequest(body, defaultMaxTokens, promptCacheKey)
 	default:
 		// Note: "cursor" is intentionally not here - serveCursorBidi translates
 		// the body itself (it needs the history blobs for the KV channel and a

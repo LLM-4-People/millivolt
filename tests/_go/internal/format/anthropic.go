@@ -10,7 +10,7 @@ import (
 
 func TestTranslateRequestBasic(t *testing.T) {
 	in := `{"model":"model-b","messages":[{"role":"system","content":"You are helpful"},{"role":"user","content":"hi"}],"max_completion_tokens":100,"temperature":0.7,"stream":true}`
-	out, err := TranslateRequest([]byte(in), 4096)
+	out, err := TranslateRequest([]byte(in), 4096, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestTranslateRequestToolCalls(t *testing.T) {
 		{"role":"tool","tool_call_id":"call_1","content":"sunny"}
 	]}`
 
-	out, err := TranslateRequest([]byte(in), 4096)
+	out, err := TranslateRequest([]byte(in), 4096, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,5 +417,35 @@ func TestAnthropicErrorEventSurfaces(t *testing.T) {
 	}
 	if !strings.Contains(sseOut.String(), `"error":{"message":"Overloaded","type":"overloaded_error"}`) {
 		t.Errorf("stream error event not re-rendered as the shared OpenAI envelope: %q", sseOut.String())
+	}
+}
+
+// TestTranslateRequestPromptCacheKey pins the sub-conversation injection: a
+// non-empty tracked value lands as Anthropic's native top-level
+// prompt_cache_key; an empty one adds nothing.
+func TestTranslateRequestPromptCacheKey(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	out, err := TranslateRequest([]byte(in), 4096, "task-7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["prompt_cache_key"] != "task-7" {
+		t.Errorf("prompt_cache_key = %v, want task-7 (body %s)", got["prompt_cache_key"], out)
+	}
+
+	out, err = TranslateRequest([]byte(in), 4096, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = map[string]any{}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := got["prompt_cache_key"]; ok {
+		t.Errorf("untracked request gained a prompt_cache_key: %s", out)
 	}
 }

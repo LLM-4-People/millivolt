@@ -210,6 +210,8 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 		return []any{map[string]any{"mode": "lower"}}
 	case KindRequestOverrides:
 		return []any{map[string]any{"client": "opencode", "headers": map[string]any{"x-sample-hint": "v1"}}}
+	case KindSubConversations:
+		return []any{map[string]any{"client": "opencode", "params": []any{"promptCacheKey"}, "strip": true}}
 	}
 	t.Fatalf("no valid non-default sample for %s (%s)", f.Key, f.Kind)
 	return nil

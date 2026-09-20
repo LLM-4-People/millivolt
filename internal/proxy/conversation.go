@@ -1,20 +1,35 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // maxDeclaredSessionBytes bounds retained relationship identifiers. This is
 // an internal safety guardrail for the opt-in parent declaration, not a
 // truncation policy or a new limit on legacy session-only requests.
 const maxDeclaredSessionBytes = 512
+
+// validDeclaredSession is the single owner of the retained-identifier bound:
+// non-empty, at most maxDeclaredSessionBytes, valid UTF-8, no control bytes.
+// requestConversation rejects a violating header declaration at the request
+// boundary; the sub-conversation extraction drops a violating tracked value
+// (never a 400 - the body is passthrough payload).
+func validDeclaredSession(id string) bool {
+	return id != "" && len(id) <= maxDeclaredSessionBytes && utf8.ValidString(id) &&
+		!strings.ContainsFunc(id, func(r rune) bool { return r < ' ' || r == 0x7f })
+}
 
 // requestConversation owns the optional parent declaration boundary. A parent
 // requires the child's explicit identity; ordinary session-only requests keep
@@ -31,7 +46,7 @@ func requestConversation(h http.Header) (session, parent string, err error) {
 	}
 	parent = strings.TrimSpace(parents[0])
 	for _, id := range []string{session, parent} {
-		if id == "" || len(id) > maxDeclaredSessionBytes || !utf8.ValidString(id) || strings.ContainsFunc(id, func(r rune) bool { return r < ' ' || r == 0x7f }) {
+		if !validDeclaredSession(id) {
 			return "", "", fmt.Errorf("declared session identifiers must be nonempty printable text of at most %d bytes", maxDeclaredSessionBytes)
 		}
 	}
@@ -42,6 +57,111 @@ func requestConversation(h http.Header) (session, parent string, err error) {
 }
 
 func explicitConversationID(id string) string { return "s:" + id }
+
+// trackedConversationID namespaces a sub-conversation param identity beside
+// explicitConversationID's s: sessions: a k: id can never collide with an
+// explicit session or a c- auto grouping.
+func trackedConversationID(id string) string { return "k:" + id }
+
+// subConversationScanMax bounds the raw byte scan of one tracked param's
+// string value. A value that can still satisfy maxDeclaredSessionBytes never
+// spans more raw bytes than this: every JSON escape sequence spends at least
+// two raw bytes per decoded byte (one six-byte \uXXXX escape per decoded byte
+// is the worst case), plus the two framing quotes. Internal safety guardrail,
+// not user-tunable.
+const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
+
+// resolveSubConversation is the sub_conversations request-path owner: it
+// resolves the classified client's configured entry and extracts the tracked
+// value from the already-buffered request body. No entries configured, or no
+// exact client leaf match, returns (nil, "") - the feature-off path leaves the
+// request byte-identical and untracked. For a matched entry the configured
+// params are checked in order and the first one whose value tail supplies a
+// decodable string wins; a supplied value that fails the declared-session
+// bound is dropped (the request stays on automatic grouping), never a 400 -
+// the body is passthrough payload, the configToken deny-by-drop precedent.
+// No second full-body parse runs: the locate is the HasErrorKey cheap-gate
+// class over the buffered bytes.
+func resolveSubConversation(entries []config.SubConversation, client string, body []byte) (entry *config.SubConversation, value string) {
+	if len(entries) == 0 {
+		return nil, ""
+	}
+	for i := range entries {
+		if entries[i].Client == client {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry == nil {
+		return nil, ""
+	}
+	// One backslash probe shared by every param's negative pre-gate: the
+	// param grammar forbids quote, backslash and control bytes in the name
+	// itself, so a key can only reach the wire spelled literally or through
+	// escape sequences.
+	anyEscape := bytes.ContainsRune(body, '\\')
+	for _, name := range entry.Params {
+		if v, present := subConversationParam(body, name, anyEscape); present {
+			return entry, v
+		}
+	}
+	return entry, ""
+}
+
+// subConversationParam locates one configured param's string value in the
+// buffered body. present reports that the param supplied the tracked value:
+// metrics.JSONKey found the key (at any nesting depth, the same lexical
+// cheap-gate class HasErrorKey uses) and the value tail decodes as a bounded
+// string. A supplied value that fails the declared-session bound comes back
+// present with the empty value - the first present param wins and its invalid
+// value is dropped, never a fall-through to a later param, so the configured
+// order stays presence-ordered, never value-quality-ordered.
+func subConversationParam(body []byte, name string, anyEscape bool) (value string, present bool) {
+	// Keep param-free regions on the vectorized negative path (the
+	// HasErrorKey pre-gate class): a body without the literal quoted spelling
+	// and without any escape sequence cannot carry the key.
+	if !bytes.Contains(body, []byte(`"`+name+`"`)) && !anyEscape {
+		return "", false
+	}
+	tail := metrics.JSONKey(body, name)
+	if len(tail) == 0 || tail[0] != '"' {
+		return "", false
+	}
+	window := tail
+	if len(window) > subConversationScanMax {
+		window = window[:subConversationScanMax]
+	}
+	end := -1
+	for i := 1; i < len(window); i++ {
+		if window[i] == '"' {
+			end = i
+			break
+		}
+		if window[i] == '\\' {
+			i++
+		}
+	}
+	if end < 0 {
+		// Unterminated within the scan cap: too long for any bounded value.
+		return "", false
+	}
+	token := window[:end+1]
+	// The standard decoder coerces invalid UTF-8 inside strings to U+FFFD;
+	// the identity bound must judge the client's actual bytes, so validate
+	// before decoding.
+	if !utf8.Valid(token[1:end]) {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(token, &s) != nil {
+		return "", false
+	}
+	s = strings.TrimSpace(s)
+	if !validDeclaredSession(s) {
+		return "", true
+	}
+	return s, true
+}
 
 // conversation.go reconstructs LLM "conversations" (multi-request tasks) from
 // stateless requests, without any client cooperation or hardcoded client rules.
@@ -120,12 +240,16 @@ func convoKey(client, keyHash string) string {
 }
 
 // Assign returns the conversation id for a request. explicitID (from
-// X-Proxy-Session) wins when present; otherwise the request is auto-grouped by
-// turn count. totalTurns is turns_user+turns_assistant+turns_tool.
-func (t *ConversationTracker) Assign(client, keyHash, explicitID string, totalTurns int, now time.Time) string {
+// X-Proxy-Session) wins when present, then trackedID (a sub_conversations
+// body-param value); each is namespaced by its own owner so neither identity
+// can collide with the other or with an auto id. Otherwise the request is
+// auto-grouped by turn count. totalTurns is turns_user+turns_assistant+turns_tool.
+func (t *ConversationTracker) Assign(client, keyHash, explicitID, trackedID string, totalTurns int, now time.Time) string {
 	if explicitID != "" {
-		// Namespaced so an explicit id can never collide with an auto one.
 		return explicitConversationID(explicitID)
+	}
+	if trackedID != "" {
+		return trackedConversationID(trackedID)
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()

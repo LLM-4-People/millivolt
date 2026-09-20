@@ -28,6 +28,14 @@ func TestConversationLineageResolution(t *testing.T) {
 		{"self parent", []contrib{lineageRow("s:child", "s:child")}, conversationSummary{Unresolved: 1}},
 		{"cycle and dependent", []contrib{lineageRow("s:first", "s:second"), lineageRow("s:second", "s:first"), lineageRow("s:dependent", "s:first")}, conversationSummary{Unresolved: 3}},
 		{"conflicting ancestor", []contrib{lineageRow("s:parent", "s:first"), lineageRow("s:parent", "s:second"), lineageRow("s:child", "s:parent")}, conversationSummary{Unresolved: 2}},
+		// k: ids (the sub_conversations tracked identity) ride the same
+		// ConversationID column with zero web branching: a leaf renders role
+		// main, and only a declared parent makes one a sub. The proxy never
+		// attaches a parent to a k: identity (the s: header wins identity when
+		// a parent is declared), so the paired row is a synthetic pin of the
+		// namespace-agnostic lineage rules, not a proxy-produced shape.
+		{"k identity leaf is a main conversation", []contrib{lineageRow("k:task-1", "")}, conversationSummary{Main: 1}},
+		{"k identity is a sub only under a declared parent", []contrib{lineageRow("k:root", ""), lineageRow("k:task-1", "k:root")}, conversationSummary{Main: 1, Sub: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var baseline map[string]*conversationInfo
