@@ -9,7 +9,10 @@ package web
 
 import (
 	"io/fs"
+	"maps"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -158,6 +161,143 @@ func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 	want := []string{config.ModelRuleExact, config.ModelRulePattern, config.ModelRuleLower}
 	if !slices.Equal(got, want) {
 		t.Fatalf("chrome.js MODEL_RULE_MODES values = %v, want the config rule-mode vocabulary %v", got, want)
+	}
+}
+
+// configOverrideSource reads internal/config/config.go from the repository
+// root (moduleRoot's self-location rule, the same one the ui_check.js
+// contract uses). Config's forbidden-override-header set is package-private,
+// so its source text is this pin's only enumerable view: the exported
+// ForbiddenOverrideHeader oracle can confirm members but cannot list them.
+// A trimpath build skips with the reason instead of guessing a path.
+func configOverrideSource(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", "config.go"))
+	if err != nil {
+		t.Fatalf("read internal/config/config.go: %v", err)
+	}
+	return string(b)
+}
+
+// sourceRegion returns src from decl through the first line-anchored closing
+// brace. Literal extractions are scoped to their owning declaration this way,
+// so a same-looking fragment elsewhere in the file can never satisfy a pin
+// silently, and a missing or unterminated region fails loudly.
+func sourceRegion(t *testing.T, src, decl string) string {
+	t.Helper()
+	start := strings.Index(src, decl)
+	if start < 0 {
+		t.Fatalf("source missing %q", decl)
+	}
+	rest := src[start:]
+	end := strings.Index(rest, "\n}")
+	if end < 0 {
+		t.Fatalf("%q is not terminated by a line-anchored closing brace", decl)
+	}
+	return rest[:end]
+}
+
+// firstSubmatch returns the first capture of re in src, failing the test
+// when the pattern is absent.
+func firstSubmatch(t *testing.T, src, re string) string {
+	t.Helper()
+	m := regexp.MustCompile(re).FindStringSubmatch(src)
+	if m == nil {
+		t.Fatalf("pattern %s not found", re)
+	}
+	return m[1]
+}
+
+// jsLiteralPairs extracts the name-to-value entries of a flat JS object
+// literal block: quoted ('name') and bare-identifier (name) keys with
+// single-quoted values, one per line. A duplicate key fails loudly rather
+// than letting map order decide which entry the pin compares.
+func jsLiteralPairs(t *testing.T, block string) map[string]string {
+	t.Helper()
+	pairs := make(map[string]string)
+	for _, m := range regexp.
+		MustCompile(`(?m)^\s*(?:'([^']+)'|([A-Za-z][A-Za-z0-9_-]*))\s*:\s*'([^']+)'\s*,?$`).
+		FindAllStringSubmatch(block, -1) {
+		name := m[1]
+		if name == "" {
+			name = m[2]
+		}
+		if _, dup := pairs[name]; dup {
+			t.Fatalf("duplicate object entry %q", name)
+		}
+		pairs[name] = m[3]
+	}
+	return pairs
+}
+
+// goMapStringStringPairs extracts the entries of a map[string]string literal
+// block ("name": "value", one per line). A duplicate key fails loudly.
+func goMapStringStringPairs(t *testing.T, block string) map[string]string {
+	t.Helper()
+	pairs := make(map[string]string)
+	for _, m := range regexp.
+		MustCompile(`(?m)^\s*"([^"]+)"\s*:\s*"([^"]+)"\s*,?$`).
+		FindAllStringSubmatch(block, -1) {
+		if _, dup := pairs[m[1]]; dup {
+			t.Fatalf("duplicate map entry %q", m[1])
+		}
+		pairs[m[1]] = m[2]
+	}
+	return pairs
+}
+
+// TestRequestOverrideForbiddenHeadersMatchGoVocabulary pins chrome.js
+// RO_FORBIDDEN_HEADERS, the request-overrides editor's live validation
+// vocabulary, to config's forbidden-header owner, name by name and reason by
+// reason, plus the control-prefix rule both sides share. The JS half is read
+// from the embedded chrome.js literal; the config half is derived from the
+// forbiddenOverrideHeaders map source and confirmed against the exported
+// ForbiddenOverrideHeader oracle, so a stale parse can never pass. Either
+// side dropping, adding or relabeling an entry reddens here before the
+// editor and the server can disagree about what an operator may override.
+func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsPairs := jsLiteralPairs(t, jsObjectBlock(t, src, "RO_FORBIDDEN_HEADERS"))
+	if len(jsPairs) == 0 {
+		t.Fatal("RO_FORBIDDEN_HEADERS declares no entries")
+	}
+	cfgSrc := configOverrideSource(t)
+	goPairs := goMapStringStringPairs(t, sourceRegion(t, cfgSrc, "forbiddenOverrideHeaders = map[string]string{"))
+	if len(goPairs) == 0 {
+		t.Fatal("config forbiddenOverrideHeaders declares no entries")
+	}
+	jsNames := slices.Sorted(maps.Keys(jsPairs))
+	goNames := slices.Sorted(maps.Keys(goPairs))
+	if !slices.Equal(jsNames, goNames) {
+		t.Fatalf("forbidden override header names differ:\nchrome.js RO_FORBIDDEN_HEADERS = %v\nconfig forbiddenOverrideHeaders = %v", jsNames, goNames)
+	}
+	for _, name := range goNames {
+		if jsPairs[name] != goPairs[name] {
+			t.Errorf("forbidden header %q: chrome.js reason %q, config reason %q", name, jsPairs[name], goPairs[name])
+		}
+		if reason, forbidden := config.ForbiddenOverrideHeader(name); !forbidden || reason != goPairs[name] {
+			t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", name, reason, forbidden, goPairs[name])
+		}
+	}
+
+	// The prefix rule: the x-proxy- control denial. Both literals are
+	// scoped to their owning functions (roForbiddenReason mirrors
+	// ForbiddenOverrideHeader), the two sides must agree, and the oracle
+	// proves the parsed Go literals are the live behavior.
+	jsFn := sourceRegion(t, string(src), "function roForbiddenReason")
+	goFn := sourceRegion(t, cfgSrc, "func ForbiddenOverrideHeader(")
+	jsPrefix := firstSubmatch(t, jsFn, `startsWith\('([^']+)'\)`)
+	goPrefix := firstSubmatch(t, goFn, `strings\.HasPrefix\(lower, "([^"]+)"\)`)
+	jsControl := firstSubmatch(t, jsFn, `return '([^']+)'`)
+	goControl := firstSubmatch(t, goFn, `return "([^"]+)", true`)
+	if jsPrefix != goPrefix || jsControl != goControl {
+		t.Fatalf("the control-prefix rule differs: chrome.js (%q returns %q), config (%q returns %q)", jsPrefix, jsControl, goPrefix, goControl)
+	}
+	if reason, forbidden := config.ForbiddenOverrideHeader(jsPrefix + "pin"); !forbidden || reason != goControl {
+		t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", jsPrefix+"pin", reason, forbidden, goControl)
 	}
 }
 

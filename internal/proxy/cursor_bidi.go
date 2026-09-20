@@ -509,11 +509,17 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 // the bidi Run path and the unary GetUsableModels path. The identity headers
 // (client version/type, ghost mode, request id) are the provider's
 // CONFIGURED upstream headers (providers.<label>.headers - the same map the
-// generic paths apply); the Connect protocol version and the h2 trailers
-// declaration are protocol constants that stay code-owned and cannot be
-// overridden.
+// generic paths apply); the resolved request-overrides merge for this
+// request wins over that map, but the Connect protocol version and the h2
+// trailers declaration below are protocol constants that stay code-owned
+// and cannot be overridden, and the credential stamped last keeps its owner
+// (applyOverrideHeaders additionally skips the auth-header names as its
+// runtime safety belt). The models-fetch target never carries a resolved
+// override (its ServeHTTP branch returns before the resolution point), so
+// discovery keeps its own header contract.
 func (s *Server) setCursorIdentity(req *http.Request, t *target, key string) {
 	s.applyProviderHeaders(req.Header, t.provider)
+	applyOverrideHeaders(req.Header, t.override, t.authHeader)
 	req.Header.Set("Connect-Protocol-Version", "1")
 	req.Header.Set("Te", "trailers")
 	setResolvedAuth(req.Header, t, key)

@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -196,6 +197,13 @@ type target struct {
 	timeout     time.Duration
 	format      string
 	extraHeader http.Header
+	// override is the request_overrides merge resolved for THIS request
+	// (nil when none are configured or nothing matched - the feature-off
+	// path). Attached in ServeHTTP after readRequest, so the
+	// models-discovery branch, which returns before routing metadata
+	// exists, never carries one, and the two inference send owners
+	// (buildUpstreamRequest, setCursorIdentity) are its only consumers.
+	override *resolvedOverride
 }
 
 // livePublisher is the narrow interface for emitting per-request lifecycle
@@ -427,7 +435,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// upstream format - passthrough for OpenAI-compatible providers, translated
 	// for Anthropic, and served from Cursor's GetUsableModels for cursor - so any
 	// provider's models are listable through the standard OpenAI route.
-	if err := s.applyThrottleHeaders(r, t.provider, classifyClient(r)); err != nil {
+	//
+	// The classified client names the caller for the throttle headers, the
+	// record, and request-overrides matching: classify once, use everywhere.
+	client := classifyClient(r)
+	if err := s.applyThrottleHeaders(r, t.provider, client); err != nil {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 		return
 	}
@@ -449,6 +461,40 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), status)
 		return
 	}
+
+	// Cursor clients send FUSED display model ids (thinking level + tier
+	// baked into the name). Record the canonical base id instead so the
+	// dashboard groups a Cursor model with the same model from other
+	// providers; the upstream wire encoding still decomposes the raw id
+	// itself. Resolved here, ahead of the request-overrides window, so a
+	// rule's model scope matches the id the dashboard records.
+	recModel := rec.Model
+	if t.format == "cursor" {
+		recModel = providerformat.CursorModelBase(recModel)
+	}
+
+	// Scoped request overrides (request_overrides): resolve the matching
+	// rules ONCE - provider, classified client and recorded model are all
+	// known now - and rewrite the body before any consumer sees it, so every
+	// relay attempt, quality re-send and cursor re-ask reuses the same
+	// bytes. The rewrite precedes the hostile-cap boundary below: override
+	// values are validated to the cap band at config load, so both token-cap
+	// boundaries and the scheduler reservation read the effective ceiling.
+	// Cursor targets skip the body section (token ceilings have no wire
+	// meaning there) and keep their header rules. A nil resolution - the
+	// feature is off, or nothing matched - leaves the request path
+	// byte-identical.
+	t.override = resolveRequestOverrides(s.cfg().RequestOverrides, client, t.provider, recModel)
+	if t.override != nil && t.override.body != nil && overrideBodyWireFormat(t.format) {
+		if rewritten, why := overrideRequestBody(body, t.override.body, int64(s.cfg().MaxRequestBytes)); why == "" {
+			body = rewritten
+			restampReqMaxTokens(body, rec)
+		} else {
+			log.Printf("request overrides: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
+				client, t.provider, recModel, why)
+		}
+	}
+
 	// Deny a hostile token cap at the trust boundary: the decoded value
 	// feeds the Acquire-time token estimate with no further range check, so
 	// an unbounded cap could wrap the estimate negative (skipping the
@@ -494,21 +540,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Cursor clients send FUSED display model ids (thinking level + tier baked
-	// into the name). Record the canonical base id instead so the dashboard
-	// groups a Cursor model with the same model from other providers; the
-	// upstream wire encoding still decomposes the raw id itself.
-	recModel := model
-	if t.format == "cursor" {
-		recModel = providerformat.CursorModelBase(model)
-	}
-
 	rec.ID = requestID()
 	rec.Provider = t.provider
 	rec.Model = recModel
 	rec.KeyHash = hashKey(key)
 	rec.UserAgent = r.UserAgent()
-	rec.Client = classifyClient(r)
+	rec.Client = client
 	rec.ClientIP = remoteIP(r)
 	rec.Path = r.URL.Path
 	rec.Method = r.Method

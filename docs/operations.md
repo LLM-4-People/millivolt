@@ -95,6 +95,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
 | Models | Ordered model-name grouping rules and their preview. |
 | Providers | Usage/cost field paths, discovery enrichment, upstream headers and provider aliases. |
+| Request overrides | Scoped upstream rewrites: set, replace or remove headers and set output-token ceilings per client, provider and/or model. |
 
 The table is a navigation aid, not another source of default values.
 [Schema](../internal/config/schema.go), configuration validation and generated
@@ -137,6 +138,70 @@ lowercase steps keep stored model spellings unchanged; an empty rule list groups
 by those raw spellings. The Settings editor supports reordering, parking and
 previewing rules. Raw export/delete predicates do not silently expand to a
 display group. Debug's native-model normalization is separate from these rules.
+
+### Request overrides
+
+`request_overrides` is an ordered rule list that rewrites the upstream request
+before relay; the default empty list leaves every request untouched. Each rule
+has a scope and at least one action: `headers` sets or replaces upstream
+headers, `remove_headers` deletes them, and `body` sets the output-token
+ceilings `max_tokens` / `max_completion_tokens` (1..1000000) on the OpenAI
+wire body. The list is capped at 64 rules and validated like every other
+setting: a rule needs at least one scope field and one action, duplicate
+scope triples are rejected, and one header name cannot be both set and removed
+in the same rule.
+
+Scope matching is exact leaf. A rule applies when every non-empty scope field
+equals the request's value exactly: `client` against the classified client
+label (`X-Proxy-Client` when sent, otherwise inferred from SDK/user-agent
+metadata), `provider` against the canonical label after `provider_aliases`,
+and `model` against the recorded model id (for Cursor requests the base id the
+dashboard records, not the fused spelling). An empty scope field matches
+anything. There is no model-rule canonicalization, regex or wildcard broadening.
+All matching rules apply in list order, and for the same header or body field
+the later rule wins.
+
+Header rules are the operator's last word on the upstream wire: the resolved
+merge applies after client-forwarded values, configured provider headers and
+the client's `X-Proxy-Headers` map, so a matching override wins over all of
+them. Credential and protocol names (`authorization`, `cookie`,
+`proxy-authorization`, `host`, `content-type`, `content-length`,
+`transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
+`proxy-connection`, `trailers`, `upgrade`) and the whole `x-proxy-` control
+prefix are rejected at load in both header lists; at runtime the target's
+configured auth header is skipped even if one slips through, so credentials
+stay at their owner. Header names are trimmed and canonicalized
+case-insensitively, and values must be non-empty single-line header values.
+
+The body rewrite is fail closed. It applies to passthrough and translated
+Anthropic requests; when the body is not a JSON object, or the rewritten
+result would exceed `max_request_bytes`, nothing is written and the original
+bytes are relayed verbatim with one process log line recording the reason. A
+successful rewrite replaces the body for the request's whole life, so every
+relay attempt, absorbed retry and quality re-send reuses it, and the recorded
+request cap is re-stamped from the effective body. Cursor targets carry no
+token ceilings on their wire, so the body section is skipped for them while
+header rules still apply at the native send.
+
+Overrides apply to inference sends only, never model discovery or token
+refresh. The list hot-reloads: changed rules apply to new requests. The
+Settings editor mirrors the server's checks and rejections live for each
+rule, marks empty scope fields as matching any request, and blocks Apply
+on the first invalid rule.
+
+To raise the output budget for one provider, either write:
+
+```yaml
+request_overrides:
+  - provider: nano-gpt.com
+    body:
+      max_completion_tokens: 65536
+```
+
+or open Settings, select **Request overrides**, pick **raise the output budget
+for a provider** from the add-a-rule menu, and fill the provider scope; the
+other starter templates seed an empty rule and an upstream header for a
+client.
 
 ## Containers
 

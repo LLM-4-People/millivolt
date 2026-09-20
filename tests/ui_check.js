@@ -3470,6 +3470,183 @@ async function main() {
     delete w.__mrGateDoc;
   }
 
+  // ---- request-overrides editor: the settings dashboard surface ----
+  // The W47 spec's settings-dashboard section: the editor renders the
+  // server doc's seeded rules, edits collect round-trip to the strict POST
+  // shape, add/delete rows work, live per-card validation mirrors
+  // config.validateRequestOverrides, and Apply blocks on the first invalid
+  // card before the POST. Scope datalists seed from the settings doc's
+  // provider labels plus the dashboard's known sets (the wire-key owners).
+  {
+    const doc = JSON.parse(JSON.stringify(cfgDoc));
+    doc.fields.push({ key: 'request_overrides', category: 'overrides', label: 'Request override rules', kind: 'request_overrides', hot_reload: true });
+    doc.categories.push({ id: 'overrides', label: 'Request overrides', help: 'Scoped rewrites of the upstream request.' });
+    doc.values.request_overrides = [
+      { client: 'claude-code', provider: '', model: '', headers: { 'X-Title': 'my app' }, remove_headers: null, body: null },
+      { client: '', provider: 'epsilon.example', model: '', headers: null, remove_headers: ['User-Agent'], body: { max_tokens: 32768, max_completion_tokens: null } },
+    ];
+    doc.revision = 'ro-r1';
+    // The known sets are unioned across the operator states at datalist
+    // render time; pin them to the stubbed wire values before the render.
+    w.eval(`(() => {
+      pauseState = { ...pauseState, [KNOWN_CLIENTS_KEY]: ['c'], [KNOWN_PROVIDERS_KEY]: ['epsilon.example', 'p'] };
+      debugState = { ...debugState, [KNOWN_CLIENTS_KEY]: ['c'], [KNOWN_PROVIDERS_KEY]: ['epsilon.example', 'p'], [KNOWN_MODELS_KEY]: ['m'] };
+      throttleState = { ...throttleState, [KNOWN_PROVIDERS_KEY]: ['p'] };
+    })()`);
+    w.__roDoc = doc;
+    w.eval("settingsCat = 'overrides'; settingsDoc = window.__roDoc; fillSettingsForm(settingsDoc)");
+    d.getElementById('settings-sheet').hidden = false;
+    const roWrap = d.querySelector('#settings-fields [data-kind="request_overrides"]');
+    check('the settings sheet renders the request-overrides editor for the field', !!roWrap);
+    const cards = () => [...roWrap.querySelectorAll('.ro-rule')];
+    check('seeded rules render as ordered cards with scope, header rows, chips and body',
+      cards().length === 2 &&
+      cards()[0].querySelector('.ro-client').value === 'claude-code' &&
+      cards()[0].querySelector('.prov-hmap .sp-hname').value === 'X-Title' &&
+      cards()[1].querySelector('.ro-provider').value === 'epsilon.example' &&
+      cards()[1].querySelector('.prov-chip').dataset.rh === 'User-Agent' &&
+      cards()[1].querySelector('.ro-max-tokens').value === '32768');
+    check('empty scope fields carry the explicit any watermark with one concrete example',
+      cards()[1].querySelector('.ro-client').placeholder.includes('any client') &&
+      cards()[0].querySelector('.ro-provider').placeholder.includes('any provider') &&
+      cards()[0].querySelector('.ro-model').placeholder.includes('any model'));
+    check('the rule count line renders after the initial paint',
+      roWrap.querySelector('.mr-count').textContent === '2 / 64 rules');
+    check('scope datalists seed from the settings doc provider labels and the known sets',
+      [...roWrap.querySelectorAll('#ro-dl-provider option')].map(o => o.value).join(',') === 'epsilon.example,p' &&
+      [...roWrap.querySelectorAll('#ro-dl-client option')].map(o => o.value).join(',') === 'c' &&
+      [...roWrap.querySelectorAll('#ro-dl-model option')].map(o => o.value).join(',') === 'm');
+    check('collect round-trips the rules losslessly with empty collections omitted',
+      JSON.stringify(w.collectSettingsValues().request_overrides) === JSON.stringify([
+        { client: 'claude-code', provider: '', model: '', headers: { 'X-Title': 'my app' } },
+        { client: '', provider: 'epsilon.example', model: '', remove_headers: ['User-Agent'], body: { max_tokens: 32768 } },
+      ]));
+    check('the clean request-overrides draft reports no unsaved changes', !w.settingsIsDirty());
+    // template add: the guided-input discipline - a fresh card immediately
+    // asks for its scope, and the sheet counts itself dirty.
+    const tpl = roWrap.querySelector('.ro-tpl');
+    tpl.value = 'blank';
+    tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('the empty-rule template adds a card that asks for its scope and marks the sheet dirty',
+      cards().length === 3 && cards()[2].dataset.roState === 'error' &&
+      cards()[2].querySelector('.ro-err').textContent.includes('no scope set') &&
+      w.settingsIsDirty() && d.getElementById('settings-count').textContent === '1 unsaved');
+    const blank = cards()[2];
+    blank.querySelector('.ro-client').value = 'zed-cli';
+    blank.querySelector('.ro-client').dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('a scoped card with no action names the missing action',
+      blank.dataset.roState === 'error' && blank.querySelector('.ro-err').textContent.includes('no action set'));
+    blank.querySelector('.ro-rh-in').value = 'X-Old-Thing';
+    blank.querySelector('[data-ro-rh-add]').click();
+    check('a remove_headers chip completes the action and clears the row error',
+      blank.querySelector('.prov-chip').dataset.rh === 'X-Old-Thing' &&
+      blank.dataset.roState !== 'error' && blank.querySelector('.ro-err').textContent === '');
+    blank.querySelector('[data-ro-rm]').click();
+    check('the remove button deletes the card and renumbers the survivors',
+      cards().length === 2 &&
+      [...roWrap.querySelectorAll('.ro-num')].map(n => n.textContent).join(',') === 'rule 1,rule 2');
+    // the shared header-row grammar: Enter in the add inputs appends a row
+    // through the providers editor's own wiring, and the live validation
+    // owns the override grammar on top.
+    const card0 = cards()[0];
+    card0.querySelector('.prov-add-h .sp-hname').value = 'Authorization';
+    card0.querySelector('.prov-add-h .sp-hval').value = 'Bearer should-not-fly';
+    card0.querySelector('.prov-add-h .sp-hname').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const credRow = [...card0.querySelectorAll('.prov-hmap .prov-hrow')].pop();
+    check('the shared header-row grammar adds rows inside an override card',
+      !!credRow && credRow.querySelector('.sp-hname').value === 'Authorization');
+    check('a credential-owned header name reddens the row with the ownership message',
+      card0.dataset.roState === 'error' &&
+      card0.querySelector('.ro-err').textContent.includes('credential-owned') &&
+      credRow.querySelector('.sp-hname').classList.contains('prov-bad'));
+    credRow.querySelector('[data-prov-hrow-rm]').click();
+    check('removing the offending header row clears the card error',
+      card0.dataset.roState !== 'error' && card0.querySelector('.ro-err').textContent === '');
+    // canonical-case duplicate: HTTP names are case-insensitive, so
+    // x-title collides with the seeded X-Title (a true conflict).
+    card0.querySelector('.prov-add-h .sp-hname').value = 'x-title';
+    card0.querySelector('.prov-add-h .sp-hval').value = 'second';
+    card0.querySelector('.prov-add-h .sp-hval').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const dupRow = [...card0.querySelectorAll('.prov-hmap .prov-hrow')].pop();
+    check('a canonical-case duplicate header name is rejected live',
+      card0.dataset.roState === 'error' &&
+      card0.querySelector('.ro-err').textContent.includes('duplicate HTTP header name'));
+    // the blocked-Apply drive: an invalid request-overrides draft must stop
+    // the POST, name the fix on the status line and focus the first
+    // offender (the model-rules gate precedent).
+    const failuresBefore = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with an invalid request-overrides draft blocks the save and focuses the offending row',
+      failures.length === failuresBefore &&
+      d.getElementById('settings-count').textContent === 'request overrides - fix the highlighted rule first' &&
+      d.activeElement === dupRow.querySelector('.sp-hname') &&
+      dupRow.querySelector('.sp-hname').classList.contains('prov-bad'));
+    dupRow.querySelector('[data-prov-hrow-rm]').click();
+    // set + remove the same canonical name: one action per header.
+    card0.querySelector('.ro-rh-in').value = 'x-title';
+    card0.querySelector('[data-ro-rh-add]').click();
+    check('a name both set in headers and removed in remove_headers names the conflict',
+      card0.dataset.roState === 'error' &&
+      card0.querySelector('.ro-err').textContent.includes('both set in headers and removed'));
+    card0.querySelector('.prov-chip [data-prov-chip-rm]').click();
+    check('removing the conflicting chip clears the error',
+      card0.dataset.roState !== 'error' && !card0.querySelector('.prov-chip'));
+    // duplicate scope triple across rules: the exact server rejection.
+    const card1 = cards()[1];
+    card1.querySelector('.ro-client').value = 'claude-code';
+    card1.querySelector('.ro-provider').value = '';
+    card1.querySelector('.ro-client').dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('a duplicate scope triple names the earlier rule',
+      card1.dataset.roState === 'error' &&
+      card1.querySelector('.ro-err').textContent.includes('duplicate scope with rule 1'));
+    card1.querySelector('.ro-client').value = '';
+    card1.querySelector('.ro-provider').value = 'epsilon.example';
+    card1.querySelector('.ro-provider').dispatchEvent(new w.Event('input', { bubbles: true }));
+    // body band: outside 1..1000000.
+    card1.querySelector('.ro-max-mct').value = '2000000';
+    card1.querySelector('.ro-max-mct').dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('an out-of-band body ceiling names the 1..1000000 band',
+      card1.dataset.roState === 'error' &&
+      card1.querySelector('.ro-err').textContent.includes('between 1 and 1000000'));
+    card1.querySelector('.ro-max-mct').value = '';
+    card1.querySelector('.ro-max-mct').dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('the repaired draft is valid end to end',
+      roWrap.querySelectorAll('.ro-rule[data-ro-state="error"]').length === 0 && !w.settingsIsDirty());
+    // the save path: a real edit, then the POST carries the strict shape
+    // with the loaded revision (the settings save-flow stub discipline).
+    card1.querySelector('.prov-add-h .sp-hname').value = 'X-Workspace';
+    card1.querySelector('.prov-add-h .sp-hval').value = 'acme';
+    card1.querySelector('.prov-add-h .sp-hval').dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    const originalRoFetch = w.fetch;
+    const roPosts = [];
+    w.fetch = (url, init) => {
+      if (!String(url).includes('/admin/config')) return originalRoFetch(url, init);
+      return new Promise(resolve => {
+        if (init?.method === 'POST') roPosts.push({ resolve, body: JSON.parse(init.body) });
+        else resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(doc)) });
+      });
+    };
+    const roSave = w.applySettings();
+    check('the request-overrides save posts the strict lossless shape with the loaded revision',
+      roPosts.length === 1 && roPosts[0].body.revision === 'ro-r1' &&
+      JSON.stringify(roPosts[0].body.values.request_overrides) === JSON.stringify([
+        { client: 'claude-code', provider: '', model: '', headers: { 'X-Title': 'my app' } },
+        { client: '', provider: 'epsilon.example', model: '', headers: { 'X-Workspace': 'acme' }, remove_headers: ['User-Agent'], body: { max_tokens: 32768 } },
+      ]));
+    const savedRo = JSON.parse(JSON.stringify(roPosts[0].body.values.request_overrides));
+    roPosts.shift().resolve({ ok: true, statusText: 'OK', json: async () => ({ saved: true, revision: 'ro-r2', values: { ...doc.values, request_overrides: savedRo }, effective: {}, restart_required: [] }) });
+    await roSave;
+    check('the accepted save adopts the new revision and a clean draft',
+      w.eval('settingsDoc.revision') === 'ro-r2' && !w.settingsIsDirty() &&
+      /saved/.test(d.getElementById('settings-count').textContent));
+    w.fetch = originalRoFetch;
+    w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__settingsTestDoc;
+    delete w.__roDoc;
+  }
+
   // ---- test 12: chart preset registry - ids unique, dropdown follows ----
   const presetIds = w.eval('CHART_PRESETS.map(p => p.id)');
   check('CHART_PRESETS ids are unique', new Set(presetIds).size === presetIds.length);

@@ -13,15 +13,16 @@ import (
 type Kind string
 
 const (
-	KindString     Kind = "string"
-	KindInt        Kind = "int"
-	KindBytes      Kind = "bytes"
-	KindBool       Kind = "bool"
-	KindDuration   Kind = "duration"
-	KindStrings    Kind = "strings"
-	KindProviders  Kind = "providers"
-	KindAliases    Kind = "aliases"
-	KindModelRules Kind = "model_rules"
+	KindString           Kind = "string"
+	KindInt              Kind = "int"
+	KindBytes            Kind = "bytes"
+	KindBool             Kind = "bool"
+	KindDuration         Kind = "duration"
+	KindStrings          Kind = "strings"
+	KindProviders        Kind = "providers"
+	KindAliases          Kind = "aliases"
+	KindModelRules       Kind = "model_rules"
+	KindRequestOverrides Kind = "request_overrides"
 )
 
 // Category groups fields in the Settings menu (and in the generated YAML).
@@ -70,6 +71,7 @@ func Categories() []Category {
 		{ID: "dashboard", Label: "Dashboard", Help: "Live-view cadence and request-log window. Hot-reloads; open dashboards pick up the next tick."},
 		{ID: "models", Label: "Models", Help: "Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same model in every grouped surface. Records keep their exact spelling; hot-reloads."},
 		{ID: "providers", Label: "Providers", Help: "Optional per-provider JSON field-name maps: usage/cost response keys, the models metadata endpoint merged into /v1/models, and optional upstream wire headers. Empty = auto-detect."},
+		{ID: "overrides", Label: "Request overrides", Help: "Scoped rewrites of the upstream request: set, replace or remove HTTP headers and set output-token ceilings per client, provider and/or model. Rules match exactly, all matching rules apply in list order, and the later rule wins. Default: an empty list, the feature fully off."},
 	}
 }
 
@@ -324,6 +326,10 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "model_rules", Category: "models", Label: "Model grouping rules",
 			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
+		// ---- overrides ----
+		{Key: "request_overrides", Category: "overrides", Label: "Request override rules",
+			Help: "Ordered rules that rewrite the upstream request before relay. A rule matches when every non-empty scope field equals the request's value exactly: client as the classified client, provider as the canonical label after provider_aliases, model as the recorded model id; an empty scope field matches anything. All matching rules apply in list order, and for the same header or body field the later rule wins. headers sets or replaces upstream headers (names are canonicalized, values must be non-empty single-line), remove_headers deletes them, and body sets max_tokens / max_completion_tokens (1..1000000) on the OpenAI wire. Credential and protocol headers (authorization, cookie, host, content-type, and the whole x-proxy- control prefix) are rejected at load. The override applies after provider headers and the client's X-Proxy-Headers map and wins over both; it covers inference sends only, never model discovery or token refresh. Body rewrites apply to passthrough and translated-anthropic requests and re-stamp the recorded request cap; the Cursor bridge reads no body fields, so body is skipped for cursor targets while header rules still apply. An empty list leaves every request untouched. Hot-reloads.",
+			Kind: KindRequestOverrides, HotReload: true},
 	})
 })
 
@@ -391,6 +397,8 @@ func (f Field) TypeLine(def any) string {
 		b.WriteString("map of old provider label → canonical label")
 	case KindModelRules:
 		b.WriteString("ordered list of {mode: exact|pattern|lower, from, to} rewrite rules")
+	case KindRequestOverrides:
+		b.WriteString("ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules")
 	default:
 		b.WriteString(string(f.Kind))
 	}

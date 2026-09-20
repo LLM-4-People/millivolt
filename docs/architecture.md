@@ -14,7 +14,7 @@ defines their supported combinations.
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
 | [internal/backup](../internal/backup/archive.go) | Self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256). |
-| [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, native-run ownership, operator state/capture; the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
+| [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
 | [internal/sse](../internal/sse/analyzer.go) | Streaming content/usage/TTFT inspection; client-facing OpenAI SSE frames and completion envelopes. |
@@ -29,6 +29,15 @@ decoder. Ordinary content is measured without retaining decoded prompt/schema
 trees; opt-in previews stay bounded. Exceptional decoder compatibility belongs
 at that owner, not a second routing parser. The Start stamp follows body upload
 and precedes metadata/translation CPU.
+
+`resolveRequestOverrides` in
+[request.go](../internal/proxy/request.go) merges the matching
+`request_overrides` rules once per request, after routing metadata is known,
+and its merge has exactly two application stages: the final header stage of
+`buildUpstreamRequest`, and the cursor identity headers at the native send. Its
+body stamp is fail closed (an undecodable or oversize result relays the
+original bytes with one log line), and a nil resolution - the feature off or
+nothing matched - leaves the request path byte-identical.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
 active requests. Admission is provider+key scoped, with provider-wide token,

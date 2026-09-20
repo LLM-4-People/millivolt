@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -103,7 +105,9 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 
 	// Provider-configured headers (e.g. mimicking a first-party client's wire
 	// fingerprint) override client-forwarded values; the explicit per-request
-	// X-Proxy-Headers injection map below still wins over them.
+	// X-Proxy-Headers injection map below still wins over them, and the
+	// resolved request_overrides merge applies LAST of all - the operator's
+	// config is the point of an override, so it wins over every other source.
 	s.applyProviderHeaders(req.Header, t.provider)
 
 	// Extra headers the app asked us to add (or override), filtered.
@@ -116,6 +120,11 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 			req.Header.Add(k, v)
 		}
 	}
+
+	// Scoped request overrides: the resolved merge for this request closes
+	// the chain (its set/replace entries, then its removals), with the
+	// credential safety belt inside applyOverrideHeaders.
+	applyOverrideHeaders(req.Header, t.override, t.authHeader)
 
 	return req, nil
 }
@@ -163,6 +172,184 @@ func rustPlatform() string {
 		arch = "aarch64"
 	}
 	return runtime.GOOS + "; " + arch
+}
+
+// --- scoped request overrides (config request_overrides) ---
+
+// resolvedOverride is the per-request merge of every request_overrides rule
+// whose scope matched the request (client, provider, recorded model; an
+// empty scope field is a wildcard). resolveRequestOverrides owns the ordered
+// walk: for any one header name the LAST matching action wins - a later
+// set/replace beats an earlier removal and vice versa - and for the body
+// fields a later rule's value wins per field. A nil *resolvedOverride (the
+// feature-off default: no rules configured, or nothing matched) must leave
+// the request path byte-identical.
+type resolvedOverride struct {
+	// headers are the merged set/replace entries keyed by canonical header
+	// name (config validation canonicalizes case at the load boundary).
+	headers map[string]string
+	// removes are the merged removal names, sorted so application is
+	// deterministic. A name whose last action was a set is absent here, and
+	// one whose last action was a removal is absent from headers.
+	removes []string
+	// body holds the merged token ceilings; nil when no matching rule names
+	// a body field. It is stamped onto the request body only for
+	// OpenAI-wire targets (overrideBodyWireFormat).
+	body *config.OverrideBody
+}
+
+// resolveRequestOverrides walks the configured request_overrides rules in
+// list order and merges every rule whose non-empty scope fields all equal
+// the request's values exactly: the classified client, the canonical
+// provider label (post provider_aliases), and the recorded model id. No
+// canonicalization, no regex, no broadening - exact leaf only. No rules or
+// no match returns nil: the feature-off path costs one slice-length check,
+// while the configured-but-unmatched path allocates the removed map and
+// walks up to config.RequestOverridesMax rules before returning nil.
+func resolveRequestOverrides(rules []config.RequestOverride, client, provider, model string) *resolvedOverride {
+	if len(rules) == 0 {
+		return nil
+	}
+	var ov resolvedOverride
+	// removed tracks the names whose last action was a removal, so a later
+	// rule's set can win a name an earlier rule removed.
+	removed := make(map[string]bool)
+	matched := false
+	for i := range rules {
+		r := &rules[i]
+		if (r.Client != "" && r.Client != client) ||
+			(r.Provider != "" && r.Provider != provider) ||
+			(r.Model != "" && r.Model != model) {
+			continue
+		}
+		matched = true
+		for name, value := range r.Headers {
+			delete(removed, name)
+			if ov.headers == nil {
+				ov.headers = make(map[string]string, len(r.Headers))
+			}
+			ov.headers[name] = value
+		}
+		for _, name := range r.RemoveHeaders {
+			delete(ov.headers, name)
+			removed[name] = true
+		}
+		if r.Body != nil {
+			if ov.body == nil {
+				ov.body = &config.OverrideBody{}
+			}
+			if r.Body.MaxTokens != nil {
+				v := *r.Body.MaxTokens
+				ov.body.MaxTokens = &v
+			}
+			if r.Body.MaxCompletionTokens != nil {
+				v := *r.Body.MaxCompletionTokens
+				ov.body.MaxCompletionTokens = &v
+			}
+		}
+	}
+	if !matched {
+		return nil
+	}
+	if len(removed) > 0 {
+		ov.removes = slices.Sorted(maps.Keys(removed))
+	}
+	return &ov
+}
+
+// overrideBodyWireFormat reports whether a target's request body is
+// OpenAI-wire JSON - the only shape the request-overrides body fields can
+// edit. Cursor's agent.v1 run_request translator reads model, messages,
+// stream and tools only, so token ceilings carry no wire meaning on a
+// cursor target: its body section is skipped (header rules still apply).
+func overrideBodyWireFormat(format string) bool {
+	return format == "" || format == "openai" || format == "anthropic"
+}
+
+// applyOverrideHeaders applies the resolved request-overrides merge to an
+// upstream request's headers: every merged set/replace entry first, then the
+// merged removals. Both send owners stamp it as the operator's last word on
+// the upstream wire - as the final stage of buildUpstreamRequest (after
+// client-forwarded headers, the provider map, and X-Proxy-Headers), and in
+// setCursorIdentity after the provider identity map. Runtime safety belt: a
+// header whose name is the target's auth header, or Authorization, is
+// silently skipped in both directions - the upstream credential stays at
+// its owner even if a future config grammar slips one past validation.
+func applyOverrideHeaders(h http.Header, ov *resolvedOverride, authHeader string) {
+	if ov == nil {
+		return
+	}
+	for name, value := range ov.headers {
+		if overrideHeaderAuthOwned(name, authHeader) {
+			continue
+		}
+		h.Set(name, value)
+	}
+	for _, name := range ov.removes {
+		if overrideHeaderAuthOwned(name, authHeader) {
+			continue
+		}
+		h.Del(name)
+	}
+}
+
+// overrideHeaderAuthOwned reports whether an override header name is the
+// credential slot for this target: literal Authorization, or the target's
+// configured auth header (X-Proxy-Auth-Header, e.g. Anthropic's x-api-key).
+// Case-insensitive, like HTTP header names.
+func overrideHeaderAuthOwned(name, authHeader string) bool {
+	return strings.EqualFold(name, "Authorization") ||
+		(authHeader != "" && strings.EqualFold(name, authHeader))
+}
+
+// overrideRequestBody stamps the merged token ceilings onto an OpenAI-wire
+// request body and returns the rewritten bytes: the whole document decodes
+// as raw JSON values (every other field preserved verbatim), only the named
+// numeric fields are set, and the document re-marshals. Fail closed - why
+// carries the operator-actionable reason and the caller relays the ORIGINAL
+// bytes unchanged - when the body is not a JSON object or the rewritten
+// result would exceed the request byte budget.
+func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (out []byte, why string) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Sprintf("the request body is not a JSON object: %v", err)
+	}
+	if doc == nil {
+		// Valid JSON null: not an object, so no field can be set on it.
+		return nil, "the request body is not a JSON object"
+	}
+	if ob.MaxTokens != nil {
+		doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
+	}
+	if ob.MaxCompletionTokens != nil {
+		doc["max_completion_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxCompletionTokens))
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Sprintf("re-encoding the rewritten body failed: %v", err)
+	}
+	if int64(len(out)) > maxBytes {
+		return nil, fmt.Sprintf("the rewritten body would exceed max_request_bytes (%d bytes)", maxBytes)
+	}
+	return out, ""
+}
+
+// restampReqMaxTokens re-reads the effective token ceiling from a rewritten
+// body onto the record, so the hostile-cap boundary, the scheduler
+// reservation and the recorded request parameters all describe the bytes
+// actually sent upstream. Shares the max_completion_tokens-wins precedence
+// with the first decode; a caps decode that still fails (the client's own
+// cap field carried a non-number) keeps the first decode's value rather
+// than fabricating one.
+func restampReqMaxTokens(body []byte, rec *metrics.Record) {
+	var caps struct {
+		MaxTokens     *int `json:"max_tokens"`
+		MaxCompTokens *int `json:"max_completion_tokens"`
+	}
+	if json.Unmarshal(body, &caps) != nil {
+		return
+	}
+	rec.ReqMaxTokens = mergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
 }
 
 // joinUpstreamURL joins a base URL and a request path without duplicating a
@@ -853,6 +1040,21 @@ type requestParameters struct {
 	Messages []requestMessage[requestContent] `json:"messages"`
 }
 
+// mergeTokenCaps owns the token-ceiling precedence every decode of the
+// request's cap fields shares: max_completion_tokens wins over max_tokens
+// (the OpenAI pair's documented semantics, mirrored by the Anthropic
+// translator, which carries exactly one max_tokens upstream), and neither
+// present means no ceiling.
+func mergeTokenCaps(maxCompletion, maxTokens *int) *int {
+	switch {
+	case maxCompletion != nil:
+		return maxCompletion
+	case maxTokens != nil:
+		return maxTokens
+	}
+	return nil
+}
+
 // parseLLMRequest is the single document decode for routing and metadata.
 // Keep the two independent trust boundaries on type errors: a malformed
 // metadata-only field must not erase valid model/stream routing, and vice
@@ -886,12 +1088,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 				MaxCompTokens *int `json:"max_completion_tokens"`
 			}
 			if json.Unmarshal(body, &caps) == nil {
-				switch {
-				case caps.MaxCompTokens != nil:
-					rec.ReqMaxTokens = caps.MaxCompTokens
-				case caps.MaxTokens != nil:
-					rec.ReqMaxTokens = caps.MaxTokens
-				}
+				rec.ReqMaxTokens = mergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
 			}
 			rec.Model, rec.Stream = req.Model, req.Stream
 			return
@@ -902,11 +1099,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 	// pick: the translated body re-decodes through this same merge, so the
 	// trust-boundary check in ServeHTTP must see the one field a translated
 	// body can actually carry upstream.
-	if req.MaxCompTokens != nil {
-		rec.ReqMaxTokens = req.MaxCompTokens
-	} else if req.MaxTokens != nil {
-		rec.ReqMaxTokens = req.MaxTokens
-	}
+	rec.ReqMaxTokens = mergeTokenCaps(req.MaxCompTokens, req.MaxTokens)
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)

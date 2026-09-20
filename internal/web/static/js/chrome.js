@@ -648,6 +648,7 @@ const SETTINGS_CAT_REF = {
   dashboard:  { dim: 'time' },
   models:     { dim: 'model' },
   providers:  { dim: 'provider' },
+  overrides:  { dim: 'request' },
 };
 
 function settingsCatVisual(id) {
@@ -798,6 +799,7 @@ function fillSettingsForm(doc) {
   // Initial paint for every rules editor: validation states, preview bench,
   // rule count - the same pass the delegated events run on every edit.
   box.querySelectorAll('.mr-wrap').forEach(wrap => { validateModelRulesDraft(wrap); mrPreview(wrap); });
+  box.querySelectorAll('.ro-wrap').forEach(wrap => { validateRequestOverridesDraft(wrap); roSyncCount(wrap); });
   fillSettingsLive(doc);
   settingsStatus(doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist');
   settingsSnap = settingsFingerprint();
@@ -1220,9 +1222,9 @@ function settingsFieldHTML(f, val, def, override) {
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
-  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && String(val) === String(def)) {
+  else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides' && String(val) === String(def)) {
     hint = `<span class="st-hint">default</span>`;
-  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings') {
+  } else if (def != null && def !== '' && f.kind !== 'providers' && f.kind !== 'aliases' && f.kind !== 'strings' && f.kind !== 'request_overrides') {
     hint = `<span class="st-hint">default ${escapeHtml(String(def))}</span>`;
   }
   if (locked) hint += `<span class="st-hint">via flag · ${escapeHtml(String(override))}</span>`;
@@ -1241,6 +1243,8 @@ function settingsFieldHTML(f, val, def, override) {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="aliases">${aliasesEditorHTML(val)}</div>`;
   } else if (f.kind === 'model_rules') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="model_rules">${modelRulesEditorHTML(val)}</div>`;
+  } else if (f.kind === 'request_overrides') {
+    control = `<div data-key="${escapeHtml(f.key)}" data-kind="request_overrides">${requestOverridesEditorHTML(val)}</div>`;
   } else if (f.kind === 'int') {
     const min = f.min != null ? ` min="${f.min}"` : '';
     const max = f.max != null ? ` max="${f.max}"` : '';
@@ -1248,7 +1252,7 @@ function settingsFieldHTML(f, val, def, override) {
   } else {
     control = `<div class="st-ctl-line"><input type="text" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${dis}>${unit}</div>`;
   }
-  const block = (f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'strings' || f.kind === 'model_rules') ? ' st-block' : '';
+  const block = (f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'strings' || f.kind === 'model_rules' || f.kind === 'request_overrides') ? ' st-block' : '';
   const ttl = escapeHtml((f.help || '') + (f.help && f.key ? ' · ' : '') + (f.key || ''));
   const hot = f.hot_reload ? '1' : '0';
   return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}"><div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div><div class="st-ctl">${control}${hint}</div></div>`;
@@ -1842,6 +1846,362 @@ function mrRestoreDefaults(wrap) {
   mrDraftChanged(wrap);
 }
 
+// ---- request overrides editor ----
+// request_overrides: ordered rules rewriting the upstream request before
+// relay (headers set/replace/remove plus OpenAI-wire token ceilings),
+// scoped per client, provider and/or model. One visual grammar with the
+// other structured editors: each rule is a .prov-sec card inside an
+// .mr-wrap shell (tools row, count, muted tokens), the headers mapping
+// reuses the providers editor's headerRowHTML family verbatim (its add
+// row, Enter key, remove buttons and change-time token lint all ride the
+// existing delegated wiring), and remove_headers reuses the chip grammar.
+// Live per-row validation mirrors config.validateRequestOverrides at every
+// keystroke (the validateMrRow discipline): scope required, action
+// required, RFC 7230 names, the credential/protocol/x-proxy- ownership
+// set, one canonical name never both set and removed, the 1..1000000 body
+// band and the duplicate-scope rejection. Apply walks the draft and blocks
+// the POST on the first invalid card, focusing the offending input.
+// Scope inputs get datalist autocomplete from the dashboard's known sets
+// (the wire-key owners) plus the settings doc's provider labels; free text
+// stays allowed because rules may target values not yet observed.
+// Mirrors config.RequestOverridesMax (64) - the count line and template
+// add-gate use it.
+const REQUEST_OVERRIDES_MAX = 64;
+// RO_FORBIDDEN_HEADERS mirrors config.forbiddenOverrideHeaders: the
+// credential and protocol names the proxy or the transport owns, keyed
+// lowercase because HTTP header names are case-insensitive. The x-proxy-
+// control prefix is denied as a whole by the prefix check in
+// roForbiddenReason. Deleting one of these is as breaking as rewriting it,
+// so both of a rule's header lists share the grammar.
+const RO_FORBIDDEN_HEADERS = {
+  authorization: 'credential',
+  cookie: 'credential',
+  'proxy-authorization': 'credential',
+  host: 'protocol',
+  'content-type': 'protocol',
+  'content-length': 'protocol',
+  'transfer-encoding': 'protocol',
+  te: 'protocol',
+  connection: 'protocol',
+  'keep-alive': 'protocol',
+  'proxy-authenticate': 'protocol',
+  'proxy-connection': 'protocol',
+  trailers: 'protocol',
+  upgrade: 'protocol',
+};
+// RO_TEMPLATES are the one-click starter rules (the mrTemplates precedent):
+// payloads stay minimal so the live validation guides the missing scope.
+const RO_TEMPLATES = {
+  blank: {},
+  budget: { body: { max_tokens: 32768 } },
+  header: { headers: { 'X-Title': 'my app' } },
+};
+
+// roForbiddenReason mirrors config.ForbiddenOverrideHeader: which owner
+// denies a header name, or '' when the name is allowed.
+function roForbiddenReason(name) {
+  const reason = RO_FORBIDDEN_HEADERS[name.toLowerCase()];
+  if (reason) return reason;
+  if (name.toLowerCase().startsWith('x-proxy-')) return 'control';
+  return '';
+}
+
+// roForbiddenMsg is the operator wording for a denied header name (the
+// config.forbiddenOverrideHeaderError mirror): each reason explains who
+// owns the header, so the fix is obvious from the message alone.
+function roForbiddenMsg(name, field) {
+  const reason = roForbiddenReason(name);
+  if (reason === 'credential')
+    return `${field}: '${name}' is credential-owned and cannot be overridden; the proxy injects the provider key itself`;
+  if (reason === 'protocol')
+    return `${field}: '${name}' is protocol-owned and cannot be overridden; the proxy and the HTTP transport manage it`;
+  return `${field}: '${name}' carries the x-proxy- control prefix and cannot be overridden; x-proxy- headers are the proxy's own request channel`;
+}
+
+// roHeaderValueOK mirrors config.ValidHeaderValue plus the overrides'
+// non-empty rule: no NUL/CR/LF or other control bytes, and not blank after
+// trim. Tab is allowed like the server allows it.
+function roHeaderValueOK(v) {
+  if (!v.trim()) return false;
+  for (let i = 0; i < v.length; i++) {
+    const c = v.charCodeAt(i);
+    if (c === 9 || (c >= 32 && c !== 127)) continue;
+    return false;
+  }
+  return true;
+}
+
+// roKnownOptions derives one kind's autocomplete options: provider from
+// the settings doc's provider labels plus the dashboard's known-providers
+// sets, client and model from the dashboard's known sets (the wire-key
+// owners - knownNames' union discipline across the operator states).
+function roKnownOptions(kind) {
+  const out = new Set();
+  if (kind === 'provider') {
+    const m = settingsDoc && settingsDoc.values && settingsDoc.values.providers;
+    if (m && typeof m === 'object') for (const k of Object.keys(m)) if (k) out.add(String(k));
+  }
+  const key = kind === 'client' ? KNOWN_CLIENTS_KEY : kind === 'provider' ? KNOWN_PROVIDERS_KEY : KNOWN_MODELS_KEY;
+  for (const st of [pauseState, debugState, throttleState]) {
+    const list = st && st[key];
+    if (Array.isArray(list)) for (const n of list) if (n) out.add(String(n));
+  }
+  return [...out].sort();
+}
+
+function roDatalistHTML(kind) {
+  const id = 'ro-dl-' + kind;
+  return `<datalist id="${id}">${roKnownOptions(kind).map(o => `<option value="${escapeHtml(o)}"></option>`).join('')}</datalist>`;
+}
+
+// roSyncDatalists refreshes the autocomplete options at focus time: the
+// known sets arrive on their own refresh cadence, so options picked at
+// render time can be stale while the sheet is open.
+function roSyncDatalists(wrap) {
+  if (!wrap) return;
+  ['client', 'provider', 'model'].forEach(kind => {
+    const dl = wrap.querySelector('#ro-dl-' + kind);
+    if (dl) dl.innerHTML = roKnownOptions(kind).map(o => `<option value="${escapeHtml(o)}"></option>`).join('');
+  });
+}
+
+function roRemoveChipHTML(name) {
+  return `<span class="prov-chip" data-rh="${escapeHtml(name)}"><span class="prov-chip-p">${escapeHtml(name)}</span><button type="button" class="prov-x" data-prov-chip-rm aria-label="remove ${escapeHtml(name)}">✕</button></span>`;
+}
+
+// roRuleCardHTML renders one rule card. Scope inputs carry the explicit
+// "any" watermark (an empty scope field is a wildcard - never a silent
+// surprise) and one concrete example each; the headers section reuses the
+// providers editor's row grammar; body fields stay empty = unset.
+function roRuleCardHTML(r, i) {
+  r = r || {};
+  const headers = r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers) ? r.headers : {};
+  const removes = Array.isArray(r.remove_headers) ? r.remove_headers : [];
+  const body = r.body && typeof r.body === 'object' ? r.body : {};
+  const num = `rule ${i + 1}`;
+  const sc = 'style="flex:1;min-width:0"';
+  return `<div class="prov-sec ro-rule">` +
+    `<div class="prov-lb"><span class="ro-num">${escapeHtml(num)}</span><span class="prov-sub">scope - an empty field matches any request</span><button type="button" class="prov-x" data-ro-rm aria-label="remove rule" title="remove rule" style="margin-left:auto">✕</button></div>` +
+    `<div class="st-ctl-line ro-scope">` +
+    `<input class="ro-client" list="ro-dl-client" value="${escapeHtml(r.client || '')}" ${sc} placeholder="any client - e.g. claude-code" aria-label="rule ${i + 1} client scope">` +
+    `<input class="ro-provider" list="ro-dl-provider" value="${escapeHtml(r.provider || '')}" ${sc} placeholder="any provider - e.g. nano-gpt.com" aria-label="rule ${i + 1} provider scope">` +
+    `<input class="ro-model" list="ro-dl-model" value="${escapeHtml(r.model || '')}" ${sc} placeholder="any model - e.g. glm-5.3" aria-label="rule ${i + 1} model scope">` +
+    `</div>` +
+    `<div class="prov-lb"><span>headers</span><span class="prov-sub">set or replace upstream headers - e.g. X-Title, my app</span></div>` +
+    `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
+    `<div class="prov-add prov-add-h"><input class="sp-hname" placeholder="header name… ↵" aria-label="add header name"><input class="sp-hval" placeholder="value - e.g. my-app/1.0 ↵" aria-label="add header value"><button type="button" class="btn prov-addbtn" data-prov-add-header aria-label="add header">+</button></div>` +
+    `<div class="prov-lb"><span>remove headers</span><span class="prov-sub">delete upstream headers by name - e.g. User-Agent</span></div>` +
+    `<div class="prov-chips">${removes.map(n => roRemoveChipHTML(String(n == null ? '' : n))).join('')}</div>` +
+    `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
+    `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
+    `<div class="st-ctl-line ro-body">` +
+    `<input class="ro-max-tokens" type="number" min="1" max="1000000" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" ${sc} placeholder="max_tokens - e.g. 32768" aria-label="rule ${i + 1} max tokens ceiling">` +
+    `<input class="ro-max-mct" type="number" min="1" max="1000000" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" ${sc} placeholder="max_completion_tokens - e.g. 32768" aria-label="rule ${i + 1} max completion tokens ceiling">` +
+    `</div>` +
+    `<div class="mr-err ro-err" aria-live="polite"></div>` +
+    `</div>`;
+}
+
+function requestOverridesEditorHTML(val) {
+  const rules = Array.isArray(val) ? val : [];
+  return `<div class="prov-sec mr-wrap ro-wrap">` +
+    `<div class="mr-hint">each rule rewrites the upstream request before relay · a rule matches when every non-empty scope field equals the request's value exactly · all matching rules apply in list order, the later rule wins · headers set or replace, remove_headers deletes, body stamps output-token ceilings</div>` +
+    `<div class="mr-tools"><select class="ro-tpl" aria-label="add a rule from a template"><option value="">add a rule…</option><option value="blank">empty rule</option><option value="budget">raise the output budget for a provider</option><option value="header">set an upstream header for a client</option></select><span class="mr-count muted"></span></div>` +
+    `<div class="ro-rows">${rules.map((r, i) => roRuleCardHTML(r, i)).join('')}</div>` +
+    roDatalistHTML('client') + roDatalistHTML('provider') + roDatalistHTML('model') +
+    `</div>`;
+}
+
+// roApplyTemplate appends one starter rule from the templates select. The
+// payload is minimal; the live validation immediately asks for the missing
+// scope (the mrApplyTemplate guided-input precedent) and focus lands on
+// the scope field the template intends.
+function roApplyTemplate(sel) {
+  const kind = sel.value;
+  sel.value = '';
+  const r = RO_TEMPLATES[kind];
+  if (!r) return;
+  const wrap = sel.closest('.ro-wrap');
+  if (!wrap || wrap.querySelectorAll('.ro-rule').length >= REQUEST_OVERRIDES_MAX) return;
+  const rows = wrap.querySelector('.ro-rows');
+  rows.insertAdjacentHTML('beforeend', roRuleCardHTML(r, rows.children.length));
+  roDraftChanged(wrap);
+  const card = [...wrap.querySelectorAll('.ro-rule')].pop();
+  const focus = card && card.querySelector(kind === 'budget' ? '.ro-provider' : '.ro-client');
+  if (focus) focus.focus();
+}
+
+// addRoRemoveHeader appends one remove_headers chip from the add input.
+// Deny by default on the token grammar (flash instead of adding a chip the
+// server would refuse); ownership and cross-list conflicts surface through
+// the live validation with their full messages.
+function addRoRemoveHeader(card) {
+  const input = card && card.querySelector('.ro-rh-in');
+  const chips = card && card.querySelector('.prov-chips');
+  if (!input || !chips) return;
+  const name = String(input.value || '').trim();
+  if (!name || !PROV_HEADER_RE.test(name)) { flashBadInput(input); return; }
+  if ([...chips.querySelectorAll('.prov-chip')].some(c => String(c.dataset.rh || '').toLowerCase() === name.toLowerCase())) { flashBadInput(input); return; }
+  chips.insertAdjacentHTML('beforeend', roRemoveChipHTML(name));
+  input.value = '';
+  roDraftChanged(card.closest('.ro-wrap'));
+}
+
+// validateRoRow is the live per-card gate (the validateMrRow discipline):
+// every check mirrors the server's checks and rejections. All offending
+// inputs redden; the first failure in server order owns the message text.
+// seen maps trimmed scope triples to their 1-based rule number for the
+// duplicate scope wording; index is this card's 0-based position.
+function validateRoRow(card, seen, index) {
+  const err = card.querySelector('.ro-err');
+  card.querySelectorAll('.prov-bad').forEach(el => el.classList.remove('prov-bad'));
+  const scopeVal = sel => String((card.querySelector(sel) || {}).value || '').trim();
+  const client = scopeVal('.ro-client');
+  const provider = scopeVal('.ro-provider');
+  const model = scopeVal('.ro-model');
+  const headerRows = [...card.querySelectorAll('.prov-hmap .prov-hrow')];
+  const removeChips = [...card.querySelectorAll('.prov-chips .prov-chip')].map(c => String(c.dataset.rh || '').trim());
+  const bodyFields = [
+    ['max_tokens', card.querySelector('.ro-max-tokens')],
+    ['max_completion_tokens', card.querySelector('.ro-max-mct')],
+  ];
+  let level = 'ok', msg = '';
+  const fail = (input, text) => {
+    if (input) input.classList.add('prov-bad');
+    if (level !== 'error') { level = 'error'; msg = text; }
+  };
+  if (!client && !provider && !model) {
+    ['.ro-client', '.ro-provider', '.ro-model'].forEach(sel => fail(card.querySelector(sel),
+      'no scope set - give the rule a client, provider or model, or remove the rule'));
+  } else if (!headerRows.length && !removeChips.length && !bodyFields.some(([, input]) => input && String(input.value || '').trim())) {
+    fail(card.querySelector('.prov-add-h .sp-hname'),
+      'no action set - give the rule a headers entry, a remove_headers entry or a body value, or remove the rule');
+  } else {
+    const seenHeaders = new Set();
+    const headerKeys = new Set();
+    for (const row of headerRows) {
+      const nameIn = row.querySelector('.sp-hname');
+      const valIn = row.querySelector('.sp-hval');
+      const name = String((nameIn || {}).value || '').trim();
+      const value = String((valIn || {}).value || '');
+      if (!name) { fail(nameIn, 'headers: a header name is empty or only whitespace - fill it in or remove the row'); continue; }
+      if (!PROV_HEADER_RE.test(name)) { fail(nameIn, `headers: '${name}' is not a valid header name (RFC 7230 token)`); continue; }
+      if (roForbiddenReason(name)) { fail(nameIn, roForbiddenMsg(name, 'headers')); continue; }
+      const key = name.toLowerCase();
+      if (seenHeaders.has(key)) { fail(nameIn, `headers: duplicate HTTP header name '${name}'`); continue; }
+      seenHeaders.add(key);
+      headerKeys.add(key);
+      if (!roHeaderValueOK(value)) fail(valIn, `headers: ${name}: value must be a non-empty single-line header value`);
+    }
+    const seenRemoves = new Set();
+    for (const name of removeChips) {
+      if (!name || !PROV_HEADER_RE.test(name)) { fail(null, `remove_headers: '${name}' is not a valid header name (RFC 7230 token)`); continue; }
+      if (roForbiddenReason(name)) { fail(null, roForbiddenMsg(name, 'remove_headers')); continue; }
+      const key = name.toLowerCase();
+      if (seenRemoves.has(key)) { fail(null, `remove_headers: duplicate HTTP header name '${name}'`); continue; }
+      seenRemoves.add(key);
+      if (headerKeys.has(key)) fail(card.querySelector('.prov-add-h .sp-hname'),
+        `'${name}' is both set in headers and removed in remove_headers; keep exactly one action per header`);
+    }
+    for (const [name, input] of bodyFields) {
+      const text = input && String(input.value || '').trim();
+      if (!text) continue;
+      const n = Number(text);
+      if (!Number.isSafeInteger(n) || n < 1 || n > 1000000) fail(input, `body.${name}: '${text}' must be a whole number between 1 and 1000000`);
+    }
+  }
+  const triple = client + '\u0000' + provider + '\u0000' + model;
+  if (level === 'ok' && seen && seen.has(triple)) {
+    level = 'error';
+    msg = `duplicate scope with rule ${seen.get(triple)} - the same client, provider and model; merge the rules or change one scope`;
+  } else if (seen && (client || provider || model)) {
+    seen.set(triple, index + 1);
+  }
+  card.dataset.roState = level;
+  if (err) { err.textContent = msg; err.dataset.level = level === 'error' ? 'error' : ''; }
+  return level;
+}
+
+// validateRequestOverridesDraft walks every rule card in order and returns
+// the first invalid one (Apply blocks on it; the button flow focuses and
+// flashes it).
+function validateRequestOverridesDraft(wrap) {
+  const seen = new Map();
+  let firstBad = null;
+  wrap.querySelectorAll('.ro-rule').forEach((card, i) => {
+    if (validateRoRow(card, seen, i) === 'error' && !firstBad) firstBad = card;
+  });
+  return { ok: !firstBad, firstBad };
+}
+
+// roRenumber rewrites the cards' rule numbers after any add or remove so
+// they keep matching the request_overrides[i] indexes the server cites in
+// its validation errors.
+function roRenumber(wrap) {
+  wrap.querySelectorAll('.ro-rule').forEach((card, i) => {
+    const el = card.querySelector('.ro-num');
+    if (el) el.textContent = 'rule ' + (i + 1);
+  });
+}
+
+// roSyncCount keeps the "N / 64 rules" line honest and gates the template
+// add-control at the cap (mirrors config.RequestOverridesMax).
+function roSyncCount(wrap) {
+  const n = wrap.querySelectorAll('.ro-rule').length;
+  const count = wrap.querySelector('.mr-count');
+  if (count) count.textContent = n + ' / ' + REQUEST_OVERRIDES_MAX + ' rules';
+  const tpl = wrap.querySelector('.ro-tpl');
+  if (tpl) tpl.disabled = n >= REQUEST_OVERRIDES_MAX;
+}
+
+// roDraftChanged is the request-overrides draft-changed epilogue (the
+// mrDraftChanged discipline): mark the sheet dirty, revalidate the whole
+// draft, renumber the cards and refresh the count.
+function roDraftChanged(wrap) {
+  markSettingsDirty();
+  validateRequestOverridesDraft(wrap);
+  roRenumber(wrap);
+  roSyncCount(wrap);
+}
+
+// collectRequestOverrides reads the editor into the strict POST shape:
+// scope fields always ride along (empty string = wildcard), header names
+// are trimmed like the server trims them, and empty collections stay
+// absent (headers, remove_headers, body and its fields) so a rule carries
+// only what it sets. The shared duplicate-key put discipline throws on
+// Apply for an exact duplicate or empty header name; canonical-case
+// conflicts and the rest of the grammar are the live gate's to block and
+// the server's to validate.
+function collectRequestOverrides(wrap, put) {
+  const out = [];
+  wrap.querySelectorAll('.ro-rule').forEach(card => {
+    const r = Object.create(null);
+    r.client = String((card.querySelector('.ro-client') || {}).value || '').trim();
+    r.provider = String((card.querySelector('.ro-provider') || {}).value || '').trim();
+    r.model = String((card.querySelector('.ro-model') || {}).value || '').trim();
+    const headers = Object.create(null);
+    card.querySelectorAll('.prov-hmap .prov-hrow').forEach(row => {
+      const n = String((row.querySelector('.sp-hname') || {}).value || '').trim();
+      const v = String((row.querySelector('.sp-hval') || {}).value || '');
+      put(headers, n, v, row.querySelector('.sp-hname'));
+    });
+    if (Object.keys(headers).length) r.headers = headers;
+    const removes = [...card.querySelectorAll('.prov-chip')].map(c => String(c.dataset.rh || '').trim()).filter(Boolean);
+    if (removes.length) r.remove_headers = removes;
+    const body = Object.create(null);
+    for (const [key, sel] of [['max_tokens', '.ro-max-tokens'], ['max_completion_tokens', '.ro-max-mct']]) {
+      const input = card.querySelector(sel);
+      const text = input && String(input.value || '').trim();
+      if (!text) continue;
+      const n = Number(text);
+      body[key] = Number.isSafeInteger(n) ? n : text;
+    }
+    if (Object.keys(body).length) r.body = body;
+    out.push(r);
+  });
+  return out;
+}
+
 // addAliasRow appends one mapping row from the add inputs. Deny by default:
 // either side empty, a self-mapping, or a duplicate old label flashes the
 // offending input instead of adding a row that could never apply.
@@ -2030,6 +2390,8 @@ function providersEditorClick(e) {
     return;
   }
   if (t.closest('[data-mr-restore]')) { mrRestoreDefaults(t.closest('.mr-wrap')); return; }
+  if (t.closest('[data-ro-rm]')) { const wrap = t.closest('.ro-wrap'); t.closest('.ro-rule').remove(); roDraftChanged(wrap); return; }
+  if (t.closest('[data-ro-rh-add]')) { addRoRemoveHeader(t.closest('.ro-rule')); return; }
   if (t.closest('[data-prov-rm]')) { t.closest('.st-prov').remove(); markSettingsDirty(); return; }
   if (t.closest('[data-prov-collapse]')) { toggleProvCollapse(t.closest('.st-prov')); return; }
   // The header band itself toggles collapse - except its interactive parts.
@@ -2052,7 +2414,15 @@ function providersEditorClick(e) {
     if (t.closest('[data-prov-add]')) { addProviderCard(t.closest('[data-prov-add]')); return; }
     return; // clicks inside the open menu close nothing but themselves
   }
-  if (t.closest('[data-prov-chip-rm]')) { t.closest('.prov-chip').remove(); markSettingsDirty(); return; }
+  if (t.closest('[data-prov-chip-rm]')) {
+    // resolve the wrap before the removal: closest walks ancestors, and a
+    // detached node has none (the request-override cards reuse this
+    // affordance and must revalidate their draft after the mutation).
+    const roW = t.closest('.ro-wrap');
+    t.closest('.prov-chip').remove();
+    if (roW) roDraftChanged(roW); else markSettingsDirty();
+    return;
+  }
   // Usage and model mapping rows share one remove branch: both remove their
   // .prov-urow and re-sync the kind's picker (the render/add twins already
   // share mappingRowHTML).
@@ -2067,8 +2437,13 @@ function providersEditorClick(e) {
   if (t.closest('[data-prov-add-cost]')) { addCostKey(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-add-usage]')) { addUsageRow(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-add-model]')) { addModelRow(t.closest('.prov-sec')); return; }
-  if (t.closest('[data-prov-hrow-rm]')) { t.closest('.prov-urow').remove(); markSettingsDirty(); return; }
-  if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); return; }
+  if (t.closest('[data-prov-hrow-rm]')) {
+    const roW = t.closest('.ro-wrap');
+    t.closest('.prov-urow').remove();
+    if (roW) roDraftChanged(roW); else markSettingsDirty();
+    return;
+  }
+  if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); const roW = t.closest('.ro-wrap'); if (roW) roDraftChanged(roW); return; }
   // Any click elsewhere in the editor closes a stray open add-menu.
   closeProvMenus(t.closest('[data-kind="providers"]'));
 }
@@ -2091,6 +2466,11 @@ function wireSettingsDelegation() {
       // the field, the moment it goes wrong) + the preview bench refresh.
       validateModelRulesDraft(wrap);
       mrPreview(wrap);
+    }
+    if (e.target.closest && e.target.closest('.ro-wrap')) {
+      // the request-overrides editor rides the same live validation
+      // discipline: every keystroke revalidates the rule cards.
+      validateRequestOverridesDraft(e.target.closest('.ro-wrap'));
     }
     dirty(e);
   });
@@ -2124,6 +2504,7 @@ function wireSettingsDelegation() {
       mrDraftChanged(e.target.closest('.mr-wrap'));
     }
     if (e.target.classList && e.target.classList.contains('mr-tpl')) mrApplyTemplate(e.target);
+    if (e.target.classList && e.target.classList.contains('ro-tpl')) roApplyTemplate(e.target);
     dirty(e);
   });
   box.addEventListener('keydown', e => {
@@ -2132,7 +2513,20 @@ function wireSettingsDelegation() {
     else if (e.target.classList.contains('prov-new-label')) { e.preventDefault(); addProviderCard(e.target); }
     else if (e.target.classList.contains('al-new-from') || e.target.classList.contains('al-new-to')) { e.preventDefault(); addAliasRow(e.target.closest('.prov-add')); }
     else if (e.target.classList.contains('mr-new-from') || e.target.classList.contains('mr-new-to')) { e.preventDefault(); addModelRuleRow(e.target.closest('.mr-add')); }
-    else if (e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval')) { e.preventDefault(); addHeaderRow(e.target.closest('.prov-sec')); }
+    else if (e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval')) {
+      e.preventDefault();
+      const roW = e.target.closest('.ro-wrap');
+      addHeaderRow(e.target.closest('.prov-sec'));
+      if (roW) roDraftChanged(roW);
+    }
+    else if (e.target.classList.contains('ro-rh-in')) { e.preventDefault(); addRoRemoveHeader(e.target.closest('.ro-rule')); }
+  });
+  // Scope autocomplete refreshes at focus time: the known sets arrive on
+  // their own cadence, so the datalists re-derive when the field is entered.
+  box.addEventListener('focusin', e => {
+    if (e.target.classList && (e.target.classList.contains('ro-client') || e.target.classList.contains('ro-provider') || e.target.classList.contains('ro-model'))) {
+      roSyncDatalists(e.target.closest('.ro-wrap'));
+    }
   });
   box.addEventListener('click', e => {
     if (e.target && e.target.id === 'btn-backup-download') { runBackupDownload(); return; }
@@ -2204,6 +2598,10 @@ function collectSettingsValues(validate = false) {
     }
     if (el.dataset.kind === 'model_rules') {
       out[k] = collectModelRules(el);
+      return;
+    }
+    if (el.dataset.kind === 'request_overrides') {
+      out[k] = collectRequestOverrides(el, put);
       return;
     }
     if (el.dataset.kind === 'aliases') {
@@ -2333,6 +2731,21 @@ function applySettings() {
       updateSettingsActions();
       settingsStatus('model rules - fix the highlighted rule first');
       const f = gate.firstBad.querySelector('.mr-from');
+      if (f) { f.focus(); flashBadInput(f); }
+      if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
+      return;
+    }
+  }
+  // Request-overrides save gate: the same discipline - the offending rule
+  // card is already marked red inline; focus its first bad input.
+  const roW = $('settings-fields') && $('settings-fields').querySelector('[data-kind="request_overrides"]');
+  if (roW) {
+    const gate = validateRequestOverridesDraft(roW);
+    if (!gate.ok) {
+      delete btn.dataset.busy;
+      updateSettingsActions();
+      settingsStatus('request overrides - fix the highlighted rule first');
+      const f = gate.firstBad.querySelector('.prov-bad') || gate.firstBad.querySelector('.ro-client');
       if (f) { f.focus(); flashBadInput(f); }
       if (gate.firstBad.scrollIntoView) gate.firstBad.scrollIntoView({ block: 'center' });
       return;

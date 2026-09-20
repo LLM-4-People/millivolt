@@ -589,3 +589,27 @@ providers:
 # Hot-reload: yes.
 #   type: map of old provider label → canonical label
 provider_aliases: {}
+
+# ---- Request overrides ----
+# Scoped rewrites of the upstream request: set, replace or remove HTTP headers and set
+# output-token ceilings per client, provider and/or model. Rules match exactly, all
+# matching rules apply in list order, and the later rule wins. Default: an empty list, the
+# feature fully off.
+# Ordered rules that rewrite the upstream request before relay. A rule matches when every
+# non-empty scope field equals the request's value exactly: client as the classified
+# client, provider as the canonical label after provider_aliases, model as the recorded
+# model id; an empty scope field matches anything. All matching rules apply in list order,
+# and for the same header or body field the later rule wins. headers sets or replaces
+# upstream headers (names are canonicalized, values must be non-empty single-line),
+# remove_headers deletes them, and body sets max_tokens / max_completion_tokens
+# (1..1000000) on the OpenAI wire. Credential and protocol headers (authorization, cookie,
+# host, content-type, and the whole x-proxy- control prefix) are rejected at load. The
+# override applies after provider headers and the client's X-Proxy-Headers map and wins
+# over both; it covers inference sends only, never model discovery or token refresh. Body
+# rewrites apply to passthrough and translated-anthropic requests and re-stamp the
+# recorded request cap; the Cursor bridge reads no body fields, so body is skipped for
+# cursor targets while header rules still apply. An empty list leaves every request
+# untouched. Hot-reloads.
+# Hot-reload: yes.
+#   type: ordered list of {client, provider, model, headers, remove_headers, body} upstream rewrite rules · default []
+request_overrides: []

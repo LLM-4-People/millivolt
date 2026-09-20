@@ -173,6 +173,12 @@ func exportValue(f Field, v any) any {
 			out[k] = pv
 		}
 		return out
+	case KindRequestOverrides:
+		rs, ok := v.([]RequestOverride)
+		if !ok || rs == nil {
+			return []RequestOverride{}
+		}
+		return cloneRequestOverrides(rs)
 	default:
 		return v
 	}
@@ -261,6 +267,12 @@ func (c *Config) setField(f Field, v any) error {
 			return err
 		}
 		rv.Set(reflect.ValueOf(rs))
+	case KindRequestOverrides:
+		ro, err := asRequestOverrides(v)
+		if err != nil {
+			return err
+		}
+		rv.Set(reflect.ValueOf(ro))
 	default:
 		return fmt.Errorf("unsupported kind %q", f.Kind)
 	}
@@ -437,6 +449,17 @@ func asProviders(v any) (map[string]ProviderOverride, error) {
 // gate the YAML path passes through.
 func asModelRules(v any) ([]ModelRule, error) {
 	return strictCoerce(v, []ModelRule{}, "[]", "want list", "want [{mode, from, to}]")
+}
+
+// asRequestOverrides coerces the Settings POST shape of request_overrides
+// (ordered list of {client, provider, model, headers, remove_headers,
+// body}). Field-level shape is checked here so a malformed rule fails the
+// Apply with a clear error; semantic validation (scope, header grammar and
+// ownership, body band, cap) runs in Validate - the same gate the YAML path
+// passes through.
+func asRequestOverrides(v any) ([]RequestOverride, error) {
+	return strictCoerce(v, []RequestOverride{}, "[]", "want list",
+		"want [{client, provider, model, headers, remove_headers, body}]")
 }
 
 // asAliases coerces the JSON shape of provider_aliases (map of old label →

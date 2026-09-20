@@ -67,9 +67,9 @@ Connection-nominated headers are removed. Precedence depends on the request path
 
 | Path | Header precedence, lowest to highest |
 | --- | --- |
-| HTTP relay, including Anthropic translation | Forwarded values → extracted authentication → configured provider headers → explicit injection. Configured/injected authentication can override the extracted key. |
-| HTTP model discovery | Constructed authentication → configured provider headers. Explicit injection is not applied. |
-| Cursor run/model discovery | Configured headers → required protocol/framing headers and extracted authentication when a key is present. Explicit injection is not applied. |
+| HTTP relay, including Anthropic translation | Forwarded values → extracted authentication → configured provider headers → explicit injection → matching request overrides. Configured/injected authentication can override the extracted key. |
+| HTTP model discovery | Constructed authentication → configured provider headers. Explicit injection and request overrides are not applied. |
+| Cursor run/model discovery | Configured headers → matching request overrides (runs only) → required protocol/framing headers and extracted authentication when a key is present. Explicit injection is not applied. |
 
 The provider label is server-derived from the base host's registrable domain;
 IPs retain their authority/port, and nonregistrable hostnames remain hostnames.
@@ -171,6 +171,13 @@ sequence numbers) are never rescued. An exhausted budget surfaces the
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
 Neither transparency nor exactly-once upstream execution is unconditional.
+
+Before relay or translation, the upstream request is subject to the configured
+`request_overrides` (see [request overrides](operations.md#request-overrides)):
+matching rules set, replace or remove upstream headers as the last header
+stage, and their body fields set `max_tokens` / `max_completion_tokens` on
+OpenAI-wire and translated targets, fail closed. Only the upstream request
+changes; the client-visible contract is unchanged.
 
 ### Scheduling and timing
 

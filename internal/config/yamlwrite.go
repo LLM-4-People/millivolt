@@ -251,6 +251,49 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 			b.WriteString("}\n")
 		}
 		return nil
+	case KindRequestOverrides:
+		rs, _ := v.([]RequestOverride)
+		if len(rs) == 0 {
+			b.WriteString(f.Key + ": []\n")
+			return nil
+		}
+		b.WriteString(f.Key + ":\n")
+		for _, r := range rs {
+			b.WriteString("  - client: " + yamlQuote(r.Client) + "\n")
+			b.WriteString("    provider: " + yamlQuote(r.Provider) + "\n")
+			b.WriteString("    model: " + yamlQuote(r.Model) + "\n")
+			if len(r.Headers) == 0 {
+				b.WriteString("    headers: {}\n")
+			} else {
+				b.WriteString("    headers:\n")
+				for _, k := range slices.Sorted(maps.Keys(r.Headers)) {
+					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(r.Headers[k]) + "\n")
+				}
+			}
+			if len(r.RemoveHeaders) == 0 {
+				b.WriteString("    remove_headers: []\n")
+			} else {
+				b.WriteString("    remove_headers:\n")
+				for _, s := range r.RemoveHeaders {
+					b.WriteString("      - " + yamlQuote(s) + "\n")
+				}
+			}
+			if overrideBodyEmpty(r.Body) {
+				// A validated rule never carries an empty body (Validate
+				// normalizes it away); "body: {}" decodes back to the same
+				// normalized shape.
+				b.WriteString("    body: {}\n")
+			} else {
+				b.WriteString("    body:\n")
+				if r.Body.MaxTokens != nil {
+					b.WriteString("      max_tokens: " + strconv.Itoa(*r.Body.MaxTokens) + "\n")
+				}
+				if r.Body.MaxCompletionTokens != nil {
+					b.WriteString("      max_completion_tokens: " + strconv.Itoa(*r.Body.MaxCompletionTokens) + "\n")
+				}
+			}
+		}
+		return nil
 	case KindBool:
 		b.WriteString(f.Key + ": " + strconv.FormatBool(v.(bool)) + "\n")
 		return nil
