@@ -337,7 +337,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// Format translation is fully buffered by design; the status line is
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
-		if t.format != "" && t.format != "openai" {
+		if !isOpenAIWire(t.format) {
 			full, rerr := io.ReadAll(io.LimitReader(resp.Body, maxTranslateBodyBytes+1))
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)

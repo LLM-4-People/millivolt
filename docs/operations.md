@@ -170,7 +170,10 @@ them. Credential and protocol names (`authorization`, `cookie`,
 `proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
 prefix are rejected at load in both header lists; at runtime the target's
 configured auth header is skipped even if one slips through, so credentials
-stay at their owner. Header names are trimmed and canonicalized
+stay at their owner. The fixed list cannot know a provider's configured
+auth header, so a rule naming the target's (for example `x-api-key`) passes
+config validation and is denied at send time by the runtime belt. Header
+names are trimmed and canonicalized
 case-insensitively, and values must be non-empty single-line header values.
 
 The body rewrite is fail closed. It applies to passthrough and translated
@@ -740,6 +743,10 @@ error envelope is a durable account condition - `insufficient_quota`,
 - **manual**: an indefinite provider-scoped pause (an operator hold labeled
   with the quota class) is created automatically; every request, triggering
   one included, queues until an operator resumes it on the pause surface.
+  When a pre-existing hold already covers the provider, no duplicate is
+  created: the triggering request queues under that hold only if it parks
+  the triggering client too, and a hold that parks other clients only lets
+  the triggering request surface the 429 immediately.
 
 The retry-mode gate shares the storm scheduler's parking, probes and pacing,
 so storm recovery settings configure it without storm protection being
@@ -774,7 +781,12 @@ available sidecar only for a captured request; expired/absent captures are not
 recreated from ordinary metrics.
 
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
-response previews in the normal record without starting a Debug session. Both
+response previews in the normal record without starting a Debug session. The
+two features also retain different request bytes: on the passthrough wire
+the record's prompt preview is the client's original body, captured at the
+metadata decode before `request_overrides` rewrite it, while a debug
+capture's request body is the rewritten upstream body sent after overrides;
+on translated targets both follow the translated body. Both
 features can retain sensitive content even when credential headers are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).

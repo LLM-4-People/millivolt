@@ -575,6 +575,79 @@ func TestRequestOverridesOverlappingRulesLastActionWins(t *testing.T) {
 	}
 }
 
+// TestRequestOverridesComposedCapSpellings pins the composed-cap rows the
+// single-spelling tables cannot express: the two token-ceiling spellings
+// are independent fields end to end. The shrug-off direction: a rule that
+// sets only max_tokens cannot cap a client max_completion_tokens - the
+// stamp lands on its own spelling, the client's survives verbatim on the
+// wire, and the re-stamped record keeps the mct-wins precedence, so the
+// effective upstream ceiling stays the client's value. The cross-rule
+// mixed pair: rule one sets max_completion_tokens, a later rule sets
+// max_tokens - the merge is per spelling, so BOTH rule values reach the
+// wire (the later rule does not evict the earlier mct) and the effective
+// ceiling is the mct value, not the later rule's max_tokens.
+func TestRequestOverridesComposedCapSpellings(t *testing.T) {
+	ruleMT, firstMCT, laterMT := 1234, 650, 430
+	for _, tc := range []struct {
+		name       string
+		rules      []config.RequestOverride
+		clientBody string
+		wantMT     int // max_tokens on the rewritten wire body
+		wantMCT    int // max_completion_tokens on the rewritten wire body
+		wantEff    int // the record's ReqMaxTokens (mct-wins precedence)
+	}{
+		{"max_tokens rule cannot cap a client max_completion_tokens", []config.RequestOverride{{
+			Client: "ov-client",
+			Body:   &config.OverrideBody{MaxTokens: &ruleMT},
+		}}, `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":900}`, ruleMT, 900, 900},
+		{"mixed pair across rules merges per spelling, mct keeps precedence", []config.RequestOverride{
+			{Client: "ov-client", Body: &config.OverrideBody{MaxCompletionTokens: &firstMCT}},
+			{Model: "model-a", Body: &config.OverrideBody{MaxTokens: &laterMT}},
+		}, `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`, laterMT, firstMCT, firstMCT},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
+			defer upstream.Close()
+			cfg := config.Default()
+			cfg.RequestOverrides = tc.rules
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			buf := metrics.NewBuffer(4)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, respBody := postOverrideChat(t, srv.URL, upstream.URL, tc.clientBody,
+				func(r *http.Request) { r.Header.Set("X-Proxy-Client", "ov-client") })
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", status, respBody)
+			}
+			bodies, _ := capt.snapshot()
+			if len(bodies) != 1 {
+				t.Fatalf("upstream sends = %d, want 1", len(bodies))
+			}
+			var got struct {
+				MaxTokens     int `json:"max_tokens"`
+				MaxCompletion int `json:"max_completion_tokens"`
+			}
+			if err := json.Unmarshal([]byte(bodies[0]), &got); err != nil {
+				t.Fatalf("upstream body is not JSON: %v (%s)", err, bodies[0])
+			}
+			if got.MaxTokens != tc.wantMT {
+				t.Errorf("upstream max_tokens = %d, want %d", got.MaxTokens, tc.wantMT)
+			}
+			if got.MaxCompletion != tc.wantMCT {
+				t.Errorf("upstream max_completion_tokens = %d, want %d", got.MaxCompletion, tc.wantMCT)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if recs[0].ReqMaxTokens == nil || *recs[0].ReqMaxTokens != tc.wantEff {
+				t.Errorf("record ReqMaxTokens = %v, want %d (the effective ceiling keeps the mct-wins precedence)",
+					recs[0].ReqMaxTokens, tc.wantEff)
+			}
+		})
+	}
+}
+
 // TestRequestOverridesHeaderPrecedenceLast pins the chain order: the resolved
 // override applies AFTER client-forwarded headers, the provider's configured
 // headers and the client's explicit X-Proxy-Headers injection map - the

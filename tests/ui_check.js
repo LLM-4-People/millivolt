@@ -3560,6 +3560,39 @@ async function main() {
     cards()[2].querySelector('[data-ro-rm]').click();
     check('removing the budget card restores the clean two-rule draft',
       cards().length === 2 && !w.settingsIsDirty());
+    // a MIDDLE-card removal: both removals above are tail removals, so
+    // neither proves the renumber rewrite is load-bearing. Removing a
+    // non-last card must renumber both the visible ordinals and the
+    // ordinal-carrying aria-labels, which share roRuleLabel with the
+    // visible numbers and must not go stale.
+    tpl.value = 'blank';
+    tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const midBefore = cards();
+    midBefore[1].querySelector('[data-ro-rm]').click();
+    const midSurvivors = cards();
+    check('a middle-card removal renumbers the survivors\' visible ordinals',
+      midBefore.length === 3 && midSurvivors.length === 2 &&
+      midSurvivors[0].querySelector('.ro-num').textContent === 'rule 1' &&
+      midSurvivors[1].querySelector('.ro-num').textContent === 'rule 2');
+    check('the renumbered survivors\' aria-labels carry the same ordinals',
+      midSurvivors[0].querySelector('.ro-client').getAttribute('aria-label') === 'rule 1 client scope' &&
+      midSurvivors[1].querySelector('.ro-client').getAttribute('aria-label') === 'rule 2 client scope' &&
+      midSurvivors[1].querySelector('.ro-max-mct').getAttribute('aria-label') === 'rule 2 max completion tokens ceiling');
+    // restore the seeded two-rule draft: drop the template card that made
+    // the removal a middle one, then rebuild the removed rule behind the
+    // survivor through the real controls so the later rows keep their
+    // seeded state.
+    midSurvivors[1].querySelector('[data-ro-rm]').click();
+    tpl.value = 'blank';
+    tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const rebuilt = cards()[1];
+    rebuilt.querySelector('.ro-provider').value = 'epsilon.example';
+    rebuilt.querySelector('.ro-rh-in').value = 'User-Agent';
+    rebuilt.querySelector('[data-ro-rh-add]').click();
+    rebuilt.querySelector('.ro-max-tokens').value = '32768';
+    rebuilt.querySelector('.ro-max-tokens').dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('rebuilding the removed rule restores the clean two-rule draft',
+      cards().length === 2 && !w.settingsIsDirty());
     // the shared header-row grammar: Enter in the add inputs appends a row
     // through the providers editor's own wiring, and the live validation
     // owns the override grammar on top.
@@ -3597,6 +3630,29 @@ async function main() {
       d.activeElement === dupRow.querySelector('.sp-hname') &&
       dupRow.querySelector('.sp-hname').classList.contains('prov-bad'));
     dupRow.querySelector('[data-prov-hrow-rm]').click();
+    // header-value grammar: the live mirror of config.ValidHeaderValue
+    // plus the overrides' non-empty rule. The pinned byte is \x01: a
+    // single-line input's spec value-sanitization strips \r\n at the DOM
+    // value layer before validation could see it, but other control bytes
+    // survive a paste and must redden the row - and the blocked-Apply
+    // drive focuses the offending VALUE input, not the name.
+    const ctlVal = card0.querySelector('.prov-hmap .prov-hrow .sp-hval');
+    ctlVal.value = 'bad\x01value';
+    ctlVal.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('a control byte in a header value reddens the row with the value-grammar message',
+      card0.dataset.roState === 'error' &&
+      card0.querySelector('.ro-err').textContent.includes('value must be a non-empty single-line header value') &&
+      ctlVal.classList.contains('prov-bad'));
+    const ctlFailuresBefore = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with a control-byte header value blocks the save and focuses the value input',
+      failures.length === ctlFailuresBefore &&
+      d.getElementById('settings-count').textContent === 'request overrides - fix the highlighted rule first' &&
+      d.activeElement === ctlVal);
+    ctlVal.value = 'my app';
+    ctlVal.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('repairing the value clears the card error',
+      card0.dataset.roState !== 'error' && card0.querySelector('.ro-err').textContent === '');
     // set + remove the same canonical name: one action per header.
     card0.querySelector('.ro-rh-in').value = 'x-title';
     card0.querySelector('[data-ro-rh-add]').click();

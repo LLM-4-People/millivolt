@@ -518,7 +518,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// byte-transparent passthrough. Cursor is excluded here: its Run RPC is
 	// bidirectional, so serveCursorBidi translates the body itself into the
 	// enveloped run_request (and keeps the history blobs for the KV channel).
-	if t.format != "" && t.format != "openai" && t.format != "cursor" {
+	if !isOpenAIWire(t.format) && t.format != "cursor" {
 		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens)
 		if err != nil {
 			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
@@ -751,7 +751,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
 		}
-		if t.format != "" && t.format != "openai" {
+		if !isOpenAIWire(t.format) {
 			s.transformResponse(ctx, w, resp, rec, t.format, stream)
 			return
 		}

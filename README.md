@@ -166,8 +166,9 @@ unconditional byte-for-byte or exactly-once contract.
 ### Route requests without a provider registry
 
 - Choose the upstream base URL, credentials, authentication header/prefix,
-  path and query on each request. Optional header overrides support custom
-  integrations without adding a provider-specific relay branch.
+  path and query on each request. Optional client-supplied header overrides
+  (the `X-Proxy-Headers` request header) support custom integrations
+  without adding a provider-specific relay branch.
 - Constrain accepted upstream URL prefixes through configuration. This helps
   control destinations but does not replace network access or egress controls.
 - Forward ordinary HTTP bodies, including streaming responses, with bounded

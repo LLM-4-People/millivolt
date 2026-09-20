@@ -1999,6 +1999,21 @@ function roRuleLabel(i) {
   return 'rule ' + (i + 1);
 }
 
+// roRuleFieldLabel composes an ordinal-carrying input's accessible name
+// from the same roRuleLabel ordinal the visible rule number uses.
+function roRuleFieldLabel(i, suffix) {
+  return roRuleLabel(i) + ' ' + suffix;
+}
+
+// roRuleFieldAttrs renders an ordinal-carrying input's accessible-name
+// attributes: the initial aria-label composes through roRuleLabel, and
+// data-ro-lbl carries the suffix roRenumber restamps the label from, so
+// the rendered names and the rewritten ones share one composer and
+// cannot drift after an add or remove.
+function roRuleFieldAttrs(i, suffix) {
+  return `aria-label="${escapeHtml(roRuleFieldLabel(i, suffix))}" data-ro-lbl="${escapeHtml(suffix)}"`;
+}
+
 // roRuleCardHTML renders one rule card. Scope inputs carry the explicit
 // "any" watermark (an empty scope field is a wildcard - never a silent
 // surprise) and one concrete example each; the headers section reuses the
@@ -2014,9 +2029,9 @@ function roRuleCardHTML(r, i) {
   return `<div class="prov-sec ro-rule">` +
     `<div class="prov-lb"><span class="ro-num">${escapeHtml(num)}</span><span class="prov-sub">scope - an empty field matches any request</span><button type="button" class="prov-x" data-ro-rm aria-label="remove rule" title="remove rule">✕</button></div>` +
     `<div class="st-ctl-line ro-scope">` +
-    `<input class="ro-client" list="${roDlId('client')}" value="${escapeHtml(r.client || '')}" placeholder="any client - e.g. claude-code" aria-label="rule ${i + 1} client scope">` +
-    `<input class="ro-provider" list="${roDlId('provider')}" value="${escapeHtml(r.provider || '')}" placeholder="any provider - e.g. nano-gpt.com" aria-label="rule ${i + 1} provider scope">` +
-    `<input class="ro-model" list="${roDlId('model')}" value="${escapeHtml(r.model || '')}" placeholder="any model - e.g. glm-5.3" aria-label="rule ${i + 1} model scope">` +
+    `<input class="ro-client" list="${roDlId('client')}" value="${escapeHtml(r.client || '')}" placeholder="any client - e.g. claude-code" ${roRuleFieldAttrs(i, 'client scope')}>` +
+    `<input class="ro-provider" list="${roDlId('provider')}" value="${escapeHtml(r.provider || '')}" placeholder="any provider - e.g. nano-gpt.com" ${roRuleFieldAttrs(i, 'provider scope')}>` +
+    `<input class="ro-model" list="${roDlId('model')}" value="${escapeHtml(r.model || '')}" placeholder="any model - e.g. glm-5.3" ${roRuleFieldAttrs(i, 'model scope')}>` +
     `</div>` +
     `<div class="prov-lb"><span>headers</span><span class="prov-sub">set or replace upstream headers - e.g. X-Title, my app</span></div>` +
     `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
@@ -2026,8 +2041,8 @@ function roRuleCardHTML(r, i) {
     `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
     `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
     `<div class="st-ctl-line ro-body">` +
-    `<input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" aria-label="rule ${i + 1} max tokens ceiling">` +
-    `<input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" aria-label="rule ${i + 1} max completion tokens ceiling">` +
+    `<input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max tokens ceiling')}>` +
+    `<input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max completion tokens ceiling')}>` +
     `</div>` +
     `<div class="mr-err ro-err" aria-live="polite"></div>` +
     `</div>`;
@@ -2167,11 +2182,17 @@ function validateRequestOverridesDraft(wrap) {
 
 // roRenumber rewrites the cards' rule numbers after any add or remove so
 // they keep matching the request_overrides[i] indexes the server cites in
-// its validation errors.
+// its validation errors. The ordinal-carrying accessible names restamp
+// through the same composer (roRuleFieldLabel reads data-ro-lbl), so a
+// non-tail removal cannot leave a scope or body input announcing a stale
+// rule number.
 function roRenumber(wrap) {
   wrap.querySelectorAll('.ro-rule').forEach((card, i) => {
     const el = card.querySelector('.ro-num');
     if (el) el.textContent = roRuleLabel(i);
+    card.querySelectorAll('[data-ro-lbl]').forEach(input => {
+      input.setAttribute('aria-label', roRuleFieldLabel(i, input.dataset.roLbl));
+    });
   });
 }
 

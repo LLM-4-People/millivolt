@@ -122,10 +122,11 @@ content was relayed. Durable
 quota/billing 429s follow `quota_pause_mode` instead of the transient retry
 ladder: `off` (default) surfaces them immediately; `retry` parks the
 triggering request and every new request to the same OpenAI-wire provider
-behind a recovery gate until the first re-send resolves 2xx (a provider
-`Retry-After` on the quota response paces the next probe like any other
-429); `manual` installs an indefinite provider pause that only an operator
-resumes. Quota re-sends never burn the transient retry budget. Provider
+behind a recovery gate until the first re-send resolves 2xx, with the
+consecutive-success threshold from `quota_pause_recovery_successes` (a
+provider `Retry-After` on the quota response paces the next probe like
+any other 429); `manual` installs an indefinite provider pause that only
+an operator resumes. Quota re-sends never burn the transient retry budget. Provider
 retry hints and operator holds can substantially extend total wall time. With
 `suppress_client_retries` the proxy declares itself the client's sole retry
 authority: every error response the relay returns then carries
@@ -176,7 +177,7 @@ Before relay or translation, the upstream request is subject to the configured
 `request_overrides` (see [request overrides](operations.md#request-overrides)):
 matching rules set, replace or remove upstream headers as the last header
 stage, and their body fields set `max_tokens` / `max_completion_tokens` on
-OpenAI-wire and translated targets, fail closed. Only the upstream request
+OpenAI-wire and translated Anthropic targets, fail closed. Only the upstream request
 changes; the client-visible contract is unchanged.
 
 ### Scheduling and timing

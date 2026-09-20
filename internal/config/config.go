@@ -141,7 +141,7 @@ type Config struct {
 	// is a floor: never retry sooner than the hint, but a short hint (HTTP
 	// Retry-After is integer seconds, so 1s is common on 503 "retry shortly")
 	// does not reset or replace the doubling. MaxBackoff does not clamp a
-	// long provider hint (daily limits are often 30–60m). Generous defaults:
+	// long provider hint (daily limits are often 30-60m). Generous defaults:
 	// these are upstream-recovery pauses, and too-short backoff just
 	// re-hammers a struggling provider.
 	BaseBackoff time.Duration `yaml:"base_backoff" json:"base_backoff"`
@@ -1495,9 +1495,11 @@ func (c *Config) RetryAfterSeconds() int {
 // range; callers render min/max/got in the field's own unit (byte sizes,
 // durations, integers, or the schema-typed bound). The byte-size, duration
 // and storm validators, the models_discovery_max_pages /
-// storage_query_max_rows integer pair, dash_log_rows, and the
-// cursor_heartbeat_interval / sse_keepalive_interval duration pair all
-// route through this one owner, so the phrasing cannot drift between them.
+// storage_query_max_rows integer pair, dash_log_rows, the
+// cursor_heartbeat_interval / sse_keepalive_interval duration pair,
+// quota_pause_recovery_successes, and the request_overrides body ceilings
+// all route through this one owner, so the phrasing cannot drift between
+// them.
 func errRange(key, min, max, got string) error {
 	return fmt.Errorf("%s: must be %s..%s, got %s", key, min, max, got)
 }

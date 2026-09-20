@@ -14,10 +14,15 @@ import (
 
 // isOpenAIWire is the single format predicate: it reports the neutral wire
 // fact whether a target format speaks the OpenAI-compatible wire - the
-// explicit "openai" spelling or the empty passthrough default. The quota
-// pause keys on it (only these upstreams return the insufficient_quota /
-// insufficient_credits envelope family the pause is defined on), and
-// overrideBodyWireFormat extends it with the translated-anthropic target.
+// explicit "openai" spelling or the empty passthrough default. Every
+// openai-versus-other spelling decision composes it and nothing hand-spells
+// the pair: the quota pause keys on it (only these upstreams return the
+// insufficient_quota / insufficient_credits envelope family the pause is
+// defined on), overrideBodyWireFormat extends it with the
+// translated-anthropic target, and its negation gates the client-meta
+// format capture, the request-translate gate (which keeps the cursor
+// exclusion explicit - cursor's bidirectional translator owns its own
+// body) and both response-translation gates.
 func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"
 }

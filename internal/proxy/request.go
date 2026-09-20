@@ -641,7 +641,7 @@ func fillClientMeta(r *http.Request, t *target, rec *metrics.Record) {
 		PkgVer:     clipClientMeta(r.Header.Get("X-Stainless-Package-Version")),
 	}
 	if t != nil {
-		if t.format != "" && t.format != "openai" {
+		if !isOpenAIWire(t.format) {
 			m.Format = clipClientMeta(t.format)
 		}
 		if t.timeout > 0 {

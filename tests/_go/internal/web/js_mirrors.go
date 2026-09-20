@@ -304,14 +304,18 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 
 // TestRequestOverrideRuleCardWiringsPinnedInSource guards the chrome.js
 // rule-card wirings jsdom cannot exercise: the three scope inputs'
-// datalist associations and the rule-number label's routing through the
-// one owner. The list attribute is native browser behavior, so ui_check
-// can only see the rendered datalist elements and their options, never
-// that an input is actually associated with its datalist; and the initial
-// render's label is roRuleLabel's to produce (ui_check pins the renumbered
-// text after a removal). A dropped or hand-spelled wiring reddens here
-// before the editor can ship a scope input without its autocomplete or a
-// rule head whose number drifts from the server's cited index.
+// datalist associations, the generator's matching datalist id, the
+// focus-time refresher's matching selector, and the rule-number label's
+// routing through the one owner. The list attribute
+// is native browser behavior, so ui_check can only see the rendered
+// datalist elements and their options, never that an input is actually
+// associated with its datalist; a hand-spelled generator id renders the
+// same ids today but can drift from the list attributes under every green
+// jsdom row; and the initial render's label is roRuleLabel's to produce
+// (ui_check pins the renumbered text after a removal). A dropped or
+// hand-spelled wiring reddens here before the editor can ship a scope
+// input without its autocomplete or a rule head whose number drifts from
+// the server's cited index.
 func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 	src, err := staticFS.ReadFile("static/js/chrome.js")
 	if err != nil {
@@ -326,6 +330,25 @@ func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
 	}
 	if !strings.Contains(region, "roRuleLabel(i)") {
 		t.Error("roRuleCardHTML's rule-number label no longer routes through roRuleLabel, the owner shared with roRenumber")
+	}
+	// The generator's id side of the same association: the datalist the
+	// three list attributes reference must be the datalist roDatalistHTML
+	// renders, and the id spelling routes through roDlId exactly like the
+	// attributes do - a hand-spelled id is the one drift jsdom rows can
+	// never see (the rendered string is identical while it matches).
+	genRegion := sourceRegion(t, string(src), "function roDatalistHTML")
+	if !strings.Contains(genRegion, `id="${roDlId(kind)}"`) {
+		t.Error("roDatalistHTML's datalist id no longer routes through roDlId, the owner shared with the rule cards' list attributes and the focus-time refresher")
+	}
+	// The focus-time refresher's selector side of the same association:
+	// roSyncDatalists must look its datalist up through roDlId too. The
+	// focus wiring only runs in a real browser, and a hand-spelled
+	// selector resolves the same ids today, so jsdom rows stay green
+	// while the refresher drifts from the generator and the list
+	// attributes - the pin is the only row that can see it.
+	syncRegion := sourceRegion(t, string(src), "function roSyncDatalists")
+	if !strings.Contains(syncRegion, `'#' + roDlId(kind)`) {
+		t.Error("roSyncDatalists' datalist selector no longer routes through roDlId, the owner shared with the generator and the rule cards' list attributes")
 	}
 }
 
