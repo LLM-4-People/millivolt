@@ -1182,7 +1182,16 @@ func yamlMappingValues(n *yaml.Node) (map[string]any, map[string]*yaml.Node, err
 	return present, nodes, nil
 }
 
+// keepYAMLKeys merges the accepted yaml keys onto def and returns the kept
+// config plus the keys the loader must drop. Two-phase contract: a file whose
+// whole accepted key set validates loads in a single merge, the common case
+// for every written file; the greedy per-key salvage loop only runs when
+// whole-set validation fails, so conflicting files keep the existing repair
+// semantics unchanged.
 func keepYAMLKeys(def *Config, present map[string]any, nodes map[string]*yaml.Node, accepted []string) (*Config, []string) {
+	if merged, err := mergeYAMLKeys(def, present, nodes, accepted); err == nil {
+		return merged, nil
+	}
 	kept := make([]string, 0, len(accepted))
 	cfg := def.Clone()
 	try := func(key string) bool {
