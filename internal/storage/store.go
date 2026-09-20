@@ -74,6 +74,11 @@ type Options struct {
 	// the written set is the exact dedupe boundary. Sized 2x the ring
 	// (history_size) so it always covers every record the ring can hold.
 	WriteTrackCap int
+	// BusyTimeout shortens the sqliteBusyTimeout guardrail for tests that
+	// assert the contention window quickly (a 5s window costs 5s of wall
+	// time per phase). Zero keeps the production constant; config has no
+	// knob because the guardrail is deliberately not user-tunable.
+	BusyTimeout time.Duration
 }
 
 // errNotSelect rejects any dashboard query that is not a single SELECT.
@@ -492,7 +497,13 @@ func Open(path string, opts Options) (*Store, error) {
 	// journal_mode WAL is persistent in the database header once the first
 	// writer connection sets it. The schema exec below is the eager fail
 	// point: a rejected pragma fails Open here, never a later request.
-	busy := fmt.Sprintf("_pragma=busy_timeout(%d)", sqliteBusyTimeout.Milliseconds())
+	// opts.BusyTimeout overrides the guardrail constant when nonzero
+	// (test seam; production Options leave it zero).
+	busyTimeout := opts.BusyTimeout
+	if busyTimeout <= 0 {
+		busyTimeout = sqliteBusyTimeout
+	}
+	busy := fmt.Sprintf("_pragma=busy_timeout(%d)", busyTimeout.Milliseconds())
 	db, err := sql.Open("sqlite", path+"?"+busy+"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
