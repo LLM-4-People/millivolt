@@ -360,10 +360,11 @@ func TestSubConversationsMapIsJSONArray(t *testing.T) {
 }
 
 // TestSubConversationsSchemaPins: the registry entry is the documentation
-// surface - the caps, the exact-name semantics, first-present-wins, the k:
-// identity and its header precedence, strip, translated-target injection
-// and the drop-not-reject bound all read from the schema help, and the
-// entry lives in the conversation category.
+// surface - the caps, the exact-name semantics, the top-level-only scope,
+// the string-value rule, first-present-wins, the k: identity and its header
+// precedence, strip, translated-target injection and the drop-not-reject
+// bound all read from the schema help, and the entry lives in the
+// conversation category.
 func TestSubConversationsSchemaPins(t *testing.T) {
 	f := FieldByKey("sub_conversations")
 	if f == nil {
@@ -381,7 +382,9 @@ func TestSubConversationsSchemaPins(t *testing.T) {
 	for _, phrase := range []string{
 		"exactly",          // exact client names, no wildcard, no case folding
 		"1..4",             // params per entry
+		"top level",        // extraction and strip see only top-level keys
 		"first present",    // first-present-wins
+		"string value",     // only a JSON string value supplies the tracked value
 		"dropped",          // drop-not-reject bound
 		"k:",               // the tracked identity namespace
 		"X-Proxy-Session",  // identity precedence
