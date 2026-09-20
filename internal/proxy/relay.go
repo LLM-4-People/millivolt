@@ -1545,6 +1545,20 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// rescueRequested: the held region never reached the client, so the caller
 	// re-sends and the fresh attempt's own terminal region takes its place.
 	finishHold := func() bool {
+		if ctx.Err() == context.Canceled {
+			// The request context only cancels when the LOCAL client is gone
+			// (markStreamErr's classification) - and this resolution is
+			// reachable with the client already gone: the upstream FIN can
+			// beat the transport's own cancellation, handing the read loop a
+			// CLEAN EOF for the abort. With out and hold drained no write
+			// remains to observe the dead socket, and the only wire contact
+			// left here is flusher.Flush, whose error net/http discards - so
+			// the disconnect is stamped here (the write-detected abort's
+			// exact accounting, in-band error kept) instead of finalizing the
+			// abort away as a clean 200.
+			clientGone()
+			return false
+		}
 		if !writeOut() {
 			return false
 		}

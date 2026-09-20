@@ -606,6 +606,46 @@ func TestWriteDetectedClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
 	}
 }
 
+// TestStreamCleanEOFAfterRequestCancelStampsDisconnect pins the FIN-race arm
+// of the write-detected abort family: when the LOCAL client aborts while the
+// relay is parked on the upstream read, the upstream FIN can beat the
+// transport's own cancellation and hand the read loop a CLEAN EOF with the
+// request context already canceled. No failed write can observe the dead
+// socket at that point - out is drained, and the only wire contact left in
+// finishHold is flusher.Flush, whose error net/http discards - so without
+// the guard the abort finalizes away as the committed 200 with no
+// disconnect, the exact intermittent CI failure
+// TestWriteDetectedClientAbortAfterInBandErrorCountsAsError showed on a
+// loaded runner. The pre-canceled context reaches the raced state
+// deterministically: the abort must classify like the write-detected twin
+// (499, ClientDisconnected, the provider's in-band error kept), never as a
+// clean 200.
+func TestStreamCleanEOFAfterRequestCancelStampsDisconnect(t *testing.T) {
+	s := New(config.Default(), metrics.NewBuffer(10))
+	rec := &metrics.Record{ID: "stream-eof-cancel", StatusCode: http.StatusOK, Provider: "provider.example"}
+	// A complete small stream: content, the provider's in-band error, then
+	// the upstream ends cleanly - the FIN - with no terminal marker.
+	stream := "data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n" +
+		"data: {\"error\":{\"message\":\"Coral Bricks is temporarily unavailable. Please retry.\",\"type\":\"api_error\",\"code\":\"internal_error\"}}\n\n"
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	w := httptest.NewRecorder()
+	uerr := &upstreamErrorRescue{}
+	s.streamBody(ctx, w, strings.NewReader(stream), rec, false, false, uerr)
+	if rec.StatusCode != metrics.StatusClientClosedRequest {
+		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
+	}
+	if !rec.ClientDisconnected {
+		t.Error("ClientDisconnected = false, want true")
+	}
+	if rec.ErrorType != "api_error" || rec.ErrorCode != "internal_error" {
+		t.Errorf("the abort must keep the provider's in-band error: type=%q code=%q", rec.ErrorType, rec.ErrorCode)
+	}
+	if !rec.IsError() {
+		t.Errorf("a provider in-band failure the client aborted around IS an error: %+v", rec)
+	}
+}
+
 // TestNonStreamClientAbortMidSpooledWriteKeepsInBandError is the non-streaming
 // row of the write-detected family: a spooled 200 in-band-error body commits
 // with one large write, and a LOCAL client aborting the moment the response
