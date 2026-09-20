@@ -40,7 +40,11 @@ func TestTransparentRateLimitRetry(t *testing.T) {
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(config.Default(), buf))
+	// The assertions pin retry accounting, never pacing: a 5ms base keeps
+	// the attempt ladder real while costing single-digit milliseconds.
+	cfg := config.Default()
+	cfg.BaseBackoff = 5 * time.Millisecond
+	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
 
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
@@ -83,7 +87,8 @@ func TestRateLimitExhaustsRetries(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
-	cfg.MaxRetries = 2 // fail fast for test
+	cfg.MaxRetries = 2                     // fail fast for test
+	cfg.BaseBackoff = 5 * time.Millisecond // assertions pin the surfaced 429, not the ladder's pacing
 	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 	defer srv.Close()
 
@@ -238,6 +243,7 @@ func TestTransparent5xxRetry(t *testing.T) {
 	buf := metrics.NewBuffer(8)
 	cfg := config.Default()
 	cfg.MaxRetries = 5
+	cfg.BaseBackoff = 5 * time.Millisecond // assertions pin attempt metadata, not pacing
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
 
@@ -322,6 +328,7 @@ func Test5xxExhaustsSurfacesLastError(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 2
+	cfg.BaseBackoff = 5 * time.Millisecond // assertions pin the surfaced 500 body, not pacing
 	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 	defer srv.Close()
 
@@ -356,7 +363,11 @@ func TestRetryAttemptsRecorded(t *testing.T) {
 			return
 		}
 		if n == 2 {
-			w.Header().Set("Retry-After", "1")
+			// A sub-second hint via the OpenAI reset header (a duration
+			// string, so production stores 10ms rather than the 1s floor
+			// an integer-second Retry-After forces) keeps the recorded-
+			// hint assertion meaningful without paying that floor.
+			w.Header().Set("X-Ratelimit-Reset-Requests", "10ms")
 			w.WriteHeader(http.StatusServiceUnavailable)
 			w.Write([]byte(`{"error":{"type":"service_unavailable","message":"try later"}}`))
 			return
@@ -369,6 +380,7 @@ func TestRetryAttemptsRecorded(t *testing.T) {
 	buf := metrics.NewBuffer(8)
 	cfg := config.Default()
 	cfg.MaxRetries = 5
+	cfg.BaseBackoff = 5 * time.Millisecond // assertions pin the attempt log and hint, not pacing
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
 
@@ -400,7 +412,7 @@ func TestRetryAttemptsRecorded(t *testing.T) {
 		t.Errorf("attempt[1] = %+v, want 503/service_unavailable", rec.Attempts[1])
 	}
 	if rec.Attempts[1].RetryAfterMs <= 0 {
-		t.Errorf("attempt[1].RetryAfterMs = %d, want > 0 (Retry-After: 1 header)", rec.Attempts[1].RetryAfterMs)
+		t.Errorf("attempt[1].RetryAfterMs = %d, want > 0 (X-Ratelimit-Reset-Requests: 10ms hint)", rec.Attempts[1].RetryAfterMs)
 	}
 }
 
@@ -650,7 +662,13 @@ func TestQuota429EndsRetryLoop(t *testing.T) {
 	defer upstream.Close()
 
 	buf := metrics.NewBuffer(8)
-	srv := httptest.NewServer(New(config.Default(), buf))
+	// 300ms rather than the 1s default: the follow-up "not paced within
+	// 200ms" bound below only catches a broken FailSend pace while the
+	// paced wait stays above it, and jitter floors the pace at 0.75x base
+	// (225ms here). The transient attempt's retry wait shrinks with it.
+	cfg := config.Default()
+	cfg.BaseBackoff = 300 * time.Millisecond
+	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
 
 	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m"}`))
@@ -715,7 +733,11 @@ func TestQuota429OnLastAttemptDoesNotPace(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 1 // quota lands on the exhaust slot
-	cfg.BaseBackoff = time.Second
+	// 300ms rather than 1s: the follow-up "not paced within 200ms" bound
+	// only catches a broken FailSend pace while the paced wait stays above
+	// it (jitter floors the pace at 0.75x base, 225ms here); the absorbed
+	// attempt's retry wait shrinks with it.
+	cfg.BaseBackoff = 300 * time.Millisecond
 	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 	defer srv.Close()
 
@@ -751,8 +773,10 @@ func TestClientCancelNotRetried(t *testing.T) {
 	// If the CALLER cancels (client disconnect), the proxy must NOT retry - the
 	// client is gone. The attempt should surface as a cancellation, not loop.
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate a slow/stalled upstream.
-		time.Sleep(2 * time.Second)
+		// Simulate a slow/stalled upstream. 300ms keeps the 150ms cancel
+		// mid-attempt while the deferred upstream.Close drains the handler
+		// quickly instead of paying the old 2s stall.
+		time.Sleep(300 * time.Millisecond)
 		w.WriteHeader(200)
 	}))
 	defer upstream.Close()
@@ -1144,8 +1168,8 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 2
-	cfg.BaseBackoff = 200 * time.Millisecond
-	cfg.MaxBackoff = 800 * time.Millisecond
+	cfg.BaseBackoff = 100 * time.Millisecond
+	cfg.MaxBackoff = 400 * time.Millisecond
 	p := New(cfg, metrics.Noop{})
 	srv := httptest.NewServer(p)
 	defer srv.Close()
@@ -1168,20 +1192,20 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 		t.Fatalf("first request hits = %d, want 3", got)
 	}
 	// The exhausted retryable failure grows the REQUEST backoff to base
-	// (200ms) and clears the owner's attempt streak; the pacing of the next
+	// (100ms) and clears the owner's attempt streak; the pacing of the next
 	// first send below is the behavioral proof of both.
 	t0 := time.Now()
 	do()
 	if secondFirst.IsZero() {
 		t.Fatal("second request never hit upstream")
 	}
-	// request base 200ms × 0.75–1.25 = 150–250ms. Leftover attempt 400ms
-	// × 0.75 = 300ms - the 280ms cap sits in that gap.
-	if elapsed := secondFirst.Sub(t0); elapsed < 120*time.Millisecond {
+	// request base 100ms × 0.75–1.25 = 75–125ms. Leftover attempt 200ms
+	// × 0.75 = 150ms - the 140ms cap sits in that gap.
+	if elapsed := secondFirst.Sub(t0); elapsed < 60*time.Millisecond {
 		t.Fatalf("next first send in %v; exhausted retryable must wait ~base request backoff", elapsed)
 	}
-	if elapsed := secondFirst.Sub(t0); elapsed > 280*time.Millisecond {
-		t.Fatalf("next first send waited %v; must be request backoff (~200ms), not leftover attempt (400ms+)", elapsed)
+	if elapsed := secondFirst.Sub(t0); elapsed > 140*time.Millisecond {
+		t.Fatalf("next first send waited %v; must be request backoff (~100ms), not leftover attempt (200ms+)", elapsed)
 	}
 }
 
