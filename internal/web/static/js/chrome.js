@@ -1077,10 +1077,11 @@ function wireBackupPane() {
   backupSetBusy(backupBusy);
 }
 
-// triggerDownload is the one anchor-click download path (log exports and
-// backups): one owner for the download attribute contract - an empty
-// string defers the filename to the server's Content-Disposition - and
-// for revoking a passed object URL once the click landed.
+// triggerDownload is the one anchor-click download path (log exports,
+// backups and debug captures): one owner for the download attribute
+// contract - an empty string defers the filename to the server's
+// Content-Disposition - and for revoking a passed object URL once the click
+// landed.
 function triggerDownload(href, download, revoke) {
   const a = document.createElement('a');
   a.href = href;
@@ -1091,21 +1092,34 @@ function triggerDownload(href, download, revoke) {
   if (revoke) URL.revokeObjectURL(href);
 }
 
+// downloadArtifact is the one fetch-blob-filename-click owner for operator
+// artifact downloads (the settings backup and the debug capture): through
+// the operator gate, blobbed, named from the server's Content-Disposition
+// with the caller's fallback, then handed to triggerDownload. It resolves
+// the blob (callers report sizes) and rejects through operatorErrorBody
+// with the caller's designed failure message.
+async function downloadArtifact(url, fallback, failed) {
+  const r = await operatorFetch(url);
+  if (!r.ok) return operatorErrorBody(r, failed);
+  const blob = await r.blob();
+  const dispo = r.headers.get('Content-Disposition') || '';
+  const m = /filename="([^"]+)"/.exec(dispo);
+  triggerDownload(URL.createObjectURL(blob), (m && m[1]) || fallback, true);
+  return blob;
+}
+
 function runBackupDownload() {
   const q = backupQuery();
   if (![...q.keys()].length) { settingsStatus('select config, database, or both'); return; }
   if (backupBusy) return;
   backupSetBusy(true);
   settingsStatus('building backup');
-  operatorFetch('/admin/backup?' + q).then(async r => {
-    if (!r.ok) return operatorErrorBody(r, 'backup failed');
-    const blob = await r.blob();
-    const dispo = r.headers.get('Content-Disposition') || '';
-    const m = /filename="([^"]+)"/.exec(dispo);
-    triggerDownload(URL.createObjectURL(blob), (m && m[1]) || 'millivolt-backup.mvb', true);
-    const n = backupBytes(blob.size);
-    settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
-  }).catch(err => settingsStatus(String(err.message || err)))
+  downloadArtifact('/admin/backup?' + q, 'millivolt-backup.mvb', 'backup failed')
+    .then(blob => {
+      const n = backupBytes(blob.size);
+      settingsStatus(n ? 'downloaded ' + n : 'backup downloaded', 'ok');
+    })
+    .catch(err => settingsStatus(String(err.message || err)))
     .finally(() => backupSetBusy(false));
 }
 

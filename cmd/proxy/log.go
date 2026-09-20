@@ -13,6 +13,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -86,6 +87,20 @@ func (w *exportWriter) Write(p []byte) (int, error) {
 	return w.ResponseWriter.Write(p)
 }
 
+// exportFailed answers a failed export read after the artifact headers were
+// staged. Nothing reached the client yet: retract the attachment name and
+// answer the store error. A partial artifact already on the wire must not
+// complete as a successful 200 download; net/http aborts the connection or
+// stream without a panic stack.
+func exportFailed(w http.ResponseWriter, ew *exportWriter, err error) {
+	if !ew.started {
+		w.Header().Del("Content-Disposition")
+		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	panic(http.ErrAbortHandler)
+}
+
 func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storage.Store) {
 	// Reserve the read-only SQL endpoint even when storage is disabled, so
 	// requests cannot fall through to inference (HandleQuery owns both
@@ -106,9 +121,24 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="millivolt-logs-`+time.Now().Format("20060102-150405")+`.json"`)
+		// The export is always a saved gzip artifact: a browser decompresses
+		// Content-Encoding before saving, so transit compression can never
+		// shrink what lands on disk. No Content-Length: the payload streams
+		// row-by-row and chunked framing is correct.
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="millivolt-logs-`+time.Now().Format("20060102-150405")+`.json.gz"`)
 		w.Header().Set("Cache-Control", "no-store")
+		// The compression gate is the one choke point every export shape
+		// crosses: the ring snapshot and the durable stream below both write
+		// through this single gzip artifact writer, so matching, all and
+		// debug-only exports inherit the same compression on either backend.
+		// The gzip layer cannot touch the socket before the first payload
+		// write (the 10-byte header is emitted lazily with the first row,
+		// never at construction), so a store that fails before producing a
+		// row still leaves the socket untouched and exportFailed's 500
+		// retraction stays reachable.
+		ew := &exportWriter{ResponseWriter: w}
+		zw := proxy.NewArtifactGzipWriter(ew)
 		if store == nil {
 			rows := buffer.Snapshot()
 			out := make([]*metrics.Record, 0, len(rows))
@@ -117,20 +147,19 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 					out = append(out, row)
 				}
 			}
-			_ = json.NewEncoder(w).Encode(out)
-			return
+			err = json.NewEncoder(zw).Encode(out)
+		} else {
+			_, err = store.ExportWhere(r.Context(), f, zw)
 		}
-		ew := &exportWriter{ResponseWriter: w}
-		if _, err := store.ExportWhere(r.Context(), f, ew); err != nil {
+		if err == nil {
+			// Close runs on the normal path so the deflate trailer flushes; a
+			// trailer that cannot reach the client is the same incomplete
+			// download.
+			err = zw.Close()
+		}
+		if err != nil {
 			log.Printf("metrics export failed: %v", err)
-			if !ew.started {
-				w.Header().Del("Content-Disposition")
-				adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
-			} else {
-				// Do not complete a successful 200 download after a read failure.
-				// net/http aborts the connection/stream without a panic stack.
-				panic(http.ErrAbortHandler)
-			}
+			exportFailed(w, ew, err)
 		}
 	})
 	// Destructive purge stays in the /admin operator action plane, never the

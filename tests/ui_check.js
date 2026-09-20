@@ -5534,9 +5534,21 @@ async function main() {
     const isolated = new JSDOM(assembleHTML(seed), {...pageOptions, beforeParse(win) {
       pageOptions.beforeParse(win);
       const fallback = win.fetch;
-      win.fetch = (url, opts) => String(url).includes('/admin/debug/capture')
-        ? Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(captureDoc)) })
-        : fallback(url, opts);
+      const dlFetches = [];
+      win.__dlFetches = dlFetches;
+      win.__dlResponse = { ok: true, blob: async () => new win.Blob(['gz-bytes']),
+        headers: { get: k => k === 'Content-Disposition' ? 'attachment; filename="millivolt-debug-20260914-000000.json.gz"' : null } };
+      win.fetch = (url, opts) => {
+        const u = String(url);
+        if (u.includes('/admin/debug/capture')) {
+          if (u.includes('download=1')) {
+            dlFetches.push({ u, auth: (opts && opts.headers && opts.headers.Authorization) || '' });
+            return Promise.resolve(win.__dlResponse);
+          }
+          return Promise.resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(captureDoc)) });
+        }
+        return fallback(url, opts);
+      };
     }});
     const sw = isolated.window, sd = sw.document;
     try {
@@ -5867,6 +5879,43 @@ async function main() {
         dbg.textContent.includes('Request body (truncated)') &&
         dbg.textContent.includes('Response body') &&
         !!dbg.querySelector('.preview-box'));
+
+      // The download affordance: the section header button fetches the
+      // same capture with download=1 through the operator gate and hands
+      // the server-named artifact to triggerDownload (the backup flow's
+      // blob-fetch pattern), with the fallback and failure contracts.
+      const dbgBtn = dbg.querySelector('#drawer-debug-download');
+      check('the debug capture section renders the download affordance with its accessible name',
+        !!dbgBtn && dbgBtn.getAttribute('aria-label') === 'download debug capture' &&
+        dbgBtn.dataset.id === 'dbg-drawer');
+      if (dbgBtn) {
+        sw.eval("operatorCredential = 'op-token'");
+        const dlTape = [];
+        sd.addEventListener('click', e => dlTape.push(e.target));
+        sw.URL.createObjectURL = () => 'blob:w16-dl';
+        sw.URL.revokeObjectURL = href => dlTape.push('revoke:' + href);
+        dbgBtn.click();
+        await sleep(30);
+        check('clicking download fetches the capture artifact through the operator gate',
+          sw.__dlFetches.length === 1 &&
+          sw.__dlFetches[0].u === '/admin/debug/capture?id=dbg-drawer&download=1' &&
+          sw.__dlFetches[0].auth === 'Bearer op-token');
+        check('the server-named artifact reaches triggerDownload and the blob URL is revoked',
+          dlTape.some(el => el && el.tagName === 'A' &&
+            el.getAttribute('download') === 'millivolt-debug-20260914-000000.json.gz') &&
+          dlTape.includes('revoke:blob:w16-dl'));
+        sw.__dlResponse = { ok: true, blob: async () => new sw.Blob(['gz']), headers: { get: () => null } };
+        dbgBtn.click();
+        await sleep(30);
+        check('a missing Content-Disposition falls back to the designed artifact name',
+          dlTape.filter(el => el && el.tagName === 'A')
+            .some(a => a.getAttribute('download') === 'millivolt-debug.json.gz'));
+        sw.__dlResponse = { ok: false, status: 502, headers: { get: () => null } };
+        dbgBtn.click();
+        await sleep(30);
+        check('a failed capture download surfaces the designed failure message in the section',
+          sd.getElementById('drawer-debug-status').textContent === 'debug capture download failed');
+      }
       sw.closeDrawer();
 
       // triggerDownload's anchor contract: href/download set, appended,

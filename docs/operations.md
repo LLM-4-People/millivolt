@@ -566,10 +566,10 @@ the credential gates both.
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates; POST requires provider. Supplied limits merge; `clear:true` removes policy. |
-| `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. |
+| `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
-| `GET /metrics/export` | Download all or exactly filtered finalized records. Debug-only export can contain sensitive sidecars. |
+| `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
@@ -780,6 +780,11 @@ bytes. Oversized captures are marked truncated. The request drawer loads an
 available sidecar only for a captured request; expired/absent captures are not
 recreated from ordinary metrics.
 
+The drawer's Debug section also carries a Download button. It fetches the same
+capture with `download=1` and saves a gzip artifact named
+`millivolt-debug-<captured_at>.json.gz`, using the record id in the name when
+the capture does not carry a readable `captured_at`.
+
 `capture_body_preview` is a different opt-in feature: it retains short prompt/
 response previews in the normal record without starting a Debug session. The
 two features also retain different request bytes: on the passthrough wire
@@ -798,6 +803,14 @@ and not a complete administrative audit trail. With durable storage it reads the
 database; otherwise it uses available ring records. Open the menu, choose a
 filter and review its matching count before Download matching, or deliberately
 choose Download all. A debug-only export can include retained capture sidecars.
+
+The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
+gunzip it to read the JSON array of records. Compression is applied at the
+export writer itself, so every export shape (filtered, all or debug-only,
+from the ring or durable storage) downloads compressed the same way. This is
+a breaking change for scripts that consumed the plain JSON download: there is
+no uncompressed fallback, so scripted consumers must decompress the artifact
+first.
 
 Clear uses the same filter/count owner. Deletion requires confirmation in the
 dashboard; it does not happen when the menu opens. A selected filter makes a

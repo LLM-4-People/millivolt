@@ -772,7 +772,7 @@ function formatDetail(r) {
   }
 
   if (r.debug) {
-    S.push(`<div class="detail-section" id="drawer-debug"><h4>Debug</h4><div class="preview-box" id="drawer-debug-body">loading capture…</div></div>`);
+    S.push(`<div class="detail-section" id="drawer-debug">` + debugSectionHead(r.id) + `<div class="preview-box" id="drawer-debug-body">loading capture…</div></div>`);
   }
 
   return S.join('');
@@ -833,6 +833,33 @@ function debugHeaderRows(list) {
   return list.map(h => debugKV(h.name || '', escapeHtml(h.value || ''), 'var(--accent2)')).join('');
 }
 
+// debugSectionHead renders the debug section header: the title, the
+// download affordance and the message line. formatDetail's first paint and
+// fillDrawerDebug's rewrite both render through it, so the button survives
+// the capture render.
+function debugSectionHead(id) {
+  return `<h4>Debug <button type="button" class="btn" id="drawer-debug-download" data-id="${escapeHtml(id)}" aria-label="download debug capture" title="download debug capture">⬇</button> <span id="drawer-debug-status" style="color:var(--err)"></span></h4>`;
+}
+
+// runDebugCaptureDownload serves the drawer's Download button: the capture
+// artifact through the shared operator download owner, with the designed
+// failure message surfaced in the section header (the backup pane's
+// empty-body 502 convention).
+function runDebugCaptureDownload(id) {
+  downloadArtifact('/admin/debug/capture?id=' + encodeURIComponent(id) + '&download=1', 'millivolt-debug.json.gz', 'debug capture download failed')
+    .then(() => debugDownloadStatus(id, ''))
+    .catch(err => debugDownloadStatus(id, String(err.message || err)));
+}
+
+// debugDownloadStatus writes the section's message line only while the
+// drawer still shows the record that started the download, so a stale
+// result never lands on the next request's section.
+function debugDownloadStatus(id, msg) {
+  if (drawerId !== id) return;
+  const el = $('drawer-debug-status');
+  if (el) el.textContent = msg;
+}
+
 function fillDrawerDebug(id) {
   const box = $('drawer-debug-body');
   if (!box) return;
@@ -876,7 +903,7 @@ function fillDrawerDebug(id) {
       const sh = debugHeaderRows(resp.headers);
       if (sh) bits.push(`<div class="detail-section"><h4>Response headers</h4>${sh}</div>`);
       const host = $('drawer-debug');
-      if (host) host.innerHTML = '<h4>Debug</h4>' + bits.filter(Boolean).join('');
+      if (host) host.innerHTML = debugSectionHead(id) + bits.filter(Boolean).join('');
     })
     .catch(() => { box.textContent = 'capture unavailable'; });
 }
@@ -891,4 +918,11 @@ $('drawer-body').addEventListener('keydown', e => {
   if (e.key !== 'Enter' && e.key !== ' ') return;
   const el = e.target.closest('.attempt-link[data-open-req]');
   if (el) { e.preventDefault(); openDrawer(el.dataset.openReq); }
+});
+// The debug section's Download button: delegated like the attempt links so
+// re-renders never drop it. A native button carries its own keyboard
+// activation, so no keydown arm is needed.
+$('drawer-body').addEventListener('click', e => {
+  const btn = e.target.closest('#drawer-debug-download');
+  if (btn) runDebugCaptureDownload(btn.dataset.id);
 });

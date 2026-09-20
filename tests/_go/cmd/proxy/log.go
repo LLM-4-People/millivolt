@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -123,8 +125,12 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 			}
 			w = httptest.NewRecorder()
 			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/export?provider=target&conversation_id=conversation&error_type=upstream&after_ms=2000&before_ms=3000", nil))
+			zr, err := gzip.NewReader(w.Body)
+			if err != nil {
+				t.Fatalf("export is not a gzip artifact: %v (%s)", err, w.Body.String())
+			}
 			var rows []*metrics.Record
-			if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil || w.Code != 200 || len(rows) != 1 || rows[0].ID != "1" {
+			if err := json.NewDecoder(zr).Decode(&rows); err != nil || w.Code != 200 || len(rows) != 1 || rows[0].ID != "1" {
 				t.Fatalf("export=%d %s err=%v", w.Code, w.Body.String(), err)
 			}
 			w = httptest.NewRecorder()
@@ -138,6 +144,120 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", nil))
 			if w.Code != 200 || b.Len() != 0 {
 				t.Fatalf("full clear=%d ring=%d", w.Code, b.Len())
+			}
+		})
+	}
+}
+
+// TestLogExportServesGzipArtifact pins the compression gate: the export is
+// always a saved gzip artifact (application/gzip, a millivolt-logs-*.json.gz
+// attachment name, no-store), and the payload gunzips to the exact row set
+// the plain export produced - on both the ring-only path and durable storage.
+func TestLogExportServesGzipArtifact(t *testing.T) {
+	dispoShape := regexp.MustCompile(`^attachment; filename="millivolt-logs-\d{8}-\d{6}\.json\.gz"$`)
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			for i, id := range []string{"gz-a", "gz-b"} {
+				recorder.Record(&metrics.Record{ID: id, Provider: "neutral.example", StatusCode: 200, Start: time.UnixMilli(int64(i+1) * 1000)})
+			}
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/export", nil))
+			if w.Code != 200 {
+				t.Fatalf("status = %d body=%q", w.Code, w.Body.String())
+			}
+			if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+				t.Fatalf("Content-Type = %q, want application/gzip", ct)
+			}
+			if dispo := w.Header().Get("Content-Disposition"); !dispoShape.MatchString(dispo) {
+				t.Fatalf("Content-Disposition = %q, want a millivolt-logs-<ts>.json.gz attachment", dispo)
+			}
+			if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+				t.Fatalf("Cache-Control = %q, want no-store", cc)
+			}
+			zr, err := gzip.NewReader(w.Body)
+			if err != nil {
+				t.Fatalf("export is not a gzip artifact: %v", err)
+			}
+			var rows []*metrics.Record
+			if err := json.NewDecoder(zr).Decode(&rows); err != nil {
+				t.Fatalf("gunzipped export is not a JSON array: %v", err)
+			}
+			got := make([]string, len(rows))
+			for i, r := range rows {
+				got[i] = r.ID
+			}
+			if strings.Join(got, ",") != "gz-a,gz-b" {
+				t.Fatalf("gunzipped row set = %v, want [gz-a gz-b] oldest-first", got)
+			}
+		})
+	}
+}
+
+// TestLogExportDebugOnlyShapeSharesCompressionGate pins the structural half
+// of the compression gate: the gzip artifact layer wraps the export at the
+// one choke point every shape crosses (the shared writer composition in the
+// route handler), so the debug-only export, the shape that embeds capture
+// sidecars and grows past a gigabyte, is a gzip round-trip on the ring-only
+// path and on durable storage alike. A per-branch hand-wrap that bypasses
+// the choke point leaves one path uncompressed (or double-compressed) and
+// reddens here on the gunzip step.
+func TestLogExportDebugOnlyShapeSharesCompressionGate(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			recorder.Record(&metrics.Record{ID: "plain-row", Provider: "neutral.example", StatusCode: 200, Start: time.UnixMilli(1000)})
+			recorder.Record(&metrics.Record{ID: "debug-row", Provider: "neutral.example", StatusCode: 200, Start: time.UnixMilli(2000), Debug: true})
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				payload := []byte(`{"schema":"millivolt.debug/v1","id":"debug-row"}`)
+				if err := s.SaveDebugCapture(t.Context(), "debug-row", "debug-row", time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli(), payload); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/metrics/export?debug=1", nil))
+			if w.Code != 200 {
+				t.Fatalf("status = %d body=%q", w.Code, w.Body.String())
+			}
+			if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+				t.Fatalf("Content-Type = %q, want application/gzip", ct)
+			}
+			if _, ok := w.Header()["Content-Length"]; ok {
+				t.Fatal("streamed export must not pin Content-Length")
+			}
+			zr, err := gzip.NewReader(w.Body)
+			if err != nil {
+				t.Fatalf("debug-only export is not a gzip artifact: %v", err)
+			}
+			raw, err := io.ReadAll(zr)
+			if err != nil {
+				t.Fatalf("gunzip failed: %v", err)
+			}
+			var rows []*metrics.Record
+			if err := json.Unmarshal(raw, &rows); err != nil {
+				t.Fatalf("gunzipped export is not a JSON array: %v", err)
+			}
+			if len(rows) != 1 || rows[0].ID != "debug-row" {
+				t.Fatalf("gunzipped rows = %v, want only debug-row", rows)
+			}
+			if s != nil && !strings.Contains(string(raw), `"debug_capture"`) {
+				t.Fatal("durable debug-only export lost the capture sidecar")
 			}
 		})
 	}

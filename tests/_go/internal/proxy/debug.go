@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -623,5 +625,122 @@ func TestSanitizeDebugBodyPolicyRows(t *testing.T) {
 	cut := capBytes([]byte("a\xc3\xa9b"), 2)
 	if cut.Raw != "a\ufffd" || cut.Bytes != 4 || !cut.Truncated {
 		t.Fatalf("mid-rune cut = %+v, want {Raw:a\\uFFFD Bytes:4 Truncated:true}", cut)
+	}
+}
+
+// TestHandleDebugCaptureDownloadServesGzipArtifact pins the download=1 mode:
+// the same handler that serves the drawer's render bytes switches to a saved
+// gzip artifact, while the render mode stays byte-identical, the 404 rows
+// hold in both modes, and a malformed flag is rejected instead of guessed.
+func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-download.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+
+	const payload = `{"schema":"millivolt.debug/v1","id":"cap-dl","captured_at":"2026-09-20T12:34:56.789012345Z","expires_at":"2026-09-21T12:34:56Z"}`
+	if err := store.SaveDebugCapture(t.Context(), "cap-dl", "sess",
+		time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli(), []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl", nil))
+	if w.Code != 200 || w.Body.String() != payload {
+		t.Fatalf("render mode changed: status=%d body=%q", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+		t.Fatalf("render Content-Type = %q", ct)
+	}
+	if dispo := w.Header().Get("Content-Disposition"); dispo != "" {
+		t.Fatalf("render mode sets Content-Disposition %q", dispo)
+	}
+
+	w = httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl&download=1", nil))
+	if w.Code != 200 {
+		t.Fatalf("download status = %d body=%q", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("download Content-Type = %q, want application/gzip", ct)
+	}
+	if dispo, want := w.Header().Get("Content-Disposition"), `attachment; filename="millivolt-debug-20260920-123456.json.gz"`; dispo != want {
+		t.Fatalf("download Content-Disposition = %q, want %q", dispo, want)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(w.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("download body is not gzip: %v (%q)", err, w.Body.String())
+	}
+	raw, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip capture artifact: %v", err)
+	}
+	if string(raw) != payload {
+		t.Fatalf("gunzipped artifact = %q, want the capture JSON", raw)
+	}
+
+	for _, tc := range []struct{ name, query string }{
+		{"render absent capture", "?id=missing"},
+		{"download absent capture", "?id=missing&download=1"},
+	} {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", tc.name, w.Code)
+		}
+	}
+	bare := New(config.Default(), metrics.Noop{})
+	for _, tc := range []struct{ name, query string }{
+		{"render no durable store", "?id=cap-dl"},
+		{"download no durable store", "?id=cap-dl&download=1"},
+	} {
+		w := httptest.NewRecorder()
+		bare.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want 404", tc.name, w.Code)
+		}
+	}
+
+	w = httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl&download=yes", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed download flag: status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleDebugCaptureDownloadNamesArtifact pins the artifact naming: a
+// readable captured_at (UTC RFC 3339Nano in the stored document, any offset
+// converted to UTC) names the file by its second-granularity timestamp, and
+// every decode or parse failure falls back to the record id.
+func TestHandleDebugCaptureDownloadNamesArtifact(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-name.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+	expires := time.Now().Add(time.Hour).UnixMilli()
+	for _, tc := range []struct{ id, payload, want string }{
+		{"name-utc", `{"id":"name-utc","captured_at":"2026-09-20T12:34:56.789012345Z"}`, "millivolt-debug-20260920-123456.json.gz"},
+		{"name-offset", `{"id":"name-offset","captured_at":"2026-09-20T14:34:56+02:00"}`, "millivolt-debug-20260920-123456.json.gz"},
+		{"fb-no-field", `{"id":"fb-no-field"}`, "millivolt-debug-fb-no-field.json.gz"},
+		{"fb-garbage-time", `{"id":"fb-garbage-time","captured_at":"not a timestamp"}`, "millivolt-debug-fb-garbage-time.json.gz"},
+		{"fb-not-json", `not json at all`, "millivolt-debug-fb-not-json.json.gz"},
+	} {
+		if err := store.SaveDebugCapture(t.Context(), tc.id, "sess", time.Now().UnixMilli(), expires, []byte(tc.payload)); err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+tc.id+"&download=1", nil))
+		want := `attachment; filename="` + tc.want + `"`
+		if w.Code != 200 || w.Header().Get("Content-Disposition") != want {
+			t.Errorf("%s: status=%d disposition=%q, want %q", tc.id, w.Code, w.Header().Get("Content-Disposition"), want)
+			continue
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(w.Body.Bytes()))
+		if err != nil {
+			t.Errorf("%s: artifact is not gzip: %v", tc.id, err)
+			continue
+		}
+		raw, err := io.ReadAll(zr)
+		if err != nil || string(raw) != tc.payload {
+			t.Errorf("%s: gunzipped artifact = %q err=%v, want the stored payload", tc.id, raw, err)
+		}
 	}
 }

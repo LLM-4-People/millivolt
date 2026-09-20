@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -555,6 +556,9 @@ func (s *Server) DebugSnapshot() map[string]any {
 
 // HandleDebugCapture is GET /admin/debug/capture?id= - the drawer fetch for
 // one sidecar document. 404 when missing/expired. Never on the live SSE path.
+// The plain response is the drawer's render JSON; download=1 serves the same
+// document as a saved gzip artifact. The method, id, no-store and 404
+// semantics are identical in both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
@@ -564,6 +568,11 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	if id == "" {
 		adminjson.WriteError(w, http.StatusBadRequest, "id required")
+		return
+	}
+	download := r.URL.Query().Get("download")
+	if download != "" && download != "0" && download != "1" {
+		adminjson.WriteError(w, http.StatusBadRequest, "download: expected 0 or 1")
 		return
 	}
 	if s.pause.persist == nil {
@@ -585,6 +594,34 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusNotFound, "debug capture not found")
 		return
 	}
+	if download == "1" {
+		// bytes.Buffer writes cannot fail, so the artifact (bounded by the
+		// capture size cap) is complete before the 200 starts.
+		var compressed bytes.Buffer
+		zw := NewArtifactGzipWriter(&compressed)
+		_, _ = zw.Write(raw)
+		_ = zw.Close()
+		w.Header().Set("Content-Type", "application/gzip")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+debugCaptureArtifactName(raw, id)+`"`)
+		w.Write(compressed.Bytes())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Write(raw)
+}
+
+// debugCaptureArtifactName names the capture download from the document's
+// captured_at (stored UTC as RFC 3339Nano; any offset converts to UTC).
+// Every decode or parse failure falls back to the record id, so a damaged
+// payload still downloads with a deterministic name.
+func debugCaptureArtifactName(raw []byte, id string) string {
+	var doc struct {
+		CapturedAt string `json:"captured_at"`
+	}
+	if err := json.Unmarshal(raw, &doc); err == nil {
+		if at, err := time.Parse(time.RFC3339Nano, doc.CapturedAt); err == nil {
+			return "millivolt-debug-" + at.UTC().Format("20060102-150405") + ".json.gz"
+		}
+	}
+	return "millivolt-debug-" + id + ".json.gz"
 }
