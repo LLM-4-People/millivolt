@@ -633,8 +633,8 @@ func TestSanitizeDebugBodyPolicyRows(t *testing.T) {
 // the same handler that serves the drawer's render bytes switches to a saved
 // gzip artifact, both modes answer Cache-Control: no-store (the comment on
 // the handler owes them that), the render mode stays byte-identical, the 404
-// rows hold in both modes, and a malformed or repeated flag is rejected
-// instead of guessed.
+// rows hold in both modes, and a malformed, repeated or pair-dropped flag or
+// id is rejected instead of guessed.
 func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-download.db"))
 	p := New(config.Default(), metrics.Noop{})
@@ -719,6 +719,24 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl&download=1&download=0", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("repeated download flag: status = %d, want 400 (deny by default, never first-wins)", w.Code)
+	}
+
+	// The query is parsed from the raw string (the export owner's rule), so
+	// crafted inputs url.Values would silently drop cannot smuggle a
+	// first-wins flag or id: a bad escape, a semicolon separator and a
+	// repeated id are all 400s, and the id gate itself still answers 400.
+	for _, tc := range []struct{ name, query string }{
+		{"unparsable escape is rejected, not pair-dropped", "?id=cap-dl&download=%zz"},
+		{"semicolon-separated duplicate is rejected, not pair-dropped", "?id=cap-dl&download=1;download=1"},
+		{"a valid spelling cannot smuggle an invalid one", "?id=cap-dl&download=1&download=%zz"},
+		{"repeated id is rejected, never first-wins", "?id=cap-dl&id=other"},
+		{"missing id is rejected", "?download=1"},
+	} {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", tc.name, w.Code)
+		}
 	}
 }
 

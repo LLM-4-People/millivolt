@@ -39,6 +39,16 @@ var gzipWriterPool = sync.Pool{
 	},
 }
 
+// newPrecomputedGzipWriter wraps w in the default-compression codec for the
+// precomputed immutable-asset representation (web.go's newStaticAsset): a
+// one-time init cost that favors ratio over the transit codec's level-2 CPU
+// economy. The construction site lives in this codec-owner file so the
+// repository check's whole-tree construction ban keeps exactly two files that
+// may build a compress/gzip writer: this one and internal/proxy/gzip.go.
+func newPrecomputedGzipWriter(w io.Writer) *gzip.Writer {
+	return gzip.NewWriter(w)
+}
+
 // acceptsGzip reports whether the client explicitly accepts gzip (denied by
 // default: a missing header or an explicit q=0 means no; any non-zero
 // qvalue - RFC 9110 §12.5.3 - is acceptance). An UNPARSEABLE qvalue is also
@@ -130,7 +140,11 @@ func Gzip(next http.Handler) http.Handler {
 		gz.Reset(w)
 		g := &gzipResponseWriter{ResponseWriter: w, gz: gz}
 		defer func() {
-			_ = gz.Close() // flush the deflate trailer; empty responses are a no-op
+			// Close always flushes a complete member: a wrapped handler that
+			// never wrote would still emit a 23-byte empty gzip member onto
+			// the socket with no Content-Encoding declared - not a no-op.
+			// Unreachable today: every wrapped handler writes on every path.
+			_ = gz.Close()
 			gzipWriterPool.Put(gz)
 		}()
 		next.ServeHTTP(g, r)

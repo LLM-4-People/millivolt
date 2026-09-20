@@ -2282,7 +2282,10 @@ function collectRequestOverrides(wrap, put) {
 // shell (hint, tools row, count, muted tokens), the client input gets
 // datalist autocomplete from the same known-set union the ro scope
 // datalists read, and the ordered param rows are inputs, not chips,
-// because order is meaning (first present wins). Live per-card
+// because order is meaning (the first present field decides: a non-string
+// value counts as absent and the next field is checked, while a present
+// string that cannot be decoded or exceeds the identity bound drops the
+// identity - no later field is consulted). Live per-card
 // validation mirrors config.validateSubConversations at every keystroke
 // (the validateRoRow discipline): the client required, 1..4 params, the
 // one JSON-key-segment grammar with the server's exact message wording,
@@ -2378,10 +2381,10 @@ function scCardHTML(e, i) {
     `<div class="st-ctl-line ro-scope">` +
     `<input class="sc-client" list="${scDlId()}" value="${escapeHtml(e.client || '')}" placeholder="classified client - e.g. opencode" ${scEntryFieldAttrs(i, 'client')}>` +
     `</div>` +
-    `<div class="prov-lb"><span>params</span><span class="prov-sub">exact request body fields, checked in order - the first present one wins</span></div>` +
+    `<div class="prov-lb"><span>params</span><span class="prov-sub">exact top-level request body fields, checked in order - the first present field decides</span></div>` +
     `<div class="sc-params">${params.map(p => scParamRowHTML(String(p == null ? '' : p))).join('')}</div>` +
     `<div class="prov-add"><input class="sc-param-in" placeholder="body field - e.g. promptCacheKey ↵" aria-label="add tracked body field"><button type="button" class="btn prov-addbtn" data-sc-param-add aria-label="add tracked body field">+</button></div>` +
-    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip the tracked field from the relayed upstream body - unchecked forwards it unchanged</span></label>` +
+    `<label class="st-check"><input type="checkbox" class="st-switch sc-strip"${e.strip ? ' checked' : ''}><span>strip every configured field from the top level of the relayed upstream body - unchecked forwards it unchanged</span></label>` +
     `<div class="mr-err sc-err" aria-live="polite"></div>` +
     `</div>`;
 }
@@ -2389,7 +2392,7 @@ function scCardHTML(e, i) {
 function subConversationsEditorHTML(val) {
   const entries = Array.isArray(val) ? val : [];
   return `<div class="prov-sec mr-wrap sc-wrap">` +
-    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from its request body · the first present param supplies the value, an absent or invalid value is dropped, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes the tracked field from the relayed body</div>` +
+    `<div class="mr-hint">each entry tracks one classified client's sub-conversation identity from top-level request body fields · the first present field decides: a present value that is not a JSON string counts as absent and the next field is checked, while a present string that cannot be decoded or exceeds the identity bound drops the identity for the request - no later field is consulted, never a client error · the value groups requests under a k: identity, after X-Proxy-Session and before client+key grouping · strip removes every configured field present at the top level of the relayed body</div>` +
     `<div class="mr-tools"><button type="button" class="btn" data-sc-add aria-label="add entry">+ add entry</button><span class="mr-count muted"></span></div>` +
     `<div class="sc-rows">${entries.map((e, i) => scCardHTML(e, i)).join('')}</div>` +
     scDatalistHTML() +

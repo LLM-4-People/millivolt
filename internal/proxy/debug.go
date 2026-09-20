@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -557,16 +558,29 @@ func (s *Server) DebugSnapshot() map[string]any {
 // HandleDebugCapture is GET /admin/debug/capture?id= - the drawer fetch for
 // one sidecar document. 404 when missing/expired. Never on the live SSE path.
 // The plain response is the drawer's render JSON; download=1 serves the same
-// document as a saved gzip artifact. The download flag is strict like every
-// filter owner: malformed or repeated values are a 400, never first-wins.
-// The method, id, no-store and 404 semantics are identical in both modes.
+// document as a saved gzip artifact. The query is strict like every filter
+// owner, parsed from the raw string (the export owner's rule) so no malformed
+// pair is silently dropped: an unparsable query, a repeated flag or id, or a
+// flag outside the standing 0/1 grammar is a 400, never first-wins; an empty
+// download value means the render mode. The method, id, no-store and 404
+// semantics are identical in both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
-	q := r.URL.Query()
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if len(q["id"]) > 1 {
+		// The duplicate download rule's class: a repeated id is ambiguous,
+		// deny it rather than guess which occurrence the client meant.
+		adminjson.WriteError(w, http.StatusBadRequest, "duplicate id")
+		return
+	}
 	id := strings.TrimSpace(q.Get("id"))
 	if id == "" {
 		adminjson.WriteError(w, http.StatusBadRequest, "id required")

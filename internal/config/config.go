@@ -374,12 +374,16 @@ type Config struct {
 	// SubConversations is the opt-in per-client list of request body fields
 	// whose value identifies a sub-conversation (exemplar: opencode's
 	// promptCacheKey). Default nil: tracking is fully off. Each entry names
-	// one classified client exactly and 1..4 exact JSON field names, checked
-	// in order with the first present field supplying the value; the value
-	// groups the request under a k: conversation identity (after the
-	// X-Proxy-Session header, before automatic client+key grouping), an
-	// absent or invalid value is dropped never rejected, and strip removes
-	// the tracked field from the relayed upstream body.
+	// one classified client exactly and 1..4 exact JSON field names, matched
+	// only at the request body's top level and checked in order: the first
+	// present field decides - a present value that is not a JSON string
+	// counts as absent and the next field is checked, while a present string
+	// that cannot be decoded or exceeds the identity bound drops the identity
+	// for the request with no later field consulted. A kept value groups the
+	// request under a k: conversation identity (after the X-Proxy-Session
+	// header, before automatic client+key grouping); an absent or dropped
+	// identity is never rejected, and strip removes every configured field
+	// present at the top level of the relayed upstream body.
 	// validateSubConversations owns the normalization and validation.
 	SubConversations []SubConversation `yaml:"sub_conversations" json:"sub_conversations"`
 }
@@ -507,20 +511,26 @@ type OverrideBody struct {
 const RequestOverridesMax = 64
 
 // SubConversation is one classified client's tracked sub-conversation
-// identity: the client whose requests are tracked, the ordered request body
-// field names whose value supplies the identity (first present wins), and
-// whether the tracked field is stripped from the relayed upstream body.
+// identity: the client whose requests are tracked, the ordered top-level
+// request body field names whose value supplies the identity (the first
+// present one decides), and whether the configured fields are stripped from
+// the relayed upstream body.
 type SubConversation struct {
 	// Client matches the request's classified client name exactly: no
 	// wildcard, no case folding. validateSubConversations trims it.
 	Client string `yaml:"client" json:"client"`
-	// Params are exact JSON field names in the client's request body,
-	// checked in order with the first present field supplying the tracked
-	// value. One JSON key segment each (see checkSubConversationParam);
-	// validateSubConversations trims every name.
+	// Params are exact JSON field names matched only at the top level of the
+	// client's request body and checked in order: the first present one
+	// decides - a present value that is not a JSON string counts as absent
+	// and the next field is checked, while a present string that cannot be
+	// decoded or exceeds the identity bound drops the identity for the
+	// request with no later field consulted. One JSON key segment each (see
+	// checkSubConversationParam); validateSubConversations trims every name.
 	Params []string `yaml:"params" json:"params"`
-	// Strip removes the tracked field from the relayed upstream body for
-	// this client. Default false: the field is forwarded unchanged.
+	// Strip removes every configured field present at the top level of the
+	// relayed upstream body for this client, not only the one that supplied
+	// the tracked value. Default false: the configured fields are forwarded
+	// unchanged.
 	Strip bool `yaml:"strip" json:"strip"`
 }
 

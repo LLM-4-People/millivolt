@@ -617,6 +617,62 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 	}
 }
 
+// TestSubConversationEditorCopyMatchSchemaOwner pins the sub-conversations
+// editor's condensed copy - the params label, the strip toggle label and the
+// category hint - to the schema help's owner semantics for sub_conversations
+// (config.FieldByKey, the live registry entry the settings help renders):
+// top-level only, the first present field decides, the absent/drop split,
+// and strip removing every configured field. The schema help once moved to
+// new semantics while these condensed mirrors stayed behind, uncovered by
+// any pin - the round-21 L8-1/L8-2 findings. Every essential fragment must
+// survive on both sides, so neither an owner reword nor an editor reword
+// can silently strand the other; the absent/drop split is pinned as its
+// two halves, absent continuing the scan (the next field is checked) while
+// drop stops it (no later field is consulted).
+func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := config.FieldByKey("sub_conversations")
+	if f == nil {
+		t.Fatal("config.FieldByKey: the schema registry has no sub_conversations field")
+	}
+	card := sourceRegion(t, string(src), "function scCardHTML")
+	hint := sourceRegion(t, string(src), "function subConversationsEditorHTML")
+	for _, p := range []struct {
+		what   string
+		owner  string // the fragment the live schema help must still carry
+		editor string // the condensed mirror the editor copy must still carry
+		site   string // card, hint or both: the editor strings that must carry the mirror
+	}{
+		{"the top-level extraction scope", "matched only at the request body's top level", "top-level request body fields", "both"},
+		{"the first-present rule", "the first present field decides", "the first present field decides", "both"},
+		{"the absent class", "counts as absent and the next field is checked", "counts as absent and the next field is checked", "hint"},
+		{"the unusable-string class", "cannot be decoded or exceeds the identity bound", "cannot be decoded or exceeds the identity bound", "hint"},
+		{"the identity drop", "drops the identity for the request", "drops the identity for the request", "hint"},
+		{"the no-later-consulted rule", "no later field is consulted", "no later field is consulted", "hint"},
+		{"the strip scope", "configured fields", "every configured field present at the top level", "hint"},
+		{"the strip toggle scope", "configured fields", "every configured field from the top level", "card"},
+	} {
+		if !strings.Contains(f.Help, p.owner) {
+			t.Errorf("the sub_conversations schema help lost %s: %q is gone from the live owner wording", p.what, p.owner)
+		}
+		var ok bool
+		switch p.site {
+		case "card":
+			ok = strings.Contains(card, p.editor)
+		case "hint":
+			ok = strings.Contains(hint, p.editor)
+		default: // both: the params label and the category hint each carry it
+			ok = strings.Contains(card, p.editor) && strings.Contains(hint, p.editor)
+		}
+		if !ok {
+			t.Errorf("the sub-conversations editor copy lost %s: want %q in the editor strings (pinned site: %s)", p.what, p.editor, p.site)
+		}
+	}
+}
+
 // TestSettingsRevealCallSitesPinnedInSource pins applySettings' reveal
 // discipline: every path that blocks a settings save must route its
 // offender through revealSettingsOffender, the one reveal that can

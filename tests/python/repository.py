@@ -378,13 +378,40 @@ class RepositoryChecks(unittest.TestCase):
         self.assertEqual(check.artifact_gzip_choke_point_errors([]), [
             "cmd/proxy/log.go: artifact source is not in the checked corpus",
             "internal/proxy/debug.go: artifact source is not in the checked corpus"])
+        # The whole-tree construction ban: a hand-rolled writer in any new
+        # file under the scanned roots is caught with its line, while the two
+        # codec owners and test sources are the only clean constructions.
+        hand_rolled_tree = good + [
+            ("internal/backup/export.go",
+             "func save(w io.Writer) {\n"
+             "\tzw := gzip.NewWriter(w)\n"
+             "\tdefer zw.Close()\n"
+             "}\n")]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(hand_rolled_tree), [
+            "internal/backup/export.go:2: direct compress/gzip writer construction - "
+            "the only codec owners are internal/proxy/gzip.go (saved artifacts) "
+            "and internal/web/gzip.go (transit)"])
+        clean_constructions = good + [
+            ("internal/proxy/gzip.go", "\tzw, err := gzip.NewWriterLevel(w, artifactGzipLevel)\n"),
+            ("internal/web/gzip.go", "\twriter, err := gzip.NewWriterLevel(nil, dashboardGzipLevel)\n"),
+            ("tests/_go/internal/web/web.go", "\twriter, err := gzip.NewWriterLevel(&encoded, level.value)\n"),
+        ]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(clean_constructions), [])
         # The real tree: both gates cross the choke point exactly once, with
-        # no direct compress/gzip construction of their own.
+        # no direct compress/gzip construction of their own, and the two
+        # codec owners are the only direct construction sites - the moved
+        # precompute call site stays clean.
         self.assertEqual(check.artifact_gzip_choke_point_errors([
             ("cmd/proxy/log.go",
              (check.ROOT / "cmd/proxy/log.go").read_text(encoding="utf-8")),
             ("internal/proxy/debug.go",
-             (check.ROOT / "internal/proxy/debug.go").read_text(encoding="utf-8"))]), [])
+             (check.ROOT / "internal/proxy/debug.go").read_text(encoding="utf-8")),
+            ("internal/proxy/gzip.go",
+             (check.ROOT / "internal/proxy/gzip.go").read_text(encoding="utf-8")),
+            ("internal/web/gzip.go",
+             (check.ROOT / "internal/web/gzip.go").read_text(encoding="utf-8")),
+            ("internal/web/web.go",
+             (check.ROOT / "internal/web/web.go").read_text(encoding="utf-8"))]), [])
 
 
 if __name__ == "__main__":

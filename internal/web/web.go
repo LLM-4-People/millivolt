@@ -3,7 +3,6 @@ package web
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
@@ -90,7 +89,7 @@ var staticCache, dashboardVersion = loadStatic(staticFS)
 func newStaticAsset(body []byte) *staticAsset {
 	a := &staticAsset{etag: `W/"` + etagHex(body) + `"`, body: body}
 	var encoded bytes.Buffer
-	writer := gzip.NewWriter(&encoded)
+	writer := newPrecomputedGzipWriter(&encoded)
 	if _, err := writer.Write(body); err != nil {
 		panic(fmt.Errorf("compress dashboard asset: %w", err))
 	}

@@ -561,6 +561,35 @@ func TestSubConversationsStripOnlySkipNamesItsFeature(t *testing.T) {
 	}
 }
 
+// TestSubConversationsMalformedBodyTracksAndRelays pins the two sides of the
+// fail-closed seam on a body whose strict decode fails but whose lexical
+// top-level param is walkable: the locate (a bounded lexical scan, never a
+// second document decode) still supplies the k: identity, while the strip's
+// rewrite engine fails closed and relays the field upstream verbatim.
+func TestSubConversationsMalformedBodyTracksAndRelays(t *testing.T) {
+	upstream, capt := scriptedUpstream(t, overrideReply{200, `{"ok":true}`})
+	defer upstream.Close()
+	cfg := scCfg(t, true, "promptCacheKey")
+	buf := metrics.NewBuffer(2)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	rawBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"x","max_tokens":`
+	status, respBody := postOverrideChat(t, srv.URL, upstream.URL, rawBody,
+		func(r *http.Request) { r.Header.Set("X-Proxy-Client", "sc-client") })
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the invalid body relays verbatim; body %s)", status, respBody)
+	}
+	bodies, _ := capt.snapshot()
+	if len(bodies) != 1 || bodies[0] != rawBody {
+		t.Fatalf("strip must fail closed and relay the tracked field verbatim:\n got %q\nwant %q", bodies, rawBody)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if got := recs[0].ConversationID; got != "k:x" {
+		t.Errorf("conversation id = %q, want k:x (the lexical locate tracks a body the strict decoder rejects)", got)
+	}
+}
+
 // TestSubConversationsTopLevelBoundaryWithStrip pins the shared depth
 // boundary end to end: extraction and strip both see only the body's
 // top-level object keys, so a nested occurrence of the tracked param is
@@ -679,22 +708,27 @@ func TestSubConversationsStripRemovesEveryPresentParam(t *testing.T) {
 // identity, the translated upstream body carries it as Anthropic's native
 // top-level prompt_cache_key, an untracked body gains no field, and strip
 // applies to the original body pre-translation while the injection (keyed on
-// extraction alone) still lands.
+// extraction alone) still lands. The s:-header row pins the documented
+// X-Proxy-Session precedence on this path too: the header wins the record's
+// identity while the injection, keyed on extraction alone, still lands.
 func TestSubConversationsTranslatedAnthropicInjectsAndCarries(t *testing.T) {
 	const anthropicReply = `{"id":"msg_1","model":"claude","role":"assistant","content":[{"type":"text","text":"bonjour"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":1}}`
 	for _, tc := range []struct {
 		name    string
 		strip   bool
+		session string
 		body    string
 		wantKey string // expected prompt_cache_key value; "" means absent
 		wantID  string // "" wants any c- auto id
 	}{
-		{"tracked value injects prompt_cache_key", false,
+		{"tracked value injects prompt_cache_key", false, "",
 			`{"model":"claude","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"task-7"}`, "task-7", "k:task-7"},
-		{"untracked body omits prompt_cache_key", false,
+		{"untracked body omits prompt_cache_key", false, "",
 			`{"model":"claude","messages":[{"role":"user","content":"hi"}]}`, "", ""},
-		{"strip then translate keeps the injection", true,
+		{"strip then translate keeps the injection", true, "",
 			`{"model":"claude","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"task-7"}`, "task-7", "k:task-7"},
+		{"the s: header wins identity while the injection still lands", false, "sess-9",
+			`{"model":"claude","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"task-9"}`, "task-9", "s:sess-9"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			upstream, capt := scriptedUpstream(t, overrideReply{200, anthropicReply})
@@ -706,6 +740,9 @@ func TestSubConversationsTranslatedAnthropicInjectsAndCarries(t *testing.T) {
 
 			status, respBody := postOverrideChat(t, srv.URL, upstream.URL, tc.body, func(r *http.Request) {
 				r.Header.Set("X-Proxy-Client", "sc-client")
+				if tc.session != "" {
+					r.Header.Set("X-Proxy-Session", tc.session)
+				}
 				r.Header.Set("X-Proxy-Auth-Header", "x-api-key")
 				r.Header.Set("X-Proxy-Auth-Prefix", "")
 				r.Header.Set("X-Proxy-Path", "/messages")
@@ -865,6 +902,10 @@ func TestSubConversationExtractionUnits(t *testing.T) {
 		{"unterminated string is dropped", entries, "sc-client", `{"promptCacheKey":"abc`, true, ""},
 		{"non-string first param falls through to the second", entries, "sc-two", `{"primaryKey":123,"secondaryKey":"second"}`, true, "second"},
 		{"an invalid supplied value never falls through", entries, "sc-two", `{"primaryKey":"bad\u0001x","secondaryKey":"second"}`, true, ""},
+		{"an over-scan first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"` + strings.Repeat("y", 6*maxDeclaredSessionBytes+3) + `","secondaryKey":"second"}`, true, ""},
+		{"invalid utf-8 in the first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"a` + "\xff" + `b","secondaryKey":"second"}`, true, ""},
+		{"an undecodable escape in the first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"a\x","secondaryKey":"second"}`, true, ""},
+		{"a duplicate top-level key resolves by its first occurrence", entries, "sc-client", `{"promptCacheKey":123,"promptCacheKey":"v"}`, true, ""},
 		{"the first present param wins", entries, "sc-two", `{"primaryKey":"first","secondaryKey":"second"}`, true, "first"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

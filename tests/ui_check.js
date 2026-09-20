@@ -794,6 +794,16 @@ async function main() {
     check('an empty-string attempt index fails closed to the request view',
       attemptSel() === null && !title().includes('attempt') &&
         bodyText().includes('PROMPT-PREVIEW-7F'));
+    // The remaining spellings the drawer's digit gate names: Number coerces
+    // '0x1' and ' 1 ' to 1, so each must fail closed through the same gate.
+    if (subRow) { subRow.setAttribute('data-attempt', '0x1'); subRow.click(); }
+    check('a 0x1 attempt index fails closed to the request view',
+      attemptSel() === null && !title().includes('attempt') &&
+        bodyText().includes('PROMPT-PREVIEW-7F'));
+    if (subRow) { subRow.setAttribute('data-attempt', ' 1 '); subRow.click(); }
+    check('a space-padded attempt index fails closed to the request view',
+      attemptSel() === null && !title().includes('attempt') &&
+        bodyText().includes('PROMPT-PREVIEW-7F'));
     d.querySelector('#tbl-requests tr.exp-row[data-id="att-open"]:not(.retry-sub)').click();
     check('clicking the parent row still opens the parent detail',
       !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F'));

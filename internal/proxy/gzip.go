@@ -49,7 +49,11 @@ func NewArtifactGzipWriter(w io.Writer) *gzip.Writer {
 // retains a downloaded artifact. fallback replaces the stamp segment when the
 // artifact's moment is unknown (the capture route's damaged-payload row names
 // the record id); a surface whose moment is always known passes the empty
-// string beside a non-zero moment.
+// string beside a non-zero moment. Precondition: at must be non-zero or
+// fallback non-empty - a zero moment with an empty fallback would publish a
+// name with an empty stamp segment. Unreachable today: every surface passes a
+// real moment (the backup and export pass time.Now(), the capture passes the
+// document's decoded moment or the record-id fallback).
 func WriteArtifactHeaders(w http.ResponseWriter, kind, ext, contentType string, at time.Time, fallback string) {
 	segment := fallback
 	if !at.IsZero() {

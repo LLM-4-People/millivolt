@@ -336,12 +336,14 @@ identity. When `sub_conversations` names the request's classified client, the
 tracked field the client already sends (exemplar: opencode's `promptCacheKey`)
 supplies that request's identity in the `k:` namespace: behind an explicit
 `X-Proxy-Session`, ahead of automatic grouping. Params match only top-level
-body fields; the first present field carrying a JSON string value supplies the
-tracked value, and a present non-string value counts as absent. The body is
-relayed unchanged unless the entry sets `strip`, which removes the entry's
-configured fields from the top level of the relayed upstream body. A request
-translated to the Anthropic wire gains a top-level `prompt_cache_key` carrying
-the tracked value. An absent or invalid value is dropped, never a client
+body fields, checked in order. The first present field decides: a present
+value that is not a JSON string counts as absent and the next field is
+checked, while a present string that cannot be decoded or exceeds the value
+bound drops the identity for the request - no later field is consulted. The
+body is relayed unchanged unless the entry sets `strip`, which removes the
+entry's configured fields from the top level of the relayed upstream body. A
+request translated to the Anthropic wire gains a top-level `prompt_cache_key`
+carrying the tracked value. An absent or dropped identity is never a client
 error. A tracked identity never declares a parent: `X-Proxy-Parent-Session`
 still requires its explicit session pair, and the session wins identity. The
 value bound, name grammar, caps and the settings surface live in

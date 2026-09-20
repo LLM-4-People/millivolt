@@ -69,9 +69,11 @@ func trackedConversationID(id string) string { return "k:" + id }
 // maxDeclaredSessionBytes never spans more raw bytes than this - every JSON
 // escape sequence spends at least two raw bytes per decoded byte (one
 // six-byte \uXXXX escape per decoded byte is the worst case), plus the two
-// framing quotes. A value whose trimmable edges push its raw span past the
-// window is dropped conservatively (still never a 400 - the body is
-// passthrough payload, the same deny-by-drop precedent as an invalid value).
+// framing quotes. The window only bounds how far the scan looks for the
+// closing quote: a present string whose raw span exceeds it is the same
+// present-dropped outcome as a value that fails the declared-session bound
+// (never a 400 - the body is passthrough payload), so the scan cap cannot
+// leak into user-visible semantics.
 // Internal safety guardrail, not user-tunable.
 const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 
@@ -80,10 +82,12 @@ const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 // value from the already-buffered request body. No entries configured, or no
 // exact client leaf match, returns (nil, "") - the feature-off path leaves the
 // request byte-identical and untracked. For a matched entry the configured
-// params are checked in order and the first one whose value tail supplies a
-// decodable string wins; a supplied value that fails the declared-session
-// bound is dropped (the request stays on automatic grouping), never a 400 -
-// the body is passthrough payload, the configToken deny-by-drop precedent.
+// params are checked in order and the first present one decides: a value that
+// is not a string counts as absent (the next param is checked), while a
+// present string that cannot be decoded or exceeds the declared-session bound
+// drops the identity for the request (which stays on automatic grouping),
+// never a 400 - the body is passthrough payload, the configToken deny-by-drop
+// precedent.
 // No second full-body parse runs: the locate is a depth-aware lexical scan of
 // the buffered bytes, with the shared negative pre-gate keeping param-free
 // regions on the vectorized path.
@@ -117,12 +121,12 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 // buffered body's TOP-LEVEL object keys - a request body param is top-level
 // by product semantics, so an occurrence of the same spelling nested inside
 // a value is neither tracked nor stripped. present reports that the param
-// supplied the tracked value: the top-level locate found the key and the
-// value tail decodes as a bounded string. A supplied value that fails the
-// declared-session bound comes back present with the empty value - the first
-// present param wins and its invalid value is dropped, never a fall-through
-// to a later param, so the configured order stays presence-ordered, never
-// value-quality-ordered.
+// decided the identity: a present value that is not a string counts as
+// absent (the next param is checked), while a present string that cannot be
+// decoded or exceeds the declared-session bound drops the identity for the
+// request - the value comes back empty with present true, never a
+// fall-through to a later param, so the configured order stays
+// presence-ordered, never value-quality-ordered.
 func subConversationParam(body []byte, name string, anyEscape bool) (value string, present bool) {
 	// Keep param-free regions on the vectorized negative path (the
 	// HasErrorKey pre-gate class): a body without the literal quoted spelling
@@ -149,19 +153,20 @@ func subConversationParam(body []byte, name string, anyEscape bool) (value strin
 		}
 	}
 	if end < 0 {
-		// Unterminated within the scan cap: too long for any bounded value.
-		return "", false
+		// Unterminated within the scan cap: too long for any bounded value,
+		// the same present-dropped class as the declared-session bound.
+		return "", true
 	}
 	token := window[:end+1]
 	// The standard decoder coerces invalid UTF-8 inside strings to U+FFFD;
 	// the identity bound must judge the client's actual bytes, so validate
 	// before decoding.
 	if !utf8.Valid(token[1:end]) {
-		return "", false
+		return "", true
 	}
 	var s string
 	if json.Unmarshal(token, &s) != nil {
-		return "", false
+		return "", true
 	}
 	s = strings.TrimSpace(s)
 	if !validDeclaredSession(s) {

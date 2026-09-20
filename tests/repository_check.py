@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from urllib.parse import unquote, urlsplit
 
-from .support import (ROOT, ARTIFACT_GZIP_OWNER, ARTIFACT_GZIP_CAPTURE_OWNER,
+from .support import (ROOT,
                        artifact_gzip_choke_point_errors,
                        dead_css_class_errors, duplicate_js_function_errors,
                        git_environment, js_template_comment_errors, palette_mirror_errors,
@@ -126,10 +126,20 @@ def check(root):
     inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
     pairs = static_pairs(inventory[1])
     # The Go choke-point detector consumes (name, text) pairs like the static
-    # detectors; this is its one corpus read of the two artifact gate files.
-    gzip_pairs = [(name, (root / name).read_text(encoding='utf-8'))
-                  for name in inventory[1]
-                  if name in (ARTIFACT_GZIP_OWNER, ARTIFACT_GZIP_CAPTURE_OWNER)]
+    # detectors; this is its one corpus read of every source file under the
+    # Go and script roots - the two artifact gate files carry the per-file
+    # wrap rules, the whole tree carries the direct-construction ban. Binary
+    # assets under the roots are not source text and never decode.
+    gzip_pairs = []
+    for name in inventory[1]:
+        if name.split('/', 1)[0] not in ('cmd', 'internal', 'scripts'):
+            continue
+        try:
+            text = (root / name).read_text(encoding='utf-8')
+        except UnicodeDecodeError:
+            continue
+        if '\0' not in text:
+            gzip_pairs.append((name, text))
     return (markdown_errors(root, inventory[1]) + publication_errors(root, inventory)
             + test_layout_errors(inventory[1])
             + dead_css_class_errors(pairs)
