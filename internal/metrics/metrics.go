@@ -482,15 +482,16 @@ func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 
 // nonRetryableQuotaClasses are provider error type/code strings that, when
 // delivered with HTTP 429, denote a DURABLE account/billing condition - quota
-// or credits exhausted, spend/hard limits, expired plans. Waiting cannot
-// clear them, so nothing may retry one: the 429 absorb path surfaces the
-// response immediately instead of burning its retry budget (and pacing the
-// whole provider+key group) on a retry loop, the error-storm observation
-// excludes them, and the retryable-in-band-error precedence denies them
-// ahead of every operator extension. Transient rate-limit 429s keep their
-// normal retry/backoff behavior. Exact match (after lowercasing) against
-// the canonical envelope parser's type AND code fields, never message text:
-// OpenAI insufficient_quota / *_limit_reached family, Kimi
+// or credits exhausted, spend/hard limits, expired plans. The ordinary retry
+// ladder never absorbs one: only quota_pause_mode governs their reaction (off
+// surfaces them immediately; retry parks the provider behind a recovery
+// gate whose re-sends are probe-paced, never budget-burned; manual installs
+// an operator hold), the error-storm observation excludes them from storm
+// evidence in every mode, and the retryable-in-band-error precedence denies
+// them ahead of every operator extension. Transient rate-limit 429s keep
+// their normal retry/backoff behavior. Exact match (after lowercasing)
+// against the canonical envelope parser's type AND code fields, never
+// message text: OpenAI insufficient_quota / *_limit_reached family, Kimi
 // exceeded_current_quota_error, and Z.AI's numeric business codes (1113
 // balance exhausted, 1309/1311/1314/1315 plan/package limits). The single
 // owner: the proxy's 429 absorb path, storm observation and the in-band

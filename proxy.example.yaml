@@ -187,8 +187,8 @@ max_queue_size: 0
 #   type: duration · range >= 0s (0s = unlimited) · default 0s
 max_queue_wait: 0s
 
-# Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s are
-# never retried.
+# Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s
+# follow quota_pause_mode instead of this budget.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = no retries) · default 5
 max_retries: 5
@@ -356,7 +356,8 @@ storm_max_retries: 20
 
 # Exact status strings selected for detection and additional storm retries: 429 or
 # 500..599, without duplicates. Empty disables HTTP status triggers. 429 is opt-in because
-# limits may be credential-specific; durable quota/billing 429s remain excluded.
+# limits may be credential-specific; durable quota/billing 429s remain excluded from storm
+# evidence (quota_pause_mode owns their reaction).
 # Hot-reload: yes.
 #   type: list of string
 storm_status_codes:
@@ -377,6 +378,27 @@ storm_transport_errors: true
 # Hot-reload: yes.
 #   type: bool · default true
 storm_stream_errors: true
+
+# ---- Quota pause ----
+# Provider-wide reaction to a 429 carrying a durable quota/billing error
+# (insufficient_quota/credits, spend limits): surface it immediately, park the provider
+# behind a recovery gate, or hold it until an operator resumes.
+# Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits,
+# spend limits; in-band occurrences included): off surfaces it immediately; retry opens a
+# provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per
+# the storm recovery delays, new requests park on the gate (bounded by
+# storm_max_queue/storm_max_wait), and the first 2xx closes it; manual creates an
+# indefinite provider pause that only an operator resumes. Classification is fixed; only
+# the reaction is configurable.
+# Hot-reload: yes.
+#   type: string · default off
+quota_pause_mode: "off"
+
+# Consecutive successful recovery probes that close a retry-mode quota gate. 1 releases
+# the queue on the first 2xx. Meaningful only in retry mode.
+# Hot-reload: yes.
+#   type: int · range 1..100 · default 1
+quota_pause_recovery_successes: 1
 
 # ---- Conversations ----
 # How the request log groups turns into conversations.

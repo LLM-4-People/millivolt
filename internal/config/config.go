@@ -122,8 +122,9 @@ type Config struct {
 	// exponential backoff - Retry-After / rate-limit reset headers are a
 	// floor, not a replacement - so clients never see a transient failure.
 	// A 429 carrying a durable quota/billing
-	// error (insufficient_quota/credits, spend limits) is never retried: it is
-	// surfaced immediately (waiting cannot clear it).
+	// error (insufficient_quota/credits, spend limits) is never retried
+	// blindly: quota_pause_mode off surfaces it immediately (waiting cannot
+	// clear it); the other modes park it behind a provider-wide pause instead.
 	MaxConcurrent int           `yaml:"max_concurrent" json:"max_concurrent"` // per provider+key; 0 = unlimited
 	MaxQueueSize  int           `yaml:"max_queue_size" json:"max_queue_size"` // per group; 0 = unlimited
 	MaxQueueWait  time.Duration `yaml:"max_queue_wait" json:"max_queue_wait"` // max queue wait before 429; 0 = unlimited
@@ -232,6 +233,30 @@ type Config struct {
 	// Completed in-band/stream/quality errors inform later traffic only;
 	// meaningful emitted upstream content is never replayed for storm recovery.
 	StormStreamErrors bool `yaml:"storm_stream_errors" json:"storm_stream_errors"`
+
+	// ---- durable quota/billing pause ----
+	// QuotaPauseMode selects the provider-wide reaction to a 429 carrying a
+	// durable quota/billing error (insufficient_quota/credits, spend limits;
+	// the classification owner is metrics.IsNonRetryableQuotaErr):
+	//   off    surface the 429 immediately; nothing is parked or retried
+	//          (waiting cannot clear the condition on its own).
+	//   retry  open a provider-wide recovery gate: the triggering request
+	//          absorbs the 429 and re-sends per the storm recovery backoff
+	//          (storm_initial_backoff..storm_max_backoff), every new request
+	//          to the provider parks on the gate (bounded by storm_max_queue
+	//          and storm_max_wait), and the first send that resolves 2xx
+	//          closes the gate and drains the queue.
+	//   manual create an indefinite provider-scoped pause (an operator hold)
+	//          that queues every request, triggering one included, until an
+	//          operator resumes it through the pause surface.
+	// Hot-reload applies to new observations. A mode switch drops in-memory
+	// retry gates (they self-heal on the next durable 429) but never removes
+	// operator holds, including manual-mode ones.
+	QuotaPauseMode string `yaml:"quota_pause_mode" json:"quota_pause_mode"`
+	// QuotaPauseRecoverySuccesses is how many consecutive successful recovery
+	// probes close a retry-mode quota gate; 1 releases the queue on the first
+	// 2xx. Meaningful only for quota_pause_mode retry.
+	QuotaPauseRecoverySuccesses int `yaml:"quota_pause_recovery_successes" json:"quota_pause_recovery_successes"`
 
 	// ---- conversation grouping (dashboard request log) ----
 	// ConversationIdleGap: a gap in activity longer than this starts a new
@@ -517,6 +542,17 @@ const (
 	HeartbeatIntervalMax = 10 * time.Minute
 )
 
+// Quota pause modes (QuotaPauseMode values; exact lowercase strings).
+const (
+	QuotaPauseOff    = "off"
+	QuotaPauseRetry  = "retry"
+	QuotaPauseManual = "manual"
+)
+
+func quotaPauseModes() string {
+	return strings.Join([]string{QuotaPauseOff, QuotaPauseRetry, QuotaPauseManual}, ", ")
+}
+
 func heartbeatRange() string {
 	return FormatDuration(HeartbeatIntervalMin) + ".." + FormatDuration(HeartbeatIntervalMax)
 }
@@ -568,6 +604,9 @@ func Default() *Config {
 		StormStatusCodes:       []string{"500", "502", "503", "504"},
 		StormTransportErrors:   true,
 		StormStreamErrors:      true,
+
+		QuotaPauseMode:              QuotaPauseOff,
+		QuotaPauseRecoverySuccesses: 1,
 
 		AutoTokenRefresh: true,
 
@@ -811,6 +850,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := validateStorm(c); err != nil {
+		return err
+	}
+	if err := validateQuotaPause(c); err != nil {
 		return err
 	}
 	// durations: negatives are always invalid. 0 is meaningful where documented
@@ -1414,6 +1456,23 @@ func validateStorm(c *Config) error {
 		if metrics.IsNonRetryableQuotaErr(class, class) {
 			return fmt.Errorf("retryable_error_classes: %q is a durable quota/billing class and is never retryable", class)
 		}
+	}
+	return nil
+}
+
+// validateQuotaPause owns the quota_pause_mode enum and its recovery
+// bound. The enum is exact lowercase (deny by default); the recovery count
+// is meaningful only in retry mode but is always range-checked so a stored
+// value cannot sit invalid while unused.
+func validateQuotaPause(c *Config) error {
+	switch c.QuotaPauseMode {
+	case QuotaPauseOff, QuotaPauseRetry, QuotaPauseManual:
+	default:
+		return fmt.Errorf("quota_pause_mode: %q must be one of %s", c.QuotaPauseMode, quotaPauseModes())
+	}
+	if c.QuotaPauseRecoverySuccesses < 1 || c.QuotaPauseRecoverySuccesses > 100 {
+		return errRange("quota_pause_recovery_successes", "1", "100",
+			strconv.Itoa(c.QuotaPauseRecoverySuccesses))
 	}
 	return nil
 }

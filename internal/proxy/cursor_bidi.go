@@ -456,10 +456,12 @@ func (s *Server) cursorEndSend(groupKey string, own, failed bool) {
 // quota429Peek classifies the bounded envelope; this transport's overflow
 // policy is applied here: an oversized 429 body is closed and re-wrapped as
 // only the truncated prefix (the cursor path synthesizes its own envelope for
-// the final error renderer), keeping normal retry semantics.
+// the final error renderer), keeping normal retry semantics. The quota
+// pause never triggers here: cursor is not an OpenAI-wire target, so a
+// durable cursor 429 keeps its surface-immediately behavior.
 func cursorSendFailed(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
-		durable, errBody, leftOpen := quota429Peek(resp)
+		durable, _, _, errBody, leftOpen := quota429Peek(resp)
 		if leftOpen {
 			resp.Body.Close()
 		}

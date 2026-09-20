@@ -157,6 +157,10 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 		if f.Key == "listen" {
 			return "127.0.0.1:9999"
 		}
+		if f.Key == "quota_pause_mode" {
+			// An exact-match enum: alternate with another member.
+			return QuotaPauseRetry
+		}
 		return "alt-" + base.fieldValue(f.Key).(string)
 	case KindInt:
 		n := base.fieldValue(f.Key).(int)

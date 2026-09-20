@@ -288,6 +288,7 @@ func main() {
 	// Operator pause: in-flight requests finish, new ones queue until resume.
 	// The dashboard Pause/Resume button is the UI for this.
 	mux.Handle("/admin/pause", http.HandlerFunc(proxySrv.HandlePause))
+	mux.Handle("/admin/quota", http.HandlerFunc(proxySrv.HandleQuotaPause))
 	mux.Handle("/admin/throttle", http.HandlerFunc(proxySrv.HandleThrottle))
 	mux.Handle("/admin/debug", http.HandlerFunc(proxySrv.HandleDebug))
 	mux.Handle("/admin/debug/capture", web.Gzip(http.HandlerFunc(proxySrv.HandleDebugCapture)))

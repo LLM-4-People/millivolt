@@ -3,6 +3,7 @@
 // Incident buttons retain their identity across updates for keyboard focus.
 let stormSnapshot = {valid: false, enabled: false, storms: []};
 let stormDialogKey = '';
+let quotaResumeError = '';
 const stormIncidentKey = s => JSON.stringify([s.provider, s.scope, s.model]);
 const stormPercent = value => value.toLocaleString(undefined, {maximumFractionDigits: 1});
 function applyStormState(st) {
@@ -11,6 +12,7 @@ function applyStormState(st) {
   const valid = s => s && typeof s.provider === 'string' && s.provider.length > 0 &&
     typeof s.model === 'string' && (s.scope === 'provider' && !s.model || s.scope === 'model') &&
     ['open', 'half_open'].includes(s.state) && typeof s.reason === 'string' &&
+    typeof s.quota === 'boolean' && (!s.quota || s.scope === 'provider') &&
     Number.isFinite(s.error_percent) && s.error_percent >= 0 && s.error_percent <= 100 &&
     (s.scope !== 'provider' || Number.isSafeInteger(s.active_models) && s.active_models >= 0 &&
       Number.isSafeInteger(s.affected_models) && s.affected_models >= 0 && s.affected_models <= s.active_models &&
@@ -35,7 +37,10 @@ function applyStormState(st) {
   storms.forEach((s, index) => {
     const key = stormIncidentKey(s);
     const scope = s.provider + ' · ' + (s.scope === 'provider' ? 'all models' : s.model || '(unspecified model)');
-    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail"><span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(stormPercent(s.error_percent))}% failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span></span>`;
+    const detail = s.quota
+      ? `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>Quota pause</span><span>${fmt(s.queued)} queued</span><span>${fmt(s.recovery_successes)} / ${fmt(s.recovery_required)} recovery probes</span>`
+      : `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(stormPercent(s.error_percent))}% failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span>`;
+    const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
     let row = existing.get(key);
     existing.delete(key);
     if (!row) {
@@ -94,6 +99,7 @@ function openStormDetails(key) {
   closeNavMenu();
   closeDimMenu();
   stormDialogKey = key;
+  quotaResumeError = '';
   renderStormDetails();
   openModal(dialog);
 }
@@ -112,15 +118,23 @@ function closeStormDetails() {
 
 function renderStormDetails() {
   if (!stormDialogKey || !$('storm-dialog-body')) return;
+  const title = $('storm-dialog-title');
   const incident = stormSnapshot.storms.find(s => stormIncidentKey(s) === stormDialogKey);
   if (!stormSnapshot.valid || !stormSnapshot.enabled || !incident) {
     const message = !stormSnapshot.valid ? 'Current incident details are unavailable.' :
       !stormSnapshot.enabled ? 'Error storm protection is disabled.' : 'This incident is no longer active.';
+    if (title) title.textContent = 'Error storm details';
     updateSection('storm-dialog-body', `<p class="storm-resolution" role="status">${message}</p>`);
     return;
   }
   const s = incident;
-  const entries = [
+  if (title) title.textContent = s.quota ? 'Provider quota pause' : 'Error storm details';
+  const entries = s.quota ? [
+    ['Provider', s.provider], ['Model scope', 'All models'],
+    ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
+    ['Queued requests', fmt(s.queued)], ['Next retry', new Date(s.retry_at).toLocaleString()],
+    ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
+  ] : [
     ['Provider', s.provider], ['Model scope', s.scope === 'provider' ? 'All models' : s.model || '(unspecified model)'],
     ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
     ['Requests affected', fmt(s.error_requests)], ['Failed upstream attempts', fmt(s.failures)],
@@ -129,10 +143,34 @@ function renderStormDetails() {
     ['Next retry', new Date(s.retry_at).toLocaleString()],
     ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
   ];
-  if (s.scope === 'provider') entries.push(['Active models', fmt(s.active_models)],
+  if (!s.quota && s.scope === 'provider') entries.push(['Active models', fmt(s.active_models)],
     ['Affected active models', fmt(s.affected_models) + ' / ' + fmt(s.active_models) + ' (' + stormPercent(s.affected_model_percent) + '%)']);
   const rows = entries.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
-  updateSection('storm-dialog-body', `<dl class="storm-facts">${rows}</dl><p class="storm-explanation">Counts cover the rolling detection window. Each request with a selected failure in this window is counted once; retries count as separate upstream attempts. Recovery checks use queued requests, so the next retry may start after the scheduled time.</p>`);
+  const explanation = s.quota
+    ? 'This provider is paused after a durable quota/billing error (for example insufficient credits). Every new request parks here and one recovery probe is admitted per cooldown - a provider Retry-After on the quota response paces it like any other 429. The first successful probe releases the queue; Resume now closes the gate immediately.'
+    : 'Counts cover the rolling detection window. Each request with a selected failure in this window is counted once; retries count as separate upstream attempts. Recovery checks use queued requests, so the next retry may start after the scheduled time.';
+  const controls = s.quota
+    ? `<div class="storm-quota-actions"><button class="btn" type="button" data-operator="quota-resume" data-value="${escapeHtml(s.provider)}">Resume now</button>${quotaResumeError ? `<span class="storm-resolution" role="alert">${escapeHtml(quotaResumeError)}</span>` : ''}</div>` : '';
+  updateSection('storm-dialog-body', `<dl class="storm-facts">${rows}</dl><p class="storm-explanation">${explanation}</p>${controls}`);
+}
+
+// resumeQuotaProvider is the retry-mode quota gate's operator action: the
+// confirmed response is the shared storm snapshot, so the banner and dialog
+// repaint from the same authoritative state; a failure keeps the dialog open
+// with the message beside the button.
+async function resumeQuotaProvider(provider) {
+  if (!provider) return;
+  try {
+    const st = await operatorJsonBody('/admin/quota', {
+      method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({provider, resume: true}),
+    }, 'could not resume ' + provider);
+    if (!st || !Array.isArray(st.storms)) throw new Error('unexpected resume response');
+    quotaResumeError = '';
+    applyStormState(st);
+  } catch (err) {
+    quotaResumeError = String(err.message || 'resume failed');
+  }
+  renderStormDetails();
 }
 
 // Operator credential owner for the gated plane. The server never issues or
@@ -340,7 +378,7 @@ document.addEventListener('click', e => {
   if (!button || button.disabled) return;
   const actions = { 'pause-edit': editPauseHold, 'pause-resume': resumePauseHold,
     'debug-edit': editDebugSession, 'debug-stop': stopDebugSession, 'limit-edit': editLimitProvider,
-    'storm-open': openStormDetails, 'storm-close': closeStormDetails };
+    'storm-open': openStormDetails, 'storm-close': closeStormDetails, 'quota-resume': resumeQuotaProvider };
   const action = actions[button.dataset.operator];
   if (action) { e.stopPropagation(); action(button.dataset.value); }
 });
@@ -602,6 +640,7 @@ const SETTINGS_CAT_REF = {
   upstream:     { dim: 'provider' },
   queue:        { dim: null, icon: '↻', color: 'var(--warn)' },
   storm:        { dim: null, icon: '⚠', color: 'var(--warn)' },
+  quota:        { dim: null, icon: '⊘', color: 'var(--warn)' },
   conversation: { dim: 'conversation' },
   format:       { dim: 'model' },
   storage:    { dim: 'key' },
@@ -2500,6 +2539,9 @@ function renderPauseHolds() {
   if (!holds.length) { box.innerHTML = ''; return; }
   box.innerHTML = '<div class="pause-known-hd">Active holds</div>' + holds.map(h => {
     const left = [holdScopeLabel(h)];
+    // The system label of an auto-created quota hold - the operator sees why
+    // a hold they did not create is parking the provider.
+    if (h.reason) left.push(h.reason);
     const until = pauseUntilLabel(h.until);
     if (until) left.push(until);
     else if (h.duration) left.push(h.duration);

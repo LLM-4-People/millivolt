@@ -22,6 +22,14 @@ type StormOptions struct {
 	BackoffMultiplier, JitterPercent, RecoverySuccesses int
 	MaxQueue, MaxScopes                                 int
 	MaxWait                                             time.Duration
+	// QuotaEnabled arms the durable quota/billing gate family: a
+	// provider-wide parking gate with recovery probes, independent of the
+	// threshold storms above (Enabled may be false). Quota outcomes open and
+	// pace the gate through StormPermit.ObserveQuota; they never become storm
+	// evidence. QuotaRecoverySuccesses bounds how many consecutive
+	// successful probes close a quota gate.
+	QuotaEnabled           bool
+	QuotaRecoverySuccesses int
 }
 
 // Fixed buckets bound work and memory independently of traffic volume. Windows
@@ -60,6 +68,7 @@ type stormScope struct {
 	reset                         uint64
 	lastActivity                  time.Time
 	active, probing               bool
+	quota                         bool // durable quota/billing gate facet (provider scopes only)
 	epoch                         uint64
 	backoff                       time.Duration
 	retryAt                       time.Time
@@ -112,7 +121,7 @@ func (s *stormState) scopesFor(provider, model string, now time.Time) ([]*stormS
 		return nil, ErrStormCapacity
 	}
 	keys := []stormKey{{provider: provider, model: model, modelScope: true}}
-	if s.opts.ProviderEnabled {
+	if s.opts.ProviderEnabled || s.opts.QuotaEnabled {
 		keys = append(keys, stormKey{provider: provider})
 	}
 	needed := 0
@@ -123,7 +132,9 @@ func (s *stormState) scopesFor(provider, model string, now time.Time) ([]*stormS
 	}
 	if len(s.scopes)+needed > s.opts.MaxScopes {
 		for key, scope := range s.scopes {
-			if !scope.active && scope.refs == 0 && scope.queued == 0 && now.Sub(scope.lastActivity) >= s.opts.Window {
+			// An open quota gate parks its provider exactly like an active
+			// storm; neither may be evicted while it holds waiters' fate.
+			if !scope.active && !scope.quota && scope.refs == 0 && scope.queued == 0 && now.Sub(scope.lastActivity) >= s.opts.Window {
 				// Keep the requested scopes even when they have no observations.
 				requested := false
 				for _, target := range keys {
@@ -158,6 +169,17 @@ func (s *stormState) scopesFor(provider, model string, now time.Time) ([]*stormS
 
 func (s *stormState) gates(scope *stormScope) bool {
 	return !scope.key.modelScope || s.opts.ModelEnabled
+}
+
+// gateHeld reports whether this scope currently parks a new send: an active
+// threshold storm gate (when its facet is enabled) or an open quota gate.
+// Both facets share one probe flag and one cooldown, so one in-flight probe
+// or an unelapsed recovery delay parks sends for whichever facet is open.
+func (s *stormState) gateHeld(scope *stormScope, now time.Time) bool {
+	if !((s.gates(scope) && scope.active) || scope.quota) {
+		return false
+	}
+	return scope.probing || now.Before(scope.retryAt)
 }
 
 type stormClaim struct {
@@ -239,7 +261,12 @@ func (s *Scheduler) waitStorm(ctx context.Context, provider, model string, onWai
 			return nil, err
 		}
 		opts := state.opts
-		if !opts.Enabled || (!opts.ProviderEnabled && !opts.ModelEnabled) {
+		// Threshold storms and the quota gate family are independent: with
+		// quota mode armed the wait loop runs even when every storm facet is
+		// disabled, so a provider parked by a durable quota/billing 429 keeps
+		// parking and probing sends. Only a fully disarmed state takes the
+		// zero-overhead disabled permit.
+		if (!opts.Enabled || (!opts.ProviderEnabled && !opts.ModelEnabled)) && !opts.QuotaEnabled {
 			state.mu.Unlock()
 			return &disabledStormPermit, nil
 		}
@@ -261,7 +288,7 @@ func (s *Scheduler) waitStorm(ctx context.Context, provider, model string, onWai
 		}
 		blocked := false
 		for _, scope := range scopes {
-			if state.gates(scope) && scope.active && (scope.probing || now.Before(scope.retryAt)) {
+			if state.gateHeld(scope, now) {
 				blocked = true
 			}
 		}
@@ -272,7 +299,7 @@ func (s *Scheduler) waitStorm(ctx context.Context, provider, model string, onWai
 			}
 			permit := &StormPermit{state: state, generation: state.generation}
 			for _, scope := range scopes {
-				probe := state.gates(scope) && scope.active
+				probe := (state.gates(scope) && scope.active) || scope.quota
 				if probe {
 					scope.probing = true
 				}
@@ -517,6 +544,77 @@ func (p *StormPermit) Cancel() {
 	}
 }
 
+// ObserveQuota settles the permit for a durable quota/billing outcome and
+// manages the provider's quota gate: it opens the gate when the provider
+// scope is not yet parked, or - when this permit carries the gate's probe
+// claim - releases the probe and grows the recovery cooldown. A provider
+// Retry-After / rate-limit-reset hint on the quota response is honored as a
+// floor on the next probe exactly like the shared retry pacing (bounded by
+// ClampRetryHint); without one, the gate's backoff alone owns the cadence.
+// A quota outcome never becomes storm evidence: no samples, no threshold
+// effects. Idempotent and concurrent safe like Observe.
+func (p *StormPermit) ObserveQuota(reason string, retryAfter time.Duration) {
+	if p == nil || p.state == nil {
+		return
+	}
+	p.once.Do(func() { p.settleQuota(reason, retryAfter) })
+}
+
+func (p *StormPermit) settleQuota(reason string, retryAfter time.Duration) {
+	s := p.state
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, claim := range p.claims[:p.claimCount] {
+		claim.scope.refs--
+	}
+	if p.generation != s.generation {
+		return
+	}
+	now := time.Now()
+	reason = strings.TrimSpace(reason)
+	if len(reason) > maxStormReasonBytes {
+		reason = reason[:maxStormReasonBytes]
+	}
+	retryAfter = ClampRetryHint(retryAfter)
+	changed := false
+	for _, claim := range p.claims[:p.claimCount] {
+		scope := claim.scope
+		// Exactly one probe is in flight per scope: whichever facet claimed
+		// it, this permit's settle releases the flag. Without this, the
+		// reopen path and cross-facet probes (a storm probe observing a
+		// quota failure) leak probing=true and park the scope forever. The
+		// epoch guard keeps a stale permit from releasing a newer gate
+		// generation's in-flight probe.
+		if claim.probe && claim.epoch == scope.epoch && scope.probing {
+			scope.probing = false
+			changed = true
+		}
+		if scope.key.modelScope {
+			continue // the quota gate is provider-wide
+		}
+		if claim.probe && claim.epoch == scope.epoch && scope.quota {
+			// This probe found the account still exhausted: keep the gate
+			// open, reset recovery and pace the next probe later.
+			scope.recovered = 0
+			scope.reason = strings.Clone(reason)
+			s.delay(scope, now, retryAfter, true)
+		} else if !scope.quota {
+			// First durable quota observation for the provider: open the
+			// gate at the initial recovery delay (or the provider hint when
+			// longer). The epoch bump keeps older permits from settling as
+			// this gate's probe.
+			scope.quota = true
+			scope.epoch++
+			scope.recovered = 0
+			scope.reason = strings.Clone(reason)
+			s.delay(scope, now, retryAfter, false)
+		}
+	}
+	if changed {
+		s.wakeLocked()
+	}
+}
+
 func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter time.Duration, observation *StormObservation) {
 	if p.state == nil {
 		return
@@ -549,10 +647,10 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 	}
 	for _, claim := range p.claims[:p.claimCount] {
 		scope := claim.scope
-		if !s.gates(scope) {
+		if !s.gates(scope) && !scope.quota {
 			continue
 		}
-		if claim.probe && claim.epoch == scope.epoch && scope.active {
+		if claim.probe && claim.epoch == scope.epoch && (scope.active || scope.quota) {
 			scope.probing = false
 			changed = true
 			if observe && failed {
@@ -561,19 +659,33 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 				s.delay(scope, now, retryAfter, true)
 			} else if observe {
 				scope.recovered++
-				if scope.recovered >= s.opts.RecoverySuccesses {
+				quotaClosed := scope.quota && scope.recovered >= s.opts.QuotaRecoverySuccesses
+				stormClosed := scope.active && scope.recovered >= s.opts.RecoverySuccesses
+				if quotaClosed {
+					scope.quota = false
+				}
+				if stormClosed {
 					scope.active = false
 					scope.backoff = 0
 					scope.retryAt = time.Time{}
 					scope.resetSamples()
 					scope.timer.stop()
-				} else {
+				} else if quotaClosed && !scope.active {
+					// A quota-only scope fully recovered: no facet remains.
+					scope.backoff = 0
+					scope.retryAt = time.Time{}
+					scope.timer.stop()
+				} else if scope.active || scope.quota {
 					// Recovery remains paced until enough clean probes confirm
 					// health; partial recovery must not release a burst.
 					s.delay(scope, now, 0, false)
 				}
 			}
-		} else if observe && failed && !scope.active && scope.threshold(now, s.opts) && (scope.key.modelScope || s.allActiveModelsAffected(scope.key.provider, now)) {
+		} else if s.opts.Enabled && (scope.key.modelScope || s.opts.ProviderEnabled) && observe && failed && !scope.active && scope.threshold(now, s.opts) && (scope.key.modelScope || s.allActiveModelsAffected(scope.key.provider, now)) {
+			// Threshold-open respects its facet's enablement: quota mode
+			// creates provider scopes for parking, but a disabled provider
+			// storm facet must not open through them. Model facets are
+			// already gated by the loop's gates() skip above.
 			scope.active = true
 			scope.epoch++
 			scope.recovered = 0
@@ -596,12 +708,15 @@ func (p *StormPermit) settle(observe, failed bool, reason string, retryAfter tim
 }
 
 // StormStatus describes an active gate with attempt-based rolling statistics.
+// Quota marks the durable quota/billing gate facet (provider-wide parking
+// after insufficient_quota/credits; recovery probes close it).
 type StormStatus struct {
 	Provider             string    `json:"provider"`
 	Model                string    `json:"model"`
 	Scope                string    `json:"scope"`
 	State                string    `json:"state"`
 	Reason               string    `json:"reason"`
+	Quota                bool      `json:"quota"`
 	ErrorPercent         float64   `json:"error_percent"`
 	Failures             int64     `json:"failures"`
 	ErrorRequests        int64     `json:"error_requests"`
@@ -614,6 +729,33 @@ type StormStatus struct {
 	ActiveModels         int       `json:"active_models"`
 	AffectedModels       int       `json:"affected_models"`
 	AffectedModelPercent float64   `json:"affected_model_percent"`
+}
+
+// ReleaseQuota closes a provider's open quota gate without waiting for a
+// recovery probe; parked sends resume immediately. It is the operator resume
+// action for retry-mode quota parking. An in-flight probe's flag dies with
+// the gate: its permit can no longer settle as this gate's probe (the facet
+// is closed), so the release clears the flag here rather than leaking the
+// exclusivity - a quota 429 that probe observes afterwards re-arms the gate
+// as fresh evidence. The report says whether a gate was open.
+func (s *Scheduler) ReleaseQuota(provider string) bool {
+	state := &s.storms
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	scope := state.scopes[stormKey{provider: provider}]
+	if scope == nil || !scope.quota {
+		return false
+	}
+	scope.quota = false
+	scope.probing = false
+	scope.recovered = 0
+	if !scope.active {
+		scope.backoff = 0
+		scope.retryAt = time.Time{}
+		scope.timer.stop()
+	}
+	state.wakeLocked()
+	return true
 }
 
 func (s *Scheduler) StormSnapshot() []StormStatus {
@@ -637,13 +779,17 @@ func (s *Scheduler) StormSnapshot() []StormStatus {
 		}
 	}
 	for _, scope := range state.scopes {
-		if !scope.active || !state.gates(scope) {
+		if !scope.quota && (!scope.active || !state.gates(scope)) {
 			continue
 		}
 		samples, failures := scope.totals(now, state.opts.Window)
 		row := StormStatus{Provider: scope.key.provider, Model: scope.key.model, Scope: "provider", State: "open", Reason: scope.reason,
+			Quota:    scope.quota,
 			Failures: failures, ErrorRequests: scope.cachedErrorRequests, Samples: samples, WindowMs: state.opts.Window.Milliseconds(), Queued: scope.queued,
 			RetryAt: scope.retryAt, RecoverySuccesses: scope.recovered, RecoveryRequired: state.opts.RecoverySuccesses}
+		if scope.quota && !scope.active {
+			row.RecoveryRequired = state.opts.QuotaRecoverySuccesses
+		}
 		if scope.key.modelScope {
 			row.Scope = "model"
 		} else {

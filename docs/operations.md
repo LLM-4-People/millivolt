@@ -87,6 +87,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
 | Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
+| Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap and open-conversation cap. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
 | Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
@@ -489,6 +490,7 @@ the credential gates both.
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
+| `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates; POST requires provider. Supplied limits merge; `clear:true` removes policy. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. |
@@ -648,6 +650,39 @@ protection. These bounds are not a total heap ceiling: waiting callers retain
 bounded request bodies, and existing ordinary queues remain separately sized.
 The [protocol guide](protocol.md#error-storm-protection) defines retry safety,
 quota exclusions, native handshakes and client-facing failures.
+
+### Quota pause
+
+Open Settings, select **Quota pause**, and choose the reaction to a 429 whose
+error envelope is a durable account condition - `insufficient_quota`,
+`insufficient_credits`, spend/hard limits, the recognized numeric billing codes
+(the classification is fixed; only the reaction is configurable):
+
+- **off** (default): the 429 surfaces to the client immediately. Nothing is
+  parked or retried.
+- **retry**: a provider-wide recovery gate opens on the first such 429 from an
+  OpenAI-wire provider. The triggering request absorbs the 429 and re-sends
+  per the error storm recovery delays; every new request to the provider
+  parks on the gate (bounded by `storm_max_queue` and `storm_max_wait`); the
+  first send that resolves 2xx closes the gate after
+  `quota_pause_recovery_successes` probes and the queue drains. A provider
+  `Retry-After` on the quota 429 paces the next probe like any other 429.
+- **manual**: an indefinite provider-scoped pause (an operator hold labeled
+  with the quota class) is created automatically; every request, triggering
+  one included, queues until an operator resumes it on the pause surface.
+
+The retry-mode gate shares the storm scheduler's parking, probes and pacing,
+so storm recovery settings configure it without storm protection being
+enabled. It surfaces in the storm banner as a quota incident with a
+**Resume now** action (`POST /admin/quota`); manual-mode holds appear on the
+pause surface with their reason and resume like any hold. A quota 429 is
+never marked as a rate limit, and quota re-sends never burn the transient
+`max_retries` budget. The retry gate is in-memory - a restart drops it and
+the provider's next durable quota 429 re-arms it - while manual-mode holds
+persist like every operator pause. In-band occurrences (the same envelope
+inside a 200 stream) arm the pause the same way; that request already
+answered, so it is never parked. Translated Anthropic-format and Cursor
+upstreams keep the off behavior in every mode.
 
 ### Debug and preview capture
 

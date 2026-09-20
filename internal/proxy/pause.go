@@ -42,7 +42,9 @@ type pausePersist interface {
 }
 
 // persistedPause is one reboot-surviving hold. Until is absolute so a
-// restart mid-window keeps the remaining time.
+// restart mid-window keeps the remaining time. Reason is the system label
+// of an auto-created hold (the durable quota/billing token); operator edits
+// preserve it and it is never accepted from the HTTP surface.
 type persistedPause struct {
 	ID         string    `json:"id,omitempty"`
 	All        bool      `json:"all,omitempty"`
@@ -53,6 +55,7 @@ type persistedPause struct {
 	Duration   string    `json:"duration,omitempty"`
 	Until      time.Time `json:"until,omitempty"`
 	MaxQueued  int       `json:"max_queued,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
 }
 
 type persistedDoc struct {
@@ -383,6 +386,9 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		snap = persistedPause{
 			ID: newPauseID(), All: all, New: newc, Clients: clients,
 			Providers: providers, Duration: dur, MaxQueued: capn,
+			// An edit re-states scope, deadline and cap; the system origin
+			// of an auto-created hold is never restated or cleared.
+			Reason: prev.Reason,
 		}
 		if hasPrev {
 			snap.ID = id
@@ -620,6 +626,10 @@ func pauseDescribe(snap persistedPause) string {
 			b.WriteString(strings.Join(snap.Providers, ","))
 		}
 	}
+	if snap.Reason != "" {
+		b.WriteString(" ")
+		b.WriteString(snap.Reason)
+	}
 	if snap.Duration != "" {
 		b.WriteString(" ")
 		b.WriteString(snap.Duration)
@@ -665,6 +675,7 @@ func (s *Server) PauseSnapshot() map[string]any {
 			"duration":     h.Duration,
 			"until":        rfc3339OrNil(h.Until),
 			"max_queued":   h.MaxQueued,
+			"reason":       h.Reason,
 			"queued":       s.scheduler.HoldQueued(h.ID),
 		})
 	}

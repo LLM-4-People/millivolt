@@ -119,8 +119,14 @@ passed through on the nontranslated path. The proxy can retry transient
 transport failures, 429 and 5xx before returning the final response, and
 retryable in-band error events on an open stream before any generation
 content was relayed. Durable
-quota/billing 429s are not treated as transient. Provider retry hints and
-operator holds can substantially extend total wall time. With
+quota/billing 429s follow `quota_pause_mode` instead of the transient retry
+ladder: `off` (default) surfaces them immediately; `retry` parks the
+triggering request and every new request to the same OpenAI-wire provider
+behind a recovery gate until the first re-send resolves 2xx (a provider
+`Retry-After` on the quota response paces the next probe like any other
+429); `manual` installs an indefinite provider pause that only an operator
+resumes. Quota re-sends never burn the transient retry budget. Provider
+retry hints and operator holds can substantially extend total wall time. With
 `suppress_client_retries` the proxy declares itself the client's sole retry
 authority: every error response the relay returns then carries
 `x-should-retry: false`, the official OpenAI SDK convention (python, node,
@@ -227,7 +233,8 @@ absorbed retries separately. Incident details also count distinct logical
 requests with a selected failure in the window; retries move the same request's
 last-failure membership instead of adding another request. Unselected statuses,
 non-retryable HTTP account/auth rejections, recognized durable quota envelopes,
-caller cancellations and fired per-send deadlines are excluded. A selected 429
+caller cancellations and fired per-send deadlines are excluded - quota outcomes
+never become storm evidence, even while a quota gate is open. A selected 429
 is a storm failure sample but remains a separate rate-limit signal in dashboard
 request health. Configurable response/stream failure detection observes a 2xx
 attempt once when its relay completes, or before an existing quality re-ask.
@@ -242,6 +249,20 @@ readiness before acquiring key concurrency, then claims a probe only at the
 actual send boundary. Readiness never reserves a probe while waiting for a key
 slot. Native parked runs remain resumable; fresh Cursor HTTP
 handshakes use the shared native send owner and can retry before a run starts.
+
+The quota pause (`quota_pause_mode: retry`) is a separate provider-wide gate in
+the same scheduler: the first durable quota/billing 429 from an OpenAI-wire
+provider opens it immediately (no sample thresholds), the triggering request
+absorbs the 429 and re-sends per the same recovery cooldowns, and every new
+request to the provider parks at admission. The first send that resolves 2xx
+closes the gate after `quota_pause_recovery_successes` probes and the queue
+drains; a provider `Retry-After` on the quota 429 is a floor on the next probe,
+bounded by the shared hint ceiling. Parked sends obey `storm_max_queue` and
+`storm_max_wait`; beyond them the proxy answers HTTP 429 locally. The gate
+appears in the storm banner as a quota incident with an operator **Resume now**
+action; a manual-mode hold appears on the pause surface instead. The gate is
+in-memory: a restart drops it and the provider's next durable quota 429 re-arms
+it. Manual-mode holds persist like every operator pause.
 
 The ordinary HTTP retry budget remains `max_retries`. Selected failures during
 an active storm may use up to `storm_max_retries` additional attempts across the

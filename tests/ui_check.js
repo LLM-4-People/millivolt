@@ -4534,7 +4534,7 @@ async function main() {
     const baseRules = [{mode: 'pattern', from: '(?P<name>a)', to: '${name}x'}];
     const baseCanon = modelFixture(baseRules, {' a ': 'ax', 'server-model': 'canonical'});
     const stormFixture = {enabled:true,banner_enabled:true,storms:[{
-      provider:'neutral.example',model:'',scope:'provider',state:'open',reason:'http_503',
+      provider:'neutral.example',model:'',scope:'provider',state:'open',reason:'http_503',quota:false,
       error_percent:75,error_requests:9,failures:15,samples:20,window_ms:60000,queued:4,
       active_models:3,affected_models:2,affected_model_percent:200/3,
       retry_at:'2026-09-05T12:00:00Z',recovery_successes:0,recovery_required:2,
@@ -4666,6 +4666,63 @@ async function main() {
       await staleStormPoll;
       check('older bootstrap responses cannot restore recovered storm warnings', banner.hidden);
       sw.applyBootstrapState(state);
+
+      // Retry-mode quota pause surface: banner facts, dialog entries, the
+      // operator resume action, and the manual-mode hold's reason label.
+      {
+        const quotaStorm = {enabled:true,banner_enabled:true,storms:[{
+          provider:'neutral.example',model:'',scope:'provider',state:'open',reason:'insufficient_quota',quota:true,
+          error_percent:0,error_requests:0,failures:0,samples:0,window_ms:60000,queued:5,
+          active_models:0,affected_models:0,affected_model_percent:0,
+          retry_at:'2026-09-05T12:01:00Z',recovery_successes:0,recovery_required:1,
+        }]};
+        sw.applyBootstrapState({...state,storm:quotaStorm});
+        check('quota gate rows report the pause and its recovery facts, not storm failure rates',
+          !banner.hidden && banner.textContent.includes('neutral.example · all models') &&
+          banner.textContent.includes('insufficient_quota') && banner.textContent.includes('Quota pause') &&
+          banner.textContent.includes('5 queued') && banner.textContent.includes('0 / 1 recovery probes') &&
+          !banner.textContent.includes('% failed attempts'));
+        const quotaRow = banner.querySelector('button');
+        quotaRow.click();
+        await sleep(20);
+        check('quota incident dialog shows the pause title, probe facts and a resume action, without storm noise',
+          !incidentDialog.hidden && sd.getElementById('storm-dialog-title').textContent === 'Provider quota pause' &&
+          detail('Error') === 'insufficient_quota' && detail('Queued requests') === '5' &&
+          detail('Successful recovery probes') === '0 / 1' && !detail('Failed upstream attempts') &&
+          incidentDialog.querySelector('[data-operator="quota-resume"]')?.dataset.value === 'neutral.example');
+        const releaseQuota = Promise.resolve({ok:true,json:async()=>({enabled:true,banner_enabled:true,storms:[]})});
+        adminReply = releaseQuota;
+        const callsBeforeResume = adminCalls;
+        incidentDialog.querySelector('[data-operator="quota-resume"]').click();
+        await sleep(20);
+        check('operator resume posts to the quota endpoint and repaints from the confirmed storm snapshot',
+          adminCalls === callsBeforeResume + 1 && banner.hidden &&
+          incidentDialog.textContent.includes('no longer active'));
+        adminReply = Promise.resolve({ok:false,json:async()=>({error:'quota endpoint unavailable'})});
+        sw.applyBootstrapState({...state,storm:quotaStorm});
+        banner.querySelector('button').click();
+        await sleep(20);
+        incidentDialog.querySelector('[data-operator="quota-resume"]').click();
+        await sleep(20);
+        check('a failed resume keeps the dialog open with the failure beside the action',
+          !incidentDialog.hidden && incidentDialog.querySelector('[data-operator="quota-resume"]') &&
+          incidentDialog.textContent.includes('quota endpoint unavailable'));
+        closeIncident.click();
+        adminReply = null;
+        sw.togglePauseMenu({stopPropagation(){}});
+        sw.applyBootstrapState({...state,
+          pause: {ok:true, paused:true, clients: [], providers: ['neutral.example'],
+            holds: [{id:'q1', all:false, new:false, clients: [], providers: ['neutral.example'], known_at_new: [],
+              duration:'', until:null, max_queued:0, reason:'insufficient_quota', queued:0}],
+            known_clients: [], known_providers: ['neutral.example'], until: null, queued: 0, default_max_queued: 0}});
+        check('manual-mode quota holds show the system reason beside their scope',
+          sd.getElementById('pf-holds').textContent.includes('neutral.example · insufficient_quota'));
+        sw.togglePauseMenu({stopPropagation(){}});
+        sw.applyBootstrapState(state);
+        // The quota surface consumed the shared admin POST tally; hand the
+        // later busy-gate assertions the same zero baseline they assume.
+        adminCalls = 0;
+      }
 
       const event = {...mkRec('observer-new'), model: 'server-model', model_canon: {revision: baseCanon.revision, names: {'server-model': 'canonical'}}};
       emit('record', event, '2');

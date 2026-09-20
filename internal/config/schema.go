@@ -62,6 +62,7 @@ func Categories() []Category {
 		{ID: "upstream", Label: "Upstream", Help: "Connection pool, header timeout, and stream keepalives."},
 		{ID: "queue", Label: "Queue & retry", Help: "Per-key concurrency, transparent 429/5xx retry, and quality re-asks."},
 		{ID: "storm", Label: "Error storm protection", Help: "Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy changes clear observations and wake waiters. Banner visibility changes do not reset protection."},
+		{ID: "quota", Label: "Quota pause", Help: "Provider-wide reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits): surface it immediately, park the provider behind a recovery gate, or hold it until an operator resumes."},
 		{ID: "conversation", Label: "Conversations", Help: "How the request log groups turns into conversations."},
 		{ID: "format", Label: "Format translation", Help: "Anthropic defaults and Cursor agent.v1 bridging."},
 		{ID: "storage", Label: "Storage", Help: "Durable SQLite write pipeline. Restart to apply."},
@@ -159,7 +160,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "How long a request may sit in the queue before 429. " + FormatDuration(0) + " is unlimited. Operator-hold time is excluded.",
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_retries", Category: "queue", Label: "Max retries",
-			Help: "Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s are never retried.",
+			Help: "Transparent retries of transient 429 / 5xx / transport failures. Durable quota 429s follow quota_pause_mode instead of this budget.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "no retries"},
 		{Key: "queue_retry_after", Category: "queue", Label: "Queue Retry-After",
 			Help: "Retry-After hint sent when our own queue is full or the wait is exceeded. HTTP Retry-After is integer seconds, so the value must be a whole number of seconds.",
@@ -233,7 +234,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Additional retries beyond max_retries only while a relevant storm is active and the failure matches a selected eligible transient condition. Does not replay meaningful emitted upstream content. 0 keeps the ordinary retry budget.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(1000), ZeroMeans: "no additional retries"},
 		{Key: "storm_status_codes", Category: "storm", Label: "HTTP failure statuses",
-			Help: "Exact status strings selected for detection and additional storm retries: 429 or 500..599, without duplicates. Empty disables HTTP status triggers. 429 is opt-in because limits may be credential-specific; durable quota/billing 429s remain excluded.",
+			Help: "Exact status strings selected for detection and additional storm retries: 429 or 500..599, without duplicates. Empty disables HTTP status triggers. 429 is opt-in because limits may be credential-specific; durable quota/billing 429s remain excluded from storm evidence (quota_pause_mode owns their reaction).",
 			Kind: KindStrings, HotReload: true},
 		{Key: "storm_transport_errors", Category: "storm", Label: "Transient transport failures",
 			Help: "Include transport failures already eligible for the shared retry policy. Caller cancellation and permanent transport errors are excluded.",
@@ -241,6 +242,14 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "storm_stream_errors", Category: "storm", Label: "Response and stream failures",
 			Help: "Include recorded in-band, stream and quality failures to protect future sends. Reports a generic response error without retaining error bodies for the banner. Never replays meaningful emitted upstream content.",
 			Kind: KindBool, HotReload: true},
+
+		// ---- quota ----
+		{Key: "quota_pause_mode", Category: "quota", Label: "Mode",
+			Help: "Reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits; in-band occurrences included): off surfaces it immediately; retry opens a provider-wide recovery gate - the triggering request absorbs the 429 and re-sends per the storm recovery delays, new requests park on the gate (bounded by storm_max_queue/storm_max_wait), and the first 2xx closes it; manual creates an indefinite provider pause that only an operator resumes. Classification is fixed; only the reaction is configurable.",
+			Kind: KindString, HotReload: true},
+		{Key: "quota_pause_recovery_successes", Category: "quota", Label: "Recovery successes",
+			Help: "Consecutive successful recovery probes that close a retry-mode quota gate. 1 releases the queue on the first 2xx. Meaningful only in retry mode.",
+			Kind: KindInt, HotReload: true, Min: num(1), Max: num(100)},
 
 		// ---- conversation ----
 		{Key: "conversation_idle_gap", Category: "conversation", Label: "Idle gap",

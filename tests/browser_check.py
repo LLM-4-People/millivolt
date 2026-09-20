@@ -529,7 +529,7 @@ async def check(base, screenshot):
                         const fixture = {enabled:true,banner_enabled:true,storms:Array.from({length:8}, (_, i) => ({
                             provider:'neutral-provider-with-a-long-scope-name.example',
                             model:i ? 'neutral-model-with-a-long-name/' + i : '',scope:i ? 'model' : 'provider',
-                            state:i ? 'half_open' : 'open',reason:i ? 'transport' : 'http_503',
+                            state:i ? 'half_open' : 'open',reason:i ? 'transport' : 'http_503',quota:false,
                             error_percent:75,error_requests:9,failures:15,samples:20,window_ms:60000,queued:4,
                             active_models:3,affected_models:2,affected_model_percent:200/3,
                             retry_at:'2026-09-05T12:00:00Z',recovery_successes:i ? 1 : 0,recovery_required:2,

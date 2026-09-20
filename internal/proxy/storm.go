@@ -25,7 +25,9 @@ func schedulerOptions(c *config.Config) scheduler.Options {
 			BackoffMultiplier: c.StormBackoffMultiplier, JitterPercent: c.StormJitterPercent,
 			RecoverySuccesses: c.StormRecoverySuccesses, MaxQueue: c.StormMaxQueue,
 			MaxWait: c.StormMaxWait, MaxScopes: c.StormMaxScopes,
-			PolicyKey: strings.Join(c.StormStatusCodes, ",") + ":" + strconv.FormatBool(c.StormTransportErrors) + ":" + strconv.FormatBool(c.StormStreamErrors) + ":" + strconv.Itoa(c.StormMaxRetries),
+			QuotaEnabled:           c.QuotaPauseMode == config.QuotaPauseRetry,
+			QuotaRecoverySuccesses: c.QuotaPauseRecoverySuccesses,
+			PolicyKey:              c.QuotaPauseMode + ":" + strings.Join(c.StormStatusCodes, ",") + ":" + strconv.FormatBool(c.StormTransportErrors) + ":" + strconv.FormatBool(c.StormStreamErrors) + ":" + strconv.Itoa(c.StormMaxRetries),
 		},
 	}
 }
@@ -35,11 +37,14 @@ func schedulerOptions(c *config.Config) scheduler.Options {
 // for readiness; only actual sends acquire exclusive recovery permits.
 // Successful HTTP responses settle after relay, so an in-band failure is one
 // failed upstream attempt rather than a success followed by a second sample.
+// format is the target's wire format: the in-band quota branch of
+// finishStormResponse gates the quota pause on the OpenAI-wire family.
 type stormRequestState struct {
 	rec         *metrics.Record
 	response    *scheduler.StormPermit
 	responseCtx context.Context
 	extra       int
+	format      string
 	observation scheduler.StormObservation
 }
 
@@ -138,7 +143,17 @@ func (s *Server) finishStormResponse(ctx context.Context, qualityFailure bool) {
 		return
 	}
 	failed := qualityFailure || state.rec.ErrorType != ""
-	if failed && (!s.cfg().StormStreamErrors || isNonRetryableQuotaErr(state.rec.ErrorType, state.rec.ErrorCode)) {
+	if failed && isNonRetryableQuotaErr(state.rec.ErrorType, state.rec.ErrorCode) {
+		// An in-band durable quota error inside a 200 stream arms the
+		// provider pause like its 429 twin, but nothing is parked for this
+		// request: its response already reached the client verbatim. The
+		// settling permit may be this gate's probe; on unarmed targets the
+		// release is the historical Cancel.
+		s.settleQuotaFailure(p, state.format, state.rec.Client, state.rec.Provider,
+			quotaReason(state.rec.ErrorType, state.rec.ErrorCode), 0)
+		return
+	}
+	if failed && !s.cfg().StormStreamErrors {
 		p.Cancel()
 		return
 	}

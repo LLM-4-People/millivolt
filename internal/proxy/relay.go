@@ -870,20 +870,22 @@ func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 // response: it reads at most maxErrBodyBytes+1 bytes of the error body and
 // classifies the in-cap envelope through the canonical parser
 // (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). An in-cap body is
-// closed and reported together with its durable classification; an overflowed
-// body (longer than maxErrBodyBytes) is deliberately left OPEN and
-// unclassified (durable=false, leftOpen=true) - the classification stays
+// closed and reported together with its durable classification and the
+// envelope's protocol tokens (type, code - the quota-pause reason label); an
+// overflowed body (longer than maxErrBodyBytes) is deliberately left OPEN
+// and unclassified (durable=false, leftOpen=true) - the classification stays
 // bounded by the cap. Each transport then applies its own overflow policy at
-// the call site: the generic relay re-serves prefix + live remainder verbatim,
-// the cursor transport closes and re-wraps only the truncated prefix.
-func quota429Peek(resp *http.Response) (durable bool, peeked []byte, leftOpen bool) {
+// the call site: the generic relay re-serves prefix + live remainder
+// verbatim, the cursor transport closes and re-wraps only the truncated
+// prefix.
+func quota429Peek(resp *http.Response) (durable bool, typ, code string, peeked []byte, leftOpen bool) {
 	peeked, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
 	if len(peeked) > maxErrBodyBytes {
-		return false, peeked, true
+		return false, "", "", peeked, true
 	}
 	resp.Body.Close()
-	typ, code, _ := metrics.ParseErrorEnvelope(peeked)
-	return isNonRetryableQuotaErr(typ, code), peeked, false
+	typ, code, _ = metrics.ParseErrorEnvelope(peeked)
+	return isNonRetryableQuotaErr(typ, code), typ, code, peeked, false
 }
 
 // withSendTimeout derives the per-attempt upstream send context: the
@@ -975,8 +977,11 @@ func (s *Server) absorbHTTPRetry(rec *metrics.Record, resp *http.Response, errBo
 // honors operator pause on retries and remaining nextAllowedAt across pause.
 // When retries are exhausted the last upstream response is returned as-is
 // (failures are never masked). A 429 whose error envelope is a durable
-// quota/billing condition (metrics.IsNonRetryableQuotaErr) is never retried -
-// waiting cannot clear it.
+// quota/billing condition (metrics.IsNonRetryableQuotaErr) follows
+// quota_pause_mode: unarmed targets surface it immediately (waiting cannot
+// clear it), armed OpenAI-wire targets park the provider and this request
+// behind the quota gate or hold until a re-send resolves 2xx - those quota
+// re-sends never count against the transient retry budget.
 //
 // firstSendIsRetry marks an invocation whose OPENING send is itself a retry
 // (the degenerate-200 quality re-run): its first WaitSend honors operator
@@ -994,6 +999,10 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 	maxRetries := s.cfg().MaxRetries
 	own := false
 	retried := false
+	// ordinary counts only transient absorb attempts (429/5xx/transport).
+	// Quota-pause re-sends park for an account condition, not a transient
+	// failure, and must never exhaust the transient budget.
+	ordinary := 0
 	end := func(failed bool) {
 		if failed {
 			// Exhausted retryable: double request backoff, keep one probe.
@@ -1052,11 +1061,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			// TLS errors) or when the retry budget is spent.
 			retryable := isRetryableTransportErr(err)
 			active := s.observeStormTransport(ctx, permit, retryable)
-			if !retryable || attempt >= maxRetries && !s.allowStormRetry(ctx, active) {
+			if !retryable || ordinary >= maxRetries && !s.allowStormRetry(ctx, active) {
 				end(retryable)
 				return nil, nil, err
 			}
 			own = s.absorbTransportRetry(rec, groupKey, transportErrText(err), own)
+			ordinary++
 			retried = true
 			continue
 		}
@@ -1065,10 +1075,15 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// provider announcing a durable account condition (quota/credits/spend
 		// limits) that waiting can never clear. Only the body's structured
 		// error type/code tells them apart, so the bounded envelope peek
-		// (quota429Peek) runs BEFORE the retry decision: a durable 429 is
-		// surfaced to the client immediately - no retry budget burned, no
-		// pacing of the group, the absorbed-attempt log stays clean (nothing
-		// was absorbed).
+		// (quota429Peek) runs BEFORE the retry decision. With the quota pause
+		// armed for this target, a durable 429 instead parks the provider and
+		// this request: the attempt is absorbed, settleQuotaFailure opens the
+		// recovery gate (retry mode) or the provider hold (manual mode), and
+		// the next admission below waits out the pause - the loop re-sends
+		// until a send resolves 2xx and the queue drains. Unarmed targets
+		// surface the 429 immediately - no retry budget burned, no pacing of
+		// the group, the absorbed-attempt log stays clean (nothing was
+		// absorbed).
 		//
 		// This relay's overflow policy: a peek that OVERFLOWS the cap leaves
 		// the body open (peekLeftOpen), so the final relay can serve
@@ -1078,17 +1093,34 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		peekLeftOpen := false
 		if resp.StatusCode == http.StatusTooManyRequests {
 			var durable bool
-			durable, errBody, peekLeftOpen = quota429Peek(resp)
+			var quotaTyp, quotaCode string
+			durable, quotaTyp, quotaCode, errBody, peekLeftOpen = quota429Peek(resp)
 			if durable {
-				permit.Cancel()
-				if attempt > 0 {
-					rec.FinalAttemptAt = attemptStart
+				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, quotaReason(quotaTyp, quotaCode), parseRetryAfter(resp)) {
+					if attempt > 0 {
+						rec.FinalAttemptAt = attemptStart
+					}
+					end(false)
+					// Re-serve the captured bytes so the client still gets the
+					// full error body verbatim.
+					resp.Body = io.NopCloser(bytes.NewReader(errBody))
+					return resp, attemptCancel, nil
 				}
-				end(false)
-				// Re-serve the captured bytes so the client still gets the
-				// full error body verbatim.
-				resp.Body = io.NopCloser(bytes.NewReader(errBody))
-				return resp, attemptCancel, nil
+				// Parked by the quota pause: book the absorbed attempt (with
+				// the provider's Retry-After hint for the record) and loop.
+				// Quota waits never burn the ordinary retry budget - only
+				// transient attempts count against maxRetries.
+				attemptCancel() // the in-cap body was drained by the peek
+				retryAfter := s.absorbHTTPRetry(rec, resp, errBody, t.authHeader)
+				rec.RetryAfterMs = int(retryAfter.Milliseconds())
+				// A durable quota condition is an account state, not flow
+				// control: RateLimited stays unset for the same reason the
+				// unarmed path does.
+				rec.ErrorType = ""
+				rec.ErrorMsg = ""
+				s.publishUpdate(rec)
+				retried = true
+				continue
 			}
 		}
 
@@ -1102,7 +1134,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		if state := stormState(ctx); state != nil && state.response == permit {
 			state.responseCtx = attemptCtx
 		}
-		if !retryable || attempt >= maxRetries && !s.allowStormRetry(ctx, active) {
+		if !retryable || ordinary >= maxRetries && !s.allowStormRetry(ctx, active) {
 			// This is the attempt whose response reaches the client: TTFT is
 			// measured from here, so a retried request shows the successful
 			// attempt's responsiveness, not the accumulated retry delay.
@@ -1154,6 +1186,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		rec.ErrorMsg = ""
 		rec.RetryAfterMs = int(retryAfter.Milliseconds())
 
+		ordinary++
 		retried = true
 		own = s.scheduler.Trip(groupKey, s.scheduler.BackoffFor(groupKey, retryAfter)) || own
 	}

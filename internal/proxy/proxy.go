@@ -102,7 +102,7 @@ const (
 // isNonRetryableQuotaErr is the proxy-local spelling of the canonical quota
 // predicate (metrics owns the vocabulary, next to ParseErrorEnvelope): a 429
 // whose structured type or code is a durable account/billing condition never
-// burns a retry.
+// burns the transient retry ladder - quota_pause_mode owns its reaction.
 func isNonRetryableQuotaErr(typ, code string) bool {
 	return metrics.IsNonRetryableQuotaErr(typ, code)
 }
@@ -155,8 +155,9 @@ var nonRetryableRequestClasses = map[string]bool{
 // type or code authorizes a transparent re-send. One precedence chain, fail
 // closed at every step:
 //  1. a durable quota/billing class (metrics.IsNonRetryableQuotaErr) never
-//     re-sends - waiting cannot restore credits, and no operator extension
-//     may override a billing condition;
+//     re-sends in-band - the quota pause (quota_pause_mode) owns the
+//     provider-wide reaction, and no operator extension may override a
+//     billing condition;
 //  2. the operator's retryable_error_classes extension list is authoritative:
 //     it may authorize any spelling the built-ins do not know, including a
 //     client-fault type a gateway mislabels;
@@ -547,7 +548,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.rec.Record(rec)
 	}()
 
-	state := &stormRequestState{rec: rec}
+	state := &stormRequestState{rec: rec, format: t.format}
 	ctx := context.WithValue(r.Context(), stormContextKey{}, state)
 	defer func() {
 		s.finishStormResponse(ctx, false)
