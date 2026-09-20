@@ -1882,11 +1882,14 @@ func validateQuery(q string) error {
 		return errNotSelect
 	}
 	// Deny side-effecting keywords even inside a SELECT-leading string (e.g.
-	// "SELECT … ATTACH …", "SELECT load_extension(...)"). Word-boundary match:
-	// only whole-word spellings trip, so a superstring spelling such as a
-	// column named "attachment" passes, while a column literally named
-	// "attach" is denied with the keyword - the accepted cost of denying the
-	// bare word everywhere.
+	// "SELECT … ATTACH …", "SELECT load_extension(...)"). Word-boundary match
+	// at the ASCII boundary: ASCII letters, digits and underscores continue a
+	// word, so a superstring spelling such as a column named "attachment" or
+	// "attach_x" passes, while a column literally named "attach" is denied
+	// with the keyword - the accepted cost of denying the bare word
+	// everywhere. A byte outside ASCII ends a word even when it spells a
+	// letter or digit, so an attaché-class spelling trips the keyword
+	// (containsWord states the measured boundary).
 	up := strings.ToUpper(t)
 	for _, kw := range []string{"ATTACH", "DETACH", "PRAGMA", "LOAD_EXTENSION"} {
 		if containsWord(up, kw) {
@@ -1897,9 +1900,13 @@ func validateQuery(q string) error {
 }
 
 // containsWord reports whether s contains the keyword kw surrounded by
-// non-word characters: letters, digits and underscores all continue a word
-// (isAlphaNum treats '_' as a word character), so "ATTACH" is not found in
-// "attachment", "attach_x" or "x_attach".
+// non-word characters. The boundary is ASCII: ASCII letters, digits and
+// underscores continue a word (isAlphaNum), so "ATTACH" is not found in
+// "attachment", "attach_x" or "x_attach"; a byte outside ASCII ends a word
+// even when it spells a letter or digit, so an attaché-class spelling trips
+// the keyword - measured after ToUpper, "attaché", "éattach", "attachß",
+// "attachﬁ" and an Arabic-Indic digit joined to the keyword are all denied,
+// while "attachſ" passes only because its upper-case is the ASCII "S".
 func containsWord(s, kw string) bool {
 	for i := 0; ; {
 		idx := strings.Index(s[i:], kw)

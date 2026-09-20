@@ -4260,9 +4260,9 @@ function refreshAfterRestart(bootstrapApplied = false) {
 
 // ---------- log export (Logs ▾ menu) ----------
 // Pick exactly what to download: the same filter dimensions as Clear (provider
-// / model / client / status / errors / age), applied and previewed against
-// the full database via the shared count endpoint - the export then streams
-// the same rows the preview announced. "Download all" exports everything.
+// / model / client / status / errors / debug / age), applied and previewed
+// against the full database via the shared count endpoint - the export then
+// streams the same rows the preview announced. "Download all" exports everything.
 
 function toggleLogsMenu(e) { toggleFilterMenu(e, 'logs-menu', 'lf', updateLogsCount); }
 

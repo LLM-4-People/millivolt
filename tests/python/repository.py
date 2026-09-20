@@ -368,8 +368,10 @@ class RepositoryChecks(unittest.TestCase):
         unit row pins the filter's reach; this row pins the call site, so
         a check() that inlines a narrower prefix-filtered loop while
         gzip_corpus stays defined reddens here even though every detector
-        unit row stays green. A comment mentioning gzip_corpus can never
-        satisfy the pin: the assertion requires the call shape."""
+        unit row stays green. The match is textual inside check()'s
+        region: a real call satisfies it, and so would call-shaped comment
+        text; the argument/result residual (a narrowed argument list or a
+        discarded result bypasses it) is recorded in agents/accepts.md."""
         source = (check.ROOT / "tests" / "repository_check.py").read_text(encoding="utf-8")
         start = source.index("def check(")
         end = source.index("\ndef ", start)

@@ -889,6 +889,12 @@ async function main() {
   check('logs open sets aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'true');
   check('opening logs closes clear', clearMenu.hidden);
   check('logs menu populated from records', d.querySelector('#lf-provider option[value="p"]') !== null);
+  // ---- R25 L4-1 freeze row: the export has been a gzip artifact with no
+  // plain-JSON fallback since wave 17, so the menu header must say so.
+  // Exact-text pin (like the debug menu header's) so the pre-compression
+  // "(JSON)" label cannot return.
+  check('logs menu header states the gzip export format',
+    d.querySelector('#logs-menu .clear-menu-hd').textContent === 'Download logs (JSON, gzip)…');
   // ---- L4-C8 pin: the Logs (lf-) and Clear (cf-) filter menus are one row
   // set modulo the id prefix. The static HTML row lists must stay identical
   // (same label texts, same per-row select ids after the prefix), and the

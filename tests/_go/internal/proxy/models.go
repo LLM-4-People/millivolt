@@ -256,9 +256,13 @@ func TestModelsUnparseableVerbatim(t *testing.T) {
 // empty list.
 func TestModelsRefusedUpstreamSurfacesAPIErrorEnvelope(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	upstream.Close() // dead address: every dial is refused, no server process left
 	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
 	defer srv.Close()
+	// The proxy must be bound before the upstream port is released: the
+	// kernel can reassign the just-closed port to the next bind, and this
+	// test's own proxy answering the discovery dial would turn the wanted
+	// refused transport into its missing-base-URL 400.
+	upstream.Close() // dead address: every dial is refused, no server process left
 
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/v1/models", nil)
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)

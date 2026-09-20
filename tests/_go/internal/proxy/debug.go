@@ -784,12 +784,15 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	// pair whose values trim to empty (the id gate would answer if it ran
 	// before the duplicate check) and a download pair whose first value
 	// already fails the 0/1 grammar (the flag grammar would answer if it
-	// ran before the duplicate check).
+	// ran before the duplicate check). The id-required class also covers a
+	// present id that trims to blank: ?id=%20 alone answers the id gate's
+	// 400, never the exact-match 404 the untrimmed blank would reach.
 	for _, tc := range []struct{ name, query, want string }{
 		{"a parse error outranks every later violation", "?id=cap-dl&id=other&download=1&download=0&download=x&bad=%zz", "invalid query"},
 		{"a duplicate id outranks the download violations", "?id=cap-dl&id=other&download=1&download=0&download=x", "duplicate id"},
 		{"a duplicate id outranks the id gate even when the pair trims to empty", "?id=%20&id=", "duplicate id"},
 		{"the missing id outranks the download violations", "?download=1&download=0&download=x", "id required"},
+		{"a trim-empty id is the id gate's missing class", "?id=%20", "id required"},
 		{"a duplicate download outranks the flag grammar", "?id=cap-dl&download=1&download=x", "duplicate download"},
 		{"a duplicate download outranks the flag grammar even when the first value fails it", "?id=cap-dl&download=x&download=1", "duplicate download"},
 		{"the flag grammar answers last", "?id=cap-dl&download=x", "download: expected 0 or 1"},

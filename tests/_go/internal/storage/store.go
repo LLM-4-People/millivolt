@@ -1326,10 +1326,15 @@ func TestValidateQueryDeniesAttach(t *testing.T) {
 		}
 	}
 	// A legitimate SELECT still passes; a column named "attachment" is not a
-	// false positive for the ATTACH keyword.
+	// false positive for the ATTACH keyword, and the underscore freeze rows
+	// pin the word-continuation boundary the containsWord doc states: '_'
+	// continues a word, so "attach_x" and "x_attach" pass the same
+	// whole-word grammar.
 	for _, q := range []string{
 		"SELECT provider, COUNT(*) FROM requests GROUP BY provider",
 		"SELECT attachment FROM requests",
+		"SELECT attach_x FROM requests",
+		"SELECT x_attach FROM requests",
 	} {
 		if err := validateQuery(q); err != nil {
 			t.Errorf("validateQuery(%q) = %v, want nil", q, err)

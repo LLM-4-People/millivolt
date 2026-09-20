@@ -299,7 +299,9 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 // dropped or ignored pair would otherwise change what the restore really
 // does. Each row also pins the 400's wording through the routes' JSON error
 // transport, and the boundary rows pin the gate order: parse error,
-// duplicates, unknown keys, then the value grammar.
+// duplicates, unknown keys, then the value grammar - whose tail rows pin
+// the member and mode 400s exactly, an invalid mode spelling answering the
+// 400 rather than silently selecting the broader replace default.
 func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 	liveReloadFixture(t)
 	// A non-default spelling so the closing invariant can see a silent
@@ -353,12 +355,19 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 		{"restore bogus=1 is an unknown key, not an ignored one", "/admin/restore?bogus=1", http.MethodPost, "unknown key bogus"},
 		{"backup bogus=1 is an unknown key, not an ignored one", "/admin/backup?bogus=1", http.MethodGet, "unknown key bogus"},
 		{"a parse error outranks the unknown key", "/admin/restore?bogus=1&bad=%zz", http.MethodPost, "invalid query"},
+		{"a restore parse error outranks the duplicate key", "/admin/restore?config=1&config=0&bad=%zz", http.MethodPost, "invalid query"},
 		{"a duplicate outranks the unknown key", "/admin/restore?config=1&config=0&bogus=1", http.MethodPost, "duplicate config"},
 		{"an unknown key outranks the value grammar", "/admin/restore?inspect=x&bogus=1", http.MethodPost, "unknown key bogus"},
 		{"the value grammar answers last", "/admin/restore?inspect=x", http.MethodPost, "inspect: want 1 or 0"},
+		{"an invalid restore config member answers the member grammar's 400", "/admin/restore?config=x", http.MethodPost, "config: want 1 or 0"},
+		{"an invalid restore database member answers the member grammar's 400", "/admin/restore?database=x", http.MethodPost, "database: want 1 or 0"},
+		{"an invalid config_mode answers the 400, never a silent replace", "/admin/restore?config_mode=bogus", http.MethodPost, "config_mode: want merge or replace"},
+		{"an invalid database_mode answers the 400, never a silent replace", "/admin/restore?database_mode=bogus", http.MethodPost, "database_mode: want merge or replace"},
 		{"a backup parse error outranks the duplicate key", "/admin/backup?config=1&config=0&bad=%zz", http.MethodGet, "invalid query"},
 		{"a backup duplicate outranks the unknown key", "/admin/backup?config=1&config=0&bogus=1", http.MethodGet, "duplicate config"},
 		{"a backup unknown key outranks the value grammar", "/admin/backup?config=x&bogus=1", http.MethodGet, "unknown key bogus"},
+		{"an invalid backup config member answers the member grammar's 400", "/admin/backup?config=x", http.MethodGet, "config: want 1 or 0"},
+		{"an invalid backup database member answers the member grammar's 400", "/admin/backup?database=x", http.MethodGet, "database: want 1 or 0"},
 	} {
 		w := httptest.NewRecorder()
 		var body io.Reader
@@ -394,8 +403,10 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 // TestRestorePercentDecodedConsumedKeyIsConsumed is the percent-decoding freeze
 // row: a percent-decoded spelling of a consumed key (?%63onfig=1) IS the
 // consumed key, never an unknown one, so the restore runs exactly as the
-// canonical ?config=1 does (the same 200, ok marker and applied config the
-// round trip pins for the canonical spelling). A strict parse that stopped
+// canonical ?config=1 does. The canonical spelling's behavior is pinned
+// collectively: the route-level round-trip tests pin the restore 200s and
+// the applied config, while the ok-marker pins live in the other-spelling
+// rows (the database-stage and merge restores). A strict parse that stopped
 // decoding keys would answer the unknown-key 400 instead of restoring.
 func TestRestorePercentDecodedConsumedKeyIsConsumed(t *testing.T) {
 	liveReloadFixture(t)

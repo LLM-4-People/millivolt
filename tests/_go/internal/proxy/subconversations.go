@@ -915,6 +915,13 @@ func TestSubConversationExtractionUnits(t *testing.T) {
 		{"an over-scan first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"` + strings.Repeat("y", 6*maxDeclaredSessionBytes+3) + `","secondaryKey":"second"}`, true, ""},
 		{"invalid utf-8 in the first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"a` + "\xff" + `b","secondaryKey":"second"}`, true, ""},
 		{"an undecodable escape in the first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"a\x","secondaryKey":"second"}`, true, ""},
+		// The trim-empty and over-bound causes are the same present-dropped
+		// class: the single-param rows above pin the drop itself, these rows
+		// pin that the second param is never consulted for them -
+		// reclassifying either cause as absent would shift the identity to
+		// the second param.
+		{"a whitespace-only first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"   ","secondaryKey":"second"}`, true, ""},
+		{"an over-bound first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"` + strings.Repeat("a", maxDeclaredSessionBytes+1) + `","secondaryKey":"second"}`, true, ""},
 		{"a duplicate top-level key resolves by its first occurrence", entries, "sc-client", `{"promptCacheKey":123,"promptCacheKey":"v"}`, true, ""},
 		{"the first present param wins", entries, "sc-two", `{"primaryKey":"first","secondaryKey":"second"}`, true, "first"},
 	} {
