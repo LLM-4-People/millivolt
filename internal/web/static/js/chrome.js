@@ -2111,10 +2111,13 @@ function addRoRemoveHeader(card) {
 }
 
 // validateRoRow is the live per-card gate (the validateMrRow discipline):
-// every check mirrors the server's checks and rejections. All offending
-// inputs redden; the first failure in server order owns the message text.
-// seen maps trimmed scope triples to their 1-based rule number for the
-// duplicate scope wording; index is this card's 0-based position.
+// every check mirrors the server's checks and rejections. Checks that own
+// an input redden it; the duplicate-scope cross-card check marks no input
+// (it cites an earlier card, not this one); the first failure in server
+// order owns the message text. seen maps trimmed scope triples to their
+// 1-based rule number for the duplicate scope wording, first occurrence
+// only - a duplicate carrying another error must not shift the ordinal
+// later duplicates cite; index is this card's 0-based position.
 function validateRoRow(card, seen, index) {
   const err = card.querySelector('.ro-err');
   card.querySelectorAll('.prov-bad').forEach(el => el.classList.remove('prov-bad'));
@@ -2177,7 +2180,7 @@ function validateRoRow(card, seen, index) {
   if (level === 'ok' && seen && seen.has(triple)) {
     level = 'error';
     msg = `duplicate scope with rule ${seen.get(triple)} - the same client, provider and model; merge the rules or change one scope`;
-  } else if (seen && (client || provider || model)) {
+  } else if (seen && (client || provider || model) && !seen.has(triple)) {
     seen.set(triple, index + 1);
   }
   card.dataset.roState = level;
@@ -2429,10 +2432,13 @@ function addScParamRow(card) {
 // discipline): every check mirrors config.validateSubConversations in
 // the server's own order and message wording (the
 // sub_conversations[i].key prefix becomes the card's inline context; %q
-// becomes the quoted name). All offending inputs redden; the first
-// failure owns the message text. seen maps trimmed clients to their
-// 1-based entry number for the duplicate wording; index is this card's
-// 0-based position.
+// becomes the quoted name). Checks that own an input redden it; the
+// duplicate-client cross-card check marks no input (it cites an earlier
+// card, not this one); the first failure owns the message text. seen
+// maps trimmed clients to their 1-based entry number for the duplicate
+// wording, first occurrence only - a duplicate carrying another error
+// must not shift the ordinal later duplicates cite; index is this
+// card's 0-based position.
 function validateScCard(card, seen, index) {
   const err = card.querySelector('.sc-err');
   card.querySelectorAll('.prov-bad').forEach(el => el.classList.remove('prov-bad'));
@@ -2464,7 +2470,7 @@ function validateScCard(card, seen, index) {
   if (level === 'ok' && seen && seen.has(client)) {
     level = 'error';
     msg = `duplicate client '${client}' with entry ${seen.get(client)}; merge the entries or change one client`;
-  } else if (seen && client) {
+  } else if (seen && client && !seen.has(client)) {
     seen.set(client, index + 1);
   }
   card.dataset.scState = level;
@@ -3062,14 +3068,16 @@ function filterSettings() {
   showSettingsCat();
 }
 
-// revealSettingsOffender is the one reveal every save gate shares. An
+// revealSettingsOffender is the one reveal every blocked save path
+// shares: the three editor save gates and the collectSettingsValues
+// catch in applySettings all route their offender through it. An
 // offender whose category the sheet is not showing sits inside a hidden
 // .st-row, where focus() and scrollIntoView() are silent no-ops - the
 // operator got only the status line, nothing moved or highlighted. When
 // the offender's row is hidden, activate its category by clicking the
 // rail item the sheet's own delegated handler selects through (it owns
 // settingsCat, the cleared search and showSettingsCat; there is no second
-// selection path), then run the gate's focus + flash + scroll sequence
+// selection path), then run the caller's focus + flash + scroll sequence
 // unchanged. A visible offender changes nothing.
 function revealSettingsOffender(firstBad, focusEl) {
   const row = firstBad.closest('.st-row');
@@ -3089,7 +3097,7 @@ function applySettings() {
   try { values = collectSettingsValues(true); }
   catch (err) {
     settingsStatus(String(err.message || err));
-    if (err.input) { err.input.focus(); flashBadInput(err.input); }
+    if (err.input) revealSettingsOffender(err.input, err.input);
     return;
   }
   const submitted = JSON.stringify(values);

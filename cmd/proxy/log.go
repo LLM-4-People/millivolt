@@ -88,10 +88,12 @@ func (w *exportWriter) Write(p []byte) (int, error) {
 }
 
 // exportFailed answers a failed export read after the artifact headers were
-// staged. Nothing reached the client yet: retract the attachment name and
-// answer the store error. A partial artifact already on the wire must not
-// complete as a successful 200 download; net/http aborts the connection or
-// stream without a panic stack.
+// staged. The not-started branch is reachable only for failures before the
+// first write - the store's filter Validate and SQL open failures - so
+// nothing reached the client yet: retract the attachment name and answer
+// the store error. A failure after a write leaves a partial artifact on the
+// wire that must not complete as a successful 200 download; net/http aborts
+// the connection or stream without a panic stack.
 func exportFailed(w http.ResponseWriter, ew *exportWriter, err error) {
 	if !ew.started {
 		w.Header().Del("Content-Disposition")
@@ -124,10 +126,10 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		// The export is always a saved gzip artifact: a browser decompresses
 		// Content-Encoding before saving, so transit compression can never
 		// shrink what lands on disk. No Content-Length: the payload streams
-		// row-by-row and chunked framing is correct.
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Disposition", `attachment; filename="millivolt-logs-`+time.Now().Format("20060102-150405")+`.json.gz"`)
-		w.Header().Set("Cache-Control", "no-store")
+		// row-by-row and chunked framing is correct. The one artifact-header
+		// owner composes the name (millivolt-logs-<UTC stamp>.json.gz),
+		// disposition, content type and no-store.
+		proxy.WriteArtifactHeaders(w, "logs", "json.gz", "application/gzip", time.Now(), "")
 		// The compression gate is the one choke point every export shape
 		// crosses: the ring snapshot and the durable stream below both write
 		// through this single gzip artifact writer, so matching, all and

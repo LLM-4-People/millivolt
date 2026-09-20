@@ -151,10 +151,11 @@ func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 
 // TestLogExportServesGzipArtifact pins the compression gate: the export is
 // always a saved gzip artifact (application/gzip, a millivolt-logs-*.json.gz
-// attachment name, no-store), and the payload gunzips to the exact row set
-// the plain export produced - on both the ring-only path and durable storage.
+// attachment named by the UTC stamp, no-store), and the payload gunzips to
+// the exact row set the plain export produced - on both the ring-only path
+// and durable storage.
 func TestLogExportServesGzipArtifact(t *testing.T) {
-	dispoShape := regexp.MustCompile(`^attachment; filename="millivolt-logs-\d{8}-\d{6}\.json\.gz"$`)
+	dispoShape := regexp.MustCompile(`^attachment; filename="millivolt-logs-(\d{8}-\d{6})\.json\.gz"$`)
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
 			mux, b, s := logRoutesForTest(t, durable)
@@ -178,8 +179,21 @@ func TestLogExportServesGzipArtifact(t *testing.T) {
 			if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
 				t.Fatalf("Content-Type = %q, want application/gzip", ct)
 			}
-			if dispo := w.Header().Get("Content-Disposition"); !dispoShape.MatchString(dispo) {
-				t.Fatalf("Content-Disposition = %q, want a millivolt-logs-<ts>.json.gz attachment", dispo)
+			dispo := w.Header().Get("Content-Disposition")
+			m := dispoShape.FindStringSubmatch(dispo)
+			if m == nil {
+				t.Fatalf("Content-Disposition = %q, want a millivolt-logs-<stamp>.json.gz attachment", dispo)
+			}
+			// The export's filename clock is UTC, one policy with the backup
+			// and capture artifacts: the stamp must sit within seconds of now
+			// UTC (a local-clock filename reddens here whenever local time
+			// differs).
+			stamp, err := time.ParseInLocation("20060102-150405", m[1], time.UTC)
+			if err != nil {
+				t.Fatalf("attachment stamp %q does not parse: %v", m[1], err)
+			}
+			if skew := time.Since(stamp); skew < -time.Minute || skew > time.Minute {
+				t.Fatalf("attachment stamp %s sits %s from now UTC - the artifact filename clock must be UTC", m[1], skew)
 			}
 			if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
 				t.Fatalf("Cache-Control = %q, want no-store", cc)

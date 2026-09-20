@@ -82,8 +82,10 @@ docker compose logs --tail 50
 `MILLIVOLT_PORT` to an unused host port if needed. Its named volumes retain
 history and private Settings configuration when the container is replaced.
 Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
-including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles).
-No separate config download is needed; existing saved settings are not overwritten.
+including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles)
+and the opencode sub-conversation tracking exemplar (the `promptCacheKey`
+tracked param, strip on). No separate config download is needed; existing saved
+settings are not overwritten.
 The runtime is non-root with a read-only root filesystem. Dashboard rebuild is
 unavailable in an image. If you replace the named volumes with host bind
 mounts, pre-create those directories writable by UID/GID `65532:65532`; see
@@ -159,7 +161,8 @@ comments and failure signaling, mid-thinking rescues that append a fresh
 attempt after reasoning-only output, optional format translation,
 operator-configured request overrides (a matching body rule rewrites the
 upstream request bytes), operator-configured sub-conversation strip (a matching
-client entry removes its tracked fields from the relayed bytes), and
+client entry removes its tracked fields from the top level of the relayed
+bytes), and
 constructed model lists. This is not an
 unconditional byte-for-byte or exactly-once contract.
 
@@ -233,7 +236,7 @@ independent billing or a complete compliance audit log.
 | Pause | Hold matching new sends/retries by client/provider, all requests or previously unseen clients; choose duration and queue cap, then resume one hold or all holds. |
 | Limits | Set provider-wide concurrency, requests-per-window and tokens-per-window policies; inspect their source and remaining budgets. |
 | Debug | Start a scoped capture session with timed or manual stop. Captured bodies are opt-in, bounded, retained separately and still sensitive. |
-| Logs | Download all or exactly filtered finalized records as JSON. |
+| Logs | Download all or exactly filtered finalized records as a gzip artifact of JSON (the compressed export; no uncompressed fallback). |
 | Clear | Preview and confirm a filtered deletion, or deliberately delete all retained records. Newer completions are protected by the deletion fence. |
 | Restart | On supported source deployments, rebuild and hand off after draining active work. Busy controls and progress reflect the actual restart state. |
 | Settings | Configure error storm protection, search configuration, edit typed fields/maps/rules, review restart markers and apply revision-checked changes. |

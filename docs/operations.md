@@ -13,10 +13,11 @@ liveness probe, origin-root brand/PWA files (`/favicon.ico`, icons,
 [proxy.example.yaml](../proxy.example.yaml) is generated from the canonical
 `config.Example()` and schema documentation. `Example()` starts with neutral
 `config.Default()` values and adds the enabled
-[Grok/Cursor compatibility profiles](adapters.md#bundled-compatibility-profiles).
-It is not mutable repository state. Source deployments copy it to ignored local
-`proxy.yaml`; images bundle their own copy for fresh config volumes. Do not start
-Settings against the committed example.
+[Grok/Cursor compatibility profiles](adapters.md#bundled-compatibility-profiles)
+and the opencode sub-conversation tracking exemplar (the `promptCacheKey`
+tracked param, strip on). It is not mutable repository state. Source
+deployments copy it to ignored local `proxy.yaml`; images bundle their own copy
+for fresh config volumes. Do not start Settings against the committed example.
 
 | Flag | Behavior |
 | --- | --- |
@@ -26,7 +27,7 @@ Settings against the committed example.
 | `-pid-file PATH` | Write/refresh the process PID after boot, including handoff children. |
 | `-healthcheck` | Probe `GET /healthz` on the configured listen address and exit nonzero on failure. Loads config read-only; used by the image's Docker HEALTHCHECK. |
 | `-print-config` | Print neutral built-in default YAML. |
-| `-print-example-config` | Print the deployment example, including its enabled compatibility profiles. |
+| `-print-example-config` | Print the deployment example, including its enabled compatibility profiles and the opencode sub-conversation tracking exemplar. |
 | `-version` | Print JSON build identity. |
 
 The three output-only flags are mutually exclusive and exit without loading local
@@ -222,12 +223,14 @@ leaf the request-overrides `client` scope matches; no wildcard, no case
 folding), and a request from any other client is never inspected, leaving its
 bytes and grouping untouched.
 
-Each entry lists 1..4 exact JSON field names, checked in order; the first one
-present on the request supplies the tracked value. A value is kept only when it
-is non-empty after trimming, valid UTF-8, free of control bytes and at most
-512 bytes, the same bound explicit session declarations satisfy. An absent or
-invalid value is dropped, never a client error: the body is passthrough payload,
-and the request keeps automatic grouping.
+Each entry lists 1..4 exact JSON field names, matched only at the request
+body's top level and checked in order; the first present field carrying a JSON
+string value supplies the tracked value, and a present non-string value counts
+as absent. A value is kept only when it is non-empty after trimming, valid
+UTF-8, free of control bytes and at most 512 bytes, the same bound explicit
+session declarations satisfy. An absent or invalid value is dropped, never a
+client error: the body is passthrough payload, and the request keeps automatic
+grouping.
 
 The kept value groups the request under a `k:` conversation identity.
 Precedence is the explicit `X-Proxy-Session` header first, then the tracked
@@ -238,14 +241,14 @@ pair, so a tracked identity never carries a parent. In the dashboard a `k:` id
 is an ordinary conversation id: lineage, filters, saved views and the request
 drawer read it like any other.
 
-`strip: true` removes every configured field of the entry that is present in
-the body from the relayed upstream bytes; the default `false` forwards them
-unchanged. The removal rides the same body-rewrite engine and gate as the
-[request overrides](#request-overrides) body section: one document decode when
-both features match one request, the original bytes relayed unchanged when the
-body is not a JSON object or the rewrite would exceed `max_request_bytes`, and
-cursor targets skipping the body section. The client's spelling reaches the
-upstream wire only on OpenAI-wire passthrough.
+`strip: true` removes every configured field of the entry that is present at
+the body's top level from the relayed upstream bytes; the default `false`
+forwards them unchanged. The removal rides the same body-rewrite engine and
+gate as the [request overrides](#request-overrides) body section: one document
+decode when both features match one request, the original bytes relayed
+unchanged when the body is not a JSON object or the rewrite would exceed
+`max_request_bytes`, and cursor targets skipping the body section. The
+client's spelling reaches the upstream wire only on OpenAI-wire passthrough.
 
 When a tracked value was extracted and the request translates to the Anthropic
 wire, the translated body gains a top-level `prompt_cache_key` carrying the

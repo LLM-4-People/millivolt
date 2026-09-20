@@ -557,20 +557,28 @@ func (s *Server) DebugSnapshot() map[string]any {
 // HandleDebugCapture is GET /admin/debug/capture?id= - the drawer fetch for
 // one sidecar document. 404 when missing/expired. Never on the live SSE path.
 // The plain response is the drawer's render JSON; download=1 serves the same
-// document as a saved gzip artifact. The method, id, no-store and 404
-// semantics are identical in both modes.
+// document as a saved gzip artifact. The download flag is strict like every
+// filter owner: malformed or repeated values are a 400, never first-wins.
+// The method, id, no-store and 404 semantics are identical in both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
-	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	q := r.URL.Query()
+	id := strings.TrimSpace(q.Get("id"))
 	if id == "" {
 		adminjson.WriteError(w, http.StatusBadRequest, "id required")
 		return
 	}
-	download := r.URL.Query().Get("download")
+	download := q.Get("download")
+	if len(q["download"]) > 1 {
+		// The export filter owner's rule: a repeated flag is ambiguous, deny
+		// it rather than guess which occurrence the client meant.
+		adminjson.WriteError(w, http.StatusBadRequest, "duplicate download")
+		return
+	}
 	if download != "" && download != "0" && download != "1" {
 		adminjson.WriteError(w, http.StatusBadRequest, "download: expected 0 or 1")
 		return
@@ -601,27 +609,30 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		zw := NewArtifactGzipWriter(&compressed)
 		_, _ = zw.Write(raw)
 		_ = zw.Close()
-		w.Header().Set("Content-Type", "application/gzip")
-		w.Header().Set("Content-Disposition", `attachment; filename="`+debugCaptureArtifactName(raw, id)+`"`)
+		WriteArtifactHeaders(w, "debug", "json.gz", "application/gzip", debugCaptureStamp(raw), id)
 		w.Write(compressed.Bytes())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write(raw)
 }
 
-// debugCaptureArtifactName names the capture download from the document's
-// captured_at (stored UTC as RFC 3339Nano; any offset converts to UTC).
-// Every decode or parse failure falls back to the record id, so a damaged
-// payload still downloads with a deterministic name.
-func debugCaptureArtifactName(raw []byte, id string) string {
+// debugCaptureStamp extracts the capture document's recorded moment for the
+// download artifact name (stored UTC as RFC 3339Nano; any offset converts to
+// UTC). Every decode or parse failure returns the zero time, and the caller's
+// fallback names the artifact from the record id instead - a damaged payload
+// still downloads with a deterministic name.
+func debugCaptureStamp(raw []byte) time.Time {
 	var doc struct {
 		CapturedAt string `json:"captured_at"`
 	}
-	if err := json.Unmarshal(raw, &doc); err == nil {
-		if at, err := time.Parse(time.RFC3339Nano, doc.CapturedAt); err == nil {
-			return "millivolt-debug-" + at.UTC().Format("20060102-150405") + ".json.gz"
-		}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return time.Time{}
 	}
-	return "millivolt-debug-" + id + ".json.gz"
+	at, err := time.Parse(time.RFC3339Nano, doc.CapturedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }

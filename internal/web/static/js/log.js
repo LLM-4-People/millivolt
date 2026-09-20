@@ -402,13 +402,22 @@ function finalizedStatusPill(r) {
   return `<span class="pill ${sc}"${errTitle || cancelTitle}>${isCancel ? '✕' : ''}${r.status_code}</span>` + debugBadge(r);
 }
 
+// attemptPillClass is the one class computation for an absorbed
+// attempt's status pill, shared by the drawer's retry list, the attempt
+// view and the log sub-row (each site keeps its own text spelling): a
+// transport failure and a 5xx are err, the statuses between are warn -
+// a degenerate 2xx/3xx failure wears the same class on every surface.
+function attemptPillClass(a) {
+  return !a.status_code || a.status_code >= 500 ? 'err' : 'warn';
+}
+
 // attemptPill is the one status pill for an absorbed attempt, shared by the
 // drawer's retry list and the attempt view. Transport failures have no HTTP
 // status (0) - a meaningless "0" becomes the transport pill; HTTP failures
 // show their real status.
 function attemptPill(a) {
-  if (!a.status_code) return `<span class="pill err">transport</span>`;
-  return `<span class="pill ${a.status_code >= 500 ? 'err' : 'warn'}">${a.status_code}</span>`;
+  if (!a.status_code) return `<span class="pill ${attemptPillClass(a)}">transport</span>`;
+  return `<span class="pill ${attemptPillClass(a)}">${a.status_code}</span>`;
 }
 
 // reqRow renders one request row for the flat live request log, plus the
@@ -491,10 +500,12 @@ function reqRow(r, sepLabel) {
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
   // Sub-rows are clickable: data-attempt carries the attempt index, so a
   // click opens that attempt inside the request's drawer; the request's own
-  // row (no data-attempt) still opens the request detail.
+  // row (no data-attempt) still opens the request detail. The pill class
+  // rides the shared attemptPillClass while the text stays this surface's
+  // own ('-' for a status-less transport failure).
   if (!attempts.length) return sep + main;
   const subs = attempts.map((a, i) => {
-    const asc = a.status_code >= 500 ? 'err' : (a.status_code >= 400 ? 'warn' : 'err');
+    const asc = attemptPillClass(a);
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
     return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
@@ -859,11 +870,15 @@ function drawerShow(id, attempt) {
 function openDrawer(id) { drawerShow(id, null); }
 
 // openDrawerAttempt opens one absorbed attempt of request id. The index
-// arrives from a DOM dataset, so it is validated here: a malformed index
-// fails closed to the request view. The re-render replaces the clicked
-// control, so the attempt view's first control - the back affordance - takes
-// focus, the same seat openModal gives a fresh open.
+// arrives from a DOM dataset, so it is validated here: only the
+// canonical digit spelling passes, then the integer and bound checks -
+// bare Number coercion alone would let '' (0), '0x1' (1) and ' 1 ' (1)
+// open an attempt. A malformed index fails closed to the request view.
+// The re-render replaces the clicked control, so the attempt view's first
+// control - the back affordance - takes focus, the same seat openModal
+// gives a fresh open.
 function openDrawerAttempt(id, index) {
+  if (!/^\d+$/.test(String(index))) { openDrawer(id); return; }
   const i = Number(index);
   if (!Number.isInteger(i) || i < 0) { openDrawer(id); return; }
   drawerShow(id, i);

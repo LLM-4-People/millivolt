@@ -339,26 +339,52 @@ class RepositoryChecks(unittest.TestCase):
                           "the :root custom-property palette is missing"])
 
     def test_artifact_gzip_choke_point_detector(self):
-        good = [("cmd/proxy/log.go", '\tzw := proxy.NewArtifactGzipWriter(ew)\n')]
+        good = [
+            ("cmd/proxy/log.go", '\tzw := proxy.NewArtifactGzipWriter(ew)\n'),
+            ("internal/proxy/debug.go", '\tzw := NewArtifactGzipWriter(&compressed)\n'),
+        ]
         self.assertEqual(check.artifact_gzip_choke_point_errors(good), [])
-        # A vanished choke point and a duplicated per-branch wrap are both
-        # drift, never a silent pass; the owner leaving the corpus fails too.
-        removed = [("cmd/proxy/log.go", '\tzw := gzip.NewWriter(ew)\n')]
-        self.assertEqual(check.artifact_gzip_choke_point_errors(removed), [
-            "cmd/proxy/log.go: the NewArtifactGzipWriter export choke point is gone - "
-            "every export shape must cross the one shared gzip artifact writer"])
-        duplicated = [("cmd/proxy/log.go",
-                       '\tzw := proxy.NewArtifactGzipWriter(ew)\n'
-                       '\tzw2 := proxy.NewArtifactGzipWriter(zw)\n')]
+        # The capture gate hand-wraps instead of crossing the choke point: the
+        # wrap is gone AND the direct construction is banned - one row proves
+        # both new failure modes.
+        hand_wrapped = good[:1] + [
+            ("internal/proxy/debug.go", '\tzw := gzip.NewWriterLevel(&compressed, 2)\n')]
+        self.assertEqual(check.artifact_gzip_choke_point_errors(hand_wrapped), [
+            "internal/proxy/debug.go: the NewArtifactGzipWriter artifact choke point is gone - "
+            "every artifact download must cross the one shared gzip artifact writer",
+            "internal/proxy/debug.go: direct compress/gzip writer construction - "
+            "NewArtifactGzipWriter is the only saved-artifact construction site"])
+        # A duplicated per-branch wrap is drift, never a silent pass.
+        duplicated = good[:1] + [
+            ("internal/proxy/debug.go",
+             '\tzw := NewArtifactGzipWriter(&compressed)\n'
+             '\tzw2 := NewArtifactGzipWriter(zw)\n')]
         self.assertEqual(check.artifact_gzip_choke_point_errors(duplicated), [
-            "cmd/proxy/log.go: 2 NewArtifactGzipWriter wraps - "
-            "the export compression gate is one choke point, never a per-branch writer"])
-        self.assertEqual(check.artifact_gzip_choke_point_errors([]),
-                         ["cmd/proxy/log.go: export source is not in the checked corpus"])
-        # The real tree: the export handler crosses the choke point exactly once.
-        self.assertEqual(check.artifact_gzip_choke_point_errors(
-            [("cmd/proxy/log.go",
-              (check.ROOT / "cmd/proxy/log.go").read_text(encoding="utf-8"))]), [])
+            "internal/proxy/debug.go: 2 NewArtifactGzipWriter wraps - "
+            "the artifact compression gate is one choke point, never a per-branch writer"])
+        # The export gate answers the same rules with its own file named.
+        self.assertEqual(check.artifact_gzip_choke_point_errors([
+            ("cmd/proxy/log.go", '\tzw := gzip.NewWriter(ew)\n'),
+            good[1]]), [
+            "cmd/proxy/log.go: the NewArtifactGzipWriter artifact choke point is gone - "
+            "every artifact download must cross the one shared gzip artifact writer",
+            "cmd/proxy/log.go: direct compress/gzip writer construction - "
+            "NewArtifactGzipWriter is the only saved-artifact construction site"])
+        # Either gate leaving the corpus fails too, never a silent pass.
+        self.assertEqual(check.artifact_gzip_choke_point_errors(good[1:]),
+                         ["cmd/proxy/log.go: artifact source is not in the checked corpus"])
+        self.assertEqual(check.artifact_gzip_choke_point_errors(good[:1]),
+                         ["internal/proxy/debug.go: artifact source is not in the checked corpus"])
+        self.assertEqual(check.artifact_gzip_choke_point_errors([]), [
+            "cmd/proxy/log.go: artifact source is not in the checked corpus",
+            "internal/proxy/debug.go: artifact source is not in the checked corpus"])
+        # The real tree: both gates cross the choke point exactly once, with
+        # no direct compress/gzip construction of their own.
+        self.assertEqual(check.artifact_gzip_choke_point_errors([
+            ("cmd/proxy/log.go",
+             (check.ROOT / "cmd/proxy/log.go").read_text(encoding="utf-8")),
+            ("internal/proxy/debug.go",
+             (check.ROOT / "internal/proxy/debug.go").read_text(encoding="utf-8"))]), [])
 
 
 if __name__ == "__main__":

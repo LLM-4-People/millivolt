@@ -140,7 +140,7 @@ dimensions, such as tools and errors, can overlap rather than partition requests
 | Providers | Server-derived upstream identities after configured aliases. |
 | Models | Model groups produced by the configured canonicalization rules. |
 | Clients | Explicit client labels or inferred SDK/User-Agent identities. |
-| Conversations | Explicit or automatically tracked conversation IDs, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
+| Conversations | Conversation IDs from explicit sessions, tracked body params (`k:` identities) or automatic grouping, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
 | Tools | Observed tool names; one request can belong to several tools. |
 | Time | Request start in the server's local timezone: weekday night 00:00-08:00, work 08:00-16:00, evening 16:00-24:00, or a single weekend group. This is separate from chart history range. |
 | Status | Coarse outcome classes and live states. The Requests dropdown instead selects exact HTTP codes or named live states. |
@@ -196,9 +196,11 @@ Scroll the same drawer for token splits, timestamps, throughput, reported cost,
 tool information and queue/rate-limit observations. Absorbed retry attempts
 appear when the selected request has them, each with its status, provider
 error detail and the attempt's own provider request id - the matching key for
-correlating a provider-side failure report with the exact attempt. These
-captures deliberately omit request content and Debug payloads; ordinary
-opt-in captures remain sensitive.
+correlating a provider-side failure report with the exact attempt. Clicking an
+absorbed attempt, a retry sub-row in the request table or an entry in the
+drawer's retry list, opens that attempt's own detail view. These captures
+deliberately omit request content and Debug payloads; ordinary opt-in captures
+remain sensitive.
 
 ![The same request drawer showing token and performance measurements](images/requests/performance.png)
 

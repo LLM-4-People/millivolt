@@ -4,10 +4,12 @@ package proxy
 // only. The config layer's validation, schema and coercion live in
 // tests/_go/internal/config/subconversations.go; these rows pin the runtime
 // contract - per-client extraction, first-present-wins param order, the
-// drop-not-reject value bound, the k: identity and its precedence under the
-// s: header and c- auto grouping, strip folded into the single body-rewrite
-// engine (one rewrite across relay retries and quality re-sends), the
-// translated-path prompt_cache_key injection, and the cursor wire gate.
+// top-level-only boundary (a nested occurrence is neither tracked nor
+// stripped), the drop-not-reject value bound, the k: identity and its
+// precedence under the s: header and c- auto grouping, strip folded into the
+// single body-rewrite engine (one rewrite across relay retries and quality
+// re-sends), the translated-path prompt_cache_key injection, and the cursor
+// wire gate.
 
 import (
 	"bytes"
@@ -502,8 +504,8 @@ func TestSubConversationsStripAndOverrideShareOneRewrite(t *testing.T) {
 			t.Fatalf("upstream body mutated by the failed rewrite:\n got %q\nwant %q", bodies, rawBody)
 		}
 		logged := logBuf.String()
-		if n := strings.Count(logged, "request overrides:"); n != 1 {
-			t.Fatalf("body-rewrite skip log lines = %d, want exactly 1 (one shared engine, not one per feature): %q", n, logged)
+		if n := strings.Count(logged, "request overrides and sub-conversation strip:"); n != 1 {
+			t.Fatalf("body-rewrite skip log lines = %d, want exactly 1 naming both requesting features (one shared engine, not one per feature): %q", n, logged)
 		}
 		for _, want := range []string{"body rewrite skipped", `"sc-client"`, "not a JSON object", "relay"} {
 			if !strings.Contains(logged, want) {
@@ -515,6 +517,161 @@ func TestSubConversationsStripAndOverrideShareOneRewrite(t *testing.T) {
 			t.Errorf("ReqMaxTokens = %v, want nil (nothing was restamped)", *recs[0].ReqMaxTokens)
 		}
 	})
+}
+
+// TestSubConversationsStripOnlySkipNamesItsFeature pins the rewrite-skip log
+// line's attribution: when only the sub-conversation strip requested the
+// rewrite, the line names the strip, never request overrides (the
+// misattribution the shared prefix used to carry), while the one shared
+// engine still emits exactly one line and relays the original bytes.
+func TestSubConversationsStripOnlySkipNamesItsFeature(t *testing.T) {
+	upstream, capt := scriptedUpstream(t, overrideReply{200, `{"ok":true}`})
+	defer upstream.Close()
+	cfg := scCfg(t, true, "promptCacheKey") // strip only: no request_overrides entry
+	buf := metrics.NewBuffer(4)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	// Truncated JSON carrying the param lexically: the strip wants a rewrite,
+	// the one engine fails closed on it once.
+	rawBody := `{"model":"m","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"x","max_tokens":`
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(os.Stderr)
+	status, respBody := postOverrideChat(t, srv.URL, upstream.URL, rawBody,
+		func(r *http.Request) { r.Header.Set("X-Proxy-Client", "sc-client") })
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (the invalid body relays verbatim; body %s)", status, respBody)
+	}
+	bodies, _ := capt.snapshot()
+	if len(bodies) != 1 || bodies[0] != rawBody {
+		t.Fatalf("upstream body mutated by the failed rewrite:\n got %q\nwant %q", bodies, rawBody)
+	}
+	logged := logBuf.String()
+	if n := strings.Count(logged, "sub-conversation strip:"); n != 1 {
+		t.Fatalf("strip-only skip log lines = %d, want exactly 1 naming the requesting feature: %q", n, logged)
+	}
+	if strings.Contains(logged, "request overrides") {
+		t.Errorf("strip-only skip is misattributed to request overrides: %q", logged)
+	}
+	for _, want := range []string{"body rewrite skipped", `"sc-client"`, "not a JSON object", "relay"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("log line omits %q: %q", want, logged)
+		}
+	}
+}
+
+// TestSubConversationsTopLevelBoundaryWithStrip pins the shared depth
+// boundary end to end: extraction and strip both see only the body's
+// top-level object keys, so a nested occurrence of the tracked param is
+// neither tracked (no k: identity) nor stripped (the field relays upstream) -
+// the deny-complete strip claim and the extraction claim agree at one depth.
+// A body carrying both a nested and a top-level occurrence tracks and strips
+// only the top-level one while the nested spelling relays.
+func TestSubConversationsTopLevelBoundaryWithStrip(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		// identical rows relay byte-identical (no rewrite fired at all);
+		// otherwise the top-level occurrence must be gone while the nested
+		// one survives inside messages.
+		identical bool
+		wantID    string // "" wants any c- auto id
+	}{
+		{"nested occurrence relays and is not tracked",
+			`{"model":"model-a","messages":[{"role":"user","content":"hi","promptCacheKey":"task-n"}],"max_tokens":10}`,
+			true, ""},
+		{"only the top-level occurrence is tracked and stripped",
+			`{"model":"model-a","messages":[{"role":"user","content":"hi","promptCacheKey":"task-n"}],"max_tokens":10,"promptCacheKey":"task-t"}`,
+			false, "k:task-t"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
+			defer upstream.Close()
+			cfg := scCfg(t, true, "promptCacheKey")
+			buf := metrics.NewBuffer(2)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, respBody := postOverrideChat(t, srv.URL, upstream.URL, tc.body,
+				func(r *http.Request) { r.Header.Set("X-Proxy-Client", "sc-client") })
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", status, respBody)
+			}
+			bodies, _ := capt.snapshot()
+			if len(bodies) != 1 {
+				t.Fatalf("upstream sends = %d, want 1", len(bodies))
+			}
+			if tc.identical {
+				if bodies[0] != tc.body {
+					t.Fatalf("a nested-only occurrence fired a rewrite:\n got %q\nwant %q", bodies[0], tc.body)
+				}
+			} else {
+				doc := scUpstreamBody(t, bodies)
+				if _, ok := doc["promptCacheKey"]; ok {
+					t.Errorf("the top-level occurrence survived strip upstream: %s", bodies[0])
+				}
+				var got struct {
+					Messages []struct {
+						PromptCacheKey string `json:"promptCacheKey"`
+					} `json:"messages"`
+					MaxTokens int `json:"max_tokens"`
+				}
+				if err := json.Unmarshal([]byte(bodies[0]), &got); err != nil || len(got.Messages) != 1 ||
+					got.Messages[0].PromptCacheKey != "task-n" || got.MaxTokens != 10 {
+					t.Errorf("the nested occurrence was altered or dropped upstream: %s", bodies[0])
+				}
+			}
+			recs := waitForRecord(t, buf, 1)
+			id := recs[0].ConversationID
+			if tc.wantID == "" {
+				if !strings.HasPrefix(id, "c-") {
+					t.Errorf("conversation id = %q, want a c- auto id (a nested occurrence is not tracked)", id)
+				}
+			} else if id != tc.wantID {
+				t.Errorf("conversation id = %q, want %q", id, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestSubConversationsStripRemovesEveryPresentParam pins strip's
+// deny-completeness for an entry with more than one param: with both
+// configured fields present at the top level, BOTH are removed from the
+// relayed upstream body - not only the one that supplied the tracked value -
+// while the extraction still takes the first present param's value.
+func TestSubConversationsStripRemovesEveryPresentParam(t *testing.T) {
+	upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
+	defer upstream.Close()
+	cfg := scCfg(t, true, "primaryKey", "secondaryKey")
+	buf := metrics.NewBuffer(2)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"primaryKey":"first","secondaryKey":"second"}`
+	status, respBody := postOverrideChat(t, srv.URL, upstream.URL, body,
+		func(r *http.Request) { r.Header.Set("X-Proxy-Client", "sc-client") })
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", status, respBody)
+	}
+	doc := scUpstreamBody(t, mustCapture(capt))
+	if _, ok := doc["primaryKey"]; ok {
+		t.Errorf("the tracked param survived strip upstream: %s", mustCapture(capt)[0])
+	}
+	if _, ok := doc["secondaryKey"]; ok {
+		t.Errorf("the second present param survived strip upstream: %s", mustCapture(capt)[0])
+	}
+	var got struct {
+		Model    string
+		Messages []json.RawMessage
+	}
+	if err := json.Unmarshal([]byte(mustCapture(capt)[0]), &got); err != nil || got.Model != "model-a" || len(got.Messages) != 1 {
+		t.Errorf("unrelated fields not preserved verbatim: %s", mustCapture(capt)[0])
+	}
+	recs := waitForRecord(t, buf, 1)
+	if recs[0].ConversationID != "k:first" {
+		t.Errorf("conversation id = %q, want k:first (the first present param wins)", recs[0].ConversationID)
+	}
 }
 
 // TestSubConversationsTranslatedAnthropicInjectsAndCarries pins the
@@ -668,9 +825,11 @@ func TestSubConversationsCursorWireGate(t *testing.T) {
 
 // TestSubConversationExtractionUnits pins the extraction pipeline at its
 // owner: the feature-off and no-entry cheap checks, the exact-leaf client
-// match, the JSONKey locate (escape-spelled keys, nesting), the bounded value
-// decode, and the declared-session bound's drop rows - including the boundary
-// byte and the presence-ordered walk a black-row HTTP test cannot see.
+// match, the top-level locate (escape-spelled keys, the top-level-only
+// boundary - a nested occurrence is neither tracked nor stripped), the
+// bounded value decode, and the declared-session bound's drop rows -
+// including the boundary byte and the presence-ordered walk a black-row HTTP
+// test cannot see.
 func TestSubConversationExtractionUnits(t *testing.T) {
 	entries := []config.SubConversation{
 		{Client: "sc-client", Params: []string{"promptCacheKey"}},
@@ -691,7 +850,9 @@ func TestSubConversationExtractionUnits(t *testing.T) {
 		{"value is trimmed to its identity", entries, "sc-client", `{"promptCacheKey":"  task-1  "}`, true, "task-1"},
 		{"escape-spelled key is located", entries, "sc-client", `{"promptC\u0061cheKey":"task-2"}`, true, "task-2"},
 		{"escaped value decodes", entries, "sc-client", `{"promptCacheKey":"a\"b\\c"}`, true, "a\"b\\c"},
-		{"nested key is located (the JSONKey class)", entries, "sc-client", `{"wrap":{"promptCacheKey":"task-3"}}`, true, "task-3"},
+		{"nested occurrence is not tracked (the top-level boundary)", entries, "sc-client", `{"wrap":{"promptCacheKey":"task-3"}}`, true, ""},
+		{"top-level key after a nested occurrence is located", entries, "sc-client", `{"wrap":{"promptCacheKey":"task-3"},"promptCacheKey":"task-4"}`, true, "task-4"},
+		{"occurrence inside a top-level array is not tracked", entries, "sc-client", `{"messages":[{"promptCacheKey":"task-3"}]}`, true, ""},
 		{"non-string value does not supply", entries, "sc-client", `{"promptCacheKey":123}`, true, ""},
 		{"null value does not supply", entries, "sc-client", `{"promptCacheKey":null}`, true, ""},
 		{"empty string is dropped", entries, "sc-client", `{"promptCacheKey":""}`, true, ""},

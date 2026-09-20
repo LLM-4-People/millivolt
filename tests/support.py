@@ -532,30 +532,40 @@ def palette_mirror_errors(pairs):
 
 
 ARTIFACT_GZIP_OWNER = 'cmd/proxy/log.go'
+ARTIFACT_GZIP_CAPTURE_OWNER = 'internal/proxy/debug.go'
 ARTIFACT_GZIP_CALL = 'NewArtifactGzipWriter('
+_GZIP_WRITER_CONSTRUCTION = re.compile(r'\bgzip\.NewWriter(?:Level)?\s*\(')
 
 
 def artifact_gzip_choke_point_errors(pairs):
-    """cmd/proxy/log.go is the compression gate every metrics export shape
-    crosses: the ring snapshot and the durable store stream both write
-    through the one NewArtifactGzipWriter wrap, so matching, all and
-    debug-only exports inherit the same saved-gzip artifact contract. A
-    second wrap is a per-branch compression gate a new export shape could
-    silently skip; a missing wrap means the artifact contract itself was
-    dropped. Exactly one occurrence keeps the single choke point
-    enforceable."""
-    text = None
-    for name, body in pairs:
-        if name == ARTIFACT_GZIP_OWNER:
-            text = body
-            break
-    if text is None:
-        return [ARTIFACT_GZIP_OWNER + ': export source is not in the checked corpus']
-    wraps = text.count(ARTIFACT_GZIP_CALL)
-    if wraps == 1:
-        return []
-    if wraps == 0:
-        return [ARTIFACT_GZIP_OWNER + ': the NewArtifactGzipWriter export choke point is '
-                'gone - every export shape must cross the one shared gzip artifact writer']
-    return [ARTIFACT_GZIP_OWNER + ': ' + str(wraps) + ' NewArtifactGzipWriter wraps - '
-            'the export compression gate is one choke point, never a per-branch writer']
+    """cmd/proxy/log.go and internal/proxy/debug.go are the two compression
+    gates every saved gzip artifact crosses: the logs export route and the
+    debug capture download each write through exactly one
+    NewArtifactGzipWriter wrap, so matching, all and debug-only exports and
+    every capture download inherit the same artifact codec. A second wrap is
+    a per-branch compression gate a new surface could silently skip; a
+    missing wrap means the artifact contract itself was dropped. Neither
+    gate may construct a compress/gzip writer directly: NewArtifactGzipWriter
+    (internal/proxy/gzip.go) is the only construction site, so the artifact
+    codec cannot fork per surface."""
+    errors = []
+    for owner in (ARTIFACT_GZIP_OWNER, ARTIFACT_GZIP_CAPTURE_OWNER):
+        text = None
+        for name, body in pairs:
+            if name == owner:
+                text = body
+                break
+        if text is None:
+            errors.append(owner + ': artifact source is not in the checked corpus')
+            continue
+        wraps = text.count(ARTIFACT_GZIP_CALL)
+        if wraps == 0:
+            errors.append(owner + ': the NewArtifactGzipWriter artifact choke point is '
+                            'gone - every artifact download must cross the one shared gzip artifact writer')
+        elif wraps > 1:
+            errors.append(owner + ': ' + str(wraps) + ' NewArtifactGzipWriter wraps - '
+                          'the artifact compression gate is one choke point, never a per-branch writer')
+        if _GZIP_WRITER_CONSTRUCTION.search(text):
+            errors.append(owner + ': direct compress/gzip writer construction - '
+                          'NewArtifactGzipWriter is the only saved-artifact construction site')
+    return errors

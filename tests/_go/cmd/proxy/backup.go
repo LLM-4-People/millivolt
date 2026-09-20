@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 	"time"
 
@@ -35,6 +36,28 @@ func TestBackupRestoreConfigRoundTrip(t *testing.T) {
 	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?config=1", nil))
 	if rr.Code != 200 {
 		t.Fatalf("backup status %d body %s", rr.Code, rr.Body.String())
+	}
+	// The download is an artifact like the export and capture surfaces:
+	// octet-stream, no-store, and a millivolt-backup-<UTC stamp>.mvb
+	// attachment name - the one shared header owner composes all three.
+	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("backup Content-Type = %q, want application/octet-stream", ct)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("backup Cache-Control = %q, want no-store", cc)
+	}
+	dispo := regexp.MustCompile(`^attachment; filename="millivolt-backup-(\d{8}-\d{6})\.mvb"$`).
+		FindStringSubmatch(rr.Header().Get("Content-Disposition"))
+	if dispo == nil {
+		t.Fatalf("Content-Disposition = %q, want a millivolt-backup-<stamp>.mvb attachment",
+			rr.Header().Get("Content-Disposition"))
+	}
+	stamp, err := time.ParseInLocation("20060102-150405", dispo[1], time.UTC)
+	if err != nil {
+		t.Fatalf("backup attachment stamp %q does not parse: %v", dispo[1], err)
+	}
+	if skew := time.Since(stamp); skew < -time.Minute || skew > time.Minute {
+		t.Fatalf("backup attachment stamp %s sits %s from now UTC - the artifact filename clock must be UTC", dispo[1], skew)
 	}
 	raw := rr.Body.Bytes()
 	arch, err := backup.Decode(raw)

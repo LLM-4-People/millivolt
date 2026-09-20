@@ -37,7 +37,12 @@ and its merge has exactly two application stages: the final header stage of
 `buildUpstreamRequest`, and the cursor identity headers at the native send. Its
 body stamp is fail closed (an undecodable or oversize result relays the
 original bytes with one log line), and a nil resolution - the feature off or
-nothing matched - leaves the request path byte-identical.
+nothing matched - leaves the request path byte-identical. The sub-conversation
+strip is the single body-rewrite engine's second consumer: it fires
+independently of override resolution, after the tracked value is extracted
+from the buffered body and before translation, with
+[conversation.go](../internal/proxy/conversation.go) owning the extraction and
+the `k:` identity.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
 active requests. Admission is provider+key scoped, with provider-wide token,

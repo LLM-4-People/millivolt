@@ -787,6 +787,13 @@ async function main() {
     check('a malformed attempt index fails closed to the request view',
       attemptSel() === null && !title().includes('attempt') &&
         bodyText().includes('PROMPT-PREVIEW-7F'));
+    // The empty-string spelling: Number('') coerces to 0, which opened
+    // attempt mode instead of failing closed - the index must pass the
+    // digit-spelling gate first.
+    if (subRow) { subRow.setAttribute('data-attempt', ''); subRow.click(); }
+    check('an empty-string attempt index fails closed to the request view',
+      attemptSel() === null && !title().includes('attempt') &&
+        bodyText().includes('PROMPT-PREVIEW-7F'));
     d.querySelector('#tbl-requests tr.exp-row[data-id="att-open"]:not(.retry-sub)').click();
     check('clicking the parent row still opens the parent detail',
       !back() && !title().includes('attempt') && bodyText().includes('PROMPT-PREVIEW-7F'));
@@ -831,6 +838,35 @@ async function main() {
     w.closeDrawer();
     check('closing the drawer clears the attempt mode',
       d.getElementById('drawer').hidden && w.eval('drawerId') === null && attemptSel() === null);
+  }
+
+  // ---- test 7g: the attempt pill class unification ----
+  // A degenerate absorbed attempt - an HTTP 200 that still carried an
+  // error payload and was retried - must wear the same pill class on
+  // every surface: the class computation is one owner (attemptPillClass),
+  // so the drawer's retry list, the attempt view and the log sub-row can
+  // never disagree about what a 1xx-3xx failure looks like.
+  {
+    const atts = [
+      { status_code: 200, error_type: 'upstream_error', error_msg: 'degenerate 200 with an error payload',
+        at: new Date(1700000104500).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-200', 200, 1700000104000), retries: 1, attempts: atts }, in_flight: 0 });
+    await sleep(20);
+    w.openDrawer('att-200');
+    const listPill = d.querySelector('.attempt-link .pill');
+    check('the drawer retry list classes the degenerate 200 attempt warn',
+      listPill.classList.contains('warn') && !listPill.classList.contains('err'));
+    d.querySelector('.attempt-link').click();
+    const viewPill = [...d.querySelectorAll('#drawer-body .detail-kv')]
+      .find(el => el.querySelector('.k')?.textContent === 'status')?.querySelector('.v .pill');
+    check('the attempt view status pill wears the same class',
+      viewPill && viewPill.classList.contains('warn') && !viewPill.classList.contains('err'));
+    w.closeDrawer();
+    d.querySelector('.retry-toggle[data-retry-for="att-200"]').click();
+    const subPill = d.querySelector('tr.retry-sub[data-retry-of="att-200"] .pill');
+    check('the log sub-row pill wears the same shared class',
+      subPill && subPill.classList.contains('warn') && !subPill.classList.contains('err'));
   }
 
 
@@ -3634,6 +3670,45 @@ async function main() {
     delete w.__mrGateDoc;
   }
 
+  // The collect-catch hidden-offender drive (the W53 reveal class, the
+  // scalar-int leg): a numeric field with garbage in a category the sheet
+  // is not showing throws from collectSettingsValues(true) before any
+  // editor gate runs, and the catch used to focus + flash the offender
+  // with no reveal - silent no-ops inside a hidden .st-row, so the
+  // operator got only the status line. The catch must route the offender
+  // through the same reveal the save gates share.
+  {
+    const doc = JSON.parse(JSON.stringify(cfgDoc));
+    doc.fields.push({ key: 'conc_cap', category: 'rate', label: 'Concurrency cap', kind: 'int', hot_reload: true });
+    doc.categories.push({ id: 'rate', label: 'Rate', help: 'rate limits' });
+    doc.values.conc_cap = 4;
+    w.__intRevealDoc = doc;
+    w.eval('settingsDoc = window.__intRevealDoc; fillSettingsForm(settingsDoc)');
+    d.getElementById('settings-sheet').hidden = false;
+    w.eval("settingsCat = 'providers'; showSettingsCat()");
+    const intRow = d.querySelector('.st-row[data-key="conc_cap"]');
+    const intIn = intRow.querySelector('input[data-key="conc_cap"]');
+    intIn.value = 'garbage';
+    intIn.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('switching the sheet to the providers category hides the scalar-int row',
+      intRow.hidden && w.settingsIsDirty() && !d.getElementById('btn-settings-apply').disabled);
+    const intFailuresBefore = failures.length;
+    d.getElementById('btn-settings-apply').click();
+    check('Apply with a hidden scalar-int offender selects its category and focuses it',
+      failures.length === intFailuresBefore &&
+        /conc_cap: enter a valid integer/.test(d.getElementById('settings-count').textContent) &&
+        w.eval('settingsCat') === 'rate' &&
+        d.querySelector('[data-st-cat="rate"]').classList.contains('active') &&
+        d.querySelector('[data-st-cat="rate"]').getAttribute('aria-current') === 'page' &&
+        !intRow.hidden &&
+        d.activeElement === intIn && intIn.classList.contains('prov-bad'));
+    w.__settingsTestDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__settingsTestDoc;
+    delete w.__intRevealDoc;
+  }
+
   // ---- request-overrides editor: the settings dashboard surface ----
   // The W47 spec's settings-dashboard section: the editor renders the
   // server doc's seeded rules, edits collect round-trip to the strict POST
@@ -3834,6 +3909,24 @@ async function main() {
     check('a duplicate scope triple names the earlier rule',
       card1.dataset.roState === 'error' &&
       card1.querySelector('.ro-err').textContent.includes('duplicate scope with rule 1'));
+    // The middle-duplicate ordinal (the first-occurrence registration): a
+    // duplicate scope whose card ALSO carries another error must not
+    // re-register the scope, or a later duplicate cites the wrong rule.
+    card1.querySelector('.ro-max-mct').value = '2000000';
+    card1.querySelector('.ro-max-mct').dispatchEvent(new w.Event('input', { bubbles: true }));
+    tpl.value = 'blank';
+    tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const roDupMid = cards()[2];
+    roDupMid.querySelector('.ro-client').value = 'claude-code';
+    roDupMid.querySelector('.ro-client').dispatchEvent(new w.Event('input', { bubbles: true }));
+    roDupMid.querySelector('.ro-rh-in').value = 'X-Extra';
+    roDupMid.querySelector('[data-ro-rh-add]').click();
+    check('a duplicate scope carrying another error does not shift the cited ordinal',
+      cards().length === 3 &&
+      roDupMid.querySelector('.ro-err').textContent === 'duplicate scope with rule 1 - the same client, provider and model; merge the rules or change one scope');
+    roDupMid.querySelector('[data-ro-rm]').click();
+    card1.querySelector('.ro-max-mct').value = '';
+    card1.querySelector('.ro-max-mct').dispatchEvent(new w.Event('input', { bubbles: true }));
     card1.querySelector('.ro-client').value = '';
     card1.querySelector('.ro-provider').value = 'epsilon.example';
     card1.querySelector('.ro-provider').dispatchEvent(new w.Event('input', { bubbles: true }));
@@ -4048,6 +4141,23 @@ async function main() {
     check('a duplicate client across cards names the earlier entry with the server wording',
       zed().dataset.scState === 'error' &&
       zed().querySelector('.sc-err').textContent === "duplicate client 'opencode' with entry 1; merge the entries or change one client");
+    // The middle-duplicate ordinal (the first-occurrence registration): a
+    // duplicate client whose card ALSO carries another error must not
+    // re-register the client, or a later duplicate cites the wrong entry.
+    gin().value = 'ba"d';
+    gin().dispatchEvent(new w.Event('input', { bubbles: true }));
+    scWrap.querySelector('[data-sc-add]').click();
+    const scDupMid = cards()[2];
+    scDupMid.querySelector('.sc-client').value = 'opencode';
+    scDupMid.querySelector('.sc-client').dispatchEvent(new w.Event('input', { bubbles: true }));
+    scDupMid.querySelector('.prov-add .sc-param-in').value = 'k';
+    scDupMid.querySelector('[data-sc-param-add]').click();
+    check('a duplicate client carrying another error does not shift the cited ordinal',
+      cards().length === 3 &&
+      scDupMid.querySelector('.sc-err').textContent === "duplicate client 'opencode' with entry 1; merge the entries or change one client");
+    scDupMid.querySelector('[data-sc-rm]').click();
+    gin().value = 'threadId';
+    gin().dispatchEvent(new w.Event('input', { bubbles: true }));
     zedClient().value = '';
     zedClient().dispatchEvent(new w.Event('input', { bubbles: true }));
     check('an emptied client names the required-client rule with the server wording',

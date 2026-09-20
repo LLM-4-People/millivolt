@@ -64,11 +64,15 @@ func explicitConversationID(id string) string { return "s:" + id }
 func trackedConversationID(id string) string { return "k:" + id }
 
 // subConversationScanMax bounds the raw byte scan of one tracked param's
-// string value. A value that can still satisfy maxDeclaredSessionBytes never
-// spans more raw bytes than this: every JSON escape sequence spends at least
-// two raw bytes per decoded byte (one six-byte \uXXXX escape per decoded byte
-// is the worst case), plus the two framing quotes. Internal safety guardrail,
-// not user-tunable.
+// string value. The bound is judged on raw bytes, before the decoded value is
+// trimmed: a value with no trimmable edges that still satisfies
+// maxDeclaredSessionBytes never spans more raw bytes than this - every JSON
+// escape sequence spends at least two raw bytes per decoded byte (one
+// six-byte \uXXXX escape per decoded byte is the worst case), plus the two
+// framing quotes. A value whose trimmable edges push its raw span past the
+// window is dropped conservatively (still never a 400 - the body is
+// passthrough payload, the same deny-by-drop precedent as an invalid value).
+// Internal safety guardrail, not user-tunable.
 const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 
 // resolveSubConversation is the sub_conversations request-path owner: it
@@ -80,8 +84,9 @@ const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 // decodable string wins; a supplied value that fails the declared-session
 // bound is dropped (the request stays on automatic grouping), never a 400 -
 // the body is passthrough payload, the configToken deny-by-drop precedent.
-// No second full-body parse runs: the locate is the HasErrorKey cheap-gate
-// class over the buffered bytes.
+// No second full-body parse runs: the locate is a depth-aware lexical scan of
+// the buffered bytes, with the shared negative pre-gate keeping param-free
+// regions on the vectorized path.
 func resolveSubConversation(entries []config.SubConversation, client string, body []byte) (entry *config.SubConversation, value string) {
 	if len(entries) == 0 {
 		return nil, ""
@@ -108,14 +113,16 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 	return entry, ""
 }
 
-// subConversationParam locates one configured param's string value in the
-// buffered body. present reports that the param supplied the tracked value:
-// metrics.JSONKey found the key (at any nesting depth, the same lexical
-// cheap-gate class HasErrorKey uses) and the value tail decodes as a bounded
-// string. A supplied value that fails the declared-session bound comes back
-// present with the empty value - the first present param wins and its invalid
-// value is dropped, never a fall-through to a later param, so the configured
-// order stays presence-ordered, never value-quality-ordered.
+// subConversationParam locates one configured param's string value among the
+// buffered body's TOP-LEVEL object keys - a request body param is top-level
+// by product semantics, so an occurrence of the same spelling nested inside
+// a value is neither tracked nor stripped. present reports that the param
+// supplied the tracked value: the top-level locate found the key and the
+// value tail decodes as a bounded string. A supplied value that fails the
+// declared-session bound comes back present with the empty value - the first
+// present param wins and its invalid value is dropped, never a fall-through
+// to a later param, so the configured order stays presence-ordered, never
+// value-quality-ordered.
 func subConversationParam(body []byte, name string, anyEscape bool) (value string, present bool) {
 	// Keep param-free regions on the vectorized negative path (the
 	// HasErrorKey pre-gate class): a body without the literal quoted spelling
@@ -123,7 +130,7 @@ func subConversationParam(body []byte, name string, anyEscape bool) (value strin
 	if !bytes.Contains(body, []byte(`"`+name+`"`)) && !anyEscape {
 		return "", false
 	}
-	tail := metrics.JSONKey(body, name)
+	tail := topLevelJSONKey(body, name)
 	if len(tail) == 0 || tail[0] != '"' {
 		return "", false
 	}
@@ -161,6 +168,125 @@ func subConversationParam(body []byte, name string, anyEscape bool) (value strin
 		return "", true
 	}
 	return s, true
+}
+
+// topLevelJSONKey locates the named key among the members of the body's
+// top-level JSON object and returns the input tail beginning at its value;
+// nil when the body is not a JSON object or the key is not a top-level
+// member. This is the depth-aware sibling of metrics.JSONKey's any-depth
+// walk (which stays with the SSE and error-class consumers): keys inside
+// nested objects or arrays never match. A lexical scan of the buffered
+// bytes, never a second document decode - string escapes are honored, and a
+// body too malformed to finish the scan simply locates nothing.
+func topLevelJSONKey(data []byte, key string) []byte {
+	i := metrics.SkipSpace(data, 0)
+	if i >= len(data) || data[i] != '{' {
+		return nil
+	}
+	i = metrics.SkipSpace(data, i+1)
+	for {
+		if i >= len(data) || data[i] == '}' {
+			return nil
+		}
+		if data[i] != '"' {
+			return nil // a member must open with a key string
+		}
+		start := i
+		i++
+		escaped := false
+		for i < len(data) && data[i] != '"' {
+			if data[i] == '\\' {
+				escaped = true
+				i++
+			}
+			i++
+		}
+		if i >= len(data) {
+			return nil
+		}
+		end := i // the key's closing quote
+		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) || data[i] != ':' {
+			return nil
+		}
+		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) {
+			return nil
+		}
+		match := string(data[start+1:end]) == key
+		if escaped {
+			var name string
+			match = json.Unmarshal(data[start:end+1], &name) == nil && name == key
+		}
+		if match {
+			return data[i:]
+		}
+		i = skipJSONValue(data, i)
+		if i < 0 {
+			return nil
+		}
+		i = metrics.SkipSpace(data, i)
+		if i >= len(data) || data[i] != ',' {
+			return nil // not a member separator: the scan is over
+		}
+		i = metrics.SkipSpace(data, i+1)
+	}
+}
+
+// skipJSONValue advances past one JSON value - a string, a nested object or
+// array tracked as a bracket depth, or a bare number/literal - returning the
+// index just past the value, or -1 when the bytes run out inside an
+// unterminated structure. Lexical only: it never validates the value.
+func skipJSONValue(data []byte, i int) int {
+	switch data[i] {
+	case '"':
+		i++
+		for i < len(data) {
+			if data[i] == '\\' {
+				i += 2
+				continue
+			}
+			if data[i] == '"' {
+				return i + 1
+			}
+			i++
+		}
+		return -1
+	case '{', '[':
+		depth := 1
+		i++
+		for i < len(data) && depth > 0 {
+			switch data[i] {
+			case '"':
+				i++
+				for i < len(data) && data[i] != '"' {
+					if data[i] == '\\' {
+						i++
+					}
+					i++
+				}
+				if i >= len(data) {
+					return -1
+				}
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+			}
+			i++
+		}
+		if depth != 0 {
+			return -1
+		}
+		return i
+	default:
+		// A number or literal (on invalid input, garbage): the next member
+		// separator or closing bracket ends the scalar.
+		for i < len(data) && data[i] != ',' && data[i] != '}' && data[i] != ']' {
+			i++
+		}
+		return i
+	}
 }
 
 // conversation.go reconstructs LLM "conversations" (multi-request tasks) from

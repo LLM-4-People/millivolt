@@ -502,8 +502,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var stripParams []string
 	if subEntry != nil && subEntry.Strip {
 		// Deny-complete for strict upstreams: every configured param of the
-		// matching entry that is present in the body goes, not only the one
-		// that supplied the tracked value.
+		// matching entry present at the body's top level goes, not only the
+		// one that supplied the tracked value.
 		stripParams = subEntry.Params
 	}
 	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) {
@@ -511,8 +511,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			body = rewritten
 			restampReqMaxTokens(body, rec)
 		} else {
-			log.Printf("request overrides: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
-				client, t.provider, recModel, why)
+			// Name the requesting feature(s) by what fired, so a strip-only
+			// skip is never misattributed to request overrides.
+			feature := "request overrides"
+			if overrideBody != nil && len(stripParams) > 0 {
+				feature = "request overrides and sub-conversation strip"
+			} else if len(stripParams) > 0 {
+				feature = "sub-conversation strip"
+			}
+			log.Printf("%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
+				feature, client, t.provider, recModel, why)
 		}
 	}
 

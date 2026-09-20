@@ -17,6 +17,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
@@ -56,10 +57,9 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
 		return
 	}
-	name := "millivolt-backup-" + time.Now().UTC().Format("20060102-150405") + ".mvb"
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
-	w.Header().Set("Cache-Control", "no-store")
+	// The one artifact-header owner composes the name (millivolt-backup-<
+	// UTC stamp>.mvb), disposition, content type and no-store.
+	proxy.WriteArtifactHeaders(w, "backup", "mvb", "application/octet-stream", time.Now(), "")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(raw)))
 	_, _ = w.Write(raw)
 }

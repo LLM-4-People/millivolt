@@ -34,8 +34,10 @@ headers and metadata but do not select an adapter or grant provider access.
 ## Bundled compatibility profiles
 
 The generated [configuration example](../proxy.example.yaml) enables Grok and
-Cursor profiles. `config.Example()` in [internal/config](../internal/config)
-owns their exact mappings and header values; built-in `config.Default()` remains
+Cursor profiles and the opencode sub-conversation tracking exemplar (the
+`promptCacheKey` tracked param, strip on). `config.Example()` in
+[internal/config](../internal/config) owns the exact profile mappings, header
+values and that tracking entry; built-in `config.Default()` remains
 provider-neutral. The image installs the example into fresh config volumes.
 Existing saved configurations are not silently replaced.
 
@@ -64,7 +66,10 @@ from a successful local fixture test.
 
 `anthropic` translates common OpenAI chat requests/responses: message history,
 system text, tools/results, selected parameters, usage and streaming events.
-It is not complete preservation of every provider-specific field. The caller
+It is not complete preservation of every provider-specific field. A configured
+[sub-conversation tracking](operations.md#sub-conversation-tracking) value is
+injected as the native top-level `prompt_cache_key`; the client's own spelling
+of the tracked field is otherwise dropped by the allowlist. The caller
 must supply the native endpoint's correct auth/version/path headers; the
 [protocol example](protocol.md#url-and-auth-examples) demonstrates the mechanism.
 

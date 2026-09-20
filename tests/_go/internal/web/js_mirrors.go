@@ -617,6 +617,30 @@ func TestSubConversationCapsMatchGoOwner(t *testing.T) {
 	}
 }
 
+// TestSettingsRevealCallSitesPinnedInSource pins applySettings' reveal
+// discipline: every path that blocks a settings save must route its
+// offender through revealSettingsOffender, the one reveal that can
+// surface an offender whose category the sheet is not showing. Exactly
+// four call sites live inside applySettings - the three editor save
+// gates (model rules, request overrides, sub-conversations) and the
+// collectSettingsValues(true) catch for scalar offenders - so a
+// dropped gate call, a catch reverted to a bare focus(), or an ad-hoc
+// fifth call reddens here. The jsdom rows cover each path's behavior,
+// but none of them counts the call sites.
+func TestSettingsRevealCallSitesPinnedInSource(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	region := sourceRegion(t, string(src), "function applySettings")
+	if got := strings.Count(region, "revealSettingsOffender("); got != 4 {
+		t.Errorf("applySettings routes %d offenders through revealSettingsOffender, want exactly 4 (the model-rules, request-overrides and sub-conversations save gates plus the collectSettingsValues catch)", got)
+	}
+	if got := strings.Count(string(src), "function revealSettingsOffender("); got != 1 {
+		t.Errorf("chrome.js declares revealSettingsOffender %d times, want exactly 1 (the count above is applySettings' call sites, not declarations)", got)
+	}
+}
+
 // TestShellAssetsEqualBrandPaths pins the sw.js SHELL_ASSETS precache list
 // to the exact Go brand-path set minus the service worker itself (the worker
 // updates independently and never precaches its own URL). The previous

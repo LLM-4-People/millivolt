@@ -6,12 +6,16 @@ package web
 // page load. Applied per-route in cmd/proxy/main.go to the dashboard's
 // buffered JSON/HTML routes ONLY - never to the LLM proxy path (the hot
 // path is sacred) and never to /metrics/live/stream (SSE flushes event-by-
-// event and must stay uncompressed). Wrapping routes that stream would
+// event and must stay uncompressed). A handler that stages Content-Type:
+// application/gzip is serving an already-compressed saved artifact, and the
+// wrapper relays it uncompressed (gzipResponseWriter below) - transit gzip
+// would double-compress the download. Wrapping routes that stream would
 // buffer or corrupt the stream; the route list is the guardrail. Immutable
 // CSS/JS use web.go's precomputed default-compression representation instead.
 
 import (
 	"compress/gzip"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -61,11 +65,15 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // gzipResponseWriter defers the Content-Encoding decision to the first
-// Write (a handler that only answers 304/HEAD never claims gzip).
+// Write (a handler that only answers 304/HEAD never claims gzip). A handler
+// that stages Content-Type: application/gzip is already serving saved gzip
+// artifact bytes: transit compression would double-compress them, so the
+// staged bytes relay untouched (no Content-Encoding claim, no Vary).
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	gz          *gzip.Writer
 	wroteHeader bool
+	plain       bool
 }
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
@@ -73,7 +81,15 @@ func (g *gzipResponseWriter) WriteHeader(code int) {
 		return
 	}
 	g.wroteHeader = true
-	if code != http.StatusNotModified {
+	if g.Header().Get("Content-Type") == "application/gzip" {
+		g.plain = true
+		// The pooled writer is still Reset on this response (Gzip reset it
+		// before dispatch), so the deferred Close would append an empty
+		// gzip member after the artifact bytes. Detach it: the close then
+		// emits onto io.Discard, and the next acquire resets the writer
+		// onto its own response, so pool reuse is unaffected.
+		g.gz.Reset(io.Discard)
+	} else if code != http.StatusNotModified {
 		h := g.Header()
 		h.Set("Content-Encoding", "gzip")
 		h.Set("Vary", "Accept-Encoding")
@@ -86,13 +102,16 @@ func (g *gzipResponseWriter) Write(b []byte) (int, error) {
 	if !g.wroteHeader {
 		g.WriteHeader(http.StatusOK)
 	}
+	if g.plain {
+		return g.ResponseWriter.Write(b)
+	}
 	return g.gz.Write(b)
 }
 
 // Flush forwards a mid-response flush (deflate-flush, not a commit) so a
 // future streaming handler on a wrapped route still works.
 func (g *gzipResponseWriter) Flush() {
-	if g.gz != nil {
+	if !g.plain {
 		_ = g.gz.Flush()
 	}
 	if f, ok := g.ResponseWriter.(http.Flusher); ok {

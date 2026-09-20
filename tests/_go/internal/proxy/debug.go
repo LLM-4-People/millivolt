@@ -15,6 +15,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
+	"github.com/LLM-4-People/millivolt/internal/web"
 )
 
 func TestHandleDebugRequiresEnabledField(t *testing.T) {
@@ -630,8 +631,10 @@ func TestSanitizeDebugBodyPolicyRows(t *testing.T) {
 
 // TestHandleDebugCaptureDownloadServesGzipArtifact pins the download=1 mode:
 // the same handler that serves the drawer's render bytes switches to a saved
-// gzip artifact, while the render mode stays byte-identical, the 404 rows
-// hold in both modes, and a malformed flag is rejected instead of guessed.
+// gzip artifact, both modes answer Cache-Control: no-store (the comment on
+// the handler owes them that), the render mode stays byte-identical, the 404
+// rows hold in both modes, and a malformed or repeated flag is rejected
+// instead of guessed.
 func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-download.db"))
 	p := New(config.Default(), metrics.Noop{})
@@ -651,6 +654,9 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	if ct := w.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
 		t.Fatalf("render Content-Type = %q", ct)
 	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("render Cache-Control = %q, want no-store", cc)
+	}
 	if dispo := w.Header().Get("Content-Disposition"); dispo != "" {
 		t.Fatalf("render mode sets Content-Disposition %q", dispo)
 	}
@@ -662,6 +668,9 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
 		t.Fatalf("download Content-Type = %q, want application/gzip", ct)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("download Cache-Control = %q, want no-store", cc)
 	}
 	if dispo, want := w.Header().Get("Content-Disposition"), `attachment; filename="millivolt-debug-20260920-123456.json.gz"`; dispo != want {
 		t.Fatalf("download Content-Disposition = %q, want %q", dispo, want)
@@ -704,6 +713,90 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl&download=yes", nil))
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("malformed download flag: status = %d, want 400", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-dl&download=1&download=0", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("repeated download flag: status = %d, want 400 (deny by default, never first-wins)", w.Code)
+	}
+}
+
+// TestDebugCaptureDownloadThroughTransitGzipSkipsDoubleCompression pins the
+// transit/artifact seam: the capture route is served behind web.Gzip, and
+// the download mode stages Content-Type application/gzip for bytes that are
+// ALREADY a saved gzip artifact - the transit wrapper must decline to wrap
+// them (no Content-Encoding), and the wrapped body must be byte-equal the
+// unwrapped artifact bytes: a pooled writer left attached to the socket
+// appends a trailing empty gzip member that the multistream gzip.Reader
+// silently absorbs, so exact byte equality is the pin that sees it. The
+// render mode keeps its ordinary transit compression.
+func TestDebugCaptureDownloadThroughTransitGzipSkipsDoubleCompression(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-transit.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+
+	const payload = `{"schema":"millivolt.debug/v1","id":"cap-tr","captured_at":"2026-09-20T12:34:56.789012345Z"}`
+	if err := store.SaveDebugCapture(t.Context(), "cap-tr", "sess",
+		time.Now().UnixMilli(), time.Now().Add(time.Hour).UnixMilli(), []byte(payload)); err != nil {
+		t.Fatal(err)
+	}
+	h := web.Gzip(http.HandlerFunc(p.HandleDebugCapture))
+
+	// The pure artifact bytes: the same handler invoked without the wrapper.
+	// The download compresses the stored bytes with the one artifact codec
+	// (no timestamped header), so two invocations are byte-identical.
+	bare := httptest.NewRecorder()
+	p.HandleDebugCapture(bare, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-tr&download=1", nil))
+	if bare.Code != 200 {
+		t.Fatalf("unwrapped download status = %d body=%q", bare.Code, bare.Body.String())
+	}
+	artifact := bare.Body.Bytes()
+
+	// Download mode through the wrapper: no Content-Encoding claim, the body
+	// byte-equal the pure artifact, and one gunzip reaches the capture JSON
+	// (a transit layer would not exist, a trailing member would not show).
+	req := httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-tr&download=1", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("download status = %d body=%q", w.Code, w.Body.String())
+	}
+	if enc := w.Header().Get("Content-Encoding"); enc != "" {
+		t.Fatalf("download Content-Encoding = %q, want none (the artifact must not be double-compressed)", enc)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/gzip" {
+		t.Fatalf("download Content-Type = %q, want application/gzip", ct)
+	}
+	if !bytes.Equal(w.Body.Bytes(), artifact) {
+		t.Fatalf("wrapped download body = %d bytes, want the exact %d unwrapped artifact bytes (a trailing gzip member means the declined writer still flushes onto the response)",
+			w.Body.Len(), len(artifact))
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(w.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("download body is not the artifact gzip: %v (%q)", err, w.Body.String())
+	}
+	raw, err := io.ReadAll(zr)
+	if err != nil || string(raw) != payload {
+		t.Fatalf("gunzipped download = %q err=%v, want the capture JSON (exactly one gzip layer)", raw, err)
+	}
+
+	// Render mode on the same wrapped route keeps its ordinary transit gzip.
+	req = httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id=cap-tr", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != 200 || w.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("render status=%d enc=%q, want the ordinary transit gzip", w.Code, w.Header().Get("Content-Encoding"))
+	}
+	zr, err = gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatalf("render body is not transit gzip: %v", err)
+	}
+	raw, err = io.ReadAll(zr)
+	if err != nil || string(raw) != payload {
+		t.Fatalf("gunzipped render = %q err=%v, want the capture JSON", raw, err)
 	}
 }
 
