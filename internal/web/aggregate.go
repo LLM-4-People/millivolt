@@ -42,8 +42,6 @@ const (
 	// xpNodeCap mirrors the explorer gallery's per-dimension node cap (the
 	// single owner now - the client no longer applies its own cap).
 	xpNodeCap = 24
-	// sparkBuckets is the per-entity trend sparkline bucket count.
-	sparkBuckets = 24
 	// pctMinSamples suppresses percentile stats below this many samples
 	// (tail-latency numbers from a handful of requests are noise).
 	pctMinSamples = 4
@@ -1075,7 +1073,6 @@ type jsonEnt struct {
 	In                int64             `json:"in"`
 	Out               int64             `json:"out"`
 	Cache             int64             `json:"cache"`
-	Reasoning         int64             `json:"reasoning"`
 	ErrFinal          int64             `json:"err_final"`
 	RateLimitRequests int64             `json:"rate_limit_requests"`
 	Tools             int64             `json:"tools"`
@@ -1090,8 +1087,6 @@ type jsonEnt struct {
 	ErrEvents   int64    `json:"err_events"`
 	Code        string   `json:"code"`
 	LastMs      int64    `json:"last_ms"`
-	Spark       []int    `json:"spark"`
-	SparkErr    []int    `json:"spark_err"`
 }
 
 type explorerPayload struct {
@@ -1119,7 +1114,6 @@ type entAcc struct {
 	in                int64
 	out               int64
 	cacheR            int64
-	reason            int64
 	tools             int64
 	errFin            int
 	rateLimitRequests int
@@ -1128,12 +1122,9 @@ type entAcc struct {
 	tpsS              []float64
 	ttftN             int
 	tpsN              int
-	startCap          int
 	// cost-REPORTING in+out tokens: the blended-$ denominator (unpriced
 	// records add tokens but not cost, so they must not dilute).
 	costInOut float64
-	starts    []int64
-	startEr   []bool
 	// error dim only
 	code     string
 	lastMs   int64
@@ -1168,7 +1159,6 @@ type explorerFold struct {
 	railCount     [dimCount]int
 	groups        map[uint32]*entAcc
 	maxGroupID    uint32
-	reserveStarts bool
 	order         projectionMetrics
 	memberSpans   []explorerMemberSpan
 	members       []uint32
@@ -1205,9 +1195,6 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	e.dims.prepare(p, mcz)
 	e.allFS = bindScope(e.allFS, p, mcz)
 	e.grpFS = bindScope(e.grpFS, p, mcz)
-	// Full galleries reserve exact projected start counts per group;
-	// filtered views stay lazy instead of allocating for unseen history.
-	e.reserveStarts = p != nil && e.statusCode == "" && len(e.grpFS) == 0
 	if p != nil {
 		e.order = p.metrics
 		// The unfiltered rail is exactly the shared dictionary's occupied
@@ -1287,7 +1274,7 @@ func (e *explorerFold) fold(c *contrib) error {
 			e.markRail(dim, id)
 		}
 		if inGroup && dim == e.dimIndex {
-			if _, err := e.foldGroup(id, c, true); err != nil {
+			if _, err := e.foldGroup(id, c); err != nil {
 				return err
 			}
 		}
@@ -1302,7 +1289,7 @@ func (e *explorerFold) fold(c *contrib) error {
 				e.markRail(dimTool, id)
 			}
 			if inGroup && e.dimIndex == dimTool {
-				if _, err := e.foldGroup(id, c, true); err != nil {
+				if _, err := e.foldGroup(id, c); err != nil {
 					return err
 				}
 			}
@@ -1315,7 +1302,7 @@ func (e *explorerFold) fold(c *contrib) error {
 				e.markRail(dimError, id)
 			}
 			if inGroup && e.dimIndex == dimError {
-				g, err := e.foldGroup(id, c, false)
+				g, err := e.foldGroup(id, c)
 				if err != nil {
 					return err
 				}
@@ -1331,26 +1318,19 @@ func (e *explorerFold) fold(c *contrib) error {
 	return nil
 }
 
-func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*entAcc, error) {
+func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	g := e.groups[dimKey]
 	if g == nil {
 		g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
 		if dimKey > e.maxGroupID {
 			e.maxGroupID = dimKey
 		}
-		if e.reserveStarts {
-			g.startCap = e.dims.count(e.dimIndex, dimKey)
-		}
-		if g.startCap > 0 {
-			g.starts = make([]int64, 0, g.startCap)
-			g.startEr = make([]bool, 0, g.startCap)
-		}
 		e.groups[dimKey] = g
 	}
 	// Health counts are affected requests, while tool/error occurrences still
 	// retain their existing event, sample, cost and token multiplicity. Error
-	// groups already need the affected-ID set for their headline and sparks;
-	// other groups only need the last ID because one row's visits are contiguous.
+	// groups need the affected-ID set for their headline; other groups only
+	// need the last ID because one row's visits are contiguous.
 	var firstRequest bool
 	if e.dimIndex == dimError {
 		if g.affected == nil {
@@ -1360,7 +1340,6 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*ent
 		firstRequest = !duplicate
 		if firstRequest {
 			g.affected[c.id] = struct{}{}
-			addStart = true
 		}
 	} else {
 		firstRequest = g.n == 0 || g.lastRequest != c.id
@@ -1382,7 +1361,6 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*ent
 		metrics.Term{Dst: &g.in, Value: c.in},
 		metrics.Term{Dst: &g.out, Value: c.out},
 		metrics.Term{Dst: &g.cacheR, Value: c.cacheR},
-		metrics.Term{Dst: &g.reason, Value: c.reason},
 		metrics.Term{Dst: &g.tools, Value: c.tools},
 	); err != nil {
 		return nil, err
@@ -1417,16 +1395,12 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib, addStart bool) (*ent
 			g.tpsS = append(g.tpsS, c.tps)
 		}
 	}
-	if addStart {
-		g.starts = append(g.starts, c.start)
-		g.startEr = append(g.startEr, c.isErr)
-	}
 	return g, nil
 }
 
 func (e *explorerFold) payload() explorerPayload {
 	conversations, conversationGroups := e.lineage.resolve()
-	// Rank before deriving percentiles and sparklines: discarded groups never
+	// Rank before deriving percentiles: discarded groups never allocate
 	// allocate response arrays or perform sample selection. Names break ties
 	// deterministically, independently of dictionary insertion or map order.
 	count := func(g *entAcc) int {
@@ -1453,7 +1427,7 @@ func (e *explorerFold) payload() explorerPayload {
 	}
 	// Resolve compact selected-group membership once, then both metrics read
 	// the same row spans. Emitting every occurrence preserves duplicate tools
-	// and error events while error-card N/sparks remain affected-request based.
+	// and error events while error-card N remains affected-request based.
 	selected := make([]uint8, int(e.maxGroupID)+1)
 	ttftCounts, tpsCounts := make([]int, len(top)), make([]int, len(top))
 	var extraTTFT []int64
@@ -1493,7 +1467,7 @@ func (e *explorerFold) payload() explorerPayload {
 	for i, g := range top {
 		ent := jsonEnt{
 			Name: g.name, N: int64(count(g)), Cost: g.cost, In: g.in, Out: g.out,
-			Cache: g.cacheR, Reasoning: g.reason, ErrFinal: int64(g.errFin),
+			Cache: g.cacheR, ErrFinal: int64(g.errFin),
 			RateLimitRequests: int64(g.rateLimitRequests),
 			Tools:             g.tools, Code: g.code, LastMs: g.lastMs,
 		}
@@ -1506,7 +1480,6 @@ func (e *explorerFold) payload() explorerPayload {
 		}
 		ent.TTFTP50, ent.TTFTP95, ent.TPSP50, ent.TPSP95 =
 			wait[i][0], wait[i][1], speed[i][0], speed[i][1]
-		ent.Spark, ent.SparkErr = spark(g.starts, g.startEr)
 		ents = append(ents, ent)
 	}
 	rail := make(map[string]int, dimCount)
@@ -1563,40 +1536,6 @@ func dimValue(dim string, c *contrib) (string, bool) {
 		return metrics.TimeBucket(time.UnixMilli(c.start)), true
 	}
 	return "", false
-}
-
-// spark buckets a group's request counts into 24 equal spans over its OWN
-// first→last window (Go mirror of the removed client bucketize(g.recs, 24)).
-func spark(starts []int64, startEr []bool) (vol, errs []int) {
-	vol = make([]int, sparkBuckets)
-	errs = make([]int, sparkBuckets)
-	if len(starts) == 0 {
-		return vol, errs
-	}
-	t0, t1 := starts[0], starts[0]
-	for _, t := range starts {
-		if t < t0 {
-			t0 = t
-		}
-		if t > t1 {
-			t1 = t
-		}
-	}
-	span := float64(t1 - t0)
-	if span < 1 {
-		span = 1
-	}
-	for i, t := range starts {
-		idx := int(math.Floor(float64(t-t0) / span * sparkBuckets))
-		if idx > sparkBuckets-1 {
-			idx = sparkBuckets - 1
-		}
-		vol[idx]++
-		if startEr[i] {
-			errs[idx]++
-		}
-	}
-	return vol, errs
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -543,7 +543,7 @@
     scroll-snap-type: y mandatory; }
   .xp-node { scroll-snap-align: start; }
   .xp-node {
-    display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 7px; align-content: start;
+    display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 7px; align-content: start;
     background: var(--panel2); border: 1px solid var(--border);
     border-radius: 11px; padding: 10px 12px; cursor: pointer; text-align: left; color: var(--text);
     font: inherit; min-width: 0; position: relative; overflow: hidden;
@@ -551,7 +551,7 @@
        is even a few px short of the natural content height makes the grid row
        shorter than the content and (with overflow:hidden) clips the footer.
        Letting content size the card means it can never clip, at any zoom.
-       Inner bands are reserved grid rows so KPIs/sparkline stay put across a
+       Inner bands are reserved grid rows so KPIs stay put across a
        stretched gallery row (flex-wrap used to let "cost $0" collapse a line). */
     box-sizing: border-box;
     transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease, background .16s ease;
@@ -578,9 +578,7 @@
   .xp-node-kpis > span:nth-child(odd):last-child { grid-column: 1 / -1; }
   .xp-node-kpis b { color: var(--text); font-weight: 600; }
   .xp-p95 { color: var(--muted); font-size: 9px; }
-  .xp-node-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; min-height: 22px; }
-  /* Health counts stay readable; a long tally may shrink the decorative spark. */
-  .xp-node-foot .spark { min-width: 0; flex-shrink: 1; }
+  .xp-node-foot { display: flex; align-items: flex-end; justify-content: flex-end; gap: 10px; }
   .xp-node-signals { font-family: var(--mono); font-size: 10px; white-space: nowrap; flex-shrink: 0; text-align: right; color: var(--muted); }
   .xp-node-err { color: var(--err); }
   .xp-node-rate { color: var(--rl); }

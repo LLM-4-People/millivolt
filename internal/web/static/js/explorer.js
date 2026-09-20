@@ -371,9 +371,8 @@ function watchGallery() {
 
 // xpNodeCard renders one gallery node-card from the server's entity aggregate
 // (jsonEnt): share of all requests (error dim: of all failure events) since
-// inception + the entity's own trend sparkline + the per-dimension KPI set
-// (`nodeKpis`). No client-side math beyond formatting - percentiles arrive
-// precomputed.
+// inception + the per-dimension KPI set (`nodeKpis`). No client-side math
+// beyond formatting - percentiles arrive precomputed.
 function kpiCell(label, inner, title) {
   const t = title ? ` title="${escapeHtml(title)}"` : '';
   return `<span${t}>${escapeHtml(label)} ${inner}</span>`;
@@ -391,7 +390,6 @@ function kpiTok(e) { return kpiNum('tok', `${fmt(e.in)}/${fmt(e.out)}`); }
 function kpiTtft(e) { return kpiTail('ttft', e.ttft_p50, e.ttft_p95, fmtDur, 'p50 / p95 time-to-first-token (the tail is what users feel)'); }
 function kpiTps(e) { return kpiTail('tps', e.tps_p50, e.tps_p95, v => Number(v).toFixed(0), 'p50 / p95 throughput (tok/s)'); }
 function kpiCache(e) { return kpiNum('cache', e.in ? pct2(e.cache, e.in) : '-', 'prompt-cache hit rate'); }
-function kpiReason(e) { return kpiNum('reason', fmt(e.reasoning || 0), 'reasoning tokens (thinking load)'); }
 function kpiErrRate(e) { return kpiNum('err rate', pct2(e.err_final || 0, e.n)); }
 // Blended $/Mtok over this entity's cost-reporting tokens (server-computed,
 // same rule as the KPI band) - a per-entity spend rate, never diluted by the
@@ -435,10 +433,10 @@ function nodeKpis(dim, e) {
       // volume is already the headline.
       return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiTtft(e);
     case 'model':
-      // Token-family slots together: in/out, cached-prompt share, reasoning
-      // (thinking is model-inherent). Cache renders like client/provider -
-      // an unreported hit rate shows 0.0%, not a fabricated gap.
-      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiCache(e) + kpiReason(e) + kpiTtft(e) + kpiTps(e);
+      // Token-family slots together: in/out and the cached-prompt share.
+      // Cache renders like client/provider - an unreported hit rate shows
+      // 0.0%, not a fabricated gap.
+      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiCache(e) + kpiTtft(e) + kpiTps(e);
     default:
       // client / provider: routing peers - spend, tokens, prompt-cache, and
       // the latency/throughput the user feels.
@@ -446,7 +444,6 @@ function nodeKpis(dim, e) {
   }
 }
 
-const SPARK_W = 96, SPARK_H = 22;
 // The server resolves observed ancestry across the complete scoped history.
 // These are exact leaf pivots, never implicit descendant/family filters.
 function conversationParent(info) {
@@ -500,7 +497,7 @@ function xpNodeCard(st, e, payload) {
     <span class="xp-node-hd">${entityBadge(dim, key)}${roleBadge}<span class="xp-node-n">${fmt(headN)}<small>${headUnit}</small></span></span>
     ${shareFrac != null ? `<span class="xp-node-share" title="${shareLabel}">${shareBar(shareFrac, entityType(dim).color)}</span>` : ''}
     <span class="xp-node-kpis">${kpis}</span>
-    <span class="xp-node-foot">${sparklineSVG(e.spark || [], e.spark_err || [], SPARK_W, SPARK_H, entityType(dim).color)}${signals ? `<span class="xp-node-signals">${signals}</span>` : ''}</span>
+    ${signals ? `<span class="xp-node-foot"><span class="xp-node-signals">${signals}</span></span>` : ''}
   </button>`;
   // Parent navigation is a sibling link, never nested inside the card button.
   return dim === 'conversation' ? `<div class="xp-conversation-node">${card}${conversationParent(info)}</div>` : card;

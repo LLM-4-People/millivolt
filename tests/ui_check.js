@@ -355,9 +355,9 @@ async function main() {
     const order = ['provider','model','client','conversation','tool','time','status','error','key'];
     check('explorer dimension order is the single desktop/mobile order',
       [...d.querySelectorAll('#xp-rail [data-xp-dim]')].map(n=>n.dataset.xpDim).join()===order.join());
-    const entity = {name:'neutral.example',n:3,cost:0,in:0,out:0,cache:0,reasoning:0,err_final:1,
+    const entity = {name:'neutral.example',n:3,cost:0,in:0,out:0,cache:0,err_final:1,
       rate_limit_requests:2,tools:0,cost_per_mtok:null,ttft_p50:null,ttft_p95:null,tps_p50:null,tps_p95:null,
-      err_events:4,code:'500',last_ms:0,spark:[1,2],spark_err:[0,1]};
+      err_events:4,code:'500',last_ms:0};
     const renderCard = (dim, overrides={}) => {
       const host=d.createElement('div');
       host.innerHTML=w.xpNodeCard({activeDim:dim,filters:[]},{...entity,...overrides},{total:3,error_total:4});
@@ -405,26 +405,6 @@ async function main() {
         measured.querySelector('.xp-node-share').title === 'of requests' &&
         !zero.querySelector('.xp-node-share') && !zero.textContent.includes('0%') &&
         !zeroErr.querySelector('.xp-node-share') && !zeroErr.textContent.includes('0%');
-    })());
-    // sparklineSVG: sparse series (null = unmeasured bucket, e.g. suppressed
-    // percentile triples) keep honest x positions; fewer than two finite
-    // samples render an empty spark, never a fabricated or NaN path.
-    check('sparkline skips absent buckets at their true x positions without NaN', (() => {
-      const sparse = w.eval('sparklineSVG([1, null, 3, null], null, 80, 14, "#fff")');
-      // dx = 80/3; finite samples sit at x=0 and x=53.3
-      return !sparse.includes('NaN') && /M0\.0 /.test(sparse) && /L53\.3 /.test(sparse) && !/L26\.7 /.test(sparse);
-    })());
-    check('sparkline renders empty below two finite samples', (() => {
-      const one = w.eval('sparklineSVG([1], null, 80, 14, "#fff")');
-      const none = w.eval('sparklineSVG([null, null, null], null, 80, 14, "#fff")');
-      const empty = w.eval('sparklineSVG([], null, 80, 14, "#fff")');
-      const flat = w.eval('sparklineSVG([2, 2, 2], null, 80, 14, "#fff")');
-      return ![one, none, empty].some(s => s.includes('<path')) && flat.includes('<path') && !flat.includes('NaN');
-    })());
-    check('sparkline error overlay skips absent error buckets', (() => {
-      const s = w.eval('sparklineSVG([1, 2, 3], [0, null, 1], 80, 14, "#fff")');
-      const allGone = w.eval('sparklineSVG([1, 2, 3], [null, null], 80, 14, "#fff")');
-      return s.split('stroke="var(--err)"').length === 2 && !allGone.includes('var(--err)');
     })());
     const savedAgg=w.eval('explorerAgg');
     const trigger=d.getElementById('xp-dim-trigger'), originalStyle=w.getComputedStyle;
