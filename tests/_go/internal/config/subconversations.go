@@ -382,19 +382,21 @@ func TestSubConversationsSchemaPins(t *testing.T) {
 		t.Fatal("sub_conversations must hot-reload")
 	}
 	for _, phrase := range []string{
-		"exactly",          // exact client names, no wildcard, no case folding
-		"1..4",             // params per entry
-		"top level",        // extraction and strip see only top-level keys
-		"first present",    // the first present field decides, no later one is consulted
-		"string value",     // only a JSON string value supplies the tracked value
-		"dropped",          // drop-not-reject bound
-		"k:",               // the tracked identity namespace
-		"X-Proxy-Session",  // identity precedence
-		"prompt_cache_key", // translated Anthropic injection
-		"strip",            // strip semantics
-		"64 bytes",         // param name byte bound
-		"16 entries",       // entry cap
-		"4 params",         // param cap
+		"exactly",                  // exact client names, no wildcard, no case folding
+		"1..4",                     // params per entry
+		"top level",                // extraction and strip see only top-level keys
+		"first present",            // the first present field decides, no later one is consulted
+		"string value",             // only a JSON string value supplies the tracked value
+		"dropped",                  // drop-not-reject bound
+		"The drop is conservative", // over-long raw spelling drops even when the trimmed form would pass
+		"scan window",              // the bounded scan window behind the conservative drop
+		"k:",                       // the tracked identity namespace
+		"X-Proxy-Session",          // identity precedence
+		"prompt_cache_key",         // translated Anthropic injection
+		"strip",                    // strip semantics
+		"64 bytes",                 // param name byte bound
+		"16 entries",               // entry cap
+		"4 params",                 // param cap
 	} {
 		if !strings.Contains(f.Help, phrase) {
 			t.Errorf("schema help omits %q: %s", phrase, f.Help)

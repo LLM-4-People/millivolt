@@ -279,7 +279,7 @@ func TestLogExportDebugOnlyShapeSharesCompressionGate(t *testing.T) {
 
 func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	mux, b, s := logRoutesForTest(t, true)
-	for _, q := range []string{"unknown=x", "provider=a&provider=b", "has_error=true", "debug=2", "status_code=1000", "before_ms=-1", "after_ms=2&before_ms=1", "bad=%zz"} {
+	for _, q := range []string{"unknown=x", "has_error=true", "debug=2", "status_code=1000", "before_ms=-1", "after_ms=2&before_ms=1", "bad=%zz"} {
 		req := httptest.NewRequest(http.MethodGet, "/metrics/export", nil)
 		req.URL.RawQuery = q
 		w := httptest.NewRecorder()
@@ -287,6 +287,21 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 		if w.Code != 400 {
 			t.Fatalf("query %s accepted: %d", q, w.Code)
 		}
+	}
+	// The duplicate wording, pinned through the route's JSON error
+	// transport (a freeze row: the wording is already correct). The export
+	// owner keeps its own inline all-keys walk, so this row is the one
+	// that sees a drift between the export's "duplicate %s" and the
+	// shared owner's wording the adminjson contract row pins.
+	dupReq := httptest.NewRequest(http.MethodGet, "/metrics/export", nil)
+	dupReq.URL.RawQuery = "provider=a&provider=b"
+	dupW := httptest.NewRecorder()
+	mux.ServeHTTP(dupW, dupReq)
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(dupW.Body.Bytes(), &body); err != nil || dupW.Code != 400 || body.Error != "duplicate provider" {
+		t.Fatalf("repeated provider: status=%d body=%q, want 400 duplicate provider", dupW.Code, dupW.Body.String())
 	}
 	b.Record(&metrics.Record{ID: "ring", StatusCode: 200})
 	if err := s.Close(); err != nil {

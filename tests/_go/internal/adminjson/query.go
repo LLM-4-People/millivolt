@@ -47,7 +47,9 @@ func TestStrictQueryContract(t *testing.T) {
 }
 
 // DuplicateQueryKey is the shared repeated-key rule; its wording is the
-// export owner's, so a drift in either direction reddens here.
+// export owner's, and a drift in either direction reddens: this mirror holds
+// the shared owner's side, while the export's own duplicate row (message-
+// pinned through its route transport) holds the export's side.
 func TestDuplicateQueryKeyContract(t *testing.T) {
 	clean := url.Values{
 		"inspect": {"1"},
@@ -71,5 +73,24 @@ func TestDuplicateQueryKeyContract(t *testing.T) {
 	}
 	if err := DuplicateQueryKey(nil); err != nil {
 		t.Fatalf("no keys to check: %v", err)
+	}
+}
+
+// UnknownQueryKey is the mutating routes' closed-set rule: an unlisted key
+// names itself, so a case variant like INSPECT can never silently select the
+// default action the real key would have narrowed.
+func TestUnknownQueryKeyContract(t *testing.T) {
+	if err := UnknownQueryKey(url.Values{"inspect": {"1"}}, "inspect", "config"); err != nil {
+		t.Fatalf("consumed key flagged: %v", err)
+	}
+	err := UnknownQueryKey(url.Values{"INSPECT": {"1"}, "config": {"0"}}, "inspect", "config")
+	if err == nil || err.Error() != "unknown key INSPECT" {
+		t.Fatalf("err = %v, want the case variant named as an unknown key", err)
+	}
+	if err := UnknownQueryKey(url.Values{"f": {"a", "b"}}, "config"); err == nil {
+		t.Fatal("a key outside the consumed set must be unknown, repeated or not")
+	}
+	if err := UnknownQueryKey(nil, "config"); err != nil {
+		t.Fatalf("empty query flagged: %v", err)
 	}
 }

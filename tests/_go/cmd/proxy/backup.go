@@ -288,13 +288,23 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 // adoption: both routes parse the raw query string, so a malformed pair can
 // never be silently dropped into a broader action (inspect=%zz must not turn
 // a would-be 400 into a real restore; config=1&database=%zz must not
-// silently skip the database member) and every repeated consumed flag is
-// denied, never first-wins. The fixture archive carries both members so each
-// dropped pair would otherwise change what the restore really does.
+// silently skip the database member), every repeated consumed flag is
+// denied, never first-wins, and every key outside the consumed set is
+// rejected outright - the ignore class belongs to idempotent fetches, while
+// on a mutating route an unknown or case-variant key silently selects the
+// default, broader action (?INSPECT=1 would run the real restore where
+// ?inspect=1 previews). The fixture archive carries both members so each
+// dropped or ignored pair would otherwise change what the restore really
+// does. Each row also pins the 400's wording through the routes' JSON error
+// transport, and the boundary rows pin the gate order: parse error,
+// duplicates, unknown keys, then the value grammar.
 func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 	liveReloadFixture(t)
+	// A non-default spelling so the closing invariant can see a silent
+	// restore: the fixture archive carries the default config, so a crafted
+	// query that slips past the gates rewrites these bytes.
 	start := liveCfg.Clone()
-	start.MaxRetries = 5
+	start.MaxRetries = 9
 	if err := config.WriteFile(liveConfigPath, start); err != nil {
 		t.Fatal(err)
 	}
@@ -326,15 +336,24 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 	registerBackupRoutes(mux)
 
 	for _, tc := range []struct {
-		name, target, method string
+		name, target, method, want string
 	}{
-		{"restore inspect=%zz must not become a real restore", "/admin/restore?inspect=%zz", http.MethodPost},
-		{"restore config=1&database=%zz must not skip the database member", "/admin/restore?config=1&database=%zz", http.MethodPost},
-		{"repeated inspect flag is denied, never first-wins", "/admin/restore?inspect=1&inspect=0", http.MethodPost},
-		{"repeated config_mode is denied, never first-wins", "/admin/restore?config_mode=merge&config_mode=replace", http.MethodPost},
-		{"repeated database_mode is denied, never first-wins", "/admin/restore?database_mode=merge&database_mode=replace", http.MethodPost},
-		{"backup config=1&database=%zz must not silently become config-only", "/admin/backup?config=1&database=%zz", http.MethodGet},
-		{"repeated backup config flag is denied, never first-wins", "/admin/backup?config=1&config=0", http.MethodGet},
+		{"restore inspect=%zz must not become a real restore", "/admin/restore?inspect=%zz", http.MethodPost, "invalid query"},
+		{"restore config=1&database=%zz must not skip the database member", "/admin/restore?config=1&database=%zz", http.MethodPost, "invalid query"},
+		{"repeated inspect flag is denied, never first-wins", "/admin/restore?inspect=1&inspect=0", http.MethodPost, "duplicate inspect"},
+		{"repeated config_mode is denied, never first-wins", "/admin/restore?config_mode=merge&config_mode=replace", http.MethodPost, "duplicate config_mode"},
+		{"repeated database_mode is denied, never first-wins", "/admin/restore?database_mode=merge&database_mode=replace", http.MethodPost, "duplicate database_mode"},
+		{"backup config=1&database=%zz must not silently become config-only", "/admin/backup?config=1&database=%zz", http.MethodGet, "invalid query"},
+		{"repeated backup config flag is denied, never first-wins", "/admin/backup?config=1&config=0", http.MethodGet, "duplicate config"},
+		{"restore INSPECT=1 must not run the real restore as the default action", "/admin/restore?INSPECT=1", http.MethodPost, "unknown key INSPECT"},
+		{"restore CONFIG_MODE=merge must not silently become the replace default", "/admin/restore?CONFIG_MODE=merge", http.MethodPost, "unknown key CONFIG_MODE"},
+		{"backup CONFIG=1 must not silently broaden the archive", "/admin/backup?CONFIG=1", http.MethodGet, "unknown key CONFIG"},
+		{"restore bogus=1 is an unknown key, not an ignored one", "/admin/restore?bogus=1", http.MethodPost, "unknown key bogus"},
+		{"backup bogus=1 is an unknown key, not an ignored one", "/admin/backup?bogus=1", http.MethodGet, "unknown key bogus"},
+		{"a parse error outranks the unknown key", "/admin/restore?bogus=1&bad=%zz", http.MethodPost, "invalid query"},
+		{"a duplicate outranks the unknown key", "/admin/restore?config=1&config=0&bogus=1", http.MethodPost, "duplicate config"},
+		{"an unknown key outranks the value grammar", "/admin/restore?inspect=x&bogus=1", http.MethodPost, "unknown key bogus"},
+		{"the value grammar answers last", "/admin/restore?inspect=x", http.MethodPost, "inspect: want 1 or 0"},
 	} {
 		w := httptest.NewRecorder()
 		var body io.Reader
@@ -342,8 +361,15 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 			body = bytes.NewReader(raw)
 		}
 		mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.target, body))
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d body %s, want 400", tc.name, w.Code, w.Body.String())
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &errBody); err != nil {
+			t.Errorf("%s: body is not the flat error shape: %v (%q)", tc.name, err, w.Body.String())
+			continue
+		}
+		if w.Code != http.StatusBadRequest || errBody.Error != tc.want {
+			t.Errorf("%s: status=%d error=%q, want 400 %q", tc.name, w.Code, errBody.Error, tc.want)
 		}
 	}
 	// No crafted query may reach a destructive side effect: the config file

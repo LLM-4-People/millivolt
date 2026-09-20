@@ -316,7 +316,10 @@ func TestFailAndResumeTwiceKeepsRestarterUsable(t *testing.T) {
 // key: the strict raw-string parse means a malformed pair the lenient read
 // would drop (answering the status representation instead of the requested
 // stream) and a repeated watch flag are both 400s, never first-wins, while
-// the plain GET keeps answering the status document.
+// the plain GET keeps answering the status document. Both rows also
+// message-pin their 400 through the flat error transport (freeze rows: the
+// wording is already correct; the pins enforce the shared owner's duplicate
+// spelling end to end).
 func TestRestartWatchFlagStrictQuery(t *testing.T) {
 	rs := newRestarter(&restartDeps{
 		cloneServer:  func() *http.Server { return nil },
@@ -324,16 +327,23 @@ func TestRestartWatchFlagStrictQuery(t *testing.T) {
 		flushStore:   func() error { return nil },
 		drainTimeout: func() time.Duration { return time.Second },
 	})
-	for _, tc := range []struct{ name, query string }{
-		{"malformed watch pair", "watch=%zz"},
-		{"repeated watch flag", "watch=1&watch=1"},
+	for _, tc := range []struct{ name, query, want string }{
+		{"malformed watch pair", "watch=%zz", "invalid query"},
+		{"repeated watch flag", "watch=1&watch=1", "duplicate watch"},
 	} {
 		rec := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, "/admin/restart", nil)
 		req.URL.RawQuery = tc.query
 		rs.handleRestart(rec, req)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d body=%s, want 400", tc.name, rec.Code, rec.Body.String())
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s: body is not the flat error shape: %v (%q)", tc.name, err, rec.Body.String())
+			continue
+		}
+		if rec.Code != http.StatusBadRequest || body.Error != tc.want {
+			t.Errorf("%s: status=%d error=%q, want 400 %q", tc.name, rec.Code, body.Error, tc.want)
 		}
 	}
 	rec := httptest.NewRecorder()

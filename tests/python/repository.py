@@ -338,6 +338,30 @@ class RepositoryChecks(unittest.TestCase):
                          ["internal/web/static/css/dashboard.css: "
                           "the :root custom-property palette is missing"])
 
+    def test_gzip_corpus_assembly_reaches_root_and_deploy(self):
+        """The perimeter's corpus half, pinned: gzip_corpus must feed the
+        choke-point detector every tracked .go file outside tests, including
+        a root-level file (version.go) and a deploy/ file (the synthetic
+        pair the unit rows already use). A revert of the assembly to a
+        narrower directory-prefix filter reddens here even though every
+        detector unit row stays green - the unit rows feed synthetic pairs
+        directly and never see the assembly."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            names = [
+                "version.go", "cmd/proxy/main.go", "deploy/sidecar/main.go",
+                "tests/_go/internal/web/web.go", "binary.go", "invalid.go", "notes.txt",
+            ]
+            for name in names[:4]:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("package x\n", encoding="utf-8")
+            (root / "binary.go").write_bytes(b"\0package x\n")
+            (root / "invalid.go").write_bytes(b"\xffpackage x\n")
+            (root / "notes.txt").write_text("not go\n", encoding="utf-8")
+            self.assertEqual([name for name, _ in check.gzip_corpus(root, names)],
+                             ["version.go", "cmd/proxy/main.go", "deploy/sidecar/main.go"])
+
     def test_artifact_gzip_choke_point_detector(self):
         good = [
             ("cmd/proxy/log.go", '\tzw := proxy.NewArtifactGzipWriter(ew)\n'),

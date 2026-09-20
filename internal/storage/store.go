@@ -1882,8 +1882,11 @@ func validateQuery(q string) error {
 		return errNotSelect
 	}
 	// Deny side-effecting keywords even inside a SELECT-leading string (e.g.
-	// "SELECT … ATTACH …", "SELECT load_extension(...)"). Word-boundary match
-	// so a column literally named "attach" isn't a false positive.
+	// "SELECT … ATTACH …", "SELECT load_extension(...)"). Word-boundary match:
+	// only whole-word spellings trip, so a superstring spelling such as a
+	// column named "attachment" passes, while a column literally named
+	// "attach" is denied with the keyword - the accepted cost of denying the
+	// bare word everywhere.
 	up := strings.ToUpper(t)
 	for _, kw := range []string{"ATTACH", "DETACH", "PRAGMA", "LOAD_EXTENSION"} {
 		if containsWord(up, kw) {

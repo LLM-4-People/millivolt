@@ -578,10 +578,12 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if len(q["id"]) > 1 {
-		// The duplicate download rule's class: a repeated id is ambiguous,
-		// deny it rather than guess which occurrence the client meant.
-		adminjson.WriteError(w, http.StatusBadRequest, "duplicate id")
+	// The consumed keys' repeated-key rule reads through the shared owner
+	// (adminjson.DuplicateQueryKey) in the export owner's wording; the
+	// pinned 400 precedence keeps a repeated id ahead of the id gate and a
+	// repeated download ahead of the flag grammar.
+	if err := adminjson.DuplicateQueryKey(q, "id"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	id := strings.TrimSpace(q.Get("id"))
@@ -590,10 +592,8 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	download := q.Get("download")
-	if len(q["download"]) > 1 {
-		// The export filter owner's rule: a repeated flag is ambiguous, deny
-		// it rather than guess which occurrence the client meant.
-		adminjson.WriteError(w, http.StatusBadRequest, "duplicate download")
+	if err := adminjson.DuplicateQueryKey(q, "download"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if download != "" && download != "0" && download != "1" {

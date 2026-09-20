@@ -121,20 +121,16 @@ def publication_errors(root, inventory=None):
             + typography)
 
 
-def check(root):
-    root = Path(root).resolve()
-    inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
-    pairs = static_pairs(inventory[1])
-    # The Go choke-point detector consumes (name, text) pairs like the static
-    # detectors; this is its one corpus read of every .go file the shared
-    # discovery owner lists outside tests (the inventory applies the
-    # repository's ignore policy, so agents/ and build artifacts never
-    # enter) - the two artifact gate files carry the per-file wrap rules,
-    # the whole tree carries the direct-construction ban, and the repository
-    # root (version.go), cmd/, internal/, scripts/ and deploy/ are all in
-    # scope. Binary assets are not source text and never decode.
-    gzip_pairs = []
-    for name in inventory[1]:
+def gzip_corpus(root, names):
+    """The Go choke-point detector's one corpus read: every tracked .go file
+    the shared discovery owner lists outside tests (the inventory applies the
+    repository's ignore policy, so agents/ and build artifacts never enter).
+    The two artifact gate files carry the per-file wrap rules, the whole tree
+    carries the direct-construction ban, and the repository root (version.go),
+    cmd/, internal/, scripts/ and deploy/ are all in scope. Binary assets are
+    not source text and never decode, so they never enter the corpus."""
+    corpus = []
+    for name in names:
         if not name.endswith('.go') or name.startswith('tests/'):
             continue
         try:
@@ -142,7 +138,17 @@ def check(root):
         except UnicodeDecodeError:
             continue
         if '\0' not in text:
-            gzip_pairs.append((name, text))
+            corpus.append((name, text))
+    return corpus
+
+
+def check(root):
+    root = Path(root).resolve()
+    inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
+    pairs = static_pairs(inventory[1])
+    # The Go choke-point detector consumes (name, text) pairs like the
+    # static detectors; gzip_corpus owns the assembly.
+    gzip_pairs = gzip_corpus(root, inventory[1])
     return (markdown_errors(root, inventory[1]) + publication_errors(root, inventory)
             + test_layout_errors(inventory[1])
             + dead_css_class_errors(pairs)

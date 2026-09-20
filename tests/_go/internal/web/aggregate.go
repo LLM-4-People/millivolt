@@ -484,38 +484,52 @@ func TestChartWindowParamDomain(t *testing.T) {
 // string, so a malformed pair can never be silently dropped into a broader
 // scope (s=%zz must not become "no scope"; a limit spelled twice must not
 // first-win its valid copy through the duplicate gate) and a repeated
-// consumed key is denied, never first-wins. The legitimately repeated f=
-// list key keeps its standing grammar.
+// consumed key is denied, never first-wins. The explorer row pairs a valid
+// dim with the malformed s pair: dim=%zz alone self-heals through the
+// invalid-dim gate under either parse, so the dim+s shape is the one that
+// discriminates a lenient revert. Every row also message-pins its 400
+// through the flat error transport; those wording pins and the strict
+// adoption are freeze rows (already-correct behavior being pinned: a lenient
+// revert or a duplicate-wording drift must redden, not silently pass). The
+// legitimately repeated f= list key keeps its standing grammar.
 func TestAggregateRoutesAdoptStrictQuery(t *testing.T) {
 	api := NewAggAPI(metrics.NewBuffer(4), nil, time.Second)
-	status := func(h http.HandlerFunc, target string) int {
-		w := httptest.NewRecorder()
-		h(w, httptest.NewRequest(http.MethodGet, target, nil))
-		return w.Code
-	}
 	for _, tc := range []struct {
 		name   string
 		handle http.HandlerFunc
 		target string
+		want   string
 	}{
-		{"chart: malformed s pair must not silently broaden the scope", api.HandleAggChart, "/metrics/agg/chart?window=15&s=%zz"},
-		{"chart: repeated window is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&window=60"},
-		{"chart: repeated s is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&s=200&s=404"},
-		{"explorer: repeated dim is denied, never first-wins", api.HandleAggExplorer, "/metrics/agg/explorer?dim=provider&dim=status"},
-		{"log page: a valid and a malformed limit answers 400 at the parse", api.HandleLogPage, "/metrics/agg/log?limit=50&limit=%zz"},
-		{"log page: repeated s is denied, never first-wins", api.HandleLogPage, "/metrics/agg/log?limit=50&s=streaming&s=paused"},
-		{"bootstrap: malformed feed pin must not trust the cursor", api.HandleBootstrap, "/metrics/bootstrap?feed=%zz&since=1"},
-		{"bootstrap: repeated feed pin is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?feed=a&feed=b"},
-		{"bootstrap: repeated since is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?since=1&since=2"},
+		{"chart: malformed s pair must not silently broaden the scope", api.HandleAggChart, "/metrics/agg/chart?window=15&s=%zz", "invalid query"},
+		{"chart: repeated window is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&window=60", "duplicate window"},
+		{"chart: repeated s is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&s=200&s=404", "duplicate s"},
+		{"explorer: malformed s pair must not silently broaden the scope", api.HandleAggExplorer, "/metrics/agg/explorer?dim=provider&s=%zz", "invalid query"},
+		{"explorer: repeated dim is denied, never first-wins", api.HandleAggExplorer, "/metrics/agg/explorer?dim=provider&dim=status", "duplicate dim"},
+		{"log page: a valid and a malformed limit answers 400 at the parse", api.HandleLogPage, "/metrics/agg/log?limit=50&limit=%zz", "invalid query"},
+		{"log page: repeated s is denied, never first-wins", api.HandleLogPage, "/metrics/agg/log?limit=50&s=streaming&s=paused", "duplicate s"},
+		{"bootstrap: malformed feed pin must not trust the cursor", api.HandleBootstrap, "/metrics/bootstrap?feed=%zz&since=1", "invalid query"},
+		{"bootstrap: repeated feed pin is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?feed=a&feed=b", "duplicate feed"},
+		{"bootstrap: repeated since is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?since=1&since=2", "duplicate since"},
 	} {
-		if code := status(tc.handle, tc.target); code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d, want 400", tc.name, code)
+		w := httptest.NewRecorder()
+		tc.handle(w, httptest.NewRequest(http.MethodGet, tc.target, nil))
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s: body is not the flat error shape: %v (%q)", tc.name, err, w.Body.String())
+			continue
+		}
+		if w.Code != http.StatusBadRequest || body.Error != tc.want {
+			t.Errorf("%s: status=%d error=%q, want 400 %q", tc.name, w.Code, body.Error, tc.want)
 		}
 	}
 	// The repeated f= list grammar is untouched: two well-formed filters
 	// still scope the chart exactly as before the adoption.
-	if code := status(api.HandleAggChart, "/metrics/agg/chart?window=15&f=client:a&f=status:2xx"); code != 200 {
-		t.Errorf("two f= filters: status = %d, want the standing 200", code)
+	w := httptest.NewRecorder()
+	api.HandleAggChart(w, httptest.NewRequest(http.MethodGet, "/metrics/agg/chart?window=15&f=client:a&f=status:2xx", nil))
+	if w.Code != 200 {
+		t.Errorf("two f= filters: status = %d, want the standing 200", w.Code)
 	}
 }
 

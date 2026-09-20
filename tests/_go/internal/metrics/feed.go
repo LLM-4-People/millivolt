@@ -265,20 +265,30 @@ func TestHandleStreamNoCrossOriginSharing(t *testing.T) {
 // the SSE stream parses the raw query before any stream header is staged, so
 // a malformed feed pin (which the lenient read would drop, trusting the
 // stale cursor on a foreign feed) and a repeated feed or since key answer a
-// plain 400, never an SSE-framed response.
+// plain 400, never an SSE-framed response. Each row also message-pins its
+// 400 through the flat error transport (freeze rows: the wording is already
+// correct; the pins enforce the shared owner's duplicate spelling end to
+// end).
 func TestHandleStreamStrictQuery(t *testing.T) {
 	b := NewBuffer(4)
 	b.Record(record("a"))
-	for _, tc := range []struct{ name, query string }{
-		{"malformed feed pin", "feed=%zz&since=1"},
-		{"repeated feed pin", "feed=" + b.FeedID() + "&feed=dead"},
-		{"repeated since", "since=1&since=2"},
+	for _, tc := range []struct{ name, query, want string }{
+		{"malformed feed pin", "feed=%zz&since=1", "invalid query"},
+		{"repeated feed pin", "feed=" + b.FeedID() + "&feed=dead", "duplicate feed"},
+		{"repeated since", "since=1&since=2", "duplicate since"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil)
 		req.URL.RawQuery = tc.query
 		w := runStreamRequest(t, b, req)
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("%s: status = %d, want a plain 400", tc.name, w.Code)
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s: body is not the flat error shape: %v (%q)", tc.name, err, w.Body.String())
+			continue
+		}
+		if w.Code != http.StatusBadRequest || body.Error != tc.want {
+			t.Errorf("%s: status = %d error=%q, want a plain 400 %q", tc.name, w.Code, body.Error, tc.want)
 		}
 		if ct := w.Header().Get("Content-Type"); ct == "text/event-stream" {
 			t.Errorf("%s: the 400 carried SSE framing", tc.name)

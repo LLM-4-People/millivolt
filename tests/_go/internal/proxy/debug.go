@@ -759,13 +759,16 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 		}
 	}
 
-	// NUL-bearing id shapes deny with no aliasing onto the real capture id,
-	// frozen: the malformed-looking escape is a valid parse, so only the id
-	// gate's exact-match 404 answers it.
+	// NUL-bearing and non-UTF-8 id shapes deny with no aliasing onto the real
+	// capture id, frozen (already-correct behavior being pinned): the
+	// malformed-looking escapes are valid parses - the raw bytes survive
+	// both the strict parse and TrimSpace - so only the id gate's
+	// exact-match 404 answers them.
 	for _, tc := range []struct{ name, id string }{
 		{"trailing NUL", "cap-dl%00"},
 		{"leading NUL", "%00cap-dl"},
 		{"interior NUL", "cap%00-dl"},
+		{"invalid UTF-8", "cap-dl%ff%fe"},
 	} {
 		w := httptest.NewRecorder()
 		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+tc.id, nil))

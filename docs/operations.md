@@ -230,7 +230,11 @@ checked, while a present string that cannot be decoded or fails the identity
 rules drops the identity for the request - no later field is consulted. A
 value is kept only when it is non-empty after trimming, valid UTF-8, free of
 control bytes and at most 512 bytes, the same bound explicit session
-declarations satisfy. The drop is conservative: the value's raw spelling is
+declarations satisfy. The UTF-8 judgment runs on the value's raw bytes
+before JSON decoding: the standard decoder coerces invalid UTF-8 inside
+strings to U+FFFD, so a raw invalid-UTF-8 sequence drops the identity while
+an escaped lone surrogate, whose bytes are ASCII, is kept and decodes to
+U+FFFD. The drop is conservative: the value's raw spelling is
 scanned inside a bounded window, so a value whose raw span exceeds the window
 (escape sequences spend more raw bytes than they decode to, and trimmable
 edges count before trimming) is dropped even when its trimmed form would
@@ -639,6 +643,8 @@ the credential gates both.
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
+| `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
+| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, database request span) without applying anything. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace; success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
 | `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |

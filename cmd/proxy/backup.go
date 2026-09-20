@@ -26,6 +26,14 @@ func registerBackupRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/restore", handleRestore)
 }
 
+// The two mutating routes' consumed query-key sets: the duplicate gate and
+// the unknown-key gate read the same list, so a future key cannot widen one
+// gate without the other.
+var (
+	backupQueryKeys  = []string{"config", "database"}
+	restoreQueryKeys = []string{"inspect", "config", "database", "config_mode", "database_mode"}
+)
+
 func handleBackup(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodGet) {
 		return
@@ -35,7 +43,15 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, "config", "database"); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, backupQueryKeys...); err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// A mutating route rejects unknown keys outright: an ignored key would
+	// silently select the default, broader action (?CONFIG=1 would broaden
+	// the archive the same way). The gate order is parse error, duplicates,
+	// unknown keys, then the value grammar.
+	if err := adminjson.UnknownQueryKey(q, backupQueryKeys...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -82,7 +98,16 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, "inspect", "config", "database", "config_mode", "database_mode"); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, restoreQueryKeys...); err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// A mutating route rejects unknown keys outright: an ignored key would
+	// silently select the default, broader action (?INSPECT=1 would run the
+	// real restore where ?inspect=1 previews; ?CONFIG_MODE=merge would
+	// silently become the replace default). The gate order is parse error,
+	// duplicates, unknown keys, then the value grammar.
+	if err := adminjson.UnknownQueryKey(q, restoreQueryKeys...); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
