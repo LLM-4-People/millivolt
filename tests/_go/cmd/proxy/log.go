@@ -279,7 +279,7 @@ func TestLogExportDebugOnlyShapeSharesCompressionGate(t *testing.T) {
 
 func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	mux, b, s := logRoutesForTest(t, true)
-	for _, q := range []string{"unknown=x", "has_error=true", "debug=2", "status_code=1000", "before_ms=-1", "after_ms=2&before_ms=1", "bad=%zz"} {
+	for _, q := range []string{"has_error=true", "debug=2", "status_code=1000", "before_ms=-1", "after_ms=2&before_ms=1", "bad=%zz"} {
 		req := httptest.NewRequest(http.MethodGet, "/metrics/export", nil)
 		req.URL.RawQuery = q
 		w := httptest.NewRecorder()
@@ -302,6 +302,19 @@ func TestLogExportRejectsInvalidQueryAndReportsDatabaseFailure(t *testing.T) {
 	}
 	if err := json.Unmarshal(dupW.Body.Bytes(), &body); err != nil || dupW.Code != 400 || body.Error != "duplicate provider" {
 		t.Fatalf("repeated provider: status=%d body=%q, want 400 duplicate provider", dupW.Code, dupW.Body.String())
+	}
+	// The unknown-filter wording, pinned the same way (a freeze row: the
+	// wording is already correct). The export owner answers unknown keys in
+	// its own filter-grammar class ("unknown filter <name>", not the
+	// mutating routes' "unknown key <name>"), and this row is the one that
+	// sees a drift between the two wordings. The row's key is "unknown"
+	// itself, so the owner's answer reads "unknown filter unknown".
+	unkReq := httptest.NewRequest(http.MethodGet, "/metrics/export", nil)
+	unkReq.URL.RawQuery = "unknown=x"
+	unkW := httptest.NewRecorder()
+	mux.ServeHTTP(unkW, unkReq)
+	if err := json.Unmarshal(unkW.Body.Bytes(), &body); err != nil || unkW.Code != 400 || body.Error != "unknown filter unknown" {
+		t.Fatalf("unknown key: status=%d body=%q, want 400 unknown filter unknown", unkW.Code, unkW.Body.String())
 	}
 	b.Record(&metrics.Record{ID: "ring", StatusCode: 200})
 	if err := s.Close(); err != nil {

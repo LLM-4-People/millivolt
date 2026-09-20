@@ -779,12 +779,19 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 
 	// The 400 precedence order, frozen: a multi-violation query answers with
 	// the first class - parse error, duplicate id, id required, duplicate
-	// download, then the flag grammar.
+	// download, then the flag grammar. Two rows carry the discriminating
+	// spellings that make the order observable instead of narrated: an id
+	// pair whose values trim to empty (the id gate would answer if it ran
+	// before the duplicate check) and a download pair whose first value
+	// already fails the 0/1 grammar (the flag grammar would answer if it
+	// ran before the duplicate check).
 	for _, tc := range []struct{ name, query, want string }{
 		{"a parse error outranks every later violation", "?id=cap-dl&id=other&download=1&download=0&download=x&bad=%zz", "invalid query"},
 		{"a duplicate id outranks the download violations", "?id=cap-dl&id=other&download=1&download=0&download=x", "duplicate id"},
+		{"a duplicate id outranks the id gate even when the pair trims to empty", "?id=%20&id=", "duplicate id"},
 		{"the missing id outranks the download violations", "?download=1&download=0&download=x", "id required"},
 		{"a duplicate download outranks the flag grammar", "?id=cap-dl&download=1&download=x", "duplicate download"},
+		{"a duplicate download outranks the flag grammar even when the first value fails it", "?id=cap-dl&download=x&download=1", "duplicate download"},
 		{"the flag grammar answers last", "?id=cap-dl&download=x", "download: expected 0 or 1"},
 	} {
 		w := httptest.NewRecorder()

@@ -362,6 +362,20 @@ class RepositoryChecks(unittest.TestCase):
             self.assertEqual([name for name, _ in check.gzip_corpus(root, names)],
                              ["version.go", "cmd/proxy/main.go", "deploy/sidecar/main.go"])
 
+    def test_check_assembles_detector_corpus_through_gzip_corpus(self):
+        """The perimeter's wiring half, pinned: check() must assemble the
+        choke-point detector's corpus by CALLING gzip_corpus. The corpus
+        unit row pins the filter's reach; this row pins the call site, so
+        a check() that inlines a narrower prefix-filtered loop while
+        gzip_corpus stays defined reddens here even though every detector
+        unit row stays green. A comment mentioning gzip_corpus can never
+        satisfy the pin: the assertion requires the call shape."""
+        source = (check.ROOT / "tests" / "repository_check.py").read_text(encoding="utf-8")
+        start = source.index("def check(")
+        end = source.index("\ndef ", start)
+        self.assertRegex(source[start:end], r"\bgzip_corpus\s*\(",
+                         "check() no longer assembles the detector corpus through gzip_corpus")
+
     def test_artifact_gzip_choke_point_detector(self):
         good = [
             ("cmd/proxy/log.go", '\tzw := proxy.NewArtifactGzipWriter(ew)\n'),

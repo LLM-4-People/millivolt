@@ -562,11 +562,12 @@ func (s *Server) DebugSnapshot() map[string]any {
 // pair is silently dropped: an unparsable query, a repeated flag or id, or a
 // flag outside the standing 0/1 grammar is a 400, never first-wins; an empty
 // download value means the render mode. The kinship with the export owner
-// stops at unknown keys, a deliberate split between the two route classes: a
-// filter grammar (the export) rejects unknown keys, while an idempotent
-// fetch like this one ignores them - only the consumed id and download are
-// validated. The method, id, no-store and 404 semantics are identical in
-// both modes.
+// stops at unknown keys, a deliberate split in the three-class route
+// taxonomy: a filter grammar (the export) rejects unknown keys, an
+// idempotent fetch like this one ignores them - only the consumed id and
+// download are validated - and a mutating closed-set route (the backup and
+// restore plane) rejects every key outside its consumed set. The method,
+// id, no-store and 404 semantics are identical in both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")

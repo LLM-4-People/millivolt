@@ -1897,7 +1897,9 @@ func validateQuery(q string) error {
 }
 
 // containsWord reports whether s contains the keyword kw surrounded by
-// non-letter/non-digit boundaries (so "attachment" doesn't match "ATTACH").
+// non-word characters: letters, digits and underscores all continue a word
+// (isAlphaNum treats '_' as a word character), so "ATTACH" is not found in
+// "attachment", "attach_x" or "x_attach".
 func containsWord(s, kw string) bool {
 	for i := 0; ; {
 		idx := strings.Index(s[i:], kw)

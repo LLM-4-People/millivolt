@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,6 +356,9 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 		{"a duplicate outranks the unknown key", "/admin/restore?config=1&config=0&bogus=1", http.MethodPost, "duplicate config"},
 		{"an unknown key outranks the value grammar", "/admin/restore?inspect=x&bogus=1", http.MethodPost, "unknown key bogus"},
 		{"the value grammar answers last", "/admin/restore?inspect=x", http.MethodPost, "inspect: want 1 or 0"},
+		{"a backup parse error outranks the duplicate key", "/admin/backup?config=1&config=0&bad=%zz", http.MethodGet, "invalid query"},
+		{"a backup duplicate outranks the unknown key", "/admin/backup?config=1&config=0&bogus=1", http.MethodGet, "duplicate config"},
+		{"a backup unknown key outranks the value grammar", "/admin/backup?config=x&bogus=1", http.MethodGet, "unknown key bogus"},
 	} {
 		w := httptest.NewRecorder()
 		var body io.Reader
@@ -383,6 +388,137 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 	}
 	if _, err := os.Stat(storage.PendingSnapshotPath(livePath)); !os.IsNotExist(err) {
 		t.Fatal("a crafted query staged a database snapshot")
+	}
+}
+
+// TestRestorePercentDecodedConsumedKeyIsConsumed is the percent-decoding freeze
+// row: a percent-decoded spelling of a consumed key (?%63onfig=1) IS the
+// consumed key, never an unknown one, so the restore runs exactly as the
+// canonical ?config=1 does (the same 200, ok marker and applied config the
+// round trip pins for the canonical spelling). A strict parse that stopped
+// decoding keys would answer the unknown-key 400 instead of restoring.
+func TestRestorePercentDecodedConsumedKeyIsConsumed(t *testing.T) {
+	liveReloadFixture(t)
+	start := config.Default()
+	start.MaxRetries = 9
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadConfig(); err != nil {
+		t.Fatal(err)
+	}
+	arch := config.Default()
+	arch.MaxRetries = 2
+	var yamlBuf bytes.Buffer
+	if err := config.WriteYAML(&yamlBuf, arch); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode("", backup.Archive{Config: yamlBuf.Bytes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?%63onfig=1", bytes.NewReader(raw))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != 200 {
+		t.Fatalf("decoded spelling status %d body %s, want the 200 the canonical ?config=1 answers (the decoded key is consumed, not unknown)", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil || !body.OK {
+		t.Fatalf("restore body %s is not the ok marker the canonical spelling answers", rr.Body.String())
+	}
+	if liveCfg.MaxRetries != 2 {
+		t.Fatalf("the decoded spelling did not run the real restore: max_retries=%d, want the archive's 2", liveCfg.MaxRetries)
+	}
+}
+
+// TestBackupRestoreConsumedQueryKeysPinned is the consumed-set source pin:
+// nothing bounded the two lists' contents, so widening restoreQueryKeys by
+// one key would silently re-admit the ignore class wave 24 removed. The pin
+// reads cmd/proxy/backup.go's source text (the package dir is the test
+// binary's working directory, the same relative-read convention
+// dev_config.go uses for scripts/dev.sh), asserts the exact list literals,
+// confirms the parsed literals against the live package variables so a
+// stale parse can never pass, and requires each route's two gates
+// (DuplicateQueryKey and UnknownQueryKey) to be called exactly once with
+// the same list variable, so the set cannot drift between the gates.
+func TestBackupRestoreConsumedQueryKeysPinned(t *testing.T) {
+	raw, err := os.ReadFile("backup.go")
+	if err != nil {
+		t.Fatalf("read cmd/proxy/backup.go: %v", err)
+	}
+	src := string(raw)
+	region := func(decl string) string {
+		t.Helper()
+		start := strings.Index(src, decl)
+		if start < 0 {
+			t.Fatalf("cmd/proxy/backup.go is missing %q", decl)
+		}
+		rest := src[start:]
+		end := strings.Index(rest, "\n}")
+		if end < 0 {
+			t.Fatalf("%q is not terminated by a line-anchored closing brace", decl)
+		}
+		return rest[:end]
+	}
+	listLiteral := func(name string) []string {
+		t.Helper()
+		m := regexp.MustCompile(`(?m)^\t` + name + `\s*=\s*\[\]string\{([^}]*)\}`).FindStringSubmatch(src)
+		if m == nil {
+			t.Fatalf("%s is not a top-level []string literal in cmd/proxy/backup.go", name)
+		}
+		quotes := regexp.MustCompile(`"([^"]*)"`).FindAllStringSubmatch(m[1], -1)
+		if len(quotes) == 0 {
+			t.Fatalf("%s declares no keys", name)
+		}
+		keys := make([]string, 0, len(quotes))
+		for _, q := range quotes {
+			keys = append(keys, q[1])
+		}
+		return keys
+	}
+	wantBackup := []string{"config", "database"}
+	wantRestore := []string{"inspect", "config", "database", "config_mode", "database_mode"}
+	if got := listLiteral("backupQueryKeys"); !slices.Equal(got, wantBackup) {
+		t.Errorf("backupQueryKeys source literal = %v, want exactly %v", got, wantBackup)
+	}
+	if !slices.Equal(backupQueryKeys, wantBackup) {
+		t.Errorf("live backupQueryKeys = %v, want exactly %v (the source pin and the variable disagree)", backupQueryKeys, wantBackup)
+	}
+	if got := listLiteral("restoreQueryKeys"); !slices.Equal(got, wantRestore) {
+		t.Errorf("restoreQueryKeys source literal = %v, want exactly %v", got, wantRestore)
+	}
+	if !slices.Equal(restoreQueryKeys, wantRestore) {
+		t.Errorf("live restoreQueryKeys = %v, want exactly %v (the source pin and the variable disagree)", restoreQueryKeys, wantRestore)
+	}
+	for _, route := range []struct{ decl, list string }{
+		{"func handleBackup(", "backupQueryKeys"},
+		{"func handleRestore(", "restoreQueryKeys"},
+	} {
+		body := region(route.decl)
+		calls := map[string]string{}
+		for _, gate := range []string{"adminjson.DuplicateQueryKey", "adminjson.UnknownQueryKey"} {
+			matches := regexp.MustCompile(regexp.QuoteMeta(gate)+`\(([^)]*)\)`).FindAllStringSubmatch(body, -1)
+			if len(matches) != 1 {
+				t.Errorf("%s calls %s %d times, want exactly one consumed-set gate call", route.decl, gate, len(matches))
+				continue
+			}
+			args := strings.Split(matches[0][1], ",")
+			if len(args) != 2 {
+				t.Errorf("%s's %s call takes %d arguments, want the parsed query and one list", route.decl, gate, len(args))
+				continue
+			}
+			calls[gate] = strings.TrimSpace(args[1])
+		}
+		want := route.list + "..."
+		if calls["adminjson.DuplicateQueryKey"] != want || calls["adminjson.UnknownQueryKey"] != want {
+			t.Errorf("%s gates read %q and %q, want both to pass %s", route.decl,
+				calls["adminjson.DuplicateQueryKey"], calls["adminjson.UnknownQueryKey"], want)
+		}
 	}
 }
 
