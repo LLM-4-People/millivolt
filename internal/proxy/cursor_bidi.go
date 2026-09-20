@@ -418,7 +418,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		resp.Body.Close()
 		stopRead()
 		upstreamCancel()
-		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody)
+		retryAfter := s.absorbHTTPRetry(state.rec, resp, errBody, t.authHeader)
 		state.rec.RetryAfterMs = int(retryAfter.Milliseconds())
 		if resp.StatusCode == 429 || resp.StatusCode == 503 {
 			state.rec.RateLimited = true
@@ -727,12 +727,25 @@ func stampCursorVoid(rec *metrics.Record) {
 // absorbCursorVoid logs a recovered void re-ask onto Attempts without
 // stamping the live record (a later successful re-ask must stay a non-error).
 func (s *Server) absorbCursorVoid(rec *metrics.Record) {
-	rec.Attempts = append(rec.Attempts, metrics.RetryAttempt{
+	at := metrics.RetryAttempt{
 		StatusCode: rec.StatusCode,
 		ErrorType:  cursorEmptyTurn,
 		ErrorMsg:   cursorVoidMsg,
 		At:         time.Now(),
-	})
+	}
+	// The void IS the response whose metadata captureUpstreamHeaders recorded
+	// when its run opened, so the attempt carries the same upstream
+	// information as every other attempt; the re-ask's own capture replaces
+	// the record-level fields afterwards. Response headers are never mutated
+	// in place (captureHeaders builds a fresh map), so sharing is safe.
+	at.ProviderRequestID = rec.ProviderRequestID
+	at.ProviderServer = rec.ProviderServer
+	at.ProviderModel = rec.ProviderModel
+	at.ProcessingMs = rec.ProcessingMs
+	at.RateLimitRemaining = rec.RateLimitRemaining
+	at.RateLimitLimit = rec.RateLimitLimit
+	at.ResponseHeaders = rec.ResponseHeaders
+	rec.Attempts = append(rec.Attempts, at)
 	rec.Retries++
 	s.publishUpdate(rec)
 }

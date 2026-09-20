@@ -418,21 +418,40 @@
   .kpi .val .unit { font-size: 11px; color: var(--muted); font-weight: 400; margin-left: 3px; }
   .kpi .sub2 { font-size: 10px; color: var(--muted); font-family: var(--mono); margin-top: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-  /* The pair under the explorer: traffic + requests side-by-side on wide
-     screens, stacked on narrow. Both react to the explorer scope. */
-  .grid-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; margin-bottom: 16px; align-items: stretch; }
-  @media (max-width: 1200px) { .grid-pair { grid-template-columns: 1fr; } }
+  /* The pair under the explorer: in the scrolling page the timeline card
+     and the requests log stack vertically, full-width, one below another -
+     side-by-side belongs exclusively to the locked one-screen mode below,
+     so any layout that scrolls reads as one straight vertical flow. Both
+     cards react to the explorer scope. */
+  .grid-pair { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 16px; align-items: stretch; }
   .grid-pair > .card { display: flex; flex-direction: column; min-height: 0; }
 
-  /* Wide two-column layout fits the viewport: inner regions scroll, the page
-     does not. The explorer stays a compact middle band sized to fit ONE full
-     gallery row without vertical scrolling (one row plus the scope bar and
-     the card's padding needs ~232px, so the 240px basis covers it with
-     slack), while the timeline / request pair takes the leftover height. On
-     genuinely short windows the band yields through flex-shrink (shrinking
-     the gallery into internal scrolling) rather than clipping a row. */
-  @media (min-width: 1200px) {
+  /* Wide-AND-tall viewports get the one-screen instrument: the ENTIRE
+     page shows without scrolling (inner regions scroll, the page does
+     not), and ONLY here do the timeline and the requests log sit
+     side-by-side. The explorer stays a compact middle band sized to fit
+     ONE full gallery row without vertical scrolling (one row plus the
+     scope bar and the card's padding needs ~208px, so the 220px basis
+     covers it with slack; on shorter-but-still-supported windows the
+     band yields through flex-shrink into its internal scrolling rather
+     than clipping a row), while the timeline / request pair takes the
+     leftover height. 750px is the supported-height floor: it covers the
+     common 1366x768-class laptop with the pair still keeping a useful
+     log, and anything smaller - narrower than 1200px OR shorter than
+     750px - falls back to the base layout above: every section keeps
+     its natural height, the sections stack vertically and the page
+     scrolls, so no window size can ever cram or crop a section. */
+  @media (min-width: 1200px) and (min-height: 750px) {
     :root { --gallery-locked: 1; }
+    /* The pair's side-by-side split is part of the one-screen instrument:
+     the timeline card takes its narrow column, the requests log the wide
+     one. The timeline column FLOORS at 546px so its summary band always
+     holds three whole 160px tracks (3x160 + 2x10 gaps = 500px of band
+     content, plus the card's ~46px of padding, borders and band chrome) -
+     the 5-metric selection wraps into at most two rows (~278px of card)
+     and stays fully visible in the pair share even at the shortest
+     supported window; the log keeps the rest. */
+    .grid-pair { grid-template-columns: minmax(546px, 1fr) minmax(0, 2fr); }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */
@@ -443,7 +462,7 @@
     footer { flex-shrink: 0; }
     .kpis { flex-shrink: 0; }
     #explorer {
-      flex: 0 1 240px; min-height: 0; max-height: 240px;
+      flex: 0 1 220px; min-height: 0; max-height: 220px;
       display: flex; flex-direction: column; min-width: 0;
     }
     #explorer .xp-body { flex: 1 1 0; min-height: 0; }
@@ -533,17 +552,23 @@
      card content reflows and never clips. Rows are max-content so each card is
      exactly as tall as its content - never stretched or crushed to fit the
      container (that was clipping card footers). */
-  /* padding-bottom gives the last row breathing room inside the scroll area, so
-     its bottom edge (border + soft shadow) is never clipped flush against the
-     container's bottom when scrolled all the way down. */
-  .xp-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; align-content: start; flex: 1 1 auto; min-height: 0; padding-bottom: 12px; box-sizing: border-box;
-    /* Whole-row scrolling: the fixed-height explorer box must never settle
-       with a row sliced across the fold (cards looked "clipped"). Every card
-       row is a snap point; rows are aligned, so one point covers the row. */
-    scroll-snap-type: y mandatory; }
+   /* scroll-padding-bottom gives the last row breathing room WHILE
+      SCROLLING (the row lands 12px above the box edge at full scroll, so
+      its border and soft shadow are never clipped flush) without adding
+      any box height - a padding-bottom here made the one-row band cap
+      12px taller than its row and let the next row's top edge peek into
+      view. */
+   .xp-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); grid-auto-rows: max-content; gap: 10px; overflow-y: auto; align-content: start; flex: 1 1 auto; min-height: 0; scroll-padding-bottom: 12px; box-sizing: border-box;
+     /* Whole-row landing, WITHOUT fighting the wheel: every card row is a
+        snap point, but proximity - not mandatory - so a small trackpad or
+        wheel delta accumulates instead of being snapped back to the row
+        start (mandatory made the one-row band twitch and never scroll);
+        a scroll that comes to rest NEAR a row still lands on it whole, so
+        a row is never left sliced across the fold. */
+    scroll-snap-type: y proximity; }
   .xp-node { scroll-snap-align: start; }
   .xp-node {
-    display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 7px; align-content: start;
+    display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 7px; align-content: start;
     background: var(--panel2); border: 1px solid var(--border);
     border-radius: 11px; padding: 10px 12px; cursor: pointer; text-align: left; color: var(--text);
     font: inherit; min-width: 0; position: relative; overflow: hidden;
@@ -551,7 +576,7 @@
        is even a few px short of the natural content height makes the grid row
        shorter than the content and (with overflow:hidden) clips the footer.
        Letting content size the card means it can never clip, at any zoom.
-       Inner bands are reserved grid rows so KPIs/sparkline stay put across a
+       Inner bands are reserved grid rows so KPIs stay put across a
        stretched gallery row (flex-wrap used to let "cost $0" collapse a line). */
     box-sizing: border-box;
     transition: border-color .16s ease, transform .16s cubic-bezier(.22,.61,.36,1), box-shadow .16s ease, background .16s ease;
@@ -578,9 +603,7 @@
   .xp-node-kpis > span:nth-child(odd):last-child { grid-column: 1 / -1; }
   .xp-node-kpis b { color: var(--text); font-weight: 600; }
   .xp-p95 { color: var(--muted); font-size: 9px; }
-  .xp-node-foot { display: flex; align-items: flex-end; justify-content: space-between; gap: 10px; min-height: 22px; }
-  /* Health counts stay readable; a long tally may shrink the decorative spark. */
-  .xp-node-foot .spark { min-width: 0; flex-shrink: 1; }
+  .xp-node-foot { display: flex; align-items: flex-end; justify-content: flex-end; gap: 10px; }
   .xp-node-signals { font-family: var(--mono); font-size: 10px; white-space: nowrap; flex-shrink: 0; text-align: right; color: var(--muted); }
   .xp-node-err { color: var(--err); }
   .xp-node-rate { color: var(--rl); }
@@ -988,21 +1011,27 @@
      plain readouts; the metrics picker at the card head owns what shows
      (the same dash.chart hidden set the legend uses), hidden metrics leave
      the band and the auto-fit grid reflows, and the spark keeps each
-     tile's color voice, so cells carry no per-metric leading tick. Tracks
-     floor at 160px so tiles run WIDER than tall.
-     Sizing: every tile is ONE fixed height (92px fits the tallest content -
-     label 10 + value 15 + sub-row 10 + spark 14 + three 6px gaps + 20px
-     padding, all line-height-1 rows so the number is typeface-independent)
-     with breathing room, so a tile is the same size whatever it carries:
-     spark or no spark, sub-row or not, and the no-data skeleton swaps to
-     data without moving the card. The spark is flex-shrink: 0 - it never
-     acts as the overflow shock absorber; an oversized tile must clip
-     visibly (the browser gate catches it), never silently crush the spark.
-     The band sits at its natural rows height - it never stretches to fill
-     the card (the old flex-basis-0 stretch collapsed the strip to a sliver
-     on content-height cards and clipped the sparks) - and the card itself
-     opts out of the pair's column stretch, so the summary never paints a
-     hollow tall card: what you see is what the metrics need. */
+      tile's color voice, so cells carry no per-metric leading tick. Tracks
+      floor at 160px - the content fit for the widest tile value (the
+      in/out/cached triple at the base strip's mono plus the tile's 24px
+      padding) - so no tile ever clips its value; the tiles wrap into as
+      many whole rows as the selection needs, and the page scrolls past
+      them, so every selected tile always renders at every viewport.
+      Sizing: every tile is ONE fixed height (100px fits the tallest content
+      - label 10 + value 13 + the tokens tile's two share lines 20 + spark
+      14 + three 6px gaps + 20px padding = 95, all line-height-1 rows so
+      the number is typeface-independent - with breathing room), so a tile
+      is the same size whatever it carries: spark or no spark, one share
+      line or
+      two, and the no-data skeleton swaps to data without moving the card.
+      The spark is flex-shrink: 0 - it never acts as the overflow shock
+      absorber; an oversized tile must clip visibly (the browser gate
+      catches it), never silently crush the spark. The band sits
+      at its natural rows height - it never stretches to fill the card (the
+      old flex-basis-0 stretch collapsed the strip to a sliver on
+      content-height cards and clipped the sparks) - and the card itself
+      opts out of the pair's column stretch, so the summary never paints a
+      hollow tall card: what you see is what the metrics need. */
   .traffic-card.tiles-only { align-self: start; }
   .traffic-card.tiles-only .chart-wrap,
   .traffic-card.tiles-only .chart-axes,
@@ -1020,7 +1049,7 @@
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 92px;
+    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 100px;
     background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
   .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
@@ -1106,8 +1135,14 @@
   #chart-metrics-btn[aria-expanded="true"] { color: var(--text); border-color: var(--accent); }
   #chart-metrics-btn[aria-expanded="true"] svg { transform: rotate(180deg); }
   #chart-metrics-btn .mp-count { color: var(--muted); font-variant-numeric: tabular-nums; }
+  /* Fixed, not absolute: the menu lives in the card head, and the card's
+     overflow: hidden clipped any menu taller than the card's remaining
+     space. Fixed placement escapes every ancestor clip; chart.js's
+     syncMetricsMenuEdge owns the coordinates (right-aligned to the
+     trigger, flipping above it near the window's bottom edge), so this
+     rule positions nothing beyond keeping an unplaced menu offscreen. */
   .metrics-menu {
-    position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
+    position: fixed; top: -9999px; right: auto; z-index: 40;
     padding: 8px; display: flex; flex-direction: column; gap: 2px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
     box-shadow: 0 12px 32px rgba(0,0,0,.5); font-family: var(--mono);
@@ -1273,6 +1308,12 @@
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
 
   .scroll { max-height: 380px; overflow-y: auto; overflow-x: auto; }
+  /* The requests log keeps ONE stable height in the stacked scrolling
+     layout: a definite box means an arriving request only scrolls inside
+     it, instead of growing the card row by row and shoving the rest of
+     the page (and the footer) down on every completion. The locked layout
+     overrides this with its own flex fill (flex-basis 0 ignores height). */
+  #tbl-requests { height: 380px; }
   .empty { color: var(--muted); text-align: center; padding: 36px; font-family: var(--mono); font-size: 12px; }
 
   /* Status-line footer: a slim instrument rail (vim/tmux-style), not a link

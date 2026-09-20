@@ -926,14 +926,19 @@ func TestMigrateRepairProbeIsOneShot(t *testing.T) {
 
 func TestStoreNeverBlocksOnOverflow(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "test.db")
-	s, err := Open(path, testOpts)
+	// A tiny channel cap overflows after a handful of records, so the
+	// nonblocking guarantee is exercised with a small fixture instead of
+	// pushing past the production 8192 cap.
+	opts := testOpts
+	opts.WriteChanCap = 8
+	s, err := Open(path, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
 
 	rec := &metrics.Record{ID: "x", Provider: "p", Model: "m"}
-	for i := 0; i < 20000; i++ {
+	for i := 0; i < 200; i++ {
 		s.Record(rec)
 	}
 }
@@ -1155,9 +1160,18 @@ func TestBusyTimeoutAbsorbsConcurrentWriter(t *testing.T) {
 
 	opts := testOpts
 	opts.FlushInterval = 20 * time.Millisecond // flush attempts hit the held lock deterministically
+	// A shortened busy window (the production 5s guardrail would cost 5s
+	// per phase): 250ms is far above the ms-scale lock holds below while
+	// keeping the honor check meaningful at its rescaled bound.
+	opts.BusyTimeout = 250 * time.Millisecond
+	busy := opts.BusyTimeout
 
 	// Phase 1: Open (schema/migrate) must survive a held write lock. The
 	// store opens in a goroutine because the busy wait blocks inside Open.
+	// The 200ms hold has no pollable "Open is now waiting" signal, so it
+	// stays a fixed window: it must outlast Open's ms-scale startup (a
+	// shorter hold could let the child open after the rollback and pass
+	// this phase vacuously) while staying inside the busy window.
 	tx := acquire()
 	type openRes struct {
 		s   *Store
@@ -1175,7 +1189,7 @@ func TestBusyTimeoutAbsorbsConcurrentWriter(t *testing.T) {
 	var res openRes
 	select {
 	case res = <-opened:
-	case <-time.After(sqliteBusyTimeout + 5*time.Second):
+	case <-time.After(busy + 5*time.Second):
 		t.Fatal("Open never returned after the lock was released")
 	}
 	if res.err != nil {
@@ -1191,7 +1205,10 @@ func TestBusyTimeoutAbsorbsConcurrentWriter(t *testing.T) {
 	metrics.FinalizeRecord(rec)
 	tx = acquire()
 	s.Record(rec)
-	time.Sleep(150 * time.Millisecond) // a flush attempt fires against the held lock
+	// Four flush windows at the 20ms cadence: the writer's flush attempt
+	// starts within one interval of the Record and is still parked on the
+	// held lock when the rollback lands 80ms in.
+	time.Sleep(80 * time.Millisecond) // a flush attempt fires against the held lock
 	if err := tx.Rollback(); err != nil {
 		t.Fatal(err)
 	}
@@ -1226,15 +1243,18 @@ func TestBusyTimeoutAbsorbsConcurrentWriter(t *testing.T) {
 	tx = acquire()
 	start := time.Now()
 	s.Record(rec2)
-	deadline = start.Add(sqliteBusyTimeout + 5*time.Second)
+	deadline = start.Add(busy + 5*time.Second)
 	for s.Dropped() == 0 {
 		if time.Now().After(deadline) {
 			t.Fatal("permanently-held lock never failed closed (busy_timeout masked it)")
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	if waited := time.Since(start); waited < sqliteBusyTimeout-1*time.Second {
-		t.Errorf("gave up after %s, want >= ~%s (the busy window was not honored)", waited, sqliteBusyTimeout)
+	// The rescaled honor bound keeps the original's 20% slack: the drop can
+	// only land after the full busy window expires on the writer's flush
+	// attempt, so anything under 200ms means the window was not honored.
+	if waited := time.Since(start); waited < busy-50*time.Millisecond {
+		t.Errorf("gave up after %s, want >= ~%s (the busy window was not honored)", waited, busy)
 	}
 	recs, err := s.LoadRecent(t.Context(), 10)
 	if err != nil {

@@ -44,8 +44,9 @@ strip with its sparklines still tells the story until a fourth point arrives.
 whole surface and they take the card - every headline metric reads its period
 value first, then its measured companion fact, then its evolution sparklines:
 requests / tokens (the request count over the blended token volume), tokens
-in/out/cached (one in / out / cached triple, with the input share of the
-blended volume and the cached share of input underneath), spend with the
+in/out/cached (one in / out / cached triple, with the input share of all
+tokens and the cache hit share of input underneath - each share line names
+what it compares), spend with the
 server's blended per-Mtok price (the same figure the KPI band shows,
 cost-reporting requests only), the health pair (errors in the error red /
 rate-limited requests in the 429 tone, over the request denominator), and
@@ -59,8 +60,12 @@ apply - so window padding never squeezes the data into a corner. The
 metrics picker in the card head chooses what shows: one dropdown of
 checkable rows, checked metrics render and unchecked ones leave the band
 (it reflows), and the selection persists per browser like every chart
-view. Every tile keeps one fixed size whatever it carries - spark or not,
-sub-row or not, and the no-data skeleton swaps in without moving the
+view. In the wide no-scroll layout the band renders at most the tiles that
+fit one row side by side - a narrower window shows fewer, wider tiles
+rather than rows that wrap past the fold, and the picker's count reports
+what is on screen; the narrow scrolling layout renders every selected
+tile. Every tile keeps one fixed size whatever it carries - spark or not,
+one share line or two, and the no-data skeleton swaps in without moving the
 card - and the band sits at its natural height at the top of the card.
 Only the time-range control applies. This preset has
 no static capture yet; the gallery images below predate it.
@@ -186,8 +191,11 @@ parameter values are retained instead of treated as missing.
 
 Scroll the same drawer for token splits, timestamps, throughput, reported cost,
 tool information and queue/rate-limit observations. Absorbed retry attempts
-appear when the selected request has them. These captures deliberately omit
-request content and Debug payloads; ordinary opt-in captures remain sensitive.
+appear when the selected request has them, each with its status, provider
+error detail and the attempt's own provider request id - the matching key for
+correlating a provider-side failure report with the exact attempt. These
+captures deliberately omit request content and Debug payloads; ordinary
+opt-in captures remain sensitive.
 
 ![The same request drawer showing token and performance measurements](images/requests/performance.png)
 

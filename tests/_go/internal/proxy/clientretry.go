@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -176,9 +177,12 @@ func TestSuppressClientRetriesHotReloadFlipsNextResponse(t *testing.T) {
 	}))
 	defer upstream.Close()
 	// No retry ladder: the 500 relays immediately, so the test measures the
-	// flip, not the group's exhausted-failure pacing.
+	// flip, not the group's exhausted-failure pacing. The tiny base keeps
+	// that incidental follow-up first-send pace near-zero too; the
+	// assertions are header-only.
 	base := config.Default()
 	base.MaxRetries = 0
+	base.BaseBackoff = 5 * time.Millisecond
 	s := New(base, metrics.NewBuffer(10))
 	srv := httptest.NewServer(s)
 	defer srv.Close()

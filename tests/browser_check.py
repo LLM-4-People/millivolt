@@ -277,13 +277,20 @@ async def check(base, screenshot):
                 # empty-bucket removal the plots apply. Every tile keeps one
                 # fixed size (uniform heights, no vertical clip, the spark
                 # full-height and pinned to the tile's bottom padding,
-                # nothing reaching past the card), checked at both viewports.
-                # The picker owns what shows: a row flip drops the tile
-                # from the band, persists in dash.chart, and a reload
-                # restores the selection. No percentile selector, no
-                # visible pXX label.
+                # nothing reaching past the card), at every viewport.
+                # Every selected tile always renders at every viewport: the
+                # band's auto-fit grid wraps the tiles into as many whole
+                # rows as the card needs and the page scrolls past them, so
+                # the DOM must match summaryVisibleTiles exactly (all 5 in
+                # the default selection) and no tile renders narrower than
+                # the 160px content-fit floor - no value ever clips. The
+                # picker owns what shows: a row flip drops the tile from the
+                # band, persists in dash.chart, and a reload restores the
+                # selection. No percentile selector, no visible pXX label.
+                # Viewports: 1440 and 2560 lock one screen, 390 stacks and
+                # scrolls - all show all 5.
                 await page.select_option('#chart-preset', 'overview')
-                for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
+                for viewport in ({'width': 1440, 'height': 1000}, {'width': 2560, 'height': 1440}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
                     state = await page.evaluate("""async () => {
                         const full = window.__fullChart;
@@ -301,16 +308,21 @@ async def check(base, screenshot):
                         const tpsV=document.querySelector('#chart-totals .v-tps');
                         const reqPair=document.querySelector('#chart-totals .v-req') && document.querySelector('#chart-totals .v-tok');
                         const cacheThird=document.querySelector('#chart-totals .v-cache');
+                        const tokSub=document.querySelector('#chart-totals .chart-total[title^="tokens in/out/cached"] .chart-sub');
                         const kept = full.buckets.filter(b => b.req > 0).length;
                         const reqPath = document.querySelector('#chart-totals .chart-total[title^="requests / tokens"] svg.spark path');
                         const sparkCmds = reqPath ? (reqPath.getAttribute('d').match(/[ML]/g) || []).length : 0;
                         const tileList = [...document.querySelectorAll('#chart-totals .chart-total')];
                         const cardRect = card.getBoundingClientRect();
+                        const visible = summaryVisibleTiles(activePreset());
                         return {tilesOnly: card.classList.contains('tiles-only'),
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
                                 wrapHidden: getComputedStyle(document.getElementById('chart-traffic')).display === 'none',
+                                visible,
+                                trackFloor: tileList.every(t => t.offsetWidth >= 160),
+                                shareLabels: !tokSub || (tokSub.textContent.includes('of tokens') && tokSub.textContent.includes('cache hit') && tokSub.textContent.includes('of input')),
                                 overflow, rlTotal, errTotal,
-                                uniformTiles: tileList.length === 5 && tileList.every(t => t.offsetHeight === tileList[0].offsetHeight),
+                                uniformTiles: tileList.length >= 1 && tileList.every(t => t.offsetHeight === tileList[0].offsetHeight),
                                 noVClip: tileList.every(t => t.scrollHeight <= t.clientHeight + 1),
                                 sparkPinned: tileList.every(t => { const s = t.querySelector('svg.spark'); return !s || (s.getBoundingClientRect().height >= 13 && t.getBoundingClientRect().bottom - s.getBoundingClientRect().bottom >= 9); }),
                                 insideCard: tileList.every(t => t.getBoundingClientRect().bottom <= cardRect.bottom + 1),
@@ -329,22 +341,27 @@ async def check(base, screenshot):
                     }""")
                     require(state['tilesOnly'] and not state['plot'] and not state['blank'] and state['wrapHidden'], state)
                     require(state['rlTotal'] == 2 and state['errTotal'] == 0, state)
-                    require(state['errors0'] and state['rateLimited2'], state)
                     require(state['reqTokensPair'] and state['cacheThird'], state)
-                    require(state['timingPair'], state)
+                    require(state['shareLabels'], state)
                     require(state['contextHidden'], state)
-                    require(state['sparks'] == 5, state)
+                    require(state['tiles'] == len(state['visible']) and state['sparks'] == state['tiles'], state)
                     require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
                     require(state['uniformTiles'] and state['noVClip'], state)
                     require(state['sparkPinned'] and state['insideCard'], state)
-                    require(state['tiles'] == 5, state)
                     require(state['pctHidden'] and state['metricsPick'], state)
+                    require(state['trackFloor'], state)
+                    if 'health' in state['visible']:
+                        require(state['errors0'] and state['rateLimited2'], state)
+                    if 'timing' in state['visible']:
+                        require(state['timingPair'], state)
                     require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                     # Metrics picker contract on the real DOM: the card-head
                     # trigger opens the menu, a row flip drops the tile from
                     # the band (no stub - the grid reflows), the trigger's
                     # count follows, and the choice persists in dash.chart.
+                    # The count reports the selection itself: every selected
+                    # tile renders, so it can never disagree with the band.
                     toggle = await page.evaluate("""async () => {
                         document.getElementById('chart-metrics-btn').click();
                         await new Promise(requestAnimationFrame);
@@ -353,17 +370,18 @@ async def check(base, screenshot):
                         row.click();
                         await new Promise(requestAnimationFrame);
                         const after = document.querySelectorAll('#chart-totals .chart-total').length;
+                        const want = summaryVisibleTiles(activePreset()).length;
                         const saved = JSON.parse(localStorage.getItem('dash.chart') || '{}');
                         return {open: !menu.hidden,
                                 expanded: document.getElementById('chart-metrics-btn').getAttribute('aria-expanded'),
                                 rowUnchecked: row.getAttribute('aria-checked') === 'false',
                                 tileGone: !document.querySelector('#chart-totals .chart-total[title^="tokens in/out/cached"]'),
-                                after,
+                                after, want,
                                 count: document.getElementById('chart-metrics-count').textContent,
                                 persisted: (saved.hidden && saved.hidden.overview || []).join() === 'tokens'};
                     }""")
                     require(toggle['open'] and toggle['expanded'] == 'true' and toggle['rowUnchecked'], toggle)
-                    require(toggle['tileGone'] and toggle['after'] == 4 and toggle['count'] == '4/5', toggle)
+                    require(toggle['tileGone'] and toggle['after'] == toggle['want'] and toggle['count'] == f"{toggle['want']}/5", toggle)
                     require(toggle['persisted'], toggle)
                     await page.evaluate("""async () => {
                         const menu = document.getElementById('chart-metrics-menu');
@@ -374,41 +392,129 @@ async def check(base, screenshot):
                         await new Promise(requestAnimationFrame);
                     }""")
                     results.append({'width': viewport['width'], 'preset': 'overview', **state})
+                # The metrics menu must never be cropped by the window's
+                # bottom edge: on a short viewport (the stacked scrolling
+                # layout, the card head sits low) opening it flips the menu
+                # above its trigger (setMetricsMenuOpen + syncMetricsMenuEdge)
+                # so every row stays reachable.
+                await page.set_viewport_size({'width': 1280, 'height': 585})
+                menu_edge = await page.evaluate("""async () => {
+                    document.getElementById('chart-metrics-btn').click();
+                    // The flip is rAF-scheduled (and the viewport switch just
+                    // queued its own resize rAF): poll frames until the menu
+                    // settles - within a handful when the mechanism works,
+                    // never (and the check fails) when it does not.
+                    let rect = null;
+                    for (let i = 0; i < 20; i++) {
+                        await new Promise(requestAnimationFrame);
+                        rect = document.getElementById('chart-metrics-menu').getBoundingClientRect();
+                        if (rect.bottom <= innerHeight - 7) break;
+                    }
+                    const menu = document.getElementById('chart-metrics-menu');
+                    const open = !menu.hidden;
+                    const fits = rect.bottom <= innerHeight - 7;
+                    const rows = menu.querySelectorAll('.metrics-row').length;
+                    document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape'}));
+                    return {open, bottom: Math.round(rect.bottom), innerH: innerHeight, fits, rows};
+                }""")
+                require(menu_edge['open'] and menu_edge['rows'] == 5 and menu_edge['fits'], menu_edge)
+                results.append({'menu_edge': menu_edge})
                 # Restore the saved-view expectations the reload check pins.
                 await page.select_option('#chart-preset', 'latency')
                 await page.select_option('#chart-pct', '99')
+                # The layout adapts by viewport size: wide-AND-tall viewports
+                # keep the locked one-screen instrument - the ENTIRE page
+                # shows without scrolling (inner regions scroll, the page
+                # does not) - while any viewport too small to hold it -
+                # narrower than 1200px OR shorter than 750px - falls back to
+                # the base layout: every section keeps its natural height and
+                # the page scrolls. 1366x768 pins the common laptop: it must
+                # still lock. 1280x585 is the exact short-tab size that once
+                # crammed the whole page into a 147px strip.
                 layout_checks = []
-                for viewport in ({'width': 1440, 'height': 1000}, {'width': 1706, 'height': 810}):
+                for viewport, want_locked in (({'width': 1440, 'height': 1000}, True),
+                                              ({'width': 1706, 'height': 810}, True),
+                                              ({'width': 1366, 'height': 768}, True),
+                                              ({'width': 1280, 'height': 585}, False),
+                                              ({'width': 1024, 'height': 900}, False)):
                     await page.set_viewport_size(viewport)
+                    # Let the locked/unlocked flip settle: the gallery band
+                    # re-caps through its ResizeObserver within a frame, and
+                    # measuring inside the transition would read stale boxes.
+                    await page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
                     state = await page.evaluate('''() => {
                         const explorer = document.querySelector('#explorer');
                         const pair = document.querySelector('.grid-pair');
                         const footer = document.querySelector('footer');
+                        const logCard = document.querySelector('.grid-pair > .card:not(.traffic-card)');
                         const er = explorer.getBoundingClientRect();
                         const pr = pair.getBoundingClientRect();
                         const fr = footer.getBoundingClientRect();
+                        const lg = logCard.getBoundingClientRect();
                         const locked = getComputedStyle(document.documentElement)
                             .getPropertyValue('--gallery-locked').trim();
-                        const explorerMax = parseFloat(getComputedStyle(explorer).maxHeight);
+                        const explorerMax = parseFloat(getComputedStyle(explorer).maxHeight) || 0;
+                        const gallery = document.querySelector('#xp-gallery');
+                        const cards = gallery ? [...gallery.children] : [];
+                        const rowH = cards.length
+                            ? Math.max(...cards.filter(c => c.offsetTop === cards[0].offsetTop).map(c => c.offsetHeight))
+                            : 0;
+                        const traffic = document.querySelector('.grid-pair .traffic-card');
+                        const tr = traffic.getBoundingClientRect();
                         return {
                             locked,
                             pageScrollY: document.documentElement.scrollHeight > innerHeight + 1,
                             pageScrollX: document.documentElement.scrollWidth > innerWidth + 1,
                             explorerH: Math.round(er.height),
                             explorerMax,
+                            // The scrolling-page explorer compresses to ONE
+                            // whole row of node cards: the band (xp-body)
+                            // carries the cap, the gallery scrolls internally.
+                            rowH,
+                            bandH: gallery ? Math.round(gallery.clientHeight) : 0,
+                            oneRowBand: !!gallery && gallery.clientHeight <= rowH + 14,
+                            // Scrolling layouts stack the pair vertically
+                            // (full-width, one below another); side-by-side
+                            // exists only in the locked one-screen mode.
+                            pairStacked: Math.abs(tr.left - lg.left) <= 1 && lg.top >= tr.bottom - 1,
                             pairH: Math.round(pr.height),
                             footerBottom: Math.round(fr.bottom),
+                            // Stacked mode: sections run one below another in
+                            // reading order and the footer sits below the fold.
+                            order: er.top >= 0 && pr.top >= er.bottom - 1 && fr.top >= pr.bottom - 1,
                             inView: er.top >= 0 && pr.top >= 0 && fr.top >= 0
                                 && er.bottom <= innerHeight + 1 && pr.bottom <= innerHeight + 1
                                 && fr.bottom <= innerHeight + 1,
+                            logH: Math.round(lg.height),
+                            // The requests table owns the pair's full column
+                            // height: the summary card opts out of the stretch
+                            // (align-self: start), so no summary change may
+                            // ever borrow the log card's space.
+                            logFill: Math.abs(lg.height - pr.height) <= 1 && Math.abs(lg.bottom - pr.bottom) <= 1,
                         };
                     }''')
-                    require(state['locked'] == '1', state)
-                    require(not state['pageScrollY'] and not state['pageScrollX'], state)
-                    require(state['explorerMax'] <= 240, state)
-                    require(state['explorerH'] <= state['explorerMax'] + 1, state)
-                    require(state['pairH'] > state['explorerH'], state)
-                    require(state['inView'], state)
+                    require(state['locked'] == ('1' if want_locked else ''), state)
+                    require(not state['pageScrollX'], state)
+                    if want_locked:
+                        require(not state['pageScrollY'], state)
+                        require(state['explorerMax'] <= 240, state)
+                        require(state['explorerH'] <= state['explorerMax'] + 1, state)
+                        require(state['pairH'] > state['explorerH'], state)
+                        require(state['logFill'], state)
+                        require(state['inView'], state)
+                    else:
+                        # Too small for one screen: the whole UI stacks
+                        # vertically - the pair included - the page scrolls,
+                        # and the explorer compresses to a compact ONE-ROW
+                        # band (the tall dimension rail scrolls inside it,
+                        # the gallery scrolls its remaining rows).
+                        require(state['pageScrollY'], state)
+                        require(state['order'], state)
+                        require(state['pairStacked'], state)
+                        require(not state['explorerMax'] or state['explorerMax'] >= 600, state)
+                        require(state['oneRowBand'], state)
+                        require(state['explorerH'] <= state['rowH'] + 120, state)
+                        require(state['logH'] >= 200, state)
                     layout_checks.append({'width': viewport['width'], 'height': viewport['height'], **state})
                 if screenshot:
                     await page.locator('.traffic-card').screenshot(path=screenshot)

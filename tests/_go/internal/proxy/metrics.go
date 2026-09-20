@@ -266,9 +266,16 @@ func TestInBandRetryableStreamErrorExhaustedThenVerbatim(t *testing.T) {
 	}
 }
 
-// testMidStreamAbortUpstream serves a two-part body with a long pause between
-// the parts, so a test client can abort while the proxy is blocked reading.
-func testMidStreamAbortUpstream(t *testing.T, contentType string, parts []string) *httptest.Server {
+// testMidStreamAbortUpstream serves a two-part body, parking the upstream
+// handler on release between the parts so a test client can abort while the
+// proxy is blocked reading. The park replaces the old fixed sleep: the tail
+// cannot arrive until the test closes release, so the abort deterministically
+// lands mid-response no matter how long the parked phase lasts. Callers
+// register close(release) as a defer AFTER defer upstream.Close() (LIFO runs
+// it first), so even a failing test releases the handler before Close drains
+// it. The client disconnect tears the proxy's upstream socket down via the
+// request context, so the proxy finalizes the record without the tail.
+func testMidStreamAbortUpstream(t *testing.T, release <-chan struct{}, contentType string, parts []string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", contentType)
@@ -276,7 +283,7 @@ func testMidStreamAbortUpstream(t *testing.T, contentType string, parts []string
 		f := w.(http.Flusher)
 		w.Write([]byte(parts[0]))
 		f.Flush()
-		time.Sleep(1500 * time.Millisecond) // proxy is blocked on the body read here
+		<-release // the proxy is blocked on the body read here
 		for _, p := range parts[1:] {
 			w.Write([]byte(p))
 		}
@@ -290,11 +297,13 @@ func testMidStreamAbortUpstream(t *testing.T, contentType string, parts []string
 // keep their own documented exception (upstream 200 honored in cursor_bidi);
 // this covers the passthrough paths whose relay dies in markStreamErr.
 func TestMidStreamClientDisconnectRecords499(t *testing.T) {
-	upstream := testMidStreamAbortUpstream(t, "text/event-stream", []string{
+	release := make(chan struct{})
+	upstream := testMidStreamAbortUpstream(t, release, "text/event-stream", []string{
 		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
 		"data: [DONE]\n\n",
 	})
 	defer upstream.Close()
+	defer close(release)
 
 	buf := metrics.NewBuffer(10)
 	srv := httptest.NewServer(New(config.Default(), buf))
@@ -336,11 +345,13 @@ func TestMidStreamClientDisconnectRecords499(t *testing.T) {
 // context: a non-streaming client receives nothing until the spool completes,
 // so there is no body for it to close early.)
 func TestMidStreamClientDisconnectNonStreamRecords499(t *testing.T) {
-	upstream := testMidStreamAbortUpstream(t, "application/json", []string{
+	release := make(chan struct{})
+	upstream := testMidStreamAbortUpstream(t, release, "application/json", []string{
 		`{"id":"1","choices":[{"message":`,
 		`{"role":"assistant","content":"hi"}}]}`,
 	})
 	defer upstream.Close()
+	defer close(release)
 
 	buf := metrics.NewBuffer(10)
 	srv := httptest.NewServer(New(config.Default(), buf))
@@ -359,8 +370,11 @@ func TestMidStreamClientDisconnectNonStreamRecords499(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(200 * time.Millisecond) // the proxy is blocked spooling the slow body
-	cancel()                           // the LOCAL client aborts
+	// The parked handler guarantees the response is mid-body (its tail is
+	// withheld on the release channel), so this sleep only needs to cover
+	// the request reaching the upstream; 50ms is ample on loopback.
+	time.Sleep(50 * time.Millisecond) // the proxy is blocked spooling the slow body
+	cancel()                          // the LOCAL client aborts
 
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
@@ -392,16 +406,21 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 	// relay pauses and the client aborts.
 	errBody := `{"error":{"type":"server_error","message":"boom","code":"internal"},"pad":"` +
 		strings.Repeat("x", 70*1024) + `"}`
+	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		f := w.(http.Flusher)
 		w.Write([]byte(errBody))
 		f.Flush()
-		time.Sleep(1500 * time.Millisecond) // the proxy is mid-relay of the 500 body here
+		// Parked on the channel instead of a fixed sleep: the tail is
+		// withheld until the test releases, so the abort below
+		// deterministically lands while the proxy is mid-relay.
+		<-release // the proxy is mid-relay of the 500 body here
 		w.Write([]byte(`{"tail":true}`))
 	}))
 	defer upstream.Close()
+	defer close(release)
 
 	cfg := config.Default()
 	cfg.MaxRetries = 0 // the 500 is final - no absorbed retry muddies the assertion
@@ -423,8 +442,10 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 			resp.Body.Close()
 		}
 	}()
-	time.Sleep(200 * time.Millisecond) // the proxy is blocked relaying the slow 500 body
-	cancel()                           // the LOCAL client aborts mid-body
+	// The parked tail keeps the response mid-body; the sleep only covers the
+	// request and the 500 burst reaching the proxy, ample at 50ms on loopback.
+	time.Sleep(50 * time.Millisecond) // the proxy is blocked relaying the slow 500 body
+	cancel()                          // the LOCAL client aborts mid-body
 
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
@@ -451,12 +472,14 @@ func TestClientDisconnectMidErrorBodyKeepsDecidedStatus(t *testing.T) {
 // short-circuit erased the failure from the error rate, the error explorer
 // and the errors-only purge, and the outage surfaced only as client cancels.
 func TestMidStreamClientAbortAfterInBandErrorCountsAsError(t *testing.T) {
-	upstream := testMidStreamAbortUpstream(t, "text/event-stream", []string{
+	release := make(chan struct{})
+	upstream := testMidStreamAbortUpstream(t, release, "text/event-stream", []string{
 		"data: {\"id\":\"1\",\"choices\":[{\"delta\":{\"content\":\"partial answer\"}}]}\n\n" +
 			"data: {\"error\":{\"message\":\"Coral Bricks is temporarily unavailable. Please retry.\",\"type\":\"api_error\",\"code\":\"internal_error\"}}\n\n",
 		"data: [DONE]\n\n",
 	})
 	defer upstream.Close()
+	defer close(release)
 
 	buf := metrics.NewBuffer(10)
 	srv := httptest.NewServer(New(config.Default(), buf))

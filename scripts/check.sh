@@ -31,7 +31,10 @@ case "$mode" in
     trap 'rm -rf -- "$check_dir"' EXIT
     go build -mod=readonly -o "$check_dir/" ./...
     python3 -B -m tests.go vet -mod=readonly ./...
-    python3 -B -m tests.go test -mod=readonly ./... -count=1
+    # One race-enabled pass proves everything the plain pass used to: the
+    # same tests run under the same overlay (no build tags, no
+    # race-conditional skips), with the race detector as a strict superset
+    # of the plain instrumentation.
     python3 -B -m tests.go test -mod=readonly -race ./... -count=1
     npm test
     ;;

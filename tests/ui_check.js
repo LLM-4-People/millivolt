@@ -355,9 +355,9 @@ async function main() {
     const order = ['provider','model','client','conversation','tool','time','status','error','key'];
     check('explorer dimension order is the single desktop/mobile order',
       [...d.querySelectorAll('#xp-rail [data-xp-dim]')].map(n=>n.dataset.xpDim).join()===order.join());
-    const entity = {name:'neutral.example',n:3,cost:0,in:0,out:0,cache:0,reasoning:0,err_final:1,
+    const entity = {name:'neutral.example',n:3,cost:0,in:0,out:0,cache:0,err_final:1,
       rate_limit_requests:2,tools:0,cost_per_mtok:null,ttft_p50:null,ttft_p95:null,tps_p50:null,tps_p95:null,
-      err_events:4,code:'500',last_ms:0,spark:[1,2],spark_err:[0,1]};
+      err_events:4,code:'500',last_ms:0};
     const renderCard = (dim, overrides={}) => {
       const host=d.createElement('div');
       host.innerHTML=w.xpNodeCard({activeDim:dim,filters:[]},{...entity,...overrides},{total:3,error_total:4});
@@ -405,26 +405,6 @@ async function main() {
         measured.querySelector('.xp-node-share').title === 'of requests' &&
         !zero.querySelector('.xp-node-share') && !zero.textContent.includes('0%') &&
         !zeroErr.querySelector('.xp-node-share') && !zeroErr.textContent.includes('0%');
-    })());
-    // sparklineSVG: sparse series (null = unmeasured bucket, e.g. suppressed
-    // percentile triples) keep honest x positions; fewer than two finite
-    // samples render an empty spark, never a fabricated or NaN path.
-    check('sparkline skips absent buckets at their true x positions without NaN', (() => {
-      const sparse = w.eval('sparklineSVG([1, null, 3, null], null, 80, 14, "#fff")');
-      // dx = 80/3; finite samples sit at x=0 and x=53.3
-      return !sparse.includes('NaN') && /M0\.0 /.test(sparse) && /L53\.3 /.test(sparse) && !/L26\.7 /.test(sparse);
-    })());
-    check('sparkline renders empty below two finite samples', (() => {
-      const one = w.eval('sparklineSVG([1], null, 80, 14, "#fff")');
-      const none = w.eval('sparklineSVG([null, null, null], null, 80, 14, "#fff")');
-      const empty = w.eval('sparklineSVG([], null, 80, 14, "#fff")');
-      const flat = w.eval('sparklineSVG([2, 2, 2], null, 80, 14, "#fff")');
-      return ![one, none, empty].some(s => s.includes('<path')) && flat.includes('<path') && !flat.includes('NaN');
-    })());
-    check('sparkline error overlay skips absent error buckets', (() => {
-      const s = w.eval('sparklineSVG([1, 2, 3], [0, null, 1], 80, 14, "#fff")');
-      const allGone = w.eval('sparklineSVG([1, 2, 3], [null, null], 80, 14, "#fff")');
-      return s.split('stroke="var(--err)"').length === 2 && !allGone.includes('var(--err)');
     })());
     const savedAgg=w.eval('explorerAgg');
     const trigger=d.getElementById('xp-dim-trigger'), originalStyle=w.getComputedStyle;
@@ -682,6 +662,34 @@ async function main() {
         d.getElementById('drawer-body').textContent.includes('sel-live') &&
         d.getElementById('drawer-body').textContent.includes('999ms') &&
         expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
+    w.closeDrawer();
+  }
+
+  // ---- test 7e: attempt metadata parity in the drawer ----
+  // Absorbed attempts store the same upstream information as the final
+  // response; the attempt log shows each attempt's own provider request id,
+  // the matching key between a provider-side failure report and the exact
+  // absorbed attempt. Attempts without one (transport failures) render no
+  // empty req span.
+  {
+    const atts = [
+      { status_code: 502, error_type: 'bad_gateway', error_msg: 'upstream overloaded',
+        provider_request_id: 'req_meta_1', at: new Date(1700000104500).toISOString() },
+      { status_code: 0, error_type: 'transport', error_msg: 'connection reset',
+        at: new Date(1700000104800).toISOString() },
+    ];
+    fire('end', { record: { ...mkRec('att-meta', 200, 1700000104000), retries: 2, attempts: atts }, in_flight: 0 });
+    await sleep(20);
+    w.openDrawer('att-meta');
+    const attRows = [...d.querySelectorAll('.attempt-link')];
+    check('the drawer attempt log renders the absorbed attempts with their own provider request ids',
+      d.getElementById('drawer').classList.contains('open') &&
+        attRows.length === 2 &&
+        attRows[0].textContent.includes('502') &&
+        attRows[0].textContent.includes('req req_meta_1') &&
+        attRows[1].textContent.includes('transport'));
+    check('an attempt without a provider request id renders no empty req span',
+      !attRows[1].textContent.includes('· req'));
     w.closeDrawer();
   }
 
@@ -1878,6 +1886,21 @@ async function main() {
     w.eval("chartView.preset = 'traffic'");
   }
 
+  // Every selected tile always renders: summaryVisibleTiles applies only
+  // the picker's hidden set - the band's auto-fit grid wraps the tiles into
+  // as many whole rows as the card needs, so no viewport can drop a metric
+  // or disagree with the picker's count.
+  {
+    w.eval("chartView.preset = 'overview'; chartView.hidden.overview = [];");
+    check('every selected summary tile renders with no viewport cap',
+      w.eval('summaryVisibleTiles(activePreset()).join()') === 'req,tokens,cost,health,timing');
+    check('the picker hidden set is the only filter',
+      w.eval(`(() => { chartView.hidden.overview = ['req'];
+        const vis = summaryVisibleTiles(activePreset());
+        chartView.hidden.overview = []; return vis.join(); })()`) === 'tokens,cost,health,timing');
+    w.eval("chartView.preset = 'traffic'");
+  }
+
   // errors preset: err count + rate recomputed from the merged pair
   w.eval("chartView.preset = 'errors'");
   const dataErr = w.eval('chartData()');
@@ -1911,11 +1934,11 @@ async function main() {
   check('cache hit derives pct-of-input per bucket and stays unmeasured at zero input',
     dataTok[5][tokSlot] === 60 && dataTok[5][0] === null);
   const tokTotals = w.eval('chartTotals()');
-  check('tokens totals carry shares, cache pct of input and the pair with its share',
+  check('tokens totals carry shares naming their denominators, cache pct of input and the pair with its share',
     tokTotals.includes('71.4%') && tokTotals.includes('28.6%') &&
-    tokTotals.includes('60.0% of in') &&
+    tokTotals.includes('60.0% of input') &&
     tokTotals.includes('in:out</span> <span class="val-pair"><span class="v-in">100</span><span class="pair-sep">/</span><span class="v-out">40</span>') &&
-    tokTotals.includes('<span class="chart-sub">71.4% in</span>'));
+    tokTotals.includes('<span class="chart-sub">71.4% of tokens</span>'));
   check('tokens preset pins the cache-hit line to a 0-100 right axis', w.eval(`(() => {
     const opts = upOpts(600, 180);
     return opts.axes.length === 3 && opts.axes[2].scale === 'pct' && opts.axes[2].side === 1 &&
@@ -2672,9 +2695,9 @@ async function main() {
   check('the health pair reads errors/429 in the chart line colors over the denominator',
     totalsOv.includes('errors / 429</span> <span class="val-pair"><span class="v-err">3</span><span class="pair-sep">/</span><span class="v-rl">1</span>') &&
     !totalsOv.includes('rate limited</span>'));
-  check('the tokens triple reads in/out/cached in the plot colors with one share row',
+  check('the tokens triple reads in/out/cached in the plot colors with both named shares',
     totalsOv.includes('tokens in/out/cached</span> <span class="val-pair"><span class="v-in">150</span><span class="pair-sep">/</span><span class="v-out">50</span><span class="pair-sep">/</span><span class="v-cache">60</span>') &&
-      totalsOv.includes('<span class="chart-sub">75.0% in · 40.0% of in</span>') &&
+      totalsOv.includes('<span class="chart-sub">input 75.0% of tokens<br>cache hit 40.0% of input</span>') &&
       !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile'));
   check('overview totals annotate the server blended price',
     totalsOv.includes('$12.5 /Mtok') &&
@@ -2688,7 +2711,7 @@ async function main() {
     // ('1M/13') and the share caps below 100% - pctCap never rounds a
     // strictly-sub-100 ratio up to a false '100.0%'.
     return wide.includes('<span class="v-in">1M</span><span class="pair-sep">/</span><span class="v-out">13</span>') &&
-      !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% in</span>');
+      !wide.includes('76926') && wide.includes('<span class="chart-sub">99.9% of tokens</span>');
   })());
   // The tokens tile's mini-chart: one self-scaled spark line per metric half
   // (in accent2, out ok, cache muted) over the kept buckets. Crafted series
@@ -2800,14 +2823,15 @@ async function main() {
       strip.style.getPropertyValue('background') === 'var(--tick-strip)';
   })());
   // Uniform-tile pin: every summary tile is ONE fixed size whatever it
-  // carries (spark or not, sub-row or not, skeleton or data - the no-jump
-  // skeleton swap is exact by construction). The 92px floor fits the
-  // tallest structure (label + value + sub-row + spark, line-height-1
-  // rows) and the spark refuses to flex-shrink, so an oversized tile clips
-  // visibly for the browser gate instead of silently crushing the spark -
-  // the failure mode the 72px attempt exposed. The band sits at its natural
-  // rows height (the old flex-basis-0 stretch both bloated tiles on the
-  // locked desktop pair and collapsed the strip to a sliver on
+  // carries (spark or not, one share line or the tokens tile's two -
+  // skeleton or data - the no-jump skeleton swap is exact by construction).
+  // The 100px floor fits the tallest structure (label + value + two share
+  // rows + spark = 95, line-height-1 rows) and the spark refuses to flex-shrink,
+  // so an oversized tile clips visibly for the browser gate instead of
+  // silently crushing the spark - the failure mode the 72px attempt
+  // exposed. The band sits at its natural rows height (the old
+  // flex-basis-0 stretch both bloated tiles on the locked desktop pair and
+  // collapsed the strip to a sliver on
   // content-height cards), and the card opts out of the pair's stretch so
   // the summary never paints a hollow tall card.
   check('summary tiles keep one fixed size on a content-height band', (() => {
@@ -2816,7 +2840,7 @@ async function main() {
     const card = firstCSSRule('.traffic-card.tiles-only');
     const spark = firstCSSRule('.traffic-card.tiles-only .chart-total .spark');
     return !!tile && !!strip && !!card && !!spark &&
-      tile.style.getPropertyValue('height') === '92px' &&
+      tile.style.getPropertyValue('height') === '100px' &&
       spark.style.getPropertyValue('flex-shrink') === '0' &&
       strip.style.getPropertyValue('flex') === '' &&
       strip.style.getPropertyValue('min-height') === '' &&
@@ -2942,7 +2966,7 @@ async function main() {
   const totalsHidden = w.eval('chartTotals()');
   check('a picker flip drops the tile from the band and updates row, count and name',
     (totalsHidden.match(/class="chart-total"/g) || []).length === 4 &&
-      !totalsHidden.includes('title="tokens in/out/cached') && !totalsHidden.includes('75.0% in') &&
+      !totalsHidden.includes('title="tokens in/out/cached') && !totalsHidden.includes('75.0% of tokens') &&
       tokRow.getAttribute('aria-checked') === 'false' && tokRow.querySelector('.mp-check').textContent === '' &&
       d.getElementById('chart-metrics-count').textContent === '4/5' &&
       mBtn.getAttribute('aria-label') === 'Summary metrics: 4 of 5 shown' &&
@@ -2961,7 +2985,7 @@ async function main() {
   mBtn.click();
   tokRow.click();
   check('a second flip restores the tile and re-persists',
-    w.eval('chartTotals()').includes('75.0% in') &&
+    w.eval('chartTotals()').includes('input 75.0% of tokens') &&
       w.eval('(chartView.hidden.overview || []).length') === 0 &&
       d.getElementById('chart-metrics-count').textContent === '5/5');
   d.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Escape' }));
@@ -4767,14 +4791,33 @@ async function main() {
         drawer.hidden && drawer.hasAttribute('inert') && sd.activeElement===open && !sd.querySelector('main').hasAttribute('inert'));
 
       const gal=sd.getElementById('xp-gallery');
+      const xbody=gal.closest('.xp-body');
       sd.documentElement.style.setProperty('--gallery-locked','');
       Object.defineProperty(gal,'scrollHeight',{configurable:true,value:1000});
+      const firstCard=gal.firstElementChild;
+      Object.defineProperty(firstCard,'offsetTop',{configurable:true,value:7});
+      Object.defineProperty(firstCard,'offsetHeight',{configurable:true,value:148});
+      if (gal.children[1]) {
+        Object.defineProperty(gal.children[1],'offsetTop',{configurable:true,value:165});
+        Object.defineProperty(gal.children[1],'offsetHeight',{configurable:true,value:148});
+      }
       sw.applyGallerySize(gal);
-      const capped=gal.style.height==='340px';
+      // One measured row (148px), EXACTLY - never two, never a sliver of the
+      // next row - applied to the band (the .xp-body box) the tall dimension
+      // rail would otherwise stretch; the gallery itself keeps its natural
+      // height (its end breathing is scroll-padding, not box height).
+      const capped=xbody.style.height==='148px' && gal.style.height==='';
       sd.documentElement.style.setProperty('--gallery-locked','1');
       sw.applyGallerySize(gal);
-      check('gallery sizing follows the CSS-owned lock state, without a second height breakpoint',capped && gal.style.height==='');
+      check('gallery sizing follows the CSS-owned lock state, without a second height breakpoint',
+        capped && xbody.style.height==='' && gal.style.height==='');
       sd.documentElement.style.removeProperty('--gallery-locked');
+      Object.defineProperty(gal,'scrollHeight',{configurable:true,value:148});
+      sw.applyGallerySize(gal);
+      // The band stays one row even when the content fits: a scrollHeight-
+      // conditional "natural" flip was the set-clear-set oscillation.
+      const settled=xbody.style.height==='148px';
+      check('the band stays one row even when the gallery content fits it', settled);
 
       sw.applyBootstrapState({...state, storage:{enabled:true,dropped:0}});
       check('zero durable drops clear the footer warning without a second counter',

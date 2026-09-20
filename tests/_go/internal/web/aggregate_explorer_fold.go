@@ -124,19 +124,15 @@ func TestExplorerFoldOccurrenceSemantics(t *testing.T) {
 			t.Fatalf("%s scope/rail = %+v", dim, p)
 		}
 		g := p.Groups[0]
-		wantN, wantSpark := int64(3), 3
+		wantN := int64(3)
 		if dim == "error" {
-			wantN, wantSpark = 2, 2
+			wantN = 2
 			if g.ErrEvents != 3 || g.LastMs != 2100 || g.Code != "500" {
 				t.Fatalf("error occurrence metadata = %+v", g)
 			}
 		}
-		var sparkN int
-		for _, n := range g.Spark {
-			sparkN += n
-		}
-		if g.N != wantN || sparkN != wantSpark || g.Cost != .2 || g.ErrFinal != 1 {
-			t.Fatalf("%s occurrence aggregation = %+v, spark requests = %d", dim, g, sparkN)
+		if g.N != wantN || g.Cost != .2 || g.ErrFinal != 1 {
+			t.Fatalf("%s occurrence aggregation = %+v", dim, g)
 		}
 	}
 }
@@ -162,48 +158,10 @@ func TestExplorerFoldPendingDedupeIsBounded(t *testing.T) {
 	}
 }
 
-func TestExplorerFoldSampleReservationIsBounded(t *testing.T) {
-	rows := make([]contrib, 1000)
-	for i := range rows {
-		rows[i] = contrib{id: fmt.Sprint(i), prov: "old.example", status: 200, ttft: 10, tps: 1}
-		if i == len(rows)-1 {
-			rows[i].prov = "new.example"
-		}
-	}
-	p := explorerProjection(rows)
-	for _, filtered := range []bool{false, true} {
-		var fs []scopeFilter
-		if filtered {
-			fs = []scopeFilter{{dim: "client", id: ""}}
-		}
-		f := newExplorerFold("provider", "", fs)
-		f.prepare(p, nil)
-		_ = f.fold(&p.rows[0])
-		_ = f.fold(&p.rows[len(p.rows)-1])
-		for i := range 10 {
-			c := contrib{prov: fmt.Sprintf("ring-%d.example", i), ttft: 10, tps: 1}
-			_ = f.fold(&c)
-		}
-		var reserved int
-		for _, g := range f.groups {
-			want := 0
-			if !filtered && g.name == "old.example" {
-				want = len(p.rows) - 1
-			} else if !filtered && g.name == "new.example" {
-				want = 1
-			}
-			if g.startCap != want {
-				t.Fatalf("filtered=%v group=%q reserved %d starts, want %d", filtered, g.name, g.startCap, want)
-			}
-			reserved += g.startCap
-		}
-		if reserved > len(p.rows) {
-			t.Fatalf("reserved %d samples for %d projected memberships", reserved, len(p.rows))
-		}
-	}
-}
-
-func TestExplorerFoldReservationsFollowProjectedMemberships(t *testing.T) {
+// Metric sample counting follows the projected memberships exactly (the
+// error dim counts affected requests; tool occurrences count duplicates),
+// and the CSR membership list retains one entry per projected membership.
+func TestExplorerFoldMetricCountsFollowProjectedMemberships(t *testing.T) {
 	rows := explorerFoldFixtures()
 	p := explorerProjection(rows)
 	mcz := &modelCanonizer{exec: config.CompileModelRules([]config.ModelRule{{Mode: config.ModelRuleLower}}), memo: make(map[string]string)}
@@ -218,21 +176,16 @@ func TestExplorerFoldReservationsFollowProjectedMemberships(t *testing.T) {
 		for i := range p.rows {
 			_ = f.fold(&p.rows[i])
 		}
-		var reserved, memberships int
+		var memberships int
 		for _, count := range counts {
 			memberships += count
 		}
 		for _, g := range f.groups {
 			want := counts[g.name]
-			if g.startCap != want || cap(g.starts) != want || cap(g.startEr) != want ||
-				g.ttftN != want || g.tpsN != want || len(g.ttftS) != 0 || len(g.tpsS) != 0 {
-				t.Fatalf("%s/%s start reservation=%d, metric counts=%d/%d, copied samples=%d/%d, want membership=%d",
-					dim, g.name, g.startCap, g.ttftN, g.tpsN, len(g.ttftS), len(g.tpsS), want)
+			if g.ttftN != want || g.tpsN != want || len(g.ttftS) != 0 || len(g.tpsS) != 0 {
+				t.Fatalf("%s/%s metric counts=%d/%d, copied samples=%d/%d, want membership=%d",
+					dim, g.name, g.ttftN, g.tpsN, len(g.ttftS), len(g.tpsS), want)
 			}
-			reserved += g.startCap
-		}
-		if reserved != memberships {
-			t.Fatalf("%s reserved %d samples for %d projected memberships", dim, reserved, memberships)
 		}
 		if len(f.members) != memberships {
 			t.Fatalf("%s retained %d CSR occurrences, want %d", dim, len(f.members), memberships)

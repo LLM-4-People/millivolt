@@ -201,14 +201,6 @@ func (q *queryDimensions) id(dim int, c *contrib, offset int) uint32 {
 	return q.intern(dim, errorKey(c.ent[offset]))
 }
 
-func (q *queryDimensions) count(dim int, id uint32) int {
-	counts := q.base[dim].counts
-	if int(id) < len(counts) {
-		return counts[id]
-	}
-	return 0
-}
-
 func (q *queryDimensions) name(dim int, id uint32) string {
 	base := q.base[dim].names
 	if int(id) < len(base) {

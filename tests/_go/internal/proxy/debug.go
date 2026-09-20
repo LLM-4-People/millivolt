@@ -489,15 +489,23 @@ func TestDebugRequestPublishedAndCaptured(t *testing.T) {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 
+	// Poll the finalized record: live publishes fire at acceptance with
+	// StatusCode still 0, so the old poll of the live view for a 200 could
+	// never match and only burned the deadline without verifying anything.
+	// finishDebugTap saves the capture before Record runs, so observing the
+	// finalized record also proves the capture is durable.
 	deadline := time.Now().Add(2 * time.Second)
 	var rec *metrics.Record
 	for time.Now().Before(deadline) {
-		if rec = spy.last.Load(); rec != nil && rec.Debug && rec.StatusCode == 200 {
+		if rec = spy.final.Load(); rec != nil && rec.Debug && rec.StatusCode == 200 {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if rec == nil || !rec.Debug {
+	if rec == nil || !rec.Debug || rec.StatusCode != 200 {
+		t.Fatal("finalized record never observed with debug=true and status 200")
+	}
+	if live := spy.last.Load(); live == nil || !live.Debug {
 		t.Fatal("live record never published with debug=true")
 	}
 

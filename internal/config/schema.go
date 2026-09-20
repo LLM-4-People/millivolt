@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -71,9 +72,9 @@ func Categories() []Category {
 	}
 }
 
-// Schema is the single registry of every user-tunable. Adding a Config field
-// requires an entry here; TestSchemaCoversConfigFields fails if they drift.
-func Schema() []Field {
+// schemaRegistry builds the schema once per process and shares it across all
+// callers. The slice is immutable after build; see Schema for the contract.
+var schemaRegistry = sync.OnceValue(func() []Field {
 	return withZeroTokens([]Field{
 		// ---- server ----
 		{Key: "listen", Category: "server", Label: "Listen address",
@@ -315,6 +316,14 @@ func Schema() []Field {
 			Help: "Ordered rewrite pipeline that merges spelling variants of the same model in every grouped surface (explorer model dimension, scope filters, debug checklist, Clear/Logs optgroups, and the request-log leaf\u2019s displayed name). Each rule is one step: exact (whole-string merge old → new), pattern (regex rewrite of all occurrences, $1 capture refs), lower (fold case). Rules apply once in order; the shipped default folds case, strips a `vendor/` namespace, strips a trailing `:tag`, strips a trailing architecture/quant suffix (`-fp4`, `-nvfp4`, `-bf16`, `-int8`, `-q4_k_m`), and unifies `.` with `-` between digits. An explicitly empty list groups by the exact stored spelling. Stored values remain unchanged; purge/export match them exactly and request details show the original. Debug matching uses separate native base-model normalization, not these display rules. Hot-reloads.",
 			Kind: KindModelRules, HotReload: true},
 	})
+})
+
+// Schema is the single registry of every user-tunable. Adding a Config field
+// requires an entry here; TestSchemaCoversConfigFields fails if they drift.
+// The slice is built once and shared by every caller: never mutate it or its
+// elements. Callers needing a private copy make one themselves.
+func Schema() []Field {
+	return schemaRegistry()
 }
 
 func withZeroTokens(fields []Field) []Field {
@@ -329,12 +338,15 @@ func withZeroTokens(fields []Field) []Field {
 	return fields
 }
 
-// FieldByKey returns the schema entry for a yaml key, or nil.
+// FieldByKey returns the schema entry for a yaml key, or nil. It scans the
+// shared registry once and returns a pointer to a copy of the entry, so a
+// caller can never mutate the cached schema through it.
 func FieldByKey(key string) *Field {
-	for i, f := range Schema() {
-		if f.Key == key {
-			fp := Schema()[i]
-			return &fp
+	fields := Schema()
+	for i := range fields {
+		if fields[i].Key == key {
+			f := fields[i]
+			return &f
 		}
 	}
 	return nil

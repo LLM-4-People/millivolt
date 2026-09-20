@@ -262,7 +262,8 @@ func TestPausePersistsAndRestores(t *testing.T) {
 
 type liveSpy struct {
 	metrics.Noop
-	last atomic.Pointer[metrics.Record]
+	last  atomic.Pointer[metrics.Record]
+	final atomic.Pointer[metrics.Record]
 }
 
 func (s *liveSpy) PublishLive(_ string, r *metrics.Record) {
@@ -271,6 +272,17 @@ func (s *liveSpy) PublishLive(_ string, r *metrics.Record) {
 	}
 	c := *r
 	s.last.Store(&c)
+}
+
+// Record captures the finalized record, the sink path live publishes never
+// see (PublishLive fires at acceptance with StatusCode still 0). Tests that
+// must observe a completed outcome poll final; last stays the live view.
+func (s *liveSpy) Record(r *metrics.Record) {
+	if r == nil {
+		return
+	}
+	c := *r
+	s.final.Store(&c)
 }
 
 func TestPausedRequestPublishedAsPaused(t *testing.T) {

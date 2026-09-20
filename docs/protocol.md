@@ -190,8 +190,14 @@ adaptive cap and can therefore outlast it. A short hint does not reset the
 doubling, so a 1s "retry shortly" cannot re-hammer a struggling upstream.
 
 A finalized request retains its absorbed attempts and final outcome in one
-record. Recovered upstream failures can count as errors even when the final
-status succeeds. A final or retried 429 is a separate affected-request signal.
+record. Every attempt - absorbed or final - stores the same upstream-response
+information: the provider request id, server, processing time, echoed model,
+rate-limit state and the redacted response headers. A provider-side request id
+therefore matches to the exact upstream attempt that produced it, including
+failures the client never saw. Transport failures have no HTTP response, so
+their attempt entries leave those fields empty. Recovered upstream failures can
+count as errors even when the final status succeeds. A final or retried 429
+is a separate affected-request signal.
 A client that disconnects before a final outcome is recorded as status 499
 with `client_disconnected`; a plain 499 is a flow event, but one carrying a
 structured error (the provider's in-band stream failure the client aborted

@@ -177,17 +177,7 @@ function hideClientTip() {
   window.addEventListener('scroll', hideClientTip, {passive: true, capture: true});
 }
 
-// ---------- explorer: sparkline (hand-rolled SVG, no dependency) ----------
-// sparklineSVG renders a word-sized area+line time-series as a single SVG
-// <path> pair (flat cost regardless of point count). Volume is the area+line;
-// errors overlay as a thin second line. Independent y-axis per sparkline (nodes
-// have wildly different volumes); the numeric total sits beside it. Decorative:
-// aria-hidden - the adjacent numbers carry the value (WCAG).
-//   series: number[] (volume per bucket), errs: number[] (errors per bucket).
-//   Sparse series tolerate null/NaN buckets: only finite samples draw, at
-//   their original index (an absent measurement keeps its honest x position
-//   instead of compressing its neighbors); fewer than two finite samples
-//   render an empty spark, never a fabricated line.
+// ---------- summary tile sparks (hand-rolled SVG, no dependency) ----------
 // sparkPath builds one sparse-tolerant, self-normalized line path over the
 // series' index space: nulls leave real gaps (x still advances per data
 // slot), values scale to their own finite min/max, and fewer than two
@@ -226,26 +216,6 @@ function sparklineMulti(specs, w, h) {
     return d ? sparkLine(d, s.color) : '';
   }).filter(Boolean);
   return sparkFrame(w, h, lines.join(''));
-}
-
-// sparklineSVG's fallback stroke when a caller passes no color.
-const SPARK_DEFAULT_COLOR = 'var(--accent)';
-
-function sparklineSVG(series, errs, w, h, color) {
-  if (!color) color = SPARK_DEFAULT_COLOR;
-  const line = sparkPath(series, w, h);
-  if (!line) {
-    return sparkFrame(w, h, '');
-  }
-  // Close the polygon from the first point (line already starts with M at (0, y0)):
-  // baseline right edge → bottom edge → implicit close up the left side. Never
-  // splice raw numbers after the M command - the old `M0 ${h}${line.slice(1)}`
-  // joined "22" and "0.0" into "220.0", emitting invalid path data (Chrome
-  // logged "<path> attribute d: Expected number" for every sparkline).
-  const area = `${line}L${w} ${h}L0 ${h}Z`;
-  const errPath = (errs && errs.some(e => e > 0)) ? sparkPath(errs, w, h) : '';
-  const errLine = errPath ? `<path d="${errPath}" fill="none" stroke="var(--err)" stroke-width="1" opacity="0.9"/>` : '';
-  return sparkFrame(w, h, `<path d="${area}" fill="${color}" opacity="0.13"/>` + sparkLine(line, color) + errLine);
 }
 
 // shareBar renders a part-to-whole proportion bar + % for a value against a

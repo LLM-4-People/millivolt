@@ -325,55 +325,79 @@ function renderGallery(st) {
 
 // sizeGallery sizes the gallery once per render. In the locked viewport layout
 // the explorer box has a fixed height and the gallery fills it via CSS (flex);
-// otherwise (scrolling page) it fits its content up to a generous cap, then
-// scrolls whole rows. The actual sizing is applied by applyGallerySize, which
-// runs after layout (rAF) and re-runs on any content/box resize (ResizeObserver)
-// - so the first paint, which used to measure before the grid settled and stay
-// wrong until a refresh, now self-corrects on the next frame.
+// otherwise (scrolling page) the gallery compresses to ONE whole row of node
+// cards - the same compact band the locked layout's 240px explorer shows -
+// with internal scrolling for the remaining rows. The actual sizing is applied
+// by applyGallerySize, which runs after layout (rAF) and re-runs on any
+// content/box resize (ResizeObserver) - so the first paint, which used to
+// measure before the grid settled and stay wrong until a refresh, now
+// self-corrects on the next frame.
 function sizeGallery() {
   const gal = $('xp-gallery');
   if (!gal) return;
   requestAnimationFrame(() => applyGallerySize(gal));
 }
 
-// XP_GALLERY_MIN_H is the scrolling-page gallery floor: never show less
-// than about two full rows of node cards. Card height is content-driven
-// (no fixed CSS height), so a computed two-row estimate from a nominal card
-// height could never reliably win; this fixed floor is itself the two-row
-// guarantee.
-const XP_GALLERY_MIN_H = 340;
+// The row's height is MEASURED from the laid-out cards - card height is
+// content-driven, so a nominal estimate could never win - and an empty
+// gallery never collapses. The cap is the row EXACTLY: the gallery's
+// end-of-scroll breathing lives in scroll-padding (not box padding), so
+// nothing of the next row peeks into the band.
+const XP_GALLERY_ROW_PAD = 12;
 
+// applyGallerySize caps the scrolling-page explorer to ONE whole row of
+// node cards by sizing the BAND (the .xp-body grid box), not the gallery:
+// the body's row is what the tall dimension rail would otherwise stretch,
+// so capping the gallery alone left the card at the rail's height. A
+// definite body height clamps its grid row exactly like the locked
+// layout's flexed band does, and both columns then scroll internally (the
+// rail's own overflow-y, the gallery's own overflow-y). The gallery itself
+// keeps its natural height inside.
 function applyGallerySize(gal) {
-  if (getComputedStyle(document.documentElement).getPropertyValue('--gallery-locked').trim() === '1') {
-    if (gal.style.height !== '') gal.style.height = ''; // locked: CSS flex fills the box
-    return;
+  const body = gal.closest('.xp-body');
+  if (!body) return;
+  const locked = getComputedStyle(document.documentElement).getPropertyValue('--gallery-locked').trim() === '1';
+  const setH = (el, want) => { if (el.style.height !== want) el.style.height = want; };
+  if (locked) { setH(body, ''); setH(gal, ''); return; } // locked: CSS flex fills the box
+  const first = gal.firstElementChild;
+  if (!first) { setH(body, ''); setH(gal, ''); return; }
+  const top = first.offsetTop;
+  let row = 0;
+  for (const c of gal.children) {
+    if (c.offsetTop !== top) break; // the first row ends where the next begins
+    row = Math.max(row, c.offsetHeight);
   }
-  const cap = XP_GALLERY_MIN_H;
-  const want = Math.min(gal.scrollHeight, cap) + 'px';
-  if (gal.style.height !== want) gal.style.height = want; // no-op if unchanged (avoids RO loop)
+  // The band is ONE row, always - never conditional on the gallery's own
+  // scrollHeight: a capped box collapses scrollHeight to the cap, so a
+  // "fits: go natural" predicate would flip to clearing the height, the
+  // box would regrow (the tall rail stretches it), the observer would
+  // re-cap, and the band would oscillate forever - the set-clear-set loop
+  // behind the layout jitter. A constant cap is a no-op on re-apply, so
+  // the band settles in one frame; the rail and the remaining gallery rows
+  // scroll inside it.
+  const cap = row + 'px';
+  setH(body, cap);
+  setH(gal, '');
 }
 
-// Re-apply sizing whenever the gallery's content changes size (first paint,
-// streaming updates, zoom, window resize). We observe the gallery's first child
-// wrapper via the gallery's own scrollHeight changes; the no-op guard in
-// applyGallerySize prevents a set-height → observe → set-height loop.
+// Re-apply sizing whenever the gallery's box changes size (first paint,
+// streaming updates, zoom, and the locked/unlocked layout flip: crossing the
+// viewport breakpoints changes the box without changing the content, so a
+// content-hash guard would miss it). Safe by construction: applyGallerySize
+// only writes when the height differs, so a re-apply that changes nothing
+// cannot re-fire the observer.
 let _galleryRO = null;
 function watchGallery() {
   const gal = $('xp-gallery');
   if (!gal || _galleryRO) return;
-  let last = -1;
-  _galleryRO = new ResizeObserver(() => {
-    // Only re-apply when the content height actually changed.
-    if (gal.scrollHeight !== last) { last = gal.scrollHeight; applyGallerySize(gal); }
-  });
+  _galleryRO = new ResizeObserver(() => applyGallerySize(gal));
   _galleryRO.observe(gal);
 }
 
 // xpNodeCard renders one gallery node-card from the server's entity aggregate
 // (jsonEnt): share of all requests (error dim: of all failure events) since
-// inception + the entity's own trend sparkline + the per-dimension KPI set
-// (`nodeKpis`). No client-side math beyond formatting - percentiles arrive
-// precomputed.
+// inception + the per-dimension KPI set (`nodeKpis`). No client-side math
+// beyond formatting - percentiles arrive precomputed.
 function kpiCell(label, inner, title) {
   const t = title ? ` title="${escapeHtml(title)}"` : '';
   return `<span${t}>${escapeHtml(label)} ${inner}</span>`;
@@ -391,7 +415,6 @@ function kpiTok(e) { return kpiNum('tok', `${fmt(e.in)}/${fmt(e.out)}`); }
 function kpiTtft(e) { return kpiTail('ttft', e.ttft_p50, e.ttft_p95, fmtDur, 'p50 / p95 time-to-first-token (the tail is what users feel)'); }
 function kpiTps(e) { return kpiTail('tps', e.tps_p50, e.tps_p95, v => Number(v).toFixed(0), 'p50 / p95 throughput (tok/s)'); }
 function kpiCache(e) { return kpiNum('cache', e.in ? pct2(e.cache, e.in) : '-', 'prompt-cache hit rate'); }
-function kpiReason(e) { return kpiNum('reason', fmt(e.reasoning || 0), 'reasoning tokens (thinking load)'); }
 function kpiErrRate(e) { return kpiNum('err rate', pct2(e.err_final || 0, e.n)); }
 // Blended $/Mtok over this entity's cost-reporting tokens (server-computed,
 // same rule as the KPI band) - a per-entity spend rate, never diluted by the
@@ -435,10 +458,10 @@ function nodeKpis(dim, e) {
       // volume is already the headline.
       return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiTtft(e);
     case 'model':
-      // Token-family slots together: in/out, cached-prompt share, reasoning
-      // (thinking is model-inherent). Cache renders like client/provider -
-      // an unreported hit rate shows 0.0%, not a fabricated gap.
-      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiCache(e) + kpiReason(e) + kpiTtft(e) + kpiTps(e);
+      // Token-family slots together: in/out and the cached-prompt share.
+      // Cache renders like client/provider - an unreported hit rate shows
+      // 0.0%, not a fabricated gap.
+      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiCache(e) + kpiTtft(e) + kpiTps(e);
     default:
       // client / provider: routing peers - spend, tokens, prompt-cache, and
       // the latency/throughput the user feels.
@@ -446,7 +469,6 @@ function nodeKpis(dim, e) {
   }
 }
 
-const SPARK_W = 96, SPARK_H = 22;
 // The server resolves observed ancestry across the complete scoped history.
 // These are exact leaf pivots, never implicit descendant/family filters.
 function conversationParent(info) {
@@ -500,7 +522,7 @@ function xpNodeCard(st, e, payload) {
     <span class="xp-node-hd">${entityBadge(dim, key)}${roleBadge}<span class="xp-node-n">${fmt(headN)}<small>${headUnit}</small></span></span>
     ${shareFrac != null ? `<span class="xp-node-share" title="${shareLabel}">${shareBar(shareFrac, entityType(dim).color)}</span>` : ''}
     <span class="xp-node-kpis">${kpis}</span>
-    <span class="xp-node-foot">${sparklineSVG(e.spark || [], e.spark_err || [], SPARK_W, SPARK_H, entityType(dim).color)}${signals ? `<span class="xp-node-signals">${signals}</span>` : ''}</span>
+    ${signals ? `<span class="xp-node-foot"><span class="xp-node-signals">${signals}</span></span>` : ''}
   </button>`;
   // Parent navigation is a sibling link, never nested inside the card button.
   return dim === 'conversation' ? `<div class="xp-conversation-node">${card}${conversationParent(info)}</div>` : card;
