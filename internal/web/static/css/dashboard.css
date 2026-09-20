@@ -445,13 +445,14 @@
     :root { --gallery-locked: 1; }
     /* The pair's side-by-side split is part of the one-screen instrument:
      the timeline card takes its narrow column, the requests log the wide
-     one. The timeline column FLOORS at 546px so its summary band always
-     holds three whole 160px tracks (3x160 + 2x10 gaps = 500px of band
-     content, plus the card's ~46px of padding, borders and band chrome) -
-     the 5-metric selection wraps into at most two rows (~278px of card)
-     and stays fully visible in the pair share even at the shortest
-     supported window; the log keeps the rest. */
-    .grid-pair { grid-template-columns: minmax(546px, 1fr) minmax(0, 2fr); }
+     one. The timeline column FLOORS at 572px so its summary band always
+     holds three whole 170px tracks (3x170 + 2x8 gaps = 526px of band
+     content, plus the card's padding, borders and band chrome) - the
+     5-metric selection wraps into at most two rows (~278px of card) and
+     every common value fits its track (the widest, the in/out/cached
+     triple at the band's 13px, needs 150px + 16px padding per tile); the
+     log keeps the rest. */
+    .grid-pair { grid-template-columns: minmax(572px, 1fr) minmax(0, 2fr); }
     /* The header is sticky (in flow), so lock the WHOLE body to the viewport
        and let main take what remains - otherwise header + 100vh main overflows
        by exactly the header height. */
@@ -1038,7 +1039,17 @@
   .traffic-card.tiles-only #traffic-legend { display: none; }
   .traffic-card.tiles-only .chart-totals {
     position: relative;
-    grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+    /* 13px values are the band's fit size: the widest common value - the
+       in/out/cached triple, e.g. "95.21M/392.78K/92.85M" - measures 150px
+       at 13px (173px at the strip's 15px, far past a 3-track row's ~160px
+       cell). With the 8px tile side padding that needs a 166px track, so
+       the floor is 170px and the lock's pair floor (546px card, below)
+       keeps three whole tracks in the timeline card at every locked
+       window. Extreme values ellipsize (the val-pair rule below), never
+       overlap. */
+    grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr));
+    gap: 8px;
+    font-size: 13px;
     margin-bottom: 10px; padding-bottom: 6px; border-bottom: 0;
   }
   .traffic-card.tiles-only .chart-totals::after {
@@ -1049,11 +1060,17 @@
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 12px; height: 100px;
+    justify-content: space-between; gap: 6px; padding: 10px 8px; height: 100px;
     background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
   .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
   .traffic-card.tiles-only .chart-total:first-child { border-left: 0; }
+  /* The KPI band's idiom, applied to the band tile's value pair: a value
+     wider than its track (extreme token counts) truncates with an ellipsis
+     instead of painting over the neighboring tile - the KPI row above
+     clips the same way, and the tile is a summary: exact figures live in
+     the KPI band and the request drawer. */
+  .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   /* Merged in/out pair: one wrapped line whose halves mirror the token
      bars' colors (input purple, output green) over a thin muted separator -
      tile and bars read as one story, and the pair fits the narrowest tile

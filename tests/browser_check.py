@@ -319,7 +319,7 @@ async def check(base, screenshot):
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
                                 wrapHidden: getComputedStyle(document.getElementById('chart-traffic')).display === 'none',
                                 visible,
-                                trackFloor: tileList.every(t => t.offsetWidth >= 160),
+                                trackFloor: tileList.every(t => t.offsetWidth >= 170),
                                 shareLabels: !tokSub || (tokSub.textContent.includes('of tokens') && tokSub.textContent.includes('cache hit') && tokSub.textContent.includes('of input')),
                                 overflow, rlTotal, errTotal,
                                 uniformTiles: tileList.length >= 1 && tileList.every(t => t.offsetHeight === tileList[0].offsetHeight),
