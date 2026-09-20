@@ -259,11 +259,12 @@ func resolveRequestOverrides(rules []config.RequestOverride, client, provider, m
 
 // overrideBodyWireFormat reports whether a target's request body is
 // OpenAI-wire JSON - the only shape the request-overrides body fields can
-// edit. Cursor's agent.v1 run_request translator reads model, messages,
+// edit. Composes the single format predicate with the translated-anthropic
+// target. Cursor's agent.v1 run_request translator reads model, messages,
 // stream and tools only, so token ceilings carry no wire meaning on a
 // cursor target: its body section is skipped (header rules still apply).
 func overrideBodyWireFormat(format string) bool {
-	return format == "" || format == "openai" || format == "anthropic"
+	return isOpenAIWire(format) || format == "anthropic"
 }
 
 // applyOverrideHeaders applies the resolved request-overrides merge to an
@@ -304,11 +305,13 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 
 // overrideRequestBody stamps the merged token ceilings onto an OpenAI-wire
 // request body and returns the rewritten bytes: the whole document decodes
-// as raw JSON values (every other field preserved verbatim), only the named
-// numeric fields are set, and the document re-marshals. Fail closed - why
-// carries the operator-actionable reason and the caller relays the ORIGINAL
-// bytes unchanged - when the body is not a JSON object or the rewritten
-// result would exceed the request byte budget.
+// as raw JSON values, only the named numeric fields are set, and the
+// document re-marshals with every other field's value preserved verbatim -
+// the re-encode sorts keys, compacts whitespace and HTML-escapes <, > and &
+// inside preserved values, so the bytes are not preserved, only the values.
+// Fail closed - why carries the operator-actionable reason and the caller
+// relays the ORIGINAL bytes unchanged - when the body is not a JSON object
+// or the rewritten result would exceed the request byte budget.
 func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (out []byte, why string) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
@@ -334,6 +337,24 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (
 	return out, ""
 }
 
+// applyTokenCaps decodes the request's token-cap pair from body with one
+// minimal unmarshal and stamps the effective ceiling onto the record
+// through MergeTokenCaps' precedence (max_completion_tokens wins, neither
+// present stamps nil). A body whose cap pair does not decode leaves the
+// record untouched. Both cap re-reads share it: restampReqMaxTokens re-reads
+// a rewritten body, and parseLLMRequest's split-decode recovery re-reads a
+// body whose parameter block failed its strict decode.
+func applyTokenCaps(body []byte, rec *metrics.Record) {
+	var caps struct {
+		MaxTokens     *int `json:"max_tokens"`
+		MaxCompTokens *int `json:"max_completion_tokens"`
+	}
+	if json.Unmarshal(body, &caps) != nil {
+		return
+	}
+	rec.ReqMaxTokens = providerformat.MergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
+}
+
 // restampReqMaxTokens re-reads the effective token ceiling from a rewritten
 // body onto the record, so the hostile-cap boundary, the scheduler
 // reservation and the recorded request parameters all describe the bytes
@@ -342,14 +363,7 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, maxBytes int64) (
 // cap field carried a non-number) keeps the first decode's value rather
 // than fabricating one.
 func restampReqMaxTokens(body []byte, rec *metrics.Record) {
-	var caps struct {
-		MaxTokens     *int `json:"max_tokens"`
-		MaxCompTokens *int `json:"max_completion_tokens"`
-	}
-	if json.Unmarshal(body, &caps) != nil {
-		return
-	}
-	rec.ReqMaxTokens = mergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
+	applyTokenCaps(body, rec)
 }
 
 // joinUpstreamURL joins a base URL and a request path without duplicating a
@@ -1040,21 +1054,6 @@ type requestParameters struct {
 	Messages []requestMessage[requestContent] `json:"messages"`
 }
 
-// mergeTokenCaps owns the token-ceiling precedence every decode of the
-// request's cap fields shares: max_completion_tokens wins over max_tokens
-// (the OpenAI pair's documented semantics, mirrored by the Anthropic
-// translator, which carries exactly one max_tokens upstream), and neither
-// present means no ceiling.
-func mergeTokenCaps(maxCompletion, maxTokens *int) *int {
-	switch {
-	case maxCompletion != nil:
-		return maxCompletion
-	case maxTokens != nil:
-		return maxTokens
-	}
-	return nil
-}
-
 // parseLLMRequest is the single document decode for routing and metadata.
 // Keep the two independent trust boundaries on type errors: a malformed
 // metadata-only field must not erase valid model/stream routing, and vice
@@ -1080,26 +1079,21 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 			// (hostileTokenCap reads rec.ReqMaxTokens): a type error anywhere
 			// else in the parameters block - including tool parameters carried
 			// as raw JSON by the Anthropic translator - must not blind that
-			// check. Recover the cap alone with a minimal decode of the same
-			// body, applying the same max_completion_tokens-wins precedence as
-			// the clean merge below.
-			var caps struct {
-				MaxTokens     *int `json:"max_tokens"`
-				MaxCompTokens *int `json:"max_completion_tokens"`
-			}
-			if json.Unmarshal(body, &caps) == nil {
-				rec.ReqMaxTokens = mergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
-			}
+			// check. Recover the cap alone with applyTokenCaps' minimal decode
+			// of the same body, applying the same max_completion_tokens-wins
+			// precedence as the clean merge below (a cap pair that still does
+			// not decode leaves the record's cap untouched).
+			applyTokenCaps(body, rec)
 			rec.Model, rec.Stream = req.Model, req.Stream
 			return
 		}
 	}
 	rec.Model, rec.Stream = req.Model, req.Stream
 	// Prefer max_completion_tokens, matching the Anthropic translator's
-	// pick: the translated body re-decodes through this same merge, so the
-	// trust-boundary check in ServeHTTP must see the one field a translated
-	// body can actually carry upstream.
-	rec.ReqMaxTokens = mergeTokenCaps(req.MaxCompTokens, req.MaxTokens)
+	// pick: the translated body re-decodes through this same
+	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP
+	// must see the one field a translated body can actually carry upstream.
+	rec.ReqMaxTokens = providerformat.MergeTokenCaps(req.MaxCompTokens, req.MaxTokens)
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)

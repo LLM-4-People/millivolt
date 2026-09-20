@@ -12,11 +12,12 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
 
-// isOpenAIWire reports whether a target format speaks the OpenAI-compatible
-// wire: the explicit "openai" spelling or the empty passthrough default. It
-// is the single format predicate behind the quota pause - only these
-// upstreams return the insufficient_quota / insufficient_credits envelope
-// family the pause is defined on.
+// isOpenAIWire is the single format predicate: it reports the neutral wire
+// fact whether a target format speaks the OpenAI-compatible wire - the
+// explicit "openai" spelling or the empty passthrough default. The quota
+// pause keys on it (only these upstreams return the insufficient_quota /
+// insufficient_credits envelope family the pause is defined on), and
+// overrideBodyWireFormat extends it with the translated-anthropic target.
 func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"
 }

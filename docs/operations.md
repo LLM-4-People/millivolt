@@ -167,7 +167,7 @@ the client's `X-Proxy-Headers` map, so a matching override wins over all of
 them. Credential and protocol names (`authorization`, `cookie`,
 `proxy-authorization`, `host`, `content-type`, `content-length`,
 `transfer-encoding`, `te`, `connection`, `keep-alive`, `proxy-authenticate`,
-`proxy-connection`, `trailers`, `upgrade`) and the whole `x-proxy-` control
+`proxy-connection`, `trailer`, `upgrade`) and the whole `x-proxy-` control
 prefix are rejected at load in both header lists; at runtime the target's
 configured auth header is skipped even if one slips through, so credentials
 stay at their owner. Header names are trimmed and canonicalized
@@ -179,7 +179,12 @@ result would exceed `max_request_bytes`, nothing is written and the original
 bytes are relayed verbatim with one process log line recording the reason. A
 successful rewrite replaces the body for the request's whole life, so every
 relay attempt, absorbed retry and quality re-send reuses it, and the recorded
-request cap is re-stamped from the effective body. Cursor targets carry no
+request cap is re-stamped from the effective body. A rule sets only the body
+fields it names, and the re-read pair keeps the wire's documented precedence -
+`max_completion_tokens` wins over `max_tokens` - so a rule setting only
+`max_tokens` cannot raise a request whose client already sent
+`max_completion_tokens`: set both fields to the same value to override either
+spelling. Cursor targets carry no
 token ceilings on their wire, so the body section is skipped for them while
 header rules still apply at the native send.
 

@@ -271,6 +271,39 @@ func TestAnthropicDefaultMaxTokensCeilingMatchesProxyBound(t *testing.T) {
 	}
 }
 
+// TestRequestOverrideBodyBandMatchesProxyBound pins the second ceiling
+// mirror: the request-overrides body band (1..1000000) shares its top end
+// with maxRequestOutputTokens. The load-bearing direction: a rule's body
+// value is stamped onto the upstream body and re-stamped onto the record,
+// which the hostile-cap boundary checks, so a config band raised above the
+// proxy bound would let a validated operator setting produce requests the
+// trust boundary then rejects. Both body fields run through the same band
+// check, so each field is pinned through the validation seam
+// (config.Default plus Validate), the same path every config load and save
+// goes through.
+func TestRequestOverrideBodyBandMatchesProxyBound(t *testing.T) {
+	for _, field := range [...]struct {
+		name  string
+		value func(int) *config.OverrideBody
+	}{
+		{"max_tokens", func(v int) *config.OverrideBody { return &config.OverrideBody{MaxTokens: &v} }},
+		{"max_completion_tokens", func(v int) *config.OverrideBody { return &config.OverrideBody{MaxCompletionTokens: &v} }},
+	} {
+		inBand := maxRequestOutputTokens
+		cfg := config.Default()
+		cfg.RequestOverrides = []config.RequestOverride{{Client: "opencode", Body: field.value(inBand)}}
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("%s = %d must validate at the proxy bound: %v", field.name, maxRequestOutputTokens, err)
+		}
+		above := maxRequestOutputTokens + 1
+		cfg.RequestOverrides = []config.RequestOverride{{Client: "opencode", Body: field.value(above)}}
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("%s = %d validates above the proxy bound (%d)",
+				field.name, above, maxRequestOutputTokens)
+		}
+	}
+}
+
 // TestMaxLimitWindowMirrorsSchedulerRetryHint pins the throttle.go comment
 // that maxLimitWindow is the same ceiling as scheduler.MaxRetryHint (a
 // daily quota window). Both bounds are deliberately in their owning

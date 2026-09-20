@@ -491,6 +491,90 @@ func TestRequestOverridesScopeNoMatch(t *testing.T) {
 	}
 }
 
+// TestRequestOverridesOverlappingRulesLastActionWins pins the ordered walk
+// across rules whose scopes overlap on one request: disjoint scope leaves
+// (client and model) both match, and for any one header name or body field
+// the last action in list order wins - a later remove beats an earlier
+// set, a later set resurrects a name an earlier rule removed, and a later
+// rule's body value beats an earlier rule's on the wire and the
+// re-stamped record. The belt row pins the within-rule order a validated
+// config can never express (one canonical name both set and removed in the
+// same rule is rejected at load, so the rule is constructed directly
+// without Validate): the rule's sets resolve before its removals, so the
+// remove wins.
+func TestRequestOverridesOverlappingRulesLastActionWins(t *testing.T) {
+	first := 111
+	second := 222
+	for _, tc := range []struct {
+		name       string
+		rules      []config.RequestOverride
+		validate   bool
+		wantXLab   string // "" means absent upstream (every value here is non-empty)
+		wantTokens int
+	}{
+		{"set then remove across rules, the later remove wins", []config.RequestOverride{
+			{Client: "ov-client", Headers: map[string]string{"X-Lab-Mode": "rule-one"}},
+			{Model: "model-a", RemoveHeaders: []string{"X-Lab-Mode"}},
+		}, true, "", 10},
+		{"remove then set across rules, the later set resurrects", []config.RequestOverride{
+			{Client: "ov-client", RemoveHeaders: []string{"X-Lab-Mode"}},
+			{Model: "model-a", Headers: map[string]string{"X-Lab-Mode": "rule-two"}},
+		}, true, "rule-two", 10},
+		{"later rule's body value wins per field", []config.RequestOverride{
+			{Client: "ov-client", Body: &config.OverrideBody{MaxTokens: &first}},
+			{Model: "model-a", Body: &config.OverrideBody{MaxTokens: &second}},
+		}, true, "client-value", second},
+		{"within-rule set and remove, the remove wins (invalid config, constructed directly)", []config.RequestOverride{
+			{Client: "ov-client", Headers: map[string]string{"X-Lab-Mode": "rule-one"},
+				RemoveHeaders: []string{"X-Lab-Mode"}},
+		}, false, "", 10},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
+			defer upstream.Close()
+			cfg := config.Default()
+			cfg.RequestOverrides = tc.rules
+			if tc.validate {
+				if err := cfg.Validate(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			buf := metrics.NewBuffer(4)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
+
+			status, _ := postOverrideChat(t, srv.URL, upstream.URL, overrideChatBody, func(r *http.Request) {
+				r.Header.Set("X-Proxy-Client", "ov-client")
+				r.Header.Set("X-Lab-Mode", "client-value")
+			})
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want 200", status)
+			}
+			bodies, hdrs := capt.snapshot()
+			if len(bodies) != 1 {
+				t.Fatalf("upstream sends = %d, want 1", len(bodies))
+			}
+			var got struct {
+				MaxTokens int `json:"max_tokens"`
+			}
+			if err := json.Unmarshal([]byte(bodies[0]), &got); err != nil {
+				t.Fatalf("upstream body is not JSON: %v (%s)", err, bodies[0])
+			}
+			if got.MaxTokens != tc.wantTokens {
+				t.Errorf("upstream max_tokens = %d, want %d", got.MaxTokens, tc.wantTokens)
+			}
+			if gotX := hdrs[0].Get("X-Lab-Mode"); gotX != tc.wantXLab {
+				t.Errorf("X-Lab-Mode = %q, want %q", gotX, tc.wantXLab)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if recs[0].ReqMaxTokens == nil || *recs[0].ReqMaxTokens != tc.wantTokens {
+				t.Errorf("record ReqMaxTokens = %v, want %d re-read from the effective body",
+					recs[0].ReqMaxTokens, tc.wantTokens)
+			}
+		})
+	}
+}
+
 // TestRequestOverridesHeaderPrecedenceLast pins the chain order: the resolved
 // override applies AFTER client-forwarded headers, the provider's configured
 // headers and the client's explicit X-Proxy-Headers injection map - the

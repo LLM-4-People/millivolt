@@ -23,6 +23,22 @@ const (
 	sseLineBufMax  = 1024 * 1024
 )
 
+// MergeTokenCaps owns the token-ceiling precedence of the OpenAI wire's cap
+// pair: max_completion_tokens wins over max_tokens (the pair's documented
+// semantics), and neither present means no ceiling. TranslateRequest composes
+// it with its deref and the configured default (Anthropic carries exactly
+// one max_tokens upstream), and the proxy's request decodes call it too, so
+// every reader of the pair resolves the same ceiling.
+func MergeTokenCaps(maxCompletion, maxTokens *int) *int {
+	switch {
+	case maxCompletion != nil:
+		return maxCompletion
+	case maxTokens != nil:
+		return maxTokens
+	}
+	return nil
+}
+
 // TranslateRequest converts an OpenAI Chat Completions request body into the
 // Anthropic Messages request body. Unknown/unsupported fields are dropped;
 // the goal is a working translation for the common case, not lossless
@@ -75,12 +91,9 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int) ([]byte, error) {
 	}
 	// max_tokens is required by Anthropic; prefer max_completion_tokens and
 	// inject a sane default when the client sent neither.
-	switch {
-	case in.MaxCompletionToken != nil:
-		out["max_tokens"] = *in.MaxCompletionToken
-	case in.MaxTokens != nil:
-		out["max_tokens"] = *in.MaxTokens
-	default:
+	if cap := MergeTokenCaps(in.MaxCompletionToken, in.MaxTokens); cap != nil {
+		out["max_tokens"] = *cap
+	} else {
 		out["max_tokens"] = defaultMaxTokens
 	}
 	if in.Temperature != nil {

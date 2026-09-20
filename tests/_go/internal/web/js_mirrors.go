@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -298,6 +299,95 @@ func TestRequestOverrideForbiddenHeadersMatchGoVocabulary(t *testing.T) {
 	}
 	if reason, forbidden := config.ForbiddenOverrideHeader(jsPrefix + "pin"); !forbidden || reason != goControl {
 		t.Errorf("config.ForbiddenOverrideHeader(%q) = (%q, %v), want (%q, true)", jsPrefix+"pin", reason, forbidden, goControl)
+	}
+}
+
+// TestRequestOverrideRuleCardWiringsPinnedInSource guards the chrome.js
+// rule-card wirings jsdom cannot exercise: the three scope inputs'
+// datalist associations and the rule-number label's routing through the
+// one owner. The list attribute is native browser behavior, so ui_check
+// can only see the rendered datalist elements and their options, never
+// that an input is actually associated with its datalist; and the initial
+// render's label is roRuleLabel's to produce (ui_check pins the renumbered
+// text after a removal). A dropped or hand-spelled wiring reddens here
+// before the editor can ship a scope input without its autocomplete or a
+// rule head whose number drifts from the server's cited index.
+func TestRequestOverrideRuleCardWiringsPinnedInSource(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	region := sourceRegion(t, string(src), "function roRuleCardHTML")
+	for _, kind := range []string{"client", "provider", "model"} {
+		wiring := "list=\"${roDlId('" + kind + "')}\""
+		if !strings.Contains(region, wiring) {
+			t.Errorf("roRuleCardHTML's %s scope input lost its datalist wiring %q", kind, wiring)
+		}
+	}
+	if !strings.Contains(region, "roRuleLabel(i)") {
+		t.Error("roRuleCardHTML's rule-number label no longer routes through roRuleLabel, the owner shared with roRenumber")
+	}
+}
+
+// TestRequestOverrideCapAndBandMatchGoOwner pins the two numeric
+// contracts the request-overrides editor shares with config: the rule
+// cap (chrome.js REQUEST_OVERRIDES_MAX, the count line and template
+// add gate, against config.RequestOverridesMax, the load-boundary cap)
+// and the body-ceiling band (chrome.js REQUEST_OVERRIDE_BODY_MAX plus
+// validateRoRow's band check and message, against config's
+// validateRequestOverrides comparison and errRange bounds). Both sides
+// are read from their sources, the ForbiddenHeaders-pin precedent, and
+// config's comparison and error wording must agree with each other too,
+// so a one-sided Go edit cannot pass. Drift would let the editor accept
+// a ceiling the server rejects, warn about one it accepts, or count
+// rules against a different cap than the load boundary.
+func TestRequestOverrideCapAndBandMatchGoOwner(t *testing.T) {
+	src, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgSrc := configOverrideSource(t)
+
+	// The rule cap: both literals from source, the Go side confirmed
+	// against the exported constant (its compile-time identity).
+	jsCap := firstSubmatch(t, string(src), `const REQUEST_OVERRIDES_MAX = (\d+);`)
+	goCap := firstSubmatch(t, cfgSrc, `const RequestOverridesMax = (\d+)`)
+	if jsCap != goCap {
+		t.Errorf("the rule cap differs: chrome.js REQUEST_OVERRIDES_MAX = %s, config RequestOverridesMax = %s", jsCap, goCap)
+	}
+	if n, err := strconv.Atoi(goCap); err != nil || n != config.RequestOverridesMax {
+		t.Errorf("config.go's RequestOverridesMax literal %q disagrees with the exported config.RequestOverridesMax = %d", goCap, config.RequestOverridesMax)
+	}
+
+	// The body band, config side: the comparison and the errRange wording
+	// inside validateRequestOverrides must spell the same pair.
+	goBand := sourceRegion(t, cfgSrc, "func validateRequestOverrides")
+	goMin := firstSubmatch(t, goBand, `\*f\.value < (\d+) \|\| \*f\.value > `)
+	goMax := strings.ReplaceAll(firstSubmatch(t, goBand, `\*f\.value > ([\d_]+)`), "_", "")
+	errMin := firstSubmatch(t, goBand, `, "(\d+)", "`)
+	errMax := firstSubmatch(t, goBand, `, "(\d+)", strconv\.Itoa`)
+	if goMin != errMin || goMax != errMax {
+		t.Fatalf("config's body band disagrees with itself: comparison %s..%s, errRange %s..%s", goMin, goMax, errMin, errMax)
+	}
+
+	// The body band, chrome.js side: the ceiling const owns the number,
+	// the live check and its message route through it, and both body
+	// inputs' max attributes ride the same owner.
+	jsMax := firstSubmatch(t, string(src), `const REQUEST_OVERRIDE_BODY_MAX = (\d+);`)
+	if jsMax != goMax {
+		t.Errorf("the body ceiling differs: chrome.js REQUEST_OVERRIDE_BODY_MAX = %s, config band max = %s", jsMax, goMax)
+	}
+	jsRow := sourceRegion(t, string(src), "function validateRoRow")
+	jsMin := firstSubmatch(t, jsRow, `n < (\d+) \|\| n > REQUEST_OVERRIDE_BODY_MAX`)
+	if jsMin != goMin {
+		t.Errorf("the body band minimum differs: chrome.js validateRoRow uses %s, config uses %s", jsMin, goMin)
+	}
+	msgMin := firstSubmatch(t, jsRow, `between (\d+) and \$\{REQUEST_OVERRIDE_BODY_MAX\}`)
+	if msgMin != goMin {
+		t.Errorf("the band message minimum differs: chrome.js says between %s and the ceiling, config uses %s", msgMin, goMin)
+	}
+	if n := strings.Count(sourceRegion(t, string(src), "function roRuleCardHTML"), `max="${REQUEST_OVERRIDE_BODY_MAX}"`); n != 2 {
+		t.Errorf("roRuleCardHTML wires %d body inputs through REQUEST_OVERRIDE_BODY_MAX, want 2", n)
 	}
 }
 

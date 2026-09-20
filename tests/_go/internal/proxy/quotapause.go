@@ -501,8 +501,12 @@ func TestQuotaPauseInBandErrorOpensGate(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 1 (quota is never rescued)", calls.Load())
 	}
 	recs := waitForRecord(t, buf, 1)
-	if recs[0].ErrorType != "insufficient_quota" || recs[0].RateLimited {
-		t.Fatalf("record = %+v, want the quota envelope without a rate-limit flag", recs[0])
+	// Pin only the surfaced error type. RateLimited is queue-wait
+	// bookkeeping (any scheduler acquire wait of 1ms or more flips it), not
+	// part of this contract, so asserting it would date the test on
+	// scheduler timing.
+	if recs[0].ErrorType != "insufficient_quota" {
+		t.Fatalf("record = %+v, want the in-band quota error surfaced verbatim", recs[0])
 	}
 	quotaPollCond(t, "in-band quota error did not arm the gate", func() bool {
 		row, ok := quotaStormRow(s)

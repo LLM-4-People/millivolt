@@ -156,9 +156,10 @@ native-format adapters, and model listing.
 Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive
 comments and failure signaling, mid-thinking rescues that append a fresh
-attempt after reasoning-only output, optional format translation, and
-constructed model lists. This is not an unconditional byte-for-byte or
-exactly-once contract.
+attempt after reasoning-only output, optional format translation,
+operator-configured request overrides (a matching body rule rewrites the
+upstream request bytes), and constructed model lists. This is not an
+unconditional byte-for-byte or exactly-once contract.
 
 ## What you get
 
@@ -242,8 +243,9 @@ actions, not per-user permissions.
 
 - One generated configuration reference covers request limits, upstream pools,
   queue/retry policy, conversation grouping, adapters, SQLite, dashboard cadence,
-  model rules, provider field mappings, aliases and templated upstream headers.
-  Settings and the CLI use the same defaults, validation and reload metadata.
+  model rules, provider field mappings, aliases, templated upstream headers and
+  scoped request overrides. Settings and the CLI use the same defaults,
+  validation and reload metadata.
 - Use SQLite for retained history and consistent online backups, or run with
   the in-memory ring only. Storage drops are visible; asynchronous accounting
   remains best-effort under overload or write failure.

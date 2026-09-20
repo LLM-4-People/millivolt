@@ -115,7 +115,7 @@ func TestRequestOverridesValidationRows(t *testing.T) {
 func TestRequestOverridesForbiddenHeaders(t *testing.T) {
 	credential := []string{"authorization", "cookie", "proxy-authorization"}
 	protocol := []string{"host", "content-type", "content-length", "transfer-encoding",
-		"te", "connection", "keep-alive", "proxy-authenticate", "proxy-connection", "trailers", "upgrade"}
+		"te", "connection", "keep-alive", "proxy-authenticate", "proxy-connection", "trailer", "upgrade"}
 	for _, name := range credential {
 		for _, spelling := range []string{name, strings.ToUpper(name)} {
 			for _, field := range []string{"headers", "remove_headers"} {

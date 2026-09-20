@@ -1858,15 +1858,21 @@ function mrRestoreDefaults(wrap) {
 // Live per-row validation mirrors config.validateRequestOverrides at every
 // keystroke (the validateMrRow discipline): scope required, action
 // required, RFC 7230 names, the credential/protocol/x-proxy- ownership
-// set, one canonical name never both set and removed, the 1..1000000 body
-// band and the duplicate-scope rejection. Apply walks the draft and blocks
-// the POST on the first invalid card, focusing the offending input.
+// set, one canonical name never both set and removed, the body band
+// (1..REQUEST_OVERRIDE_BODY_MAX) and the duplicate-scope rejection. Apply
+// walks the draft and blocks the POST on the first invalid card, focusing
+// the offending input.
 // Scope inputs get datalist autocomplete from the dashboard's known sets
 // (the wire-key owners) plus the settings doc's provider labels; free text
 // stays allowed because rules may target values not yet observed.
 // Mirrors config.RequestOverridesMax (64) - the count line and template
 // add-gate use it.
 const REQUEST_OVERRIDES_MAX = 64;
+// REQUEST_OVERRIDE_BODY_MAX mirrors config's body-ceiling band (the
+// validateRequestOverrides 1..1_000_000 range): the body inputs' max
+// attributes and the live band check share this one number. The
+// cross-language pin in js_mirrors binds it to the config owner.
+const REQUEST_OVERRIDE_BODY_MAX = 1000000;
 // RO_FORBIDDEN_HEADERS mirrors config.forbiddenOverrideHeaders: the
 // credential and protocol names the proxy or the transport owns, keyed
 // lowercase because HTTP header names are case-insensitive. The x-proxy-
@@ -1886,14 +1892,18 @@ const RO_FORBIDDEN_HEADERS = {
   'keep-alive': 'protocol',
   'proxy-authenticate': 'protocol',
   'proxy-connection': 'protocol',
-  trailers: 'protocol',
+  trailer: 'protocol',
   upgrade: 'protocol',
 };
 // RO_TEMPLATES are the one-click starter rules (the mrTemplates precedent):
-// payloads stay minimal so the live validation guides the missing scope.
+// payloads stay minimal so the live validation guides the missing scope. The
+// budget template sets both token spellings to the same value: the cap pair
+// is precedence-merged (max_completion_tokens wins over max_tokens), so a
+// client request carrying either spelling would shrug off a rule that sets
+// only the other one.
 const RO_TEMPLATES = {
   blank: {},
-  budget: { body: { max_tokens: 32768 } },
+  budget: { body: { max_tokens: 32768, max_completion_tokens: 32768 } },
   header: { headers: { 'X-Title': 'my app' } },
 };
 
@@ -1949,9 +1959,22 @@ function roKnownOptions(kind) {
   return [...out].sort();
 }
 
+// roDlId owns the scope datalist id grammar shared by the generator, the
+// rule card's three list attributes and the focus-time refresher, so the
+// association cannot drift between render and refresh.
+function roDlId(kind) {
+  return 'ro-dl-' + kind;
+}
+
+// roDlOptionsHTML owns the datalist options expression shared by the
+// initial render and the focus-time refresher: both spellings must derive
+// the same option list from the same known sets.
+function roDlOptionsHTML(kind) {
+  return roKnownOptions(kind).map(o => `<option value="${escapeHtml(o)}"></option>`).join('');
+}
+
 function roDatalistHTML(kind) {
-  const id = 'ro-dl-' + kind;
-  return `<datalist id="${id}">${roKnownOptions(kind).map(o => `<option value="${escapeHtml(o)}"></option>`).join('')}</datalist>`;
+  return `<datalist id="${roDlId(kind)}">${roDlOptionsHTML(kind)}</datalist>`;
 }
 
 // roSyncDatalists refreshes the autocomplete options at focus time: the
@@ -1960,8 +1983,8 @@ function roDatalistHTML(kind) {
 function roSyncDatalists(wrap) {
   if (!wrap) return;
   ['client', 'provider', 'model'].forEach(kind => {
-    const dl = wrap.querySelector('#ro-dl-' + kind);
-    if (dl) dl.innerHTML = roKnownOptions(kind).map(o => `<option value="${escapeHtml(o)}"></option>`).join('');
+    const dl = wrap.querySelector('#' + roDlId(kind));
+    if (dl) dl.innerHTML = roDlOptionsHTML(kind);
   });
 }
 
@@ -1969,23 +1992,31 @@ function roRemoveChipHTML(name) {
   return `<span class="prov-chip" data-rh="${escapeHtml(name)}"><span class="prov-chip-p">${escapeHtml(name)}</span><button type="button" class="prov-x" data-prov-chip-rm aria-label="remove ${escapeHtml(name)}">✕</button></span>`;
 }
 
+// roRuleLabel owns the rule-number label ("rule N", the 1-based index the
+// server cites in request_overrides[i] errors) shared by the card render
+// and roRenumber, so the initial label and the rewritten one cannot drift.
+function roRuleLabel(i) {
+  return 'rule ' + (i + 1);
+}
+
 // roRuleCardHTML renders one rule card. Scope inputs carry the explicit
 // "any" watermark (an empty scope field is a wildcard - never a silent
 // surprise) and one concrete example each; the headers section reuses the
-// providers editor's row grammar; body fields stay empty = unset.
+// providers editor's row grammar; body fields stay empty = unset. The
+// scope and body inputs stretch evenly and the head's remove button pins
+// to the right end through the request-overrides CSS block.
 function roRuleCardHTML(r, i) {
   r = r || {};
   const headers = r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers) ? r.headers : {};
   const removes = Array.isArray(r.remove_headers) ? r.remove_headers : [];
   const body = r.body && typeof r.body === 'object' ? r.body : {};
-  const num = `rule ${i + 1}`;
-  const sc = 'style="flex:1;min-width:0"';
+  const num = roRuleLabel(i);
   return `<div class="prov-sec ro-rule">` +
-    `<div class="prov-lb"><span class="ro-num">${escapeHtml(num)}</span><span class="prov-sub">scope - an empty field matches any request</span><button type="button" class="prov-x" data-ro-rm aria-label="remove rule" title="remove rule" style="margin-left:auto">✕</button></div>` +
+    `<div class="prov-lb"><span class="ro-num">${escapeHtml(num)}</span><span class="prov-sub">scope - an empty field matches any request</span><button type="button" class="prov-x" data-ro-rm aria-label="remove rule" title="remove rule">✕</button></div>` +
     `<div class="st-ctl-line ro-scope">` +
-    `<input class="ro-client" list="ro-dl-client" value="${escapeHtml(r.client || '')}" ${sc} placeholder="any client - e.g. claude-code" aria-label="rule ${i + 1} client scope">` +
-    `<input class="ro-provider" list="ro-dl-provider" value="${escapeHtml(r.provider || '')}" ${sc} placeholder="any provider - e.g. nano-gpt.com" aria-label="rule ${i + 1} provider scope">` +
-    `<input class="ro-model" list="ro-dl-model" value="${escapeHtml(r.model || '')}" ${sc} placeholder="any model - e.g. glm-5.3" aria-label="rule ${i + 1} model scope">` +
+    `<input class="ro-client" list="${roDlId('client')}" value="${escapeHtml(r.client || '')}" placeholder="any client - e.g. claude-code" aria-label="rule ${i + 1} client scope">` +
+    `<input class="ro-provider" list="${roDlId('provider')}" value="${escapeHtml(r.provider || '')}" placeholder="any provider - e.g. nano-gpt.com" aria-label="rule ${i + 1} provider scope">` +
+    `<input class="ro-model" list="${roDlId('model')}" value="${escapeHtml(r.model || '')}" placeholder="any model - e.g. glm-5.3" aria-label="rule ${i + 1} model scope">` +
     `</div>` +
     `<div class="prov-lb"><span>headers</span><span class="prov-sub">set or replace upstream headers - e.g. X-Title, my app</span></div>` +
     `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
@@ -1995,8 +2026,8 @@ function roRuleCardHTML(r, i) {
     `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
     `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
     `<div class="st-ctl-line ro-body">` +
-    `<input class="ro-max-tokens" type="number" min="1" max="1000000" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" ${sc} placeholder="max_tokens - e.g. 32768" aria-label="rule ${i + 1} max tokens ceiling">` +
-    `<input class="ro-max-mct" type="number" min="1" max="1000000" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" ${sc} placeholder="max_completion_tokens - e.g. 32768" aria-label="rule ${i + 1} max completion tokens ceiling">` +
+    `<input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" aria-label="rule ${i + 1} max tokens ceiling">` +
+    `<input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" aria-label="rule ${i + 1} max completion tokens ceiling">` +
     `</div>` +
     `<div class="mr-err ro-err" aria-live="polite"></div>` +
     `</div>`;
@@ -2107,7 +2138,7 @@ function validateRoRow(card, seen, index) {
       const text = input && String(input.value || '').trim();
       if (!text) continue;
       const n = Number(text);
-      if (!Number.isSafeInteger(n) || n < 1 || n > 1000000) fail(input, `body.${name}: '${text}' must be a whole number between 1 and 1000000`);
+      if (!Number.isSafeInteger(n) || n < 1 || n > REQUEST_OVERRIDE_BODY_MAX) fail(input, `body.${name}: '${text}' must be a whole number between 1 and ${REQUEST_OVERRIDE_BODY_MAX}`);
     }
   }
   const triple = client + '\u0000' + provider + '\u0000' + model;
@@ -2140,7 +2171,7 @@ function validateRequestOverridesDraft(wrap) {
 function roRenumber(wrap) {
   wrap.querySelectorAll('.ro-rule').forEach((card, i) => {
     const el = card.querySelector('.ro-num');
-    if (el) el.textContent = 'rule ' + (i + 1);
+    if (el) el.textContent = roRuleLabel(i);
   });
 }
 

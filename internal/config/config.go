@@ -516,7 +516,7 @@ var forbiddenOverrideHeaders = map[string]string{
 	"keep-alive":          "protocol",
 	"proxy-authenticate":  "protocol",
 	"proxy-connection":    "protocol",
-	"trailers":            "protocol",
+	"trailer":             "protocol",
 	"upgrade":             "protocol",
 }
 

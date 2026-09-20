@@ -3545,6 +3545,21 @@ async function main() {
     check('the remove button deletes the card and renumbers the survivors',
       cards().length === 2 &&
       [...roWrap.querySelectorAll('.ro-num')].map(n => n.textContent).join(',') === 'rule 1,rule 2');
+    // the budget starter seeds BOTH token spellings with the same value: the
+    // cap pair is precedence-merged (max_completion_tokens wins), so a
+    // single-field template could not raise a request that carries the other
+    // spelling.
+    tpl.value = 'budget';
+    tpl.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('the budget template seeds both token ceilings with the same value and still asks for scope',
+      cards().length === 3 &&
+      cards()[2].querySelector('.ro-max-tokens').value === '32768' &&
+      cards()[2].querySelector('.ro-max-mct').value === '32768' &&
+      cards()[2].dataset.roState === 'error' &&
+      cards()[2].querySelector('.ro-err').textContent.includes('no scope set'));
+    cards()[2].querySelector('[data-ro-rm]').click();
+    check('removing the budget card restores the clean two-rule draft',
+      cards().length === 2 && !w.settingsIsDirty());
     // the shared header-row grammar: Enter in the add inputs appends a row
     // through the providers editor's own wiring, and the live validation
     // owns the override grammar on top.
