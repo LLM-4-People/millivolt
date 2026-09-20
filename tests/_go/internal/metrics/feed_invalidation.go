@@ -87,7 +87,7 @@ func TestRemovalInvalidatesReplayEpoch(t *testing.T) {
 	}
 	r := httptest.NewRequest(http.MethodGet, "/?since=2&feed="+old.FeedID, nil)
 	r.Header.Set("Last-Event-ID", "2")
-	snap := b.SnapshotRequest(r)
+	snap := b.SnapshotRequest(strictQuery(t, r), r.Header)
 	if snap.FeedID == old.FeedID || snap.Incremental || len(snap.Records) != 1 || snap.Records[0].ID != "survivor" {
 		t.Fatalf("old tip cursor must see the full surviving ring: %+v", snap)
 	}
@@ -121,7 +121,8 @@ func TestRemovalEpochPreservesPostBoundaryAndPending(t *testing.T) {
 	b.PublishLive("begin", &Record{ID: "pending"})
 	b.Record(record("new"))
 	b.RemoveThrough(boundary, nil)
-	snap := b.SnapshotRequest(httptest.NewRequest(http.MethodGet, "/?since=2&feed="+feed, nil))
+	boundaryReq := httptest.NewRequest(http.MethodGet, "/?since=2&feed="+feed, nil)
+	snap := b.SnapshotRequest(strictQuery(t, boundaryReq), boundaryReq.Header)
 	if snap.Incremental || len(snap.Records) != 1 || snap.Records[0].ID != "new" || snap.Counters.TotalReq != 1 {
 		t.Fatalf("post-boundary completion was lost: %+v", snap)
 	}
@@ -182,7 +183,8 @@ func TestStreamInvalidationDuringInitialSnapshot(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "event: reset\ndata: {\"feed_id\":\""+b.FeedID()+"\"}") {
 		t.Fatalf("missing immediate reset event: %s", w.Body.String())
 	}
-	snap := b.SnapshotRequest(httptest.NewRequest(http.MethodGet, "/?feed="+feed+"&since=1", nil))
+	reopenReq := httptest.NewRequest(http.MethodGet, "/?feed="+feed+"&since=1", nil)
+	snap := b.SnapshotRequest(strictQuery(t, reopenReq), reopenReq.Header)
 	if snap.Incremental || len(snap.Records) != 1 || snap.Records[0].ID != "new" {
 		t.Fatalf("reopened old URL did not force a fresh full snapshot: %+v", snap)
 	}
@@ -235,6 +237,7 @@ func TestSnapshotRequestAtomicallyValidatesEpoch(t *testing.T) {
 	b.Record(record("keep"))
 	feed := b.FeedID()
 	r := httptest.NewRequest(http.MethodGet, "/?feed="+feed+"&since=1", nil)
+	q := strictQuery(t, r)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -243,7 +246,7 @@ func TestSnapshotRequestAtomicallyValidatesEpoch(t *testing.T) {
 		}
 	}()
 	for range 100 {
-		snap := b.SnapshotRequest(r)
+		snap := b.SnapshotRequest(q, r.Header)
 		if snap.FeedID != feed && (snap.Incremental || len(snap.Records) != 1) {
 			t.Fatalf("new epoch incorrectly blessed old cursor: %+v", snap)
 		}

@@ -721,10 +721,11 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 		t.Fatalf("repeated download flag: status = %d, want 400 (deny by default, never first-wins)", w.Code)
 	}
 
-	// The query is parsed from the raw string (the export owner's rule), so
-	// crafted inputs url.Values would silently drop cannot smuggle a
-	// first-wins flag or id: a bad escape, a semicolon separator and a
-	// repeated id are all 400s, and the id gate itself still answers 400.
+	// The query is parsed from the raw string through the shared strict
+	// owner, so crafted inputs that url.Values would silently drop cannot
+	// smuggle a first-wins flag or id: a bad escape, a semicolon separator
+	// and a repeated id are all 400s, and the id gate itself still answers
+	// 400.
 	for _, tc := range []struct{ name, query string }{
 		{"unparsable escape is rejected, not pair-dropped", "?id=cap-dl&download=%zz"},
 		{"semicolon-separated duplicate is rejected, not pair-dropped", "?id=cap-dl&download=1;download=1"},
@@ -736,6 +737,64 @@ func TestHandleDebugCaptureDownloadServesGzipArtifact(t *testing.T) {
 		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("%s: status = %d, want 400", tc.name, w.Code)
+		}
+	}
+	// The mode condition's coverage, frozen: download=0 and an empty
+	// download value both answer the render mode with the render headers,
+	// never the artifact download.
+	for _, tc := range []struct{ name, query string }{
+		{"download=0 answers the render mode", "?id=cap-dl&download=0"},
+		{"an empty download value answers the render mode", "?id=cap-dl&download="},
+	} {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
+		if w.Code != 200 || w.Body.String() != payload {
+			t.Errorf("%s: status=%d body=%q, want the render bytes", tc.name, w.Code, w.Body.String())
+		}
+		if ct := w.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+			t.Errorf("%s: Content-Type = %q, want the render content type", tc.name, ct)
+		}
+		if dispo := w.Header().Get("Content-Disposition"); dispo != "" {
+			t.Errorf("%s: Content-Disposition = %q, want none in the render mode", tc.name, dispo)
+		}
+	}
+
+	// NUL-bearing id shapes deny with no aliasing onto the real capture id,
+	// frozen: the malformed-looking escape is a valid parse, so only the id
+	// gate's exact-match 404 answers it.
+	for _, tc := range []struct{ name, id string }{
+		{"trailing NUL", "cap-dl%00"},
+		{"leading NUL", "%00cap-dl"},
+		{"interior NUL", "cap%00-dl"},
+	} {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+tc.id, nil))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("%s: status = %d, want the exact-match 404", tc.name, w.Code)
+		}
+	}
+
+	// The 400 precedence order, frozen: a multi-violation query answers with
+	// the first class - parse error, duplicate id, id required, duplicate
+	// download, then the flag grammar.
+	for _, tc := range []struct{ name, query, want string }{
+		{"a parse error outranks every later violation", "?id=cap-dl&id=other&download=1&download=0&download=x&bad=%zz", "invalid query"},
+		{"a duplicate id outranks the download violations", "?id=cap-dl&id=other&download=1&download=0&download=x", "duplicate id"},
+		{"the missing id outranks the download violations", "?download=1&download=0&download=x", "id required"},
+		{"a duplicate download outranks the flag grammar", "?id=cap-dl&download=1&download=x", "duplicate download"},
+		{"the flag grammar answers last", "?id=cap-dl&download=x", "download: expected 0 or 1"},
+	} {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture"+tc.query, nil))
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Errorf("%s: body is not the flat error shape: %v (%q)", tc.name, err, w.Body.String())
+			continue
+		}
+		if w.Code != http.StatusBadRequest || body.Error != tc.want {
+			t.Errorf("%s: status=%d error=%q, want 400 %q", tc.name, w.Code, body.Error, tc.want)
 		}
 	}
 }

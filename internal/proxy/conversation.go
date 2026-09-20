@@ -72,8 +72,11 @@ func trackedConversationID(id string) string { return "k:" + id }
 // framing quotes. The window only bounds how far the scan looks for the
 // closing quote: a present string whose raw span exceeds it is the same
 // present-dropped outcome as a value that fails the declared-session bound
-// (never a 400 - the body is passthrough payload), so the scan cap cannot
-// leak into user-visible semantics.
+// (never a 400 - the body is passthrough payload). The drop is deliberately
+// conservative: a value whose trimmable edges push its raw span past the
+// window is dropped even though its trimmed form would pass the identity
+// bound, so the scan cap can narrow user-visible semantics in exactly this
+// one direction - never silently broaden one.
 // Internal safety guardrail, not user-tunable.
 const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 
@@ -84,8 +87,8 @@ const subConversationScanMax = 6*maxDeclaredSessionBytes + 2
 // request byte-identical and untracked. For a matched entry the configured
 // params are checked in order and the first present one decides: a value that
 // is not a string counts as absent (the next param is checked), while a
-// present string that cannot be decoded or exceeds the declared-session bound
-// drops the identity for the request (which stays on automatic grouping),
+// present string that cannot be decoded or fails the identity rules drops
+// the identity for the request (which stays on automatic grouping),
 // never a 400 - the body is passthrough payload, the configToken deny-by-drop
 // precedent.
 // No second full-body parse runs: the locate is a depth-aware lexical scan of
@@ -122,8 +125,8 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 // by product semantics, so an occurrence of the same spelling nested inside
 // a value is neither tracked nor stripped. present reports that the param
 // decided the identity: a present value that is not a string counts as
-// absent (the next param is checked), while a present string that cannot be
-// decoded or exceeds the declared-session bound drops the identity for the
+// absent (the next param is checked), while a present string that cannot
+// be decoded or fails the identity rules drops the identity for the
 // request - the value comes back empty with present true, never a
 // fall-through to a later param, so the configured order stays
 // presence-ordered, never value-quality-ordered.
@@ -153,8 +156,12 @@ func subConversationParam(body []byte, name string, anyEscape bool) (value strin
 		}
 	}
 	if end < 0 {
-		// Unterminated within the scan cap: too long for any bounded value,
-		// the same present-dropped class as the declared-session bound.
+		// Unterminated within the scan window: the raw span either exceeds
+		// it (a value too long for any bounded value, or one whose trimmable
+		// edges alone push the span past the window even though its trimmed
+		// form would pass) or the body ends before the closing quote (a
+		// truncated body) - both are the same present-dropped class as the
+		// identity rules.
 		return "", true
 	}
 	token := window[:end+1]

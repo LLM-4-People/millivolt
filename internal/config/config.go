@@ -378,7 +378,7 @@ type Config struct {
 	// only at the request body's top level and checked in order: the first
 	// present field decides - a present value that is not a JSON string
 	// counts as absent and the next field is checked, while a present string
-	// that cannot be decoded or exceeds the identity bound drops the identity
+	// that cannot be decoded or fails the identity rules drops the identity
 	// for the request with no later field consulted. A kept value groups the
 	// request under a k: conversation identity (after the X-Proxy-Session
 	// header, before automatic client+key grouping); an absent or dropped
@@ -523,7 +523,7 @@ type SubConversation struct {
 	// client's request body and checked in order: the first present one
 	// decides - a present value that is not a JSON string counts as absent
 	// and the next field is checked, while a present string that cannot be
-	// decoded or exceeds the identity bound drops the identity for the
+	// decoded or fails the identity rules drops the identity for the
 	// request with no later field consulted. One JSON key segment each (see
 	// checkSubConversationParam); validateSubConversations trims every name.
 	Params []string `yaml:"params" json:"params"`

@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -558,19 +557,23 @@ func (s *Server) DebugSnapshot() map[string]any {
 // HandleDebugCapture is GET /admin/debug/capture?id= - the drawer fetch for
 // one sidecar document. 404 when missing/expired. Never on the live SSE path.
 // The plain response is the drawer's render JSON; download=1 serves the same
-// document as a saved gzip artifact. The query is strict like every filter
-// owner, parsed from the raw string (the export owner's rule) so no malformed
+// document as a saved gzip artifact. The query is parsed from the raw string
+// through the shared strict owner (adminjson.StrictQuery) so no malformed
 // pair is silently dropped: an unparsable query, a repeated flag or id, or a
 // flag outside the standing 0/1 grammar is a 400, never first-wins; an empty
-// download value means the render mode. The method, id, no-store and 404
-// semantics are identical in both modes.
+// download value means the render mode. The kinship with the export owner
+// stops at unknown keys, a deliberate split between the two route classes: a
+// filter grammar (the export) rejects unknown keys, while an idempotent
+// fetch like this one ignores them - only the consumed id and download are
+// validated. The method, id, no-store and 404 semantics are identical in
+// both modes.
 func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", "GET")
 		adminjson.WriteError(w, http.StatusMethodNotAllowed, "GET")
 		return
 	}
-	q, err := url.ParseQuery(r.URL.RawQuery)
+	q, err := adminjson.StrictQuery(r)
 	if err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
 		return

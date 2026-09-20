@@ -113,7 +113,7 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectUnless(w, r, http.MethodGet) {
 			return
 		}
-		q, err := url.ParseQuery(r.URL.RawQuery)
+		q, err := adminjson.StrictQuery(r)
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
 			return

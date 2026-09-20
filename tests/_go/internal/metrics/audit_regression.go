@@ -112,7 +112,8 @@ func TestSubscriberOverflowRetiresOnlySlowChannel(t *testing.T) {
 	if last != subChanCap {
 		t.Fatalf("slow cursor=%d", last)
 	}
-	snap := b.SnapshotRequest(httptest.NewRequest("GET", fmt.Sprintf("/?feed=%s&since=%d", b.FeedID(), last), nil))
+	gapReq := httptest.NewRequest("GET", fmt.Sprintf("/?feed=%s&since=%d", b.FeedID(), last), nil)
+	snap := b.SnapshotRequest(strictQuery(t, gapReq), gapReq.Header)
 	if !snap.Incremental || len(snap.Records) != 2 {
 		t.Fatalf("gap not replayed: %+v", snap)
 	}

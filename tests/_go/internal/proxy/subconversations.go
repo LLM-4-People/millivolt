@@ -3,7 +3,9 @@ package proxy
 // Sub-conversation tracking (config sub_conversations): the proxy mechanism
 // only. The config layer's validation, schema and coercion live in
 // tests/_go/internal/config/subconversations.go; these rows pin the runtime
-// contract - per-client extraction, first-present-wins param order, the
+// contract - per-client extraction, the presence-ordered param walk (the
+// first present string value decides, and a present value that fails the
+// identity rules drops the identity instead of falling through), the
 // top-level-only boundary (a nested occurrence is neither tracked nor
 // stripped), the drop-not-reject value bound, the k: identity and its
 // precedence under the s: header and c- auto grouping, strip folded into the
@@ -165,9 +167,10 @@ func TestSubConversationsExtractionByClient(t *testing.T) {
 }
 
 // TestSubConversationsFirstPresentWins pins the ordered param walk: the
-// first param whose value tail supplies a decodable string wins; a non-string
-// value does not supply (the next param is checked), but a present value that
-// fails the identity bound is dropped without falling through - the
+// first param present with a string value decides the identity; a non-string
+// value counts as absent (the next param is checked), while a present string
+// that cannot be decoded or fails the identity rules drops the identity for
+// the request - the unified drop, no fall-through to a later param - so the
 // configured order stays presence-ordered, never value-quality-ordered.
 func TestSubConversationsFirstPresentWins(t *testing.T) {
 	cfg := scCfg(t, false, "primaryKey", "secondaryKey")
@@ -887,6 +890,13 @@ func TestSubConversationExtractionUnits(t *testing.T) {
 		{"value is trimmed to its identity", entries, "sc-client", `{"promptCacheKey":"  task-1  "}`, true, "task-1"},
 		{"escape-spelled key is located", entries, "sc-client", `{"promptC\u0061cheKey":"task-2"}`, true, "task-2"},
 		{"escaped value decodes", entries, "sc-client", `{"promptCacheKey":"a\"b\\c"}`, true, "a\"b\\c"},
+		// A freeze row, green on the pre-change engine: a lone-surrogate
+		// escape spells raw ASCII, so it clears the pre-decode UTF-8 gate,
+		// and the standard decoder coerces the unpaired half to U+FFFD -
+		// a rune every identity rule accepts, so the deterministic coerced
+		// value is kept. Distinct lone-surrogate spellings (\ud800,
+		// \udbff) coerce to that same rune and collapse onto one identity.
+		{"a lone surrogate escape is kept as the coerced replacement rune", entries, "sc-client", `{"promptCacheKey":"\ud800"}`, true, "\ufffd"},
 		{"nested occurrence is not tracked (the top-level boundary)", entries, "sc-client", `{"wrap":{"promptCacheKey":"task-3"}}`, true, ""},
 		{"top-level key after a nested occurrence is located", entries, "sc-client", `{"wrap":{"promptCacheKey":"task-3"},"promptCacheKey":"task-4"}`, true, "task-4"},
 		{"occurrence inside a top-level array is not tracked", entries, "sc-client", `{"messages":[{"promptCacheKey":"task-3"}]}`, true, ""},

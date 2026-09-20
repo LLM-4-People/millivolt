@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"fmt"
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -458,7 +459,11 @@ func TestChartClockAlignedLadder(t *testing.T) {
 func TestChartWindowParamDomain(t *testing.T) {
 	for _, v := range []string{"", "all", "1", "15", "90", "525600", strconv.FormatInt(chartMaxWindowMinutes, 10)} {
 		r := httptest.NewRequest(http.MethodGet, "/metrics/agg/chart?window="+v, nil)
-		got, ok := windowParam(r)
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			t.Fatalf("window %q: strict parse: %v", v, err)
+		}
+		got, ok := windowParam(q)
 		if !ok || ((v == "" || v == "all") && got != 0) || (v != "" && v != "all" && strconv.Itoa(got) != v) {
 			t.Errorf("windowParam(%q) = %d, %v", v, got, ok)
 		}
@@ -471,6 +476,46 @@ func TestChartWindowParamDomain(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Errorf("window %q status = %d, want 400", v, w.Code)
 		}
+	}
+}
+
+// TestAggregateRoutesAdoptStrictQuery pins the read surfaces' strict-query
+// adoption: the chart, explorer, log page and bootstrap parse the raw query
+// string, so a malformed pair can never be silently dropped into a broader
+// scope (s=%zz must not become "no scope"; a limit spelled twice must not
+// first-win its valid copy through the duplicate gate) and a repeated
+// consumed key is denied, never first-wins. The legitimately repeated f=
+// list key keeps its standing grammar.
+func TestAggregateRoutesAdoptStrictQuery(t *testing.T) {
+	api := NewAggAPI(metrics.NewBuffer(4), nil, time.Second)
+	status := func(h http.HandlerFunc, target string) int {
+		w := httptest.NewRecorder()
+		h(w, httptest.NewRequest(http.MethodGet, target, nil))
+		return w.Code
+	}
+	for _, tc := range []struct {
+		name   string
+		handle http.HandlerFunc
+		target string
+	}{
+		{"chart: malformed s pair must not silently broaden the scope", api.HandleAggChart, "/metrics/agg/chart?window=15&s=%zz"},
+		{"chart: repeated window is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&window=60"},
+		{"chart: repeated s is denied, never first-wins", api.HandleAggChart, "/metrics/agg/chart?window=15&s=200&s=404"},
+		{"explorer: repeated dim is denied, never first-wins", api.HandleAggExplorer, "/metrics/agg/explorer?dim=provider&dim=status"},
+		{"log page: a valid and a malformed limit answers 400 at the parse", api.HandleLogPage, "/metrics/agg/log?limit=50&limit=%zz"},
+		{"log page: repeated s is denied, never first-wins", api.HandleLogPage, "/metrics/agg/log?limit=50&s=streaming&s=paused"},
+		{"bootstrap: malformed feed pin must not trust the cursor", api.HandleBootstrap, "/metrics/bootstrap?feed=%zz&since=1"},
+		{"bootstrap: repeated feed pin is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?feed=a&feed=b"},
+		{"bootstrap: repeated since is denied, never first-wins", api.HandleBootstrap, "/metrics/bootstrap?since=1&since=2"},
+	} {
+		if code := status(tc.handle, tc.target); code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400", tc.name, code)
+		}
+	}
+	// The repeated f= list grammar is untouched: two well-formed filters
+	// still scope the chart exactly as before the adoption.
+	if code := status(api.HandleAggChart, "/metrics/agg/chart?window=15&f=client:a&f=status:2xx"); code != 200 {
+		t.Errorf("two f= filters: status = %d, want the standing 200", code)
 	}
 }
 

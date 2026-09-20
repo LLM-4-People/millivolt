@@ -534,7 +534,7 @@ def palette_mirror_errors(pairs):
 ARTIFACT_GZIP_OWNER = 'cmd/proxy/log.go'
 ARTIFACT_GZIP_CAPTURE_OWNER = 'internal/proxy/debug.go'
 ARTIFACT_GZIP_CODEC_OWNERS = ('internal/proxy/gzip.go', 'internal/web/gzip.go')
-_GZIP_TREE_ROOTS = ('cmd/', 'internal/', 'scripts/')
+_GZIP_TEST_ROOT = 'tests/'
 ARTIFACT_GZIP_CALL = 'NewArtifactGzipWriter('
 _GZIP_WRITER_CONSTRUCTION = re.compile(r'\bgzip\.NewWriter(?:Level)?\s*\(')
 
@@ -550,15 +550,17 @@ def artifact_gzip_choke_point_errors(pairs):
     gate may construct a compress/gzip writer directly: NewArtifactGzipWriter
     (internal/proxy/gzip.go) is the only construction site, so the artifact
     codec cannot fork per surface.
-    The whole-tree rule: no file under cmd/, internal/ or scripts/ may
-    construct a compress/gzip writer directly - the two codec owners
+    The whole-tree rule: no .go file outside tests in the checked corpus
+    may construct a compress/gzip writer directly - the two codec owners
     (internal/proxy/gzip.go for saved artifacts, internal/web/gzip.go for
     the dashboard's transit and precomputed representations) are the only
-    construction sites, so a future download surface cannot hand-roll gzip
-    silently. A violation reports file:line. The two artifact gate files
-    above carry their own stricter per-file construction ban and are not
-    rescanned here (one defect, one report). Test and agent sources are
-    outside the scanned roots."""
+    construction sites, so a future download surface in any package (the
+    repository root, deploy/, or a new cmd) cannot hand-roll gzip silently.
+    A violation reports file:line. The two artifact gate files above carry
+    their own stricter per-file construction ban and are not rescanned here
+    (one defect, one report). Test sources stay outside the ban by design;
+    ignored paths (agents/ and build artifacts) never enter the corpus the
+    repository check feeds this detector."""
     errors = []
     for owner in (ARTIFACT_GZIP_OWNER, ARTIFACT_GZIP_CAPTURE_OWNER):
         text = None
@@ -580,13 +582,14 @@ def artifact_gzip_choke_point_errors(pairs):
             errors.append(owner + ': direct compress/gzip writer construction - '
                           'NewArtifactGzipWriter is the only saved-artifact construction site')
     for name, text in pairs:
-        if not name.startswith(_GZIP_TREE_ROOTS):
-            continue
         if name in ARTIFACT_GZIP_CODEC_OWNERS or name in (ARTIFACT_GZIP_OWNER, ARTIFACT_GZIP_CAPTURE_OWNER):
+            continue
+        if name.startswith(_GZIP_TEST_ROOT):
             continue
         for match in _GZIP_WRITER_CONSTRUCTION.finditer(text):
             line = text.count('\n', 0, match.start()) + 1
             errors.append(f"{name}:{line}: direct compress/gzip writer construction - "
                           "the only codec owners are internal/proxy/gzip.go "
-                          "(saved artifacts) and internal/web/gzip.go (transit)")
+                          "(saved artifacts) and internal/web/gzip.go "
+                          "(the dashboard's transit and precomputed representations)")
     return errors

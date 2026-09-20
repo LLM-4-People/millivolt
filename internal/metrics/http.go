@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -43,21 +44,23 @@ func SetStreamHeaders(h http.Header) {
 }
 
 // cursorParam resolves the resume cursor for a live-feed request - the ONE
-// gate both /metrics/bootstrap and the SSE stream share. The `?feed=` pin is
+// gate both /metrics/bootstrap and the SSE stream share. q is the caller's
+// one strict-parsed query (adminjson.StrictQuery; the feed and since
+// duplicates are already rejected before this gate runs). The `?feed=` pin is
 // checked FIRST (deny by default: a foreign feed is a full snapshot -
 // sequence numbers are meaningless across restarts, so a stale-but-in-range
 // cursor must never be trusted), then the `Last-Event-ID` header (the
 // browser echoes the newest consumed id on reconnect) wins over `?since=`
 // (the boot-time snapshot position).
-func cursorParam(r *http.Request, feed string) int64 {
-	if f := r.URL.Query().Get("feed"); f != "" && f != feed {
+func cursorParam(q url.Values, header http.Header, feed string) int64 {
+	if f := q.Get("feed"); f != "" && f != feed {
 		return 0
 	}
-	if v := r.Header.Get("Last-Event-ID"); v != "" {
+	if v := header.Get("Last-Event-ID"); v != "" {
 		since, _ := strconv.ParseInt(v, 10, 64) // malformed → 0 = full snapshot
 		return since
 	}
-	if v := r.URL.Query().Get("since"); v != "" {
+	if v := q.Get("since"); v != "" {
 		since, _ := strconv.ParseInt(v, 10, 64) // malformed → 0 = full snapshot
 		return since
 	}
@@ -67,9 +70,13 @@ func cursorParam(r *http.Request, feed string) int64 {
 // SnapshotRequest validates the feed pin and reads the snapshot under one
 // lock. A purge between those steps must never label a partial old-epoch delta
 // with a new feed ID. Bootstrap and SSE share this atomic trust boundary.
-func (b *Buffer) SnapshotRequest(r *http.Request) Snapshot {
+// q is the caller's strict-parsed query and header carries the request's
+// Last-Event-ID; both HTTP callers parse once, reject the malformed and
+// duplicated feed/since spellings before any stream header or payload is
+// staged, and pass the trusted values down here.
+func (b *Buffer) SnapshotRequest(q url.Values, header http.Header) Snapshot {
 	b.mu.RLock()
-	snap := b.snapshotSinceLocked(cursorParam(r, b.feedID))
+	snap := b.snapshotSinceLocked(cursorParam(q, header, b.feedID))
 	b.mu.RUnlock()
 	sortPendingRecords(snap.InFlightRecords)
 	return snap
@@ -97,6 +104,19 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	if !RejectUnlessGet(w, r) {
 		return
 	}
+	// The strict parse runs before any stream header is staged, so a
+	// malformed pair answers a plain 400, never an SSE-framed error - a
+	// dropped feed pin would otherwise leave a stale cursor trusted on a
+	// foreign feed. feed and since are this surface's consumed keys.
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "feed", "since"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -118,7 +138,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	live := b.SubscribeLive()
 	defer b.UnsubscribeLive(live)
 
-	snapshot := b.SnapshotRequest(r)
+	snapshot := b.SnapshotRequest(q, r.Header)
 	snap, err := json.Marshal(ObserveSnapshot(snapshot, b.observerModels(true, snapshot.Records, snapshot.InFlightRecords)))
 	if err != nil {
 		log.Printf("metrics: encode snapshot: %v", err)

@@ -312,6 +312,37 @@ func TestFailAndResumeTwiceKeepsRestarterUsable(t *testing.T) {
 	}
 }
 
+// TestRestartWatchFlagStrictQuery pins the GET plane's only consumed query
+// key: the strict raw-string parse means a malformed pair the lenient read
+// would drop (answering the status representation instead of the requested
+// stream) and a repeated watch flag are both 400s, never first-wins, while
+// the plain GET keeps answering the status document.
+func TestRestartWatchFlagStrictQuery(t *testing.T) {
+	rs := newRestarter(&restartDeps{
+		cloneServer:  func() *http.Server { return nil },
+		closeFeeds:   func() {},
+		flushStore:   func() error { return nil },
+		drainTimeout: func() time.Duration { return time.Second },
+	})
+	for _, tc := range []struct{ name, query string }{
+		{"malformed watch pair", "watch=%zz"},
+		{"repeated watch flag", "watch=1&watch=1"},
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/admin/restart", nil)
+		req.URL.RawQuery = tc.query
+		rs.handleRestart(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d body=%s, want 400", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	rec := httptest.NewRecorder()
+	rs.handleRestart(rec, httptest.NewRequest(http.MethodGet, "/admin/restart", nil))
+	if rec.Code != 200 {
+		t.Errorf("plain GET = %d body=%s, want the standing 200 status document", rec.Code, rec.Body.String())
+	}
+}
+
 func TestFailedHandoffReplacesClosedListenerAndServer(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

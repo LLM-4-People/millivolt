@@ -649,7 +649,7 @@ func TestSubConversationEditorCopyMatchSchemaOwner(t *testing.T) {
 		{"the top-level extraction scope", "matched only at the request body's top level", "top-level request body fields", "both"},
 		{"the first-present rule", "the first present field decides", "the first present field decides", "both"},
 		{"the absent class", "counts as absent and the next field is checked", "counts as absent and the next field is checked", "hint"},
-		{"the unusable-string class", "cannot be decoded or exceeds the identity bound", "cannot be decoded or exceeds the identity bound", "hint"},
+		{"the unusable-string class", "cannot be decoded or fails the identity rules", "cannot be decoded or fails the identity rules", "hint"},
 		{"the identity drop", "drops the identity for the request", "drops the identity for the request", "hint"},
 		{"the no-later-consulted rule", "no later field is consulted", "no later field is consulted", "hint"},
 		{"the strip scope", "configured fields", "every configured field present at the top level", "hint"},

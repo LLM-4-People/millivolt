@@ -17,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 )
 
 // The restart choreography (POST /admin/restart) performs a graceful binary
@@ -698,11 +700,23 @@ func (rs *restarter) writeStatus(w http.ResponseWriter) {
 }
 
 // handleRestart serves GET (status), GET ?watch=1 (NDJSON step stream) and
-// POST (start) on /admin/restart.
+// POST (start) on /admin/restart. The GET plane's one query key, watch, is
+// read through the shared strict parse: a malformed pair the lenient read
+// would drop (answering the status representation instead of the requested
+// stream) and a repeated watch flag are 400s, never first-wins.
 func (rs *restarter) handleRestart(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		if r.URL.Query().Get("watch") != "" {
+		q, err := adminjson.StrictQuery(r)
+		if err != nil {
+			denyOperator(w, http.StatusBadRequest, "invalid query")
+			return
+		}
+		if err := adminjson.DuplicateQueryKey(q, "watch"); err != nil {
+			denyOperator(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if q.Get("watch") != "" {
 			rs.serveWatch(w, r)
 			return
 		}

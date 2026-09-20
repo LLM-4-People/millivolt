@@ -379,7 +379,7 @@ class RepositoryChecks(unittest.TestCase):
             "cmd/proxy/log.go: artifact source is not in the checked corpus",
             "internal/proxy/debug.go: artifact source is not in the checked corpus"])
         # The whole-tree construction ban: a hand-rolled writer in any new
-        # file under the scanned roots is caught with its line, while the two
+        # source file outside tests is caught with its line, while the two
         # codec owners and test sources are the only clean constructions.
         hand_rolled_tree = good + [
             ("internal/backup/export.go",
@@ -390,7 +390,16 @@ class RepositoryChecks(unittest.TestCase):
         self.assertEqual(check.artifact_gzip_choke_point_errors(hand_rolled_tree), [
             "internal/backup/export.go:2: direct compress/gzip writer construction - "
             "the only codec owners are internal/proxy/gzip.go (saved artifacts) "
-            "and internal/web/gzip.go (transit)"])
+            "and internal/web/gzip.go (the dashboard's transit and precomputed representations)"])
+        # The perimeter reaches every tracked .go file outside tests: a
+        # construction in a root-level or deploy/ Go file is caught with the
+        # same owner-label wording.
+        for name in ("version.go", "deploy/sidecar/main.go"):
+            self.assertEqual(check.artifact_gzip_choke_point_errors(good + [
+                (name, "func save(w io.Writer) {\n\tzw := gzip.NewWriterLevel(w, 2)\n}\n")]), [
+                name + ":2: direct compress/gzip writer construction - "
+                "the only codec owners are internal/proxy/gzip.go (saved artifacts) "
+                "and internal/web/gzip.go (the dashboard's transit and precomputed representations)"])
         clean_constructions = good + [
             ("internal/proxy/gzip.go", "\tzw, err := gzip.NewWriterLevel(w, artifactGzipLevel)\n"),
             ("internal/web/gzip.go", "\twriter, err := gzip.NewWriterLevel(nil, dashboardGzipLevel)\n"),

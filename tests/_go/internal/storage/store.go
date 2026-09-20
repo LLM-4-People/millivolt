@@ -992,6 +992,45 @@ func TestHandleQueryRejectsNonSelect(t *testing.T) {
 	}
 }
 
+// TestHandleQueryStrictQuery pins the route's single consumed key under the
+// strict-query rule: a malformed pair the lenient read would drop answers
+// the invalid-query 400 (not the missing-q wording a dropped pair self-heals
+// into), and a repeated q is denied, never first-wins.
+func TestHandleQueryStrictQuery(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "strict-q.db")
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	errorText := func(w *httptest.ResponseRecorder) string {
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("body is not the flat error shape: %v (%q)", err, w.Body.String())
+		}
+		return body.Error
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics/query", nil)
+	req.URL.RawQuery = "q=%zz"
+	w := httptest.NewRecorder()
+	s.HandleQuery(w, req)
+	if w.Code != http.StatusBadRequest || errorText(w) != "invalid query" {
+		t.Fatalf("malformed q: status=%d error=%q, want 400 invalid query", w.Code, errorText(w))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/metrics/query", nil)
+	req.URL.RawQuery = "q=" + url.QueryEscape("SELECT 1") + "&q=" + url.QueryEscape("SELECT 2")
+	w = httptest.NewRecorder()
+	s.HandleQuery(w, req)
+	if w.Code != http.StatusBadRequest || errorText(w) != "duplicate q" {
+		t.Fatalf("repeated q: status=%d error=%q, want 400 duplicate q", w.Code, errorText(w))
+	}
+}
+
 func TestRecordAfterCloseDoesNotPanic(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.db")
 	s, err := Open(path, testOpts)

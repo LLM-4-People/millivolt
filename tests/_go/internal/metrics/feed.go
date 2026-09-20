@@ -6,12 +6,27 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/adminjson"
 )
+
+// strictQuery is the mirrors' production-path query parse: every row drives
+// the same strict owner the handlers parse through, so a signature change in
+// the lenient read can never drift past these tests.
+func strictQuery(t *testing.T, r *http.Request) url.Values {
+	t.Helper()
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		t.Fatalf("strict parse of %q: %v", r.URL.RawQuery, err)
+	}
+	return q
+}
 
 func record(id string) *Record {
 	return &Record{ID: id, Provider: "p", StatusCode: 200, Start: time.Now()}
@@ -177,7 +192,7 @@ func TestCursorParamGate(t *testing.T) {
 		if tc.lastEventID != "" {
 			req.Header.Set("Last-Event-ID", tc.lastEventID)
 		}
-		if got := cursorParam(req, b.FeedID()); got != tc.want {
+		if got := cursorParam(strictQuery(t, req), req.Header, b.FeedID()); got != tc.want {
 			t.Errorf("%s: CursorParam = %d, want %d", tc.name, got, tc.want)
 		}
 	}
@@ -243,6 +258,31 @@ func TestHandleStreamNoCrossOriginSharing(t *testing.T) {
 				t.Fatalf("ordinary replay changed: %+v", p)
 			}
 		})
+	}
+}
+
+// TestHandleStreamStrictQuery pins the live feed's strict-query adoption:
+// the SSE stream parses the raw query before any stream header is staged, so
+// a malformed feed pin (which the lenient read would drop, trusting the
+// stale cursor on a foreign feed) and a repeated feed or since key answer a
+// plain 400, never an SSE-framed response.
+func TestHandleStreamStrictQuery(t *testing.T) {
+	b := NewBuffer(4)
+	b.Record(record("a"))
+	for _, tc := range []struct{ name, query string }{
+		{"malformed feed pin", "feed=%zz&since=1"},
+		{"repeated feed pin", "feed=" + b.FeedID() + "&feed=dead"},
+		{"repeated since", "since=1&since=2"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil)
+		req.URL.RawQuery = tc.query
+		w := runStreamRequest(t, b, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want a plain 400", tc.name, w.Code)
+		}
+		if ct := w.Header().Get("Content-Type"); ct == "text/event-stream" {
+			t.Errorf("%s: the 400 carried SSE framing", tc.name)
+		}
 	}
 }
 

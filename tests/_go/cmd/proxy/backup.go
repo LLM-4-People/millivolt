@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -281,6 +282,82 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 	out = binary.BigEndian.AppendUint64(out, 0)
 	out = append(out, sum[:]...)
 	return append(out, zbuf.Bytes()...)
+}
+
+// TestBackupRestoreAdoptStrictQuery pins the destructive plane's strict-query
+// adoption: both routes parse the raw query string, so a malformed pair can
+// never be silently dropped into a broader action (inspect=%zz must not turn
+// a would-be 400 into a real restore; config=1&database=%zz must not
+// silently skip the database member) and every repeated consumed flag is
+// denied, never first-wins. The fixture archive carries both members so each
+// dropped pair would otherwise change what the restore really does.
+func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
+	liveReloadFixture(t)
+	start := liveCfg.Clone()
+	start.MaxRetries = 5
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	live, _, livePath, dir := openLiveStoreFixture(t)
+	live.Record(&metrics.Record{ID: "strict-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := live.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var yamlBuf bytes.Buffer
+	if err := config.WriteYAML(&yamlBuf, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Config: yamlBuf.Bytes(), Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = livePath
+	liveStore = live
+	beforeConfig, err := os.ReadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+
+	for _, tc := range []struct {
+		name, target, method string
+	}{
+		{"restore inspect=%zz must not become a real restore", "/admin/restore?inspect=%zz", http.MethodPost},
+		{"restore config=1&database=%zz must not skip the database member", "/admin/restore?config=1&database=%zz", http.MethodPost},
+		{"repeated inspect flag is denied, never first-wins", "/admin/restore?inspect=1&inspect=0", http.MethodPost},
+		{"repeated config_mode is denied, never first-wins", "/admin/restore?config_mode=merge&config_mode=replace", http.MethodPost},
+		{"repeated database_mode is denied, never first-wins", "/admin/restore?database_mode=merge&database_mode=replace", http.MethodPost},
+		{"backup config=1&database=%zz must not silently become config-only", "/admin/backup?config=1&database=%zz", http.MethodGet},
+		{"repeated backup config flag is denied, never first-wins", "/admin/backup?config=1&config=0", http.MethodGet},
+	} {
+		w := httptest.NewRecorder()
+		var body io.Reader
+		if tc.method == http.MethodPost {
+			body = bytes.NewReader(raw)
+		}
+		mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.target, body))
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d body %s, want 400", tc.name, w.Code, w.Body.String())
+		}
+	}
+	// No crafted query may reach a destructive side effect: the config file
+	// stays byte-identical and no database snapshot is staged.
+	afterConfig, err := os.ReadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeConfig, afterConfig) {
+		t.Fatal("a crafted query rewrote the live config file")
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(livePath)); !os.IsNotExist(err) {
+		t.Fatal("a crafted query staged a database snapshot")
+	}
 }
 
 func TestBackupRequiresAPart(t *testing.T) {

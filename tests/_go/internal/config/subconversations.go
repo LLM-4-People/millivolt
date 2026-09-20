@@ -123,7 +123,8 @@ func TestSubConversationsValidationRows(t *testing.T) {
 
 // TestSubConversationsNormalize pins the normalization-before-judging
 // contract: a valid list comes back canonical - the client and every param
-// name trimmed, order preserved, first-present-wins order intact - and
+// name trimmed, order preserved, the presence-ordered walk intact (the
+// first present string value decides) - and
 // strip stays a plain bool defaulting to false (forward unchanged).
 func TestSubConversationsNormalize(t *testing.T) {
 	c := Default()
@@ -361,7 +362,8 @@ func TestSubConversationsMapIsJSONArray(t *testing.T) {
 
 // TestSubConversationsSchemaPins: the registry entry is the documentation
 // surface - the caps, the exact-name semantics, the top-level-only scope,
-// the string-value rule, first-present-wins, the k: identity and its header
+// the string-value rule, the first-present-decides walk with its unified
+// drop, the k: identity and its header
 // precedence, strip, translated-target injection and the drop-not-reject
 // bound all read from the schema help, and the entry lives in the
 // conversation category.
@@ -383,7 +385,7 @@ func TestSubConversationsSchemaPins(t *testing.T) {
 		"exactly",          // exact client names, no wildcard, no case folding
 		"1..4",             // params per entry
 		"top level",        // extraction and strip see only top-level keys
-		"first present",    // first-present-wins
+		"first present",    // the first present field decides, no later one is consulted
 		"string value",     // only a JSON string value supplies the tracked value
 		"dropped",          // drop-not-reject bound
 		"k:",               // the tracked identity namespace

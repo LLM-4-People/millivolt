@@ -226,12 +226,16 @@ bytes and grouping untouched.
 Each entry lists 1..4 exact JSON field names, matched only at the request
 body's top level and checked in order; the first present field decides. A
 present value that is not a JSON string counts as absent and the next field is
-checked, while a present string that cannot be decoded or exceeds the identity
-bound drops the identity for the request - no later field is consulted. A
+checked, while a present string that cannot be decoded or fails the identity
+rules drops the identity for the request - no later field is consulted. A
 value is kept only when it is non-empty after trimming, valid UTF-8, free of
 control bytes and at most 512 bytes, the same bound explicit session
-declarations satisfy. An absent or dropped identity is never a client error:
-the body is passthrough payload, and the request keeps automatic grouping.
+declarations satisfy. The drop is conservative: the value's raw spelling is
+scanned inside a bounded window, so a value whose raw span exceeds the window
+(escape sequences spend more raw bytes than they decode to, and trimmable
+edges count before trimming) is dropped even when its trimmed form would
+pass. An absent or dropped identity is never a client error: the body is
+passthrough payload, and the request keeps automatic grouping.
 
 The kept value groups the request under a `k:` conversation identity.
 Precedence is the explicit `X-Proxy-Session` header first, then the tracked

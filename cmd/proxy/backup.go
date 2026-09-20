@@ -30,7 +30,16 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodGet) {
 		return
 	}
-	wantConfig, wantDB, err := parseBackupParts(r.URL.Query())
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "config", "database"); err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	wantConfig, wantDB, err := parseBackupParts(q)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
@@ -68,7 +77,15 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodPost) {
 		return
 	}
-	q := r.URL.Query()
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "inspect", "config", "database", "config_mode", "database_mode"); err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	inspect, err := queryFlag(q, "inspect")
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "inspect: "+err.Error())

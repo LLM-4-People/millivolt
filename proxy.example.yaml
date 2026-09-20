@@ -420,16 +420,19 @@ conversation_max_open: 64
 # request body's top level; the first present field decides (duplicate top-level keys
 # resolve by their first occurrence): a present value that is not a JSON string value
 # counts as absent and the next field is checked, while a present string that cannot be
-# decoded or exceeds the identity bound drops the identity for the request - no later
-# field is consulted - and a dropped identity is never a client error. The value groups
-# the request under a k: conversation identity, after the X-Proxy-Session header (s:) and
-# before automatic client+key grouping; X-Proxy-Parent-Session still owns parent linkage.
-# Requests translated to the Anthropic wire gain a top-level prompt_cache_key carrying the
-# value. strip: true removes the entry's configured fields from the top level of the
-# relayed upstream passthrough body; the default false forwards the body unchanged. Param
-# names are exact printable-ASCII JSON key segments up to 64 bytes, no quotes or
-# backslashes; duplicate clients and duplicate params within an entry are rejected. Caps:
-# 16 entries, 4 params per entry. Default: an empty list, tracking fully off. Hot-reloads.
+# decoded or fails the identity rules (non-empty after trimming, valid UTF-8, free of
+# control bytes, at most 512 bytes) drops the identity for the request - no later field is
+# consulted - and a dropped identity is never a client error. The drop is conservative: a
+# value whose raw spelling exceeds the bounded scan window is dropped even when its
+# trimmed form would pass. The value groups the request under a k: conversation identity,
+# after the X-Proxy-Session header (s:) and before automatic client+key grouping;
+# X-Proxy-Parent-Session still owns parent linkage. Requests translated to the Anthropic
+# wire gain a top-level prompt_cache_key carrying the value. strip: true removes the
+# entry's configured fields from the top level of the relayed upstream passthrough body;
+# the default false forwards the body unchanged. Param names are exact printable-ASCII
+# JSON key segments up to 64 bytes, no quotes or backslashes; duplicate clients and
+# duplicate params within an entry are rejected. Caps: 16 entries, 4 params per entry.
+# Default: an empty list, tracking fully off. Hot-reloads.
 # Hot-reload: yes.
 #   type: ordered list of {client, params, strip} per-client tracked body params · default []
 sub_conversations:

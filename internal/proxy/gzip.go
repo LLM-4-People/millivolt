@@ -51,9 +51,13 @@ func NewArtifactGzipWriter(w io.Writer) *gzip.Writer {
 // the record id); a surface whose moment is always known passes the empty
 // string beside a non-zero moment. Precondition: at must be non-zero or
 // fallback non-empty - a zero moment with an empty fallback would publish a
-// name with an empty stamp segment. Unreachable today: every surface passes a
-// real moment (the backup and export pass time.Now(), the capture passes the
-// document's decoded moment or the record-id fallback).
+// name with an empty stamp segment - and fallback must be quote-safe (no
+// double quote or backslash): the name is spliced inside a quoted
+// Content-Disposition, and a quote-bearing fallback would break the header.
+// Unreachable today: every surface passes a real moment (the backup and
+// export pass time.Now(), the capture passes the document's decoded moment
+// or the record-id fallback, and the only realizable fallback is the minted
+// request id, which is quote-safe).
 func WriteArtifactHeaders(w http.ResponseWriter, kind, ext, contentType string, at time.Time, fallback string) {
 	segment := fallback
 	if !at.IsZero() {

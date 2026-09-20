@@ -19,6 +19,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -780,12 +781,21 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
-	winMin, ok := windowParam(r)
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "window", "s"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	winMin, ok := windowParam(q)
 	if !ok {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid window")
 		return
 	}
-	fs, statusCode, ok := parseScope(r)
+	fs, statusCode, ok := parseScope(q)
 	if !ok {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid filter")
 		return
@@ -805,8 +815,10 @@ func (a *AggAPI) HandleAggChart(w http.ResponseWriter, r *http.Request) {
 // windowParam owns the API's time-window domain: all history or positive
 // integral minutes bounded to safe duration arithmetic. CHART_WINDOWS owns
 // the UI's curated choices, not a second whitelist that could drift here.
-func windowParam(r *http.Request) (int, bool) {
-	v := r.URL.Query().Get("window")
+// q is the handler's one strict-parsed query (adminjson.StrictQuery); no
+// route parses the request twice.
+func windowParam(q url.Values) (int, bool) {
+	v := q.Get("window")
 	if v == "" || v == "all" {
 		return 0, true
 	}
@@ -896,9 +908,21 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
+	// The two cursor keys this surface consumes go through the strict parse:
+	// a malformed pair must never drop a feed pin and leave a stale cursor
+	// trusted, and a repeated feed or since is ambiguous.
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "feed", "since"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// State and the running asset version must come from the current process.
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, a.bootstrap(a.buf.SnapshotRequest(r)))
+	writeJSON(w, a.bootstrap(a.buf.SnapshotRequest(q, r.Header)))
 }
 
 // bootstrap owns the initial HTML and live endpoint payload alike. A new
@@ -981,8 +1005,8 @@ func (f scopeFilter) matches(c *contrib) bool {
 	return false
 }
 
-func parseScopeFilters(r *http.Request) ([]scopeFilter, bool) {
-	vals, ok := r.URL.Query()["f"]
+func parseScopeFilters(q url.Values) ([]scopeFilter, bool) {
+	vals, ok := q["f"]
 	if !ok {
 		return nil, true
 	}
@@ -1022,12 +1046,14 @@ func liveStatusFilter(s string) bool {
 // same dims the log is scoped by) plus the Requests-card status dropdown
 // (s=200: an exact HTTP code, OR s=streaming/paused/…: a live in-flight
 // class). Unknown s= is rejected (deny by default) - never silently ignored.
-func parseScope(r *http.Request) (fs []scopeFilter, statusCode string, ok bool) {
-	fs, ok = parseScopeFilters(r)
+// q is the handler's one strict-parsed query (adminjson.StrictQuery); the
+// repeated f= list key keeps its multi-value grammar.
+func parseScope(q url.Values) (fs []scopeFilter, statusCode string, ok bool) {
+	fs, ok = parseScopeFilters(q)
 	if !ok {
 		return nil, "", false
 	}
-	if s := r.URL.Query().Get("s"); s != "" {
+	if s := q.Get("s"); s != "" {
 		if liveStatusFilter(s) {
 			statusCode = s
 		} else {
@@ -1500,12 +1526,21 @@ func (a *AggAPI) HandleAggExplorer(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
-	dim := r.URL.Query().Get("dim")
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	if err := adminjson.DuplicateQueryKey(q, "dim", "s"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	dim := q.Get("dim")
 	if !validDims[dim] {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid dim")
 		return
 	}
-	allFS, statusCode, ok := parseScope(r)
+	allFS, statusCode, ok := parseScope(q)
 	if !ok {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid filter")
 		return
@@ -1565,13 +1600,24 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	if !metrics.RejectUnlessGet(w, r) {
 		return
 	}
-	fs, statusCode, ok := parseScope(r)
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
+		return
+	}
+	// s is this surface's only single-occurrence scope key; the repeated f=
+	// list keeps its grammar, and the before_ms/before_id/limit duplicates
+	// stay behind their existing pairing gates below.
+	if err := adminjson.DuplicateQueryKey(q, "s"); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	fs, statusCode, ok := parseScope(q)
 	if !ok {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid scope")
 		return
 	}
 	mcz := a.canonizer()
-	q := r.URL.Query()
 	var cursor *storage.LogCursor
 	ms, hasMs := q["before_ms"]
 	ids, hasID := q["before_id"]
@@ -1587,7 +1633,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 		}
 		cursor = &storage.LogCursor{StartMs: n, ID: ids[0]}
 	}
-	v := r.URL.Query().Get("limit")
+	v := q.Get("limit")
 	if v == "" || len(q["limit"]) != 1 {
 		adminjson.WriteError(w, http.StatusBadRequest, "limit required")
 		return

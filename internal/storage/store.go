@@ -1933,16 +1933,25 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusServiceUnavailable, ErrStorageDisabled.Error())
 		return
 	}
-	q := r.URL.Query().Get("q")
-	if q == "" {
-		fail(http.StatusBadRequest, "missing q")
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		fail(http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := validateQuery(q); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, "q"); err != nil {
 		fail(http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := s.Query(r.Context(), q)
+	if q.Get("q") == "" {
+		fail(http.StatusBadRequest, "missing q")
+		return
+	}
+	query := q.Get("q")
+	if err := validateQuery(query); err != nil {
+		fail(http.StatusBadRequest, err.Error())
+		return
+	}
+	rows, err := s.Query(r.Context(), query)
 	if err != nil {
 		// The verbatim body serves the operator's browser (operator-gated
 		// path); the server-side log is the durable record of the cause.

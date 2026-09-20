@@ -42,9 +42,12 @@ var gzipWriterPool = sync.Pool{
 // newPrecomputedGzipWriter wraps w in the default-compression codec for the
 // precomputed immutable-asset representation (web.go's newStaticAsset): a
 // one-time init cost that favors ratio over the transit codec's level-2 CPU
-// economy. The construction site lives in this codec-owner file so the
-// repository check's whole-tree construction ban keeps exactly two files that
-// may build a compress/gzip writer: this one and internal/proxy/gzip.go.
+// economy. The default level is the deliberate choice - bytes computed once
+// and served forever should spend the extra CPU on ratio; do not reroute
+// through the transit level-2 without revisiting that tradeoff. The
+// construction site lives in this codec-owner file so the repository check's
+// whole-tree construction ban keeps exactly two files that may build a
+// compress/gzip writer: this one and internal/proxy/gzip.go.
 func newPrecomputedGzipWriter(w io.Writer) *gzip.Writer {
 	return gzip.NewWriter(w)
 }

@@ -126,13 +126,16 @@ def check(root):
     inventory = source_inventory(root, (*IGNORED_PATHS, *PUBLIC_PATHS))
     pairs = static_pairs(inventory[1])
     # The Go choke-point detector consumes (name, text) pairs like the static
-    # detectors; this is its one corpus read of every source file under the
-    # Go and script roots - the two artifact gate files carry the per-file
-    # wrap rules, the whole tree carries the direct-construction ban. Binary
-    # assets under the roots are not source text and never decode.
+    # detectors; this is its one corpus read of every .go file the shared
+    # discovery owner lists outside tests (the inventory applies the
+    # repository's ignore policy, so agents/ and build artifacts never
+    # enter) - the two artifact gate files carry the per-file wrap rules,
+    # the whole tree carries the direct-construction ban, and the repository
+    # root (version.go), cmd/, internal/, scripts/ and deploy/ are all in
+    # scope. Binary assets are not source text and never decode.
     gzip_pairs = []
     for name in inventory[1]:
-        if name.split('/', 1)[0] not in ('cmd', 'internal', 'scripts'):
+        if not name.endswith('.go') or name.startswith('tests/'):
             continue
         try:
             text = (root / name).read_text(encoding='utf-8')
