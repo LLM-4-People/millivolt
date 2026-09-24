@@ -346,13 +346,23 @@ async def capture_history(args):
 
 
 async def layout(page):
-    return await page.evaluate('''() => {
+    return await page.evaluate('''async () => {
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const targets = ['#explorer','#xp-rail','#xp-dim-trigger','.xp-rail-item',
             '.xp-node','.xp-node-foot','.xp-node-signals','.xp-conversation-parent'];
         const overflow = [...document.querySelectorAll(targets.join(','))]
             .filter(e => e.clientWidth && e.scrollWidth > e.clientWidth + 2)
             .map(e => ({selector:e.id||e.className, width:e.clientWidth, scroll:e.scrollWidth}));
-        return {viewport:innerWidth, documentOverflow:document.documentElement.scrollWidth > innerWidth+2, overflow};
+        const gallery = document.querySelector('#xp-gallery');
+        const cards = gallery ? [...gallery.children] : [];
+        const firstRow = cards.filter(card => card.offsetTop === cards[0]?.offsetTop);
+        const galleryRect = gallery?.getBoundingClientRect();
+        const rowFullyVisible = !!galleryRect && firstRow.length > 0 && firstRow.every(card => {
+            const rect = card.getBoundingClientRect();
+            return rect.top >= galleryRect.top - 0.01 && rect.bottom <= galleryRect.bottom + 0.01;
+        });
+        return {viewport:innerWidth, documentOverflow:document.documentElement.scrollWidth > innerWidth+2,
+            overflow, rowFullyVisible};
     }''')
 
 
@@ -463,7 +473,8 @@ async def check(args):
                     if dim == 'provider':
                         require(len(footers) == 1 and footers[0]['text'] == '1 err · 2 ×429', 'combined health signals')
                     measured = await layout(page)
-                    require(not measured['documentOverflow'] and not measured['overflow'], (dim, measured))
+                    require(not measured['documentOverflow'] and not measured['overflow'] and measured['rowFullyVisible'],
+                            (dim, measured))
                     if dim == 'conversation':
                         roles = await page.locator('.xp-conversation-role').all_text_contents()
                         require(roles.count('main') == 1 and roles.count('sub') == 3, ('roles', roles))

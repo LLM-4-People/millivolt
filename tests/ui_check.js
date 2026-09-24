@@ -5699,22 +5699,26 @@ async function main() {
       Object.defineProperty(gal,'scrollHeight',{configurable:true,value:1000});
       const firstCard=gal.firstElementChild;
       Object.defineProperty(firstCard,'offsetTop',{configurable:true,value:7});
-      Object.defineProperty(firstCard,'offsetHeight',{configurable:true,value:148});
+      Object.defineProperty(firstCard,'getBoundingClientRect',{configurable:true,value:()=>({height:148})});
       if (gal.children[1]) {
         Object.defineProperty(gal.children[1],'offsetTop',{configurable:true,value:165});
-        Object.defineProperty(gal.children[1],'offsetHeight',{configurable:true,value:148});
+        Object.defineProperty(gal.children[1],'getBoundingClientRect',{configurable:true,value:()=>({height:148})});
       }
+      Object.defineProperty(xbody,'getBoundingClientRect',{configurable:true,value:()=>({top:20})});
+      Object.defineProperty(gal,'getBoundingClientRect',{configurable:true,value:()=>({top:20})});
       sw.applyGallerySize(gal);
-      // One measured row (148px), EXACTLY - never two, never a sliver of the
-      // next row - applied to the band (the .xp-body box) the tall dimension
-      // rail would otherwise stretch; the gallery itself keeps its natural
-      // height (its end breathing is scroll-padding, not box height).
       const capped=xbody.style.height==='148px' && gal.style.height==='';
+      Object.defineProperty(firstCard,'getBoundingClientRect',{configurable:true,value:()=>({height:148.25})});
+      Object.defineProperty(gal,'getBoundingClientRect',{configurable:true,value:()=>({top:74.25})});
+      sw.applyGallerySize(gal);
+      const stacked=xbody.style.height==='203px';
       sd.documentElement.style.setProperty('--gallery-locked','1');
       sw.applyGallerySize(gal);
-      check('gallery sizing follows the CSS-owned lock state, without a second height breakpoint',
-        capped && xbody.style.height==='' && gal.style.height==='');
+      check('gallery sizing follows the CSS-owned lock state and reserves stacked layout space',
+        capped && stacked && xbody.style.height==='' && gal.style.height==='');
       sd.documentElement.style.removeProperty('--gallery-locked');
+      Object.defineProperty(firstCard,'getBoundingClientRect',{configurable:true,value:()=>({height:148})});
+      Object.defineProperty(gal,'getBoundingClientRect',{configurable:true,value:()=>({top:20})});
       Object.defineProperty(gal,'scrollHeight',{configurable:true,value:148});
       sw.applyGallerySize(gal);
       // The band stays one row even when the content fits: a scrollHeight-
