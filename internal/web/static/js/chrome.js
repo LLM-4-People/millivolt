@@ -1389,6 +1389,7 @@ function providerCardHTML(label, p) {
   const usage = p.usage_keys && typeof p.usage_keys === 'object' && !Array.isArray(p.usage_keys) ? p.usage_keys : {};
   const modelsPath = p.models_path == null ? '' : String(p.models_path);
   const modelsKeys = p.models_keys && typeof p.models_keys === 'object' && !Array.isArray(p.models_keys) ? p.models_keys : {};
+  const ensureTools = Array.isArray(p.ensure_tools) ? p.ensure_tools.map(n => String(n)) : [];
   const headers = p.headers && typeof p.headers === 'object' && !Array.isArray(p.headers) ? p.headers : {};
   const fields = canonicalUsageFields();
   const used = new Set(Object.keys(usage));
@@ -1397,10 +1398,10 @@ function providerCardHTML(label, p) {
   const mused = new Set(Object.keys(modelsKeys));
   const mfree = mfields.filter(f => !mused.has(f));
   // Section order is fixed: cost keys, then usage keys, then models
-  // enrichment, then upstream headers last. Every section opens and closes
-  // inside the card - one missing close here cascades the following sections
-  // into each other (the models section once rendered nested inside usage
-  // keys).
+  // enrichment, then ensured tools, then upstream headers last. Every
+  // section opens and closes inside the card - one missing close here
+  // cascades the following sections into each other (the models section
+  // once rendered nested inside usage keys).
   return `<div class="st-prov">` +
     `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${trashIconSVG()}</button></div>` +
     `<div class="prov-body">` +
@@ -1416,7 +1417,10 @@ function providerCardHTML(label, p) {
     `<div class="prov-mmap">${Object.entries(modelsKeys).map(([f, path]) => modelRowHTML(f, path, mfields)).join('')}</div>` +
     (mfree.length ? `<div class="prov-add prov-add-m"><select class="sp-mfield-new" aria-label="canonical model field">${mfree.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-model aria-label="add model mapping">+ map</button></div>` : '') +
     `</div>` +
-    `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} expand per request</span></div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names every chat request's tools array must carry - missing names are injected as inert stubs upstream</span></div>` +
+    `<div class="prov-add"><input class="sp-etools" value="${escapeHtml(ensureTools.join(', '))}" placeholder="tool names, comma-separated - e.g. bash, read" aria-label="ensured tool names"></div>` +
+    `</div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} / {{opencode-msg-id}} / {{opencode-ses-id}} expand per request</span></div>` +
     `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
     `<div class="prov-add prov-add-h"><input class="sp-hname" placeholder="header name… ↵" aria-label="upstream header name"><input class="sp-hval" placeholder="header value… ↵" aria-label="upstream header value"><button type="button" class="btn prov-addbtn" data-prov-add-header aria-label="add header">+</button></div>` +
     `</div>` +
@@ -2990,11 +2994,17 @@ function collectSettingsValues(validate = false) {
           const v = String((row.querySelector('.sp-hval') || {}).value || '');
           put(headers, n, v, row.querySelector('.sp-hname'));
         });
+        // Ensured tools are one comma-separated input; empty segments drop
+        // and the rest ride the shared server validator (empty and
+        // duplicate names reject at save, like every other editor field).
+        const ensureTools = String((card.querySelector('.sp-etools') || {}).value || '')
+          .split(',').map(s => s.trim()).filter(Boolean);
         put(m, label, {
           cost_keys: cost,
           usage_keys: usage,
           models_path: String((card.querySelector('.sp-mpath') || {}).value || '').trim(),
           models_keys: modelsKeys,
+          ensure_tools: ensureTools,
           headers: headers,
         }, card.querySelector('.sp-label'));
       });

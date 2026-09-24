@@ -87,6 +87,20 @@ profile is not an account, key or permission, and there is no zen login
 helper. Zen's models are listed in
 [OpenCode's Zen documentation](https://opencode.ai/docs/zen/).
 
+Every profile is editable operator configuration, in the private config file
+or in Settings under Providers (each card edits the field maps, ensured tool
+names and upstream headers, with hot reload): changing a signature tool set
+or a header value is an edit, never a code change. To reproduce another
+first-party client's signature for a different provider, work from evidence
+top down: capture the client's own requests against a local logging upstream,
+strip one signal at a time against the real endpoint (TLS ClientHello, header
+order and values, body fields, credentials) until only the gate remains, then
+express the surviving identity as a provider profile - static headers
+directly, per-request dynamic values as `{{uuid4}}`, `{{platform}}` or a new
+mint placeholder in the single template expander, and required tool names as
+`ensure_tools`. The zen profile above is one worked example of that recipe,
+not a hardcoded mechanism.
+
 ## Anthropic-compatible Messages
 
 `anthropic` translates common OpenAI chat requests/responses: message history,

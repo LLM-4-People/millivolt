@@ -136,7 +136,7 @@ const cfgDoc = {
     { key: 'provider_aliases', category: 'providers', label: 'Provider aliases', help: 'Merge an old provider label into its canonical one (old → canonical).', kind: 'aliases', hot_reload: true },
   ],
   categories: [{ id: 'providers', label: 'Providers', help: 'Per-provider usage/cost JSON field-name maps.' }],
-  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
+  values: { providers: { 'epsilon.example': { cost_keys: ['x_billing_pricing.cost'], usage_keys: { input_tokens: 'x_billing_pricing.inputTokens' }, models_path: '/model-meta', models_keys: { input_modalities: 'input_modalities' }, ensure_tools: ['bash', 'read'], headers: { 'User-Agent': 'my-shell/1.0 ({{platform}})' } } }, provider_aliases: { 'old.example': 'new.example' } },
   defaults: { providers: {}, model_rules: DEF_RULES },
   effective: {},
   overrides: {},
@@ -3368,7 +3368,18 @@ async function main() {
     menu.querySelector('.prov-menu-item .prov-ic').getAttribute('style') === '--ent:#0072B2');
   menu.querySelector('.prov-new-label').value = 'gamma.example';
   menu.querySelector('[data-prov-add]').click();
-  check('new provider card collects with empty maps', JSON.stringify(w.collectSettingsValues().providers['gamma.example']) === JSON.stringify({ cost_keys: [], usage_keys: {}, models_path: '', models_keys: {}, headers: {} }));
+  check('new provider card collects with empty maps', JSON.stringify(w.collectSettingsValues().providers['gamma.example']) === JSON.stringify({ cost_keys: [], usage_keys: {}, models_path: '', models_keys: {}, ensure_tools: [], headers: {} }));
+  // The ensured-tools input round-trips through collect: comma-separated
+  // names split and trim, empty segments drop, and the saved provider keeps
+  // the section, so editing any other section never drops the signature.
+  const gamma = prow.querySelector('.st-prov:last-child');
+  check('ensured tools section renders on new cards', !!gamma.querySelector('.sp-etools'));
+  gamma.querySelector('.sp-etools').value = ' bash ,, read ';
+  check('ensured tools collect splits, trims and drops empty segments',
+    JSON.stringify(w.collectSettingsValues().providers['gamma.example'].ensure_tools) === JSON.stringify(['bash', 'read']));
+  gamma.querySelector('.sp-etools').value = 'bash, bash';
+  check('ensured tools pass duplicates to the shared server validator',
+    JSON.stringify(w.collectSettingsValues().providers['gamma.example'].ensure_tools) === JSON.stringify(['bash', 'bash']));
   check('add menu closes after adding', menu.hidden);
   check('closing the provider picker couples aria-expanded on its toggle',
     topBtn.getAttribute('aria-expanded') === 'false');
@@ -3410,15 +3421,17 @@ async function main() {
     card.querySelector('.prov-mmap .sp-mkey').value === 'input_modalities');
   // Upstream headers ride the same card grammar: name/value rows, collected
   // like the other maps. Section order is FIXED - cost keys, usage keys,
-  // models enrichment, upstream headers last.
-  check('models enrichment is the last mapping section in every card', [...provRow.querySelectorAll('.st-prov')].every(c2 => {
+  // models enrichment, ensured tools, upstream headers last.
+  check('upstream headers is the last section in every card', [...provRow.querySelectorAll('.st-prov')].every(c2 => {
     const secs = [...c2.querySelectorAll('.prov-body > .prov-sec')];
-    return secs.length === 4 &&
+    return secs.length === 5 &&
       secs[0].querySelector('.prov-lb span').textContent === 'cost keys' &&
       secs[1].querySelector('.prov-lb span').textContent === 'usage keys' &&
       secs[2].querySelector('.prov-lb span').textContent === 'models enrichment' &&
       !!secs[2].querySelector('.sp-mpath') &&
-      secs[3].querySelector('.prov-lb span').textContent === 'upstream headers';
+      secs[3].querySelector('.prov-lb span').textContent === 'ensured tools' &&
+      !!secs[3].querySelector('.sp-etools') &&
+      secs[4].querySelector('.prov-lb span').textContent === 'upstream headers';
   }));
   check('model field dropdown is the server-owned canonical list', card.querySelectorAll('.prov-mmap .sp-mfield option').length === 5);
   card.querySelector('.sp-mfield-new').value = 'max_output_tokens';
