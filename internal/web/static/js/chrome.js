@@ -794,6 +794,7 @@ function fillSettingsForm(doc) {
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
   box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('') + settingsBackupHTML(doc);
+  box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
   wireBackupPane();
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
@@ -1231,9 +1232,44 @@ function fillSettingsLive(doc) {
     lastApply;
 }
 
+function settingsFieldID(key, part) {
+  return `settings-${part}-${encodeURIComponent(String(key))}`;
+}
+
+function settingsScalarErrorMessage(input) {
+  const validity = input.validity;
+  if (validity.valueMissing) return 'enter a value';
+  if (validity.rangeUnderflow) return 'enter a value of at least ' + input.min;
+  if (validity.rangeOverflow) return 'enter a value no greater than ' + input.max;
+  if (validity.stepMismatch) return 'enter a value in steps of ' + (input.step || '1');
+  return input.validationMessage || 'enter a valid value';
+}
+
+function validateSettingsScalar(input) {
+  if (!input || !input.dataset || input.dataset.stScalar !== '1') return true;
+  const row = input.closest('.st-row');
+  const error = row && row.querySelector('.st-error');
+  const valid = !input.willValidate || input.checkValidity();
+  input.classList.toggle('prov-bad', !valid);
+  if (valid) input.removeAttribute('aria-invalid');
+  else input.setAttribute('aria-invalid', 'true');
+  if (error) error.textContent = valid ? '' : settingsScalarErrorMessage(input);
+  const helpId = input.dataset.stHelpId || '';
+  const errorId = input.dataset.stErrorId || '';
+  const described = [helpId, valid ? '' : errorId].filter(Boolean).join(' ');
+  if (described) input.setAttribute('aria-describedby', described);
+  else input.removeAttribute('aria-describedby');
+  return valid;
+}
+
 function settingsFieldHTML(f, val, def, override) {
   const locked = override != null && String(override) !== '';
+  const structured = f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'model_rules' || f.kind === 'request_overrides' || f.kind === 'sub_conversations';
+  const fieldId = settingsFieldID(f.key, 'field');
+  const helpId = settingsFieldID(f.key, 'help');
+  const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
+  const scalarAttrs = ` data-st-scalar="1" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
@@ -1248,10 +1284,10 @@ function settingsFieldHTML(f, val, def, override) {
   const nameExtra = f.kind === 'providers' ? providersAddHTML() : '';
   if (f.kind === 'bool') {
     const on = val === true || val === 'true';
-    control = `<input type="checkbox" class="st-switch" data-key="${escapeHtml(f.key)}"${on ? ' checked' : ''}${dis}>`;
+    control = `<input type="checkbox" class="st-switch" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}"${on ? ' checked' : ''}${scalarAttrs}${dis}>`;
   } else if (f.kind === 'strings') {
     const text = Array.isArray(val) ? val.join('\n') : (val || '');
-    control = `<textarea data-key="${escapeHtml(f.key)}" rows="3" placeholder="one per line"${dis}>${escapeHtml(text)}</textarea>`;
+    control = `<textarea id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" rows="3" placeholder="one per line"${scalarAttrs}${dis}>${escapeHtml(text)}</textarea>`;
   } else if (f.kind === 'providers') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="providers">${providersEditorHTML(val)}</div>`;
   } else if (f.kind === 'aliases') {
@@ -1263,16 +1299,21 @@ function settingsFieldHTML(f, val, def, override) {
   } else if (f.kind === 'sub_conversations') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="sub_conversations">${subConversationsEditorHTML(val)}</div>`;
   } else if (f.kind === 'int') {
-    const min = f.min != null ? ` min="${f.min}"` : '';
-    const max = f.max != null ? ` max="${f.max}"` : '';
-    control = `<div class="st-ctl-line"><input type="number" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${dis}>${unit}</div>`;
+    const min = f.min != null ? ` min="${escapeHtml(String(f.min))}"` : '';
+    const max = f.max != null ? ` max="${escapeHtml(String(f.max))}"` : '';
+    control = `<div class="st-ctl-line"><input type="number" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${scalarAttrs}${dis}>${unit}</div>`;
   } else {
-    control = `<div class="st-ctl-line"><input type="text" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${dis}>${unit}</div>`;
+    control = `<div class="st-ctl-line"><input type="text" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${scalarAttrs}${dis}>${unit}</div>`;
   }
-  const block = (f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'strings' || f.kind === 'model_rules' || f.kind === 'request_overrides' || f.kind === 'sub_conversations') ? ' st-block' : '';
+  const block = (structured || f.kind === 'strings') ? ' st-block' : '';
+  const name = structured
+    ? `<div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div>`
+    : `<label class="st-name" for="${escapeHtml(fieldId)}">${escapeHtml(f.label)}${pills}</label>`;
+  const help = f.help ? `<details class="st-help"><summary>Help</summary><div class="st-help-text" id="${escapeHtml(helpId)}">${escapeHtml(f.help)}</div></details>` : '';
+  const error = structured ? '' : `<div class="st-error" id="${escapeHtml(errorId)}" aria-live="polite"></div>`;
   const ttl = escapeHtml((f.help || '') + (f.help && f.key ? ' · ' : '') + (f.key || ''));
   const hot = f.hot_reload ? '1' : '0';
-  return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}"><div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div><div class="st-ctl">${control}${hint}</div></div>`;
+  return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}">${name}<div class="st-ctl">${control}${error}${hint}${help}</div></div>`;
 }
 
 // ---- providers editor ----
@@ -2596,7 +2637,10 @@ const INPUT_FLASH_MS = 1200;
 function flashBadInput(el) {
   if (!el) return;
   el.classList.add('prov-bad');
-  setTimeout(() => el.classList.remove('prov-bad'), INPUT_FLASH_MS);
+  setTimeout(() => {
+    if (el.dataset && el.dataset.stScalar === '1' && el.getAttribute('aria-invalid') === 'true') return;
+    el.classList.remove('prov-bad');
+  }, INPUT_FLASH_MS);
 }
 
 function addCostKey(sec) {
@@ -2810,6 +2854,7 @@ function wireSettingsDelegation() {
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   };
   box.addEventListener('input', e => {
+    validateSettingsScalar(e.target);
     if (e.target.closest && e.target.closest('.mr-wrap')) {
       const wrap = e.target.closest('.mr-wrap');
       // live per-keystroke validation (regex101/NN(g)-style: inline, at
@@ -2830,6 +2875,7 @@ function wireSettingsDelegation() {
     dirty(e);
   });
   box.addEventListener('change', e => {
+    validateSettingsScalar(e.target);
     if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
       if (e.target.id === 'backup-file') return;
       if (backupBusy) return;

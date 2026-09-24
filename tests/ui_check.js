@@ -3477,6 +3477,85 @@ async function main() {
   check('valid alias row collects', w.collectSettingsValues().provider_aliases['old.example'] === 'new.example');
   w.closeSettings(true);
 
+  {
+    const doc = {
+      revision: 'ux-r1',
+      fields: [
+        { key: 'safe_text', category: 'ux', label: 'Plain label', help: 'Search <em>needle</em> & "quoted"', kind: 'string', hot_reload: true },
+        { key: 'safe_list', category: 'ux', label: 'List label', help: 'List help', kind: 'strings', hot_reload: true },
+        { key: 'safe_toggle', category: 'ux', label: 'Toggle label', help: '', kind: 'bool', hot_reload: true },
+        { key: 'safe_number', category: 'ux', label: 'Number label', help: 'Number help', kind: 'int', min: 0, max: 10, unit: 'items', hot_reload: true },
+        { key: 'providers', category: 'ux', label: 'Provider maps', help: 'Structured help', kind: 'providers', hot_reload: true },
+      ],
+      categories: [{ id: 'ux', label: 'UX', help: 'ordinary fields' }],
+      values: { safe_text: 'ordinary value', safe_list: ['one'], safe_toggle: true, safe_number: 3, providers: {} },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.__settingsUxDoc = doc;
+    w.eval('settingsDoc = window.__settingsUxDoc; fillSettingsForm(settingsDoc)');
+    d.getElementById('settings-sheet').hidden = false;
+    const box = d.getElementById('settings-fields');
+    const textRow = box.querySelector('.st-row[data-key="safe_text"]');
+    const textInput = textRow.querySelector('[data-st-scalar]');
+    const help = textRow.querySelector('details.st-help');
+    const helpText = help.querySelector('.st-help-text');
+    const scalarRows = [...box.querySelectorAll('.st-row')].filter(row => row.querySelector('[data-st-scalar]'));
+    const scalarIds = scalarRows.map(row => row.querySelector('[data-st-scalar]').id);
+    const search = d.getElementById('settings-q');
+    search.value = 'needle';
+    w.filterSettings();
+    const visibleKeys = [...box.querySelectorAll('.st-row')].filter(row => !row.hidden).map(row => row.dataset.key);
+    check('ordinary settings help is an escaped collapsed disclosure and remains searchable',
+      help && !help.open && help.querySelector('summary').textContent === 'Help' &&
+      helpText.textContent === 'Search <em>needle</em> & "quoted"' && !helpText.querySelector('em') &&
+      textRow.dataset.help === 'Search <em>needle</em> & "quoted"' &&
+      textRow.title === 'Search <em>needle</em> & "quoted" · safe_text' &&
+      JSON.stringify(visibleKeys) === JSON.stringify(['safe_text']));
+    check('ordinary settings controls have unique visible label associations',
+      scalarRows.length === 4 && new Set(scalarIds).size === scalarIds.length &&
+      scalarRows.every(row => {
+        const input = row.querySelector('[data-st-scalar]');
+        const label = row.querySelector('label.st-name');
+        return label && label.htmlFor === input.id && d.getElementById(input.id) === input;
+      }));
+    const structuredRow = box.querySelector('.st-row[data-key="providers"]');
+    check('specialized settings fields remain non-label containers',
+      !!structuredRow.querySelector('[data-kind="providers"]') && !structuredRow.querySelector('label.st-name') &&
+      !structuredRow.querySelector('[data-st-scalar]'));
+    check('scalar controls associate their visible help text',
+      textInput.getAttribute('aria-describedby').split(/\s+/).includes(helpText.id));
+    const number = box.querySelector('input[data-key="safe_number"]');
+    const numberError = number.closest('.st-row').querySelector('.st-error');
+    check('valid ordinary settings start without false local errors',
+      scalarRows.every(row => {
+        const input = row.querySelector('[data-st-scalar]');
+        const error = row.querySelector('.st-error');
+        return !input.classList.contains('prov-bad') && !input.hasAttribute('aria-invalid') && error.textContent === '';
+      }) && number.required && number.min === '0' && number.max === '10' && number.step === '1');
+    number.value = '11';
+    number.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('invalid numeric input is visibly marked with adjacent live feedback',
+      number.classList.contains('prov-bad') && number.getAttribute('aria-invalid') === 'true' &&
+      numberError.textContent.length > 0 && number.getAttribute('aria-describedby').split(/\s+/).includes(numberError.id));
+    number.value = '1.5';
+    number.dispatchEvent(new w.Event('change', { bubbles: true }));
+    check('native step validity is reflected in the same local feedback',
+      number.classList.contains('prov-bad') && numberError.textContent.includes('steps'));
+    number.value = '3';
+    number.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('repairing numeric input clears its local error and description',
+      !number.classList.contains('prov-bad') && !number.hasAttribute('aria-invalid') && numberError.textContent === '' &&
+      !number.getAttribute('aria-describedby').split(/\s+/).includes(numberError.id));
+    search.value = '';
+    w.filterSettings();
+    const restore = JSON.parse(JSON.stringify(cfgDoc));
+    w.__settingsUxRestore = restore;
+    w.eval('settingsDoc = window.__settingsUxRestore; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__settingsUxDoc;
+    delete w.__settingsUxRestore;
+  }
+
   // Settings transactions: preserve drafts across late loads/saves and reject
   // incomplete numeric/map edits rather than silently turning them into zeros
   // or deleting entries. HTTP is stubbed; no running YAML is modified.
