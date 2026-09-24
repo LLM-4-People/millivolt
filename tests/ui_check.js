@@ -70,9 +70,23 @@ function assembleHTML(bootstrap) {
 const html = assembleHTML();
 
 let failures = [];
+// diagDump is installed once the dashboard DOM exists; until then a failed
+// check carries only its label. On every red check it prints the recorded
+// activity that explains the failure, so a diagnosis needs no second run
+// and no ad-hoc instrumentation, locally or in CI output.
+let diagDump = null;
 const check = (label, cond) => {
   console.log((cond ? 'PASS ' : 'FAIL ') + label);
-  if (!cond) failures.push(label);
+  if (!cond) {
+    failures.push(label);
+    if (diagDump) console.log(diagDump(label));
+  }
+};
+// The shared summary owner: the green path, a red run and a crash all
+// report the accumulated failures through this one printer.
+const reportFailures = crashed => {
+  if (failures.length) console.log('\nFAILURES: ' + failures.join(' | '));
+  else console.log(crashed ? '\nCRASHED BEFORE ANY CHECK FAILED' : '\nALL UI CHECKS PASSED');
 };
 
 const mkRec = (id, status = 200, start = Date.now() - 1000) => ({
@@ -276,6 +290,62 @@ dom.virtualConsole.removeAllListeners('jsdomError');
 dom.virtualConsole.on('jsdomError', error => {
   if (error.type === 'not-implemented' && /navigation/.test(error.message)) jsdomReloads++;
   else { failures.push(error.message); console.error(error); }
+});
+// ---------- failure diagnostics ----------
+// One bounded activity recorder feeds one dump owner, so any red check or
+// a crashed run reports the same decisive context in its own output. The
+// recorded owners are the page's lifecycle functions because the settings
+// sheet rebuilding under a cached DOM handle is the failure class that
+// hides from a bare label: a refill turns every element reference the
+// tests hold stale while focus and flags stay plausible. Recording is
+// passive - names and one key argument per call, the log capped - so a
+// green run prints nothing and pays almost nothing.
+const diagT0 = Date.now();
+const diagEvents = [];
+const diagNote = entry => {
+  diagEvents.push(((Date.now() - diagT0) / 1000).toFixed(1) + 's ' + entry);
+  if (diagEvents.length > 100) diagEvents.shift();
+};
+for (const [name, describe] of [
+  ['fillSettingsForm', doc => 'settings refill, revision ' + (doc && doc.revision)],
+  ['fetchSettings', () => 'settings fetch'],
+  ['refreshAfterRestart', () => 'reconnect refresh of every server-fed surface'],
+  ['fetchBootstrap', mode => 'bootstrap fetch, mode ' + mode],
+  ['applySnapshotPayload', payload => 'snapshot, feed ' + (payload && payload.feed_id)],
+]) {
+  if (typeof w[name] !== 'function') continue;
+  const orig = w[name];
+  w[name] = function () {
+    diagNote(name + ' (' + describe(...arguments) + ')');
+    return orig.apply(this, arguments);
+  };
+}
+// The DOM truth supplements the owner names: any rebuild of the settings
+// fields (including a load-failure render) and every sheet open or close
+// are recorded whatever called them, since event listeners capture their
+// handler references before this wrapper layer existed.
+const diagFields = d.getElementById('settings-fields');
+if (diagFields && typeof w.MutationObserver === 'function') {
+  new w.MutationObserver(() => diagNote('settings fields rebuilt')).observe(diagFields, { childList: true });
+  const diagSheet = d.getElementById('settings-sheet');
+  if (diagSheet) new w.MutationObserver(() => diagNote('settings sheet ' + (diagSheet.hidden ? 'closed' : 'opened'))).observe(diagSheet, { attributes: true, attributeFilter: ['hidden'] });
+}
+const diagActive = () => {
+  const el = d.activeElement;
+  if (!el) return null;
+  return el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '');
+};
+diagDump = why => 'DIAG ' + JSON.stringify({
+  why,
+  activity: diagEvents,
+  activeElement: diagActive(),
+  settingsSheetOpen: (() => { const s = d.getElementById('settings-sheet'); return s ? !s.hidden : null; })(),
+  jsdomReloads,
+  feedId: w.eval('feedId'),
+  lastSeq: w.eval('lastSeq'),
+  cannedFeed: typeof fullPayload !== 'undefined' && fullPayload ? { feed_id: fullPayload.feed_id, seq: fullPayload.seq } : null,
+  settingsDoc: w.eval('typeof settingsDoc !== "undefined" && settingsDoc ? settingsDoc.revision : null'),
+  settingsCat: w.eval('typeof settingsCat !== "undefined" ? settingsCat : null'),
 });
 for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
   'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
@@ -6969,7 +7039,15 @@ async function main() {
     } finally { sw.close(); }
   }
 
-  console.log(failures.length ? '\nFAILURES: ' + failures.join(' | ') : '\nALL UI CHECKS PASSED');
+  reportFailures(false);
   process.exit(failures.length ? 1 : 0);
 }
-main();
+// A crashed run must not swallow what it already knows: without this
+// handler the process dies on the raw exception and the accumulated
+// failures, the diagnostic dump and the check history never print.
+main().catch(err => {
+  console.error(err);
+  if (diagDump) console.log(diagDump('crash: ' + (err && err.message)));
+  reportFailures(true);
+  process.exit(1);
+});
