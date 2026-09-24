@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -237,10 +238,13 @@ func TestCursorHeadersFromProviderConfig(t *testing.T) {
 }
 
 // The shipped OpenCode Zen profile must key exactly the label a real zen base
-// URL derives, and its client identity must replace a non-opencode client's
-// fingerprint while the CLI's per-conversation headers stay client-owned.
-// The mock upstream's IP label is re-keyed to opencode.ai through
-// provider_aliases, the same single choke point production traffic uses.
+// URL derives, and its client identity must reach the upstream: static
+// headers verbatim, the per-request id templates expanded into the CLI's
+// 26-character identifier shape (12 lowercase hex, then 14 base62), and the
+// client's own id values replaced, because provider headers override
+// client-forwarded ones. The mock upstream's IP label is re-keyed to
+// opencode.ai through provider_aliases, the same single choke point
+// production traffic uses.
 func TestOpencodeZenProfileAppliesToZenLabel(t *testing.T) {
 	upstream, cap := captureUpstream(t, `{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`)
 	defer upstream.Close()
@@ -258,16 +262,29 @@ func TestOpencodeZenProfileAppliesToZenLabel(t *testing.T) {
 
 	postChat(t, srv.URL, upstream.URL, func(r *http.Request) {
 		r.Header.Set("User-Agent", "generic-sdk/9.9")
-		r.Header.Set("x-opencode-request", "msg_relaysuntouched")
+		r.Header.Set("x-opencode-request", "msg_clientownthatmustlosetheoverride")
 	})
 	h := cap.snapshot()[0]
 	zen := cfg.Providers["opencode.ai"]
+	idShape := regexp.MustCompile(`^[0-9a-f]{12}[0-9A-Za-z]{14}$`)
 	for name, want := range zen.Headers {
-		if got := h.Get(name); got != want {
-			t.Errorf("%s = %q, want the shipped opencode identity %q", name, got, want)
+		got := h.Get(name)
+		switch name {
+		case "x-opencode-request":
+			if !strings.HasPrefix(got, "msg_") || !idShape.MatchString(strings.TrimPrefix(got, "msg_")) {
+				t.Errorf("x-opencode-request = %q, want a minted msg_ opencode id", got)
+			}
+		case "x-opencode-session":
+			if !strings.HasPrefix(got, "ses_") || !idShape.MatchString(strings.TrimPrefix(got, "ses_")) {
+				t.Errorf("x-opencode-session = %q, want a minted ses_ opencode id", got)
+			}
+		default:
+			if got != want {
+				t.Errorf("%s = %q, want the shipped opencode identity %q", name, got, want)
+			}
 		}
 	}
-	if got := h.Get("x-opencode-request"); got != "msg_relaysuntouched" {
-		t.Errorf("x-opencode-request = %q, want the client's own value to pass through", got)
+	if got := h.Get("x-opencode-request"); strings.Contains(got, "clientown") {
+		t.Errorf("x-opencode-request = %q, want the profile's minted value to override the client's own", got)
 	}
 }

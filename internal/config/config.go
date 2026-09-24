@@ -458,14 +458,27 @@ type ProviderOverride struct {
 	// the ModelsPath enrichment entry (e.g. "architecture.input_modalities").
 	// A mapped field only fills entries that do not already carry it.
 	ModelsKeys map[string]string `yaml:"models_keys" json:"models_keys"`
+	// EnsureTools names function tools that must be present in the tools
+	// array of relayed OpenAI-wire chat bodies for this provider. A
+	// first-party client may gate its free tier on its own tool signature;
+	// names the request lacks are injected as inert function stubs, and a
+	// body that carried no tools and no tool_choice also receives
+	// tool_choice "none" so the injected stubs can never be invoked. Only
+	// chat-shaped bodies (a top-level messages array) are rewritten; a body
+	// that already carries every configured name relays byte-identical.
+	// Names must be non-empty and unique, validated on load.
+	EnsureTools []string `yaml:"ensure_tools" json:"ensure_tools"`
 	// Headers are extra upstream headers sent on every request to this
 	// provider (LLM calls and models discovery), e.g. mimicking a first-party
 	// client's wire fingerprint. Values override client-forwarded headers;
-	// the client's explicit X-Proxy-Headers injection map still wins. Two
+	// the client's explicit X-Proxy-Headers injection map still wins. Four
 	// per-request template placeholders expand at send time: "{{uuid4}}" (a
-	// fresh UUID v4 per request) and "{{platform}}" (rust-style "os; arch",
-	// e.g. "linux; x86_64"). Names are validated as RFC 7230 tokens and
-	// values as single-line header values on load.
+	// fresh UUID v4 per request), "{{platform}}" (rust-style "os; arch",
+	// e.g. "linux; x86_64"), "{{opencode-msg-id}}" and
+	// "{{opencode-ses-id}}" (fresh identifiers in the opencode CLI's wire
+	// format, prefix plus 12 lowercase hex and 14 base62 characters). Names
+	// are validated as RFC 7230 tokens and values as single-line header
+	// values on load.
 	Headers map[string]string `yaml:"headers" json:"headers"`
 }
 
@@ -687,11 +700,12 @@ func (c *Config) Clone() *Config {
 		out.Providers = make(map[string]ProviderOverride, len(c.Providers))
 		for k, v := range c.Providers {
 			out.Providers[k] = ProviderOverride{
-				CostKeys:   append([]string(nil), v.CostKeys...),
-				UsageKeys:  cloneStrMap(v.UsageKeys),
-				ModelsPath: v.ModelsPath,
-				ModelsKeys: cloneStrMap(v.ModelsKeys),
-				Headers:    cloneStrMap(v.Headers),
+				CostKeys:    append([]string(nil), v.CostKeys...),
+				UsageKeys:   cloneStrMap(v.UsageKeys),
+				ModelsPath:  v.ModelsPath,
+				ModelsKeys:  cloneStrMap(v.ModelsKeys),
+				EnsureTools: append([]string(nil), v.EnsureTools...),
+				Headers:     cloneStrMap(v.Headers),
 			}
 		}
 	}
@@ -920,17 +934,28 @@ func Example() *Config {
 		},
 		"opencode.ai": {
 			// OpenCode Zen uses the ordinary OpenAI-compatible relay and its
-			// standard models list, so only the CLI's client identity is
-			// supplied. The CLI's per-conversation request/session id headers
-			// stay client-owned on purpose: configured headers override
-			// client-forwarded values, and a genuine opencode client's real
-			// ids are the faithful ones. Non-opencode clients send none.
-			UsageKeys:  map[string]string{},
-			ModelsKeys: map[string]string{},
+			// standard models list. The CLI's free tier is gated on its wire
+			// signature, not on TLS or header order: the request must carry
+			// the CLI's per-conversation msg_/ses_ id headers in its 26-char
+			// identifier format (shape-validated upstream; the two template
+			// placeholders mint fresh ones per request) and a tools array
+			// containing the bash and read tool names (ensure_tools injects
+			// inert stubs when a client's request lacks them, with
+			// tool_choice none so stubs can never be invoked). A check on
+			// 2026-09-24 found the free models then served under the
+			// anonymous public bearer with this signature; that is an
+			// observation about that day, not an entitlement. The profile is
+			// not an account, key or permission, and there is no zen login
+			// helper.
+			UsageKeys:   map[string]string{},
+			ModelsKeys:  map[string]string{},
+			EnsureTools: []string{"bash", "read"},
 			Headers: map[string]string{
 				"User-Agent":         "opencode/" + opencodeCLI + " ai-sdk/provider-utils/" + opencodeProvider + " runtime/bun/" + opencodeRuntime,
 				"x-opencode-client":  "cli",
 				"x-opencode-project": "global",
+				"x-opencode-request": "{{opencode-msg-id}}",
+				"x-opencode-session": "{{opencode-ses-id}}",
 			},
 		},
 	}
@@ -1234,6 +1259,19 @@ func (c *Config) Validate() error {
 			if err := checkProvPath(label, "models_keys", field, p.ModelsKeys[field]); err != nil {
 				return err
 			}
+		}
+		// ensure_tools names relay into the upstream tools array verbatim;
+		// an empty or duplicated name would be a silent no-op or a double
+		// stub. Denied at load, never clamped.
+		seenTools := make(map[string]bool, len(p.EnsureTools))
+		for _, name := range p.EnsureTools {
+			if strings.TrimSpace(name) == "" {
+				return fmt.Errorf("providers.%s.ensure_tools: tool name must be non-empty", label)
+			}
+			if seenTools[name] {
+				return fmt.Errorf("providers.%s.ensure_tools: duplicate tool name %q", label, name)
+			}
+			seenTools[name] = true
 		}
 		names := sortedKeys(p.Headers)
 		if err := ValidateHeaderNames(names); err != nil {

@@ -206,6 +206,14 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(p.ModelsKeys[k]) + "\n")
 				}
 			}
+			if len(p.EnsureTools) == 0 {
+				b.WriteString("    ensure_tools: []\n")
+			} else {
+				b.WriteString("    ensure_tools:\n")
+				for _, k := range p.EnsureTools {
+					b.WriteString("      - " + yamlQuote(k) + "\n")
+				}
+			}
 			if len(p.Headers) == 0 {
 				b.WriteString("    headers: {}\n")
 			} else {

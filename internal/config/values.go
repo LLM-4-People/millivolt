@@ -154,11 +154,12 @@ func exportValue(f Field, v any) any {
 		out := make(map[string]ProviderOverride, len(m))
 		for k, pv := range m {
 			nv := ProviderOverride{
-				CostKeys:   append([]string(nil), pv.CostKeys...),
-				UsageKeys:  cloneStrMap(pv.UsageKeys),
-				ModelsPath: pv.ModelsPath,
-				ModelsKeys: cloneStrMap(pv.ModelsKeys),
-				Headers:    cloneStrMap(pv.Headers),
+				CostKeys:    append([]string(nil), pv.CostKeys...),
+				UsageKeys:   cloneStrMap(pv.UsageKeys),
+				ModelsPath:  pv.ModelsPath,
+				ModelsKeys:  cloneStrMap(pv.ModelsKeys),
+				EnsureTools: append([]string(nil), pv.EnsureTools...),
+				Headers:     cloneStrMap(pv.Headers),
 			}
 			out[k] = nv
 		}
@@ -442,7 +443,7 @@ func strictCoerce[T any](v any, empty T, emptyLiteral, want, shape string) (T, e
 
 func asProviders(v any) (map[string]ProviderOverride, error) {
 	m, err := strictCoerce(v, map[string]ProviderOverride{}, "{}", "want object",
-		"want {label: {cost_keys, usage_keys, models_path, models_keys, headers}}")
+		"want {label: {cost_keys, usage_keys, models_path, models_keys, ensure_tools, headers}}")
 	if err != nil {
 		return nil, err
 	}

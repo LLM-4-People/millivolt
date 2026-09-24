@@ -481,19 +481,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// conversation identity; no new storage.
 	subEntry, subValue := resolveSubConversation(s.cfg().SubConversations, client, body)
 
-	// Scoped request overrides (request_overrides) and the sub-conversation
-	// strip share the SINGLE body-rewrite engine: resolve the matching
-	// rules ONCE - provider, classified client and recorded model are all
-	// known now - and rewrite the body before any consumer sees it, so every
-	// relay attempt, quality re-send and cursor re-ask reuses the same
-	// bytes, and a request whose override body actions and strip both fire
-	// is rewritten once, through one document decode. The rewrite precedes
-	// the hostile-cap boundary below: override values are validated to the
-	// cap band at config load, so both token-cap boundaries and the
-	// scheduler reservation read the effective ceiling. Cursor targets skip
-	// the body section (token ceilings have no wire meaning there) and keep
-	// their header rules. Nil resolutions - both features off, or nothing
-	// matched - leave the request path byte-identical.
+	// Scoped request overrides (request_overrides), the sub-conversation
+	// strip and the provider's ensured tools share the SINGLE body-rewrite
+	// engine: resolve the matching rules ONCE - provider, classified client
+	// and recorded model are all known now - and rewrite the body before any
+	// consumer sees it, so every relay attempt, quality re-send and cursor
+	// re-ask reuses the same bytes, and a request whose actions from several
+	// features fire is rewritten once, through one document decode. The
+	// rewrite precedes the hostile-cap boundary below: override values are
+	// validated to the cap band at config load, so both token-cap boundaries
+	// and the scheduler reservation read the effective ceiling. Cursor
+	// targets skip the body section (token ceilings have no wire meaning
+	// there) and keep their header rules. Nil resolutions - every feature
+	// off, or nothing matched - leave the request path byte-identical.
 	t.override = resolveRequestOverrides(s.cfg().RequestOverrides, client, t.provider, recModel)
 	var overrideBody *config.OverrideBody
 	if t.override != nil {
@@ -506,18 +506,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// one that supplied the tracked value.
 		stripParams = subEntry.Params
 	}
-	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) {
-		if rewritten, why := overrideRequestBody(body, overrideBody, stripParams, int64(s.cfg().MaxRequestBytes)); why == "" {
+	// The provider's ensured tool names are a third actor of the same engine,
+	// but only on the OpenAI wire: the stubs are chat/completions-shaped, so
+	// a translated-anthropic or cursor body must not receive them. Token
+	// ceilings and strip keep their wider wire reach.
+	var ensureTools []string
+	if isOpenAIWire(t.format) {
+		if prof, ok := s.cfg().Providers[t.provider]; ok {
+			ensureTools = prof.EnsureTools
+		}
+	}
+	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) || len(ensureTools) > 0 {
+		if rewritten, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
 			body = rewritten
 			restampReqMaxTokens(body, rec)
 		} else {
-			// Name the requesting feature(s) by what fired, so a strip-only
-			// skip is never misattributed to request overrides.
+			// Name the requesting feature(s) by what fired, so a
+			// strip-only or tools-only skip is never misattributed.
 			feature := "request overrides"
-			if overrideBody != nil && len(stripParams) > 0 {
+			switch {
+			case overrideBody != nil && len(stripParams) > 0 && len(ensureTools) > 0:
+				feature = "request overrides, sub-conversation strip and ensured tools"
+			case overrideBody != nil && len(stripParams) > 0:
 				feature = "request overrides and sub-conversation strip"
-			} else if len(stripParams) > 0 {
+			case overrideBody != nil && len(ensureTools) > 0:
+				feature = "request overrides and ensured tools"
+			case len(stripParams) > 0 && len(ensureTools) > 0:
+				feature = "sub-conversation strip and ensured tools"
+			case len(stripParams) > 0:
 				feature = "sub-conversation strip"
+			case len(ensureTools) > 0:
+				feature = "ensured tools"
 			}
 			log.Printf("%s: body rewrite skipped for client %q, provider %q, model %q: %s; the original request bytes are relayed unchanged",
 				feature, client, t.provider, recModel, why)
