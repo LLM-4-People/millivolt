@@ -237,10 +237,20 @@ const pageOptions = {
           in_flight_records: bp.in_flight_records,
           counters: bp.counters,
           pending_revision: bp.pending_revision ?? Math.max(0, window.eval('_pendingRevision')),
-          // These ordinary fixtures replace the sample collection between
-          // scenarios; a live server's same-feed cursor never rewinds with it.
-          seq: bp.feed_id === window.eval('feedId') ? Math.max(bp.seq, window.eval('lastSeq')) : bp.seq,
-          feed_id: bp.feed_id, incremental: !!bsince,
+          // The canned payload's feed identity tracks the page's live
+          // epoch: this stub also answers the page's real periodic tick,
+          // and a tick announcing a foreign feed fabricates a proxy
+          // restart - refreshAfterRestart re-pulls config and refills an
+          // open settings sheet, invalidating every DOM handle the
+          // current test holds - whenever a tick fires after some test
+          // moved the feed. Tests that exercise a restart supply the
+          // foreign feed explicitly through their own snapshot dispatches
+          // or bootstrap stubs, so the default keeps the same-feed
+          // contract and the cursor rule below applies unconditionally:
+          // the sample collection between scenarios never rewinds the
+          // live cursor.
+          seq: Math.max(bp.seq, window.eval('lastSeq')),
+          feed_id: window.eval('feedId') || bp.feed_id, incremental: !!bsince,
           kpi: { requests: 30, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0, avg_ttft_ms: null, avg_tps: null },
           dashboard_version: TEST_DASHBOARD_VERSION,
           model_canon: {rules: []},
@@ -3363,6 +3373,10 @@ async function main() {
   await sleep(30);
   check('feed change resets the log to the fresh process snapshot', rows().length === 1 && rows()[0].dataset.id === 'restarted1');
   check('feed change sweeps operator state (config re-fetched in place)', cfgFetches > cfgBefore);
+  // Drain the sweep's own refill before yielding: the restart refresh
+  // re-pulls config and rebuilds the settings sheet, and a later landing
+  // would race whatever test opens the sheet next.
+  await sleep(30);
   check('footer clock carries the weekday', /(mon|tues|wednes|thurs|fri|satur|sun)day/i.test(d.getElementById('f-clock').textContent));
 
   // ---- test 14: providers field-map editor ----
