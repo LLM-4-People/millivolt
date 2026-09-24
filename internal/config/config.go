@@ -865,7 +865,7 @@ func Default() *Config {
 }
 
 // Example returns the shipped configuration, reusing every server default,
-// enabling two optional public provider profiles, and enabling the opencode
+// enabling three optional public provider profiles, and enabling the opencode
 // sub-conversation tracking exemplar (strip on: the operator's upstream
 // rejects the field with a 400). These noncredential headers are
 // compatibility snapshots, not verified or stable provider API contracts.
@@ -874,6 +874,14 @@ func Default() *Config {
 func Example() *Config {
 	c := Default()
 	const grokVersion = "1.0.13" // Keep the compatibility identity internally consistent.
+	// The opencode CLI's composite User-Agent: its own version, the
+	// @ai-sdk/openai-compatible provider-utils build, and the bun runtime.
+	// Keep the three-part identity internally consistent.
+	const (
+		opencodeCLI      = "1.18.32"
+		opencodeProvider = "4.0.23"
+		opencodeRuntime  = "1.3.14"
+	)
 	c.SubConversations = []SubConversation{
 		// opencode identifies its sub-conversations through promptCacheKey in
 		// the request body; the tracked value rides the k: conversation
@@ -908,6 +916,21 @@ func Example() *Config {
 				"x-grok-client-identifier": "grok-shell",
 				"x-grok-client-version":    grokVersion,
 				"x-grok-req-id":            "{{uuid4}}",
+			},
+		},
+		"opencode.ai": {
+			// OpenCode Zen uses the ordinary OpenAI-compatible relay and its
+			// standard models list, so only the CLI's client identity is
+			// supplied. The CLI's per-conversation request/session id headers
+			// stay client-owned on purpose: configured headers override
+			// client-forwarded values, and a genuine opencode client's real
+			// ids are the faithful ones. Non-opencode clients send none.
+			UsageKeys:  map[string]string{},
+			ModelsKeys: map[string]string{},
+			Headers: map[string]string{
+				"User-Agent":         "opencode/" + opencodeCLI + " ai-sdk/provider-utils/" + opencodeProvider + " runtime/bun/" + opencodeRuntime,
+				"x-opencode-client":  "cli",
+				"x-opencode-project": "global",
 			},
 		},
 	}

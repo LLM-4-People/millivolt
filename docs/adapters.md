@@ -33,9 +33,9 @@ headers and metadata but do not select an adapter or grant provider access.
 
 ## Bundled compatibility profiles
 
-The generated [configuration example](../proxy.example.yaml) enables Grok and
-Cursor profiles and the opencode sub-conversation tracking exemplar (the
-`promptCacheKey` tracked param, strip on). `config.Example()` in
+The generated [configuration example](../proxy.example.yaml) enables the Grok,
+OpenCode Zen and Cursor profiles and the opencode sub-conversation tracking
+exemplar (the `promptCacheKey` tracked param, strip on). `config.Example()` in
 [internal/config](../internal/config) owns the exact profile mappings, header
 values and that tracking entry; built-in `config.Default()` remains
 provider-neutral. The image installs the example into fresh config volumes.
@@ -61,6 +61,18 @@ retention guarantee. Cursor's [public authentication documentation](https://curs
 does not establish a stable public contract for this native bridge or its
 compatibility headers. Keep authorization and current service support separate
 from a successful local fixture test.
+
+The OpenCode Zen profile supplies the opencode CLI's client identity on the
+ordinary OpenAI-compatible relay: the CLI's composite `User-Agent`, plus
+`x-opencode-client` and `x-opencode-project`. The CLI's per-conversation request
+and session headers are deliberately absent from the profile; configured
+headers override client-forwarded values, so a genuine opencode client's own
+ids remain the faithful ones while non-opencode clients send none. Zen's
+models, including free ones such as Space Bunny Free, are listed in
+[OpenCode's Zen documentation](https://opencode.ai/docs/zen/); a check on
+2026-09-24 found the free models served under the anonymous `public` bearer,
+an observation about that day rather than a standing entitlement. The profile
+is not an account, key or permission, and there is no zen login helper.
 
 ## Anthropic-compatible Messages
 

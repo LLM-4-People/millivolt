@@ -157,8 +157,8 @@ func TestExampleProfilesAreIsolated(t *testing.T) {
 	if err := example.Validate(); err != nil {
 		t.Fatalf("shipped example is invalid: %v", err)
 	}
-	if len(defaults.Providers) != 0 || len(example.Providers) != 2 {
-		t.Fatal("only the shipped example should enable the two provider profiles")
+	if len(defaults.Providers) != 0 || len(example.Providers) != 3 {
+		t.Fatal("only the shipped example should enable the three provider profiles")
 	}
 	withoutProfiles := example.Clone()
 	withoutProfiles.Providers = nil
@@ -166,7 +166,7 @@ func TestExampleProfilesAreIsolated(t *testing.T) {
 	if !reflect.DeepEqual(withoutProfiles.Map(), defaults.Map()) {
 		t.Fatal("example duplicates or changes server defaults")
 	}
-	for _, label := range []string{"cursor.sh", "x.ai"} {
+	for _, label := range []string{"cursor.sh", "opencode.ai", "x.ai"} {
 		profile, ok := example.Providers[label]
 		if !ok || len(profile.Headers) == 0 || len(profile.CostKeys) != 0 || len(profile.UsageKeys) != 0 {
 			t.Errorf("profile %q must retain headers and automatic cost/usage detection", label)
@@ -176,6 +176,14 @@ func TestExampleProfilesAreIsolated(t *testing.T) {
 				t.Errorf("example contains credential header %q", header)
 			}
 		}
+	}
+	zen := example.Providers["opencode.ai"]
+	if zen.ModelsPath != "" {
+		t.Fatal("OpenCode Zen example must use the standard models endpoint, not an enrichment path")
+	}
+	ua := zen.Headers["User-Agent"]
+	if !strings.HasPrefix(ua, "opencode/") || !strings.Contains(ua, " ai-sdk/provider-utils/") || !strings.Contains(ua, " runtime/bun/") {
+		t.Fatal("OpenCode Zen example must carry the CLI's three-part client identity")
 	}
 	xai := example.Providers["x.ai"]
 	if xai.ModelsPath != "/language-models" || !reflect.DeepEqual(xai.ModelsKeys, map[string]string{

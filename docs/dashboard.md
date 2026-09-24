@@ -300,10 +300,11 @@ process-local storage drops.
 
 ### Provider compatibility
 
-The example enables Grok and Cursor compatibility profiles without credentials
-or upstream registrations. Their headers and metadata mappings are editable
-operator-selected snapshots, not guaranteed current provider contracts.
-See [adapters](adapters.md#bundled-compatibility-profiles) before relying on them.
+The example enables Grok, OpenCode Zen and Cursor compatibility profiles
+without credentials or upstream registrations. Their headers and metadata
+mappings are editable operator-selected snapshots, not guaranteed current
+provider contracts. See [adapters](adapters.md#bundled-compatibility-profiles)
+before relying on them.
 
 ![Provider Settings showing the public Cursor compatibility profile](images/settings/providers.png)
 

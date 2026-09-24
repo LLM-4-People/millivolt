@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -233,4 +234,40 @@ func TestCursorHeadersFromProviderConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
+}
+
+// The shipped OpenCode Zen profile must key exactly the label a real zen base
+// URL derives, and its client identity must replace a non-opencode client's
+// fingerprint while the CLI's per-conversation headers stay client-owned.
+// The mock upstream's IP label is re-keyed to opencode.ai through
+// provider_aliases, the same single choke point production traffic uses.
+func TestOpencodeZenProfileAppliesToZenLabel(t *testing.T) {
+	upstream, cap := captureUpstream(t, `{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"}}]}`)
+	defer upstream.Close()
+	zenURL, err := url.Parse("https://opencode.ai/zen/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label := providerFromURL(zenURL); label != "opencode.ai" {
+		t.Fatalf("zen base URL derives provider label %q, want opencode.ai", label)
+	}
+	cfg := config.Example()
+	cfg.ProviderAliases = map[string]string{upstreamLabel(upstream.URL): "opencode.ai"}
+	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
+	defer srv.Close()
+
+	postChat(t, srv.URL, upstream.URL, func(r *http.Request) {
+		r.Header.Set("User-Agent", "generic-sdk/9.9")
+		r.Header.Set("x-opencode-request", "msg_relaysuntouched")
+	})
+	h := cap.snapshot()[0]
+	zen := cfg.Providers["opencode.ai"]
+	for name, want := range zen.Headers {
+		if got := h.Get(name); got != want {
+			t.Errorf("%s = %q, want the shipped opencode identity %q", name, got, want)
+		}
+	}
+	if got := h.Get("x-opencode-request"); got != "msg_relaysuntouched" {
+		t.Errorf("x-opencode-request = %q, want the client's own value to pass through", got)
+	}
 }
