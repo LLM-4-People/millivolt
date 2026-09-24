@@ -180,6 +180,48 @@ func TestProviderEnsureToolsSkipNonChatBody(t *testing.T) {
 	}
 }
 
+// TestProviderEnsureToolsSkipTranslatedAnthropic pins the wire guard at the
+// relay level: ensured tools are chat/completions-shaped, so a
+// translated-anthropic target must never receive them even though its
+// provider carries ensure_tools (token ceilings keep their wider wire
+// reach; the stubs do not).
+func TestProviderEnsureToolsSkipTranslatedAnthropic(t *testing.T) {
+	var upstreamBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamBody, _ = io.ReadAll(r.Body)
+		// Anthropic-shaped non-streaming response, like the format tests.
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"msg_1","model":"claude-x","role":"assistant","content":[{"type":"text","text":"bonjour"}],"stop_reason":"end_turn","usage":{"input_tokens":7,"output_tokens":1}}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(ensuredCfg(upstreamLabel(upstream.URL)), metrics.Noop{}))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`))
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("X-Proxy-Format", "anthropic")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("anthropic relay status = %d, want 200", resp.StatusCode)
+	}
+	var translated map[string]json.RawMessage
+	if err := json.Unmarshal(upstreamBody, &translated); err != nil {
+		t.Fatalf("upstream body does not decode: %v\n%s", err, upstreamBody)
+	}
+	if raw, ok := translated["tools"]; ok {
+		if strings.Contains(string(raw), `"bash"`) || strings.Contains(string(raw), `"read"`) {
+			t.Fatalf("ensured chat stubs leaked into a translated-anthropic body:\n%s", raw)
+		}
+	}
+}
+
 // TestOpencodeIDFormat pins the CLI's identifier shape and per-call
 // uniqueness: prefix plus 12 lowercase hex and 14 base62 characters, and no
 // collisions across a same-millisecond burst.
