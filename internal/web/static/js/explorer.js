@@ -339,19 +339,19 @@ function sizeGallery() {
 }
 
 // The row's height is MEASURED from the laid-out cards - card height is
-// content-driven, so a nominal estimate could never win - and an empty
-// gallery never collapses. The cap is the row EXACTLY: the gallery's
-// end-of-scroll breathing lives in scroll-padding (not box padding), so
-// nothing of the next row peeks into the band.
+// content-driven, so a nominal estimate could never win - and an empty gallery
+// never collapses. The gallery viewport is at least ONE whole row: end-of-scroll
+// breathing lives in scroll-padding (not box padding), so nothing of the next
+// row peeks into the band.
 
-// applyGallerySize caps the scrolling-page explorer to ONE whole row of
-// node cards by sizing the BAND (the .xp-body grid box), not the gallery:
-// the body's row is what the tall dimension rail would otherwise stretch,
-// so capping the gallery alone left the card at the rail's height. A
-// definite body height clamps its grid row exactly like the locked
-// layout's flexed band does, and both columns then scroll internally (the
-// rail's own overflow-y, the gallery's own overflow-y). The gallery itself
-// keeps its natural height inside.
+// applyGallerySize caps the scrolling-page explorer at ONE whole row of node
+// cards by sizing the BAND (the .xp-body grid box), not the gallery: the tall
+// dimension rail would otherwise stretch the body. Side-by-side bodies align
+// the gallery with the band top. Stacked bodies lead with the dimension
+// trigger, so the cap adds the measured body-to-gallery lead to the row before
+// rounding up; this reserves the trigger and row without a second breakpoint.
+// A definite body height clamps its grid row like the locked layout's flexed
+// band, while the gallery keeps its natural height and internal scrolling.
 function applyGallerySize(gal) {
   const body = gal.closest('.xp-body');
   if (!body) return;
@@ -364,17 +364,17 @@ function applyGallerySize(gal) {
   let row = 0;
   for (const c of gal.children) {
     if (c.offsetTop !== top) break; // the first row ends where the next begins
-    row = Math.max(row, c.offsetHeight);
+    row = Math.max(row, c.getBoundingClientRect().height);
   }
-  // The band is ONE row, always - never conditional on the gallery's own
-  // scrollHeight: a capped box collapses scrollHeight to the cap, so a
-  // "fits: go natural" predicate would flip to clearing the height, the
-  // box would regrow (the tall rail stretches it), the observer would
-  // re-cap, and the band would oscillate forever - the set-clear-set loop
-  // behind the layout jitter. A constant cap is a no-op on re-apply, so
-  // the band settles in one frame; the rail and the remaining gallery rows
-  // scroll inside it.
-  const cap = row + 'px';
+  const lead = gal.getBoundingClientRect().top - body.getBoundingClientRect().top;
+  // The gallery viewport is ONE row, always - never conditional on the
+  // gallery's own scrollHeight: a capped box collapses scrollHeight to the cap,
+  // so a "fits: go natural" predicate would flip to clearing the height, the
+  // box would regrow (the tall rail stretches it), the observer would re-cap,
+  // and the band would oscillate forever - the set-clear-set loop behind the
+  // layout jitter. A stable cap is a no-op on re-apply, so the band settles in
+  // one frame; the rail and the remaining gallery rows scroll inside it.
+  const cap = Math.ceil(row + lead) + 'px';
   setH(body, cap);
   setH(gal, '');
 }

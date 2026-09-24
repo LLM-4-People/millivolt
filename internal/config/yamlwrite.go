@@ -75,8 +75,9 @@ func WriteYAML(w io.Writer, c *Config) error {
 	b.WriteString("# dashboard Settings menu also uses). Copy proxy.example.yaml to a private\n")
 	b.WriteString("# runtime config such as proxy.yaml. Edit that private file or use Settings;\n")
 	b.WriteString("# never use the committed example as writable runtime configuration.\n")
-	b.WriteString("# The shipped example enables Grok/Cursor compatibility profiles and the opencode\n")
-	b.WriteString("# sub-conversation tracking exemplar; built-in defaults remain provider-neutral.\n")
+	b.WriteString("# The shipped example enables Grok/OpenCode Zen/Cursor compatibility profiles\n")
+	b.WriteString("# and the opencode sub-conversation tracking exemplar; built-in defaults\n")
+	b.WriteString("# remain provider-neutral.\n")
 	b.WriteString("# Header versions are editable snapshots, not verified provider contracts or\n")
 	b.WriteString("# privacy guarantees.\n")
 	b.WriteString("#\n")
@@ -203,6 +204,14 @@ func writeKey(b *strings.Builder, f Field, v any) error {
 				b.WriteString("    models_keys:\n")
 				for _, k := range slices.Sorted(maps.Keys(p.ModelsKeys)) {
 					b.WriteString("      " + yamlQuote(k) + ": " + yamlQuote(p.ModelsKeys[k]) + "\n")
+				}
+			}
+			if len(p.EnsureTools) == 0 {
+				b.WriteString("    ensure_tools: []\n")
+			} else {
+				b.WriteString("    ensure_tools:\n")
+				for _, k := range p.EnsureTools {
+					b.WriteString("      - " + yamlQuote(k) + "\n")
 				}
 			}
 			if len(p.Headers) == 0 {

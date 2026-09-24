@@ -42,7 +42,11 @@ strip is the single body-rewrite engine's second consumer: it fires
 independently of override resolution, after the tracked value is extracted
 from the buffered body and before translation, with
 [conversation.go](../internal/proxy/conversation.go) owning the extraction and
-the `k:` identity.
+the `k:` identity. A provider's ensured tool names are the same engine's
+third consumer: they are restricted to the OpenAI wire, because the injected
+stub tools are chat/completions-shaped and must never reach a
+translated-anthropic or cursor body, and they fire with any override and
+strip actions through one document decode.
 
 Immutable config/client snapshots hot-swap for new work; old transports finish
 active requests. Admission is provider+key scoped, with provider-wide token,

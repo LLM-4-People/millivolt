@@ -794,6 +794,7 @@ function fillSettingsForm(doc) {
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
   box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('') + settingsBackupHTML(doc);
+  box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
   wireBackupPane();
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
@@ -1231,9 +1232,44 @@ function fillSettingsLive(doc) {
     lastApply;
 }
 
+function settingsFieldID(key, part) {
+  return `settings-${part}-${encodeURIComponent(String(key))}`;
+}
+
+function settingsScalarErrorMessage(input) {
+  const validity = input.validity;
+  if (validity.valueMissing) return 'enter a value';
+  if (validity.rangeUnderflow) return 'enter a value of at least ' + input.min;
+  if (validity.rangeOverflow) return 'enter a value no greater than ' + input.max;
+  if (validity.stepMismatch) return 'enter a value in steps of ' + (input.step || '1');
+  return input.validationMessage || 'enter a valid value';
+}
+
+function validateSettingsScalar(input) {
+  if (!input || !input.dataset || input.dataset.stScalar !== '1') return true;
+  const row = input.closest('.st-row');
+  const error = row && row.querySelector('.st-error');
+  const valid = !input.willValidate || input.checkValidity();
+  input.classList.toggle('prov-bad', !valid);
+  if (valid) input.removeAttribute('aria-invalid');
+  else input.setAttribute('aria-invalid', 'true');
+  if (error) error.textContent = valid ? '' : settingsScalarErrorMessage(input);
+  const helpId = input.dataset.stHelpId || '';
+  const errorId = input.dataset.stErrorId || '';
+  const described = [helpId, valid ? '' : errorId].filter(Boolean).join(' ');
+  if (described) input.setAttribute('aria-describedby', described);
+  else input.removeAttribute('aria-describedby');
+  return valid;
+}
+
 function settingsFieldHTML(f, val, def, override) {
   const locked = override != null && String(override) !== '';
+  const structured = f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'model_rules' || f.kind === 'request_overrides' || f.kind === 'sub_conversations';
+  const fieldId = settingsFieldID(f.key, 'field');
+  const helpId = settingsFieldID(f.key, 'help');
+  const errorId = settingsFieldID(f.key, 'error');
   const dis = (locked ? ' disabled' : '') + ` aria-label="${escapeHtml(f.label)}"`;
+  const scalarAttrs = ` data-st-scalar="1" data-st-error-id="${escapeHtml(errorId)}"${f.help ? ` data-st-help-id="${escapeHtml(helpId)}" aria-describedby="${escapeHtml(helpId)}"` : ''}`;
   const pills = locked ? '<span class="st-pill lock">flag</span>' : '';
   let hint = '';
   if (f.zero_means && (val === 0 || val === '0' || (f.zero_token && val === f.zero_token))) hint = `<span class="st-hint">${escapeHtml(f.zero_means)}</span>`;
@@ -1248,10 +1284,10 @@ function settingsFieldHTML(f, val, def, override) {
   const nameExtra = f.kind === 'providers' ? providersAddHTML() : '';
   if (f.kind === 'bool') {
     const on = val === true || val === 'true';
-    control = `<input type="checkbox" class="st-switch" data-key="${escapeHtml(f.key)}"${on ? ' checked' : ''}${dis}>`;
+    control = `<input type="checkbox" class="st-switch" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}"${on ? ' checked' : ''}${scalarAttrs}${dis}>`;
   } else if (f.kind === 'strings') {
     const text = Array.isArray(val) ? val.join('\n') : (val || '');
-    control = `<textarea data-key="${escapeHtml(f.key)}" rows="3" placeholder="one per line"${dis}>${escapeHtml(text)}</textarea>`;
+    control = `<textarea id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" rows="3" placeholder="one per line"${scalarAttrs}${dis}>${escapeHtml(text)}</textarea>`;
   } else if (f.kind === 'providers') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="providers">${providersEditorHTML(val)}</div>`;
   } else if (f.kind === 'aliases') {
@@ -1263,16 +1299,21 @@ function settingsFieldHTML(f, val, def, override) {
   } else if (f.kind === 'sub_conversations') {
     control = `<div data-key="${escapeHtml(f.key)}" data-kind="sub_conversations">${subConversationsEditorHTML(val)}</div>`;
   } else if (f.kind === 'int') {
-    const min = f.min != null ? ` min="${f.min}"` : '';
-    const max = f.max != null ? ` max="${f.max}"` : '';
-    control = `<div class="st-ctl-line"><input type="number" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${dis}>${unit}</div>`;
+    const min = f.min != null ? ` min="${escapeHtml(String(f.min))}"` : '';
+    const max = f.max != null ? ` max="${escapeHtml(String(f.max))}"` : '';
+    control = `<div class="st-ctl-line"><input type="number" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(String(val ?? ''))}" step="1" required${min}${max}${scalarAttrs}${dis}>${unit}</div>`;
   } else {
-    control = `<div class="st-ctl-line"><input type="text" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${dis}>${unit}</div>`;
+    control = `<div class="st-ctl-line"><input type="text" id="${escapeHtml(fieldId)}" data-key="${escapeHtml(f.key)}" value="${escapeHtml(val == null ? '' : String(val))}"${scalarAttrs}${dis}>${unit}</div>`;
   }
-  const block = (f.kind === 'providers' || f.kind === 'aliases' || f.kind === 'strings' || f.kind === 'model_rules' || f.kind === 'request_overrides' || f.kind === 'sub_conversations') ? ' st-block' : '';
+  const block = (structured || f.kind === 'strings') ? ' st-block' : '';
+  const name = structured
+    ? `<div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div>`
+    : `<label class="st-name" for="${escapeHtml(fieldId)}">${escapeHtml(f.label)}${pills}</label>`;
+  const help = f.help ? `<details class="st-help"><summary>Help</summary><div class="st-help-text" id="${escapeHtml(helpId)}">${escapeHtml(f.help)}</div></details>` : '';
+  const error = structured ? '' : `<div class="st-error" id="${escapeHtml(errorId)}" aria-live="polite"></div>`;
   const ttl = escapeHtml((f.help || '') + (f.help && f.key ? ' · ' : '') + (f.key || ''));
   const hot = f.hot_reload ? '1' : '0';
-  return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}"><div class="st-name">${escapeHtml(f.label)}${pills}${nameExtra}</div><div class="st-ctl">${control}${hint}</div></div>`;
+  return `<div class="st-row${block}" data-cat="${escapeHtml(f.category)}" data-key="${escapeHtml(f.key)}" data-label="${escapeHtml(f.label)}" data-help="${escapeHtml(f.help || '')}" data-hot="${hot}" title="${ttl}">${name}<div class="st-ctl">${control}${error}${hint}${help}</div></div>`;
 }
 
 // ---- providers editor ----
@@ -1348,6 +1389,7 @@ function providerCardHTML(label, p) {
   const usage = p.usage_keys && typeof p.usage_keys === 'object' && !Array.isArray(p.usage_keys) ? p.usage_keys : {};
   const modelsPath = p.models_path == null ? '' : String(p.models_path);
   const modelsKeys = p.models_keys && typeof p.models_keys === 'object' && !Array.isArray(p.models_keys) ? p.models_keys : {};
+  const ensureTools = Array.isArray(p.ensure_tools) ? p.ensure_tools.map(n => String(n)) : [];
   const headers = p.headers && typeof p.headers === 'object' && !Array.isArray(p.headers) ? p.headers : {};
   const fields = canonicalUsageFields();
   const used = new Set(Object.keys(usage));
@@ -1356,10 +1398,10 @@ function providerCardHTML(label, p) {
   const mused = new Set(Object.keys(modelsKeys));
   const mfree = mfields.filter(f => !mused.has(f));
   // Section order is fixed: cost keys, then usage keys, then models
-  // enrichment, then upstream headers last. Every section opens and closes
-  // inside the card - one missing close here cascades the following sections
-  // into each other (the models section once rendered nested inside usage
-  // keys).
+  // enrichment, then ensured tools, then upstream headers last. Every
+  // section opens and closes inside the card - one missing close here
+  // cascades the following sections into each other (the models section
+  // once rendered nested inside usage keys).
   return `<div class="st-prov">` +
     `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${trashIconSVG()}</button></div>` +
     `<div class="prov-body">` +
@@ -1375,7 +1417,10 @@ function providerCardHTML(label, p) {
     `<div class="prov-mmap">${Object.entries(modelsKeys).map(([f, path]) => modelRowHTML(f, path, mfields)).join('')}</div>` +
     (mfree.length ? `<div class="prov-add prov-add-m"><select class="sp-mfield-new" aria-label="canonical model field">${mfree.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('')}</select><button type="button" class="btn prov-addbtn" data-prov-add-model aria-label="add model mapping">+ map</button></div>` : '') +
     `</div>` +
-    `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} expand per request</span></div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>ensured tools</span><span class="prov-sub">tool names every chat request's tools array must carry - missing names are injected as inert stubs upstream</span></div>` +
+    `<div class="prov-add"><input class="sp-etools" value="${escapeHtml(ensureTools.join(', '))}" placeholder="tool names, comma-separated - e.g. bash, read" aria-label="ensured tool names"></div>` +
+    `</div>` +
+    `<div class="prov-sec"><div class="prov-lb"><span>upstream headers</span><span class="prov-sub">extra headers sent upstream - {{uuid4}} / {{platform}} / {{opencode-msg-id}} / {{opencode-ses-id}} expand per request</span></div>` +
     `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
     `<div class="prov-add prov-add-h"><input class="sp-hname" placeholder="header name… ↵" aria-label="upstream header name"><input class="sp-hval" placeholder="header value… ↵" aria-label="upstream header value"><button type="button" class="btn prov-addbtn" data-prov-add-header aria-label="add header">+</button></div>` +
     `</div>` +
@@ -1919,9 +1964,9 @@ const RO_FORBIDDEN_HEADERS = {
 // client request carrying either spelling would shrug off a rule that sets
 // only the other one.
 const RO_TEMPLATES = {
-  blank: {},
-  budget: { body: { max_tokens: 32768, max_completion_tokens: 32768 } },
-  header: { headers: { 'X-Title': 'my app' } },
+  blank: { label: 'empty rule', starter: {} },
+  budget: { label: 'raise the output budget for a provider', starter: { body: { max_tokens: 32768, max_completion_tokens: 32768 } } },
+  header: { label: 'set an upstream header for a client', starter: { headers: { 'X-Title': 'my app' } } },
 };
 
 // roForbiddenReason mirrors config.ForbiddenOverrideHeader: which owner
@@ -1945,13 +1990,24 @@ function roForbiddenMsg(name, field) {
   return `${field}: '${name}' carries the x-proxy- control prefix and cannot be overridden; x-proxy- headers are the proxy's own request channel`;
 }
 
+const RO_SERVER_SPACE = /[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028-\u2029\u202f\u205f\u3000]/;
+function trimServerSpace(value) {
+  const text = String(value == null ? '' : value);
+  let start = 0;
+  let end = text.length;
+  while (start < end && RO_SERVER_SPACE.test(text[start])) start++;
+  while (end > start && RO_SERVER_SPACE.test(text[end - 1])) end--;
+  return text.slice(start, end);
+}
+
 // roHeaderValueOK mirrors config.ValidHeaderValue plus the overrides'
 // non-empty rule: no NUL/CR/LF or other control bytes, and not blank after
 // trim. Tab is allowed like the server allows it.
 function roHeaderValueOK(v) {
-  if (!v.trim()) return false;
-  for (let i = 0; i < v.length; i++) {
-    const c = v.charCodeAt(i);
+  const value = trimServerSpace(v);
+  if (!value) return false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value.charCodeAt(i);
     if (c === 9 || (c >= 32 && c !== 127)) continue;
     return false;
   }
@@ -2031,24 +2087,143 @@ function roRuleFieldAttrs(i, suffix) {
   return `aria-label="${escapeHtml(roRuleFieldLabel(i, suffix))}" data-ro-lbl="${escapeHtml(suffix)}"`;
 }
 
-// roRuleCardHTML renders one rule card. Scope inputs carry the explicit
-// "any" watermark (an empty scope field is a wildcard - never a silent
-// surprise) and one concrete example each; the headers section reuses the
-// providers editor's row grammar; body fields stay empty = unset. The
-// scope and body inputs stretch evenly and the head's remove button pins
-// to the right end through the request-overrides CSS block.
-function roRuleCardHTML(r, i) {
+let roRuleDomSeq = 0;
+
+function roRuleDomToken() {
+  return ++roRuleDomSeq;
+}
+
+function roRuleActionLabel(i, suffix) {
+  return roRuleFieldLabel(i, suffix);
+}
+
+function roRuleActionAttrs(i, suffix) {
+  const label = roRuleActionLabel(i, suffix);
+  return `aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}" data-ro-action="${escapeHtml(suffix)}"`;
+}
+
+function roSummaryValue(value) {
+  const text = trimServerSpace(value);
+  if (!text) return 'any';
+  if (text === 'any') return '"any" (exact)';
+  return text === '*' ? '* (exact)' : text;
+}
+
+function roCountLabel(n, singular, plural) {
+  return `${n} ${n === 1 ? singular : plural || singular + 's'}`;
+}
+
+function roScopeSummary(r) {
+  r = r || {};
+  return `client ${roSummaryValue(r.client)} · provider ${roSummaryValue(r.provider)} · model ${roSummaryValue(r.model)}`;
+}
+
+function roFormatActionSummary(headers, removes, body) {
+  return `${roCountLabel(headers, 'header')} · ${roCountLabel(removes, 'remove header')} · ${roCountLabel(body, 'body ceiling')}`;
+}
+
+function roActionSummary(r) {
+  r = r || {};
+  const headers = r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers) ? Object.keys(r.headers).length : 0;
+  const removes = Array.isArray(r.remove_headers) ? r.remove_headers.length : 0;
+  const body = r.body && typeof r.body === 'object' ? r.body : {};
+  const bodyCount = ['max_tokens', 'max_completion_tokens'].filter(k => body[k] != null && trimServerSpace(body[k]) !== '').length;
+  return roFormatActionSummary(headers, removes, bodyCount);
+}
+
+function roSyncSummary(card) {
+  if (!card) return;
+  const scope = roScopeSummary({
+    client: (card.querySelector('.ro-client') || {}).value,
+    provider: (card.querySelector('.ro-provider') || {}).value,
+    model: (card.querySelector('.ro-model') || {}).value,
+  });
+  const headers = card.querySelectorAll('.prov-hmap .prov-hrow').length;
+  const removes = card.querySelectorAll('.prov-chips .prov-chip').length;
+  const body = [...card.querySelectorAll('.ro-max-tokens, .ro-max-mct')].filter(input => trimServerSpace(input.value)).length;
+  const actions = roFormatActionSummary(headers, removes, body);
+  const scopeEl = card.querySelector('.ro-summary-scope');
+  const actionEl = card.querySelector('.ro-summary-actions');
+  if (scopeEl) { scopeEl.textContent = scope; scopeEl.title = scope; }
+  if (actionEl) { actionEl.textContent = actions; actionEl.title = actions; }
+  if (card.hasAttribute('tabindex')) {
+    const i = Number(card.dataset.roIndex || 0);
+    card.setAttribute('aria-label', `${roRuleLabel(i)}: ${scope}; ${actions}`);
+  }
+}
+
+function roSetCardExpanded(card, expanded) {
+  if (!card) return;
+  const open = !!expanded;
+  card.dataset.roExpanded = open ? '1' : '0';
+  const body = card.querySelector('.ro-rule-body');
+  const toggle = card.querySelector('[data-ro-toggle]');
+  if (body) body.hidden = !open;
+  if (!toggle) return;
+  toggle.setAttribute('aria-expanded', String(open));
+  if (body) toggle.setAttribute('aria-controls', body.id);
+  const action = open ? 'collapse rule details' : 'expand rule details';
+  const label = roRuleActionLabel(Number(card.dataset.roIndex || 0), action);
+  toggle.setAttribute('aria-label', label);
+  toggle.title = label;
+  const caret = toggle.querySelector('.ro-disclosure-caret');
+  if (caret) caret.textContent = open ? '▾' : '▸';
+}
+
+function roSetActionLabel(el, i, suffix) {
+  if (!el) return;
+  const label = roRuleActionLabel(i, suffix);
+  el.setAttribute('aria-label', label);
+  el.title = label;
+}
+
+function roSyncActionLabels(card, i) {
+  if (!card) return;
+  card.querySelectorAll('[data-ro-action]').forEach(el => {
+    if (!el.matches('[data-ro-toggle]')) roSetActionLabel(el, i, el.dataset.roAction);
+  });
+  roSetActionLabel(card.querySelector('[data-prov-add-header]'), i, 'add header');
+  roSetActionLabel(card.querySelector('[data-ro-rh-add]'), i, 'add remove header');
+  roSetActionLabel(card.querySelector('.ro-rh-in'), i, 'add remove header');
+  card.querySelectorAll('.prov-add-h .sp-hname').forEach(el => roSetActionLabel(el, i, 'add header name'));
+  card.querySelectorAll('.prov-add-h .sp-hval').forEach(el => roSetActionLabel(el, i, 'add header value'));
+  card.querySelectorAll('.prov-hrow .sp-hname').forEach(el => roSetActionLabel(el, i, 'upstream header name'));
+  card.querySelectorAll('.prov-hrow .sp-hval').forEach(el => roSetActionLabel(el, i, 'upstream header value'));
+  card.querySelectorAll('.prov-hrow [data-prov-hrow-rm]').forEach(el => {
+    const name = trimServerSpace((el.closest('.prov-hrow').querySelector('.sp-hname') || {}).value) || 'header';
+    roSetActionLabel(el, i, `remove ${name}`);
+  });
+  card.querySelectorAll('.prov-chip [data-prov-chip-rm]').forEach(el => {
+    const name = trimServerSpace((el.closest('.prov-chip') || {}).dataset?.rh) || 'header';
+    roSetActionLabel(el, i, `remove ${name}`);
+  });
+  roSetCardExpanded(card, card.dataset.roExpanded === '1');
+}
+
+function roRuleCardHTML(r, i, expanded = false) {
   r = r || {};
   const headers = r.headers && typeof r.headers === 'object' && !Array.isArray(r.headers) ? r.headers : {};
   const removes = Array.isArray(r.remove_headers) ? r.remove_headers : [];
   const body = r.body && typeof r.body === 'object' ? r.body : {};
-  const num = roRuleLabel(i);
-  return `<div class="prov-sec ro-rule">` +
-    `<div class="prov-lb"><span class="ro-num">${escapeHtml(num)}</span><span class="prov-sub">scope - an empty field matches any request</span><button type="button" class="prov-x" data-ro-rm aria-label="remove rule" title="remove rule">✕</button></div>` +
+  const open = !!expanded;
+  const domToken = roRuleDomToken();
+  const bodyId = `ro-rule-body-${domToken}`;
+  const errorId = `ro-rule-error-${domToken}`;
+  const scope = roScopeSummary(r);
+  const actions = roActionSummary(r);
+  return `<div class="prov-sec ro-rule" role="group" tabindex="-1" data-ro-index="${i}" data-ro-expanded="${open ? '1' : '0'}" aria-label="${escapeHtml(roRuleLabel(i) + ': ' + scope + '; ' + actions)}">` +
+    `<div class="ro-rule-head">` +
+    `<button type="button" class="ro-disclosure" data-ro-toggle ${roRuleActionAttrs(i, 'toggle')} aria-expanded="${open}" aria-controls="${bodyId}"><span class="ro-disclosure-caret" aria-hidden="true">${open ? '▾' : '▸'}</span></button>` +
+    `<span class="ro-num">${escapeHtml(roRuleLabel(i))}</span>` +
+    `<div class="ro-summary"><span class="ro-summary-scope" title="${escapeHtml(scope)}">${escapeHtml(scope)}</span><span class="ro-summary-actions" title="${escapeHtml(actions)}">${escapeHtml(actions)}</span></div>` +
+    `<span class="ro-head-actions"><button type="button" class="ro-action" data-ro-up ${roRuleActionAttrs(i, 'move up')}>Move up</button><button type="button" class="ro-action" data-ro-dn ${roRuleActionAttrs(i, 'move down')}>Move down</button><button type="button" class="prov-x ro-action" data-ro-rm ${roRuleActionAttrs(i, 'remove rule')}>Remove</button></span>` +
+    `</div>` +
+    `<div class="ro-rule-body" id="${bodyId}" role="region" aria-label="${escapeHtml(roRuleLabel(i) + ' details')}"${open ? '' : ' hidden'}>` +
+    `<div class="prov-lb"><span>scope</span><span class="prov-sub">an empty field matches any request</span></div>` +
     `<div class="st-ctl-line ro-scope">` +
-    `<input class="ro-client" list="${roDlId('client')}" value="${escapeHtml(r.client || '')}" placeholder="any client - e.g. claude-code" ${roRuleFieldAttrs(i, 'client scope')}>` +
-    `<input class="ro-provider" list="${roDlId('provider')}" value="${escapeHtml(r.provider || '')}" placeholder="any provider - e.g. nano-gpt.com" ${roRuleFieldAttrs(i, 'provider scope')}>` +
-    `<input class="ro-model" list="${roDlId('model')}" value="${escapeHtml(r.model || '')}" placeholder="any model - e.g. glm-5.3" ${roRuleFieldAttrs(i, 'model scope')}>` +
+    `<label class="ro-field"><span>client</span><input class="ro-client" list="${roDlId('client')}" value="${escapeHtml(r.client || '')}" placeholder="any client - e.g. claude-code" ${roRuleFieldAttrs(i, 'client scope')}></label>` +
+    `<label class="ro-field"><span>provider</span><input class="ro-provider" list="${roDlId('provider')}" value="${escapeHtml(r.provider || '')}" placeholder="any provider - e.g. nano-gpt.com" ${roRuleFieldAttrs(i, 'provider scope')}></label>` +
+    `<label class="ro-field"><span>model</span><input class="ro-model" list="${roDlId('model')}" value="${escapeHtml(r.model || '')}" placeholder="any model - e.g. glm-5.3" ${roRuleFieldAttrs(i, 'model scope')}></label>` +
     `</div>` +
     `<div class="prov-lb"><span>headers</span><span class="prov-sub">set or replace upstream headers - e.g. X-Title, my app</span></div>` +
     `<div class="prov-hmap">${Object.entries(headers).map(([n, v]) => headerRowHTML(n, v)).join('')}</div>` +
@@ -2058,36 +2233,44 @@ function roRuleCardHTML(r, i) {
     `<div class="prov-add"><input class="ro-rh-in" placeholder="header name to remove… ↵" aria-label="add header to remove"><button type="button" class="btn prov-addbtn" data-ro-rh-add aria-label="add header to remove">+</button></div>` +
     `<div class="prov-lb"><span>body</span><span class="prov-sub">output-token ceilings on the OpenAI wire - empty leaves the request's own value</span></div>` +
     `<div class="st-ctl-line ro-body">` +
-    `<input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max tokens ceiling')}>` +
-    `<input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max completion tokens ceiling')}>` +
+    `<label class="ro-field"><span>max_tokens</span><input class="ro-max-tokens" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_tokens == null ? '' : String(body.max_tokens))}" placeholder="max_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_tokens ceiling')}></label>` +
+    `<label class="ro-field"><span>max_completion_tokens</span><input class="ro-max-mct" type="number" min="1" max="${REQUEST_OVERRIDE_BODY_MAX}" step="1" value="${escapeHtml(body.max_completion_tokens == null ? '' : String(body.max_completion_tokens))}" placeholder="max_completion_tokens - e.g. 32768" ${roRuleFieldAttrs(i, 'max_completion_tokens ceiling')}></label>` +
     `</div>` +
-    `<div class="mr-err ro-err" aria-live="polite"></div>` +
-    `</div>`;
+    `<div class="mr-err ro-err" id="${errorId}" role="status" aria-live="polite" aria-atomic="true"></div>` +
+    `</div></div>`;
 }
 
 function requestOverridesEditorHTML(val) {
   const rules = Array.isArray(val) ? val : [];
   return `<div class="prov-sec mr-wrap ro-wrap">` +
     `<div class="mr-hint">each rule rewrites the upstream request before relay · a rule matches when every non-empty scope field equals the request's value exactly · all matching rules apply in list order, the later rule wins · headers set or replace, remove_headers deletes, body stamps output-token ceilings</div>` +
-    `<div class="mr-tools"><select class="ro-tpl" aria-label="add a rule from a template"><option value="">add a rule…</option><option value="blank">empty rule</option><option value="budget">raise the output budget for a provider</option><option value="header">set an upstream header for a client</option></select><span class="mr-count muted"></span></div>` +
+    `<div class="mr-tools"><div class="ro-add"><button type="button" class="btn ro-add-btn" data-ro-add aria-label="add rule" aria-expanded="false" aria-controls="ro-template-menu" title="add a request-override rule from a template">+ add rule</button><div class="ro-tpl-menu" id="ro-template-menu" data-ro-tpl-menu hidden>${Object.entries(RO_TEMPLATES).map(([kind, template]) => `<button type="button" class="ro-tpl-item" data-ro-tpl="${kind}" title="${escapeHtml(template.label)}">${escapeHtml(template.label)}</button>`).join('')}</div></div><span class="mr-count muted"></span></div>` +
     `<div class="ro-rows">${rules.map((r, i) => roRuleCardHTML(r, i)).join('')}</div>` +
     roDatalistHTML('client') + roDatalistHTML('provider') + roDatalistHTML('model') +
     `</div>`;
 }
 
-// roApplyTemplate appends one starter rule from the templates select. The
-// payload is minimal; the live validation immediately asks for the missing
-// scope (the mrApplyTemplate guided-input precedent) and focus lands on
-// the scope field the template intends.
-function roApplyTemplate(sel) {
-  const kind = sel.value;
-  sel.value = '';
-  const r = RO_TEMPLATES[kind];
-  if (!r) return;
-  const wrap = sel.closest('.ro-wrap');
-  if (!wrap || wrap.querySelectorAll('.ro-rule').length >= REQUEST_OVERRIDES_MAX) return;
+function roSetTemplateMenuOpen(menu, open) {
+  if (!menu) return;
+  if (menu._roCloseTimer) { clearTimeout(menu._roCloseTimer); menu._roCloseTimer = null; }
+  menu.hidden = !open;
+  const btn = menu.parentElement && menu.parentElement.querySelector('[data-ro-add]');
+  if (btn) btn.setAttribute('aria-expanded', String(!!open));
+}
+
+function closeRoTemplateMenus(scope) {
+  (scope || document).querySelectorAll('.ro-tpl-menu:not([hidden])').forEach(menu => roSetTemplateMenuOpen(menu, false));
+}
+
+function roApplyTemplate(source) {
+  const kind = String((source && source.dataset && source.dataset.roTpl) || '');
+  const wrap = source && source.closest ? source.closest('.ro-wrap') : null;
+  if (!wrap) return;
+  closeRoTemplateMenus(wrap);
+  const template = RO_TEMPLATES[kind];
+  if (!template || wrap.querySelectorAll('.ro-rule').length >= REQUEST_OVERRIDES_MAX) return;
   const rows = wrap.querySelector('.ro-rows');
-  rows.insertAdjacentHTML('beforeend', roRuleCardHTML(r, rows.children.length));
+  rows.insertAdjacentHTML('beforeend', roRuleCardHTML(template.starter, rows.children.length, true));
   roDraftChanged(wrap);
   const card = [...wrap.querySelectorAll('.ro-rule')].pop();
   const focus = card && card.querySelector(kind === 'budget' ? '.ro-provider' : '.ro-client');
@@ -2102,44 +2285,59 @@ function addRoRemoveHeader(card) {
   const input = card && card.querySelector('.ro-rh-in');
   const chips = card && card.querySelector('.prov-chips');
   if (!input || !chips) return;
-  const name = String(input.value || '').trim();
+  const name = trimServerSpace(input.value);
   if (!name || !PROV_HEADER_RE.test(name)) { flashBadInput(input); return; }
-  if ([...chips.querySelectorAll('.prov-chip')].some(c => String(c.dataset.rh || '').toLowerCase() === name.toLowerCase())) { flashBadInput(input); return; }
+  if ([...chips.querySelectorAll('.prov-chip')].some(c => trimServerSpace(c.dataset.rh || '').toLowerCase() === name.toLowerCase())) { flashBadInput(input); return; }
   chips.insertAdjacentHTML('beforeend', roRemoveChipHTML(name));
   input.value = '';
   roDraftChanged(card.closest('.ro-wrap'));
 }
 
-// validateRoRow is the live per-card gate (the validateMrRow discipline):
-// every check mirrors the server's checks and rejections. Checks that own
-// an input redden it; the duplicate-scope cross-card check marks no input
-// (it cites an earlier card, not this one); the first failure in server
-// order owns the message text. seen maps trimmed scope triples to their
-// 1-based rule number for the duplicate scope wording, first occurrence
-// only - a duplicate carrying another error must not shift the ordinal
-// later duplicates cite; index is this card's 0-based position.
 function validateRoRow(card, seen, index) {
   const err = card.querySelector('.ro-err');
+  if (err) err.replaceChildren();
+  else card.querySelectorAll('.ro-error-detail').forEach(detail => detail.remove());
   card.querySelectorAll('.prov-bad').forEach(el => el.classList.remove('prov-bad'));
-  const scopeVal = sel => String((card.querySelector(sel) || {}).value || '').trim();
+  card.querySelectorAll('input, button').forEach(el => {
+    el.removeAttribute('aria-invalid');
+    el.removeAttribute('aria-describedby');
+  });
+  const detailByControl = new Map();
+  let detailIndex = 0;
+  const scopeVal = sel => trimServerSpace((card.querySelector(sel) || {}).value);
   const client = scopeVal('.ro-client');
   const provider = scopeVal('.ro-provider');
   const model = scopeVal('.ro-model');
   const headerRows = [...card.querySelectorAll('.prov-hmap .prov-hrow')];
-  const removeChips = [...card.querySelectorAll('.prov-chips .prov-chip')].map(c => String(c.dataset.rh || '').trim());
+  const removeChips = [...card.querySelectorAll('.prov-chips .prov-chip')].map(chip => ({
+    name: trimServerSpace(chip.dataset.rh || ''),
+    button: chip.querySelector('[data-prov-chip-rm]'),
+  }));
   const bodyFields = [
     ['max_tokens', card.querySelector('.ro-max-tokens')],
     ['max_completion_tokens', card.querySelector('.ro-max-mct')],
   ];
-  let level = 'ok', msg = '';
+  let level = 'ok';
   const fail = (input, text) => {
-    if (input) input.classList.add('prov-bad');
-    if (level !== 'error') { level = 'error'; msg = text; }
+    if (input) {
+      input.classList.add('prov-bad');
+      input.setAttribute('aria-invalid', 'true');
+      if (err && err.id && !detailByControl.has(input)) {
+        const detail = document.createElement('div');
+        detail.className = 'ro-error-detail';
+        detail.id = `${err.id}-detail-${detailIndex++}`;
+        detail.textContent = text;
+        (err || card).appendChild(detail);
+        detailByControl.set(input, detail.id);
+        input.setAttribute('aria-describedby', detail.id);
+      }
+    }
+    if (level !== 'error') level = 'error';
   };
   if (!client && !provider && !model) {
     ['.ro-client', '.ro-provider', '.ro-model'].forEach(sel => fail(card.querySelector(sel),
       'no scope set - give the rule a client, provider or model, or remove the rule'));
-  } else if (!headerRows.length && !removeChips.length && !bodyFields.some(([, input]) => input && String(input.value || '').trim())) {
+  } else if (!headerRows.length && !removeChips.length && !bodyFields.some(([, input]) => input && trimServerSpace(input.value))) {
     fail(card.querySelector('.prov-add-h .sp-hname'),
       'no action set - give the rule a headers entry, a remove_headers entry or a body value, or remove the rule');
   } else {
@@ -2148,8 +2346,8 @@ function validateRoRow(card, seen, index) {
     for (const row of headerRows) {
       const nameIn = row.querySelector('.sp-hname');
       const valIn = row.querySelector('.sp-hval');
-      const name = String((nameIn || {}).value || '').trim();
-      const value = String((valIn || {}).value || '');
+      const name = trimServerSpace((nameIn || {}).value);
+      const value = trimServerSpace((valIn || {}).value);
       if (!name) { fail(nameIn, 'headers: a header name is empty or only whitespace - fill it in or remove the row'); continue; }
       if (!PROV_HEADER_RE.test(name)) { fail(nameIn, `headers: '${name}' is not a valid header name (RFC 7230 token)`); continue; }
       if (roForbiddenReason(name)) { fail(nameIn, roForbiddenMsg(name, 'headers')); continue; }
@@ -2160,17 +2358,17 @@ function validateRoRow(card, seen, index) {
       if (!roHeaderValueOK(value)) fail(valIn, `headers: ${name}: value must be a non-empty single-line header value`);
     }
     const seenRemoves = new Set();
-    for (const name of removeChips) {
-      if (!name || !PROV_HEADER_RE.test(name)) { fail(null, `remove_headers: '${name}' is not a valid header name (RFC 7230 token)`); continue; }
-      if (roForbiddenReason(name)) { fail(null, roForbiddenMsg(name, 'remove_headers')); continue; }
+    for (const {name, button} of removeChips) {
+      if (!name || !PROV_HEADER_RE.test(name)) { fail(button, `remove_headers: '${name}' is not a valid header name (RFC 7230 token)`); continue; }
+      if (roForbiddenReason(name)) { fail(button, roForbiddenMsg(name, 'remove_headers')); continue; }
       const key = name.toLowerCase();
-      if (seenRemoves.has(key)) { fail(null, `remove_headers: duplicate HTTP header name '${name}'`); continue; }
+      if (seenRemoves.has(key)) { fail(button, `remove_headers: duplicate HTTP header name '${name}'`); continue; }
       seenRemoves.add(key);
-      if (headerKeys.has(key)) fail(card.querySelector('.prov-add-h .sp-hname'),
+      if (headerKeys.has(key)) fail(button,
         `'${name}' is both set in headers and removed in remove_headers; keep exactly one action per header`);
     }
     for (const [name, input] of bodyFields) {
-      const text = input && String(input.value || '').trim();
+      const text = input && trimServerSpace(input.value);
       if (!text) continue;
       const n = Number(text);
       if (!Number.isSafeInteger(n) || n < 1 || n > REQUEST_OVERRIDE_BODY_MAX) fail(input, `body.${name}: '${text}' must be a whole number between 1 and ${REQUEST_OVERRIDE_BODY_MAX}`);
@@ -2178,13 +2376,16 @@ function validateRoRow(card, seen, index) {
   }
   const triple = client + '\u0000' + provider + '\u0000' + model;
   if (level === 'ok' && seen && seen.has(triple)) {
-    level = 'error';
-    msg = `duplicate scope with rule ${seen.get(triple)} - the same client, provider and model; merge the rules or change one scope`;
+    const focusedScope = [...card.querySelectorAll('.ro-client, .ro-provider, .ro-model')].find(input => input === document.activeElement);
+    fail(focusedScope || card.querySelector('.ro-client'), `duplicate scope with rule ${seen.get(triple)} - the same client, provider and model; merge the rules or change one scope`);
   } else if (seen && (client || provider || model) && !seen.has(triple)) {
     seen.set(triple, index + 1);
   }
   card.dataset.roState = level;
-  if (err) { err.textContent = msg; err.dataset.level = level === 'error' ? 'error' : ''; }
+  if (err) err.dataset.level = level === 'error' ? 'error' : '';
+  roSyncSummary(card);
+  roSyncActionLabels(card, index);
+  if (level === 'error') roSetCardExpanded(card, true);
   return level;
 }
 
@@ -2208,11 +2409,16 @@ function validateRequestOverridesDraft(wrap) {
 // rule number.
 function roRenumber(wrap) {
   wrap.querySelectorAll('.ro-rule').forEach((card, i) => {
+    card.dataset.roIndex = String(i);
     const el = card.querySelector('.ro-num');
     if (el) el.textContent = roRuleLabel(i);
     card.querySelectorAll('[data-ro-lbl]').forEach(input => {
       input.setAttribute('aria-label', roRuleFieldLabel(i, input.dataset.roLbl));
     });
+    const body = card.querySelector('.ro-rule-body');
+    if (body) body.setAttribute('aria-label', `${roRuleLabel(i)} details`);
+    roSyncSummary(card);
+    roSyncActionLabels(card, i);
   });
 }
 
@@ -2222,8 +2428,11 @@ function roSyncCount(wrap) {
   const n = wrap.querySelectorAll('.ro-rule').length;
   const count = wrap.querySelector('.mr-count');
   if (count) count.textContent = n + ' / ' + REQUEST_OVERRIDES_MAX + ' rules';
-  const tpl = wrap.querySelector('.ro-tpl');
-  if (tpl) tpl.disabled = n >= REQUEST_OVERRIDES_MAX;
+  const cap = n >= REQUEST_OVERRIDES_MAX;
+  const add = wrap.querySelector('[data-ro-add]');
+  if (add) add.disabled = cap;
+  wrap.querySelectorAll('[data-ro-tpl]').forEach(item => { item.disabled = cap; });
+  if (cap) closeRoTemplateMenus(wrap);
 }
 
 // roDraftChanged is the request-overrides draft-changed epilogue (the
@@ -2248,22 +2457,22 @@ function collectRequestOverrides(wrap, put) {
   const out = [];
   wrap.querySelectorAll('.ro-rule').forEach(card => {
     const r = Object.create(null);
-    r.client = String((card.querySelector('.ro-client') || {}).value || '').trim();
-    r.provider = String((card.querySelector('.ro-provider') || {}).value || '').trim();
-    r.model = String((card.querySelector('.ro-model') || {}).value || '').trim();
+    r.client = trimServerSpace((card.querySelector('.ro-client') || {}).value);
+    r.provider = trimServerSpace((card.querySelector('.ro-provider') || {}).value);
+    r.model = trimServerSpace((card.querySelector('.ro-model') || {}).value);
     const headers = Object.create(null);
     card.querySelectorAll('.prov-hmap .prov-hrow').forEach(row => {
-      const n = String((row.querySelector('.sp-hname') || {}).value || '').trim();
-      const v = String((row.querySelector('.sp-hval') || {}).value || '');
+      const n = trimServerSpace((row.querySelector('.sp-hname') || {}).value);
+      const v = trimServerSpace((row.querySelector('.sp-hval') || {}).value);
       put(headers, n, v, row.querySelector('.sp-hname'));
     });
     if (Object.keys(headers).length) r.headers = headers;
-    const removes = [...card.querySelectorAll('.prov-chip')].map(c => String(c.dataset.rh || '').trim()).filter(Boolean);
+    const removes = [...card.querySelectorAll('.prov-chip')].map(c => trimServerSpace(c.dataset.rh || '')).filter(Boolean);
     if (removes.length) r.remove_headers = removes;
     const body = Object.create(null);
     for (const [key, sel] of [['max_tokens', '.ro-max-tokens'], ['max_completion_tokens', '.ro-max-mct']]) {
       const input = card.querySelector(sel);
-      const text = input && String(input.value || '').trim();
+      const text = input && trimServerSpace(input.value);
       if (!text) continue;
       const n = Number(text);
       body[key] = Number.isSafeInteger(n) ? n : text;
@@ -2596,7 +2805,10 @@ const INPUT_FLASH_MS = 1200;
 function flashBadInput(el) {
   if (!el) return;
   el.classList.add('prov-bad');
-  setTimeout(() => el.classList.remove('prov-bad'), INPUT_FLASH_MS);
+  setTimeout(() => {
+    if (el.getAttribute && el.getAttribute('aria-invalid') === 'true') return;
+    el.classList.remove('prov-bad');
+  }, INPUT_FLASH_MS);
 }
 
 function addCostKey(sec) {
@@ -2644,11 +2856,12 @@ function addHeaderRow(sec) {
   const nameIn = sec && sec.querySelector('.prov-add-h .sp-hname');
   const valIn = sec && sec.querySelector('.prov-add-h .sp-hval');
   if (!map || !nameIn || !valIn) return;
-  const name = String(nameIn.value || '').trim();
-  const value = String(valIn.value || '').trim();
+  const trim = sec.closest('.ro-wrap') ? trimServerSpace : value => String(value == null ? '' : value).trim();
+  const name = trim(nameIn.value);
+  const value = trim(valIn.value);
   if (!name || !PROV_HEADER_RE.test(name)) { flashBadInput(nameIn); return; }
   if (!value) { flashBadInput(valIn); return; }
-  if ([...map.querySelectorAll('.prov-hrow .sp-hname')].some(n => n.value.trim() === name)) { flashBadInput(nameIn); return; }
+  if ([...map.querySelectorAll('.prov-hrow .sp-hname')].some(n => trim(n.value) === name)) { flashBadInput(nameIn); return; }
   map.insertAdjacentHTML('beforeend', headerRowHTML(name, value));
   nameIn.value = '';
   valIn.value = '';
@@ -2706,6 +2919,16 @@ function closeProvMenus(scope) {
   (scope || document).querySelectorAll('.prov-menu:not([hidden])').forEach(m => setProvMenuOpen(m, false));
 }
 
+function roRemovalFocusTarget(container, removed, itemSelector, controlSelector, fallbackSelector) {
+  if (!container || !removed) return null;
+  const items = [...container.querySelectorAll(itemSelector)];
+  const index = items.indexOf(removed);
+  const fallbackRoot = removed.closest('.ro-rule') || container;
+  const target = items[index + 1] || items[index - 1] || fallbackRoot.querySelector(fallbackSelector);
+  if (!target) return null;
+  return target.matches(controlSelector) || target.matches(fallbackSelector) ? target : target.querySelector(controlSelector);
+}
+
 function providersEditorClick(e) {
   const t = e.target;
   if (t.closest('[data-al-rm]')) { t.closest('.al-row').remove(); markSettingsDirty(); return; }
@@ -2736,7 +2959,51 @@ function providersEditorClick(e) {
     return;
   }
   if (t.closest('[data-mr-restore]')) { mrRestoreDefaults(t.closest('.mr-wrap')); return; }
-  if (t.closest('[data-ro-rm]')) { const wrap = t.closest('.ro-wrap'); t.closest('.ro-rule').remove(); roDraftChanged(wrap); return; }
+  if (t.closest('[data-ro-add]')) {
+    const add = t.closest('[data-ro-add]');
+    const menu = add.closest('.ro-add') && add.closest('.ro-add').querySelector('.ro-tpl-menu');
+    if (menu) {
+      const open = menu.hidden;
+      roSetTemplateMenuOpen(menu, open);
+      if (open) {
+        const first = menu.querySelector('button:not(:disabled)');
+        if (first) first.focus();
+      }
+    }
+    return;
+  }
+  if (t.closest('[data-ro-tpl]')) { roApplyTemplate(t.closest('[data-ro-tpl]')); return; }
+  if (t.closest('.ro-tpl-menu')) return;
+  if (t.closest('[data-ro-toggle]')) {
+    const card = t.closest('.ro-rule');
+    roSetCardExpanded(card, card.dataset.roExpanded !== '1');
+    return;
+  }
+  if (t.closest('[data-ro-up], [data-ro-dn]')) {
+    const button = t.closest('[data-ro-up], [data-ro-dn]');
+    const card = button.closest('.ro-rule');
+    const wrap = button.closest('.ro-wrap');
+    const sibling = button.matches('[data-ro-up]') ? card.previousElementSibling : card.nextElementSibling;
+    if (sibling) {
+      if (button.matches('[data-ro-up]')) card.parentNode.insertBefore(card, sibling);
+      else card.parentNode.insertBefore(sibling, card);
+      roDraftChanged(wrap);
+    }
+    button.focus();
+    return;
+  }
+  if (t.closest('[data-ro-rm]')) {
+    const card = t.closest('.ro-rule');
+    const wrap = card.closest('.ro-wrap');
+    const before = [...wrap.querySelectorAll('.ro-rule')];
+    const index = before.indexOf(card);
+    card.remove();
+    roDraftChanged(wrap);
+    const after = [...wrap.querySelectorAll('.ro-rule')];
+    const target = after[index] || after[index - 1] || wrap.querySelector('[data-ro-add]');
+    if (target) target.focus();
+    return;
+  }
   if (t.closest('[data-ro-rh-add]')) { addRoRemoveHeader(t.closest('.ro-rule')); return; }
   if (t.closest('[data-sc-rm]')) { const wrap = t.closest('.sc-wrap'); t.closest('.sc-card').remove(); scDraftChanged(wrap); return; }
   if (t.closest('[data-sc-p-rm]')) { const wrap = t.closest('.sc-wrap'); t.closest('.sc-prow').remove(); scDraftChanged(wrap); return; }
@@ -2765,12 +3032,14 @@ function providersEditorClick(e) {
     return; // clicks inside the open menu close nothing but themselves
   }
   if (t.closest('[data-prov-chip-rm]')) {
-    // resolve the wrap before the removal: closest walks ancestors, and a
-    // detached node has none (the request-override cards reuse this
-    // affordance and must revalidate their draft after the mutation).
+    const chip = t.closest('.prov-chip');
     const roW = t.closest('.ro-wrap');
-    t.closest('.prov-chip').remove();
-    if (roW) roDraftChanged(roW); else markSettingsDirty();
+    const focusTarget = roW ? roRemovalFocusTarget(chip.parentElement, chip, '.prov-chip', '[data-prov-chip-rm]', '.ro-rh-in') : null;
+    chip.remove();
+    if (roW) {
+      roDraftChanged(roW);
+      if (focusTarget) focusTarget.focus();
+    } else markSettingsDirty();
     return;
   }
   // Usage and model mapping rows share one remove branch: both remove their
@@ -2788,9 +3057,14 @@ function providersEditorClick(e) {
   if (t.closest('[data-prov-add-usage]')) { addUsageRow(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-add-model]')) { addModelRow(t.closest('.prov-sec')); return; }
   if (t.closest('[data-prov-hrow-rm]')) {
+    const row = t.closest('.prov-hrow');
     const roW = t.closest('.ro-wrap');
-    t.closest('.prov-urow').remove();
-    if (roW) roDraftChanged(roW); else markSettingsDirty();
+    const focusTarget = roW ? roRemovalFocusTarget(row.parentElement, row, '.prov-hrow', '.sp-hname', '.prov-add-h .sp-hname') : null;
+    row.remove();
+    if (roW) {
+      roDraftChanged(roW);
+      if (focusTarget) focusTarget.focus();
+    } else markSettingsDirty();
     return;
   }
   if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); const roW = t.closest('.ro-wrap'); if (roW) roDraftChanged(roW); return; }
@@ -2810,6 +3084,7 @@ function wireSettingsDelegation() {
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   };
   box.addEventListener('input', e => {
+    validateSettingsScalar(e.target);
     if (e.target.closest && e.target.closest('.mr-wrap')) {
       const wrap = e.target.closest('.mr-wrap');
       // live per-keystroke validation (regex101/NN(g)-style: inline, at
@@ -2830,6 +3105,7 @@ function wireSettingsDelegation() {
     dirty(e);
   });
   box.addEventListener('change', e => {
+    validateSettingsScalar(e.target);
     if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
       if (e.target.id === 'backup-file') return;
       if (backupBusy) return;
@@ -2842,7 +3118,8 @@ function wireSettingsDelegation() {
     if (e.target.closest && e.target.closest('[data-backup="download"]')) return;
     if (e.target.matches('.sp-ufield, .sp-mfield')) syncMappingPicker(e.target.closest('.prov-sec'), e.target.matches('.sp-ufield') ? 'usage' : 'model');
     if (e.target.classList && (e.target.classList.contains('sp-upath') || e.target.classList.contains('sp-cost-in') || e.target.classList.contains('sp-label') || e.target.classList.contains('sp-mkey') || e.target.classList.contains('sp-mpath') || e.target.classList.contains('sp-hname') || e.target.classList.contains('sp-hval'))) {
-      const v = String(e.target.value || '').trim();
+      const trim = e.target.closest('.ro-wrap') ? trimServerSpace : value => String(value == null ? '' : value).trim();
+      const v = trim(e.target.value);
       let bad = false;
       if (v !== '') {
         if (e.target.classList.contains('sp-mpath')) bad = !v.startsWith('/');
@@ -2859,10 +3136,20 @@ function wireSettingsDelegation() {
       mrDraftChanged(e.target.closest('.mr-wrap'));
     }
     if (e.target.classList && e.target.classList.contains('mr-tpl')) mrApplyTemplate(e.target);
-    if (e.target.classList && e.target.classList.contains('ro-tpl')) roApplyTemplate(e.target);
     dirty(e);
   });
   box.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      const menu = e.target.closest && e.target.closest('.ro-tpl-menu');
+      if (menu) {
+        e.preventDefault();
+        e.stopPropagation();
+        const trigger = menu.parentElement && menu.parentElement.querySelector('[data-ro-add]');
+        closeRoTemplateMenus(menu.closest('.ro-wrap'));
+        if (trigger) trigger.focus();
+        return;
+      }
+    }
     if (e.key !== 'Enter') return;
     if (e.target.classList.contains('sp-cost-in')) { e.preventDefault(); addCostKey(e.target.closest('.prov-sec')); }
     else if (e.target.classList.contains('prov-new-label')) { e.preventDefault(); addProviderCard(e.target); }
@@ -2887,6 +3174,20 @@ function wireSettingsDelegation() {
       scSyncDatalists(e.target.closest('.sc-wrap'));
     }
   });
+  box.addEventListener('focusout', e => {
+    const menu = e.target.closest && e.target.closest('.ro-tpl-menu');
+    if (!menu || (e.relatedTarget && menu.contains(e.relatedTarget))) return;
+    // The close is deferred so focus passing through a neighbor (the
+    // classic focusout/relatedTarget blur race) cannot close the menu
+    // before the focus lands. The pending close is owned BY THE MENU: any
+    // later open or close clears it, so a stale timer from an earlier blur
+    // can never tear down a freshly reopened menu.
+    menu._roCloseTimer = setTimeout(() => {
+      menu._roCloseTimer = null;
+      if (menu.hidden || (document.activeElement && menu.contains(document.activeElement))) return;
+      roSetTemplateMenuOpen(menu, false);
+    }, 0);
+  });
   box.addEventListener('click', e => {
     if (e.target && e.target.id === 'btn-backup-download') { runBackupDownload(); return; }
     if (e.target && e.target.id === 'btn-backup-restore') { const f = $('backup-file'); if (f) f.click(); return; }
@@ -2897,8 +3198,9 @@ function wireSettingsDelegation() {
   // Clicks outside the add-menu close it (the menu lives in the sheet, but
   // the veil/other panels are outside #settings-fields).
   document.addEventListener('click', e => {
-    if (e.target.closest && (e.target.closest('.prov-menu') || e.target.closest('[data-prov-menu-toggle]'))) return;
+    if (e.target.closest && (e.target.closest('.prov-menu') || e.target.closest('[data-prov-menu-toggle]') || e.target.closest('.ro-tpl-menu') || e.target.closest('[data-ro-add]'))) return;
     closeProvMenus();
+    closeRoTemplateMenus();
   });
 }
 wireSettingsDelegation();
@@ -2944,11 +3246,17 @@ function collectSettingsValues(validate = false) {
           const v = String((row.querySelector('.sp-hval') || {}).value || '');
           put(headers, n, v, row.querySelector('.sp-hname'));
         });
+        // Ensured tools are one comma-separated input; empty segments drop
+        // and the rest ride the shared server validator (empty and
+        // duplicate names reject at save, like every other editor field).
+        const ensureTools = String((card.querySelector('.sp-etools') || {}).value || '')
+          .split(',').map(s => s.trim()).filter(Boolean);
         put(m, label, {
           cost_keys: cost,
           usage_keys: usage,
           models_path: String((card.querySelector('.sp-mpath') || {}).value || '').trim(),
           models_keys: modelsKeys,
+          ensure_tools: ensureTools,
           headers: headers,
         }, card.querySelector('.sp-label'));
       });
@@ -3083,6 +3391,8 @@ function filterSettings() {
 // selection path), then run the caller's focus + flash + scroll sequence
 // unchanged. A visible offender changes nothing.
 function revealSettingsOffender(firstBad, focusEl) {
+  const card = firstBad.closest('.ro-rule');
+  if (card && card.dataset.roExpanded !== '1') roSetCardExpanded(card, true);
   const row = firstBad.closest('.st-row');
   if (row && row.hidden && row.dataset.cat) {
     const rail = $('settings-rail');
@@ -3100,7 +3410,13 @@ function applySettings() {
   try { values = collectSettingsValues(true); }
   catch (err) {
     settingsStatus(String(err.message || err));
-    if (err.input) revealSettingsOffender(err.input, err.input);
+    if (err.input) {
+      const wrap = err.input.closest && err.input.closest('.ro-wrap');
+      const gate = wrap ? validateRequestOverridesDraft(wrap) : null;
+      const firstBad = gate && gate.firstBad;
+      const focusEl = firstBad ? (firstBad.querySelector('.prov-bad') || firstBad.querySelector('.ro-client')) : err.input;
+      revealSettingsOffender(firstBad || err.input, focusEl);
+    }
     return;
   }
   const submitted = JSON.stringify(values);

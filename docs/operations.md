@@ -13,7 +13,7 @@ liveness probe, origin-root brand/PWA files (`/favicon.ico`, icons,
 [proxy.example.yaml](../proxy.example.yaml) is generated from the canonical
 `config.Example()` and schema documentation. `Example()` starts with neutral
 `config.Default()` values and adds the enabled
-[Grok/Cursor compatibility profiles](adapters.md#bundled-compatibility-profiles)
+[Grok, OpenCode Zen and Cursor compatibility profiles](adapters.md#bundled-compatibility-profiles)
 and the opencode sub-conversation tracking exemplar (the `promptCacheKey`
 tracked param, strip on). It is not mutable repository state. Source
 deployments copy it to ignored local `proxy.yaml`; images bundle their own copy

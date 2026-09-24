@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -132,8 +133,10 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 // applyProviderHeaders sets the provider's configured upstream headers
 // (config providers.<label>.headers) on an upstream request. Template
 // placeholders in values expand per request: {{uuid4}} mints a fresh UUID v4
-// (the cursor x-request-id idiom) and {{platform}} renders the rust-style
-// "os; arch" pair of the machine the proxy runs on. Every configured header
+// (the cursor x-request-id idiom), {{platform}} renders the rust-style
+// "os; arch" pair of the machine the proxy runs on, and
+// {{opencode-msg-id}}/{{opencode-ses-id}} mint fresh identifiers in the
+// opencode CLI's wire format (the zen idiom). Every configured header
 // is set, never deleted: empty values are rejected at config load
 // (config.ValidHeaderValue plus the mapping's non-empty rule), so there is no
 // delete feature - deny by default.
@@ -149,14 +152,55 @@ func (s *Server) applyProviderHeaders(h http.Header, provider string) {
 
 // expandHeaderTemplates expands the per-request placeholders in a configured
 // header value. Unknown {{...}} sequences pass through verbatim - only the
-// two documented placeholders are special.
+// documented placeholders are special.
 func expandHeaderTemplates(v string) string {
 	if !strings.Contains(v, "{{") {
 		return v
 	}
 	v = strings.ReplaceAll(v, "{{uuid4}}", providerformat.UUID4())
 	v = strings.ReplaceAll(v, "{{platform}}", rustPlatform())
+	v = strings.ReplaceAll(v, "{{opencode-msg-id}}", opencodeID("msg_"))
+	v = strings.ReplaceAll(v, "{{opencode-ses-id}}", opencodeID("ses_"))
 	return v
+}
+
+// opencodeIDChars is the opencode CLI's identifier alphabet: 62 characters
+// the CLI picks its random tail from (byte % 62 over the same set).
+const opencodeIDChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+var (
+	opencodeIDmu      sync.Mutex
+	opencodeIDlastMS  int64
+	opencodeIDcounter int64
+)
+
+// opencodeID mints an identifier in the opencode CLI's wire format: prefix
+// plus 26 characters - 12 lowercase hex encoding the low 48 bits of
+// (timestamp_ms * 4096 + counter), then 14 base62 characters of
+// cryptographically random bytes. This ports the CLI's identifier generator
+// (packages/schema identifier.ts) faithfully; upstream gates have been
+// observed to validate the shape (12 hex + 14 base62), not the timestamp.
+// The counter shares the CLI's same-millisecond monotonicity, so ids minted
+// within one process never collide.
+func opencodeID(prefix string) string {
+	opencodeIDmu.Lock()
+	ms := time.Now().UnixMilli()
+	if ms != opencodeIDlastMS {
+		opencodeIDlastMS = ms
+		opencodeIDcounter = 0
+	}
+	opencodeIDcounter++
+	value := uint64(ms)*0x1000 + uint64(opencodeIDcounter)
+	opencodeIDmu.Unlock()
+	tail := make([]byte, 14)
+	// crypto/rand.Read cannot fail on the supported platforms; a zero tail
+	// still matches the validated shape if it ever did.
+	_, _ = rand.Read(tail)
+	chars := make([]byte, 14)
+	for i, b := range tail {
+		chars[i] = opencodeIDChars[int(b)%62]
+	}
+	return prefix + fmt.Sprintf("%012x", value&(1<<48-1)) + string(chars)
 }
 
 // rustPlatform renders the platform pair the grok-build CLI puts in its
@@ -306,16 +350,18 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 // overrideRequestBody rewrites an OpenAI-wire request body through the
 // single body-rewrite engine and returns the new bytes: the whole document
 // decodes as raw JSON values once, the named token ceilings are set, the
-// named strip fields are deleted, and the document re-marshals with every
-// other field's value preserved verbatim - the re-encode sorts keys, compacts
-// whitespace and HTML-escapes <, > and & inside preserved values, so the
-// bytes are not preserved, only the values. ob may be nil (strip only) and
-// strip may be nil (override actions only); when no action changes the
-// document the ORIGINAL bytes come back unchanged - no rewrite happened. Fail
-// closed - why carries the operator-actionable reason and the caller relays
-// the ORIGINAL bytes unchanged - when the body is not a JSON object or the
-// rewritten result would exceed the request byte budget.
-func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, maxBytes int64) (out []byte, why string) {
+// named strip fields are deleted, the ensured tool names are injected where
+// missing, and the document re-marshals with every other field's value
+// preserved verbatim - the re-encode sorts keys, compacts whitespace and
+// HTML-escapes <, > and & inside preserved values, so the bytes are not
+// preserved, only the values. ob may be nil (no ceiling actions), strip may
+// be nil (no strip actions) and ensureTools may be nil (no tool actions);
+// when no action changes the document the ORIGINAL bytes come back
+// unchanged - no rewrite happened. Fail closed - why carries the
+// operator-actionable reason and the caller relays the ORIGINAL bytes
+// unchanged - when the body is not a JSON object or the rewritten result
+// would exceed the request byte budget.
+func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64) (out []byte, why string) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return nil, fmt.Sprintf("the request body is not a JSON object: %v", err)
@@ -341,6 +387,13 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, m
 			changed = true
 		}
 	}
+	if len(ensureTools) > 0 {
+		if ensureToolsChanged, whyTools := ensureToolsInBody(doc, ensureTools); whyTools != "" {
+			return nil, whyTools
+		} else if ensureToolsChanged {
+			changed = true
+		}
+	}
 	if !changed {
 		return body, ""
 	}
@@ -352,6 +405,91 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, m
 		return nil, fmt.Sprintf("the rewritten body would exceed max_request_bytes (%d bytes)", maxBytes)
 	}
 	return out, ""
+}
+
+// ensureToolStub is the inert function stub injected for a configured name a
+// chat body's tools array lacks. The description tells the model to keep
+// away: the stub exists for a first-party client's tool-signature gate, not
+// to be called, and a body that carried no tools of its own additionally
+// gets tool_choice "none" so the model cannot invoke it at all.
+type ensureToolStub struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	} `json:"function"`
+}
+
+// ensureToolsInBody is the tools actor of the body-rewrite engine: it adds
+// every configured name the body's tools array lacks as an inert stub. Only
+// chat-shaped bodies qualify (a top-level messages array), so discovery,
+// responses-style and embeddings bodies stay untouched; a tools value that
+// does not decode as an array skips the actor rather than corrupting the
+// body. A body whose own tools array is absent or empty and that carries no
+// tool_choice also receives tool_choice "none": the injected stubs then
+// cannot be invoked, matching what a client that sent no tools expects
+// back. A body that already carries every name is returned unchanged - the
+// passthrough invariant survives satisfied signatures.
+func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (changed bool, why string) {
+	if _, ok := doc["messages"]; !ok {
+		return false, ""
+	}
+	have := make(map[string]bool, len(ensureTools))
+	clientTools := 0
+	if raw, ok := doc["tools"]; ok {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			// Not an array: not a chat tools field the stubs belong in.
+			return false, ""
+		}
+		clientTools = len(entries)
+		for _, entry := range entries {
+			var fn struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			}
+			if json.Unmarshal(entry, &fn) == nil && fn.Function.Name != "" {
+				have[fn.Function.Name] = true
+			}
+		}
+	}
+	var additions []json.RawMessage
+	for _, name := range ensureTools {
+		if have[name] {
+			continue
+		}
+		stub := ensureToolStub{Type: "function"}
+		stub.Function.Name = name
+		stub.Function.Description = "Proxy-injected compatibility stub; never call this tool."
+		stub.Function.Parameters = json.RawMessage(`{"type":"object","properties":{}}`)
+		encoded, err := json.Marshal(stub)
+		if err != nil {
+			return false, fmt.Sprintf("encoding an ensured tool stub for %q failed: %v", name, err)
+		}
+		additions = append(additions, encoded)
+	}
+	if len(additions) == 0 {
+		return false, ""
+	}
+	var tools []json.RawMessage
+	if clientTools > 0 {
+		if raw, ok := doc["tools"]; ok && json.Unmarshal(raw, &tools) == nil {
+			tools = append(tools, additions...)
+		}
+	} else {
+		tools = additions
+		if _, ok := doc["tool_choice"]; !ok {
+			doc["tool_choice"] = json.RawMessage(`"none"`)
+		}
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return false, fmt.Sprintf("encoding the ensured tools array failed: %v", err)
+	}
+	doc["tools"] = encoded
+	return true, ""
 }
 
 // applyTokenCaps decodes the request's token-cap pair from body with one

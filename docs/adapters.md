@@ -29,13 +29,14 @@ For native formats, supply the adapter selection and the upstream's required
 authentication, version and path headers; the
 [Anthropic example](protocol.md#url-and-auth-examples) and
 [Cursor login setup](#cursor-login) show these choices. Provider profiles enrich
-headers and metadata but do not select an adapter or grant provider access.
+headers, metadata and ensured tool signatures but do not select an adapter or
+grant provider access.
 
 ## Bundled compatibility profiles
 
-The generated [configuration example](../proxy.example.yaml) enables Grok and
-Cursor profiles and the opencode sub-conversation tracking exemplar (the
-`promptCacheKey` tracked param, strip on). `config.Example()` in
+The generated [configuration example](../proxy.example.yaml) enables the Grok,
+OpenCode Zen and Cursor profiles and the opencode sub-conversation tracking
+exemplar (the `promptCacheKey` tracked param, strip on). `config.Example()` in
 [internal/config](../internal/config) owns the exact profile mappings, header
 values and that tracking entry; built-in `config.Default()` remains
 provider-neutral. The image installs the example into fresh config volumes.
@@ -61,6 +62,44 @@ retention guarantee. Cursor's [public authentication documentation](https://curs
 does not establish a stable public contract for this native bridge or its
 compatibility headers. Keep authorization and current service support separate
 from a successful local fixture test.
+
+The OpenCode Zen profile supplies the opencode CLI's client identity on the
+ordinary OpenAI-compatible relay: the CLI's composite `User-Agent`,
+`x-opencode-client` and `x-opencode-project`, plus the CLI's per-conversation
+`x-opencode-request` and `x-opencode-session` headers, which the
+`{{opencode-msg-id}}` and `{{opencode-ses-id}}` templates mint fresh per
+request in the CLI's 26-character identifier format (provider headers
+override client-forwarded values; the ids carry no session state, so
+replacing a genuine client's own ids is functionally neutral). The profile
+also sets `ensure_tools: [bash, read]`. A check on 2026-09-24 found zen's
+free tier gated on that wire signature rather than on TLS, header order or
+credentials: with the id headers in shape and a chat `tools` array containing
+the `bash` and `read` tool names, the gated free models served even under
+the anonymous `public` bearer. `ensure_tools` injects missing names as inert
+stubs and adds `tool_choice: none` when the client sent no tools of its own,
+so the stubs can never be invoked; a body that already satisfies the
+signature relays byte-identical, and non-chat bodies are never rewritten.
+The same check found the signature also requires a streaming request
+(`"stream": true`): non-streaming requests to the gated free models get the
+provider's `FreeTierError` 403, so clients of those models must stream (the
+CLI always does). That observation is about that day, not an entitlement: the
+profile is not an account, key or permission, and there is no zen login
+helper. Zen's models are listed in
+[OpenCode's Zen documentation](https://opencode.ai/docs/zen/).
+
+Every profile is editable operator configuration, in the private config file
+or in Settings under Providers (each card edits the field maps, ensured tool
+names and upstream headers, with hot reload): changing a signature tool set
+or a header value is an edit, never a code change. To reproduce another
+first-party client's signature for a different provider, work from evidence
+top down: capture the client's own requests against a local logging upstream,
+strip one signal at a time against the real endpoint (TLS ClientHello, header
+order and values, body fields, credentials) until only the gate remains, then
+express the surviving identity as a provider profile - static headers
+directly, per-request dynamic values as `{{uuid4}}`, `{{platform}}` or a new
+mint placeholder in the single template expander, and required tool names as
+`ensure_tools`. The zen profile above is one worked example of that recipe,
+not a hardcoded mechanism.
 
 ## Anthropic-compatible Messages
 

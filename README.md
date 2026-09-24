@@ -82,7 +82,7 @@ docker compose logs --tail 50
 `MILLIVOLT_PORT` to an unused host port if needed. Its named volumes retain
 history and private Settings configuration when the container is replaced.
 Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
-including enabled [Grok/Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles)
+including enabled [Grok, OpenCode Zen and Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles)
 and the opencode sub-conversation tracking exemplar (the `promptCacheKey`
 tracked param, strip on). No separate config download is needed; existing saved
 settings are not overwritten.

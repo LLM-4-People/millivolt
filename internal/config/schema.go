@@ -71,7 +71,7 @@ func Categories() []Category {
 		{ID: "backup", Label: "Backup", Help: "Download or restore a self-checked archive of the saved config, the SQLite history, or both. Restore inspects first: merge keeps live defaults and live request ids; replace writes the backup as-is."},
 		{ID: "dashboard", Label: "Dashboard", Help: "Live-view cadence and request-log window. Hot-reloads; open dashboards pick up the next tick."},
 		{ID: "models", Label: "Models", Help: "Model grouping rules - an ordered rewrite pipeline merging spelling variants of the same model in every grouped surface. Records keep their exact spelling; hot-reloads."},
-		{ID: "providers", Label: "Providers", Help: "Optional per-provider JSON field-name maps: usage/cost response keys, the models metadata endpoint merged into /v1/models, and optional upstream wire headers. Empty = auto-detect."},
+		{ID: "providers", Label: "Providers", Help: "Optional per-provider JSON field-name maps: usage/cost response keys, the models metadata endpoint merged into /v1/models, ensured tool names injected into relayed chat bodies, and optional upstream wire headers. Empty = auto-detect."},
 		{ID: "overrides", Label: "Request overrides", Help: "Scoped rewrites of the upstream request: set, replace or remove HTTP headers and set output-token ceilings per client, provider and/or model. Rules match exactly, all matching rules apply in list order, and the later rule wins. Default: an empty list, the feature fully off."},
 	}
 }
@@ -321,7 +321,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 
 		// ---- providers ----
 		{Key: "providers", Category: "providers", Label: "Provider field maps",
-			Help: "Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment, and headers (a string map). Field names only, never static prices. Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion. Header values expand {{uuid4}} to a fresh UUID and {{platform}} to the server's Rust-style os; arch pair; unknown templates stay literal. On HTTP relay requests, configured headers override forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor bridge construct headers separately and do not apply X-Proxy-Headers. Headers can contain secrets; keep runtime configuration private.",
+			Help: "Per-provider cost/usage JSON field paths, optional models_path/models_keys enrichment, ensured tool names and headers (a string map). Field names only, never static prices. Custom cost_keys must report USD; leave cost_in_usd_ticks to automatic unit conversion. ensure_tools names function tools injected as inert stubs into relayed OpenAI-wire chat bodies missing them, with tool_choice none added when the client sent no tools, so a first-party client's tool-signature gate still recognizes the request. Header values expand {{uuid4}} to a fresh UUID, {{platform}} to the server's Rust-style os; arch pair, and {{opencode-msg-id}}/{{opencode-ses-id}} to fresh opencode-format identifiers; unknown templates stay literal. On HTTP relay requests, configured headers override forwarded/extracted-auth values and X-Proxy-Headers wins. Model discovery and the Cursor bridge construct headers separately and do not apply X-Proxy-Headers. Headers can contain secrets; keep runtime configuration private.",
 			Kind: KindProviders, HotReload: true},
 		{Key: "provider_aliases", Category: "providers", Label: "Provider aliases",
 			Help: "Map an old provider label to a canonical label. Rewrites existing stored history at boot and on reload; new requests use the canonical label. Existing in-memory records keep their prior label until they age out or the process restarts. Removing a mapping does not restore rewritten history. Chains and self-maps are rejected.",
@@ -396,7 +396,7 @@ func (f Field) TypeLine(def any) string {
 	case KindStrings:
 		b.WriteString("list of string")
 	case KindProviders:
-		b.WriteString("map of provider label → {cost_keys, usage_keys, models_path, models_keys, headers}")
+		b.WriteString("map of provider label → {cost_keys, usage_keys, models_path, models_keys, ensure_tools, headers}")
 	case KindAliases:
 		b.WriteString("map of old provider label → canonical label")
 	case KindModelRules:
