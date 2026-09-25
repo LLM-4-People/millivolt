@@ -925,7 +925,7 @@ function renderDrawer() {
   // the request view, never a throw.
   const a = drawerAttempt != null && Array.isArray(r.attempts) ? r.attempts[drawerAttempt] : null;
   if (drawerAttempt != null && !a) drawerAttempt = null;
-  const base = `${r.client || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`;
+  const base = `${clientLabel(r.client) || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`;
   if (a) {
     // The title carries the attempt identity: index, real status (transport
     // for status-less failures) and the provider request id that matches a
