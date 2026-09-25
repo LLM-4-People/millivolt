@@ -106,7 +106,7 @@ function clientTipHTML(id, rec) {
   };
   const join = (xs) => xs.filter(Boolean).join(' ');
   sec('Client');
-  row('name', id);
+  row('name', clientLabel(id));
   if (!rec) return rows.join('');
   const m = rec.client_meta || {};
   row('lang', rec.client_lang);

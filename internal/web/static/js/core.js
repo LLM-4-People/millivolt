@@ -181,6 +181,10 @@ function providerLabel(name) {
   if (!name) return '?';
   return name.includes('.') && !/^\d/.test(name) ? name.split('.')[0] : name;
 }
+function clientLabel(name) {
+  const value = String(name || '').trim();
+  return value.replace(/^([^/\s]+)\/[vV]?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?(?=\s|$)/, '$1').replace(/^(\S+)\s+[vV]?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?(?=\s|$)/, '$1');
+}
 const _faviconBroken = new Set();
 function faviconErr(img, origin) {
   // Swap the failed icon for the type-icon fallback sibling (one-shot; dead

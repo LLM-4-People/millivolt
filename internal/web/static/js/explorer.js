@@ -217,6 +217,7 @@ function recordMatchesDim(r, dim, id) {
 // their short label, conversations their short id, errors their type).
 function dimLabel(dim, key) {
   if (dim === 'provider') return providerLabel(key);
+  if (dim === 'client') return clientLabel(key);
   return shortId(dim, key);
 }
 

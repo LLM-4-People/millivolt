@@ -277,7 +277,7 @@ class RepositoryChecks(unittest.TestCase):
                         "fillSettingsLive template body is not scanned")
         log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(log)
-        expr = log.index("r.client || '?'")
+        expr = log.index("clientLabel(r.client) || '?'")
         sep = log.index(" · ", expr)
         self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
                         "renderDrawer template body is not scanned")

@@ -366,6 +366,14 @@ for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'lo
 check('qualified provider favicon keeps the canonical host',
   w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
   w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
+check('client labels omit SDK versions consistently',
+  w.clientLabel('opencode/1.18.32') === 'opencode' &&
+  w.clientLabel('python 1.55') === 'python' &&
+  w.clientLabel('team/2fa') === 'team/2fa' &&
+  w.clientLabel('python 2fa') === 'python 2fa' &&
+  w.dimLabel('client', 'opencode/1.18.32') === 'opencode' &&
+  w.entityBadge('client', 'opencode/1.18.32').includes('>opencode</span>') &&
+  w.clientTipHTML('opencode/1.18.32').includes('>opencode</span>'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const rows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row[data-id]')].filter(tr => !tr.classList.contains('retry-sub'));
@@ -1232,7 +1240,30 @@ async function main() {
     modelSelHTML.includes('<optgroup label="glm-5-3 (2)"') &&
     modelSelHTML.includes('value="glm-5.3"') && modelSelHTML.includes('value="glm-5-3"') &&
     modelSelHTML.includes('value="grok-4.6"') && !modelSelHTML.includes('value="glm-5-3 (2)"'));
-  // applyModelCanon: a rule change invalidates the scope derivation and
+  const clientSelHTML = w.eval(`(() => {
+    const saved = lastData;
+    lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
+    populateFilterMenu('cf');
+    const html = document.getElementById('cf-client').innerHTML;
+    lastData = saved;
+    return html;
+  })()`);
+  check('client filter labels omit versions while preserving exact values',
+    clientSelHTML.includes('<option value="opencode/1.18.32">opencode</option>') &&
+    clientSelHTML.includes('<option value="team/2fa">team/2fa</option>'));
+  const clientDrawerTitle = w.eval(`(() => {
+    const saved = lastData, savedDrawer = drawerId;
+    lastData = { records: [{ id: 'client-label', client: 'opencode/1.18.32', provider: 'provider.example', model: 'space-bunny-free' }] };
+    drawerId = 'client-label';
+    renderDrawer();
+    const title = document.getElementById('drawer-title').textContent;
+    lastData = saved;
+    drawerId = savedDrawer;
+    closeDrawer();
+    return title;
+  })()`);
+  check('drawer title uses the shared client label',
+    clientDrawerTitle.startsWith('opencode · provider.example · space-bunny-free'));
   // refreshes the server aggregates; an unchanged payload does neither.
   {
     const rev0 = w.eval('lastData._rev');

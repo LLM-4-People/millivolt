@@ -4401,13 +4401,13 @@ const FILTER_AGES = [['', '-'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'],
 
 function populateFilterMenu(prefix) {
   const recs = lastData?.records || [];
-  const fill = (id, vals) => {
+  const fill = (id, vals, label = v => v) => {
     const el = $(id);
     const cur = el.value;
-    fillSelectPairs(el, [['', 'any']].concat(vals.map(v => [v, String(v)])), cur);
+    fillSelectPairs(el, [['', 'any']].concat(vals.map(v => [v, label(v)])), cur);
   };
   fill(prefix+'-provider', [...new Set(recs.map(r => r.provider).filter(Boolean))].sort());
-  fill(prefix+'-client', [...new Set(recs.map(r => r.client).filter(Boolean))].sort());
+  fill(prefix+'-client', [...new Set(recs.map(r => r.client).filter(Boolean))].sort(), clientLabel);
   fill(prefix+'-status', [...new Set(recs.map(r => r.status_code))].sort((a,b)=>a-b).map(String));
   // The model select groups spelling variants under their canonical group
   // (an <optgroup> per multi-variant group) so the same model clusters
