@@ -197,10 +197,12 @@ type Config struct {
 	// sees the error, so a client-side retry only duplicates upstream work
 	// and billing. No response exists to carry the directive on
 	// transport-level failures, and clients that ignore the header (e.g.
-	// the Vercel AI SDK / opencode stack, whose retry policy is status- and
-	// body-text driven) keep their own policy; mid-stream SSE errors never
-	// auto-retry in official SDKs and cannot carry new headers. Success
-	// responses are untouched. Reload applies to new responses.
+	// the Vercel AI SDK / opencode stack, whose OpenAI adapter classifies an
+	// in-band error by the error's `code` and `type` alone - never its
+	// message - and so cannot be steered by a header) keep their own policy;
+	// mid-stream SSE errors never auto-retry in official SDKs and cannot carry
+	// new headers. Success responses are untouched. Reload applies to new
+	// responses.
 	SuppressClientRetries bool `yaml:"suppress_client_retries" json:"suppress_client_retries"`
 
 	// Error storm protection observes eligible upstream attempts in a bounded
