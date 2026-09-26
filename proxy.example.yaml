@@ -253,10 +253,11 @@ atomic_tool_calls: false
 # time, garbled into one text part. That duplicate is the entire cost, and
 # atomic_tool_calls keeps it to visible text - a re-send could otherwise merge both
 # attempts' arguments for the same tool-call index, yielding a malformed tool call or a
-# spurious execution, so this setting is rejected at load unless atomic_tool_calls is on.
-# Responses-API feeds and finish_reason length are never rescued. Each rescue re-sends the
-# full request (billed); one request can spend every rescue budget, so 0 disables unless
-# you accept the cost.
+# spurious execution, so this setting requires atomic_tool_calls: the Settings API rejects
+# the pair, and a hand-edited file has append_retries dropped with a log line rather than
+# refused. Responses-API feeds and finish_reason length are never rescued. Each rescue
+# re-sends the full request (billed); one request can spend every rescue budget, so 0
+# disables unless you accept the cost.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 0
 append_retries: 0

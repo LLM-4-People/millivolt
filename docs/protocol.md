@@ -217,7 +217,25 @@ stream stays disjoint: nothing relayed is `quality_retries`, reasoning-only is
 
 Cost, stated plainly: one client request can spend every rescue budget in turn,
 so with all three at their maximum it can drive 1 + 3 + 3 + 3 = 10 upstream
-sends (each billed), on top of the transport-level `max_retries` ladder. The
+sends (each billed), on top of the transport-level `max_retries` ladder.
+
+What the record shows is narrower than what was billed, and that gap predates
+this class but the append class widens it. The record is filled by the
+SUCCEEDING attempt alone - `RetryAttempt` carries no usage, tokens or cost, only
+status, class, provider request id and headers - so every absorbed attempt's
+prompt tokens are missing, and for this class so are the answer tokens the
+client actually read. Measured with all three budgets at 1 and a permanently
+truncating upstream: the provider billed 4000 input and 1700 output tokens
+across 4 sends, and the record reports 1000 input and 400 output. Only the
+provider's own `ProviderRequestID` on the absorbed attempt can reconcile it.
+Two further consequences of the same rule: `TTFT` is measured from the final
+attempt, so it excludes the rescue's queueing and backoff entirely, and
+`FinalizeRecord` zeroes `answer_tokens` when the winning attempt ends in
+`finish_reason: tool_calls` without content - which for a rescued turn is a
+record claiming zero answer content for a turn the client did read. The
+absorbed attempt is also booked as a storm failure sample while the record's own
+error predicates call the request a success, so a provider that truncates
+inflates its own storm rate. The
 append class also duplicates the relayed text prefix once per rescue, so the
 duplicated volume grows with the budget. Up to 1 MiB per in-flight stream is
 withheld while a tool call is pending, and `max_concurrent` defaults to

@@ -141,7 +141,9 @@ type Record struct {
 	RateLimited bool  `json:"rate_limited,omitempty"` // scheduler wait or 429/503 pacing; HasRateLimit owns the exact 429 predicate
 	// Attempts records each transparently-retried upstream response (the ones
 	// the client never saw) so the proxy logs the full history, not just the
-	// final outcome. Bounded by max_retries.
+	// final outcome. Not bounded by max_retries: one request can spend the
+	// transport ladder plus every rescue budget, so an attempt entry carries
+	// its own response header map and this array has no size cap of its own.
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.

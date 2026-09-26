@@ -265,3 +265,101 @@ func TestAppendRescueRefusesCanceledCaller(t *testing.T) {
 		})
 	}
 }
+
+// TestAppendRescueRefusedWhenEventAlreadyOpen pins a non-regressing rule. The
+// withhold region can open on a NON-FIRST data line of a multi-line event: here
+// the first data line is an incomplete JSON prefix with no tool-call key in it,
+// so it is RELAYED verbatim before the second line - which does carry the key -
+// can open the region. That prefix cannot be withdrawn, so the client's event
+// cannot be repaired.
+//
+// The tempting repair, a closing blank line, is strictly worse than doing
+// nothing: it DISPATCHES the orphaned prefix as an event holding truncated
+// JSON, so the client raises a mid-stream parse error in front of an otherwise
+// fine result. The pre-atomic relay relayed the whole event, which is valid
+// JSON, and degraded cleanly. So this shape is never rescued and never
+// substituted: the region is dropped, leaving the event dangling for the
+// client's own parser to discard at end of stream, where it reports the
+// truncation itself.
+func TestAppendRescueRefusedWhenEventAlreadyOpen(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		calls.Add(1)
+		w.WriteHeader(200)
+		w.Write([]byte(atomicRoleFrame + atomicTextFrame))
+		w.(http.Flusher).Flush()
+		// Event, two data lines. Line one carries no tool-call key, so it is
+		// relayed before the region can open on line two.
+		w.Write([]byte(`data: {"id":"A","choices":[{"delta":{` + "\n" +
+			`data: "tool_calls":[{"index":0,"id":"call_LATE","function":{"name":"bash","arguments":"{}"}}]}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+		// Truncated: no terminator.
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.AtomicToolCalls = true
+	cfg.AppendRetries = 1
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1: an unrepairable event must never be rescued", n)
+	}
+	if n := toolCallCount(got); n != 0 {
+		t.Fatalf("the withheld tool call must not reach the client, saw %d deltas: %s", n, got)
+	}
+	// Critically: no synthetic error chunk may be appended, because it would be
+	// joined to the already-relayed event prefix by the client's parser.
+	if strings.Contains(got, `"error"`) {
+		t.Fatalf("an unrepairable event must not be substituted with an error chunk: %s", got)
+	}
+}
+
+// TestToolCallInsideFinishReasonRegion is a finish_reason chunk's region. Two
+// things make it distinct and neither is a safety hole, so they are pinned here
+// rather than assumed: sse.TerminalLine matches only [DONE] and Responses
+// terminal events, so a finish_reason OPENS the withhold region without
+// resolving it on that line, and a tool call that follows lands inside it; and
+// because a finish_reason IS a terminator, the region is released verbatim at
+// end of stream, so the committed tool call DOES reach the client. The append
+// class cannot apply (terminatorSeen is sticky), so no re-send follows.
+func TestToolCallInsideFinishReasonRegion(t *testing.T) {
+	huge := strings.Repeat("q", 256*1024)
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte(atomicRoleFrame + atomicTextFrame))
+		w.(http.Flusher).Flush()
+		// Opens the region; does not resolve it.
+		w.Write([]byte(`data: {"id":"A","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n"))
+		w.(http.Flusher).Flush()
+		// A tool call well past terminalHoldMax, inside the still-open region.
+		w.Write([]byte(`data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_big","function":{"name":"bash","arguments":"` + huge + `"}}]}}]}` + "\n\n"))
+		w.(http.Flusher).Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	cfg.AtomicToolCalls = true
+	cfg.AppendRetries = 1
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1: a finish_reason is a terminator, so no re-send may follow", n)
+	}
+	if n := toolCallCount(got); n != 1 {
+		t.Fatalf("the committed tool call must be released verbatim, saw %d deltas", n)
+	}
+	if !strings.Contains(got, huge[:512]) {
+		t.Fatal("the tool call's arguments must reach the client intact")
+	}
+}

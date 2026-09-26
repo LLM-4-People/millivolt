@@ -97,10 +97,11 @@ const (
 	// stream - the relay observes that in toolBytesOnWire rather than inferring
 	// it. Safety guardrail, not user-tunable.
 	//
-	// It only has to be chosen once, at the opening line: a region opened by a
-	// terminator is resolved by that same line (sse.TerminalLine), and a region
-	// opened by a tool call is here. So no tool call can arrive inside a region
-	// that is still open with the smaller bound, and there is no upgrade path.
+	// It is set when the region opens on a tool call, and RAISED if a tool call
+	// begins inside a region that some other line opened. That second case is
+	// real: sse.TerminalLine matches only [DONE] and Responses terminal events,
+	// so a finish_reason chunk opens the region without resolving it on the
+	// same line, and the tool-call deltas that follow land inside it.
 	// Sizing it equal to sseScannerBufMax is deliberate, not incidental: a
 	// single tool-call frame past the scanner bound is newline-free, so that
 	// guardrail relays it before any region could open, and the two escape

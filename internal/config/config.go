@@ -216,7 +216,14 @@ type Config struct {
 	// no tool call reached the client - without it a re-send would merge both
 	// attempts' arguments for the same tool-call index, yielding either a
 	// malformed tool call or a spurious execution, so Validate rejects the
-	// combination outright rather than trusting the operator. Responses-API
+	// combination rather than trusting the operator. How that rejection
+	// surfaces differs, and an operator needs to know: the Settings API
+	// returns an error naming both settings, but a hand-edited config FILE
+	// cannot be refused on this ground - the loader treats a key whose
+	// whole-config validate fails as a per-key salvage candidate, drops it
+	// with one log line and rewrites the file. Either way the rescue can
+	// never be live unsound; it can only be silently absent, so check
+	// append_retries took effect after editing the file by hand. Responses-API
 	// feeds are never rescued (per-response sequence numbers are documented
 	// ordering state) and finish_reason length is the client's own token cap.
 	// Each rescue re-sends the full request (the upstream bills every

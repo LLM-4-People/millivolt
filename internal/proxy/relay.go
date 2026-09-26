@@ -1544,6 +1544,21 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// site that writes analyzer-fed stream bytes to the client; each site
 		// is redundant on its own, so no single one can be removed.
 		toolBytesOnWire bool
+		// eventDataLines counts the data: lines already RELAYED for the event
+		// currently being assembled, reset at every blank-line boundary.
+		eventDataLines int
+		// framingUnrepairable records that the withhold region opened on a
+		// NON-FIRST data line of its event - a "tool_calls" key whose value
+		// continues on the next line is exactly that shape. Those earlier lines
+		// are already on the wire and cannot be withdrawn, so the client's
+		// event cannot be repaired: a closing blank line would dispatch the
+		// orphaned prefix as an event holding a truncated JSON fragment, which
+		// is strictly worse than the pre-atomic relay (which relayed the whole
+		// event, valid JSON, and degraded cleanly). So this shape is never
+		// rescued and never substituted: the region is dropped, which leaves the
+		// event dangling for the client's own parser to discard at end of
+		// stream, and the client reports the truncation itself.
+		framingUnrepairable bool
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// a hold-bound overflow): the stream then COMMITS to verbatim relay -
 		// no degenerate classification may substitute anything (a stream with
@@ -1686,8 +1701,29 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				line := b[:idx]
 				prev := withholdOpened()
 				a.Feed(line, now)
+				// Track the event's relayed data lines for framingUnrepairable.
+				// priorDataLines is the count BEFORE this line, so it is what
+				// decides whether this line opens its event or continues it.
+				priorDataLines := eventDataLines
+				if len(bytes.TrimSpace(line)) == 0 {
+					eventDataLines = 0
+				} else if _, isData := sse.DataPayload(line); isData {
+					eventDataLines++
+				}
 				switch {
 				case holding:
+					// Raise the bound if a tool call begins inside a region some
+					// other line opened. sse.TerminalLine matches only [DONE] and
+					// Responses terminal events, so a finish_reason chunk opens the
+					// region WITHOUT resolving it, and a tool call that follows
+					// lands inside a region still bounded by terminalHoldMax. This
+					// is not a safety gate - a finish_reason is a terminator, so
+					// that region is released verbatim and no re-send can follow
+					// it either way - it keeps the region's size reflecting its
+					// content instead of overflowing at the terminal cap.
+					if atomicTools && holdMax < toolCallHoldMax && a.ToolCallRegionOpened() {
+						holdMax = toolCallHoldMax
+					}
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
 					// The terminal marker itself: everything that defines the
@@ -1714,6 +1750,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// it eagerly would let a re-send merge both attempts'
 					// arguments for the same tool-call index.
 					holding = true
+					if priorDataLines > 0 {
+						framingUnrepairable = true
+					}
 					if atomicTools && a.ToolCallRegionOpened() {
 						holdMax = toolCallHoldMax
 					}
@@ -1933,6 +1972,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// confirmed call, and discarding it would throw away ordinary
 			// answer text for no soundness gain. Those bytes are given back
 			// verbatim and the normal path surfaces the truncation.
+			if framingUnrepairable {
+				// Drop the region and stop: substituting an error here would
+				// join it to the already-relayed event prefix. See the field doc.
+				hold = hold[:0]
+				holding = false
+				a.Fill(rec)
+				return rescueNone
+			}
 			appendOK := allowAppendRetry && !toolBytesOnWire && ctx.Err() == nil &&
 				a.RetryableAppendTruncation() && !rec.ClientDisconnected
 			// Evaluated AFTER the predicate, which flushes the pending event:
