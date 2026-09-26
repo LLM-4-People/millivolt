@@ -181,6 +181,114 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 	}
 }
 
+// TestAnalyzerToolCallRegionOpened gates atomic withholding: the relay must
+// learn that a tool call has begun from the FIRST tool-call byte, not from the
+// id-carrying delta that toolCalls counts. Argument-only continuation deltas
+// carry no id, so a gate keyed on toolCalls would open the withhold region
+// late - after argument bytes already reached the client - and the whole
+// atomicity guarantee would silently not apply. The deprecated function_call
+// shape must open it too.
+func TestAnalyzerToolCallRegionOpened(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"no tool call stays closed", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}`,
+		}, false},
+		{"id-carrying tool call opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
+		}, true},
+		{"argument-only continuation opens it (no id)", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\""}}]}}]}`,
+		}, true},
+		{"empty tool_calls array does not open it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
+		}, false},
+		{"deprecated function_call opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.ToolCallRegionOpened(); got != c.want {
+				t.Fatalf("ToolCallRegionOpened = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAnalyzerRetryableAppendTruncation gates the opt-in append class. It is
+// the relaxed twin of TestAnalyzerRetryableTruncation: answer content, a tool
+// call, a refusal and a deprecated function_call all QUALIFY here, because the
+// relay (not the analyzer) is what proves no tool-call byte reached the wire.
+// It must stay disjoint from the other two classes so the three budgets never
+// compete for one stream: a nothing-relayed truncation and a reasoning-only
+// truncation are the quality and thinking classes, not this one. A terminator,
+// a Responses-shaped feed (per-response sequence numbers are documented
+// ordering state) and a provider in-band error (its own class) disqualify it.
+func TestAnalyzerRetryableAppendTruncation(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"relayed content qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half "}}]}`,
+		}, true},
+		{"relayed tool call qualifies (the relay gates tool bytes)", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+		}, true},
+		{"relayed refusal qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"refusal":"partial"}}]}`,
+		}, true},
+		{"relayed deprecated function_call qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, true},
+		{"nothing relayed stays the quality class", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+		}, false},
+		{"reasoning-only stays the thinking class", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+		}, false},
+		{"provider in-band error is its own class", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			``,
+			`data: {"error":{"message":"died","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"trailing multi-line error disqualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			``,
+			`data: {"error":`,
+			`data: {"message":"died","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"seen terminator is not a truncation", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			`data: [DONE]`,
+		}, false},
+		{"finish_reason length is the client's own cap", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"length"}]}`,
+		}, false},
+		{"non-chatlike stream stays out", []string{
+			`data: {"event":"custom","payload":42}`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.RetryableAppendTruncation(); got != c.want {
+				t.Fatalf("RetryableAppendTruncation = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestAnalyzerRetryableReasoningTruncation gates the mid-thinking rescue: a
 // truncation after reasoning-only output IS re-sendable (the reasoning the
 // client saw is auxiliary display text, not completion contract), but any

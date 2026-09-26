@@ -67,6 +67,15 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
+The one mechanism that keeps that invariant true under an append-behind-the-wire
+re-send is atomic tool calls: the relay withholds every tool-call-bearing event
+until the stream's terminator, so an UNCOMMITTED tool call is never on the wire.
+A client commits a streamed tool call at end-of-body, not at finish_reason, so
+eagerly relayed tool-call bytes are the only contract bytes a re-send could
+duplicate destructively. With them withheld, the append rescue can duplicate
+visible text and nothing else, and the relay's own `toolBytesOnWire` observation
+(not an inference from its own buffers) is what gates it.
+
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
 exclusive recovery permits. Provider activation requires all models with
@@ -81,8 +90,8 @@ a request-ID map. No storm observation scans metrics history or waits for SQLite
 
 [proxy/storm.go](../internal/proxy/storm.go) maps config once into scheduler
 options and bridges existing relay/native send outcomes. A 2xx permit settles
-after relay or before an existing quality re-ask or thinking rescue re-send,
-preventing double samples and stream replay. Safe protocol-level reason labels
+after relay or before an existing quality re-ask, thinking rescue or append
+rescue re-send, preventing double samples and stream replay. Safe protocol-level reason labels
 carry no provider error bodies.
 The banner uses the canonical bootstrap builder and browser apply/render gates,
 with no client-side event arithmetic. Storm scheduler/proxy/config regressions

@@ -147,7 +147,8 @@ in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
 a stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
-the in-band error for the client to retry. A provider error event streamed
+the in-band error for the client to retry unless `append_retries` is enabled
+(see [append rescues](#append-rescues-and-atomic-tool-calls)). A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
 `server_error`, the 503 overloaded/unavailable family, request timeouts, and
@@ -166,12 +167,48 @@ reasoning-only output, a cleanly finished reasoning-only completion (the
 withheld terminal region is replaced by the fresh attempt), and a retryable
 in-band error that arrived after reasoning-only output. The fresh stream
 appends behind the already-relayed reasoning, which is auxiliary display text;
-answer content, tool calls, refusals, `finish_reason: length` (the client's
-own token cap) and Responses-API feeds (per-response
+by that budget, answer content, tool calls, refusals, `finish_reason: length`
+(the client's own token cap) and Responses-API feeds (per-response
 sequence numbers) are never rescued. An exhausted budget surfaces the
 `reasoning_only` class as a provider error (`upstream_error`) on both
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
+### Append rescues and atomic tool calls
+
+`append_retries` (default 0) is the one opt-in class that re-sends behind bytes
+already on the wire. A stream truncated after answer content or a refusal
+reached the client is re-sent with the fresh attempt **appending**, because a
+delivered SSE delta cannot be retracted: the client sees the relayed text prefix
+a second time, which a spec-conforming client accumulates into the same text
+part. Responses-API feeds are never rescued (their per-response sequence numbers
+are documented ordering state) and `finish_reason: length` is the client's own
+token cap.
+
+What keeps that bounded to visible text is `atomic_tool_calls` (default true):
+the relay withholds every tool-call-bearing event - a `tool_calls` delta or a
+deprecated `function_call` delta - from the client's connection until the
+stream's terminator, then releases it verbatim. This matters because a client
+commits a streamed tool call at the **end of the response body**, not at
+`finish_reason`: it enqueues every accumulated tool call, so relaying tool-call
+bytes eagerly can hand the client a call no terminator ever committed, and a
+re-send behind it merges both attempts' arguments for the same tool-call index,
+yielding either a malformed tool call or a spurious execution. Withholding
+costs the client nothing it can act on - it could never execute a partially
+streamed tool call - and it makes an uncommitted tool call impossible on the
+wire.
+
+The relay therefore gates the class on a direct observation (`toolBytesOnWire`),
+not an inference from its own buffers, because withholding has two documented
+escape hatches that both put tool-call bytes on the wire: the hold's size bound
+and the newline-free guardrail for a single frame larger than the scanner
+buffer. A stream that took either is not append-rescuable. Which budget claims a
+stream stays disjoint: nothing relayed is `quality_retries`, reasoning-only is
+`thinking_retries`, answer content is `append_retries`.
+
+`atomic_tool_calls: false` restores eager tool-call relay, and `Validate` then
+refuses `append_retries > 0` outright, so the unsound combination cannot be
+configured.
+
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured

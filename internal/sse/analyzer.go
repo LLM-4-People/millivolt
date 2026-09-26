@@ -55,6 +55,15 @@ type Analyzer struct {
 	toolNames    []string
 	finishReason string
 
+	// toolCallBytesSeen marks that at least one tool-call-bearing delta has
+	// been parsed (a tool_calls entry, or a deprecated function_call delta).
+	// Unlike toolCalls, which counts only the deltas that carry an id, this is
+	// sticky from the FIRST tool-call byte: it is what lets the relay open its
+	// withhold region at the start of a tool call rather than at its commit,
+	// so an uncommitted tool call is never on the wire. See
+	// WithholdRegionOpened.
+	toolCallBytesSeen bool
+
 	// terminatorSeen records that the stream's documented end-of-stream marker
 	// arrived: a [DONE] line, a non-empty finish_reason chunk, or a Responses
 	// API terminal event (response.completed/failed/incomplete). A stream that
@@ -286,11 +295,17 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
 	}
-	// Refusal and deprecated function_call deltas are answer-shaped bytes:
-	// a rescue appending a fresh attempt after them would duplicate visible
-	// output-shaped text, so they disqualify the thinking rescue.
-	if tokenHasNonEmpty(payload, "refusal") || tokenHasNonEmpty(payload, "function_call") {
+	// Refusal and deprecated function_call deltas are answer-shaped bytes: a
+	// rescue appending a fresh attempt after them would duplicate visible
+	// output-shaped text, so they disqualify the thinking rescue. A deprecated
+	// function_call is also a tool call in the older shape, so it opens the
+	// withhold region exactly like a tool_calls delta does.
+	deprecatedFunctionCall := tokenHasNonEmpty(payload, "function_call")
+	if tokenHasNonEmpty(payload, "refusal") || deprecatedFunctionCall {
 		a.answerishSeen = true
+	}
+	if hasToolCall || deprecatedFunctionCall {
+		a.toolCallBytesSeen = true
 	}
 
 	// Capture the model + request id from the first chunk (they're in every
@@ -556,6 +571,59 @@ func (a *Analyzer) RetryableTruncation() bool {
 	}
 	a.flushEvent()
 	return a.firstTokenAt.IsZero() && a.errType == ""
+}
+
+// ToolCallRegionOpened reports that a tool-call-bearing delta has been seen.
+// Withholding a tool call from its first byte is what makes an UNCOMMITTED tool
+// call impossible on the wire, which is the precondition
+// RetryableAppendTruncation depends on. A client commits a streamed tool call
+// at the end of the response body, not at finish_reason: the Vercel AI SDK's
+// OpenAI adapter enqueues every accumulated tool call whose hasFinished is
+// unset, and hasFinished is only ever initialized to false, never set. So
+// relaying tool-call bytes eagerly can hand the client a call no terminator
+// ever committed, and appending a re-send behind it merges both attempts'
+// arguments for the same tool-call index. The analyzer reports the fact; the
+// relay combines it with the operator's atomic_tool_calls setting.
+func (a *Analyzer) ToolCallRegionOpened() bool { return a.toolCallBytesSeen }
+
+// RetryableAppendTruncation reports whether a finished stream is a truncation
+// the operator explicitly opted into re-sending AFTER content already reached
+// the client (append_retries). It is RetryableTruncation with the content
+// gates removed, and it is sound ONLY while no tool-call byte reached the
+// client:
+//
+//   - chatlike, because the degenerate rules only apply to a chat-shaped feed
+//     and a foreign SSE protocol must never get a synthetic outcome.
+//   - no terminator, so the class is a truncation and not a provider-signaled
+//     finish.
+//   - not a Responses-API feed, whose per-response sequence numbers are
+//     documented ordering state that a re-send would restart mid-stream.
+//   - no provider in-band error: that is the rescueUpstreamError class, and
+//     the provider's own failure statement must not be compounded.
+//   - content must have been relayed, keeping this disjoint from
+//     RetryableTruncation (nothing relayed at all) and from
+//     RetryableReasoningTruncation (reasoning, no answer-shaped output), so
+//     the three budgets never compete for one stream.
+//
+// Tool-call safety is deliberately NOT this predicate's to establish, because
+// it is a property of the WIRE and not of the analyzer's view of it. The
+// caller must additionally prove no tool-call byte was written: either the
+// relay withheld the tool call (config.AtomicToolCalls) and never overflowed
+// that hold, or the stream carried no tool call. Under that proof the only
+// relayed contract bytes are answer text, which a re-send duplicates visibly;
+// no tool call can be malformed or executed twice. The trailing event is
+// flushed first so a final multi-line error frame that never saw its
+// blank-line boundary still disqualifies the rescue. Client-disconnect gating
+// is the caller's (it owns the record).
+func (a *Analyzer) RetryableAppendTruncation() bool {
+	if !a.chatlike || a.terminatorSeen || a.responsesStream {
+		return false
+	}
+	a.flushEvent()
+	if a.errType != "" {
+		return false
+	}
+	return !a.firstAnswerAt.IsZero() || a.toolCalls > 0 || a.answerishSeen
 }
 
 // RetryableReasoningTruncation reports whether the finished stream is a

@@ -171,7 +171,8 @@ idle_conn_timeout: 90s
 sse_keepalive_interval: 15s
 
 # ---- Queue & retry ----
-# Per-key concurrency, transparent 429/5xx retry, and quality re-asks.
+# Per-key concurrency, transparent 429/5xx retry, quality/thinking/append rescues, and
+# atomic tool calls.
 # In-flight sends per provider+key. 0 is unlimited.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 0
@@ -230,6 +231,30 @@ quality_retries: 1
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1
+
+# Withhold every streamed tool call (a tool_calls or deprecated function_call delta) from
+# the client until the stream's terminator, then release it verbatim. Costs the client
+# nothing it can use: an SDK commits a streamed tool call at the END of the response body,
+# not at finish_reason, so it could never execute a partially-streamed one. Makes an
+# uncommitted tool call impossible on the wire, which is what makes append_retries safe.
+# Past a bounded hold size the region commits verbatim, restoring eager relay for that
+# stream only.
+# Hot-reload: yes.
+#   type: bool · default true
+atomic_tool_calls: true
+
+# Opt-in rescue of a stream that died truncated (no completion marker) after answer
+# content already reached the client. The SSE wire cannot retract a delivered delta, so
+# the fresh attempt APPENDS: the client sees the relayed text prefix a second time,
+# garbled into one text part. That duplicate is the entire cost, and atomic_tool_calls
+# keeps it to visible text - a re-send could otherwise merge both attempts' arguments for
+# the same tool-call index, yielding a malformed tool call or a spurious execution, so
+# this setting is rejected at load unless atomic_tool_calls is on. Responses-API feeds and
+# finish_reason length are never rescued. Each rescue re-sends the full request (billed).
+# 0 disables.
+# Hot-reload: yes.
+#   type: int · range 0..3 (0 = disabled) · default 0
+append_retries: 0
 
 # Operator extensions to the built-in retryable in-band error vocabulary: exact type or
 # code strings (case-insensitive) that a provider reports inside a 200 and that authorize

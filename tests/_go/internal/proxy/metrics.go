@@ -638,7 +638,7 @@ func TestStreamCleanEOFAfterRequestCancelStampsDisconnect(t *testing.T) {
 	cancel()
 	w := httptest.NewRecorder()
 	uerr := &upstreamErrorRescue{}
-	s.streamBody(ctx, w, strings.NewReader(stream), rec, false, false, uerr)
+	s.streamBody(ctx, w, strings.NewReader(stream), rec, false, false, false, false, uerr)
 	if rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
 	}
