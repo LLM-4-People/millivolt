@@ -181,6 +181,70 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 	}
 }
 
+// TestAnalyzerRetryableAppendTruncation gates the opt-in append class. It is
+// the relaxed twin of TestAnalyzerRetryableTruncation: answer content, a tool
+// call, a refusal and a deprecated function_call all QUALIFY here (they are
+// exactly what the quality predicate refuses), because the operator accepted
+// the appended duplicate prefix. It must stay disjoint from the other two
+// classes so the three budgets never compete for one stream: a
+// nothing-relayed truncation and a reasoning-only truncation are the quality
+// and thinking classes, not this one. A terminator, a Responses-shaped feed
+// (per-response sequence numbers are documented ordering state) and a
+// provider in-band error (its own class) all disqualify it.
+func TestAnalyzerRetryableAppendTruncation(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"relayed content qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half "}}]}`,
+		}, true},
+		{"relayed tool call qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
+		}, true},
+		{"relayed refusal qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"refusal":"partial"}}]}`,
+		}, true},
+		{"relayed deprecated function_call qualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, true},
+		{"nothing relayed stays the quality class", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+		}, false},
+		{"reasoning-only stays the thinking class", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+		}, false},
+		{"provider in-band error is its own class", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			``,
+			`data: {"error":{"message":"died","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"trailing multi-line error disqualifies", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			``,
+			`data: {"error":`,
+			`data: {"message":"died","type":"overloaded_error","code":"overloaded"}}`,
+		}, false},
+		{"seen terminator is not a truncation", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
+			`data: [DONE]`,
+		}, false},
+		{"non-chatlike stream stays out", []string{
+			`data: {"event":"custom","payload":42}`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.RetryableAppendTruncation(); got != c.want {
+				t.Fatalf("RetryableAppendTruncation = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestAnalyzerRetryableReasoningTruncation gates the mid-thinking rescue: a
 // truncation after reasoning-only output IS re-sendable (the reasoning the
 // client saw is auxiliary display text, not completion contract), but any

@@ -231,6 +231,18 @@ quality_retries: 1
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1
 
+# Opt-in rescue of a stream that died truncated (no completion marker) after answer
+# content, tool-call deltas or a refusal already reached the client. The SSE wire cannot
+# retract a delivered delta, so the fresh attempt APPENDS: the client sees the relayed
+# prefix a second time, and a mid-flight tool call arrives incomplete and then recovered.
+# A truncation means no finish_reason ever committed a tool call, and conforming SDKs
+# (Vercel AI SDK from ai@7.0.91) discard the failed attempt's tool calls. Buys a recovered
+# turn instead of a failed one. Responses-API feeds and finish_reason length are never
+# rescued. Each rescue re-sends the full request (billed). 0 disables.
+# Hot-reload: yes.
+#   type: int · range 0..3 (0 = disabled) · default 0
+append_retries: 0
+
 # Operator extensions to the built-in retryable in-band error vocabulary: exact type or
 # code strings (case-insensitive) that a provider reports inside a 200 and that authorize
 # a transparent re-send while no generation content was relayed. Built-ins already cover

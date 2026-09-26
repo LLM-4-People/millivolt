@@ -8,12 +8,21 @@ import (
 // Degenerate-outcome detection: a "successful" upstream response that carried
 // nothing usable. These are the canonical error codes surfaced in-band on
 // streams and as HTTP 502s on non-streaming bodies. The strings deliberately
-// avoid the verbs that downgrade retryability in common clients (Vercel AI
-// SDK's getStatusCode maps codes containing "invalid"/"bad_request"/
-// "context_length"/"authentication"/"permission"/"not_found"/"overload"/
-// "timeout" to non-retryable 4xx classes); an unrecognized code maps to a
-// retryable 500 instead - which is exactly how a degenerate completion must
-// behave (the client retries it, the user retries it, nothing is masked).
+// avoid the verbs that downgrade retryability in common clients; an
+// unrecognized code maps to a retryable 500 instead - which is exactly how a
+// degenerate completion must behave (the client retries it, the user retries
+// it, nothing is masked).
+//
+// The avoidance above is a request-level guarantee, not a streaming one. The
+// Vercel AI SDK's getStatusCode substring mapping (the reason "timeout" and
+// "overload" are avoided) classifies APICallError, raised only when a call
+// fails BEFORE streaming begins. Once a stream is open, the same SDK raises
+// StreamProviderError and each provider adapter supplies isRetryable from its
+// OWN type/code mapping; an unrecognized type gets no statusCode and is
+// classified conservatively, i.e. not retryable. So on the in-band path these
+// codes are the client's to interpret and no spelling here can guarantee a
+// client retries. See the append_retries setting (config.Config) for the
+// proxy-side recovery that does not depend on the client at all.
 const (
 	// CodeEmptyCompletion: the stream terminated cleanly (terminator seen),
 	// but produced no answer content, no reasoning, and no tool calls, with a

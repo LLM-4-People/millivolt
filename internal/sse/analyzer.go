@@ -558,6 +558,44 @@ func (a *Analyzer) RetryableTruncation() bool {
 	return a.firstTokenAt.IsZero() && a.errType == ""
 }
 
+// RetryableAppendTruncation reports whether a finished stream is a truncation
+// the operator has explicitly opted into re-sending AFTER answer content,
+// tool-call deltas or a refusal already reached the client (append_retries).
+// It is RetryableTruncation with exactly the content gates removed and the
+// remaining hazards documented rather than prevented:
+//
+//   - chatlike, because the degenerate rules only apply to a chat-shaped feed
+//     and a foreign SSE protocol must never get a synthetic outcome.
+//   - no terminator, so the class is a truncation and not a provider-signaled
+//     finish. This is also what bounds the tool-call damage: a truncation
+//     implies no finish_reason chunk, so no tool call was ever COMMITTED.
+//     Every tool call the client holds is an incomplete argument fragment
+//     that conforming SDKs discard, and never execute, on the failed attempt.
+//   - not a Responses-API feed, whose per-response sequence numbers are
+//     documented ordering state that a re-send would restart mid-stream.
+//   - no provider in-band error: that is the rescueUpstreamError class, and
+//     the provider's own failure statement must not be compounded.
+//
+// Accepted cost, opt-in only: a delivered delta cannot be retracted on this
+// wire, so the client sees the already-relayed prefix twice and the recovered
+// attempt appends behind it. The trailing event is flushed first so a final
+// multi-line error frame that never saw its blank-line boundary still
+// disqualifies the rescue. Disjoint from RetryableTruncation (which requires
+// nothing at all was relayed) and from RetryableReasoningTruncation (which
+// requires reasoning but no answer-shaped output): this class requires
+// answer-shaped output, so the three budgets never compete for one stream.
+// Client-disconnect gating is the caller's (it owns the record).
+func (a *Analyzer) RetryableAppendTruncation() bool {
+	if !a.chatlike || a.terminatorSeen || a.responsesStream {
+		return false
+	}
+	a.flushEvent()
+	if a.errType != "" {
+		return false
+	}
+	return !a.firstAnswerAt.IsZero() || a.toolCalls > 0 || a.answerishSeen
+}
+
 // RetryableReasoningTruncation reports whether the finished stream is a
 // mid-thinking death the proxy may transparently re-send even though the
 // client already saw reasoning bytes: a chat-completions-shaped stream that

@@ -171,6 +171,32 @@ sequence numbers) are never rescued. An exhausted budget surfaces the
 `reasoning_only` class as a provider error (`upstream_error`) on both
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
+
+One class is opt-in and not wire-clean (`append_retries`, default 0). A stream
+that dies truncated (clean EOF or a read error, no completion marker) *after*
+answer content, tool-call deltas or a refusal reached the client is re-sent with
+the fresh attempt **appending** behind the relayed prefix: the chat-completions
+SSE wire cannot retract a delivered delta, so the client sees that prefix twice
+and a mid-flight tool call arrives incomplete and then recovered. A truncation
+implies no `finish_reason` chunk, so no tool call was ever committed and
+conforming SDKs (the Vercel AI SDK from `ai@7.0.91`) discard the failed
+attempt's tool calls rather than executing them twice; a client that renders the
+duplicated prefix, or that executes a partial tool call, will show it. The class
+buys a recovered turn instead of a failed one and never applies to
+Responses-API feeds or `finish_reason: length`. Which budget claims a stream is
+fixed: nothing relayed is `quality_retries`, reasoning-only is
+`thinking_retries`, answer-shaped output is `append_retries`, and the three
+never compete for one stream.
+
+Because a mid-stream error cannot carry new headers and clients differ in
+whether they recover from one, transparent recovery here is the proxy's job, not
+the client's. The reverse also holds: the degenerate error codes are chosen to
+avoid words that make common SDKs classify a failure as permanent, which is a
+request-level guarantee only. Once a stream is open the Vercel AI SDK raises
+`StreamProviderError` and each provider adapter supplies `isRetryable` from its
+own type/code mapping, so no error code the proxy emits can guarantee a client
+retries.
+
 Neither transparency nor exactly-once upstream execution is unconditional.
 
 Before relay or translation, the upstream request is subject to the configured

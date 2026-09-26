@@ -558,9 +558,10 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter, resp *http.Response, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) {
 	qualityLeft := s.cfg().QualityRetries
 	thinkingLeft := s.cfg().ThinkingRetries
+	appendLeft := s.cfg().AppendRetries
 	for {
 		uerr := &upstreamErrorRescue{}
-		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr)
+		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, appendLeft > 0, uerr)
 		if rescue == rescueNone {
 			return
 		}
@@ -592,6 +593,16 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 			at.ErrorMsg = metrics.DegenerateMessage(metrics.CodeReasoningOnly)
 		case rescueReasoningTruncation:
 			thinkingLeft--
+			at.ErrorCode = metrics.CodeTruncated
+			at.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
+		case rescueAppendTruncation:
+			// The only class that appends behind relayed answer content or
+			// tool-call deltas. The attempt log carries the truncation class
+			// under the provider-error view, like its reasoning twin: the
+			// client already saw the failed attempt's bytes, and the recovery
+			// is what the operator opted into.
+			appendLeft--
+			at.ErrorType = sse.TypeUpstreamError
 			at.ErrorCode = metrics.CodeTruncated
 			at.ErrorMsg = metrics.DegenerateMessage(metrics.CodeTruncated)
 		default:
@@ -1420,6 +1431,15 @@ const (
 	// void on the wire; the re-send replaces the withheld finish. The
 	// thinking_retries budget owns this class (metrics.CodeReasoningOnly).
 	rescueReasoningStop
+	// rescueAppendTruncation: the stream died truncated (clean EOF or a read
+	// error, no completion marker) AFTER answer content, tool-call deltas or
+	// a refusal reached the client - the only class that does NOT guarantee a
+	// clean wire. The append_retries budget owns it, and it exists only when
+	// the operator opted in: a delivered delta cannot be retracted, so the
+	// fresh attempt appends behind the relayed prefix and the client sees
+	// that prefix twice. No terminator means no tool call was ever committed,
+	// so the tool-call deltas the client holds are incomplete fragments.
+	rescueAppendTruncation
 	// rescueUpstreamError: the provider signaled failure in-band (an error
 	// event streamed inside the 200) in a retryable server-availability
 	// class, while nothing content-bearing had reached the client - the
@@ -1476,12 +1496,19 @@ type upstreamErrorRescue struct {
 // reported in those no-contract-bytes states - never after answer content,
 // tool calls, a refusal, an in-band error that reached the wire, or a read
 // error caused by our own context (client gone or the per-send deadline).
+// The one documented exception is the opt-in append class
+// (allowAppendRetry, the append_retries budget): a truncation that died after
+// answer content, tool-call deltas or a refusal reached the client returns
+// rescueAppendTruncation, and the fresh attempt appends behind the relayed
+// prefix because a delivered delta cannot be retracted on this wire. No
+// terminator means no tool call was ever committed, so those deltas are
+// incomplete fragments.
 // With the budget spent (rescueNone), the truncation or degenerate class
 // surfaces in-band exactly as before: finish_reason length is a terminator
 // and never rescuable. uerr receives the provider's envelope for a
 // rescueUpstreamError return (the caller's attempt bookkeeping); it is
 // untouched for every other outcome.
-func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue bool, uerr *upstreamErrorRescue) (rescue streamRescue) {
+func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.Reader, rec *metrics.Record, allowTruncationRetry, allowThinkingRescue, allowAppendRetry bool, uerr *upstreamErrorRescue) (rescue streamRescue) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		if _, err := io.Copy(disconnectWriter{w, rec}, body); err != nil {
@@ -1743,6 +1770,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 					return rescueReasoningTruncation
 				}
+				// The opt-in append class reaches the same conclusion for a
+				// death AFTER answer content: the upstream is gone with no
+				// completion marker, which is the truncation the budget
+				// covers, and our own context is not the cause (same guards).
+				if allowAppendRetry && ctx.Err() == nil &&
+					!errors.Is(err, context.DeadlineExceeded) &&
+					a.RetryableAppendTruncation() && !rec.ClientDisconnected {
+					return rescueAppendTruncation
+				}
 				// A real read failure is the transport's own error - release
 				// the held bytes verbatim (byte preservation) and never
 				// substitute a synthetic outcome on top.
@@ -1781,6 +1817,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			}
 			if allowThinkingRescue && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				return rescueReasoningTruncation
+			}
+			// The opt-in append class: same truncation, but the client already
+			// holds answer content, tool-call deltas or a refusal. Every byte
+			// here is already on the wire (writeOut ran per read) and the hold
+			// is empty (truncation implies no terminator), so the fresh attempt
+			// appends behind the relayed prefix rather than replacing it.
+			if allowAppendRetry && a.RetryableAppendTruncation() && !rec.ClientDisconnected {
+				return rescueAppendTruncation
 			}
 			if !finishHold() {
 				return rescueNone

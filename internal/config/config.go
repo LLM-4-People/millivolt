@@ -173,6 +173,24 @@ type Config struct {
 	// disables.
 	ThinkingRetries int `yaml:"thinking_retries" json:"thinking_retries"`
 
+	// AppendRetries bounds the opt-in transparent rescue of a stream that
+	// died truncated (clean EOF or a read error, no completion marker) AFTER
+	// answer content, tool-call deltas or a refusal already reached the
+	// client. The chat-completions SSE wire cannot retract a delivered delta,
+	// so unlike every other class here the fresh attempt APPENDS behind the
+	// relayed prefix: the client sees that prefix twice, and a tool call that
+	// was mid-flight arrives incomplete followed by the recovered one. A
+	// truncation implies no terminator, so no tool call was ever committed by
+	// a finish_reason and conforming SDKs (Vercel AI SDK from ai@7.0.91)
+	// discard the failed attempt's tool calls; a client that executes a
+	// partial tool call, or that renders the duplicated prefix, will show it.
+	// That cost buys a recovered turn instead of a failed one, so the class is
+	// opt-in and 0 by default. Responses-API feeds are never rescued (their
+	// per-response sequence numbers are documented ordering state) and
+	// finish_reason length is the client's own token cap. Each rescue re-sends
+	// the full request (the upstream bills every attempt).
+	AppendRetries int `yaml:"append_retries" json:"append_retries"`
+
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
 	// api_error, overloaded_error, timeout_error and the common gateway
@@ -733,6 +751,8 @@ const (
 	QualityRetriesMax = 3
 	// ThinkingRetriesMax is the band for thinking_retries (0 disables).
 	ThinkingRetriesMax = 3
+	// AppendRetriesMax is the band for append_retries (0 disables).
+	AppendRetriesMax = 3
 	// QueueRetryAfterMax is the Retry-After hint cap (HTTP delta-seconds).
 	QueueRetryAfterMax = 24 * time.Hour
 	// Inbound body band (Validate, overlay, Schema).
@@ -813,6 +833,7 @@ func Default() *Config {
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
+		AppendRetries:   0,
 
 		StormEnabled:           false,
 		StormProviderEnabled:   true,
@@ -1072,6 +1093,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ThinkingRetries < 0 || c.ThinkingRetries > ThinkingRetriesMax {
 		return fmt.Errorf("thinking_retries: must be 0..%d, got %d", ThinkingRetriesMax, c.ThinkingRetries)
+	}
+	if c.AppendRetries < 0 || c.AppendRetries > AppendRetriesMax {
+		return fmt.Errorf("append_retries: must be 0..%d, got %d", AppendRetriesMax, c.AppendRetries)
 	}
 	if err := checkQueueRetryAfter(c.QueueRetryAfter); err != nil {
 		return err
