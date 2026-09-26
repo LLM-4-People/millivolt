@@ -110,17 +110,17 @@ func TestNoTerminatorProviderRegressionGuard(t *testing.T) {
 	}
 }
 
-// TestToolCallAfterTerminalRegionUsesTheToolBound pins the bound selection: a
-// provider that sends finish_reason BEFORE its tool_calls deltas opens the
-// withhold region on the terminal region, so the bound must be raised when the
-// tool call begins. With a tool call far larger than terminalHoldMax, the
-// smaller bound would spuriously overflow and commit it to the wire.
-func TestToolCallAfterTerminalRegionUsesTheToolBound(t *testing.T) {
-	// ~256 KiB of arguments: past terminalHoldMax (64 KiB), inside
-	// toolCallHoldMax (1 MiB). Sent AFTER a finish_reason-bearing region opener.
-	huge := strings.Repeat("y", 256*1024)
-	toolAfterFinish := `data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"` + huge + `"}}]}}]}` + "\n\n"
-
+// TestToolCallAfterTerminatorIsRelayedVerbatim pins the one shape withholding
+// does NOT cover, so the guarantee is stated honestly rather than implied. A
+// provider that emits a terminator and THEN a tool call has already ended the
+// stream: the terminal region was released on that line, so the later tool-call
+// line is relayed verbatim. Withholding cannot cover it - there is no
+// terminator left to release a second region at, and the bytes have already
+// been ordered behind the terminator. Such a stream is malformed regardless
+// (a tool call after the end), and the append class never applies to it because
+// the terminator is sticky. The provider frames its own disagreement, so this
+// is recorded rather than papered over.
+func TestToolCallAfterTerminatorIsRelayedVerbatim(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -128,13 +128,11 @@ func TestToolCallAfterTerminalRegionUsesTheToolBound(t *testing.T) {
 		w.WriteHeader(200)
 		w.Write([]byte(atomicRoleFrame + atomicTextFrame))
 		w.(http.Flusher).Flush()
-		// A Responses-free chat frame carrying finish_reason opens the region...
-		w.Write([]byte(`data: {"id":"A","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n"))
+		// The terminator arrives first and closes the stream's region.
+		w.Write([]byte(atomicStopFrame + atomicDoneFrame))
 		w.(http.Flusher).Flush()
-		// ...and the tool call follows it, still inside the open region.
-		w.Write([]byte(toolAfterFinish))
-		w.(http.Flusher).Flush()
-		w.Write([]byte("\n" + atomicDoneFrame))
+		// ...and a tool call follows it, out of contract.
+		w.Write([]byte(atomicToolFrame))
 		w.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
@@ -148,13 +146,14 @@ func TestToolCallAfterTerminalRegionUsesTheToolBound(t *testing.T) {
 
 	_, got := streamRequest(t, srv, upstream)
 	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1: a terminator was seen, so this is not a truncation", n)
+		t.Fatalf("upstream calls = %d, want 1 (a terminator was seen, so this is not a truncation)", n)
 	}
 	if n := toolCallCount(got); n != 1 {
-		t.Fatalf("the large tool call must be released whole, saw %d deltas", n)
+		t.Fatalf("the post-terminator tool call is relayed verbatim, saw %d deltas: %s", n, got)
 	}
-	if !strings.Contains(got, huge[:1024]) {
-		t.Fatal("the tool call's arguments must be relayed intact (not truncated by the smaller bound)")
+	// Order must still be preserved: the tool call is where it arrived.
+	if i, j := strings.Index(got, atomicDoneFrame), strings.Index(got, atomicToolFrame); i < 0 || j < i {
+		t.Fatalf("relay order broken: done=%d tool=%d\n%s", i, j, got)
 	}
 }
 

@@ -92,14 +92,19 @@ const (
 	// toolCallHoldMax bounds the same withhold region when it was opened by a
 	// tool call (config.AtomicToolCalls): tool-call arguments are
 	// provider-authored and routinely dwarf a terminal region, so the region
-	// gets its own, larger cap. It is chosen when the region opens and raised
-	// if a tool call begins inside an already-open terminal region. Past it the
-	// region commits verbatim, which puts tool-call bytes on the wire and so
-	// disables the append rescue for that stream - the relay observes that in
-	// toolBytesOnWire rather than inferring it. Safety guardrail, not
-	// user-tunable. Numerically equal to sseScannerBufMax by design: a single
-	// frame past the scanner bound is newline-free and is relayed by that
-	// guardrail instead, so the two escape hatches coincide rather than overlap.
+	// gets its own, larger cap. Past it the region commits verbatim, which puts
+	// tool-call bytes on the wire and so disables the append rescue for that
+	// stream - the relay observes that in toolBytesOnWire rather than inferring
+	// it. Safety guardrail, not user-tunable.
+	//
+	// It only has to be chosen once, at the opening line: a region opened by a
+	// terminator is resolved by that same line (sse.TerminalLine), and a region
+	// opened by a tool call is here. So no tool call can arrive inside a region
+	// that is still open with the smaller bound, and there is no upgrade path.
+	// Sizing it equal to sseScannerBufMax is deliberate, not incidental: a
+	// single tool-call frame past the scanner bound is newline-free, so that
+	// guardrail relays it before any region could open, and the two escape
+	// hatches meet at the same byte count instead of leaving a gap between them.
 	toolCallHoldMax = 1 << 20 // 1 MiB
 	// maxTranslateBodyBytes caps the buffered read of a translated
 	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool

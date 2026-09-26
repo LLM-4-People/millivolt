@@ -74,10 +74,14 @@ text. The mechanism that bounds it to visible text is atomic tool calls
 tool-call-bearing event until the stream's terminator, so an UNCOMMITTED tool
 call is never on the wire, and the rescue is gated on the direct
 `toolBytesOnWire` observation rather than an inference from the relay's own
-buffers. Covered by `TestAtomicToolCallNeverReachesClientOnTruncation`,
-`TestAppendRetriesRefusedWhenAtomicToolCallsOff` and
-`TestAtomicToolCallHoldOverflowCommitsVerbatim`
-([tests](../tests/_go/internal/proxy/atomic_tool_calls.go)).
+buffers. Covered by `TestAtomicWithholdingIsBoundedByTheTerminator`,
+`TestAtomicToolCallNeverReachesClientOnTruncation`,
+`TestAppendRetriesRefusedWhenAtomicToolCallsOff`,
+`TestToolCallInsideOversizedHoldIsNotRescued` and
+`TestNoTerminatorProviderRegressionGuard`
+([tests](../tests/_go/internal/proxy/atomic_tool_calls.go),
+[edges](../tests/_go/internal/proxy/atomic_tool_calls_edges.go),
+[multiline](../tests/_go/internal/proxy/atomic_tool_calls_multiline.go)).
 A client commits a streamed tool call at end-of-body, not at finish_reason, so
 eagerly relayed tool-call bytes are the only contract bytes a re-send could
 duplicate destructively. With them withheld, the append rescue can duplicate

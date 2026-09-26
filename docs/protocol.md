@@ -215,6 +215,17 @@ buffer. A stream that took either is not append-rescuable. Which budget claims a
 stream stays disjoint: nothing relayed is `quality_retries`, reasoning-only is
 `thinking_retries`, answer content is `append_retries`.
 
+Cost, stated plainly: one client request can spend every rescue budget in turn,
+so with all three at their maximum it can drive 1 + 3 + 3 + 3 = 10 upstream
+sends (each billed), on top of the transport-level `max_retries` ladder. The
+append class also duplicates the relayed text prefix once per rescue, so the
+duplicated volume grows with the budget. Up to 1 MiB per in-flight stream is
+withheld while a tool call is pending, and `max_concurrent` defaults to
+unlimited, so size it deliberately before enabling this on a busy deployment.
+Withholding does not cover a tool call that arrives AFTER the stream's
+terminator: the region is already released by then, and such a stream is out of
+contract regardless.
+
 `atomic_tool_calls: false` restores eager tool-call relay, and `Validate` then
 refuses `append_retries > 0` outright, so the unsound combination cannot be
 configured.

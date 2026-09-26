@@ -29,7 +29,11 @@ const (
 	// about it is a fragment, so only the withholding makes a re-send safe.
 	atomicToolFrame = `data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"{\"command\":\"ls -la\"}"}}]}}]}` + "\n\n"
 	atomicStopFrame = `data: {"id":"A","choices":[{"delta":{},"finish_reason":"tool_calls"}]}` + "\n\n"
-	atomicDoneFrame = "data: [DONE]\n\n"
+	// atomicStopOnlyFrame is the terminator for a stream with no tool call: a
+	// tool_calls finish_reason with zero tool-call deltas is its own degenerate
+	// class (empty_tool_call) and would have its terminal region substituted.
+	atomicStopOnlyFrame = `data: {"id":"A","choices":[{"delta":{},"finish_reason":"stop"}]}` + "\n\n"
+	atomicDoneFrame     = "data: [DONE]\n\n"
 )
 
 // toolCallCount counts the tool-call DELTAS the client actually received, so a
@@ -40,11 +44,14 @@ func toolCallCount(wire string) int {
 	return strings.Count(wire, `"function":{"name"`)
 }
 
-// TestAtomicToolCallWithheldUntilTerminator is the core contract: a tool call
-// is not on the wire while the stream is still running, and arrives verbatim
-// (byte-identical, in order) once the terminator lands. A client therefore
-// only ever sees a complete tool call.
-func TestAtomicToolCallWithheldUntilTerminator(t *testing.T) {
+// TestAtomicToolCallReleasedVerbatimAtTerminator asserts the RELEASE side: a
+// tool call that reaches the terminator arrives byte-identical, in order, and
+// exactly once, so a client only ever sees a complete one. It deliberately
+// asserts nothing about mid-flight state, which no offline test can observe
+// without a timing race - TestAtomicWithholdingIsBoundedByTheTerminator owns
+// the withholding half, by contrasting the same bytes with and without a
+// terminator.
+func TestAtomicToolCallReleasedVerbatimAtTerminator(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -184,7 +191,14 @@ func TestAtomicToolCallSplitFinishReasonDoesNotRescueWithHeldToolCall(t *testing
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
 			w.WriteHeader(200)
-			w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
+			// A finish_reason whose KEY ends one data line and whose VALUE is on
+			// the next: the analyzer scans per line, so neither line shows it a
+			// terminator and the stream classifies as truncated even though the
+			// provider did commit the tool call. Withholding is what keeps that
+			// safe - the committed call is still behind the hold.
+			w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame +
+				`data: {"id":"A","choices":[{"delta":{},"finish_reason":` + "\n" +
+				`data: "tool_calls"}]}` + "\n\n"))
 			w.(http.Flusher).Flush()
 			return
 		}
@@ -211,10 +225,11 @@ func TestAtomicToolCallSplitFinishReasonDoesNotRescueWithHeldToolCall(t *testing
 }
 
 // TestAtomicToolCallsDisabledRelaysEagerly pins the operator escape hatch: with
-// atomic tool calls off the tool call is relayed as it streams (today's
-// behavior), and because tool-call bytes are then on the wire the append
-// rescue must refuse the stream. That refusal is the second half of the
-// soundness argument and is asserted here rather than assumed.
+// atomic tool calls off, a tool call is relayed as it streams (the behavior
+// that predates this feature). The refusal half of the soundness argument is
+// NOT asserted here - this test leaves the append budget at 0, so there is no
+// rescue to refuse; TestAppendRetriesRefusedWhenAtomicToolCallsOff is the test
+// that forces the budget on and proves the relay refuses.
 func TestAtomicToolCallsDisabledRelaysEagerly(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -467,11 +482,21 @@ func TestAppendRetriesBudgetBoundsUpstreamCalls(t *testing.T) {
 	}
 }
 
-// TestAtomicToolCallHoldOverflowCommitsVerbatim pins the memory bound: past
-// ToolCallHoldMax the region commits to the wire (today's eager behavior) and,
-// because tool-call bytes are now on the wire, the append rescue must refuse
-// the stream.
-func TestAtomicToolCallHoldOverflowCommitsVerbatim(t *testing.T) {
+// truncateForMsg bounds a failure message so a short wire cannot panic the
+// test that reports it.
+func truncateForMsg(s string) string {
+	if len(s) <= 400 {
+		return s
+	}
+	return s[:400] + "...(truncated)"
+}
+
+// TestAtomicToolCallOversizedFrameCommitsVerbatim pins the OTHER memory bound:
+// a single tool-call frame larger than the scanner buffer is newline-free, so
+// the relay's newline-free guardrail relays it before any withhold region can
+// open, and the append rescue must then refuse. The hold-bound overflow is the
+// sibling case, covered by TestToolCallInsideOversizedHoldIsNotRescued.
+func TestAtomicToolCallOversizedFrameCommitsVerbatim(t *testing.T) {
 	var calls atomic.Int32
 	huge := strings.Repeat("x", toolCallHoldMax+4096)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -501,7 +526,7 @@ func TestAtomicToolCallHoldOverflowCommitsVerbatim(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 1 (the overflow puts tool bytes on the wire, so no rescue)", n)
 	}
 	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("the truncation must surface in-band after an overflow commit: %s", got[:200])
+		t.Fatalf("the truncation must surface in-band after a verbatim commit: %s", truncateForMsg(got))
 	}
 }
 
@@ -576,12 +601,13 @@ func TestAtomicToolCallRefusalDeltaStaysAnswerShaped(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + `data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help"}}]}` + "\n\n"))
-		w.(http.Flusher).Flush()
+		refusal := atomicRoleFrame + `data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help"}}]}` + "\n\n"
 		if calls.Add(1) == 1 {
+			w.Write([]byte(refusal))
+			w.(http.Flusher).Flush()
 			return
 		}
-		w.Write([]byte(atomicRoleFrame + `data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help"}}]}` + "\n\n" + atomicStopFrame + atomicDoneFrame))
+		w.Write([]byte(refusal + atomicStopOnlyFrame + atomicDoneFrame))
 		w.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
@@ -597,7 +623,20 @@ func TestAtomicToolCallRefusalDeltaStaysAnswerShaped(t *testing.T) {
 	if n := calls.Load(); n != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (a refusal is append-rescuable text)", n)
 	}
-	if !strings.Contains(got, "I cannot help") {
-		t.Fatalf("the refusal must reach the client: %s", got)
+	// The duplication this class documents, asserted rather than assumed: the
+	// refusal is visible text, so both attempts' copies reach the client.
+	if n := strings.Count(got, "I cannot help"); n != 2 {
+		t.Fatalf("refusal count = %d, want 2 (the append class duplicates visible text): %s", n, got)
+	}
+	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("the recovered request must not surface the truncation: %s", got)
+	}
+	// A refusal is answer-SHAPED but not metrics answer content, so a
+	// refusal-only stream is the pre-existing empty_completion class and its
+	// terminal region is substituted rather than relayed. That classification
+	// is unchanged by this feature; what the append class guarantees is that
+	// the TRUNCATION is not what the operator sees.
+	if !strings.Contains(got, `"code":"`+metrics.CodeEmptyCompletion+`"`) {
+		t.Fatalf("a refusal-only stream keeps its empty_completion class: %s", got)
 	}
 }

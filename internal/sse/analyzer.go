@@ -61,8 +61,15 @@ type Analyzer struct {
 	// sticky from the FIRST tool-call byte: it is what lets the relay open its
 	// withhold region at the start of a tool call rather than at its commit,
 	// so an uncommitted tool call is never on the wire. See
-	// WithholdRegionOpened.
+	// ToolCallRegionOpened.
 	toolCallBytesSeen bool
+	// toolCallConfirmed marks that a COMPLETE tool call was actually seen, as
+	// opposed to a region merely being opened on a line that only looks like
+	// the start of one (a multi-line "tool_calls":[ that turns out to be an
+	// empty array, say). The relay uses the difference to give withheld bytes
+	// back when a truncation turns out to hold no real tool call, so an
+	// ambiguous opener cannot cost ordinary answer text.
+	toolCallConfirmed bool
 
 	// terminatorSeen records that the stream's documented end-of-stream marker
 	// arrived: a [DONE] line, a non-empty finish_reason chunk, or a Responses
@@ -214,13 +221,13 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	toolBlock, toolBlockComplete := extractContainer(jsonKey(payload, "tool_calls"), '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 	// A tool_calls array that this line does not close continues on the next
-	// data line of the same event. That is still a tool call, and the withhold
-	// region must open on THIS line: waiting for the array to balance would
-	// relay the first argument bytes before the region existed, which is
-	// exactly the uncommitted-tool-call hazard atomic withholding exists to
-	// prevent. It is deliberately not counted as generation content (hasToolCall
-	// stays false), because no complete call is known yet.
-	opensToolCall := !toolBlockComplete && len(toolBlock) > 0
+	// data line of the same event, and so does a tool_calls key whose value
+	// starts on the next line at all. Either way the withhold region must open
+	// on THIS line: waiting would relay tool-call bytes before the region
+	// existed, which is exactly the uncommitted-tool-call hazard atomic
+	// withholding exists to prevent. Neither is counted as generation content
+	// (hasToolCall stays false), because no complete call is known yet.
+	opensToolCall := !toolBlockComplete || toolCallValueOnNextLine(payload)
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
@@ -315,6 +322,9 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if hasToolCall || opensToolCall || deprecatedFunctionCall {
 		a.toolCallBytesSeen = true
 	}
+	if hasToolCall || deprecatedFunctionCall {
+		a.toolCallConfirmed = true
+	}
 
 	// Capture the model + request id from the first chunk (they're in every
 	// chunk, so we only need the first).
@@ -382,8 +392,23 @@ func (a *Analyzer) extractCost(raw []byte) (float64, bool) {
 // Feed already caught the common case, so this is the safety net for events
 // whose error JSON spans multiple data: lines.
 func (a *Analyzer) flushEvent() {
-	if len(a.eventData) > 0 && a.errType == "" && metrics.HasErrorKey(a.eventData) {
-		a.captureStreamError(a.eventData)
+	if len(a.eventData) > 0 {
+		if a.errType == "" && metrics.HasErrorKey(a.eventData) {
+			a.captureStreamError(a.eventData)
+		}
+		// Confirm a tool call from the REASSEMBLED event. A tool call split
+		// across data lines is never complete on any single line, so the
+		// per-line scan cannot confirm it - yet the withhold region does hold
+		// it, and the relay needs to know that before discarding the region at
+		// a truncation. The reassembled event is well-formed JSON, so the same
+		// key scan is exact here.
+		if !a.toolCallConfirmed {
+			if block, complete := extractContainer(jsonKey(a.eventData, "tool_calls"), '[', ']'); !complete ||
+				(len(block) > 0 && metrics.SkipSpace(block, 1) < len(block)-1) ||
+				tokenHasNonEmpty(a.eventData, "function_call") {
+				a.toolCallConfirmed = true
+			}
+		}
 	}
 	a.eventData = a.eventData[:0]
 }
@@ -593,6 +618,14 @@ func (a *Analyzer) RetryableTruncation() bool {
 // arguments for the same tool-call index. The analyzer reports the fact; the
 // relay combines it with the operator's atomic_tool_calls setting.
 func (a *Analyzer) ToolCallRegionOpened() bool { return a.toolCallBytesSeen }
+
+// ToolCallConfirmed reports that a COMPLETE tool call was parsed, not merely
+// that a line looked like the start of one. Withholding opens on an ambiguous
+// opener (a multi-line "tool_calls":[ could be an empty array), so the relay
+// needs this to tell "the hold hides a tool call" from "the hold hides
+// ordinary text that happened to follow an ambiguous key" - only the first
+// justifies discarding the hold at a truncation.
+func (a *Analyzer) ToolCallConfirmed() bool { return a.toolCallConfirmed }
 
 // RetryableAppendTruncation reports whether a finished stream is a truncation
 // the operator explicitly opted into re-sending AFTER content already reached
@@ -908,6 +941,27 @@ func jsonKey(payload []byte, key string) []byte {
 		return nil
 	}
 	return metrics.JSONKey(payload, key)
+}
+
+// toolCallValueOnNextLine reports that this data line ends immediately after a
+// "tool_calls" key and its colon, so the array's first byte is on the NEXT data
+// line of the same event. JSONKey cannot see this: it returns nil both for "no
+// such key" and for "key present, value not on this line", and the line that
+// does carry the array body has no key in it at all. Without this the withhold
+// region would open one line late, after tool-call bytes reached the client.
+// The bare-token scan cannot false-positive on content text, because a JSON
+// string can only contain the key with escaped quotes ("\"tool_calls\"").
+func toolCallValueOnNextLine(payload []byte) bool {
+	const key = `"tool_calls"`
+	i := bytes.Index(payload, []byte(key))
+	if i < 0 {
+		return false
+	}
+	j := metrics.SkipSpace(payload, i+len(key))
+	if j >= len(payload) || payload[j] != ':' {
+		return false
+	}
+	return metrics.SkipSpace(payload, j+1) >= len(payload)
 }
 
 // extractObject returns the {...} portion of raw starting at the opening

@@ -192,8 +192,15 @@ type Config struct {
 	// is safer for execution (no tool runs from a truncated stream) but it does
 	// lose a tool call such a provider completed. It also stops tool-call
 	// delivery from being progressive: the client sees the whole call at the
-	// terminator. Past the relay's ToolCallHoldMax the region commits verbatim
-	// to bound memory, restoring eager behavior for that stream alone.
+	// terminator. Past the relay's toolCallHoldMax (1 MiB) the region commits
+	// verbatim, restoring eager behavior for that stream alone.
+	//
+	// Memory: up to toolCallHoldMax per in-flight stream is withheld, on top of
+	// the pre-existing scanner buffer. The only default cap on concurrency is
+	// max_conns_per_host (512) - max_concurrent itself defaults to 0, meaning
+	// UNLIMITED - so this setting multiplies with the operator's concurrency
+	// rather than being bounded by it. Size max_concurrent deliberately before
+	// enabling it on a busy deployment.
 	// Hot-reload applies to new streams. The generic OpenAI-wire relay only:
 	// translated Anthropic streams, the Cursor bridge and Responses-API feeds
 	// keep their own framing and are unaffected.

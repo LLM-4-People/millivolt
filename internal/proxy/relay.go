@@ -1520,20 +1520,29 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		hold    []byte       // bytes withheld from the withhold region onward
 		holding bool
 		// holdMax is the bound for the open region, chosen when the region
-		// opens: terminalHoldMax for a terminal region, ToolCallHoldMax for
+		// opens: terminalHoldMax for a terminal region, toolCallHoldMax for
 		// one opened by a tool call (tool-call arguments are far larger than a
 		// terminal region). Overflowing either bound commits the region
-		// verbatim and sets holdAborted.
+		// verbatim and sets holdAborted. The bound is checked once per read
+		// cycle, so a single read that both opens and then resolves a region is
+		// never measured against it - that path is bounded by the scanner
+		// buffer instead, and the bound's purpose (a region that large is not
+		// a degenerate stream) is unaffected.
 		holdMax = terminalHoldMax
 		buf     [4096]byte
-		// toolBytesOnWire is the relay's DIRECT observation that a tool-call
-		// byte reached the client, and it is the only thing the append rescue
-		// consults. It must be an observation, not an inference: withholding
-		// can be bypassed by the newline-free guardrail (a single tool-call
-		// frame larger than sseScannerBufMax is relayed before any hold could
-		// open) and by the hold-bound overflow, so holdAborted alone does not
-		// prove the tool call is still behind the hold. Set at every site that
-		// writes analyzer-fed stream bytes to the client.
+		// toolBytesOnWire records that analyzer-fed bytes carrying a tool-call
+		// shape were COMMITTED for the client, and it is the only thing the
+		// append rescue consults. It replaces an inference about the hold
+		// state, which is defeatable: the newline-free guardrail relays a
+		// single tool-call frame larger than sseScannerBufMax before any region
+		// could open, and the hold-bound overflow commits one mid-stream. It is
+		// a DETECTOR observation rather than a byte-level proof, and
+		// deliberately pessimistic - a decoy tool-call shape inside a huge
+		// newline-free frame can set it with no real tool call, refusing a
+		// rescue that was safe. Erring that way costs a recoverable turn; the
+		// opposite error would duplicate or execute a tool call. Set at every
+		// site that writes analyzer-fed stream bytes to the client; each site
+		// is redundant on its own, so no single one can be removed.
 		toolBytesOnWire bool
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// a hold-bound overflow): the stream then COMMITS to verbatim relay -
@@ -1811,6 +1820,16 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				if holding {
 					hold = append(hold, b...)
 				} else {
+					// Staged for the client but NOT yet written: a rescue
+					// discards out rather than flushing it, so these bytes never
+					// reach the wire. The flag is still set, because the
+					// invariant it carries must hold at every site that commits
+					// analyzer-fed bytes for the client - a future refactor that
+					// flushed out before the rescue decision would otherwise
+					// silently reinstate an unsound append.
+					if a.ToolCallRegionOpened() {
+						toolBytesOnWire = true
+					}
 					out.Write(b)
 				}
 				lineBuf.Reset()
@@ -1833,11 +1852,28 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				// The append twin of the truncation above: a death after
 				// answer content is the same rescuable truncation, and the same
-				// holdAborted proof applies. Our own context is still excluded -
-				// a re-send would mint a deadline the client never asked for.
-				if allowAppendRetry && !toolBytesOnWire && ctx.Err() == nil &&
+				// toolBytesOnWire proof applies. A region with no confirmed tool
+				// call is given back verbatim first, for the same reason.
+				// Our own context is excluded: a re-send would mint a deadline
+				// the client never asked for.
+				appendOK := allowAppendRetry && !toolBytesOnWire && ctx.Err() == nil &&
 					!errors.Is(err, context.DeadlineExceeded) &&
-					a.RetryableAppendTruncation() && !rec.ClientDisconnected {
+					a.RetryableAppendTruncation() && !rec.ClientDisconnected
+				// After the predicate, for the same reason as the clean-EOF
+				// path: the predicate flushes the pending event.
+				if appendOK && holding && !a.ToolCallConfirmed() {
+					// Released verbatim for the same reason as the clean-EOF
+					// path: an ambiguous opener holds ordinary text.
+					if _, werr := w.Write(hold); werr != nil {
+						clientGone()
+						return rescueNone
+					}
+					flusher.Flush()
+					hold = hold[:0]
+					holding = false
+					appendOK = false
+				}
+				if appendOK {
 					if !closeClientEvent() {
 						return rescueNone
 					}
@@ -1884,14 +1920,38 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			if allowThinkingRescue && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				return rescueReasoningTruncation
 			}
-			// The opt-in append class. The withhold region is DISCARDED here, so
-			// an uncommitted tool call never reaches the client; that is what
-			// makes appending behind the relayed text sound, and holdAborted is
-			// the relay's proof that the region was instead committed to the
-			// wire, which no re-send may follow. Truncation implies no
-			// terminator, so the hold cannot be open on the terminal region
-			// here - only on a tool call.
-			if allowAppendRetry && !toolBytesOnWire && a.RetryableAppendTruncation() && !rec.ClientDisconnected {
+			// The opt-in append class. A withhold region holding a CONFIRMED
+			// tool call is DISCARDED here, so an uncommitted tool call never
+			// reaches the client; that is what makes appending behind the
+			// relayed text sound, and toolBytesOnWire is the relay's proof that
+			// the region was instead committed to the wire, which no re-send may
+			// follow. Truncation implies no terminator, so the region can only
+			// be open on a tool call here.
+			//
+			// A region opened by an AMBIGUOUS opener - a multi-line
+			// "tool_calls":[ that turns out to be an empty array - holds no
+			// confirmed call, and discarding it would throw away ordinary
+			// answer text for no soundness gain. Those bytes are given back
+			// verbatim and the normal path surfaces the truncation.
+			appendOK := allowAppendRetry && !toolBytesOnWire && ctx.Err() == nil &&
+				a.RetryableAppendTruncation() && !rec.ClientDisconnected
+			// Evaluated AFTER the predicate, which flushes the pending event:
+			// a tool call split across data lines is only confirmable once the
+			// event is reassembled.
+			if appendOK && holding && !a.ToolCallConfirmed() {
+				// Release the bytes rather than dropping them: the region was
+				// opened by an ambiguous "tool_calls":[ line and holds ordinary
+				// answer text, which must reach the client (byte preservation).
+				if _, werr := w.Write(hold); werr != nil {
+					clientGone()
+					return rescueNone
+				}
+				flusher.Flush()
+				hold = hold[:0]
+				holding = false
+				appendOK = false
+			}
+			if appendOK {
 				if !closeClientEvent() {
 					return rescueNone
 				}

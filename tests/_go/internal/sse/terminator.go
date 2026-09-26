@@ -207,8 +207,17 @@ func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 		{"empty tool_calls array does not open it", []string{
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
 		}, false},
-		{"a tool_calls array this line does not close opens it (multi-line event)", []string{
+		// A bare "[" cannot be told from an empty array until the next data
+		// line, so the region opens conservatively. ToolCallConfirmed is what
+		// lets the relay give the bytes back if it was an empty array.
+		{"a bare unclosed bracket opens it (ambiguous, resolved by ToolCallConfirmed)", []string{
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+		}, true},
+		{"a tool_calls array this line starts but does not close opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,`,
+		}, true},
+		{"a tool_calls key with no value on this line opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":`,
 		}, true},
 		{"deprecated function_call opens it", []string{
 			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
@@ -220,6 +229,59 @@ func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 			feedLines(a, c.lines...)
 			if got := a.ToolCallRegionOpened(); got != c.want {
 				t.Fatalf("ToolCallRegionOpened = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestAnalyzerToolCallConfirmed separates "the region opened" from "a complete
+// tool call was parsed". The withhold region opens on an ambiguous opener (a
+// multi-line "tool_calls":[ could be an empty array), so the relay needs this
+// to avoid discarding ordinary answer text at a truncation.
+func TestAnalyzerToolCallConfirmed(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"no tool call is unconfirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}`,
+		}, false},
+		{"a bare unclosed bracket is unconfirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+		}, false},
+		{"a key with no value yet is unconfirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":`,
+		}, false},
+		{"an empty array is unconfirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
+		}, false},
+		{"a real tool call is confirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
+		}, true},
+		{"a deprecated function_call is confirmed", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, true},
+		// Confirmation happens at the SSE event boundary, because a tool call
+		// split across data lines is only complete once the event is
+		// reassembled. The blank line is what triggers it, exactly as on the
+		// wire.
+		{"confirmed once the split event is assembled", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+			`data: {"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
+			``,
+		}, true},
+		{"an unassembled split call is not confirmed yet", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+			`data: {"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
+		}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.ToolCallConfirmed(); got != c.want {
+				t.Fatalf("ToolCallConfirmed = %v, want %v", got, c.want)
 			}
 		})
 	}
