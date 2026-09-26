@@ -207,6 +207,9 @@ func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 		{"empty tool_calls array does not open it", []string{
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
 		}, false},
+		{"a tool_calls array this line does not close opens it (multi-line event)", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+		}, true},
 		{"deprecated function_call opens it", []string{
 			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
 		}, true},

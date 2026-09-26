@@ -165,7 +165,9 @@ type Config struct {
 	// output, and a non-streaming reasoning-only body. The fresh attempt
 	// appends to the committed SSE connection after the already-relayed
 	// reasoning (auxiliary display text, never the completion contract) -
-	// never after answer content or tool calls, which are never rescuable.
+	// never after answer content or tool calls, which that budget never rescues
+	// (append_retries rescues answer content, once atomic tool calls keep the
+	// tool call itself off the wire).
 	// finish_reason length is the client's own token cap and is never
 	// rescued. The generic OpenAI-compatible relay only; the Cursor bridge
 	// and translated Anthropic streams keep their own signaling. Each rescue
@@ -175,16 +177,26 @@ type Config struct {
 
 	// AtomicToolCalls makes a streamed tool call atomic on the wire: the relay
 	// withholds every tool-call-bearing event (a tool_calls delta or a
-	// deprecated function_call delta) from the client's connection until the
-	// stream's terminator arrives, then releases it verbatim. It costs the
-	// client nothing it can use - an SDK commits a streamed tool call at the
-	// END of the response body, not at finish_reason, so it could never
-	// execute a partially-streamed one - and it makes an uncommitted tool call
-	// impossible on the wire, which is what makes append_retries safe. Past
-	// tool_call_hold_max withheld bytes the hold commits verbatim to bound
-	// memory, which restores the eager behavior for that stream only.
-	// Hot-reload applies to new streams. Responses-API feeds and translated
-	// streams keep their own framing and are unaffected.
+	// deprecated function_call delta) until the stream's terminator arrives,
+	// then releases it verbatim. It exists because a client commits a streamed
+	// tool call at the END of the response body, not at finish_reason, so
+	// eager relay can hand it a call no terminator ever committed - and a
+	// re-send behind that call would merge both attempts' arguments for the
+	// same tool-call index. Withholding makes an uncommitted tool call
+	// impossible on the wire, which is what makes append_retries sound.
+	//
+	// The trade, which is why this is opt-in rather than a default: a provider
+	// that ends the body with neither finish_reason nor [DONE] (a real shape -
+	// see metrics.ClassifyOutcome) truncates, and the withheld tool call is
+	// then discarded with the rest of the truncation rather than relayed. That
+	// is safer for execution (no tool runs from a truncated stream) but it does
+	// lose a tool call such a provider completed. It also stops tool-call
+	// delivery from being progressive: the client sees the whole call at the
+	// terminator. Past the relay's ToolCallHoldMax the region commits verbatim
+	// to bound memory, restoring eager behavior for that stream alone.
+	// Hot-reload applies to new streams. The generic OpenAI-wire relay only:
+	// translated Anthropic streams, the Cursor bridge and Responses-API feeds
+	// keep their own framing and are unaffected.
 	AtomicToolCalls bool `yaml:"atomic_tool_calls" json:"atomic_tool_calls"`
 
 	// AppendRetries bounds the opt-in transparent rescue of a stream that died
@@ -768,14 +780,6 @@ const (
 	ThinkingRetriesMax = 3
 	// AppendRetriesMax is the band for append_retries (0 disables).
 	AppendRetriesMax = 3
-	// ToolCallHoldMax bounds the bytes withheld for one in-flight atomic tool
-	// call before the hold commits verbatim. Tool-call arguments are
-	// provider-authored and can dwarf the terminal region, so this is its own
-	// larger guardrail. Past it the stream degrades to eager relay (the
-	// pre-atomic behavior) for that stream only, and because tool-call bytes
-	// are then on the wire the append rescue is correctly disallowed there.
-	// Safety guardrail, not user-tunable.
-	ToolCallHoldMax = 1 << 20 // 1 MiB
 	// QueueRetryAfterMax is the Retry-After hint cap (HTTP delta-seconds).
 	QueueRetryAfterMax = 24 * time.Hour
 	// Inbound body band (Validate, overlay, Schema).
@@ -856,11 +860,11 @@ func Default() *Config {
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
-		// Atomic tool calls are strictly safer than eager relay and cost the
-		// client nothing it can act on, so they are the default. AppendRetries
-		// stays 0: it duplicates visible text and re-bills the request, which
-		// only an operator should opt into.
-		AtomicToolCalls: true,
+		// Both append-rescue settings are opt-in and OFF by default, so a
+		// deployment's wire behavior is byte-identical until an operator turns
+		// them on. Atomic tool calls trade one real cost for another - see the
+		// field doc - so that trade is the operator's to make, not a default.
+		AtomicToolCalls: false,
 		AppendRetries:   0,
 
 		StormEnabled:           false,

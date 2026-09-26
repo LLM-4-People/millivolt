@@ -69,9 +69,10 @@ func TestAtomicToolCallWithheldUntilTerminator(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
-	if !cfg.AtomicToolCalls {
-		t.Fatal("atomic_tool_calls must default on: it is strictly safer than eager relay")
+	if cfg.AtomicToolCalls {
+		t.Fatal("atomic_tool_calls must default OFF: withholding can discard a tool call from a provider that sends no terminator, which is a compatibility trade an operator must make deliberately")
 	}
+	cfg.AtomicToolCalls = true
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
@@ -126,6 +127,7 @@ func TestAtomicToolCallNeverReachesClientOnTruncation(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -193,6 +195,7 @@ func TestAtomicToolCallSplitFinishReasonDoesNotRescueWithHeldToolCall(t *testing
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -298,6 +301,7 @@ func TestAppendRetriesTextOnlyTruncationRescued(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -341,6 +345,7 @@ func TestAppendRetriesClosesPendingClientEvent(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -407,6 +412,7 @@ func TestAppendRetriesExhaustedSurfacesInBand(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -446,6 +452,7 @@ func TestAppendRetriesBudgetBoundsUpstreamCalls(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = config.AppendRetriesMax
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -466,7 +473,7 @@ func TestAppendRetriesBudgetBoundsUpstreamCalls(t *testing.T) {
 // the stream.
 func TestAtomicToolCallHoldOverflowCommitsVerbatim(t *testing.T) {
 	var calls atomic.Int32
-	huge := strings.Repeat("x", config.ToolCallHoldMax+4096)
+	huge := strings.Repeat("x", toolCallHoldMax+4096)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -480,6 +487,7 @@ func TestAtomicToolCallHoldOverflowCommitsVerbatim(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -511,6 +519,7 @@ func TestAppendRetriesIgnoresFinishedStream(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = config.AppendRetriesMax
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -544,6 +553,7 @@ func TestAppendRetriesIgnoresProviderInBandError(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 3
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
@@ -577,6 +587,7 @@ func TestAtomicToolCallRefusalDeltaStaysAnswerShaped(t *testing.T) {
 	defer upstream.Close()
 
 	cfg := config.Default()
+	cfg.AtomicToolCalls = true
 	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))

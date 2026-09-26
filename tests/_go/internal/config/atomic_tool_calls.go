@@ -13,8 +13,13 @@ import (
 // that guarantees that. A comment cannot hold that invariant; Validate can.
 func TestAtomicToolCallsAndAppendRetries(t *testing.T) {
 	d := Default()
-	if !d.AtomicToolCalls {
-		t.Fatal("atomic_tool_calls must default on: withholding a tool call costs the client nothing it can act on and is strictly safer than eager relay")
+	// Both default OFF, so a deployment's wire is byte-identical to the
+	// pre-atomic relay until an operator opts in. Atomic withholding is not a
+	// free win: for a provider that sends neither finish_reason nor [DONE] it
+	// discards a tool call the eager relay would have delivered, and it stops
+	// tool-call delivery being progressive. That trade is the operator's.
+	if d.AtomicToolCalls {
+		t.Fatal("atomic_tool_calls must default off: it can discard a completed tool call from a no-terminator provider")
 	}
 	if d.AppendRetries != 0 {
 		t.Fatalf("default append_retries = %d, want 0 (it duplicates visible text and re-bills, so it is opt-in)", d.AppendRetries)

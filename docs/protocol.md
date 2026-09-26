@@ -173,6 +173,7 @@ sequence numbers) are never rescued. An exhausted budget surfaces the
 `reasoning_only` class as a provider error (`upstream_error`) on both
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
+
 ### Append rescues and atomic tool calls
 
 `append_retries` (default 0) is the one opt-in class that re-sends behind bytes
@@ -184,18 +185,27 @@ part. Responses-API feeds are never rescued (their per-response sequence numbers
 are documented ordering state) and `finish_reason: length` is the client's own
 token cap.
 
-What keeps that bounded to visible text is `atomic_tool_calls` (default true):
-the relay withholds every tool-call-bearing event - a `tool_calls` delta or a
-deprecated `function_call` delta - from the client's connection until the
-stream's terminator, then releases it verbatim. This matters because a client
+What keeps that bounded to visible text is `atomic_tool_calls` (default false,
+so a deployment's wire is byte-identical until an operator opts in):
+the generic OpenAI-wire relay withholds every tool-call-bearing event - a
+`tool_calls` delta or a deprecated `function_call` delta - until the stream's
+terminator, then releases it verbatim. Translated Anthropic streams, the Cursor
+bridge and Responses-API feeds keep their own framing and never reach it. This matters because a client
 commits a streamed tool call at the **end of the response body**, not at
 `finish_reason`: it enqueues every accumulated tool call, so relaying tool-call
 bytes eagerly can hand the client a call no terminator ever committed, and a
 re-send behind it merges both attempts' arguments for the same tool-call index,
 yielding either a malformed tool call or a spurious execution. Withholding
-costs the client nothing it can act on - it could never execute a partially
-streamed tool call - and it makes an uncommitted tool call impossible on the
-wire.
+makes an uncommitted tool call impossible on the wire.
+
+The trade, which is why both settings are opt-in: a provider that ends the body
+with neither `finish_reason` nor `[DONE]` (a real shape - see
+`metrics.ClassifyOutcome`) truncates, and the withheld tool call is then
+discarded with the rest of the truncation instead of being relayed. That is
+safer for execution, since no tool runs from a truncated stream, but it does
+lose a tool call such a provider completed. It also stops tool-call delivery
+from being progressive: the client receives the whole call at the terminator
+rather than as it streams.
 
 The relay therefore gates the class on a direct observation (`toolBytesOnWire`),
 not an inference from its own buffers, because withholding has two documented
@@ -285,8 +295,10 @@ caller cancellations and fired per-send deadlines are excluded - quota outcomes
 never become storm evidence, even while a quota gate is open. A selected 429
 is a storm failure sample but remains a separate rate-limit signal in dashboard
 request health. Configurable response/stream failure detection observes a 2xx
-attempt once when its relay completes, or before an existing quality re-ask.
-It never adds a replay after meaningful output or native tool execution.
+attempt once when its relay completes, or before an existing quality, thinking
+or append rescue re-send. Apart from the bounded, opt-in append class - which
+duplicates visible text and is why atomic tool calls exist - it never adds a
+replay after meaningful output or native tool execution.
 
 An open scope holds new sends until its cooldown expires, then admits one shared
 probe. Failed probes multiply the cooldown, with configurable jitter and a cap;
@@ -314,7 +326,7 @@ it. Manual-mode holds persist like every operator pause.
 
 The ordinary HTTP retry budget remains `max_retries`. Selected failures during
 an active storm may use up to `storm_max_retries` additional attempts across the
-logical request, including quality re-asks. Cursor retains its single-handshake
+logical request, including quality, thinking and append re-sends. Cursor retains its single-handshake
 behavior when protection is off and uses only the additional storm budget for
 failed fresh handshakes. Exhaustion returns the final upstream failure. Retrying
 inference can repeat upstream execution or billing even when no output arrived;

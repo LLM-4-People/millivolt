@@ -211,8 +211,16 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	eventType := responseEventType(payload)
 	hasContent := a.tokenStart(payload) || responsesContentEvent(eventType, payload)
 	hasReasoning := a.reasoningStart(payload) || responsesReasoningEvent(eventType, payload)
-	toolBlock := extractContainer(jsonKey(payload, "tool_calls"), '[', ']')
+	toolBlock, toolBlockComplete := extractContainer(jsonKey(payload, "tool_calls"), '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
+	// A tool_calls array that this line does not close continues on the next
+	// data line of the same event. That is still a tool call, and the withhold
+	// region must open on THIS line: waiting for the array to balance would
+	// relay the first argument bytes before the region existed, which is
+	// exactly the uncommitted-tool-call hazard atomic withholding exists to
+	// prevent. It is deliberately not counted as generation content (hasToolCall
+	// stays false), because no complete call is known yet.
+	opensToolCall := !toolBlockComplete && len(toolBlock) > 0
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
 	// or a tool call) - not on the empty role chunk.
@@ -304,7 +312,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if tokenHasNonEmpty(payload, "refusal") || deprecatedFunctionCall {
 		a.answerishSeen = true
 	}
-	if hasToolCall || deprecatedFunctionCall {
+	if hasToolCall || opensToolCall || deprecatedFunctionCall {
 		a.toolCallBytesSeen = true
 	}
 
@@ -909,12 +917,23 @@ func jsonKey(payload []byte, key string) []byte {
 // start with '{' (e.g. "usage":null) so a non-object value is never treated
 // as a usage blob.
 func extractObject(raw []byte) json.RawMessage {
-	return extractContainer(raw, '{', '}')
+	blob, _ := extractContainer(raw, '{', '}')
+	return blob
 }
 
-func extractContainer(raw []byte, open, close byte) json.RawMessage {
+// extractContainer returns the {...} / [...] portion of raw starting at the
+// opening delimiter, reading until the delimiters balance, plus whether this
+// line actually CLOSED it. It is JSON-string-aware: delimiters inside a string
+// literal do not affect depth, and a quote is escaped iff preceded by an odd
+// number of consecutive backslashes. Returns nil if raw does not start with the
+// opening delimiter (e.g. "usage":null) so a non-container value is never
+// treated as a blob. complete=false means the container continues on a later
+// data line of the same SSE event, which is legal SSE and which callers that
+// gate on "does this line carry a tool call" must not mistake for "no tool
+// call": the per-line scan sees an unterminated prefix, not an absent value.
+func extractContainer(raw []byte, open, close byte) (json.RawMessage, bool) {
 	if len(raw) == 0 || raw[0] != open {
-		return nil
+		return nil, true
 	}
 	depth := 0
 	inString := false
@@ -934,10 +953,10 @@ func extractContainer(raw []byte, open, close byte) json.RawMessage {
 			if !inString {
 				depth--
 				if depth == 0 {
-					return raw[:i+1]
+					return raw[:i+1], true
 				}
 			}
 		}
 	}
-	return raw
+	return raw, false
 }

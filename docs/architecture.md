@@ -67,9 +67,17 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
-The one mechanism that keeps that invariant true under an append-behind-the-wire
-re-send is atomic tool calls: the relay withholds every tool-call-bearing event
-until the stream's terminator, so an UNCOMMITTED tool call is never on the wire.
+The one bounded exception to that invariant is the opt-in append rescue, which
+re-sends after answer text reached the client and therefore duplicates visible
+text. The mechanism that bounds it to visible text is atomic tool calls
+([relay.go](../internal/proxy/relay.go) `streamBody`): the relay withholds every
+tool-call-bearing event until the stream's terminator, so an UNCOMMITTED tool
+call is never on the wire, and the rescue is gated on the direct
+`toolBytesOnWire` observation rather than an inference from the relay's own
+buffers. Covered by `TestAtomicToolCallNeverReachesClientOnTruncation`,
+`TestAppendRetriesRefusedWhenAtomicToolCallsOff` and
+`TestAtomicToolCallHoldOverflowCommitsVerbatim`
+([tests](../tests/_go/internal/proxy/atomic_tool_calls.go)).
 A client commits a streamed tool call at end-of-body, not at finish_reason, so
 eagerly relayed tool-call bytes are the only contract bytes a re-send could
 duplicate destructively. With them withheld, the append rescue can duplicate

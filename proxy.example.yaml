@@ -226,32 +226,37 @@ quality_retries: 1
 # stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only
 # completion, a retryable in-band provider error that arrived after reasoning-only output,
 # and a non-streaming reasoning-only body. The fresh attempt appends after the relayed
-# reasoning; answer content and tool calls are never rescued, and finish_reason length
-# never is. Each rescue re-sends the full request (billed). 0 disables.
+# reasoning; by that budget answer content and tool calls are never rescued
+# (append_retries rescues answer content), and finish_reason length never is. Each rescue
+# re-sends the full request (billed). 0 disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1
 
-# Withhold every streamed tool call (a tool_calls or deprecated function_call delta) from
-# the client until the stream's terminator, then release it verbatim. Costs the client
-# nothing it can use: an SDK commits a streamed tool call at the END of the response body,
-# not at finish_reason, so it could never execute a partially-streamed one. Makes an
-# uncommitted tool call impossible on the wire, which is what makes append_retries safe.
+# Withhold every streamed tool call (a tool_calls or deprecated function_call delta) until
+# the stream's terminator, then release it verbatim. An SDK commits a streamed tool call
+# at the END of the response body, not at finish_reason, so eager relay can hand it a call
+# no terminator committed; withholding makes that impossible, which is what makes
+# append_retries sound. The trade: a provider that sends neither finish_reason nor [DONE]
+# truncates, and its completed tool call is then discarded rather than relayed, and
+# tool-call delivery stops being progressive (the client sees the call at the terminator).
 # Past a bounded hold size the region commits verbatim, restoring eager relay for that
-# stream only.
+# stream alone. Generic OpenAI-wire relay only; translated streams, the Cursor bridge and
+# Responses-API feeds are unaffected.
 # Hot-reload: yes.
-#   type: bool · default true
-atomic_tool_calls: true
+#   type: bool · default false
+atomic_tool_calls: false
 
 # Opt-in rescue of a stream that died truncated (no completion marker) after answer
-# content already reached the client. The SSE wire cannot retract a delivered delta, so
-# the fresh attempt APPENDS: the client sees the relayed text prefix a second time,
-# garbled into one text part. That duplicate is the entire cost, and atomic_tool_calls
-# keeps it to visible text - a re-send could otherwise merge both attempts' arguments for
-# the same tool-call index, yielding a malformed tool call or a spurious execution, so
-# this setting is rejected at load unless atomic_tool_calls is on. Responses-API feeds and
-# finish_reason length are never rescued. Each rescue re-sends the full request (billed).
-# 0 disables.
+# content or a refusal already reached the client. The SSE wire cannot retract a delivered
+# delta, so the fresh attempt APPENDS: the client sees the relayed text prefix a second
+# time, garbled into one text part. That duplicate is the entire cost, and
+# atomic_tool_calls keeps it to visible text - a re-send could otherwise merge both
+# attempts' arguments for the same tool-call index, yielding a malformed tool call or a
+# spurious execution, so this setting is rejected at load unless atomic_tool_calls is on.
+# Responses-API feeds and finish_reason length are never rescued. Each rescue re-sends the
+# full request (billed); one request can spend every rescue budget, so 0 disables unless
+# you accept the cost.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 0
 append_retries: 0

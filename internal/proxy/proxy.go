@@ -89,6 +89,18 @@ const (
 	// error. Past the cap the hold is abandoned: no terminal region this large
 	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
 	terminalHoldMax = 64 * 1024
+	// toolCallHoldMax bounds the same withhold region when it was opened by a
+	// tool call (config.AtomicToolCalls): tool-call arguments are
+	// provider-authored and routinely dwarf a terminal region, so the region
+	// gets its own, larger cap. It is chosen when the region opens and raised
+	// if a tool call begins inside an already-open terminal region. Past it the
+	// region commits verbatim, which puts tool-call bytes on the wire and so
+	// disables the append rescue for that stream - the relay observes that in
+	// toolBytesOnWire rather than inferring it. Safety guardrail, not
+	// user-tunable. Numerically equal to sseScannerBufMax by design: a single
+	// frame past the scanner bound is newline-free and is relayed by that
+	// guardrail instead, so the two escape hatches coincide rather than overlap.
+	toolCallHoldMax = 1 << 20 // 1 MiB
 	// maxTranslateBodyBytes caps the buffered read of a translated
 	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool
 	// prefixes above, translation needs the WHOLE document, so this is a

@@ -540,16 +540,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 // an in-band error that arrived after reasoning-only output. The failed
 // attempt leaves the client at most role/keepalive/reasoning frames (every
 // OpenAI SDK accumulates chat delta frames independently; reasoning is
-// auxiliary display text), so the fresh stream appends cleanly to the
+// auxiliary display text), or - for the append class - answer text the client
+// accumulates twice. Either way the fresh stream appends cleanly to the
 // committed SSE connection; the idle pacer keeps the socket alive during the
 // re-send's queue/hold/backoff waits. finish_reason length is a clean
 // terminator and never rescued. The absorbed attempt is logged like every
 // other (Retries/Attempts, the dashboard's correction flag) while a rescue
 // that eventually succeeds stays a success record; an exhausted budget
 // surfaces the in-band error exactly as before, and a provider error that
-// already reached the wire - content was relayed, the class is
-// non-retryable, or the budget is spent - is verbatim relay and the client's
-// to retry. Re-send failures are answered in-band: applyUpstream has
+// already reached the wire - the class is non-retryable, or the budget is
+// spent - is verbatim relay and the client's to retry. Re-send failures are answered in-band: applyUpstream has
 // already committed the status line before this function runs (even for
 // clients that never asked for streaming), so no JSON error can land after
 // relayed event-stream bytes, and the record carries the real error status.
@@ -1468,23 +1468,26 @@ type upstreamErrorRescue struct {
 //
 // The relay withholds the stream's terminal region - everything from the
 // first event carrying a non-null finish_reason or a [DONE] - until the
-// stream ends, then releases it verbatim. When the analyzer classifies the
+// stream ends, then releases it verbatim. Under config.AtomicToolCalls the
+// withhold region instead opens at the first tool-call-bearing event, and its
+// bound is whichever of toolCallHoldMax / terminalHoldMax fits what opened it. When the analyzer classifies the
 // finished stream as degenerate (metrics.ClassifyOutcome: truncated /
 // tool_calls-without-calls / empty stop / reasoning-only stop), the held
 // region is replaced with an in-band OpenAI error chunk the client treats as
 // a retryable failure. The withholding is what makes that work: SDKs treat
 // the finish chunk as the stream's end, so an error written after it would be
-// ignored. The hold is bounded by terminalHoldMax (past it the stream
+// ignored. The hold is bounded (past its bound the stream
 // commits to verbatim relay - no degenerate stream has a large "terminal"
 // region), and every non-held byte is written through immediately, so the hot
 // path only ever reserves one event's worth of bytes.
 //
 // Transparent re-sends: while a rescue budget remains, a truncation that
-// relayed nothing content-bearing (allowTruncationRetry, the quality
-// budget) or a mid-thinking death that relayed only reasoning
-// (allowThinkingRescue, the thinking budget) returns the matching
-// rescueReasoning* class instead of surfacing an error: the caller owns the
-// re-send and the attempt bookkeeping. A reasoning-only clean stop is equally
+// relayed nothing content-bearing (allowTruncationRetry, the quality budget), a
+// mid-thinking death that relayed only reasoning (allowThinkingRescue, the
+// thinking budget), or a truncation after answer content (allowAppendRetry, the
+// append budget, sound only because atomicTools kept every tool call off the
+// wire) returns the matching rescue class instead of surfacing an error: the
+// caller owns the re-send and the attempt bookkeeping. A reasoning-only clean stop is equally
 // rescuable (rescueReasoningStop) because its terminal region never left the
 // hold. A provider error event streamed in-band on the 200 is the same
 // contract from the other side: while nothing content-bearing was relayed
@@ -1492,10 +1495,12 @@ type upstreamErrorRescue struct {
 // (retryableUpstreamErrorClass, the OpenAI retry semantics) is dropped and
 // rescueUpstreamError re-sends - the multi-line flush discovery, a frame
 // after opened content, a non-retryable class, or a spent budget falls back
-// to verbatim relay exactly as before. The returned rescue is only ever
-// reported in those no-contract-bytes states - never after answer content,
-// tool calls, a refusal, an in-band error that reached the wire, or a read
-// error caused by our own context (client gone or the per-send deadline).
+// to verbatim relay exactly as before. The returned rescue is reported only in
+// the states its class allows: the no-contract-bytes states above, or - for the
+// opt-in append class - after answer content, where atomic tool calls keep any
+// tool call off the wire so only visible text is duplicated. Never after an
+// in-band error that reached the wire, and never on a read error caused by our
+// own context (client gone or the per-send deadline).
 // With the budget spent (rescueNone), the truncation or degenerate class
 // surfaces in-band exactly as before: finish_reason length is a terminator
 // and never rescuable. uerr receives the provider's envelope for a
@@ -1555,16 +1560,6 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			a.Fill(rec)
 		}
 	}
-	// closeClientEvent ends an SSE event the client still has open, with no
-	// data. A rescue drops the withheld region and any trailing partial line,
-	// so the last bytes already on the wire may be a data line whose
-	// blank-line terminator never arrived; without this the fresh attempt's
-	// first frame would be joined into that event by any spec-conforming SSE
-	// parser, producing one unparseable event instead of two valid ones. A
-	// blank line is a no-op between already-complete events, so it is safe to
-	// write unconditionally. Writes straight to w, deliberately NOT through
-	// out: flushing out here would release the trailing partial line the
-	// rescue is required to drop.
 	// withholdOpened reports whether the relay must start withholding from
 	// this line on: the stream's terminal region, or - only under atomic tool
 	// calls - a tool call. The analyzer reports the facts; the operator's
@@ -1572,6 +1567,19 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	withholdOpened := func() bool {
 		return a.Terminated() || (atomicTools && a.ToolCallRegionOpened())
 	}
+	// closeClientEvent ends an SSE event the client still has open, with no
+	// data. A rescue drops the withheld region and any trailing partial line,
+	// so the last bytes already on the wire may be a data line whose blank-line
+	// terminator never arrived; without this the fresh attempt's first frame is
+	// joined into that event by any spec-conforming SSE parser, producing one
+	// unparseable event instead of two valid ones. A blank line is a no-op
+	// between already-complete events, so writing it unconditionally is safe.
+	// It writes straight to w, deliberately NOT via out: flushing out here
+	// would release the trailing partial line a rescue is required to drop.
+	// (A truncation INSIDE a multi-line data event still yields an invalid
+	// event - the pre-atomic relay does too - because a partial line cannot be
+	// completed after the fact. This repair covers the single-line shape,
+	// which is the overwhelmingly common one.)
 	closeClientEvent := func() bool {
 		if _, werr := w.Write([]byte("\n")); werr != nil {
 			clientGone()
@@ -1698,7 +1706,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// arguments for the same tool-call index.
 					holding = true
 					if atomicTools && a.ToolCallRegionOpened() {
-						holdMax = config.ToolCallHoldMax
+						holdMax = toolCallHoldMax
 					}
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
@@ -1738,8 +1746,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						// first chunk. A blank line ends that event with no
 						// data - spec parsers discard it - and is a no-op
 						// between complete events.
-						out.WriteByte('\n')
-						if !writeOut() {
+						if !closeClientEvent() {
 							return rescueNone
 						}
 						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
@@ -1867,8 +1874,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// the thinking class (thinking budget) may additionally leave
 			// reasoning deltas, which are auxiliary display text the fresh
 			// stream appends after. The record is filled by the succeeding
-			// attempt alone. No truncation can coexist with an open hold:
-			// holding implies a seen terminator.
+			// attempt alone. A truncation cannot coexist with a TERMINAL-region
+			// hold (that requires a seen terminator), but it CAN coexist with a
+			// tool-call hold, which is why the append rescue consults
+			// toolBytesOnWire rather than the hold state.
 			if allowTruncationRetry && a.RetryableTruncation() && !rec.ClientDisconnected {
 				return rescueEmptyTruncation
 			}
