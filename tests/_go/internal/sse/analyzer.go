@@ -455,12 +455,18 @@ func TestAnalyzerCostFromSiblingPricingObject(t *testing.T) {
 func TestAnalyzerToolCalls(t *testing.T) {
 	var a Analyzer
 
+	now := time.Now()
+	// Each delta is its own SSE event, so each is terminated by a blank line -
+	// the event is the single owner of tool-call accounting.
 	// First delta: has the tool call id.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"search","arguments":""}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"search","arguments":""}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 	// Argument chunk: no id, should not be counted again.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 	// Second tool call: new id.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_def456","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_def456","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 
 	rec := &metrics.Record{}
 	a.Fill(rec)

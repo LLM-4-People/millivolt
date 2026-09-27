@@ -176,8 +176,8 @@ an empty continuation; exhausted/invalid continuations surface errors rather
 than silently completing. Cursor's wire reports one combined output total with
 no answer/reasoning split, so the generic mid-thinking rescue
 (`thinking_retries`) does not apply here: a Cursor turn that produced nothing
-is the existing empty-turn re-ask's business. Neither `atomic_tool_calls` nor
-`append_retries` reaches this bridge either: it keeps its own tool-call
+is the existing empty-turn re-ask's business. `atomic_tool_calls` does not
+reach this bridge either: it keeps its own tool-call
 signaling and never enters the generic relay's withhold region. This is not exactly-once
 execution, checkpoint persistence, or a guarantee that an upstream keeps a
 parked stream alive.

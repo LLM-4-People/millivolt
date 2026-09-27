@@ -149,12 +149,9 @@ func TestWriteYAMLRoundTripEachSchemaKey(t *testing.T) {
 }
 
 // alternateSchemaValue returns the override map that moves f off its default:
-// the value itself plus, when the validator demands it, the companion setting
-// that makes the value legal. It is a map rather than a bare value because a
-// key can be coupled - append_retries > 0 is rejected unless atomic_tool_calls
-// is on, so no single-key sample of it validates. The companion is DISCOVERED
-// by trying the bool settings rather than by naming one, so this probe stays
-// generic and does not mirror Validate's coupling.
+// a single setting, changed on its own. It is a map rather than a bare value
+// because that is what Apply takes, not because any setting is coupled to
+// another.
 func alternateSchemaValue(t *testing.T, f Field, base *Config) map[string]any {
 	t.Helper()
 	one := func(v any) map[string]any { return map[string]any{f.Key: v} }
@@ -179,25 +176,11 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) map[string]any {
 				return one(cand)
 			}
 		}
-		// Coupled key: the candidate is only legal alongside another setting.
-		// Search the bool settings for the companion the validator demands,
-		// rather than naming it here, so the probe cannot drift from Validate.
-		for _, cand := range []int{n + 1, n - 1} {
-			for _, b := range Schema() {
-				if b.Kind != KindBool {
-					continue
-				}
-				trial := base.Clone()
-				trial.fieldRV(f.Key).SetInt(int64(cand))
-				trial.fieldRV(b.Key).SetBool(!base.fieldValue(b.Key).(bool))
-				if trial.Validate() == nil {
-					return map[string]any{
-						f.Key: cand,
-						b.Key: !base.fieldValue(b.Key).(bool),
-					}
-				}
-			}
-		}
+	// No setting is coupled to another today, so a single-key sample must
+	// validate on its own for every kind. The one setting that ever needed a
+	// companion is gone; if a coupled setting returns, the round-trip test
+	// fails here with a clear "sample is still the default" message rather
+	// than this probe quietly searching the bool settings for a fix.
 	case KindBytes:
 		n := int64(base.fieldValue(f.Key).(ByteSize))
 		for _, cand := range []int64{n + 1024, n - 1024} {

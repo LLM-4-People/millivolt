@@ -67,26 +67,25 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
-The one bounded exception to that invariant is the opt-in append rescue, which
-re-sends after answer text reached the client and therefore duplicates visible
-text. The mechanism that bounds it to visible text is atomic tool calls
-([relay.go](../internal/proxy/relay.go) `streamBody`): the relay withholds every
-tool-call-bearing event until the stream's terminator, so an UNCOMMITTED tool
-call is never on the wire, and the rescue is gated on the direct
-`toolBytesOnWire` observation rather than an inference from the relay's own
-buffers. Covered by `TestAtomicWithholdingIsBoundedByTheTerminator`,
+Opt-in atomic tool calls ([relay.go](../internal/proxy/relay.go) `streamBody`)
+narrow that gap rather than widen it: the relay withholds every tool-call-bearing
+event until the stream's terminator, so an UNCOMMITTED tool call is never on the
+wire. A client commits a streamed tool call at end-of-body, not at finish_reason,
+so those are the only contract bytes a re-send could duplicate destructively;
+with them withheld, every rescue budget keeps its guarantee. The region a tool
+call opens is bounded by `toolCallHoldMax` ([proxy.go](../internal/proxy/proxy.go)),
+chosen on the opening line, and the count of distinct tool calls has one owner:
+the tool-call id set on
+[analyzer.go](../internal/sse/analyzer.go), fed by both the reassembled event
+and the raw data line. Covered by `TestAtomicWithholdingIsBoundedByTheTerminator`,
 `TestAtomicToolCallNeverReachesClientOnTruncation`,
-`TestAppendRetriesRefusedWhenAtomicToolCallsOff`,
-`TestToolCallInsideOversizedHoldIsNotRescued` and
-`TestNoTerminatorProviderRegressionGuard`
+`TestSplitToolCallIsNotAlsoReportedAsEmptyToolCall`,
+`TestToolCallLargerThanTheTerminalCapIsStillWithheld`,
+`TestOversizedToolCallDataLineIsCountedAndRelayed` and
+`TestAtomicFunctionCallIsWithheldAndCounted`
 ([tests](../tests/_go/internal/proxy/atomic_tool_calls.go),
 [edges](../tests/_go/internal/proxy/atomic_tool_calls_edges.go),
-[multiline](../tests/_go/internal/proxy/atomic_tool_calls_multiline.go)).
-A client commits a streamed tool call at end-of-body, not at finish_reason, so
-eagerly relayed tool-call bytes are the only contract bytes a re-send could
-duplicate destructively. With them withheld, the append rescue can duplicate
-visible text and nothing else, and the relay's own `toolBytesOnWire` observation
-(not an inference from its own buffers) is what gates it.
+[regressions](../tests/_go/internal/proxy/atomic_regressions.go)).
 
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
@@ -102,8 +101,8 @@ a request-ID map. No storm observation scans metrics history or waits for SQLite
 
 [proxy/storm.go](../internal/proxy/storm.go) maps config once into scheduler
 options and bridges existing relay/native send outcomes. A 2xx permit settles
-after relay or before an existing quality re-ask, thinking rescue or append
-rescue re-send, preventing double samples and stream replay. Safe protocol-level reason labels
+after relay or before an existing quality re-ask or thinking rescue re-send,
+preventing double samples and stream replay. Safe protocol-level reason labels
 carry no provider error bodies.
 The banner uses the canonical bootstrap builder and browser apply/render gates,
 with no client-side event arithmetic. Storm scheduler/proxy/config regressions

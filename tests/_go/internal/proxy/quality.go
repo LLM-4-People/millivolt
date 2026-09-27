@@ -488,9 +488,9 @@ func TestStreamToolCallsWithoutCallsReplaced(t *testing.T) {
 // without any terminator gets an in-band truncated error appended after the
 // already-relayed bytes (content can't be un-relayed - the error tells the
 // client the answer is incomplete). Content-bearing truncation is never
-// proxy-retried under the shipped defaults - the client already saw
-// generation bytes, and re-sending behind them is the opt-in append class
-// (append_retries), which needs atomic_tool_calls to stay sound.
+// proxy-retried under the shipped defaults: the client already saw
+// generation bytes, and every rescue budget guarantees the client received no
+// completion-contract bytes, so re-sending behind them is never available.
 func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

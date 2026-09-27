@@ -93,19 +93,20 @@ const (
 	// tool call (config.AtomicToolCalls): tool-call arguments are
 	// provider-authored and routinely dwarf a terminal region, so the region
 	// gets its own, larger cap. Past it the region commits verbatim, which puts
-	// tool-call bytes on the wire and so disables the append rescue for that
-	// stream - the relay observes that in toolBytesOnWire rather than inferring
-	// it. Safety guardrail, not user-tunable.
+	// tool-call bytes on the wire - the stream then has no withhold region to
+	// discard, so it is recorded as whatever it is rather than as a clean
+	// success. Safety guardrail, not user-tunable.
 	//
-	// It is set when the region opens on a tool call, and RAISED if a tool call
-	// begins inside a region that some other line opened. That second case is
-	// real: sse.TerminalLine matches only [DONE] and Responses terminal events,
-	// so a finish_reason chunk opens the region without resolving it on the
-	// same line, and the tool-call deltas that follow land inside it.
-	// Sizing it equal to sseScannerBufMax is deliberate, not incidental: a
-	// single tool-call frame past the scanner bound is newline-free, so that
-	// guardrail relays it before any region could open, and the two escape
-	// hatches meet at the same byte count instead of leaving a gap between them.
+	// It is set on the line that OPENS the region when that line is a
+	// tool-call line, and RAISED if a tool call begins inside a region some
+	// other line opened. That second case is real: sse.TerminalLine matches
+	// only [DONE] and Responses terminal events, so a finish_reason chunk opens
+	// the region without resolving it on the same line, and the tool-call deltas
+	// that follow land inside it. Sizing it equal to sseScannerBufMax is
+	// deliberate, not incidental: a single tool-call frame past the scanner
+	// bound is newline-free, so that guardrail relays it before any region
+	// could open, and the two escape hatches meet at the same byte count
+	// instead of leaving a gap between them.
 	toolCallHoldMax = 1 << 20 // 1 MiB
 	// maxTranslateBodyBytes caps the buffered read of a translated
 	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool

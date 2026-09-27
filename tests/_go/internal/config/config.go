@@ -121,15 +121,13 @@ func TestDefaultHasNoZeroTunables(t *testing.T) {
 			t.Errorf("Default().%s is zero/empty - every tunable must have a default", k)
 		}
 	}
-	// The queue caps are intentionally zero (0 = unlimited) and append_retries
-	// is intentionally zero (disabled); pin those so an accidental default-zero
-	// on a real tunable isn't masked, and each one's documented zero semantics
-	// are asserted somewhere.
+	// The queue caps are intentionally zero (0 = unlimited); pin that so an
+	// accidental default-zero on a real tunable isn't masked, and each one's
+	// documented zero semantics are asserted somewhere.
 	zeroByDesign := map[string]bool{
 		"max_concurrent": c.MaxConcurrent == 0,
 		"max_queue_size": c.MaxQueueSize == 0,
 		"max_queue_wait": c.MaxQueueWait == 0,
-		"append_retries": c.AppendRetries == 0,
 	}
 	for k, ok := range zeroByDesign {
 		if !ok {

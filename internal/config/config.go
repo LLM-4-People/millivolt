@@ -165,14 +165,12 @@ type Config struct {
 	// output, and a non-streaming reasoning-only body. The fresh attempt
 	// appends to the committed SSE connection after the already-relayed
 	// reasoning (auxiliary display text, never the completion contract) -
-	// never after answer content or tool calls, which that budget never rescues
-	// (append_retries rescues answer content, once atomic tool calls keep the
-	// tool call itself off the wire).
-	// finish_reason length is the client's own token cap and is never
-	// rescued. The generic OpenAI-compatible relay only; the Cursor bridge
-	// and translated Anthropic streams keep their own signaling. Each rescue
-	// re-sends the full request (the upstream bills every attempt); 0
-	// disables.
+	// never after answer content or a tool call, which is what a client would
+	// treat as the model's final word. finish_reason length is the client's own
+	// token cap and is never rescued. The generic OpenAI-compatible relay only;
+	// the Cursor bridge and translated Anthropic streams keep their own
+	// signaling. Each rescue re-sends the full request (the upstream bills
+	// every attempt); 0 disables.
 	ThinkingRetries int `yaml:"thinking_retries" json:"thinking_retries"`
 
 	// AtomicToolCalls makes a streamed tool call atomic on the wire: the relay
@@ -180,10 +178,9 @@ type Config struct {
 	// deprecated function_call delta) until the stream's terminator arrives,
 	// then releases it verbatim. It exists because a client commits a streamed
 	// tool call at the END of the response body, not at finish_reason, so
-	// eager relay can hand it a call no terminator ever committed - and a
-	// re-send behind that call would merge both attempts' arguments for the
-	// same tool-call index. Withholding makes an uncommitted tool call
-	// impossible on the wire, which is what makes append_retries sound.
+	// eager relay can hand it a call no terminator ever committed. Withholding
+	// makes an uncommitted tool call impossible on the wire: no tool can run
+	// from a stream the model never finished.
 	//
 	// The trade, which is why this is opt-in rather than a default: a provider
 	// that ends the body with neither finish_reason nor [DONE] (a real shape -
@@ -192,8 +189,10 @@ type Config struct {
 	// is safer for execution (no tool runs from a truncated stream) but it does
 	// lose a tool call such a provider completed. It also stops tool-call
 	// delivery from being progressive: the client sees the whole call at the
-	// terminator. Past the relay's toolCallHoldMax (1 MiB) the region commits
-	// verbatim, restoring eager behavior for that stream alone.
+	// terminator. The region a tool call opens is bounded by the relay's
+	// toolCallHoldMax (1 MiB) rather than the terminal cap, and past even that
+	// bound the region commits verbatim, restoring eager behavior for that
+	// stream alone.
 	//
 	// Memory: up to toolCallHoldMax per in-flight stream is withheld, on top of
 	// the pre-existing scanner buffer. The only default cap on concurrency is
@@ -205,30 +204,6 @@ type Config struct {
 	// translated Anthropic streams, the Cursor bridge and Responses-API feeds
 	// keep their own framing and are unaffected.
 	AtomicToolCalls bool `yaml:"atomic_tool_calls" json:"atomic_tool_calls"`
-
-	// AppendRetries bounds the opt-in transparent rescue of a stream that died
-	// truncated (clean EOF or a read error, no completion marker) AFTER
-	// answer content or a refusal already reached the client. Unlike every
-	// other rescue class, the fresh attempt APPENDS behind the relayed
-	// prefix: a delivered SSE delta cannot be retracted, so the client sees
-	// that prefix twice, garbled into one text part. That is the whole cost,
-	// and it is bounded to visible text because atomic_tool_calls guarantees
-	// no tool call reached the client - without it a re-send would merge both
-	// attempts' arguments for the same tool-call index, yielding either a
-	// malformed tool call or a spurious execution, so Validate rejects the
-	// combination rather than trusting the operator. How that rejection
-	// surfaces differs, and an operator needs to know: the Settings API
-	// returns an error naming both settings, but a hand-edited config FILE
-	// cannot be refused on this ground - the loader treats a key whose
-	// whole-config validate fails as a per-key salvage candidate, drops it
-	// with one log line and rewrites the file. Either way the rescue can
-	// never be live unsound; it can only be silently absent, so check
-	// append_retries took effect after editing the file by hand. Responses-API
-	// feeds are never rescued (per-response sequence numbers are documented
-	// ordering state) and finish_reason length is the client's own token cap.
-	// Each rescue re-sends the full request (the upstream bills every
-	// attempt); 0 disables.
-	AppendRetries int `yaml:"append_retries" json:"append_retries"`
 
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
@@ -792,8 +767,6 @@ const (
 	QualityRetriesMax = 3
 	// ThinkingRetriesMax is the band for thinking_retries (0 disables).
 	ThinkingRetriesMax = 3
-	// AppendRetriesMax is the band for append_retries (0 disables).
-	AppendRetriesMax = 3
 	// QueueRetryAfterMax is the Retry-After hint cap (HTTP delta-seconds).
 	QueueRetryAfterMax = 24 * time.Hour
 	// Inbound body band (Validate, overlay, Schema).
@@ -874,12 +847,9 @@ func Default() *Config {
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
-		// Both append-rescue settings are opt-in and OFF by default, so a
-		// deployment's wire behavior is byte-identical until an operator turns
-		// them on. Atomic tool calls trade one real cost for another - see the
-		// field doc - so that trade is the operator's to make, not a default.
+		// Atomic tool calls are opt-in and OFF by default, so a deployment's
+		// wire is byte-identical until an operator turns them on.
 		AtomicToolCalls: false,
-		AppendRetries:   0,
 
 		StormEnabled:           false,
 		StormProviderEnabled:   true,
@@ -1139,17 +1109,6 @@ func (c *Config) Validate() error {
 	}
 	if c.ThinkingRetries < 0 || c.ThinkingRetries > ThinkingRetriesMax {
 		return fmt.Errorf("thinking_retries: must be 0..%d, got %d", ThinkingRetriesMax, c.ThinkingRetries)
-	}
-	if c.AppendRetries < 0 || c.AppendRetries > AppendRetriesMax {
-		return fmt.Errorf("append_retries: must be 0..%d, got %d", AppendRetriesMax, c.AppendRetries)
-	}
-	// The append rescue re-sends behind bytes already on the wire, so it is
-	// only sound while no tool call reached the client - a guarantee
-	// atomic_tool_calls provides and nothing else does. Refuse the unsound
-	// combination at the trust boundary instead of documenting a caveat the
-	// operator can walk straight past.
-	if c.AppendRetries > 0 && !c.AtomicToolCalls {
-		return fmt.Errorf("append_retries (%d) requires atomic_tool_calls: true: a re-send appends behind relayed bytes, and without atomic tool calls a client would merge both attempts' arguments for the same tool-call index", c.AppendRetries)
 	}
 	if err := checkQueueRetryAfter(c.QueueRetryAfter); err != nil {
 		return err

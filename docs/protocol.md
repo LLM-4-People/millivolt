@@ -147,8 +147,7 @@ in-band. Bounded terminal/quality handling can replace a degenerate completion
 with an error. Non-streaming quality retries may make another upstream request;
 a stream truncated before any generation content was relayed is re-sent on the
 same committed connection, while a truncation after relayed content surfaces
-the in-band error for the client to retry unless `append_retries` is enabled
-(see [append rescues](#append-rescues-and-atomic-tool-calls)). A provider error event streamed
+the in-band error for the client to retry. A provider error event streamed
 in-band on the 200 is retried the same way while nothing content-bearing was
 relayed: the error classes the OpenAI API documents as retryable (500
 `server_error`, the 503 overloaded/unavailable family, request timeouts, and
@@ -174,79 +173,73 @@ sequence numbers) are never rescued. An exhausted budget surfaces the
 surfaces: in-band on the streaming connection, and as an HTTP 502 error
 envelope for non-streaming requests.
 
-### Append rescues and atomic tool calls
+### Atomic tool calls
 
-`append_retries` (default 0) is the one opt-in class that re-sends behind bytes
-already on the wire. A stream truncated after answer content or a refusal
-reached the client is re-sent with the fresh attempt **appending**, because a
-delivered SSE delta cannot be retracted: the client sees the relayed text prefix
-a second time, which a spec-conforming client accumulates into the same text
-part. Responses-API feeds are never rescued (their per-response sequence numbers
-are documented ordering state) and `finish_reason: length` is the client's own
-token cap.
-
-What keeps that bounded to visible text is `atomic_tool_calls` (default false,
-so a deployment's wire is byte-identical until an operator opts in):
-the generic OpenAI-wire relay withholds every tool-call-bearing event - a
-`tool_calls` delta or a deprecated `function_call` delta - until the stream's
+`atomic_tool_calls` (default false, so a deployment's wire is unchanged until
+an operator opts in) makes a streamed tool call atomic: the generic OpenAI-wire
+relay withholds every tool-call-bearing event - a `tool_calls` delta, a
+deprecated `function_call` delta, or an ambiguous opener such as a `tool_calls`
+key whose value continues on the next `data:` line - until the stream's
 terminator, then releases it verbatim. Translated Anthropic streams, the Cursor
-bridge and Responses-API feeds keep their own framing and never reach it. This matters because a client
-commits a streamed tool call at the **end of the response body**, not at
-`finish_reason`: it enqueues every accumulated tool call, so relaying tool-call
-bytes eagerly can hand the client a call no terminator ever committed, and a
-re-send behind it merges both attempts' arguments for the same tool-call index,
-yielding either a malformed tool call or a spurious execution. Withholding
-makes an uncommitted tool call impossible on the wire.
+bridge and Responses-API feeds keep their own framing and never reach it.
 
-The trade, which is why both settings are opt-in: a provider that ends the body
-with neither `finish_reason` nor `[DONE]` (a real shape - see
-`metrics.ClassifyOutcome`) truncates, and the withheld tool call is then
-discarded with the rest of the truncation instead of being relayed. That is
-safer for execution, since no tool runs from a truncated stream, but it does
-lose a tool call such a provider completed. It also stops tool-call delivery
-from being progressive: the client receives the whole call at the terminator
-rather than as it streams.
+It exists because a client commits a streamed tool call at the **end of the
+response body**, not at `finish_reason`: it enqueues every accumulated tool call
+whose `hasFinished` is unset, and `hasFinished` is only ever initialized to
+false. So eager relay can hand a client a tool call no terminator ever
+confirmed, and a client that executes it runs a tool from a response the model
+never finished. That is measured, not theoretical: a Vercel AI SDK at
+`@ai-sdk/provider-utils` 4.x - the generation the incident client runs - executes
+such a call. It is not universal; a client at `ai@7` parses the same call and
+declines to execute it, and the `openai` SDKs throw before it is usable. The
+generality is why the relay does not rely on any one client's cooperation.
 
-The relay therefore gates the class on a direct observation (`toolBytesOnWire`),
-not an inference from its own buffers, because withholding has two documented
-escape hatches that both put tool-call bytes on the wire: the hold's size bound
-and the newline-free guardrail for a single frame larger than the scanner
-buffer. A stream that took either is not append-rescuable. Which budget claims a
-stream stays disjoint: nothing relayed is `quality_retries`, reasoning-only is
-`thinking_retries`, answer content is `append_retries`.
+Tool-call accounting has a single owner, the set of distinct tool-call ids
+seen on the stream - not a counter any one scan maintains. Two producers feed
+it, and neither can double count another because both register through the same
+id de-duplication. The reassembled SSE event is one: a `tool_calls` array is
+legal SSE spread across several `data:` lines of one event, and a per-line count
+alone would miss every entry, which would make the relay relay a complete tool
+call and simultaneously classify the stream as the `empty_tool_call` degenerate
+class, substituting an error for a tool call it had just sent. The raw `data:`
+line is the other: the event buffer is bounded, and a single tool-call frame
+can be larger than that bound, so a frame the buffer had to drop is still
+counted from the line itself. Every occurrence of a tool-call key within one
+event is scanned, not just the first, because a gateway that drops the blank
+line between two tool-call frames legally merges them into a single event.
 
-Cost, stated plainly: one client request can spend every rescue budget in turn,
-so with all three at their maximum it can drive 1 + 3 + 3 + 3 = 10 upstream
-sends (each billed), on top of the transport-level `max_retries` ladder.
-
-What the record shows is narrower than what was billed, and that gap predates
-this class but the append class widens it. The record is filled by the
-SUCCEEDING attempt alone - `RetryAttempt` carries no usage, tokens or cost, only
-status, class, provider request id and headers - so every absorbed attempt's
-prompt tokens are missing, and for this class so are the answer tokens the
-client actually read. Measured with all three budgets at 1 and a permanently
-truncating upstream: the provider billed 4000 input and 1700 output tokens
-across 4 sends, and the record reports 1000 input and 400 output. Only the
-provider's own `ProviderRequestID` on the absorbed attempt can reconcile it.
-Two further consequences of the same rule: `TTFT` is measured from the final
-attempt, so it excludes the rescue's queueing and backoff entirely, and
-`FinalizeRecord` zeroes `answer_tokens` when the winning attempt ends in
-`finish_reason: tool_calls` without content - which for a rescued turn is a
-record claiming zero answer content for a turn the client did read. The
-absorbed attempt is also booked as a storm failure sample while the record's own
-error predicates call the request a success, so a provider that truncates
-inflates its own storm rate. The
-append class also duplicates the relayed text prefix once per rescue, so the
-duplicated volume grows with the budget. Up to 1 MiB per in-flight stream is
-withheld while a tool call is pending, and `max_concurrent` defaults to
-unlimited, so size it deliberately before enabling this on a busy deployment.
-Withholding does not cover a tool call that arrives AFTER the stream's
-terminator: the region is already released by then, and such a stream is out of
+The trade, which is why it is opt-in. A provider that ends the body with
+neither `finish_reason` nor `[DONE]` - a real shape, see
+`metrics.ClassifyOutcome` - truncates, and the withheld tool call is then
+dropped with the rest of the truncation rather than relayed. That is safer for
+execution but loses a tool call such a provider completed. Tool-call delivery
+also stops being progressive: the client sees the whole call at the terminator.
+The region a tool call opens is bounded by the relay's `toolCallHoldMax`
+(1 MiB), not the 64 KiB terminal cap - tool-call arguments are
+provider-authored and routinely dwarf a terminal region. Past even that bound
+the region commits verbatim, which restores eager behavior for that stream
+alone; a tool call arriving *after* the terminator is likewise relayed
+verbatim, because the region is already released and such a stream is out of
 contract regardless.
 
-`atomic_tool_calls: false` restores eager tool-call relay, and `Validate` then
-refuses `append_retries > 0` outright, so the unsound combination cannot be
-configured.
+Memory: up to 1 MiB per in-flight stream is withheld, on top of the pre-existing
+scanner buffer. The only default cap on concurrency is `max_conns_per_host`
+(512) - `max_concurrent` itself defaults to 0, meaning **unlimited** - so this
+multiplies with the operator's concurrency rather than being bounded by it.
+Size `max_concurrent` deliberately before enabling this on a busy deployment.
+
+Every rescue budget still guarantees the client received no completion-contract
+bytes, which is what makes a re-send invisible. Note what the record therefore
+does not show: `RetryAttempt` carries no usage, tokens or cost, so an absorbed
+attempt's spend is invisible, `TTFT` is measured from the final attempt and so
+excludes any queueing and backoff, and `FinalizeRecord` can zero `answer_tokens`
+when the winning attempt ends in `finish_reason: tool_calls` without content.
+And `Record.ToolCalls` counts what the PROVIDER sent, not what the client was
+given, so it can exceed what was delivered: a truncated stream whose tool call
+was withheld records `ToolCalls: 1` while the client received zero tool-call
+deltas. That is deliberate - the record is the provider's behavior, and a count
+that followed the wire would report a tool call the model did make as one it
+did not.
 
 Neither transparency nor exactly-once upstream execution is unconditional.
 
@@ -325,9 +318,8 @@ never become storm evidence, even while a quota gate is open. A selected 429
 is a storm failure sample but remains a separate rate-limit signal in dashboard
 request health. Configurable response/stream failure detection observes a 2xx
 attempt once when its relay completes, or before an existing quality, thinking
-or append rescue re-send. Apart from the bounded, opt-in append class - which
-duplicates visible text and is why atomic tool calls exist - it never adds a
-replay after meaningful output or native tool execution.
+or thinking rescue re-send. It never adds a replay after meaningful output
+or native tool execution.
 
 An open scope holds new sends until its cooldown expires, then admits one shared
 probe. Failed probes multiply the cooldown, with configurable jitter and a cap;
@@ -355,7 +347,7 @@ it. Manual-mode holds persist like every operator pause.
 
 The ordinary HTTP retry budget remains `max_retries`. Selected failures during
 an active storm may use up to `storm_max_retries` additional attempts across the
-logical request, including quality, thinking and append re-sends. Cursor retains its single-handshake
+logical request, including quality and thinking re-sends. Cursor retains its single-handshake
 behavior when protection is off and uses only the additional storm budget for
 failed fresh handshakes. Exhaustion returns the final upstream failure. Retrying
 inference can repeat upstream execution or billing even when no output arrived;

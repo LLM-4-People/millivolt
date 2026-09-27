@@ -158,9 +158,10 @@ native-format adapters, and model listing.
 Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive
 comments and failure signaling, mid-thinking rescues that append a fresh
-attempt after reasoning-only output, opt-in append rescues that append a fresh
-attempt after answer text (with streamed tool calls withheld until their
-terminator, so a re-send can duplicate visible text but never a tool call),
+attempt after reasoning-only output, opt-in atomic streamed tool calls (a
+tool-call-bearing event is withheld until the stream's terminator, so a client
+never commits a call the model never finished, at the cost of a completed call
+from a provider that sends no terminator),
 optional format translation,
 operator-configured request overrides (a matching body rule rewrites the
 upstream request bytes), operator-configured sub-conversation strip (a matching

@@ -183,11 +183,10 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 
 // TestAnalyzerToolCallRegionOpened gates atomic withholding: the relay must
 // learn that a tool call has begun from the FIRST tool-call byte, not from the
-// id-carrying delta that toolCalls counts. Argument-only continuation deltas
-// carry no id, so a gate keyed on toolCalls would open the withhold region
-// late - after argument bytes already reached the client - and the whole
-// atomicity guarantee would silently not apply. The deprecated function_call
-// shape must open it too.
+// counted call. Argument-only continuation deltas carry no id, so a gate keyed
+// on the count would open the withhold region late - after argument bytes
+// already reached the client - and the whole atomicity guarantee would silently
+// not apply. The deprecated function_call shape must open it too.
 func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -208,9 +207,9 @@ func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
 		}, false},
 		// A bare "[" cannot be told from an empty array until the next data
-		// line, so the region opens conservatively. ToolCallConfirmed is what
-		// lets the relay give the bytes back if it was an empty array.
-		{"a bare unclosed bracket opens it (ambiguous, resolved by ToolCallConfirmed)", []string{
+		// line, so the region opens conservatively: the only cost is that an
+		// empty array also withholds its (empty) event.
+		{"a bare unclosed bracket opens it (ambiguous until the event closes)", []string{
 			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
 		}, true},
 		{"a tool_calls array this line starts but does not close opens it", []string{
@@ -229,126 +228,6 @@ func TestAnalyzerToolCallRegionOpened(t *testing.T) {
 			feedLines(a, c.lines...)
 			if got := a.ToolCallRegionOpened(); got != c.want {
 				t.Fatalf("ToolCallRegionOpened = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// TestAnalyzerToolCallConfirmed separates "the region opened" from "a complete
-// tool call was parsed". The withhold region opens on an ambiguous opener (a
-// multi-line "tool_calls":[ could be an empty array), so the relay needs this
-// to avoid discarding ordinary answer text at a truncation.
-func TestAnalyzerToolCallConfirmed(t *testing.T) {
-	cases := []struct {
-		name  string
-		lines []string
-		want  bool
-	}{
-		{"no tool call is unconfirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}`,
-		}, false},
-		{"a bare unclosed bracket is unconfirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
-		}, false},
-		{"a key with no value yet is unconfirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":`,
-		}, false},
-		{"an empty array is unconfirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
-		}, false},
-		{"a real tool call is confirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
-		}, true},
-		{"a deprecated function_call is confirmed", []string{
-			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
-		}, true},
-		// Confirmation happens at the SSE event boundary, because a tool call
-		// split across data lines is only complete once the event is
-		// reassembled. The blank line is what triggers it, exactly as on the
-		// wire.
-		{"confirmed once the split event is assembled", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
-			`data: {"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
-			``,
-		}, true},
-		{"an unassembled split call is not confirmed yet", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
-			`data: {"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
-		}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a := &Analyzer{}
-			feedLines(a, c.lines...)
-			if got := a.ToolCallConfirmed(); got != c.want {
-				t.Fatalf("ToolCallConfirmed = %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// TestAnalyzerRetryableAppendTruncation gates the opt-in append class. It is
-// the relaxed twin of TestAnalyzerRetryableTruncation: answer content, a tool
-// call, a refusal and a deprecated function_call all QUALIFY here, because the
-// relay (not the analyzer) is what proves no tool-call byte reached the wire.
-// It must stay disjoint from the other two classes so the three budgets never
-// compete for one stream: a nothing-relayed truncation and a reasoning-only
-// truncation are the quality and thinking classes, not this one. A terminator,
-// a Responses-shaped feed (per-response sequence numbers are documented
-// ordering state) and a provider in-band error (its own class) disqualify it.
-func TestAnalyzerRetryableAppendTruncation(t *testing.T) {
-	cases := []struct {
-		name  string
-		lines []string
-		want  bool
-	}{
-		{"relayed content qualifies", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"half "}}]}`,
-		}, true},
-		{"relayed tool call qualifies (the relay gates tool bytes)", []string{
-			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"x"}}]}}]}`,
-		}, true},
-		{"relayed refusal qualifies", []string{
-			`data: {"id":"1","choices":[{"delta":{"refusal":"partial"}}]}`,
-		}, true},
-		{"relayed deprecated function_call qualifies", []string{
-			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
-		}, true},
-		{"nothing relayed stays the quality class", []string{
-			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
-		}, false},
-		{"reasoning-only stays the thinking class", []string{
-			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
-		}, false},
-		{"provider in-band error is its own class", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
-			``,
-			`data: {"error":{"message":"died","type":"overloaded_error","code":"overloaded"}}`,
-		}, false},
-		{"trailing multi-line error disqualifies", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
-			``,
-			`data: {"error":`,
-			`data: {"message":"died","type":"overloaded_error","code":"overloaded"}}`,
-		}, false},
-		{"seen terminator is not a truncation", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
-			`data: [DONE]`,
-		}, false},
-		{"finish_reason length is the client's own cap", []string{
-			`data: {"id":"1","choices":[{"delta":{"content":"half"}}]}`,
-			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"length"}]}`,
-		}, false},
-		{"non-chatlike stream stays out", []string{
-			`data: {"event":"custom","payload":42}`,
-		}, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			a := &Analyzer{}
-			feedLines(a, c.lines...)
-			if got := a.RetryableAppendTruncation(); got != c.want {
-				t.Fatalf("RetryableAppendTruncation = %v, want %v", got, c.want)
 			}
 		})
 	}

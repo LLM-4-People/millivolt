@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,10 +12,9 @@ import (
 )
 
 // Atomic tool calls (config.AtomicToolCalls) withhold every tool-call-bearing
-// event until the stream's terminator, which is what makes the append rescue
-// (config.AppendRetries) sound: an uncommitted tool call can never be on the
-// wire, so a re-send can only duplicate visible text, never merge two
-// attempts' arguments for the same tool-call index.
+// event until the stream's terminator, so an uncommitted tool call can never be
+// on the wire: a client that commits one at end of body can never run a tool
+// from a response the model never finished.
 //
 // The motivating production record: 200, stream, 5 answer tokens, one `bash`
 // tool call, no completion marker, retries 0. These tests pin the whole
@@ -109,127 +107,54 @@ func TestAtomicToolCallReleasedVerbatimAtTerminator(t *testing.T) {
 }
 
 // TestAtomicToolCallNeverReachesClientOnTruncation is the production incident
-// as a test. The stream relays text and a COMPLETE tool call, then dies with
-// no completion marker. With the append class enabled the request is
-// transparently re-sent, and the invariant that makes it safe is asserted
-// directly: the client never received attempt 1's tool call, so the recovered
-// turn carries exactly one tool call and no merged argument string.
+// as a test. The stream relays text and a COMPLETE tool call, then dies with no
+// completion marker. Withholding means the uncommitted tool call never reaches
+// the client at all - so no client can commit and execute it, which is the
+// hazard this setting exists to remove (a Vercel AI SDK at provider-utils 4.x
+// does exactly that with the call eagerly relayed). The turn still fails, and
+// says so: the truncation surfaces in-band and no upstream re-send happens.
 func TestAtomicToolCallNeverReachesClientOnTruncation(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		if calls.Add(1) == 1 {
-			w.Header().Set("X-Request-Id", "req-first")
-			w.WriteHeader(200)
-			w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
-			w.(http.Flusher).Flush()
-			// Clean EOF, no finish_reason, no [DONE].
-			return
-		}
-		w.Header().Set("X-Request-Id", "req-second")
 		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame + atomicStopFrame + atomicDoneFrame))
+		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
 		w.(http.Flusher).Flush()
+		// Clean EOF, no finish_reason, no [DONE].
 	}))
 	defer upstream.Close()
 
 	cfg := config.Default()
 	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	status, got := streamRequest(t, srv, upstream)
-	if status != 200 {
-		t.Fatalf("stream status = %d, want 200", status)
-	}
-	// The load-bearing assertion: the truncated attempt's tool call was never
-	// written, so the client holds exactly one and its arguments are intact.
-	if n := toolCallCount(got); n != 1 {
-		t.Fatalf("client saw %d tool-call frames, want 1 (the uncommitted one must never be relayed): %s", n, got)
-	}
-	if !strings.Contains(got, `{\"command\":\"ls -la\"}`) {
-		t.Fatalf("the recovered tool call's arguments must be intact: %s", got)
-	}
-	// The documented cost: the relayed text prefix IS duplicated.
-	if n := strings.Count(got, atomicTextFrame); n != 2 {
-		t.Fatalf("text prefix count = %d, want 2 (the append class duplicates visible text): %s", n, got)
-	}
-	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("the recovered request must not surface the truncation: %s", got)
-	}
-	if strings.Count(got, "data: [DONE]") != 1 {
-		t.Fatalf("exactly one [DONE] expected: %s", got)
-	}
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (truncated absorbed + append rescue)", n)
-	}
-	recs := waitForRecord(t, buf, 1)
-	rec := recs[0]
-	if rec.IsError() {
-		t.Fatalf("recovered request must not be an error: %+v", rec)
-	}
-	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorCode != metrics.CodeTruncated {
-		t.Fatalf("absorbed attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
-	}
-	if rec.ProviderRequestID != "req-second" {
-		t.Fatalf("record must carry the re-send's provider metadata, got %q", rec.ProviderRequestID)
-	}
-}
-
-// TestAtomicToolCallSplitFinishReasonDoesNotRescueWithHeldToolCall covers the
-// invisible-terminator case: a finish_reason split across two data lines of
-// one event is never seen by the analyzer, so the stream classifies as
-// truncated even though the provider did commit the tool call. Withholding is
-// what keeps that safe - the committed tool call is still behind the hold, so
-// the client must end up with none from the absorbed attempt rather than a
-// tool call no terminator ever committed.
-func TestAtomicToolCallSplitFinishReasonDoesNotRescueWithHeldToolCall(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if calls.Add(1) == 1 {
-			w.WriteHeader(200)
-			// A finish_reason whose KEY ends one data line and whose VALUE is on
-			// the next: the analyzer scans per line, so neither line shows it a
-			// terminator and the stream classifies as truncated even though the
-			// provider did commit the tool call. Withholding is what keeps that
-			// safe - the committed call is still behind the hold.
-			w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame +
-				`data: {"id":"A","choices":[{"delta":{},"finish_reason":` + "\n" +
-				`data: "tool_calls"}]}` + "\n\n"))
-			w.(http.Flusher).Flush()
-			return
-		}
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicStopFrame + atomicDoneFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
 	if n := toolCallCount(got); n != 0 {
-		t.Fatalf("client saw %d tool-call frames, want 0 (attempt 1's tool call was withheld and dropped): %s", n, got)
+		t.Fatalf("client saw %d tool-call deltas, want 0: an uncommitted tool call must never be relayed: %s", n, got)
 	}
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (rescued)", n)
+	if !strings.Contains(got, atomicTextFrame) {
+		t.Fatalf("already-relayed answer content must still reach the client: %s", got)
+	}
+	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
+		t.Fatalf("the truncation must surface in-band: %s", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no re-send is configured)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if !recs[0].IsError() || recs[0].ErrorCode != metrics.CodeTruncated {
+		t.Fatalf("record must carry the truncation class: %+v", recs[0])
 	}
 }
 
 // TestAtomicToolCallsDisabledRelaysEagerly pins the operator escape hatch: with
 // atomic tool calls off, a tool call is relayed as it streams (the behavior
-// that predates this feature). The refusal half of the soundness argument is
-// NOT asserted here - this test leaves the append budget at 0, so there is no
-// rescue to refuse; TestAppendRetriesRefusedWhenAtomicToolCallsOff is the test
-// that forces the budget on and proves the relay refuses.
+// that predates this feature). No rescue budget applies either way here, since
+// the client received a tool call and every budget guarantees the client
+// received no completion-contract bytes.
 func TestAtomicToolCallsDisabledRelaysEagerly(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +168,6 @@ func TestAtomicToolCallsDisabledRelaysEagerly(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.AtomicToolCalls = false
-	cfg.AppendRetries = 0
 	buf := metrics.NewBuffer(100)
 	srv := httptest.NewServer(New(cfg, buf))
 	defer srv.Close()
@@ -256,134 +180,7 @@ func TestAtomicToolCallsDisabledRelaysEagerly(t *testing.T) {
 		t.Fatalf("the truncation must surface in-band: %s", got)
 	}
 	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (no rescue without atomic tool calls)", n)
-	}
-}
-
-// TestAppendRetriesRefusedWhenAtomicToolCallsOff proves the relay's own
-// tool-call proof works, independently of the config gate: the combination is
-// forced onto the Server (bypassing Validate) and the rescue still must not
-// fire, because tool-call bytes reached the wire.
-func TestAppendRetriesRefusedWhenAtomicToolCallsOff(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = false
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	// Deliberately skip Validate: this asserts the RELAY's gate, not the
-	// config gate. A rescue here would be a tool-call double-execution.
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (the relay must refuse to append behind a relayed tool call)", n)
-	}
-	if n := toolCallCount(got); n != 1 {
-		t.Fatalf("client saw %d tool-call frames, want 1: %s", n, got)
-	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("the truncation must surface in-band: %s", got)
-	}
-}
-
-// TestAppendRetriesTextOnlyTruncationRescued: with no tool call in the stream
-// there is nothing to withhold, so the class behaves like the other rescues -
-// the client sees the duplicated text prefix and one terminator.
-func TestAppendRetriesTextOnlyTruncationRescued(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if calls.Add(1) == 1 {
-			w.WriteHeader(200)
-			w.Write([]byte(atomicRoleFrame + atomicTextFrame))
-			w.(http.Flusher).Flush()
-			return
-		}
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicStopFrame + atomicDoneFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (rescued)", n)
-	}
-	if n := strings.Count(got, atomicTextFrame); n != 2 {
-		t.Fatalf("text prefix count = %d, want 2: %s", n, got)
-	}
-	if strings.Count(got, "data: [DONE]") != 1 {
-		t.Fatalf("exactly one [DONE] expected: %s", got)
-	}
-	recs := waitForRecord(t, buf, 1)
-	if recs[0].IsError() {
-		t.Fatalf("recovered request must not be an error: %+v", recs[0])
-	}
-}
-
-// TestAppendRetriesClosesPendingClientEvent pins the SSE framing repair: when
-// the truncation lands between a data line and its blank-line terminator, the
-// rescue must close the client's open event, or the fresh attempt's first
-// frame is joined into it and the client parses one invalid event.
-func TestAppendRetriesClosesPendingClientEvent(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		if calls.Add(1) == 1 {
-			w.WriteHeader(200)
-			// Note: no trailing blank line - the event is left open.
-			w.Write([]byte(atomicRoleFrame + atomicTextFrame + `data: {"id":"A","choices":[{"delta":{"content":"open"}}]}` + "\n"))
-			w.(http.Flusher).Flush()
-			return
-		}
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicStopFrame + atomicDoneFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	// SSE concatenates consecutive data: lines of one event, so the assertion
-	// has to be at EVENT level: every event's accumulated payload must be a
-	// single JSON value. Without the closing blank line the fresh attempt's
-	// first frame joins attempt 1's open event and the client parses one
-	// invalid payload - which a per-line check would not notice, because each
-	// line is individually well-formed JSON.
-	for i, ev := range sseEvents(got) {
-		if ev == "[DONE]" {
-			continue
-		}
-		var v map[string]any
-		if err := json.Unmarshal([]byte(ev), &v); err != nil {
-			t.Fatalf("SSE event %d is not a single JSON value (%v): %q\nfull wire:\n%s", i, err, ev, got)
-		}
-	}
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (rescued)", n)
+		t.Fatalf("upstream calls = %d, want 1 (no rescue budget is configured)", n)
 	}
 }
 
@@ -412,76 +209,6 @@ func sseEvents(wire string) []string {
 	return out
 }
 
-// TestAppendRetriesExhaustedSurfacesInBand: a spent budget surfaces the
-// truncation in-band instead of looping, and the withheld tool call is never
-// written even on the final attempt.
-func TestAppendRetriesExhaustedSurfacesInBand(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := toolCallCount(got); n != 0 {
-		t.Fatalf("client saw %d tool-call frames, want 0 (never relayed without a terminator): %s", n, got)
-	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("an exhausted budget must surface the truncation in-band: %s", got)
-	}
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (one rescue, then exhausted)", n)
-	}
-	recs := waitForRecord(t, buf, 1)
-	rec := recs[0]
-	if !rec.IsError() || rec.ErrorCode != metrics.CodeTruncated {
-		t.Fatalf("record must carry the truncation class: %+v", rec)
-	}
-	if rec.Retries != 1 || len(rec.Attempts) != 1 {
-		t.Fatalf("the absorbed attempt must still be logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
-	}
-}
-
-// TestAppendRetriesBudgetBoundsUpstreamCalls pins the worst case: a permanently
-// truncating upstream costs exactly 1+AppendRetries sends, never more.
-func TestAppendRetriesBudgetBoundsUpstreamCalls(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = config.AppendRetriesMax
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := calls.Load(); n != int32(config.AppendRetriesMax)+1 {
-		t.Fatalf("upstream calls = %d, want %d (1 initial + budget)", n, config.AppendRetriesMax+1)
-	}
-	if n := toolCallCount(got); n != 0 {
-		t.Fatalf("client saw %d tool-call frames, want 0: %s", n, got)
-	}
-}
-
 // truncateForMsg bounds a failure message so a short wire cannot panic the
 // test that reports it.
 func truncateForMsg(s string) string {
@@ -491,152 +218,86 @@ func truncateForMsg(s string) string {
 	return s[:400] + "...(truncated)"
 }
 
-// TestAtomicToolCallOversizedFrameCommitsVerbatim pins the OTHER memory bound:
-// a single tool-call frame larger than the scanner buffer is newline-free, so
-// the relay's newline-free guardrail relays it before any withhold region can
-// open, and the append rescue must then refuse. The hold-bound overflow is the
-// sibling case, covered by TestToolCallInsideOversizedHoldIsNotRescued.
+// TestAtomicToolCallOversizedFrameCommitsVerbatim pins the memory bounds a
+// single tool-call frame can exceed, and what each one means. A frame whose
+// data line lands between the analyzer's per-EVENT buffer cap and the relay's
+// scanner line guardrail is still whole and legal: the event counter silently
+// dropped the line, so accounting must fall back to the raw data line or the
+// record claims no tool call for a stream the client just received one from.
+// A frame past the scanner guardrail is newline-free for long enough that the
+// guardrail relays it before any withhold region can open, and the truncation
+// still surfaces in-band because the region never opened at all.
+//
+// The two cases differ in whether the in-band truncation appears, and that is
+// the design, not an accident: the first case overflows the tool-call hold
+// bound, and an overflow is commit-to-verbatim mode (nothing may be
+// substituted on top of bytes the client already has), while the second never
+// opens a region.
 func TestAtomicToolCallOversizedFrameCommitsVerbatim(t *testing.T) {
-	var calls atomic.Int32
-	huge := strings.Repeat("x", toolCallHoldMax+4096)
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame))
-		w.(http.Flusher).Flush()
-		// One enormous tool-call argument frame: past the hold bound.
-		w.Write([]byte(`data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"` + huge + `"}}]}}]}` + "\n\n"))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := toolCallCount(got); n != 1 {
-		t.Fatalf("an oversized tool call must commit verbatim, saw %d frames", n)
+	cases := []struct {
+		name      string
+		argsSize  int
+		wantTrunc bool
+		wantCount int
+	}{
+		// eventDataMax (the analyzer's event buffer) and sseScannerBufMax (the
+		// relay's line guardrail) are both 1 MiB, so the window between them is
+		// the scanner's own slack; land in the middle of it. The call is whole
+		// there, so a producer can see it.
+		{name: "whole frame past the event buffer cap", argsSize: oversizedArgs, wantCount: 1},
+		// Past the guardrail the relay splits the frame mid-line, so NO producer
+		// can see a whole call: neither the raw line (there is none) nor the
+		// event buffer (too large). That is a known, documented limit of the
+		// guardrail, not something this test can close; what it does guarantee
+		// is that the client still receives the call verbatim and the
+		// truncation still surfaces.
+		{name: "newline-free frame past the scanner guardrail", argsSize: toolCallHoldMax + 4096, wantTrunc: true},
 	}
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (the overflow puts tool bytes on the wire, so no rescue)", n)
-	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("the truncation must surface in-band after a verbatim commit: %s", truncateForMsg(got))
-	}
-}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.argsSize <= 1<<20 {
+				t.Fatalf("the fixture must sit past the analyzer's event buffer cap, got %d", c.argsSize)
+			}
+			var calls atomic.Int32
+			huge := strings.Repeat("x", c.argsSize)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(200)
+				w.Write([]byte(atomicRoleFrame + atomicTextFrame))
+				w.(http.Flusher).Flush()
+				// One enormous tool-call argument frame: past the analyzer's
+				// event buffer; past the scanner's line guardrail too in the
+				// second case.
+				w.Write([]byte(`data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"` + huge + `"}}]}}]}` + "\n\n"))
+				w.(http.Flusher).Flush()
+			}))
+			defer upstream.Close()
 
-// TestAppendRetriesIgnoresFinishedStream: a cleanly terminated stream is never
-// a truncation, so a committed tool call is relayed and never re-sent.
-func TestAppendRetriesIgnoresFinishedStream(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicRoleFrame + atomicTextFrame + atomicToolFrame + atomicStopFrame + atomicDoneFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
+			cfg := config.Default()
+			cfg.AtomicToolCalls = true
+			buf := metrics.NewBuffer(100)
+			srv := httptest.NewServer(New(cfg, buf))
+			defer srv.Close()
 
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = config.AppendRetriesMax
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := toolCallCount(got); n != 1 {
-		t.Fatalf("a completed stream must relay its tool call once, saw %d: %s", n, got)
-	}
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (a terminator is never a truncation)", n)
-	}
-	if !strings.Contains(got, `"finish_reason":"tool_calls"`) {
-		t.Fatalf("the finish chunk must be relayed: %s", got)
-	}
-}
-
-// TestAppendRetriesIgnoresProviderInBandError: a provider in-band error is its
-// own class; the append class must not compound it.
-func TestAppendRetriesIgnoresProviderInBandError(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		w.Write([]byte(atomicTextFrame))
-		w.(http.Flusher).Flush()
-		w.Write([]byte(`data: {"error":{"message":"bad key","type":"authentication_error","code":"invalid_api_key"}}` + "\n\n"))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 3
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if !strings.Contains(got, "invalid_api_key") {
-		t.Fatalf("the provider's own error must relay verbatim: %s", got)
-	}
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (a provider error is not this class)", n)
-	}
-}
-
-// TestAtomicToolCallRefusalDeltaStaysAnswerShaped: a refusal is visible text, not
-// a tool call, so it is NOT withheld - the client sees it as it streams and the
-// append class may duplicate it (visible, not dangerous).
-func TestAtomicToolCallRefusalDeltaStaysAnswerShaped(t *testing.T) {
-	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(200)
-		refusal := atomicRoleFrame + `data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help"}}]}` + "\n\n"
-		if calls.Add(1) == 1 {
-			w.Write([]byte(refusal))
-			w.(http.Flusher).Flush()
-			return
-		}
-		w.Write([]byte(refusal + atomicStopOnlyFrame + atomicDoneFrame))
-		w.(http.Flusher).Flush()
-	}))
-	defer upstream.Close()
-
-	cfg := config.Default()
-	cfg.AtomicToolCalls = true
-	cfg.AppendRetries = 1
-	buf := metrics.NewBuffer(100)
-	srv := httptest.NewServer(New(cfg, buf))
-	defer srv.Close()
-
-	_, got := streamRequest(t, srv, upstream)
-	if n := calls.Load(); n != 2 {
-		t.Fatalf("upstream calls = %d, want 2 (a refusal is append-rescuable text)", n)
-	}
-	// The duplication this class documents, asserted rather than assumed: the
-	// refusal is visible text, so both attempts' copies reach the client.
-	if n := strings.Count(got, "I cannot help"); n != 2 {
-		t.Fatalf("refusal count = %d, want 2 (the append class duplicates visible text): %s", n, got)
-	}
-	if strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`) {
-		t.Fatalf("the recovered request must not surface the truncation: %s", got)
-	}
-	// A refusal is answer-SHAPED but not metrics answer content, so a
-	// refusal-only stream is the pre-existing empty_completion class and its
-	// terminal region is substituted rather than relayed. That classification
-	// is unchanged by this feature; what the append class guarantees is that
-	// the TRUNCATION is not what the operator sees.
-	if !strings.Contains(got, `"code":"`+metrics.CodeEmptyCompletion+`"`) {
-		t.Fatalf("a refusal-only stream keeps its empty_completion class: %s", got)
+			_, got := streamRequest(t, srv, upstream)
+			if n := toolCallCount(got); n != 1 {
+				t.Fatalf("an oversized tool call must commit verbatim, saw %d frames", n)
+			}
+			if n := calls.Load(); n != 1 {
+				t.Fatalf("upstream calls = %d, want 1 (the call reached the wire, so no rescue can follow it)", n)
+			}
+			truncSurfaced := strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`)
+			if truncSurfaced != c.wantTrunc {
+				t.Fatalf("in-band truncation surfaced = %v, want %v", truncSurfaced, c.wantTrunc)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if recs[0].ToolCalls != c.wantCount {
+				t.Fatalf("record ToolCalls = %d, want %d: the analyzer dropped this data line, so the per-line producer is the only one that saw the call", recs[0].ToolCalls, c.wantCount)
+			}
+			if c.wantCount == 1 && (len(recs[0].ToolNames) != 1 || recs[0].ToolNames[0] != "bash") {
+				t.Fatalf("record ToolNames = %v, want [bash]", recs[0].ToolNames)
+			}
+		})
 	}
 }
