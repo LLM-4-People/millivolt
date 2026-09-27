@@ -169,16 +169,34 @@ func newRestarter(deps *restartDeps) *restarter {
 }
 
 // findModuleRoot locates the Go module root this binary was built from, via
-// the compile-time source path of this file (absolute unless built with
-// -trimpath, which cannot self-locate its source - restart then stays
-// unavailable and says so, never guesses).
+// the compile-time source path of this file.
 func findModuleRoot() (string, string) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
 		return "", "cannot locate own source path"
 	}
+	return moduleRootForSource(file)
+}
+
+// moduleRootForSource is findModuleRoot's decision on one compile-time source
+// path, split out so the -trimpath shape is testable without producing a
+// trimmed binary. A -trimpath build records a MODULE-RELATIVE path, which
+// cannot be resolved from any working directory, so that case is named as such
+// rather than reported as a moved source: the two have opposite remedies
+// (rebuild the binary vs. find the checkout). Self-restart stays unavailable
+// in both, and never guesses a root.
+func moduleRootForSource(file string) (string, string) {
+	if !filepath.IsAbs(file) {
+		return "", trimpathUnavailReason
+	}
 	return moduleRootFrom(file)
 }
+
+// trimpathUnavailReason is the honest diagnosis for a -trimpath build: the
+// binary has no source path to walk up, so the fix is a rebuild without the
+// flag or an external process manager, not a hunt for a moved checkout.
+const trimpathUnavailReason = "built with -trimpath, so the binary cannot locate its own source; " +
+	"self-restart is unavailable (restart via your process manager)"
 
 func moduleRootFrom(sourceFile string) (string, string) {
 	if _, err := os.Stat(sourceFile); err != nil {
@@ -249,6 +267,16 @@ func (rs *restarter) removeWatcher(ch chan map[string]any) {
 		close(ch)
 	}
 	rs.mu.Unlock()
+}
+
+// EligibilitySnapshot is the boot-time answer the dashboard renders before the
+// menu is ever opened: {available, reason}. It is deliberately tiny and
+// immutable - unlike the live choreography status - so a page that never opens
+// the menu still knows whether to OFFER the action at all.
+func (rs *restarter) EligibilitySnapshot() any {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return map[string]any{"available": rs.available(), "reason": rs.availReason()}
 }
 
 // available reports whether a restart can even be attempted (source located

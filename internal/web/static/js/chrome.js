@@ -4633,9 +4633,10 @@ function restartInProgress() {
 // restart started in another tab. Status refreshes cannot unlock a local run.
 function syncRestartControls() {
   const active = restartInProgress();
+  const unavailable = restartServerState.available === false;
   const btn = $('btn-restart-now');
   if (btn) {
-    btn.disabled = active || restartServerState.available === false;
+    btn.disabled = active || unavailable;
     btn.textContent = active ? 'Restarting…' : 'Restart now';
     btn.setAttribute('aria-busy', String(active));
   }
@@ -4646,6 +4647,27 @@ function syncRestartControls() {
     trigger.title = active ? 'Restarting - view progress' : 'Restart';
     trigger.setAttribute('aria-label', trigger.title);
   }
+  // A binary that cannot restart is not offered at all: the whole control and
+  // its menu leave the row (the wrap is the unit - the menu means nothing
+  // without its trigger, and an empty wrap would hold the row's gap open). A
+  // run in progress keeps it reachable so progress can still be reopened. The
+  // header's title cannot carry the reason once it is hidden; the reason rides
+  // the status line instead (fetchRestartStatus), where an attempt reaches it.
+  const wrap = $('restart-wrap');
+  if (wrap) wrap.hidden = unavailable && !active;
+}
+
+// applyRestartState folds the bootstrap's boot-time eligibility into the
+// restart state and re-syncs the controls, so a page that never opens the menu
+// still knows whether to OFFER the action. The verdict rides the bootstrap the
+// page already loads: no extra round trip, and a payload without the section
+// (or without a boolean available) leaves the current behaviour alone. Only
+// the verdict is adopted - the accompanying reason is rendered where an
+// attempt reaches it (the menu's status line, and the server's own refusal).
+function applyRestartState(st) {
+  if (!st || typeof st.available !== 'boolean') return;
+  restartServerState = { ...restartServerState, available: st.available };
+  syncRestartControls();
 }
 
 // RESTART_STEPS is the visible choreography. `rank` matches the server's

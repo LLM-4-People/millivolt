@@ -3373,8 +3373,36 @@ async function main() {
   restartState.status = { available: false, reason: 'source unavailable' };
   await w.fetchRestartStatus();
   check('unavailable restart stays disabled', restartAction.disabled);
+  // A binary that can never restart is not OFFERED at all: the control and its
+  // menu leave the header row (an empty wrap would hold the row's gap open),
+  // and the server's own diagnosis is the status line an attempt would read.
+  const restartWrap = d.getElementById('restart-wrap');
+  check('an ineligible restart is not offered in the header, and its reason is what the menu would say',
+    restartWrap && restartWrap.hidden &&
+    d.getElementById('restart-count').textContent === 'source unavailable' &&
+    d.getElementById('restart-count').dataset.err === '1');
+  // A run in progress keeps the control reachable, so its progress can be
+  // reopened; the verdict only withholds the OFFER.
+  w.applyRestartEvent({ phase: 'draining', rank: 1, available: false, reason: 'source unavailable' });
+  check('a restart in progress keeps the control reachable for its progress',
+    !restartWrap.hidden && d.getElementById('btn-restart').hasAttribute('data-busy') && restartAction.disabled);
+  w.applyRestartEvent({ phase: 'idle', rank: -1, available: false, reason: 'source unavailable', error: '' });
+  check('an idle ineligible restart withholds the control again', restartWrap.hidden);
+  // The boot payload is the only pre-menu signal. An absent or unusable
+  // section changes nothing: the control stays exactly as the last verdict
+  // left it, so a build that never reports eligibility is never worse off
+  // than today.
+  w.applyRestartState({ available: true, reason: '' });
+  w.applyRestartState(null);
+  w.applyRestartState({ reason: 'no verdict here' });
+  check('a bootstrap without a verdict keeps the control', !restartWrap.hidden);
+  w.applyRestartState({ available: false, reason: 'built with -trimpath, so the binary cannot locate its own source; self-restart is unavailable (restart via your process manager)' });
+  check('the bootstrap fold withholds the control for an ineligible binary', restartWrap.hidden);
+  w.applyRestartState({ available: true, reason: '' });
+  check('the bootstrap fold offers the control for an eligible binary', !restartWrap.hidden);
   restartState.status = {};
   await w.fetchRestartStatus();
+  check('an available status offers the control again', !restartWrap.hidden);
   // The refusal path through operatorErrorBody: a non-2xx whose body is not
   // JSON-with-an-error (a plain-text operator denial, an HTML 502) must
   // reject with the restart site's designed fallback text, marked as a
@@ -5549,6 +5577,52 @@ async function main() {
         check('later full resync fetches fresh state rather than reusing HTML seed', bootstrapFetches === 1);
       }
       sw.close();
+    }
+  }
+
+  // The Restart control's eligibility rides the payload the page ALREADY
+  // loads: a fresh page must decide before the menu is ever opened, without a
+  // second round trip. A -trimpath image (no source tree, no go toolchain)
+  // therefore never paints the control at all, while a build that reports
+  // nothing keeps today's behaviour.
+  {
+    const base = {
+      dashboard_version: TEST_DASHBOARD_VERSION, feed_id: 'restart-seed', seq: 1, pending_revision: 0,
+      incremental: false, records: [mkRec('restart-seed')], in_flight_records: [],
+      counters: {in_flight: 0, total_requests: 1, total_errors: 0},
+      kpi: {requests: 1, errors: 0}, dash: {}, model_canon: {rules: []},
+    };
+    const trimpath = 'built with -trimpath, so the binary cannot locate its own source; ' +
+      'self-restart is unavailable (restart via your process manager)';
+    for (const [label, restart] of [
+      ['ineligible', {available: false, reason: trimpath}],
+      ['eligible', {available: true, reason: ''}],
+      ['silent', undefined],
+    ]) {
+      let bootstrapFetches = 0;
+      const seed = restart ? {...base, restart} : base;
+      const isolated = dashboardDOM(assembleHTML(seed), {...pageOptions,
+        beforeParse(win) {
+          pageOptions.beforeParse(win);
+          const fallback = win.fetch;
+          win.fetch = (url, options) => {
+            if (String(url).includes('/metrics/bootstrap')) bootstrapFetches++;
+            return fallback(url, options);
+          };
+          win.EventSource = function() {
+            return {readyState: 1, addEventListener() {}, close() {}};
+          };
+        },
+      });
+      await sleep(100);
+      const wrap = isolated.window.document.getElementById('restart-wrap');
+      check(`${label} seed decides the Restart control from the payload it already loads`,
+        bootstrapFetches === 0 && !!wrap && wrap.hidden === !!(restart && restart.available === false));
+      if (label === 'ineligible') {
+        check('the ineligible verdict also keeps the action itself disabled',
+          isolated.window.document.getElementById('btn-restart-now').disabled);
+      }
+      isolated.window.close();
     }
   }
 
