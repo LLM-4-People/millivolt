@@ -143,7 +143,9 @@ models_discovery_max_bytes: 8MiB
 #   type: int · range 1..1000 · default 100
 models_discovery_max_pages: 100
 
-# Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
+# HTTP/1.1 connections per upstream host. Go's HTTP/2 client never reads this, so an h2
+# upstream multiplexes every stream onto one connection; use max_concurrent to bound
+# those.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 512
 max_conns_per_host: 512

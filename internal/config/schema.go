@@ -137,7 +137,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Maximum upstream model responses per discovery, including a unary RPC and optional enrichment. Limits are captured once, never reset between pages.",
 			Kind: KindInt, HotReload: true, Min: num(ModelsDiscoveryMaxPagesMin), Max: num(ModelsDiscoveryMaxPagesMax)},
 		{Key: "max_conns_per_host", Category: "upstream", Label: "Max conns per host",
-			Help: "Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.",
+			Help: "HTTP/1.1 connections per upstream host. Go's HTTP/2 client never reads this, so an h2 upstream multiplexes every stream onto one connection; use max_concurrent to bound those.",
 			Kind: KindInt, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},
 		{Key: "max_idle_conns", Category: "upstream", Label: "Max idle conns",
 			Help: "Process-wide idle connection pool.",

@@ -192,14 +192,19 @@ type Config struct {
 	// terminator. The region a tool call opens is bounded by the relay's
 	// toolCallHoldMax (1 MiB) rather than the terminal cap, and past even that
 	// bound the region commits verbatim, restoring eager behavior for that
-	// stream alone.
+	// stream alone - after which no rescue may follow those bytes and the
+	// stream's class is still surfaced in-band behind them.
 	//
-	// Memory: up to toolCallHoldMax per in-flight stream is withheld, on top of
-	// the pre-existing scanner buffer. The only default cap on concurrency is
-	// max_conns_per_host (512) - max_concurrent itself defaults to 0, meaning
-	// UNLIMITED - so this setting multiplies with the operator's concurrency
-	// rather than being bounded by it. Size max_concurrent deliberately before
-	// enabling it on a busy deployment.
+	// Memory: a 1 MiB withhold region retains about 3 MiB per in-flight
+	// stream, not 1 - the region's bytes, the relay's line buffer and the
+	// analyzer's per-event buffer are all live and all the same size. Measured
+	// at 64 and 256 concurrent streams: 193 MiB and 772 MiB, so 1,000 streams
+	// is about 3 GiB. There is no default ceiling on that product and
+	// max_conns_per_host does not provide one: Go's HTTP/2 client ignores that
+	// field, so against any HTTPS upstream that negotiates h2 the real bound is
+	// the provider's own concurrent-stream limit. max_concurrent itself
+	// defaults to 0, meaning UNLIMITED. Size max_concurrent deliberately
+	// before enabling this on a busy deployment.
 	// Hot-reload applies to new streams. The generic OpenAI-wire relay only:
 	// translated Anthropic streams, the Cursor bridge and Responses-API feeds
 	// keep their own framing and are unaffected.

@@ -1004,8 +1004,11 @@ upstream failures. HTTP 429 counts requests that encountered a final or retried
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
-received and aborted around), and counts as the provider error it is. Zero
-explorer health badges are hidden independently. Error-dimension headline
+received and aborted around), and counts as the provider error it is. A close
+the SERVER initiated is not a client cancellation at all and is never recorded
+as 499: the graceful-shutdown abort carries 503 + `server_shutdown`, so a request
+the proxy itself cut short shows as the failure it is instead of a clean one.
+Zero explorer health badges are hidden independently. Error-dimension headline
 counts can count error occurrences, so do not treat every displayed error
 number as the same metric.
 

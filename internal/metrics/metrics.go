@@ -355,8 +355,9 @@ func (r *Record) IsError() bool {
 		return absorbedServerFailure(r.Attempts)
 	}
 	// A structured error classified by the proxy (queue_full,
-	// upstream_unreachable, stream_read_error, transform_error, or the
-	// provider's parsed error type) is always a genuine failure.
+	// upstream_unreachable, stream_read_error, server_shutdown,
+	// transform_error, or the provider's parsed error type) is always a genuine
+	// failure.
 	if r.ErrorType != "" {
 		return true
 	}

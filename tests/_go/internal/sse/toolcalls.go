@@ -251,3 +251,59 @@ func toolCallArrayLine(n int) []byte {
 	}
 	return append(b, `]}}]}`...)
 }
+
+// TestToolCallShapeInAnyByteRun pins the fragment producer, the third way a
+// tool-call shape can reach the analyzer. Feed owns a whole `data:` line and
+// returns immediately for anything else, so a call whose key sits past the
+// relay's 1 MiB newline-free line guardrail - or in the trailing partial such a
+// split leaves behind - was invisible: the relay then believed the client held
+// no completion-contract bytes and re-sent the request behind the call it had
+// already written. FeedFragment scans the raw run with the same key vocabulary,
+// so the same logical call is recognized split or whole, and it must recognize
+// nothing else: a null or empty decoy is what a provider's role chunk carries,
+// and a fragment that over-reports one would withhold a region for a stream that
+// called no tool and suppress its void class.
+func TestToolCallShapeInAnyByteRun(t *testing.T) {
+	const call = `"tool_calls":[{"index":0,"id":"c0","function":{"name":"bash","arguments":"{}"}}]`
+	cases := []struct {
+		name     string
+		run      string
+		wantOpen bool
+		wantCall int
+	}{
+		{name: "whole array inside a fragment", run: `ll",` + call + `}}]}`, wantOpen: true, wantCall: 1},
+		{name: "an array this run does not close", run: `ll","tool_calls":[{"index":0,"id":"c0"`, wantOpen: true},
+		{name: "a lone call serialized as an object", run: `,"tool_calls":{"index":0,"id":"c0","function":{"name":"bash"}}`,
+			wantOpen: true, wantCall: 1},
+		{name: "a deprecated function_call", run: `,"function_call":{"name":"lookup","arguments":"{}"}}]}`,
+			wantOpen: true, wantCall: 1},
+		{name: "a null decoy", run: `,"tool_calls":null}}]}`},
+		{name: "an empty array decoy", run: `,"tool_calls":[]}}]}`},
+		{name: "an empty function_call decoy", run: `,"function_call":""}}]}`},
+		{name: "content that only mentions the key in a string", run: `,"content":"see \"tool_calls\": here"}]}`},
+		{name: "no tool-call key at all", run: `,"content":"hello"}}]}`},
+		{
+			// Feed owns a whole data line; running both producers over it would
+			// decode one array twice.
+			name: "a whole data line is left to Feed",
+			run:  `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"bash"}}]}}]}`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var a Analyzer
+			a.FeedFragment([]byte(c.run))
+			if got := a.ToolCallRegionOpened(); got != c.wantOpen {
+				t.Fatalf("ToolCallRegionOpened = %v, want %v for run %q", got, c.wantOpen, c.run)
+			}
+			rec := new(metrics.Record)
+			a.Fill(rec)
+			if rec.ToolCalls != c.wantCall {
+				t.Fatalf("ToolCalls = %d, want %d for run %q", rec.ToolCalls, c.wantCall, c.run)
+			}
+			if c.wantCall == 0 && a.OutcomeCode() == metrics.CodeEmptyToolCall {
+				t.Fatalf("a run with no real call must not be classified as a call: %q", c.run)
+			}
+		})
+	}
+}

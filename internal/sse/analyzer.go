@@ -626,6 +626,54 @@ func (a *Analyzer) registerFunctionCall(value []byte) {
 	}
 }
 
+// FeedFragment ingests a byte run that is NOT a whole `data:` line: a fragment
+// of one line the relay's newline-free guardrail split, or the tail of one whose
+// head the relay already relayed. Feed owns a whole data line and returns
+// immediately for anything else, so a call whose key sits past the relay's 1 MiB
+// line guardrail was invisible to the analyzer - every fragment after the first
+// begins mid-JSON with no `data:` prefix. That blindness is not cosmetic: it
+// left the relay believing the client held no completion-contract bytes, so a
+// rescue re-sent the request behind tool-call bytes already on the wire, and a
+// void class was reported for a call that was in flight.
+//
+// The shape test is Feed's own, key for key, so the same logical call is
+// recognized whether it arrived whole or split: a non-empty `tool_calls` array, a
+// lone call serialized as an object, a `function_call` with a present value, and
+// - the fragment twin of a value that continues on the next data line - a
+// container this run does not close. A null or empty decoy registers nothing, so
+// a provider's role chunk cannot withhold a region or suppress a void class. A
+// run that IS a whole data line is left to Feed, which owns those bytes and
+// would otherwise decode one array twice. Nothing else is inferred from a
+// fragment: content presence, TTFT, finish_reason and the chatlike gate stay
+// with whole lines, because a fragment carries no event boundary to attribute
+// them to.
+func (a *Analyzer) FeedFragment(run []byte) {
+	if _, ok := DataPayload(run); ok {
+		return
+	}
+	forEachKeyValue(run, toolCallsKey, func(value []byte) {
+		block, complete := extractContainer(value, '[', ']')
+		switch {
+		case len(block) > 0 && metrics.SkipSpace(block, 1) < len(block)-1:
+			a.toolCallBytesSeen = true
+			a.registerToolCalls(value)
+		case !complete:
+			// The array continues past this run: a call is in flight even
+			// though no entry is complete, which is what opens the region.
+			a.toolCallBytesSeen = true
+		case valueIsObject(value):
+			a.toolCallBytesSeen = true
+			a.registerToolCalls(value)
+		}
+	})
+	forEachKeyValue(run, functionCallKey, func(value []byte) {
+		if valueIsNonEmpty(value) {
+			a.toolCallBytesSeen = true
+			a.registerFunctionCall(value)
+		}
+	})
+}
+
 // countEventToolCalls counts the tool calls in the REASSEMBLED event, and owns
 // every byte the event buffer kept: Feed's per-line producer decodes only a
 // line this buffer had to drop, so the same array is never decoded twice. A
@@ -898,16 +946,17 @@ func (a *Analyzer) RetryableTruncation() bool {
 // Withholding a tool call from its first byte is what makes an UNCOMMITTED tool
 // call impossible on the wire, which is the precondition atomic withholding
 // depends on. No client generation waits for the model to say it is finished:
-// the Vercel AI SDK's OpenAI adapter (both the @ai-sdk/openai 2.x generation
-// and the @ai-sdk/provider-utils 5.x tracker behind ai@7) commits an
-// accumulated tool call as soon as its arguments parse as complete JSON, and
-// the 5.x tracker finalizes every call left unfinished in its flush() with a
-// source comment that tool calls must not finalize before the stream ends - so
-// it commits at the end of the response body, not at finish_reason. Either way
-// a stream that never terminates can hand the client a call the model never
-// finished, and appending a re-send behind it merges both attempts' arguments
-// for the same tool-call index. The analyzer reports the fact; the relay
-// combines it with the operator's atomic_tool_calls setting.
+// every Vercel AI SDK generation checked finalizes its accumulated calls in an
+// end-of-stream flush() - @ai-sdk/openai-compatible 2.x (the ai@6 generation),
+// whose `hasFinished` flag is never assigned anywhere in the package, so its
+// flush finalizes every call it holds; and the @ai-sdk/provider-utils 5.x
+// tracker behind ai@7 and @ai-sdk/openai 4.x, whose finishToolCall is called
+// from flush() and nowhere else - so both commit at the end of the response
+// body, not at finish_reason. A stream that never terminates can therefore hand
+// the client a call the model never finished, and appending a re-send behind it
+// merges both attempts' arguments for the same tool-call index. The analyzer
+// reports the fact; the relay combines it with the operator's atomic_tool_calls
+// setting.
 func (a *Analyzer) ToolCallRegionOpened() bool { return a.toolCallBytesSeen }
 
 // RetryableReasoningTruncation reports whether the finished stream is a
