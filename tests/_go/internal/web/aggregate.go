@@ -1594,10 +1594,12 @@ func TestBootstrapCarriesModelCanon(t *testing.T) {
 // TestBootstrapCarriesRestartEligibility: the boot payload carries the
 // restarter's eligibility so a fresh page knows whether to OFFER the Restart
 // control before the menu is ever opened - no extra round trip, and a build
-// whose only possible outcome is a refusal never shows the action. The
-// section is exactly the {available, reason} document GET /admin/restart
-// reports, and an unwired provider omits it entirely (the browser then keeps
-// the current behaviour rather than hiding a working action).
+// whose only possible outcome is a refusal never shows the action. The section
+// carries the two eligibility fields GET /admin/restart also reports and
+// deliberately none of that document's live state (phase, pid, error, rank,
+// drain timings), so it cannot drift into a second source of restart truth; and
+// an unwired provider omits it entirely (the browser then keeps the current
+// behaviour rather than hiding a working action).
 func TestBootstrapCarriesRestartEligibility(t *testing.T) {
 	const trimpath = "built with -trimpath, so the binary cannot locate its own source; " +
 		"self-restart is unavailable (restart via your process manager)"

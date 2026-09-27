@@ -70,22 +70,50 @@ explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 Opt-in atomic tool calls ([relay.go](../internal/proxy/relay.go) `streamBody`)
 narrow that gap rather than widen it: the relay withholds every tool-call-bearing
 event until the stream's terminator, so an UNCOMMITTED tool call is never on the
-wire. A client commits a streamed tool call at end-of-body, not at finish_reason,
-so those are the only contract bytes a re-send could duplicate destructively;
-with them withheld, every rescue budget keeps its guarantee. The region a tool
-call opens is bounded by `toolCallHoldMax` ([proxy.go](../internal/proxy/proxy.go)),
-chosen on the opening line, and the count of distinct tool calls has one owner:
-the tool-call id set on
-[analyzer.go](../internal/sse/analyzer.go), fed by both the reassembled event
-and the raw data line. Covered by `TestAtomicWithholdingIsBoundedByTheTerminator`,
+wire. No client generation waits for `finish_reason` to commit a streamed tool
+call - `@ai-sdk/openai` 2.x commits on parsable arguments, the
+`@ai-sdk/provider-utils` 5.x tracker behind `ai@7` in its end-of-stream `flush()`
+- so those are the only contract bytes a re-send could duplicate destructively;
+with them withheld, every rescue budget keeps its guarantee. The region opens on
+whatever byte run revealed the tool call, including the newline-free line
+guardrail and a trailing partial line, so a delta larger than one read still has
+its tail and terminator withheld; it is bounded by `toolCallHoldMax`
+([proxy.go](../internal/proxy/proxy.go)), and past that bound it COMMITS. A
+commit is a wire fact the relay carries positively: no rescue fires behind it
+and nothing is substituted over it, while the finished stream's class - a
+truncation, the one class a commit cannot change - is still surfaced in-band
+after the committed bytes, so a committed region is never a silent success.
+The withhold decision is independent of the chatlike gate the degenerate
+classifier uses; a non-chatlike feed's tool-call region is dropped and its
+truncation surfaced rather than released.
+
+The count of distinct tool calls has one owner, the index-keyed set on
+[analyzer.go](../internal/sse/analyzer.go): a client keys a streamed tool call by
+its array index, so two indices are two calls even with one id, an
+argument-only continuation at a seen index is the same call, and an entry with
+an empty or absent id is still a call. It is a fixed-size bitset plus a bounded
+id fallback (1024 calls), registration is O(1), and the reassembled event owns
+every byte its buffer kept while the raw data line covers only what that buffer
+dropped, so no array is decoded twice. A stream whose tool-call bytes were seen
+but whose call is uncountable is never classified as a void. Covered by
+`TestAtomicWithholdingIsBoundedByTheTerminator`,
 `TestAtomicToolCallNeverReachesClientOnTruncation`,
 `TestSplitToolCallIsNotAlsoReportedAsEmptyToolCall`,
 `TestToolCallLargerThanTheTerminalCapIsStillWithheld`,
-`TestOversizedToolCallDataLineIsCountedAndRelayed` and
+`TestOversizedToolCallFramesAreCountedAndRelayed`,
+`TestToolCallFramePastTheRelayGuardrailIsRelayedWholeAndTerminatedOnce`,
+`TestCommittedToolCallRegionIsSurfacedAndNeverResent`,
+`TestToolCallWithNoUsableIdIsStillACall`,
+`TestTwoCallsSharingOneIdAreTwoCalls`,
+`TestAtomicWithholdingAppliesToANonChatlikeFeed` and
 `TestAtomicFunctionCallIsWithheldAndCounted`
 ([tests](../tests/_go/internal/proxy/atomic_tool_calls.go),
 [edges](../tests/_go/internal/proxy/atomic_tool_calls_edges.go),
-[regressions](../tests/_go/internal/proxy/atomic_regressions.go)).
+[regressions](../tests/_go/internal/proxy/atomic_regressions.go)), plus
+`TestToolCallIdentityIsTheIndex`, `TestTrackedToolCallsAreBounded`,
+`TestUncountableToolCallIsNeverAVoid`, `TestOutcomeCodeAssemblesThePendingEvent`
+and `BenchmarkAnalyzerToolCallArray`
+([sse tests](../tests/_go/internal/sse/toolcalls.go)).
 
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
@@ -263,3 +291,23 @@ Operators use shared mutation/revision gates, lossless Settings collection,
 stable event-path outside-click handling and a focus/inert dialog lifecycle.
 CSS owns responsive breakpoints. Preserve accessibility, saved state and cheap
 boot; jsdom tests do not replace real desktop/mobile canvas checks.
+
+## Restart eligibility
+
+Whether a graceful self-restart can even be attempted is decided once at boot by
+the [restarter](../cmd/proxy/restart.go) (Go on PATH plus the compiled-in source
+tree) and is immutable for the process. That boot-time verdict is what the
+dashboard renders from, so it travels in the canonical bootstrap builder's
+payload as its own `restart` section: a strict SUBSET of `GET /admin/restart`'s
+status document, carrying `available` and `reason` and none of that document's
+live phase, pid, error, rank or drain state, so it cannot become a second source
+of restart truth. A payload without the section (or without a boolean
+`available`) leaves the current behavior alone. When the verdict is false the
+browser hides the control and its menu together, which also means the
+eligibility `reason` has no reachable surface - it is an API-level fact, and the
+server's own refusal still carries it. Covered by
+`TestEligibilitySnapshotMatchesAvailability`
+([tests](../tests/_go/cmd/proxy/restart.go)) and
+`TestBootstrapCarriesRestartEligibility`
+([tests](../tests/_go/internal/web/aggregate.go)), with the control's
+visibility pinned by the shared UI suite.

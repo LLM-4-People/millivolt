@@ -62,7 +62,7 @@ func Categories() []Category {
 		{ID: "server", Label: "Server", Help: "Bind address, database, and ring depth restart to apply. shutdown_timeout applies at the next SIGINT/SIGTERM."},
 		{ID: "request", Label: "Request", Help: "Inbound body cap, SSRF allowlist, optional body-preview, and debug-capture retention."},
 		{ID: "upstream", Label: "Upstream", Help: "Connection pool, header timeout, and stream keepalives."},
-		{ID: "queue", Label: "Queue & retry", Help: "Per-key concurrency, transparent 429/5xx retry, quality/thinking/append rescues, and atomic tool calls."},
+		{ID: "queue", Label: "Queue & retry", Help: "Per-key concurrency, transparent 429/5xx retry, quality/thinking rescues, and atomic tool calls."},
 		{ID: "storm", Label: "Error storm protection", Help: "Bounded recovery queues for affected providers or exact model names. Hot-reloads; policy changes clear observations and wake waiters. Banner visibility changes do not reset protection."},
 		{ID: "quota", Label: "Quota pause", Help: "Provider-wide reaction to a 429 carrying a durable quota/billing error (insufficient_quota/credits, spend limits): surface it immediately, park the provider behind a recovery gate, or hold it until an operator resumes."},
 		{ID: "conversation", Label: "Conversations", Help: "How the request log groups turns into conversations."},

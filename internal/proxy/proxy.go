@@ -89,24 +89,32 @@ const (
 	// error. Past the cap the hold is abandoned: no terminal region this large
 	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
 	terminalHoldMax = 64 * 1024
-	// toolCallHoldMax bounds the same withhold region when it was opened by a
+	// toolCallHoldMax bounds the same withhold region when it was OPENED by a
 	// tool call (config.AtomicToolCalls): tool-call arguments are
 	// provider-authored and routinely dwarf a terminal region, so the region
-	// gets its own, larger cap. Past it the region commits verbatim, which puts
-	// tool-call bytes on the wire - the stream then has no withhold region to
-	// discard, so it is recorded as whatever it is rather than as a clean
-	// success. Safety guardrail, not user-tunable.
+	// gets its own, larger cap. Past it the region COMMITS: its bytes reach the
+	// client, the relay records that as a fact of the wire, and from then on
+	// nothing may re-send behind them or replace them. The finished stream's
+	// outcome is still surfaced - the in-band error appends after the committed
+	// bytes, and the record carries the class - so a committed region is a
+	// failed stream that says so, never a silent success and never a rescue.
+	// Safety guardrail, not user-tunable.
 	//
-	// It is set on the line that OPENS the region when that line is a
-	// tool-call line, and RAISED if a tool call begins inside a region some
-	// other line opened. That second case is real: sse.TerminalLine matches
-	// only [DONE] and Responses terminal events, so a finish_reason chunk opens
-	// the region without resolving it on the same line, and the tool-call deltas
-	// that follow land inside it. Sizing it equal to sseScannerBufMax is
-	// deliberate, not incidental: a single tool-call frame past the scanner
-	// bound is newline-free, so that guardrail relays it before any region
-	// could open, and the two escape hatches meet at the same byte count
-	// instead of leaving a gap between them.
+	// It is set on the byte run that opens the region when that run carries a
+	// tool call, and RAISED if a tool call begins inside a region something else
+	// opened. That second case is real: sse.TerminalLine matches only [DONE] and
+	// Responses terminal events, so a finish_reason chunk opens the region
+	// without resolving it on the same line, and the tool-call deltas that
+	// follow land inside it.
+	//
+	// Sizing it equal to sseScannerBufMax is deliberate, not incidental. The
+	// relay's newline-free guardrail splits any data line longer than that, and
+	// a tool call whose arguments exceed the cap is therefore committed in
+	// fragments - with the region opened on the first of them, so its tail and
+	// the terminator are still withheld and released once. Raising the cap past
+	// the guardrail would buy nothing: the line is already un-reassemblable by
+	// then. Lowering it would commit calls that fit comfortably, which is the
+	// hazard the setting exists to remove.
 	toolCallHoldMax = 1 << 20 // 1 MiB
 	// maxTranslateBodyBytes caps the buffered read of a translated
 	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool

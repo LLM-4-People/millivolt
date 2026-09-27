@@ -4650,9 +4650,11 @@ function syncRestartControls() {
   // A binary that cannot restart is not offered at all: the whole control and
   // its menu leave the row (the wrap is the unit - the menu means nothing
   // without its trigger, and an empty wrap would hold the row's gap open). A
-  // run in progress keeps it reachable so progress can still be reopened. The
-  // header's title cannot carry the reason once it is hidden; the reason rides
-  // the status line instead (fetchRestartStatus), where an attempt reaches it.
+  // run in progress keeps it reachable so progress can still be reopened.
+  // Hiding the control also hides the eligibility REASON: nothing tells the
+  // operator why the row lost its Restart entry, because the one surface that
+  // could (the menu's status line, fed by fetchRestartStatus) is itself
+  // unreachable once the trigger is gone.
   const wrap = $('restart-wrap');
   if (wrap) wrap.hidden = unavailable && !active;
 }
@@ -4661,9 +4663,11 @@ function syncRestartControls() {
 // restart state and re-syncs the controls, so a page that never opens the menu
 // still knows whether to OFFER the action. The verdict rides the bootstrap the
 // page already loads: no extra round trip, and a payload without the section
-// (or without a boolean available) leaves the current behaviour alone. Only
-// the verdict is adopted - the accompanying reason is rendered where an
-// attempt reaches it (the menu's status line, and the server's own refusal).
+// (or without a boolean available) leaves the current behaviour alone. Only the
+// verdict is adopted. The accompanying reason is deliberately NOT: the control
+// is hidden exactly when the verdict is false, so there is nowhere to render it.
+// The server's own refusal (POST /admin/restart) still carries the same string
+// for a caller of the API.
 function applyRestartState(st) {
   if (!st || typeof st.available !== 'boolean') return;
   restartServerState = { ...restartServerState, available: st.available };

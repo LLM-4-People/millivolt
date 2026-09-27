@@ -159,9 +159,11 @@ Normal relay paths preserve request content and upstream response content, with
 documented exceptions: bounded request/quality buffering, retries, SSE keepalive
 comments and failure signaling, mid-thinking rescues that append a fresh
 attempt after reasoning-only output, opt-in atomic streamed tool calls (a
-tool-call-bearing event is withheld until the stream's terminator, so a client
-never commits a call the model never finished, at the cost of a completed call
-from a provider that sends no terminator),
+tool-call-bearing event is withheld until the stream's terminator, so a
+terminated stream is the only one that can commit a tool call, at the cost of a
+completed call from a provider that sends no terminator, and of a call larger
+than the withhold bound, which commits early and is then reported as the failed
+stream it is - see [atomic tool calls](docs/protocol.md#atomic-tool-calls)),
 optional format translation,
 operator-configured request overrides (a matching body rule rewrites the
 upstream request bytes), operator-configured sub-conversation strip (a matching

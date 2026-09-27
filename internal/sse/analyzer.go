@@ -28,6 +28,7 @@ package sse
 import (
 	"bytes"
 	"encoding/json"
+	"math/bits"
 	"slices"
 	"strings"
 	"time"
@@ -51,22 +52,37 @@ type Analyzer struct {
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 
-	// toolCallIDs is the SINGLE source of truth for how many distinct tool
-	// calls this stream has made: toolCalls is its size, never a separate
-	// counter. Two producers contribute to it and cannot double count because
-	// both register through the same id de-duplication:
+	// The distinct tool calls of this stream have exactly two owners, and their
+	// sum is the count (see toolCalls). The IDENTITY of a streamed tool call is
+	// its array index: a client keys it by index, not by id, so
 	//
-	//   - the per-line scan in Feed, which reads the RAW line and therefore
-	//     still sees a call inside a data line too large for eventData to
-	//     hold (eventDataMax); and
+	//   - two entries at different indices are two calls even when a gateway
+	//     hands them the same id, and
+	//   - an argument-only continuation at an index already seen is the same
+	//     call, whether or not it repeats the id.
+	//
+	// An entry with an empty or absent id is therefore a real call whenever it
+	// carries an index. An entry the provider gave NO index to (a
+	// non-conforming gateway) falls back to its id, and an entry with neither
+	// contributes nothing: that is the continuation shape, indistinguishable
+	// from a repeat of a call already counted.
+	//
+	// Two producers contribute and cannot double count, because the event
+	// flush owns every byte the event buffer kept (Feed's per-line decode runs
+	// only for a line the buffer had to drop):
+	//
 	//   - countEventToolCalls, which owns the REASSEMBLED event and therefore
-	//     sees a call whose array is legal SSE spread across several data
+	//     also sees a call whose array is legal SSE spread across several data
 	//     lines, plus the deprecated function_call shape that no per-line scan
-	//     can complete.
+	//     can complete; and
+	//   - the per-line scan in Feed, which reads the RAW line and still sees a
+	//     call in a data line the bounded event buffer dropped.
 	//
-	// A slice, not a map: a stream carries a handful of tool calls, so the
-	// linear scan is the same cost as hashing and keeps the set readable
-	// (matching toolNames' de-duplication below).
+	// Both are bounded by maxTrackedToolCalls (an index bitset plus a fallback
+	// id set), so a stream's accounting is O(1) per entry and cannot grow with
+	// what an upstream chooses to send - max_concurrent defaults to unlimited,
+	// so per-stream work is not bounded by any operator setting.
+	toolIdx      toolCallIndexSet
 	toolCallIDs  []string
 	toolNames    []string
 	finishReason string
@@ -213,7 +229,8 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// the boundary. Joined with "\n" per spec; bounded by eventDataMax - past
 	// the cap only per-line lexical scans remain available for accounting.
 	firstDataFrame := len(a.eventData) == 0
-	if len(a.eventData)+len(payload)+1 <= eventDataMax {
+	accumulated := len(a.eventData)+len(payload)+1 <= eventDataMax
+	if accumulated {
 		if len(a.eventData) > 0 {
 			a.eventData = append(a.eventData, '\n')
 		}
@@ -227,8 +244,16 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	eventType := responseEventType(payload)
 	hasContent := a.tokenStart(payload) || responsesContentEvent(eventType, payload)
 	hasReasoning := a.reasoningStart(payload) || responsesReasoningEvent(eventType, payload)
-	toolBlock, toolBlockComplete := extractContainer(jsonKey(payload, toolCallsKey), '[', ']')
+	toolValue := jsonKey(payload, toolCallsKey)
+	toolBlock, toolBlockComplete := extractContainer(toolValue, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
+	if !hasToolCall && valueIsObject(toolValue) {
+		// A tool_calls value that is an OBJECT is one whole entry: it carries
+		// the index the call is keyed by, so it is a real call, not a malformed
+		// frame. extractContainer cannot see it (it only opens on '['), so the
+		// shared non-empty value test is the gate.
+		hasToolCall = true
+	}
 	// A tool_calls array that this line does not close continues on the next
 	// data line of the same event, and so does a tool-call key whose value
 	// starts on the next line at all. Either way the withhold region must open
@@ -237,15 +262,14 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// withholding exists to prevent. Neither is counted as generation content
 	// (hasToolCall stays false), because no complete call is known yet.
 	opensToolCall := !toolBlockComplete || toolCallValueOnNextLine(payload)
-	// Count the calls this line carries. The event-level counter
-	// (countEventToolCalls) owns the reassembled event and is the only producer
-	// that can see an array spread across several data lines - but eventData
-	// refuses to grow past eventDataMax, and a single tool-call frame can be
-	// larger than that, so the per-line scan is also a producer: it reads the
-	// RAW line and still sees the call the event buffer had to drop. Registering
-	// by tool-call id means a line the event buffer DID keep is counted once.
-	if hasToolCall {
-		a.registerToolCallArray(toolBlock)
+	// Count the calls this line carries, but only when the event buffer had to
+	// DROP it. An accumulated line belongs to the event boundary, which decodes
+	// it there: only that producer can also see an array split across several
+	// data lines, so decoding the same bytes here too would unmarshal one array
+	// twice for no new information. This producer exists for exactly the case
+	// the bounded event buffer cannot cover.
+	if hasToolCall && !accumulated {
+		a.registerToolCalls(toolValue)
 	}
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
@@ -412,40 +436,174 @@ var toolCallKeys = [...]string{toolCallsKey, functionCallKey}
 
 // deprecatedFunctionCallID is the reserved id the legacy function_call shape
 // registers under. That shape streams a single OBJECT (never an array) and
-// carries no id of its own, so every one of its argument deltas resolves to
-// this one entry: the set then counts it exactly once per stream, which is the
-// number of calls the legacy shape can express. The leading NUL cannot collide
-// with a provider's own tool-call id.
+// carries neither an index nor an id of its own, so every one of its argument
+// deltas resolves to this one entry: the set then counts it exactly once per
+// stream, which is the number of calls the legacy shape can express. The
+// leading NUL cannot collide with a provider's own tool-call id.
 const deprecatedFunctionCallID = "\x00function_call"
 
-// toolCalls reports how many DISTINCT tool calls this stream has made: the size
-// of the id set, the single source of truth for that count (see Analyzer).
-func (a *Analyzer) toolCalls() int { return len(a.toolCallIDs) }
+// maxTrackedToolCalls bounds how many distinct tool calls one stream's
+// accounting tracks, and is the single bound on that state: past it the count
+// stops growing, no further name is recorded, and a tool-call value that
+// ARRIVES after the cap is not decoded at all. It exists because the proxy-stream path must stay bounded and
+// cheap while max_concurrent defaults to UNLIMITED, so nothing else caps what
+// one stream's accounting may allocate. It is far above any real completion
+// (a client has to execute every one of these calls before its turn ends), so
+// hitting it means a pathological upstream, not a shape to report exactly -
+// which is why the count saturates instead of pretending to be exact. Past the
+// bound the classification still works: every degenerate class it feeds needs
+// only "zero calls or not".
+const maxTrackedToolCalls = 1024
 
-// registerToolCallArray adds every id-bearing entry of a tool_calls array to
-// the id set. Entries without an id are argument-only deltas of a call an
-// earlier delta already registered, so they are skipped - the same rule the
-// event counter and the per-line scan have always applied.
-func (a *Analyzer) registerToolCallArray(block []byte) {
-	var calls []struct {
-		ID       string `json:"id"`
-		Function struct {
-			Name string `json:"name"`
-		} `json:"function"`
+// toolCallIndexSet is the bounded index-keyed half of the tool-call identity
+// set: one bit per index below maxTrackedToolCalls, so registering an entry is
+// O(1) and the whole set is a fixed 128 bytes - no map, no growth, no linear
+// rescan per entry. A fixed array (not a slice) keeps the zero-alloc path.
+type toolCallIndexSet [maxTrackedToolCalls / 64]uint64
+
+// add records index. The count is a popcount of the set rather than a running
+// total, so registering an entry is a single OR with no second field to keep
+// consistent.
+func (s *toolCallIndexSet) add(index int) {
+	s[index/64] |= 1 << uint(index%64)
+}
+
+// count returns how many indices are set.
+func (s *toolCallIndexSet) count() int {
+	n := 0
+	for _, word := range s {
+		n += bits.OnesCount64(word)
 	}
-	if json.Unmarshal(block, &calls) != nil {
-		return
+	return n
+}
+
+// toolCalls reports how many DISTINCT tool calls this stream has made: the
+// index-keyed set plus the id-keyed fallback for entries that carried no
+// index. It is the single source of truth for that count (see Analyzer).
+func (a *Analyzer) toolCalls() int { return a.toolIdx.count() + len(a.toolCallIDs) }
+
+// registerToolCalls adds the calls a located `tool_calls` VALUE carries, and
+// reports that a call is in flight when the value is an array this byte run
+// does not close (a legal split array, or a frame the relay only holds
+// partially). The value is the provider's array, the shape every provider
+// uses; a value that is an OBJECT instead is one entry, not a malformed frame
+// - a gateway that serializes a lone call that way still made the call, and an
+// uncounted call classifies the stream as the empty_tool_call void, which the
+// relay then answers by DESTROYING a real tool call. A value that ARRIVES past
+// maxTrackedToolCalls is not decoded at all: the count cannot grow, so decoding
+// it would be pure cost.
+func (a *Analyzer) registerToolCalls(value []byte) (inFlight bool) {
+	if a.toolCalls() >= maxTrackedToolCalls {
+		return false
 	}
-	for _, call := range calls {
-		if call.ID == "" {
-			continue
+	value = value[metrics.SkipSpace(value, 0):]
+	if len(value) == 0 {
+		return false
+	}
+	open, close := byte('['), byte(']')
+	if value[0] == '{' {
+		open, close = '{', '}'
+	}
+	block, complete := extractContainer(value, open, close)
+	if !complete {
+		return true
+	}
+	if open == '{' {
+		var one toolCallEntry
+		if json.Unmarshal(block, &one) == nil {
+			a.registerToolCallEntry(one)
 		}
-		if !slices.Contains(a.toolCallIDs, call.ID) {
+		return false
+	}
+	var many []toolCallEntry
+	if json.Unmarshal(block, &many) != nil {
+		return false
+	}
+	for _, call := range many {
+		a.registerToolCallEntry(call)
+	}
+	return false
+}
+
+// toolCallEntry is the one shape both tool-call producers decode.
+type toolCallEntry struct {
+	Index    toolCallIndex `json:"index"`
+	ID       string        `json:"id"`
+	Function struct {
+		Name string `json:"name"`
+	} `json:"function"`
+}
+
+// toolCallIndex is a streamed tool call's array index, or ABSENT. Presence has
+// to be distinguishable from index 0, but a *int field would allocate one int
+// per entry of every tool_calls array the analyzer decodes - and it decodes a
+// whole array at a time - so the value rides in the struct and presence is a
+// flag (and two int32-sized fields rather than a pointer's own allocation, so a
+// decoded array costs 8 bytes per entry more, not one allocation). A malformed
+// or absurd index is treated as absent, which sends the entry to the id
+// fallback rather than to a fabricated identity.
+type toolCallIndex struct {
+	value int32
+	set   bool
+}
+
+// UnmarshalJSON accepts a bare JSON integer. A non-integer (a quoted "0", a
+// float, a gateway's null) is not an error: the entry simply has no index.
+func (i *toolCallIndex) UnmarshalJSON(raw []byte) error {
+	v, ok := parseToolCallIndex(raw)
+	if !ok {
+		return nil
+	}
+	i.value, i.set = int32(v), true
+	return nil
+}
+
+// parseToolCallIndex reads raw as a decimal integer, refusing anything that is
+// not one and anything at or past the tracked range: such an index is a
+// malformed frame, not an identity to track, and the entry falls back to its id.
+func parseToolCallIndex(raw []byte) (int, bool) {
+	neg, i := false, 0
+	if len(raw) > 0 && (raw[0] == '-' || raw[0] == '+') {
+		neg, i = raw[0] == '-', 1
+	}
+	if i >= len(raw) {
+		return 0, false
+	}
+	n := 0
+	for ; i < len(raw); i++ {
+		c := raw[i]
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+		if n >= maxTrackedToolCalls {
+			return 0, false
+		}
+	}
+	if neg {
+		n = -n
+	}
+	return n, true
+}
+
+// registerToolCallEntry folds one decoded entry into the stream's tool-call
+// set: the index is the identity, the id is the fallback for an entry that
+// carries no usable index, and the name joins the record's distinct-name set.
+func (a *Analyzer) registerToolCallEntry(call toolCallEntry) {
+	switch {
+	case call.Index.set && call.Index.value >= 0:
+		// parseToolCallIndex already refused anything past the tracked range.
+		a.toolIdx.add(int(call.Index.value))
+	case call.ID != "":
+		// No usable index: the id is the identity. Only a provider that
+		// indexes nothing reaches here, so the bounded slice is enough.
+		if !slices.Contains(a.toolCallIDs, call.ID) && a.toolCalls() < maxTrackedToolCalls {
 			a.toolCallIDs = append(a.toolCallIDs, call.ID)
 		}
-		if name := call.Function.Name; name != "" && !slices.Contains(a.toolNames, name) {
-			a.toolNames = append(a.toolNames, name)
-		}
+	}
+	if name := call.Function.Name; name != "" && len(a.toolNames) < maxTrackedToolCalls &&
+		!slices.Contains(a.toolNames, name) {
+		a.toolNames = append(a.toolNames, name)
 	}
 }
 
@@ -459,15 +617,18 @@ func (a *Analyzer) registerFunctionCall(value []byte) {
 	if !valueIsNonEmpty(value) {
 		return
 	}
-	if !slices.Contains(a.toolCallIDs, deprecatedFunctionCallID) {
+	if a.toolCalls() < maxTrackedToolCalls && !slices.Contains(a.toolCallIDs, deprecatedFunctionCallID) {
 		a.toolCallIDs = append(a.toolCallIDs, deprecatedFunctionCallID)
 	}
-	if name := jsonStringValue(value, "name"); name != "" && !slices.Contains(a.toolNames, name) {
+	if name := jsonStringValue(value, "name"); name != "" && len(a.toolNames) < maxTrackedToolCalls &&
+		!slices.Contains(a.toolNames, name) {
 		a.toolNames = append(a.toolNames, name)
 	}
 }
 
-// countEventToolCalls counts the tool calls in the REASSEMBLED event. A
+// countEventToolCalls counts the tool calls in the REASSEMBLED event, and owns
+// every byte the event buffer kept: Feed's per-line producer decodes only a
+// line this buffer had to drop, so the same array is never decoded twice. A
 // per-line scan alone cannot do this correctly, because a tool_calls array is
 // legal SSE spread across several data lines of one event - and when it is, a
 // per-line count misses every entry, so the relay would classify a stream that
@@ -476,22 +637,16 @@ func (a *Analyzer) registerFunctionCall(value []byte) {
 // key is scanned, not just the shallowest: an event may legally carry two
 // tool-call arrays (a gateway that drops the blank line between two tool-call
 // frames merges them into one event). The outer chunk `"id":"1"` is excluded by
-// reading only within each array, and Feed's per-line producer may already have
-// registered the same ids - the id set makes that a no-op rather than a double
-// count.
+// reading only within each array.
 func (a *Analyzer) countEventToolCalls() {
 	forEachKeyValue(a.eventData, toolCallsKey, func(value []byte) {
-		block, complete := extractContainer(value, '[', ']')
-		if !complete {
-			// An array this event does not close proves a tool call is in
-			// flight even though no entry is complete. The per-line scan
-			// already opened the withhold region on the line that carried the
-			// key; this is the flush-time restatement for a line the event
-			// buffer never held.
+		// An array this event does not close proves a tool call is in flight
+		// even though no entry is complete. The per-line scan already opened
+		// the withhold region on the line that carried the key; this is the
+		// flush-time restatement for a line the event buffer never held.
+		if a.registerToolCalls(value) {
 			a.toolCallBytesSeen = true
-			return
 		}
-		a.registerToolCallArray(block)
 	})
 	forEachKeyValue(a.eventData, functionCallKey, a.registerFunctionCall)
 }
@@ -690,12 +845,26 @@ func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 // nothing-at-all void. "" = healthy; otherwise the error code to surface (or,
 // on the passthrough path, the code whose in-band error chunk replaces the
 // held terminal event).
+//
+// Tool-call bytes seen with no call countable is an UNPROVABLE count, and the
+// void classes are the only ones that assert it: "the model declared a tool and
+// never called it" is disproven by the call that was in flight, and "nothing
+// was produced" likewise. So no void is reported for such a stream; a
+// truncation still is, because it asserts only that the stream stopped, which
+// is observed directly.
 func (a *Analyzer) OutcomeCode() string {
-	// The event is the owner of tool-call accounting, so the pending event must
-	// be assembled before the finished stream is classified.
+	// The reassembled event is assembled here, not in Feed: it is the only
+	// producer that can see a tool_calls array split across data lines, and
+	// this is the one place a stream's events are all known to be over. A
+	// stream whose last event never saw its blank-line boundary is still
+	// covered, because the pending event is flushed below.
 	a.flushEvent()
-	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
+	code := metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
 		!a.firstAnswerAt.IsZero(), !a.firstReasoningAt.IsZero(), a.toolCalls(), a.chatlike)
+	if code != metrics.CodeTruncated && code != "" && a.toolCallBytesSeen && a.toolCalls() == 0 {
+		return ""
+	}
+	return code
 }
 
 // RetryableTruncation reports whether the finished stream is a truncation
@@ -708,9 +877,12 @@ func (a *Analyzer) OutcomeCode() string {
 // error frame that never saw its blank-line boundary is still caught.
 // Anything the client already saw - generation content or the provider's own
 // error - makes a re-send duplicate visible bytes and stays client-side.
-// Client-disconnect gating is the caller's (it owns the record). When this
-// reports true the terminal region was never opened (holding requires a seen
-// terminator), so no withheld bytes are pending.
+// Client-disconnect gating is the caller's (it owns the record). This predicate
+// speaks only about what the ANALYZER saw; a withheld region that overflowed its
+// bound put tool-call bytes on the wire without the analyzer necessarily
+// knowing, so the relay additionally refuses every rescue once it has committed
+// a region (see streamBody's committed fact). A truncation CAN otherwise
+// coexist with a tool-call withhold region: opening one requires no terminator.
 func (a *Analyzer) RetryableTruncation() bool {
 	// answerishSeen (a refusal or deprecated function_call delta) is
 	// answer-shaped output the client saw: no rescue may append behind it,
@@ -724,15 +896,18 @@ func (a *Analyzer) RetryableTruncation() bool {
 
 // ToolCallRegionOpened reports that a tool-call-bearing delta has been seen.
 // Withholding a tool call from its first byte is what makes an UNCOMMITTED tool
-// call impossible on the wire, which is the precondition
-// atomic withholding depends on. A client commits a streamed tool call
-// at the end of the response body, not at finish_reason: the Vercel AI SDK's
-// OpenAI adapter enqueues every accumulated tool call whose hasFinished is
-// unset, and hasFinished is only ever initialized to false, never set. So
-// relaying tool-call bytes eagerly can hand the client a call no terminator
-// ever committed, and appending a re-send behind it merges both attempts'
-// arguments for the same tool-call index. The analyzer reports the fact; the
-// relay combines it with the operator's atomic_tool_calls setting.
+// call impossible on the wire, which is the precondition atomic withholding
+// depends on. No client generation waits for the model to say it is finished:
+// the Vercel AI SDK's OpenAI adapter (both the @ai-sdk/openai 2.x generation
+// and the @ai-sdk/provider-utils 5.x tracker behind ai@7) commits an
+// accumulated tool call as soon as its arguments parse as complete JSON, and
+// the 5.x tracker finalizes every call left unfinished in its flush() with a
+// source comment that tool calls must not finalize before the stream ends - so
+// it commits at the end of the response body, not at finish_reason. Either way
+// a stream that never terminates can hand the client a call the model never
+// finished, and appending a re-send behind it merges both attempts' arguments
+// for the same tool-call index. The analyzer reports the fact; the relay
+// combines it with the operator's atomic_tool_calls setting.
 func (a *Analyzer) ToolCallRegionOpened() bool { return a.toolCallBytesSeen }
 
 // RetryableReasoningTruncation reports whether the finished stream is a
@@ -771,10 +946,13 @@ func (a *Analyzer) RetryableReasoningTruncation() bool {
 // refusal or deprecated function_call delta is answer-shaped output the
 // client saw, and a Responses-API feed carries per-response sequence numbers
 // a re-send would restart mid-stream - neither may ever be appended behind.
-// The still-withheld check (the relay's hold state) is the caller's.
+// The still-withheld check (the relay's hold state) is the caller's. The
+// pending event is assembled here, not left to a caller's ordering: a tool call
+// in the stream's last event is invisible to the count until the flush, and
+// this predicate is exported, so it must be self-contained. The flush is
+// idempotent once the event is empty, which is why the relay can call it after
+// OutcomeCode has already run.
 func (a *Analyzer) RetryableReasoningStop() bool {
-	// Flush first: tool-call accounting belongs to the reassembled event, so a
-	// pending event's tool call is invisible until then.
 	a.flushEvent()
 	return a.chatlike && a.terminatorSeen && a.errType == "" && !a.responsesStream &&
 		!a.answerishSeen && a.toolCalls() == 0
@@ -839,15 +1017,6 @@ func extractPreview(payload []byte) []byte {
 		return nil
 	}
 	return []byte(metrics.TruncatePreview(text))
-}
-
-// precedingBackslashes counts consecutive '\\' bytes immediately before i.
-func precedingBackslashes(b []byte, i int) int {
-	n := 0
-	for i-n-1 >= 0 && b[i-n-1] == '\\' {
-		n++
-	}
-	return n
 }
 
 // decodeUsage parses the "usage":{...} JSON fragment captured from the final
@@ -990,6 +1159,15 @@ func valueIsNonEmpty(value []byte) bool {
 	}
 }
 
+// valueIsObject reports whether a located JSON value is a present, non-empty
+// OBJECT. It is the gate for the tool_calls-as-object shape, which
+// extractContainer cannot see: that helper only opens on the array delimiter,
+// so a lone call serialized as an object would otherwise read as an absent
+// value - uncounted, and with no withhold region.
+func valueIsObject(value []byte) bool {
+	return len(value) > 0 && value[0] == '{' && valueIsNonEmpty(value)
+}
+
 // geminiThoughtMarker matches Gemini's `"thought":true` part flag (tolerating
 // optional whitespace after the colon).
 func geminiThoughtMarker(payload []byte) bool {
@@ -1102,26 +1280,34 @@ func extractContainer(raw []byte, open, close byte) (json.RawMessage, bool) {
 	if len(raw) == 0 || raw[0] != open {
 		return nil, true
 	}
+	// One forward pass, tracking escape parity as it goes rather than
+	// re-walking the backslashes before every quote: this scan runs over a whole
+	// tool_calls array, which on a long call is the largest thing the analyzer
+	// ever looks at.
 	depth := 0
-	inString := false
+	inString, escaped := false, false
 	for i := 0; i < len(raw); i++ {
-		switch raw[i] {
+		c := raw[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		switch c {
 		case '"':
-			// A quote toggles string state iff not escaped (even number of
-			// preceding backslashes).
-			if precedingBackslashes(raw, i)%2 == 0 {
-				inString = !inString
-			}
+			inString = true
 		case open:
-			if !inString {
-				depth++
-			}
+			depth++
 		case close:
-			if !inString {
-				depth--
-				if depth == 0 {
-					return raw[:i+1], true
-				}
+			depth--
+			if depth == 0 {
+				return raw[:i+1], true
 			}
 		}
 	}

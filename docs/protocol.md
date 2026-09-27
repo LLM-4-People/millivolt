@@ -183,63 +183,108 @@ key whose value continues on the next `data:` line - until the stream's
 terminator, then releases it verbatim. Translated Anthropic streams, the Cursor
 bridge and Responses-API feeds keep their own framing and never reach it.
 
-It exists because a client commits a streamed tool call at the **end of the
-response body**, not at `finish_reason`: it enqueues every accumulated tool call
-whose `hasFinished` is unset, and `hasFinished` is only ever initialized to
-false. So eager relay can hand a client a tool call no terminator ever
-confirmed, and a client that executes it runs a tool from a response the model
-never finished. That is measured, not theoretical: a Vercel AI SDK at
-`@ai-sdk/provider-utils` 4.x - the generation the incident client runs - executes
-such a call. It is not universal; a client at `ai@7` parses the same call and
-declines to execute it, and the `openai` SDKs throw before it is usable. The
-generality is why the relay does not rely on any one client's cooperation.
+It exists because no client generation waits for the model to say it finished.
+A streamed tool call is committed on the client's side, and the two Vercel AI
+SDK generations differ only in *when*: `@ai-sdk/openai` 2.x (the `ai@4`
+generation, and the one the incident client ran) emits the call as soon as its
+accumulated arguments parse as complete JSON, so a prefix of a longer argument
+string is already executed mid-stream; `@ai-sdk/provider-utils` 5.x, the tracker
+behind `ai@7`, never commits mid-stream at all - it initializes `hasFinished`
+to false, never sets it during the stream, and finalizes every unfinished call
+in its `flush()` handler, with a source comment stating that tool calls must not
+finalize before the stream ends. So the second generation commits at the **end
+of the response body**, not at `finish_reason`. Either way, a stream that never
+terminates can hand the client a tool call the model never finished, and a
+client that executes it runs a tool from a truncated response. The official
+`openai` SDKs instead throw before such a call is usable, which is why the
+relay does not rely on any one client's cooperation. Both mechanisms are
+verified in the published packages, not inferred: see the class-level tests in
+[internal/sse](../internal/sse/analyzer.go) (`ToolCallRegionOpened`).
 
-Tool-call accounting has a single owner, the set of distinct tool-call ids
-seen on the stream - not a counter any one scan maintains. Two producers feed
-it, and neither can double count another because both register through the same
-id de-duplication. The reassembled SSE event is one: a `tool_calls` array is
-legal SSE spread across several `data:` lines of one event, and a per-line count
-alone would miss every entry, which would make the relay relay a complete tool
-call and simultaneously classify the stream as the `empty_tool_call` degenerate
-class, substituting an error for a tool call it had just sent. The raw `data:`
-line is the other: the event buffer is bounded, and a single tool-call frame
-can be larger than that bound, so a frame the buffer had to drop is still
+Tool-call accounting has a single owner: the set of distinct tool calls seen on
+the stream, keyed the way a client keys them - by the entry's **array index**,
+not by its `id`. Two entries at different indices are two calls even when a
+gateway hands them the same id, and an argument-only continuation at an index
+already seen is the same call. An entry whose `id` is empty or absent is
+therefore still a call, which matters because a gateway that omits ids used to
+make the relay classify such a stream as the `empty_tool_call` void and replace
+a real tool call with that (retryable) error. An entry the provider gave no
+index to falls back to its id; an entry with neither contributes nothing, being
+an argument-only continuation indistinguishable from a repeat.
+
+Two producers feed that set and never decode the same bytes twice. The
+reassembled SSE event is the owner of every byte its bounded buffer kept: a
+`tool_calls` array is legal SSE spread across several `data:` lines of one
+event, and a per-line count alone would miss every entry, which would make the
+relay relay a complete tool call and simultaneously classify the stream as the
+`empty_tool_call` degenerate class. The raw `data:` line is the other, and only
+for a line the event buffer had to drop: the buffer caps one event at 1 MiB, so
+a tool-call frame whose line is larger is invisible to the event and still
 counted from the line itself. Every occurrence of a tool-call key within one
 event is scanned, not just the first, because a gateway that drops the blank
-line between two tool-call frames legally merges them into a single event.
+line between two tool-call frames legally merges them into a single event. Both
+sides are bounded and linear: the tracked set is a fixed-size index bitset plus
+a bounded id fallback capped at 1024 distinct calls, registration is O(1), and
+a value arriving past the cap is not decoded at all. That bound is what keeps
+the proxy-stream path cheap, since `max_concurrent` defaults to unlimited and
+nothing else caps one stream's accounting.
 
 The trade, which is why it is opt-in. A provider that ends the body with
 neither `finish_reason` nor `[DONE]` - a real shape, see
 `metrics.ClassifyOutcome` - truncates, and the withheld tool call is then
 dropped with the rest of the truncation rather than relayed. That is safer for
-execution but loses a tool call such a provider completed. Tool-call delivery
-also stops being progressive: the client sees the whole call at the terminator.
+execution but loses a tool call such a provider completed. This holds whatever
+the feed's shape: a `tool_calls` delta in a stream the chat-completions
+classifier does not recognize is still withheld and still dropped, and its
+truncation is surfaced in-band, because a region that is withheld could not also
+be released without defeating the setting. Tool-call delivery also stops being
+progressive: the client sees the whole call at the terminator.
+
 The region a tool call opens is bounded by the relay's `toolCallHoldMax`
-(1 MiB), not the 64 KiB terminal cap - tool-call arguments are
-provider-authored and routinely dwarf a terminal region. Past even that bound
-the region commits verbatim, which restores eager behavior for that stream
-alone; a tool call arriving *after* the terminator is likewise relayed
-verbatim, because the region is already released and such a stream is out of
-contract regardless.
+(1 MiB), not the 64 KiB terminal cap - tool-call arguments are provider-authored
+and routinely dwarf a terminal region. The region opens on whatever byte run
+first revealed the tool call, including the relay's newline-free line guardrail
+and a trailing partial line, so a tool-call delta larger than one read still has
+its tail and the terminator withheld. Past the bound the region **commits**: the
+bytes reach the client, the relay records that as a fact of the wire, and from
+then on no rescue may append a fresh attempt behind them and no synthetic
+outcome may replace them. A committed region is not a silent success, though -
+the finished stream's class is surfaced in-band *after* the committed bytes, and
+the record carries it, so a stream that failed says so. Only a truncation
+survives a commit: it is the one class that asserts merely that the stream
+stopped, which no committed region can change, while every other degenerate
+class is an inference from counts a commit is exactly what makes untrustworthy.
+A tool call arriving *after* the terminator is likewise relayed verbatim,
+because the region is already released and such a stream is out of contract
+regardless.
 
 Memory: up to 1 MiB per in-flight stream is withheld, on top of the pre-existing
-scanner buffer. The only default cap on concurrency is `max_conns_per_host`
-(512) - `max_concurrent` itself defaults to 0, meaning **unlimited** - so this
-multiplies with the operator's concurrency rather than being bounded by it.
-Size `max_concurrent` deliberately before enabling this on a busy deployment.
+scanner buffer. There is no default ceiling on that product: `max_concurrent`
+defaults to 0, meaning **unlimited**, and `max_conns_per_host` (512) caps
+connections per host on a shared transport that advertises HTTP/2, where one
+connection multiplexes many streams - it is not a per-stream memory bound. Size
+`max_concurrent` deliberately before enabling this on a busy deployment.
 
 Every rescue budget still guarantees the client received no completion-contract
-bytes, which is what makes a re-send invisible. Note what the record therefore
-does not show: `RetryAttempt` carries no usage, tokens or cost, so an absorbed
-attempt's spend is invisible, `TTFT` is measured from the final attempt and so
-excludes any queueing and backoff, and `FinalizeRecord` can zero `answer_tokens`
-when the winning attempt ends in `finish_reason: tool_calls` without content.
-And `Record.ToolCalls` counts what the PROVIDER sent, not what the client was
-given, so it can exceed what was delivered: a truncated stream whose tool call
-was withheld records `ToolCalls: 1` while the client received zero tool-call
-deltas. That is deliberate - the record is the provider's behavior, and a count
-that followed the wire would report a tool call the model did make as one it
-did not.
+bytes, which is what makes a re-send invisible. That guarantee is a property of
+the wire, not of the analyzer's bookkeeping: the relay refuses every rescue once
+a withhold region has committed, so a re-send can never land behind bytes the
+client already holds even when the analyzer never saw a whole call in them.
+Note what the record therefore does not show: `RetryAttempt` carries no usage,
+tokens or cost, so an absorbed attempt's spend is invisible, `TTFT` is measured
+from the final attempt and so excludes any queueing and backoff, and
+`FinalizeRecord` can zero `answer_tokens` when the winning attempt ends in
+`finish_reason: tool_calls` without content.
+
+`Record.ToolCalls` is the provider's behavior, not the wire's, and it errs in
+both directions. It can exceed what was delivered: a truncated stream whose tool
+call was withheld records `ToolCalls: 1` while the client received zero tool-call
+deltas. It can also under-count: a tool-call frame split at the relay's
+newline-free line guardrail belongs to neither producer, so the record reports no
+call for a call the client did receive - the count follows what could be
+observed, and inventing one would be worse. A stream in that state is never
+classified as a void either, since a call in flight disproves "the model
+declared a tool and never called it".
 
 Neither transparency nor exactly-once upstream execution is unconditional.
 
@@ -317,9 +362,9 @@ caller cancellations and fired per-send deadlines are excluded - quota outcomes
 never become storm evidence, even while a quota gate is open. A selected 429
 is a storm failure sample but remains a separate rate-limit signal in dashboard
 request health. Configurable response/stream failure detection observes a 2xx
-attempt once when its relay completes, or before an existing quality, thinking
-or thinking rescue re-send. It never adds a replay after meaningful output
-or native tool execution.
+attempt once when its relay completes, or before an existing quality or thinking
+rescue re-send. It never adds a replay after meaningful output or native tool
+execution.
 
 An open scope holds new sends until its cooldown expires, then admits one shared
 probe. Failed probes multiply the cooldown, with configurable jitter and a cap;

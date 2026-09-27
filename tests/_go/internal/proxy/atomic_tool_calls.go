@@ -34,12 +34,17 @@ const (
 	atomicDoneFrame     = "data: [DONE]\n\n"
 )
 
+// toolCallMarker is what one tool_calls delta contributes to the wire. The
+// deprecated function_call shape spells its own (see toolCallCount).
+const toolCallMarker = `"function":{"name"`
+
 // toolCallCount counts the tool-call DELTAS the client actually received, so a
 // test can assert it never saw an uncommitted one. It keys on the delta's
 // function payload, never on the bare "tool_calls" token, which also appears in
-// the finish chunk's finish_reason.
+// the finish chunk's finish_reason. The deprecated function_call shape is
+// counted by the cases that need it with its own spelling.
 func toolCallCount(wire string) int {
-	return strings.Count(wire, `"function":{"name"`)
+	return strings.Count(wire, toolCallMarker)
 }
 
 // TestAtomicToolCallReleasedVerbatimAtTerminator asserts the RELEASE side: a
@@ -218,85 +223,148 @@ func truncateForMsg(s string) string {
 	return s[:400] + "...(truncated)"
 }
 
-// TestAtomicToolCallOversizedFrameCommitsVerbatim pins the memory bounds a
-// single tool-call frame can exceed, and what each one means. A frame whose
-// data line lands between the analyzer's per-EVENT buffer cap and the relay's
-// scanner line guardrail is still whole and legal: the event counter silently
-// dropped the line, so accounting must fall back to the raw data line or the
-// record claims no tool call for a stream the client just received one from.
-// A frame past the scanner guardrail is newline-free for long enough that the
-// guardrail relays it before any withhold region can open, and the truncation
-// still surfaces in-band because the region never opened at all.
-//
-// The two cases differ in whether the in-band truncation appears, and that is
-// the design, not an accident: the first case overflows the tool-call hold
-// bound, and an overflow is commit-to-verbatim mode (nothing may be
-// substituted on top of bytes the client already has), while the second never
-// opens a region.
-func TestAtomicToolCallOversizedFrameCommitsVerbatim(t *testing.T) {
+// TestOversizedToolCallFramesAreCountedAndRelayed pins the whole-line case: a
+// tool-call data line longer than the analyzer's per-EVENT buffer, delivered
+// whole by the relay's line loop. The event buffer dropped it, so the raw-line
+// producer is the only one that can see the call - without it the classifier
+// read zero calls and REPLACED a complete, valid tool call with the
+// empty_tool_call error. Both tool-call shapes are covered, terminated and
+// truncated, because the truncated case is the one that used to leave a silent
+// success: the region committed, so nothing may be substituted over its bytes,
+// but the stream's own outcome is still surfaced after them.
+func TestOversizedToolCallFramesAreCountedAndRelayed(t *testing.T) {
+	big := strings.Repeat("x", oversizedArgs)
+	// sse.Analyzer's per-event buffer cap is 1 MiB, package-private to that
+	// package; the fixture must sit past it for the raw-line producer to be the
+	// only producer that sees the call.
+	if oversizedArgs <= 1<<20 {
+		t.Fatalf("the fixture must sit past the analyzer's event buffer cap, got %d", oversizedArgs)
+	}
 	cases := []struct {
-		name      string
-		argsSize  int
-		wantTrunc bool
-		wantCount int
+		name  string
+		frame string
+		tail  string
+		// marker is the substring one whole call contributes to the wire; the
+		// tool_calls shape spells it one way and the deprecated shape another.
+		marker     string
+		wantName   string
+		wantTrunc  bool
+		wantFrames int
 	}{
-		// eventDataMax (the analyzer's event buffer) and sseScannerBufMax (the
-		// relay's line guardrail) are both 1 MiB, so the window between them is
-		// the scanner's own slack; land in the middle of it. The call is whole
-		// there, so a producer can see it.
-		{name: "whole frame past the event buffer cap", argsSize: oversizedArgs, wantCount: 1},
-		// Past the guardrail the relay splits the frame mid-line, so NO producer
-		// can see a whole call: neither the raw line (there is none) nor the
-		// event buffer (too large). That is a known, documented limit of the
-		// guardrail, not something this test can close; what it does guarantee
-		// is that the client still receives the call verbatim and the
-		// truncation still surfaces.
-		{name: "newline-free frame past the scanner guardrail", argsSize: toolCallHoldMax + 4096, wantTrunc: true},
+		{
+			name:       "tool_calls, terminated",
+			frame:      atomicToolCallWithArgs(big, "call_1", "bash", false),
+			tail:       atomicStopFrame + atomicDoneFrame,
+			marker:     toolCallMarker,
+			wantName:   "bash",
+			wantFrames: 1,
+		},
+		{
+			name:       "tool_calls, truncated after the region committed",
+			frame:      atomicToolCallWithArgs(big, "call_1", "bash", false),
+			marker:     toolCallMarker,
+			wantName:   "bash",
+			wantTrunc:  true,
+			wantFrames: 1,
+		},
+		{
+			name: "deprecated function_call, terminated",
+			frame: `data: {"id":"A","choices":[{"delta":{"function_call":{"name":"lookup","arguments":"` + big +
+				`"}}}]}` + "\n\n",
+			tail:       atomicStopFrame + atomicDoneFrame,
+			marker:     `"function_call":{"name":"lookup"`,
+			wantName:   "lookup",
+			wantFrames: 1,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if c.argsSize <= 1<<20 {
-				t.Fatalf("the fixture must sit past the analyzer's event buffer cap, got %d", c.argsSize)
+			got, calls, rec := atomicStream(t, atomicRoleFrame+c.frame+c.tail)
+
+			if calls != 1 {
+				t.Fatalf("upstream attempts = %d, want 1: the call reached the wire, so no rescue may follow it", calls)
 			}
-			var calls atomic.Int32
-			huge := strings.Repeat("x", c.argsSize)
-			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
-				w.Header().Set("Content-Type", "text/event-stream")
-				w.WriteHeader(200)
-				w.Write([]byte(atomicRoleFrame + atomicTextFrame))
-				w.(http.Flusher).Flush()
-				// One enormous tool-call argument frame: past the analyzer's
-				// event buffer; past the scanner's line guardrail too in the
-				// second case.
-				w.Write([]byte(`data: {"id":"A","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash","arguments":"` + huge + `"}}]}}]}` + "\n\n"))
-				w.(http.Flusher).Flush()
-			}))
-			defer upstream.Close()
+			if n := strings.Count(got, c.marker); n != c.wantFrames {
+				t.Fatalf("client saw %d tool-call deltas, want %d: %s", n, c.wantFrames, truncateForMsg(got))
+			}
+			if strings.Contains(got, metrics.CodeEmptyToolCall) {
+				t.Fatalf("a stream that DID call a tool must not be substituted with %s: %s",
+					metrics.CodeEmptyToolCall, truncateForMsg(got))
+			}
+			if rec.ToolCalls != 1 {
+				t.Fatalf("record ToolCalls = %d, want 1: the event buffer dropped this data line, so the raw-line producer is the only one that saw the call",
+					rec.ToolCalls)
+			}
+			if len(rec.ToolNames) != 1 || rec.ToolNames[0] != c.wantName {
+				t.Fatalf("record ToolNames = %v, want [%s]", rec.ToolNames, c.wantName)
+			}
+			if surfaced, want := strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`), c.wantTrunc; surfaced != want {
+				t.Fatalf("in-band truncation surfaced = %v, want %v: %s", surfaced, want, truncateForMsg(got))
+			}
+			if c.wantTrunc {
+				if !rec.IsError() || rec.ErrorCode != metrics.CodeTruncated {
+					t.Fatalf("a committed region must still surface the outcome: IsError=%v ErrorCode=%q", rec.IsError(), rec.ErrorCode)
+				}
+			} else if rec.IsError() {
+				t.Fatalf("record must not be an error: %+v", rec)
+			}
+		})
+	}
+}
 
-			cfg := config.Default()
-			cfg.AtomicToolCalls = true
-			buf := metrics.NewBuffer(100)
-			srv := httptest.NewServer(New(cfg, buf))
-			defer srv.Close()
+// TestToolCallFramePastTheRelayGuardrailIsRelayedWholeAndTerminatedOnce covers
+// the case the previous test deliberately leaves out: a tool-call data line so
+// long that the relay's newline-free guardrail fires before the line completes.
+// The region must open THERE - the opener is inside the first megabyte, and a
+// newline-free frame never returns to the line loop - so the tail, the finish
+// chunk and the terminator are all withheld and released once. Before the fix
+// the region never opened, the client received the call AND a second
+// `data: [DONE]` appended behind a substituted empty_tool_call error, on a
+// record flagged as a failed request.
+func TestToolCallFramePastTheRelayGuardrailIsRelayedWholeAndTerminatedOnce(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		tail      string
+		wantTrunc bool
+	}{
+		{name: "terminated", tail: atomicStopFrame + atomicDoneFrame},
+		{name: "truncated", tail: "", wantTrunc: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			frame := atomicToolCallWithArgs(strings.Repeat("x", guardrailArgs), "call_1", "bash", false)
+			if len(frame) <= sseScannerBufMax {
+				t.Fatalf("the fixture must outgrow the relay's line guardrail, got %d bytes", len(frame))
+			}
+			got, calls, rec := atomicStream(t, atomicRoleFrame+frame+c.tail)
 
-			_, got := streamRequest(t, srv, upstream)
+			if calls != 1 {
+				t.Fatalf("upstream attempts = %d, want 1: the call reached the wire, so no rescue may follow it", calls)
+			}
 			if n := toolCallCount(got); n != 1 {
-				t.Fatalf("an oversized tool call must commit verbatim, saw %d frames", n)
+				t.Fatalf("client saw %d tool-call deltas, want 1: the guardrail relays the frame, it does not drop it", n)
 			}
-			if n := calls.Load(); n != 1 {
-				t.Fatalf("upstream calls = %d, want 1 (the call reached the wire, so no rescue can follow it)", n)
+			if n := strings.Count(got, "data: [DONE]"); n != 1 {
+				t.Fatalf("client saw %d [DONE] markers, want exactly 1: a second one lands behind whatever the relay then decided", n)
 			}
-			truncSurfaced := strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`)
-			if truncSurfaced != c.wantTrunc {
-				t.Fatalf("in-band truncation surfaced = %v, want %v", truncSurfaced, c.wantTrunc)
+			if strings.Contains(got, metrics.CodeEmptyToolCall) || strings.Contains(got, metrics.CodeEmptyCompletion) {
+				t.Fatalf("no void may be claimed for a call the client received: %s", truncateForMsg(got))
 			}
-			recs := waitForRecord(t, buf, 1)
-			if recs[0].ToolCalls != c.wantCount {
-				t.Fatalf("record ToolCalls = %d, want %d: the analyzer dropped this data line, so the per-line producer is the only one that saw the call", recs[0].ToolCalls, c.wantCount)
+			// The count is the documented under-count direction: an array that
+			// spans the guardrail boundary belongs to neither producer, so the
+			// record reports no call rather than inventing one. What the void
+			// rule protects is exactly this state.
+			if rec.ToolCalls != 0 {
+				t.Fatalf("record ToolCalls = %d, want 0: neither producer can reassemble a frame split at the guardrail", rec.ToolCalls)
 			}
-			if c.wantCount == 1 && (len(recs[0].ToolNames) != 1 || recs[0].ToolNames[0] != "bash") {
-				t.Fatalf("record ToolNames = %v, want [bash]", recs[0].ToolNames)
+			if surfaced, want := strings.Contains(got, `"code":"`+metrics.CodeTruncated+`"`), c.wantTrunc; surfaced != want {
+				t.Fatalf("in-band truncation surfaced = %v, want %v", surfaced, want)
+			}
+			if c.wantTrunc {
+				if !rec.IsError() || rec.ErrorCode != metrics.CodeTruncated {
+					t.Fatalf("a committed region must still surface the outcome: IsError=%v ErrorCode=%q", rec.IsError(), rec.ErrorCode)
+				}
+			} else if rec.IsError() {
+				t.Fatalf("record must not be an error: %+v", rec)
 			}
 		})
 	}

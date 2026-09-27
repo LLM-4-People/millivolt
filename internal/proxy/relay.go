@@ -540,8 +540,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 // an in-band error that arrived after reasoning-only output. The failed
 // attempt leaves the client at most role/keepalive/reasoning frames (every
 // OpenAI SDK accumulates chat delta frames independently; reasoning is
-// auxiliary display text), or - for the append class - answer text the client
-// accumulates twice. Either way the fresh stream appends cleanly to the
+// auxiliary display text), and never a tool call, a refusal or any other
+// answer-shaped byte. The fresh stream therefore appends cleanly to the
 // committed SSE connection; the idle pacer keeps the socket alive during the
 // re-send's queue/hold/backoff waits. finish_reason length is a clean
 // terminator and never rescued. The absorbed attempt is logged like every
@@ -1452,15 +1452,22 @@ type upstreamErrorRescue struct {
 // stream ends, then releases it verbatim. Under config.AtomicToolCalls the
 // withhold region instead opens at the first tool-call-bearing event, and its
 // bound is whichever of toolCallHoldMax / terminalHoldMax fits what opened it.
+// Every path that feeds the analyzer can open the region, including the
+// newline-free guardrail and the trailing-partial-line path, so a tool call
+// larger than one read still withholds its tail and the terminator with it.
 // When the analyzer classifies the finished stream as degenerate
 // (metrics.ClassifyOutcome: truncated / tool_calls-without-calls / empty stop /
 // reasoning-only stop), the held region is replaced with an in-band OpenAI
 // error chunk the client treats as a retryable failure. The withholding is what
 // makes that work: SDKs treat the finish chunk as the stream's end, so an
-// error written after it would be ignored. The hold is bounded (past its bound
-// the stream commits to verbatim relay - no degenerate stream has a large
-// "terminal" region), and every non-held byte is written through immediately,
-// so the hot path only ever reserves one event's worth of bytes.
+// error written after it would be ignored.
+//
+// The hold is bounded, and past its bound the region COMMITS: its bytes reach
+// the client, `committed` records that as a fact of the wire, and from then on
+// nothing may re-send behind them or replace them. The finished stream's class
+// is still surfaced, appended after the committed bytes, so the record and the
+// client both learn the stream failed. Every non-held byte is written through
+// immediately, so the hot path only ever reserves one event's worth of bytes.
 //
 // Transparent re-sends: while a rescue budget remains, a truncation that
 // relayed nothing content-bearing (allowTruncationRetry, the quality budget)
@@ -1500,15 +1507,21 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// opens: terminalHoldMax for a terminal region, toolCallHoldMax for
 		// one opened by a tool call (tool-call arguments are far larger than a
 		// terminal region), and raised if a tool call lands inside a region
-		// some other line opened. Overflowing either bound commits the region
-		// verbatim and sets holdAborted. The bound is checked once per read
-		// cycle, so a single read that both opens and then resolves a region is
-		// never measured against it - that path is bounded by the scanner
-		// buffer instead, and the bound's purpose (a region that large is not
-		// a degenerate stream) is unaffected.
-		holdMax     = terminalHoldMax
-		buf         [4096]byte
-		holdAborted bool
+		// some other line opened. Overflowing either bound commits the region.
+		// The bound is checked once per read cycle, so a single read that both
+		// opens and then resolves a region is never measured against it - that
+		// path is bounded by the scanner buffer instead, and the bound's purpose
+		// (a region that large is not a degenerate stream) is unaffected.
+		holdMax = terminalHoldMax
+		buf     [4096]byte
+		// committed is the POSITIVE fact that bytes from a withhold region
+		// have been written to the client, so the region can no longer be
+		// withheld: no rescue may append a fresh attempt behind them, and no
+		// synthetic outcome may replace them. It is not derivable from the
+		// analyzer - a region that overflowed its bound carries tool-call
+		// bytes the analyzer may never have seen a whole call in - so every
+		// rescue gate consults this, not the analyzer's view.
+		committed bool
 		// rescueRequested carries the rescue decision out of finishHold
 		// (which returns only client-gone).
 		rescueRequested streamRescue
@@ -1532,6 +1545,27 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// setting decides what to do with them, so the combination lives here.
 	withholdOpened := func() bool {
 		return a.Terminated() || (atomicTools && a.ToolCallRegionOpened())
+	}
+	// openRegion starts withholding when THIS byte run is what opened the
+	// region. prev must be sampled BEFORE the run is fed to the analyzer: the
+	// thinking-stop and terminal rescues depend on a line arriving after the
+	// transition not re-opening the region. Every path that feeds the analyzer
+	// goes through here - the complete-line loop, the newline-free guardrail
+	// and the trailing-partial-line path - so a trigger that arrives on a path
+	// which never sees a newline still withholds its bytes instead of relaying
+	// them, the tool-call tail and the terminator included.
+	openRegion := func(prev bool) {
+		if prev || !withholdOpened() {
+			return
+		}
+		holding = true
+		// The bound is chosen by what OPENED the region. Without raising it
+		// here a tool call would stay on the terminal cap (64 KiB), overflow
+		// it, commit verbatim and be recorded as whatever it is: both the
+		// hazard this setting exists to remove, and a silent-success record.
+		if atomicTools && a.ToolCallRegionOpened() {
+			holdMax = toolCallHoldMax
+		}
 	}
 	writeOut := func() bool {
 		if out.Len() == 0 {
@@ -1577,17 +1611,34 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		if !writeOut() {
 			return false
 		}
-		if holdAborted {
-			// Commit-to-verbatim mode: the overflow already released the
-			// terminal bytes - nothing may be substituted, ever.
-			flusher.Flush()
-			return true
-		}
 		code := a.OutcomeCode()
+		if committed && code != metrics.CodeTruncated {
+			// Commit-to-verbatim: a region the relay could no longer withhold is
+			// on the wire, so no synthetic outcome may replace its bytes. The
+			// truncation is the one class that survives that, because it asserts
+			// only that the stream stopped - a fact about the terminator no
+			// committed region can change - while every other class here is an
+			// inference from counts a committed region is exactly what makes
+			// untrustworthy. It APPENDS after the committed bytes, never over
+			// them, and no re-send may follow: the client already holds them.
+			code = ""
+		}
+		if code == "" && atomicTools && a.ToolCallRegionOpened() && !a.Terminated() {
+			// A tool-call region that never saw a terminator is a truncation
+			// whatever the feed's shape. The chatlike gate in the degenerate
+			// classifier keeps a foreign SSE protocol from being handed a
+			// synthetic error, but it cannot also mean "release the withheld
+			// call": with atomic tool calls on, releasing it is exactly what
+			// the setting forbids, and the client would get an uncommitted
+			// tool call for a stream that never finished. The region is
+			// dropped and the truncation surfaced in its place.
+			code = metrics.CodeTruncated
+		}
 		if code != "" && !a.HasInBandError() && !rec.ClientDisconnected {
 			// The stop rescue requires the terminal region still WITHHELD:
-			// once a finishHold call released it the outcome was already
-			// signed on the wire, and no re-send may append behind it.
+			// once a finishHold call released it, or the region overflowed its
+			// bound and committed, the outcome was already signed on the wire
+			// and no re-send may append behind it.
 			// RetryableReasoningStop is the analyzer's wire-safety gate (no
 			// refusal/function_call bytes, not a Responses-shaped feed).
 			if holding && code == metrics.CodeReasoningOnly && allowThinkingRescue && a.RetryableReasoningStop() {
@@ -1596,6 +1647,11 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				rescueRequested = rescueReasoningStop
 				return true
 			}
+			// A committed region's bytes are never replaced: the in-band error
+			// APPENDS after them, so the client still holds the tool call it was
+			// already given and additionally learns the stream failed. That is
+			// the honest outcome for a region the relay could no longer
+			// withhold - and the only one, because nothing may re-send here.
 			emitDegenerateSSE(w, &a, time.Now(), code, rec)
 		} else if len(hold) > 0 {
 			if _, werr := w.Write(hold); werr != nil {
@@ -1657,24 +1713,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// first byte of a tool call. Withhold it (and everything
 					// after) until the outcome is decided. A tool call is
 					// withheld from its FIRST byte so that an uncommitted one
-					// is never on the wire: the client commits a streamed tool
-					// call at end-of-body, not at finish_reason, so relaying
-					// it eagerly would let a re-send merge both attempts'
-					// arguments for the same tool-call index.
-					holding = true
-					// The bound is chosen by what OPENED the region, and a
-					// tool call opens it on exactly the first line a tool-call
-					// byte appears - which is here, not in the holding branch
-					// above. Without this the region stays on the terminal cap
-					// (64 KiB), a tool call between that and toolCallHoldMax
-					// overflows it and is committed verbatim, and the stream is
-					// then recorded as a clean success: both the hazard this
-					// setting exists to remove, and a silent-success record.
-					if atomicTools && a.ToolCallRegionOpened() {
-						holdMax = toolCallHoldMax
-					}
+					// is never on the wire: a client commits a streamed tool
+					// call without waiting for the model to say it finished (see
+					// sse.Analyzer.ToolCallRegionOpened), so relaying it eagerly
+					// would let a re-send merge both attempts' arguments for the
+					// same tool-call index.
+					openRegion(prev)
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
+
 					if !writeOut() {
 						return rescueNone
 					}
@@ -1693,30 +1740,36 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					// caller transparently re-sends - the OpenAI retry semantics
 					// the provider asked for ("please retry"), applied at the
 					// only wire state where re-sending cannot duplicate anything.
-					// Anything else falls through to verbatim relay.
-					if typ, code, msg, reasoning := a.RetryableUpstreamError(); typ != "" &&
-						s.retryableUpstreamErrorClass(typ, code) && !rec.ClientDisconnected &&
-						ctx.Err() == nil &&
-						((reasoning && allowThinkingRescue) || (!reasoning && allowTruncationRetry)) {
-						// Flush the complete lines the loop already fed to the
-						// analyzer (role/keepalive/reasoning) so the wire matches
-						// the record before the fresh attempt appends behind them.
-						if !writeOut() {
-							return rescueNone
+					// Anything else falls through to verbatim relay. A COMMITTED
+					// withhold region is never a rescue state: its bytes are on the
+					// wire, so a fresh attempt would append behind them - for a tool
+					// call, the same-index argument merge this whole path exists to
+					// prevent.
+					if !committed {
+						if typ, code, msg, reasoning := a.RetryableUpstreamError(); typ != "" &&
+							s.retryableUpstreamErrorClass(typ, code) && !rec.ClientDisconnected &&
+							ctx.Err() == nil &&
+							((reasoning && allowThinkingRescue) || (!reasoning && allowTruncationRetry)) {
+							// Flush the complete lines the loop already fed to the
+							// analyzer (role/keepalive/reasoning) so the wire matches
+							// the record before the fresh attempt appends behind them.
+							if !writeOut() {
+								return rescueNone
+							}
+							// Close the client's pending SSE event: the dropped
+							// frame was its first data line, so field lines of the
+							// same event (an Anthropic-style `event: error`) may have
+							// been relayed and must not type the fresh attempt's
+							// first chunk. A blank line ends that event with no
+							// data - spec parsers discard it - and is a no-op
+							// between complete events.
+							out.WriteByte('\n')
+							if !writeOut() {
+								return rescueNone
+							}
+							uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
+							return rescueUpstreamError
 						}
-						// Close the client's pending SSE event: the dropped
-						// frame was its first data line, so field lines of the
-						// same event (an Anthropic-style `event: error`) may have
-						// been relayed and must not type the fresh attempt's
-						// first chunk. A blank line ends that event with no
-						// data - spec parsers discard it - and is a no-op
-						// between complete events.
-						out.WriteByte('\n')
-						if !writeOut() {
-							return rescueNone
-						}
-						uerr.typ, uerr.code, uerr.msg, uerr.reasoning = typ, code, msg, reasoning
-						return rescueUpstreamError
 					}
 					out.Write(line)
 					out.WriteByte('\n')
@@ -1728,6 +1781,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// complete lines already seen by the analyzer. TCP/read chunk
 				// boundaries must never discard a terminal usage event.
 				if len(hold)+lineBuf.Len() > holdMax {
+					// The region outgrew its bound, so it commits. The bytes are
+					// fed to the analyzer FIRST, so its view of the stream can
+					// never diverge from what the client is about to receive:
+					// a fragment is byte-scanned like any other, which can cost
+					// one extra counted chunk for a line split here. The commit
+					// itself is the fact the rescue gates consult, because the
+					// analyzer's view is not a wire fact.
+					a.Feed(lineBuf.Bytes(), now)
 					hold = append(hold, lineBuf.Bytes()...)
 					lineBuf.Reset()
 					if _, werr := w.Write(hold); werr != nil {
@@ -1737,7 +1798,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					flusher.Flush()
 					hold = hold[:0]
 					holding = false
-					holdAborted = true
+					committed = true
 				}
 			} else if lineBuf.Len() > sseScannerBufMax {
 				// Safety guardrail: a newline-free (or one giant) stream from a
@@ -1745,9 +1806,23 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// A newline-free chunk never enters the line loop above, so the
 				// check must live here too; past the cap, feed the accumulated
 				// bytes to the analyzer (it only byte-scans, so a fragment is
-				// harmless), relay, and reset.
+				// harmless) and either withhold or relay them, then reset.
+				//
+				// The region-opening decision belongs here too. A tool-call
+				// delta larger than this cap carries its opener inside the
+				// first megabyte, so feeding the fragment is what reveals the
+				// transition - and a newline-free frame never returns to the
+				// line loop, so nothing else would. Relaying it instead would
+				// put the call's head on the wire with its tail, the finish
+				// chunk and the terminator still to come.
+				prev := withholdOpened()
 				a.Feed(lineBuf.Bytes(), now)
-				out.Write(lineBuf.Bytes())
+				openRegion(prev)
+				if holding {
+					hold = append(hold, lineBuf.Bytes()...)
+				} else {
+					out.Write(lineBuf.Bytes())
+				}
 				lineBuf.Reset()
 			}
 			if !writeOut() {
@@ -1756,23 +1831,29 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		}
 		if err != nil {
 			now := time.Now()
-			// Flush any trailing partial line into the analyzer. A partial
-			// line can never be a terminal marker, so it is never withheld.
-			// Its bytes stay in `out` (unflushed) until the outcome below
-			// decides whether to write them - a rescue drops them, so the
-			// client never sees an unterminated line; the fresh attempt
+			// Flush any trailing partial line into the analyzer, and into the
+			// withhold region if it turned out to open one. A partial line can
+			// never be a terminal marker, so it never resolves a region. When it
+			// does not open one its bytes stay in `out` (unflushed) until the
+			// outcome below decides whether to write them - a rescue drops them,
+			// so the client never sees an unterminated line; the fresh attempt
 			// opens a clean new event stream.
 			if lineBuf.Len() > 0 {
 				b := lineBuf.Bytes()
+				prev := withholdOpened()
 				a.Feed(b, now)
+				// The trailing partial line can never BE a terminal marker, so
+				// it never resolves a region - but it can OPEN one, and it must
+				// be withheld when it does: an upstream that closes mid-tool-call
+				// leaves the whole call in these bytes, and relaying them
+				// hands the client an uncommitted one.
+				openRegion(prev)
 				if holding {
 					hold = append(hold, b...)
 				} else {
 					// Staged for the client but NOT yet written: a rescue
 					// discards out rather than flushing it, so these bytes never
-					// reach the wire. A partial line can never be a terminal
-					// marker and never carries a whole tool call, so it is
-					// never withheld itself.
+					// reach the wire.
 					out.Write(b)
 				}
 				lineBuf.Reset()
@@ -1788,7 +1869,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// stays clean when it kills the read - reject the deadline
 				// sentinel itself (and any error wrapping it): a re-send
 				// would mint a fresh deadline the client did not ask for.
-				if allowThinkingRescue && ctx.Err() == nil &&
+				if allowThinkingRescue && ctx.Err() == nil && !committed &&
 					!errors.Is(err, context.DeadlineExceeded) &&
 					a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 					return rescueReasoningTruncation
@@ -1828,11 +1909,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			// hold (that requires a seen terminator), but it CAN coexist with a
 			// tool-call region, whose withheld bytes are exactly what must not
 			// reach a client this path declares un-rescuable: finishHold drops
-			// them and surfaces the truncation in-band.
-			if allowTruncationRetry && a.RetryableTruncation() && !rec.ClientDisconnected {
+			// them and surfaces the truncation in-band. A COMMITTED region is
+			// never rescuable at all - its bytes are on the wire, whatever the
+			// analyzer made of them, so the only honest outcome left is the
+			// surfaced error finishHold writes.
+			if allowTruncationRetry && !committed && a.RetryableTruncation() && !rec.ClientDisconnected {
 				return rescueEmptyTruncation
 			}
-			if allowThinkingRescue && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
+			if allowThinkingRescue && !committed && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				return rescueReasoningTruncation
 			}
 			if !finishHold() {

@@ -171,8 +171,8 @@ idle_conn_timeout: 90s
 sse_keepalive_interval: 15s
 
 # ---- Queue & retry ----
-# Per-key concurrency, transparent 429/5xx retry, quality/thinking/append rescues, and
-# atomic tool calls.
+# Per-key concurrency, transparent 429/5xx retry, quality/thinking rescues, and atomic
+# tool calls.
 # In-flight sends per provider+key. 0 is unlimited.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 0

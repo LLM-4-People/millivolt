@@ -99,8 +99,10 @@ type AggAPI struct {
 	Debug    func() any // operator debug sessions (same shape as GET /admin/debug)
 	Storm    func() any // current automatic error-storm protection and recovery
 	// Restart reports whether the graceful self-restart is ELIGIBLE on this
-	// binary, so the dashboard can offer the action only when it can work.
-	// Same shape as GET /admin/restart.
+	// binary, so the dashboard can offer the action only when it can work. A
+	// strict SUBSET of GET /admin/restart's status document, carrying its two
+	// eligibility fields (available, reason) and none of the live phase, pid or
+	// drain state: this is the boot-time verdict, immutable by construction.
 	Restart func() any
 	// ModelCanon serves the effective model-canonicalization rules (single
 	// owner config.CanonicalModel) for the bootstrap payload; the fold reads

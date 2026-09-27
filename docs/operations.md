@@ -603,7 +603,10 @@ that those consumers have not adopted yet. The schema/example identify which
 fields require restart.
 
 Rebuild & restart requires Go on PATH and the original source tree available at
-its compiled-in path. Moved/trimpath builds may report it unavailable. It builds
+its compiled-in path. Moved/trimpath builds report it unavailable, and the
+dashboard then omits the Restart control entirely (see
+[Settings and Restart](#settings-and-restart)) rather than offering an action
+that cannot work. It builds
 first, stops acceptance while retaining the listening socket, drains active
 handlers, flushes storage, then hands the socket to a ready child. Drain timeout
 or flush failure aborts and resumes the old process. Parked native-adapter runs
@@ -635,7 +638,7 @@ the credential gates both.
 | `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
-| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
+| `GET/POST /admin/restart` | Status / rebuild. Carries `available` and `reason` plus the live `phase`, `pid`, `started_at`, `error`, `rank` and drain fields; the bootstrap's `restart` section is the boot-time subset `{available, reason}`. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; optional ID targets one session. |
@@ -910,8 +913,13 @@ structured editors work on a local draft; Apply uses the
 [revision-checked save contract](#saving-settings-safely).
 
 Opening Restart reads availability and status. Restart now is disabled while a
-restart is in progress or rebuilding is unavailable. Progress reports actual
-build/drain/flush/handoff phases; it is not a simulated timer. After a successful
+restart is in progress. Availability is decided at boot (Go on PATH plus the
+compiled-in source tree) and rides the bootstrap payload's `restart` section as
+`{available, reason}`; on a build that cannot rebuild, the control and its menu
+leave the row entirely, so the dashboard shows no Restart entry and does not
+render that reason anywhere - read it from `GET /admin/restart` instead.
+Progress reports actual build/drain/flush/handoff phases; it is not a simulated
+timer. After a successful
 handoff, reconnect/bootstrap refreshes history, aggregates, operator state and
 config. Changed embedded frontend assets trigger a page reload through that same
 refresh owner. The [lifecycle section](#reload-restart-and-shutdown) distinguishes
