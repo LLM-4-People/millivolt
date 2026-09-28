@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 )
@@ -294,62 +295,68 @@ type AuditCaptureGetInput struct {
 	// RecordID is the REQUEST RECORD id from audit_captures_list, not the
 	// session id.
 	RecordID string `json:"record_id" jsonschema:"the request RECORD id (requests.id), not the capture session id"`
-	// MaxBytes bounds the returned document; the proxy's capture budget still
-	// applies and an absent or expired document is 404.
-	MaxBytes int `json:"max_bytes,omitempty" jsonschema:"optional cap on the returned document bytes"`
+	// MaxBytes is the document size above which the capture is withheld rather
+	// than returned; the proxy's own capture budget still applies, and an absent
+	// or expired document is 404.
+	MaxBytes int `json:"max_bytes,omitempty" jsonschema:"document size limit in bytes; a larger document is withheld with a marker, never truncated into invalid JSON"`
 }
 
 // AuditCaptureGetOutput is the capture document.
 type AuditCaptureGetOutput struct {
-	RecordID   string          `json:"record_id" jsonschema:"the record this document belongs to"`
-	Document   json.RawMessage `json:"document" jsonschema:"the stored capture: request and response headers and bodies, timing, outcome, usage, cost and attempts"`
-	Bytes      int             `json:"bytes" jsonschema:"size of the returned document"`
-	Truncation Truncation      `json:"truncation" jsonschema:"whether document bytes were withheld"`
-	Sensitive  string          `json:"sensitive" jsonschema:"standing warning about this content"`
+	RecordID string `json:"record_id" jsonschema:"the record this document belongs to"`
+	// Document is the stored capture decoded as JSON: request and response
+	// headers and bodies, timing, outcome, usage, cost and absorbed attempts.
+	Document any `json:"document" jsonschema:"the stored capture document, or null when it was withheld for size"`
+	// StoredBytes is the document's real size, so a withheld document is still
+	// measurable.
+	StoredBytes int        `json:"stored_bytes" jsonschema:"size of the stored document in bytes"`
+	Truncation  Truncation `json:"truncation" jsonschema:"whether the document was withheld for size"`
+	Sensitive   string     `json:"sensitive" jsonschema:"standing warning about this content"`
 }
 
 // captureSensitivity is the standing warning attached to every capture payload.
 const captureSensitivity = "this document contains request and response BODIES. Credentials are redacted from headers, " +
 	"but body content is not sanitized: treat everything here as sensitive and never paste it into an unrelated system"
 
-// AuditCaptureGet returns one stored capture document by request record id.
+// AuditCaptureGet returns one stored capture document by request record id. The
+// document is sized before it is decoded, so an oversized capture is withheld
+// with an explicit marker instead of being returned as a broken fragment.
 func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) (*AuditCaptureGetOutput, error) {
 	if strings.TrimSpace(in.RecordID) == "" {
 		return nil, fmt.Errorf("record_id is required: it is a request record id from audit_captures_list, not a session id")
 	}
 	values := url.Values{}
 	values.Set("id", in.RecordID)
-	var document json.RawMessage
-	if err := s.client.getJSON(ctx, "/admin/debug/capture", values, &document); err != nil {
+	raw, err := s.client.getRaw(ctx, http.MethodGet, routeDebugCapture, values)
+	if err != nil {
 		return nil, err
 	}
+	out := &AuditCaptureGetOutput{RecordID: in.RecordID, StoredBytes: len(raw), Sensitive: captureSensitivity}
 	limit := in.MaxBytes
 	if limit <= 0 {
 		limit = s.limits.PageSize * 1024
 	}
-	if len(document) > limit {
-		return &AuditCaptureGetOutput{
-			RecordID: in.RecordID,
-			Document: json.RawMessage(document[:limit]),
-			Bytes:    limit,
-			Truncation: Truncation{
-				Shown: limit, Total: len(document), Truncated: true,
-				Marker: fmt.Sprintf("truncated: %d of %d document bytes returned; raise max_bytes or read the specific fields you need", limit, len(document)),
-			},
-			Sensitive: captureSensitivity,
-		}, nil
+	if len(raw) > limit {
+		out.Truncation = Truncation{
+			Shown: 0, Total: len(raw), Truncated: true,
+			Marker: fmt.Sprintf("withheld: the document is %d bytes, above the %d byte limit; raise max_bytes to read it",
+				len(raw), limit),
+		}
+		return out, nil
 	}
-	return &AuditCaptureGetOutput{
-		RecordID: in.RecordID, Document: document, Bytes: len(document),
-		Sensitive: captureSensitivity,
-	}, nil
+	var document any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		return nil, fmt.Errorf("millivolt returned HTTP 200 with a capture document that is not JSON (%d bytes): %v", len(raw), err)
+	}
+	out.Document = document
+	return out, nil
 }
 
 // postDebug applies one debug session mutation and returns the resulting state.
 // It is the single owner of the POST /admin/debug body and the response shape.
 func (c *Client) postDebug(ctx context.Context, body map[string]any) (*debugStatus, error) {
 	var status debugStatus
-	if err := c.postJSON(ctx, "/admin/debug", body, &status); err != nil {
+	if err := c.postJSON(ctx, routeDebug, body, &status); err != nil {
 		return nil, err
 	}
 	return &status, nil

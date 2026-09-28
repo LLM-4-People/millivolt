@@ -20,6 +20,28 @@ import (
 	"strings"
 )
 
+// Route paths. This is the closed set of operator-plane endpoints this server
+// calls: a tool cannot name an arbitrary path, so no request can reach the
+// proxy's transparent inference catch-all, and no restore-adjacent route is
+// reachable.
+const (
+	routeQuery        = "/metrics/query"
+	routeExplorer     = "/metrics/agg/explorer"
+	routeChart        = "/metrics/agg/chart"
+	routeLog          = "/metrics/agg/log"
+	routeBootstrap    = "/metrics/bootstrap"
+	routePrometheus   = "/metrics/prometheus"
+	routePause        = "/admin/pause"
+	routeThrottle     = "/admin/throttle"
+	routeQuota        = "/admin/quota"
+	routeDebug        = "/admin/debug"
+	routeDebugCapture = "/admin/debug/capture"
+	routeConfig       = "/admin/config"
+	routeReload       = "/admin/reload"
+	routePurge        = "/admin/purge"
+	routePurgeCount   = "/admin/purge/count"
+)
+
 // maxResponseBytes bounds one response body read. An internal guardrail against
 // a runaway payload, not a user-tunable: the proxy already bounds its own
 // surfaces (storage_query_max_bytes for SQL results, debug_capture_max_bytes
@@ -163,9 +185,16 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 }
 
 // getText performs one authenticated GET and returns a bounded body without
-// JSON decoding, for the Prometheus text exposition.
+// decoding, for the Prometheus exposition and the capture document (which the
+// tool sizes before decoding).
 func (c *Client) getText(ctx context.Context, path string, query url.Values) ([]byte, error) {
-	resp, err := c.send(ctx, http.MethodGet, path, query, nil)
+	return c.getRaw(ctx, http.MethodGet, path, query)
+}
+
+// getRaw is the one bounded, authenticated body reader for a response the tool
+// does not decode itself.
+func (c *Client) getRaw(ctx context.Context, method, path string, query url.Values) ([]byte, error) {
+	resp, err := c.send(ctx, method, path, query, nil)
 	if err != nil {
 		return nil, err
 	}

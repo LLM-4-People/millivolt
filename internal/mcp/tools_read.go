@@ -83,7 +83,7 @@ func (s *Service) explore(ctx context.Context, in ExploreInput) (*ExploreOutput,
 		Scope               map[string]int64 `json:"scope"`
 		ConversationSummary map[string]int   `json:"conversation_summary"`
 	}
-	if err := s.client.getJSON(ctx, "/metrics/agg/explorer", values, &payload); err != nil {
+	if err := s.client.getJSON(ctx, routeExplorer, values, &payload); err != nil {
 		return nil, err
 	}
 	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups")
@@ -150,7 +150,7 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 		CostPerMTok *float64         `json:"cost_per_mtok"`
 		Buckets     []map[string]any `json:"buckets"`
 	}
-	if err := s.client.getJSON(queryCtx, "/metrics/agg/chart", values, &payload); err != nil {
+	if err := s.client.getJSON(queryCtx, routeChart, values, &payload); err != nil {
 		return nil, err
 	}
 	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets")
@@ -280,7 +280,7 @@ func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutp
 		limit = s.limits.PageSize
 	}
 	var payload bootstrapSnapshot
-	if err := s.client.getJSON(ctx, "/metrics/bootstrap", nil, &payload); err != nil {
+	if err := s.client.getJSON(ctx, routeBootstrap, nil, &payload); err != nil {
 		return nil, err
 	}
 	kept, truncation := clamp(payload.Records, limit, "records")
@@ -314,7 +314,7 @@ type PrometheusOutput struct {
 // Prometheus returns the scrape text. It covers the in-memory ring, NOT the
 // durable since-inception totals the dashboard aggregates use.
 func (s *Service) prometheus(ctx context.Context, _ PrometheusInput) (*PrometheusOutput, error) {
-	body, err := s.client.getText(ctx, "/metrics/prometheus", nil)
+	body, err := s.client.getText(ctx, routePrometheus, nil)
 	if err != nil {
 		return nil, err
 	}

@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -352,12 +351,12 @@ func TestAuditCaptureGetPinsRecordIDAndSensitivity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.RecordID != "rec-1" || out.Bytes != len(document) {
+	if out.RecordID != "rec-1" || out.StoredBytes != len(document) {
 		t.Fatalf("capture output = %+v", out)
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(out.Document, &decoded); err != nil {
-		t.Fatalf("the document must be returned as stored JSON: %v", err)
+	decoded, ok := out.Document.(map[string]any)
+	if !ok {
+		t.Fatalf("the document must be returned as stored JSON: %T", out.Document)
 	}
 	if decoded["captured_at"] != "2026-01-01T00:00:00Z" {
 		t.Fatalf("document mapping = %+v", decoded)
@@ -371,12 +370,13 @@ func TestAuditCaptureGetPinsRecordIDAndSensitivity(t *testing.T) {
 	assertQuery(t, request, "id", "rec-1")
 	assertNoQuery(t, request, "download")
 
-	// A bounded read states the withholding rather than returning invalid JSON.
+	// An oversized document is withheld whole, never truncated into broken
+	// JSON: the model raises max_bytes instead of reading a fragment.
 	truncated, err := service.auditCaptureGet(context.Background(), AuditCaptureGetInput{RecordID: "rec-1", MaxBytes: 40})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !truncated.Truncation.Truncated || truncated.Bytes != 40 {
+	if !truncated.Truncation.Truncated || truncated.Document != nil || truncated.StoredBytes != len(document) {
 		t.Fatalf("bounded capture = %+v", truncated)
 	}
 	if !strings.Contains(truncated.Truncation.Marker, "max_bytes") {

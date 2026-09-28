@@ -23,7 +23,7 @@ func (c *Client) querySQL(ctx context.Context, statement string) (rows, error) {
 	values := url.Values{}
 	values.Set("q", statement)
 	var out rows
-	if err := c.getJSON(ctx, "/metrics/query", values, &out); err != nil {
+	if err := c.getJSON(ctx, routeQuery, values, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -127,7 +127,7 @@ type bootstrapSnapshot struct {
 // counters.
 func (c *Client) bootstrap(ctx context.Context) (*bootstrapSnapshot, error) {
 	var snapshot bootstrapSnapshot
-	if err := c.getJSON(ctx, "/metrics/bootstrap", nil, &snapshot); err != nil {
+	if err := c.getJSON(ctx, routeBootstrap, nil, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
@@ -136,7 +136,7 @@ func (c *Client) bootstrap(ctx context.Context) (*bootstrapSnapshot, error) {
 // debug reads the capture session state.
 func (c *Client) debug(ctx context.Context) (*debugStatus, error) {
 	var status debugStatus
-	if err := c.getJSON(ctx, "/admin/debug", nil, &status); err != nil {
+	if err := c.getJSON(ctx, routeDebug, nil, &status); err != nil {
 		return nil, err
 	}
 	return &status, nil

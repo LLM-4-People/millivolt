@@ -27,9 +27,9 @@ var operatorStateReads = []struct {
 	name string
 	path string
 }{
-	{"pause", "/admin/pause"},
-	{"throttle", "/admin/throttle"},
-	{"quota", "/admin/quota"},
+	{"pause", routePause},
+	{"throttle", routeThrottle},
+	{"quota", routeQuota},
 	{"restart", "/admin/restart"},
 }
 
@@ -126,7 +126,7 @@ func (s *Service) setPause(ctx context.Context, in SetPauseInput) (*SetPauseOutp
 		}
 	}
 	var state map[string]any
-	if err := s.client.postJSON(ctx, "/admin/pause", body, &state); err != nil {
+	if err := s.client.postJSON(ctx, routePause, body, &state); err != nil {
 		return nil, err
 	}
 	out := &SetPauseOutput{State: object(state), Resumed: !in.Paused, Note: pauseNote}
@@ -228,7 +228,7 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 		}
 	}
 	var state map[string]any
-	if err := s.client.postJSON(ctx, "/admin/throttle", body, &state); err != nil {
+	if err := s.client.postJSON(ctx, routeThrottle, body, &state); err != nil {
 		return nil, err
 	}
 	out := &SetThrottleOutput{State: object(state), KnownProviders: []string{}, Note: throttleNote}
@@ -266,7 +266,7 @@ func (s *Service) resumeQuota(ctx context.Context, in ResumeQuotaInput) (*Resume
 	}
 	body := map[string]any{"provider": in.Provider, "resume": true}
 	var state map[string]any
-	if err := s.client.postJSON(ctx, "/admin/quota", body, &state); err != nil {
+	if err := s.client.postJSON(ctx, routeQuota, body, &state); err != nil {
 		return nil, err
 	}
 	out := &ResumeQuotaOutput{State: object(state), Note: quotaNote}
@@ -328,7 +328,7 @@ func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigO
 	revision := in.Revision
 	if revision == "" {
 		var state configState
-		if err := s.client.getJSON(ctx, "/admin/config", nil, &state); err != nil {
+		if err := s.client.getJSON(ctx, routeConfig, nil, &state); err != nil {
 			return nil, fmt.Errorf("read the current config revision before patching: %v", err)
 		}
 		revision = state.Revision
@@ -343,7 +343,7 @@ func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigO
 		Values          map[string]any `json:"values"`
 		Error           string         `json:"error"`
 	}
-	if err := s.client.postJSON(ctx, "/admin/config", body, &saved); err != nil {
+	if err := s.client.postJSON(ctx, routeConfig, body, &saved); err != nil {
 		return nil, err
 	}
 	out := &SetConfigOutput{
@@ -375,7 +375,7 @@ func (s *Service) reloadConfig(ctx context.Context, _ ReloadConfigInput) (*Reloa
 		OK              bool     `json:"ok"`
 		RestartRequired []string `json:"restart_required"`
 	}
-	if err := s.client.postJSON(ctx, "/admin/reload", nil, &payload); err != nil {
+	if err := s.client.postJSON(ctx, routeReload, nil, &payload); err != nil {
 		return nil, err
 	}
 	return &ReloadConfigOutput{OK: payload.OK, RestartRequired: list(payload.RestartRequired)}, nil
@@ -474,7 +474,7 @@ func (s *Service) purgePreview(ctx context.Context, in PurgePreviewInput) (*Purg
 	var payload struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, "/admin/purge/count", in.Filter.document(), &payload); err != nil {
+	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &payload); err != nil {
 		return nil, err
 	}
 	return &PurgePreviewOutput{
@@ -536,14 +536,14 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var current struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, "/admin/purge/count", in.Filter.document(), &current); err != nil {
+	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &current); err != nil {
 		return nil, fmt.Errorf("verify the reviewed count before deleting: %v", err)
 	}
 	if current.Count != in.ReviewedCount {
 		return nil, fmt.Errorf("the filter now matches %d rows but %d were reviewed: re-run purge_preview and confirm again",
 			current.Count, in.ReviewedCount)
 	}
-	if err := s.client.postJSON(ctx, "/admin/purge", in.Filter.document(), nil); err != nil {
+	if err := s.client.postJSON(ctx, routePurge, in.Filter.document(), nil); err != nil {
 		return nil, err
 	}
 	out := &PurgeOutput{
@@ -554,7 +554,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 	var remaining struct {
 		Count int64 `json:"count"`
 	}
-	if err := s.client.postJSON(ctx, "/admin/purge/count", in.Filter.document(), &remaining); err == nil {
+	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &remaining); err == nil {
 		out.Recount = remaining.Count
 	}
 	return out, nil
