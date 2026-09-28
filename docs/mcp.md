@@ -25,6 +25,7 @@ falls through to the default instead of becoming a broken value.
 | `--operator-token` | `MILLIVOLT_MCP_OPERATOR_TOKEN` | (required) | The proxy's own `MILLIVOLT_OPERATOR_TOKEN`. |
 | `--query-max-rows` | `MILLIVOLT_MCP_QUERY_MAX_ROWS` | `200` | Row cap applied to a `query` result. |
 | `--page-size` | `MILLIVOLT_MCP_PAGE_SIZE` | `50` | Default page for the record and capture listings. |
+| `--capture-max-bytes` | `MILLIVOLT_MCP_CAPTURE_MAX_BYTES` | `262144` | Document size above which a capture is withheld whole instead of being returned. |
 | `--query-timeout` | `MILLIVOLT_MCP_QUERY_TIMEOUT` | `2m` | Bound on a full-history chart or explorer read. |
 | `--timeout` | `MILLIVOLT_MCP_TIMEOUT` | `30s` | Bound on every call to the proxy. |
 

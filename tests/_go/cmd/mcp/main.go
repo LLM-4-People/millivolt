@@ -38,12 +38,13 @@ func TestFlagAndEnvironmentSetup(t *testing.T) {
 
 	t.Run("environment supplies both", func(t *testing.T) {
 		o, err := parse(nil, env(map[string]string{
-			"MILLIVOLT_MCP_PROXY_URL":      "http://127.0.0.1:9090",
-			"MILLIVOLT_MCP_OPERATOR_TOKEN": token,
-			"MILLIVOLT_MCP_QUERY_MAX_ROWS": "42",
-			"MILLIVOLT_MCP_PAGE_SIZE":      "7",
-			"MILLIVOLT_MCP_QUERY_TIMEOUT":  "90s",
-			"MILLIVOLT_MCP_TIMEOUT":        "5s",
+			"MILLIVOLT_MCP_PROXY_URL":         "http://127.0.0.1:9090",
+			"MILLIVOLT_MCP_OPERATOR_TOKEN":    token,
+			"MILLIVOLT_MCP_QUERY_MAX_ROWS":    "42",
+			"MILLIVOLT_MCP_PAGE_SIZE":         "7",
+			"MILLIVOLT_MCP_CAPTURE_MAX_BYTES": "4096",
+			"MILLIVOLT_MCP_QUERY_TIMEOUT":     "90s",
+			"MILLIVOLT_MCP_TIMEOUT":           "5s",
 		}))
 		if err != nil {
 			t.Fatal(err)
@@ -51,7 +52,7 @@ func TestFlagAndEnvironmentSetup(t *testing.T) {
 		if o.proxyURL != "http://127.0.0.1:9090" || o.operatorToken != token {
 			t.Fatalf("options = %+v", o)
 		}
-		if o.limits.QueryMaxRows != 42 || o.limits.PageSize != 7 ||
+		if o.limits.QueryMaxRows != 42 || o.limits.PageSize != 7 || o.limits.CaptureBytes != 4096 ||
 			o.limits.QueryTimeout != 90*time.Second || o.limits.Timeout != 5*time.Second {
 			t.Fatalf("limits = %+v", o.limits)
 		}

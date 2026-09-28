@@ -56,10 +56,9 @@ const maxErrorBodyBytes = 4 << 10
 // Client is the one HTTP owner for the operator plane. Every request it builds
 // carries the Bearer credential; no caller ever formats a header or a URL.
 type Client struct {
-	base   *url.URL
-	token  string
-	http   *http.Client
-	limits Limits
+	base  *url.URL
+	token string
+	http  *http.Client
 }
 
 // Origin is the validated proxy origin the client calls. It never carries the
@@ -78,10 +77,9 @@ func NewClient(proxyURL, token string, limits Limits) (*Client, error) {
 		return nil, err
 	}
 	return &Client{
-		base:   base,
-		token:  token,
-		http:   &http.Client{Timeout: limits.Timeout},
-		limits: limits,
+		base:  base,
+		token: token,
+		http:  &http.Client{Timeout: limits.Timeout},
 	}, nil
 }
 

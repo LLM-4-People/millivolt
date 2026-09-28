@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
 )
 
 // QueryInput is a single bounded SELECT.
@@ -21,7 +19,6 @@ type QueryOutput struct {
 	Rows       []map[string]any `json:"rows" jsonschema:"result rows, each a flat column-name to value object"`
 	RowCount   int              `json:"row_count" jsonschema:"rows returned after truncation"`
 	Truncation Truncation       `json:"truncation" jsonschema:"whether rows were withheld, and how to continue"`
-	Storage    bool             `json:"storage_enabled" jsonschema:"false when durable storage is off and this surface cannot work"`
 }
 
 // Query runs one bounded SELECT and truncates client-side with an explicit
@@ -40,7 +37,7 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 		return nil, err
 	}
 	kept, truncation := clamp(result, limit, "rows")
-	return &QueryOutput{Rows: kept, RowCount: len(kept), Truncation: truncation, Storage: true}, nil
+	return &QueryOutput{Rows: kept, RowCount: len(kept), Truncation: truncation}, nil
 }
 
 // maxQueryRowsCeiling is an internal sanity bound so a typo cannot ask for a
@@ -330,6 +327,3 @@ func (s *Service) prometheus(ctx context.Context, _ PrometheusInput) (*Prometheu
 // prometheusMaxLines bounds the exposition a model reads. An internal guardrail
 // on output volume, not a proxy limit.
 const prometheusMaxLines = 400
-
-// fmtDuration renders a duration for a tool message.
-func fmtDuration(d time.Duration) string { return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s" }

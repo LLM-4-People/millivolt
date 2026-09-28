@@ -8,6 +8,7 @@
 //	--operator-token  / MILLIVOLT_MCP_OPERATOR_TOKEN  (the proxy's MILLIVOLT_OPERATOR_TOKEN)
 //	--query-max-rows  / MILLIVOLT_MCP_QUERY_MAX_ROWS
 //	--page-size       / MILLIVOLT_MCP_PAGE_SIZE
+//	--capture-max-bytes / MILLIVOLT_MCP_CAPTURE_MAX_BYTES
 //	--query-timeout   / MILLIVOLT_MCP_QUERY_TIMEOUT
 //	--timeout         / MILLIVOLT_MCP_TIMEOUT
 //
@@ -51,6 +52,7 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	var (
 		queryMaxRows int
 		pageSize     int
+		captureBytes int
 		queryTimeout time.Duration
 		timeout      time.Duration
 	)
@@ -61,6 +63,9 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	if pageSize, err = envInt(lookupEnv, "MILLIVOLT_MCP_PAGE_SIZE", defaults.PageSize); err != nil {
 		return options{}, err
 	}
+	if captureBytes, err = envInt(lookupEnv, "MILLIVOLT_MCP_CAPTURE_MAX_BYTES", defaults.CaptureBytes); err != nil {
+		return options{}, err
+	}
 	if queryTimeout, err = envDuration(lookupEnv, "MILLIVOLT_MCP_QUERY_TIMEOUT", defaults.QueryTimeout); err != nil {
 		return options{}, err
 	}
@@ -69,7 +74,7 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	}
 	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
 	var o options
-	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, PageSize: pageSize, QueryTimeout: queryTimeout, Timeout: timeout}
+	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
 	fs.StringVar(&o.proxyURL, "proxy-url", envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", ""),
 		"millivolt proxy origin, for example http://127.0.0.1:8081 (env MILLIVOLT_MCP_PROXY_URL)")
 	fs.StringVar(&o.operatorToken, "operator-token", envString(lookupEnv, "MILLIVOLT_MCP_OPERATOR_TOKEN", ""),
@@ -78,6 +83,8 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 		"row cap applied to query results before the explicit truncation marker (env MILLIVOLT_MCP_QUERY_MAX_ROWS)")
 	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
 		"default page size for the record and capture listings (env MILLIVOLT_MCP_PAGE_SIZE)")
+	fs.IntVar(&o.limits.CaptureBytes, "capture-max-bytes", o.limits.CaptureBytes,
+		"document size above which a capture is withheld whole, in bytes (env MILLIVOLT_MCP_CAPTURE_MAX_BYTES)")
 	fs.DurationVar(&o.limits.QueryTimeout, "query-timeout", o.limits.QueryTimeout,
 		"bound on a full-history chart or explorer read (env MILLIVOLT_MCP_QUERY_TIMEOUT)")
 	fs.DurationVar(&o.limits.Timeout, "timeout", o.limits.Timeout,

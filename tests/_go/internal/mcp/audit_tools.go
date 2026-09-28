@@ -233,10 +233,9 @@ func TestAuditCapturesListPagesThroughSQL(t *testing.T) {
 	proxy.json(http.MethodGet, schemaPath,
 		`[{"id":"c2","started_at":1700,"status_code":200,"provider":"local","model":"demo","client":"dev","debug_session_id":"s1","cost":0.1},`+
 			`{"id":"c1","started_at":1600,"status_code":500,"provider":"local","model":"demo","client":"dev","debug_session_id":"s1","cost":0}]`)
-	service := newTestService(t, proxy, Limits{
-		QueryMaxRows: DefaultLimits().QueryMaxRows, PageSize: 2,
-		QueryTimeout: DefaultLimits().QueryTimeout, Timeout: DefaultLimits().Timeout,
-	})
+	limits := DefaultLimits()
+	limits.PageSize = 2
+	service := newTestService(t, proxy, limits)
 
 	out, err := service.auditCapturesList(context.Background(), AuditCapturesListInput{SessionID: "s1"})
 	if err != nil {

@@ -334,7 +334,7 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 	out := &AuditCaptureGetOutput{RecordID: in.RecordID, StoredBytes: len(raw), Sensitive: captureSensitivity}
 	limit := in.MaxBytes
 	if limit <= 0 {
-		limit = s.limits.PageSize * 1024
+		limit = s.limits.CaptureBytes
 	}
 	if len(raw) > limit {
 		out.Truncation = Truncation{

@@ -26,6 +26,11 @@ type Limits struct {
 	QueryMaxRows int
 	// PageSize is the default page for records and audit capture listings.
 	PageSize int
+	// CaptureBytes is the size above which a stored capture document is
+	// withheld whole instead of being returned. A capture carries full request
+	// and response bodies; a document that large is more than a model should
+	// read in one call.
+	CaptureBytes int
 	// QueryTimeout bounds one proxy read that is not the server's own bounded
 	// SQL reader (a full-history chart or explorer fold can take seconds).
 	QueryTimeout time.Duration
@@ -39,6 +44,7 @@ func DefaultLimits() Limits {
 	return Limits{
 		QueryMaxRows: 200,
 		PageSize:     50,
+		CaptureBytes: 256 << 10,
 		QueryTimeout: 120 * time.Second,
 		Timeout:      30 * time.Second,
 	}
@@ -51,6 +57,8 @@ func (l Limits) Validate() error {
 		return errors.New("query max rows must be at least 1")
 	case l.PageSize < 1:
 		return errors.New("page size must be at least 1")
+	case l.CaptureBytes < 1:
+		return errors.New("capture bytes must be at least 1")
 	case l.QueryTimeout <= 0:
 		return errors.New("query timeout must be greater than zero")
 	case l.Timeout <= 0:
