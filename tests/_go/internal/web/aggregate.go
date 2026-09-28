@@ -1591,6 +1591,48 @@ func TestBootstrapCarriesModelCanon(t *testing.T) {
 	}
 }
 
+// TestBootstrapCarriesRestartEligibility: the boot payload carries the
+// restarter's eligibility so a fresh page knows whether to OFFER the Restart
+// control before the menu is ever opened - no extra round trip, and a build
+// whose only possible outcome is a refusal never shows the action. The section
+// carries the two eligibility fields GET /admin/restart also reports and
+// deliberately none of that document's live state (phase, pid, error, rank,
+// drain timings), so it cannot drift into a second source of restart truth; and
+// an unwired provider omits it entirely (the browser then keeps the current
+// behaviour rather than hiding a working action).
+func TestBootstrapCarriesRestartEligibility(t *testing.T) {
+	const trimpath = "built with -trimpath, so the binary cannot locate its own source; " +
+		"self-restart is unavailable (restart via your process manager)"
+	for _, tc := range []struct {
+		name      string
+		doc       any
+		available bool
+		reason    string
+	}{
+		{name: "eligible", doc: map[string]any{"available": true, "reason": ""}, available: true},
+		{name: "ineligible", doc: map[string]any{"available": false, "reason": trimpath}, reason: trimpath},
+	} {
+		agg := NewAggAPI(metrics.NewBuffer(4), nil, time.Second)
+		agg.Restart = func() any { return tc.doc }
+		p := get(t, http.HandlerFunc(agg.HandleBootstrap), "/metrics/bootstrap")
+		section, ok := p["restart"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: restart section = %v, want the eligibility document", tc.name, p["restart"])
+		}
+		if len(section) != 2 || section["available"] != tc.available || section["reason"] != tc.reason {
+			t.Errorf("%s: restart section = %v, want available=%v with the server's own reason", tc.name, section, tc.available)
+		}
+	}
+
+	// Unwired (a build without the provider) omits the section rather than
+	// claiming an eligibility nobody computed.
+	agg := NewAggAPI(metrics.NewBuffer(4), nil, time.Second)
+	p := get(t, http.HandlerFunc(agg.HandleBootstrap), "/metrics/bootstrap")
+	if _, ok := p["restart"]; ok {
+		t.Errorf("bootstrap carried a restart section with no provider: %v", p["restart"])
+	}
+}
+
 // TestCanonicalModelScopeAppliesEverywhere: the canonical model name is
 // applied at the LOWEST server read choke point - contrib construction
 // (fromRecord/fromPending/scanContrib all run the modelCanonizer) - so
