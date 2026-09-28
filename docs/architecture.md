@@ -21,6 +21,7 @@ defines their supported combinations.
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
 | [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
+| [internal/mcp](../internal/mcp) | The stdio MCP client for the operator plane: one HTTP owner (credential, request building, error extraction), one scope-filter owner, the tool set and the destructive-call guards. No route or projection of its own. |
 
 ## Request and scheduling path
 
@@ -210,6 +211,26 @@ mixed namespaces remain unknown; missing parents are not invented roots.
 Summary counts follow full-filter rail scope; conversation cards follow the
 gallery cross-filter. Payloads retain small resolved fields, not the temporary
 graph. Parent pivots remain exact namespace-qualified leaves.
+
+## Operator plane clients
+
+The HTTP client in [internal/mcp](../internal/mcp) owns the operator credential,
+request building, the bounded response read and the `.error` extraction that
+reads the flat error body regardless of the declared Content-Type. Its route
+paths are one closed set beside it, so no tool can name a path outside the
+operator plane: nothing reaches the transparent inference catch-all, and no
+restore-adjacent route is exposed. The explorer's `f=dim:id` / `s=` grammar is
+owned once and shared by every scoped tool, and the tools never loop: a
+non-advancing cursor is reported as exhaustion because the aggregate scan budget
+is bounded per call.
+
+The destructive surface is guarded where the risk lives. A purge needs a
+filter that constrains something (the bodyless delete-everything command is never
+sent), an exact confirmation phrase, and a reviewed count re-checked against a
+fresh count of the same filter; capture refuses to start without durable storage
+because a session would then report success and store nothing. Stopping a
+capture session never deletes stored documents, and the tools say so rather than
+implying otherwise. See the [MCP server guide](mcp.md).
 
 ## Dashboard render owners
 

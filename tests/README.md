@@ -51,6 +51,14 @@ These behaviors are verified against the Go version in the root module. See
 the official [Go command documentation](https://pkg.go.dev/cmd/go) for overlay
 and package-pattern limitations.
 
+The MCP server's live test is opt-in, because it starts a private dev instance
+and generates loopback fixture traffic. It never targets port 8080, and it owns
+its instance through `scripts/dev.sh`:
+
+```sh
+MILLIVOLT_MCP_INTEGRATION=1 scripts/check.sh go test -count=1 ./internal/mcp
+```
+
 ## Python and browser harnesses
 
 Python unit tests live in `python/`, separate from the harnesses they test.

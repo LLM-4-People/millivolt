@@ -245,6 +245,10 @@ See the [operator workflows and API routes](docs/operations.md#operator-and-data
 before changing state. A protected listener is essential: these are operator
 actions, not per-user permissions.
 
+To let an LLM run these same analyses and drive the same controls, `cmd/mcp`
+serves the operator API over stdio. It is a client of the routes below, using
+the same credential: see the [MCP server guide](docs/mcp.md).
+
 ### Customize and deploy
 
 - One generated configuration reference covers request limits, upstream pools,
@@ -307,6 +311,7 @@ requirements.
 
 - [Documentation index](docs/README.md)
 - [Protocol and client integration](docs/protocol.md)
+- [MCP server for LLM-driven analysis](docs/mcp.md)
 - [Operations and limitations](docs/operations.md)
 - [Architecture and ownership](docs/architecture.md)
 - [Upstream compatibility, adapters and token refresh](docs/adapters.md)

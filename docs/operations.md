@@ -656,6 +656,13 @@ Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
 
+`cmd/mcp` serves this whole surface to an LLM over stdio, using the same
+credential and the same routes. It adds no route of its own, and it refuses the
+calls that are unsafe to make without a human in the loop: an empty purge filter,
+a purge without an exact confirmation phrase and a count that matches a real
+preview, and a capture session on a proxy without durable storage. See the
+[MCP server guide](mcp.md).
+
 ### Operator access
 
 `MILLIVOLT_OPERATOR_TOKEN` is the single operator credential for the whole
