@@ -3,6 +3,7 @@ package mcp
 import (
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -195,4 +196,40 @@ func assertNoToken(t *testing.T, where, text string) {
 	if strings.Contains(text, testToken) {
 		t.Fatalf("operator token leaked into %s", where)
 	}
+}
+
+// sink records anything a redirect target receives. It exists so the redirect
+// guard can assert a negative - that nothing was replayed - rather than only
+// that an error came back.
+type sink struct {
+	mu       sync.Mutex
+	seen     []seenRequest
+	listener net.Listener
+	server   *httptest.Server
+}
+
+func newSink(t *testing.T) *sink {
+	t.Helper()
+	s := &sink{}
+	s.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s.mu.Lock()
+		s.seen = append(s.seen, seenRequest{
+			Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(),
+			Auth: r.Header.Get("Authorization"), Body: string(body),
+		})
+		s.mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(s.server.Close)
+	return s
+}
+
+func (s *sink) url() string { return s.server.URL }
+
+func (s *sink) requests() []seenRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]seenRequest(nil), s.seen...)
 }

@@ -205,3 +205,101 @@ func TestErrorBodyExcerptIsBounded(t *testing.T) {
 		t.Fatalf("a bounded excerpt must say it was truncated: %v", err)
 	}
 }
+
+// TestRefusedRedirectReplaysNothing is the credential-replay guard. net/http
+// strips Authorization only when the HOSTNAME changes, and the port is not part
+// of that comparison, so a same-host different-port or subdomain 307/308 replays
+// both the credential and the full POST body to the redirect target. The proxy
+// redirects no operator route, so refusing every redirect removes the question.
+func TestRefusedRedirectReplaysNothing(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect,
+		http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			// The sink is a second listener: anything it receives was replayed.
+			sink := newSink(t)
+			upstream := newFakeProxy(t)
+			// A body-carrying POST, so a replay would carry the request body as
+			// well as the credential.
+			upstream.respond(http.MethodPost, reloadPath, cannedResponse{
+				Status:      status,
+				ContentType: "text/plain",
+				Headers:     map[string]string{"Location": sink.url() + "/admin/reload"},
+				Body:        "moved\n",
+			})
+			// The proxy this client trusts is on the sink's own host, so a
+			// hostname-only redirect check would have replayed the credential.
+			service := newTestService(t, upstream, Limits{})
+			_, err := service.reloadConfig(context.Background(), ReloadConfigInput{})
+			if err == nil {
+				t.Fatal("a redirect must be a clean tool error, never a success")
+			}
+			if !strings.Contains(err.Error(), "redirect") {
+				t.Fatalf("error = %v, want the redirect refusal", err)
+			}
+			if !strings.Contains(err.Error(), "credential") {
+				t.Fatalf("the refusal must say why following it is unsafe: %v", err)
+			}
+			assertNoToken(t, "redirect error", err.Error())
+			if got := sink.requests(); len(got) != 0 {
+				t.Fatalf("the redirect target received %d requests, want none: %+v", len(got), got[0])
+			}
+		})
+	}
+	// A redirect on a read is refused the same way.
+	sink := newSink(t)
+	upstream := newFakeProxy(t)
+	upstream.respond(http.MethodGet, explorerPath, cannedResponse{
+		Status: http.StatusTemporaryRedirect, ContentType: "text/plain",
+		Headers: map[string]string{"Location": sink.url() + "/metrics/agg/explorer"}, Body: "moved\n",
+	})
+	service := newTestService(t, upstream, Limits{})
+	if _, err := service.explore(context.Background(), ExploreInput{Dim: "provider"}); err == nil ||
+		!strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("a read redirect must be refused too, got %v", err)
+	}
+	if len(sink.requests()) != 0 {
+		t.Fatal("the redirect target received a request")
+	}
+}
+
+// TestErrorBodyIsRedactedOfTheCredential pins that the redaction covers the
+// failure BODY, not only the transport error. An endpoint that reflects the
+// Authorization header into its own error would otherwise hand the credential to
+// the model verbatim, and everything this server returns is logged and pasted
+// elsewhere.
+func TestErrorBodyIsRedactedOfTheCredential(t *testing.T) {
+	// The fake echoes the credential into its own body, which is the worst case
+	// a transport can face.
+	proxy := newFakeProxy(t)
+	proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+		Status: http.StatusInternalServerError, ContentType: "application/json",
+		Body: `{"error":"upstream repeated ` + testToken + ` in a header"}`,
+	})
+	proxy.respond(http.MethodGet, schemaPath, cannedResponse{
+		Status: http.StatusBadGateway, ContentType: "text/html",
+		Body: "<html><body>Authorization: Bearer " + testToken + "</body></html>",
+	})
+	service := newTestService(t, proxy, Limits{})
+	ctx := context.Background()
+
+	_, err := service.explore(ctx, ExploreInput{Dim: "provider"})
+	if err == nil {
+		t.Fatal("expected the echoed failure")
+	}
+	assertNoToken(t, "flat .error body", err.Error())
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("the redaction must be visible, not silent removal: %q", err)
+	}
+	// The non-JSON excerpt path too: the proxy's own .error field is absent
+	// there, so a different branch produces the message.
+	_, err = service.query(ctx, QueryInput{SQL: "SELECT 1"})
+	if err == nil {
+		t.Fatal("expected the reflected failure")
+	}
+	assertNoToken(t, "excerpted body", err.Error())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error must be an *APIError, got %T", err)
+	}
+	assertNoToken(t, "APIError.Message", apiErr.Message)
+}

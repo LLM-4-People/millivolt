@@ -12,8 +12,9 @@
 //	--query-timeout   / MILLIVOLT_MCP_QUERY_TIMEOUT
 //	--timeout         / MILLIVOLT_MCP_TIMEOUT
 //
-// The credential is never logged, never placed in a URL, and never echoed into
-// a tool result. stdout carries the MCP stream only: every diagnostic goes to
+// The credential is never logged, never placed in a URL, never used as a flag
+// default (flag.PrintDefaults would print it), and never echoed into a tool
+// result. stdout carries the MCP stream only: every diagnostic goes to
 // stderr, because a stray stdout line would corrupt the protocol.
 package main
 
@@ -77,8 +78,13 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
 	fs.StringVar(&o.proxyURL, "proxy-url", envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", ""),
 		"millivolt proxy origin, for example http://127.0.0.1:8081 (env MILLIVOLT_MCP_PROXY_URL)")
-	fs.StringVar(&o.operatorToken, "operator-token", envString(lookupEnv, "MILLIVOLT_MCP_OPERATOR_TOKEN", ""),
-		"the proxy's MILLIVOLT_OPERATOR_TOKEN (env MILLIVOLT_MCP_OPERATOR_TOKEN)")
+	// The credential is registered with an EMPTY default and resolved after
+	// parsing. flag.PrintDefaults renders `(default "...")` for any flag whose
+	// default is not its zero value, and it runs on -h, on --help and on every
+	// flag parse error - so a credential used as a flag default is printed in
+	// plaintext to stderr, which an MCP host does not capture.
+	fs.StringVar(&o.operatorToken, "operator-token", "",
+		"the proxy's MILLIVOLT_OPERATOR_TOKEN; the value is never echoed in usage output (env MILLIVOLT_MCP_OPERATOR_TOKEN)")
 	fs.IntVar(&o.limits.QueryMaxRows, "query-max-rows", o.limits.QueryMaxRows,
 		"row cap applied to query results before the explicit truncation marker (env MILLIVOLT_MCP_QUERY_MAX_ROWS)")
 	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
@@ -92,13 +98,32 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
+	// Flags win over the environment, decided by what was actually NAMED on the
+	// command line, not by whether the resolved value is empty: an explicit
+	// empty --operator-token is a deliberate (and invalid) choice, while an
+	// absent flag falls through to the environment.
+	if !named(fs, "operator-token") {
+		o.operatorToken = envString(lookupEnv, "MILLIVOLT_MCP_OPERATOR_TOKEN", "")
+	}
 	if fs.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
 	return o, nil
 }
 
+// named reports whether the caller actually named a flag on the command line.
+func named(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
+
 func main() {
+
 	os.Exit(run(os.Args[1:], os.LookupEnv, os.Stderr))
 }
 

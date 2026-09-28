@@ -38,6 +38,7 @@ const (
 	routeDebugCapture = "/admin/debug/capture"
 	routeConfig       = "/admin/config"
 	routeReload       = "/admin/reload"
+	routeRestart      = "/admin/restart"
 	routePurge        = "/admin/purge"
 	routePurgeCount   = "/admin/purge/count"
 )
@@ -52,6 +53,19 @@ const maxResponseBytes = 64 << 20
 // message. The proxy's flat {"error": "..."} body is far smaller; the rest of
 // the budget keeps an unexpected HTML error page from filling a model context.
 const maxErrorBodyBytes = 4 << 10
+
+// errRedirectRefused is returned instead of following a redirect. No operator
+// route redirects, so a redirect answer is a misconfiguration or a hostile
+// endpoint - and following one is exactly the wrong thing to do: net/http
+// compares only the HOSTNAME when deciding whether to keep the Authorization
+// header, so a same-host different-port or subdomain 307/308 would replay both
+// the credential and the full POST body to the redirect target. Refusing every
+// redirect removes the question.
+var errRedirectRefused = errors.New("millivolt answered a redirect; no operator route redirects, " +
+	"and following one would replay the operator credential and the request body to another endpoint")
+
+// refuseRedirect is the one CheckRedirect this client installs. It never follows.
+func refuseRedirect(*http.Request, []*http.Request) error { return errRedirectRefused }
 
 // Client is the one HTTP owner for the operator plane. Every request it builds
 // carries the Bearer credential; no caller ever formats a header or a URL.
@@ -79,7 +93,7 @@ func NewClient(proxyURL, token string, limits Limits) (*Client, error) {
 	return &Client{
 		base:  base,
 		token: token,
-		http:  &http.Client{Timeout: limits.Timeout},
+		http:  &http.Client{Timeout: limits.Timeout, CheckRedirect: refuseRedirect},
 	}, nil
 }
 
@@ -145,7 +159,12 @@ func (e *APIError) Error() string {
 // the declared Content-Type: the operator routes are inconsistent, and some
 // answers with text/plain carrying a JSON body. A body that is not that shape
 // degrades to a bounded, whitespace-collapsed excerpt instead of raw bytes.
-func newAPIError(resp *http.Response, body []byte) *APIError {
+//
+// The credential is redacted from the RESULT, not only from the transport
+// error: an endpoint that reflects the Authorization header back into its own
+// failure body would otherwise hand the credential to the model verbatim, and
+// everything this returns is logged and pasted elsewhere.
+func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	message := strings.TrimSpace(string(body))
 	var flat struct {
 		Error string `json:"error"`
@@ -158,15 +177,22 @@ func newAPIError(resp *http.Response, body []byte) *APIError {
 			message = message[:maxErrorBodyBytes] + " [truncated]"
 		}
 	}
-	if message == "" {
-		message = http.StatusText(resp.StatusCode)
-	}
 	return &APIError{
 		Status:     resp.StatusCode,
-		Message:    message,
+		Message:    redactCredential(errorMessage(message, resp.StatusCode), token),
 		RetryAfter: resp.Header.Get("Retry-After"),
 		Challenge:  resp.Header.Get("WWW-Authenticate"),
 	}
+}
+
+// errorMessage is the one owner of "the proxy's own text, or the status text
+// when it sent none". It is shared with the config patch path, where a failure
+// status arrives in a body this server already decoded.
+func errorMessage(message string, status int) string {
+	if trimmed := strings.TrimSpace(message); trimmed != "" {
+		return trimmed
+	}
+	return http.StatusText(status)
 }
 
 // getJSON performs one authenticated GET and decodes the JSON body into out.
@@ -202,42 +228,59 @@ func (c *Client) getRaw(ctx context.Context, method, path string, query url.Valu
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, newAPIError(resp, body)
+		return nil, newAPIError(resp, body, c.token)
 	}
 	return body, nil
 }
 
 // doJSON is the single request/response owner: URL assembly, the Bearer
-// header, the bounded read, the status check and the JSON decode.
+// header, the bounded read, the status check and the JSON decode. It discards
+// the status; a caller that must reason about a non-2xx status uses
+// doJSONTolerating.
 func (c *Client) doJSON(ctx context.Context, method, path string, query url.Values, body any, out any) error {
+	_, err := c.doJSONTolerating(ctx, method, path, query, body, out, nil)
+	return err
+}
+
+// doJSONTolerating is doJSON with an explicit allowlist of non-2xx statuses
+// whose body is still that route's success document, and it reports the status
+// so the caller can tell a tolerated one from a real failure.
+//
+// Exactly one route needs it: POST /admin/config writes the file and THEN
+// answers 500 when the reload failed (internal/config/admin.go servePost).
+// Treating that as a transport failure reports an error for a mutation that
+// SUCCEEDED and invites a retry that then fails with 409. No other status on
+// any route is tolerated: a 409, a 401 and a 500 with no committed document all
+// stay errors.
+func (c *Client) doJSONTolerating(ctx context.Context, method, path string, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("encode request body: %v", err)
+			return 0, fmt.Errorf("encode request body: %v", err)
 		}
 		payload = bytes.NewReader(encoded)
 	}
 	resp, err := c.send(ctx, method, path, query, payload)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	raw, err := readBody(resp.Body)
 	if err != nil {
-		return err
+		return resp.StatusCode, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return newAPIError(resp, raw)
+	if (resp.StatusCode < 200 || resp.StatusCode > 299) && !tolerate[resp.StatusCode] {
+		return resp.StatusCode, newAPIError(resp, raw, c.token)
 	}
 	if out == nil {
-		return nil
+		return resp.StatusCode, nil
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("millivolt returned HTTP %d with a body this tool could not decode as JSON (%d bytes): %v",
+		return resp.StatusCode, fmt.Errorf("millivolt returned HTTP %d with a body this tool could not decode as JSON (%d bytes): %v",
 			resp.StatusCode, len(raw), err)
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // send builds and performs the authenticated request. The credential appears
@@ -262,6 +305,11 @@ func (c *Client) send(ctx context.Context, method, path string, query url.Values
 	// rotated token. Every call presents the Bearer explicitly.
 	resp, err := c.http.Do(request)
 	if err != nil {
+		// net/http wraps CheckRedirect's error in *url.Error; unwrap it so the
+		// model reads the refusal itself rather than a request-line dump.
+		if errors.Is(err, errRedirectRefused) {
+			return nil, errRedirectRefused
+		}
 		return nil, fmt.Errorf("reach millivolt at %s: %v", c.base.String(), redactCredential(err.Error(), c.token))
 	}
 	return resp, nil
@@ -280,9 +328,10 @@ func readBody(body io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
-// redactCredential removes the operator token from a transport error string.
-// net/http does not echo request headers, so this is a belt-and-braces guard
-// for any future error that carries the request URL or its headers.
+// redactCredential removes the operator token from any text that can reach a
+// model or a log. It covers the transport error, where net/http does not echo
+// request headers, and the failure body, where a reflecting endpoint could put
+// the credential back verbatim.
 func redactCredential(message, token string) string {
 	if token == "" {
 		return message
