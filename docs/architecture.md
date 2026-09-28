@@ -216,21 +216,42 @@ graph. Parent pivots remain exact namespace-qualified leaves.
 
 The HTTP client in [internal/mcp](../internal/mcp) owns the operator credential,
 request building, the bounded response read and the `.error` extraction that
-reads the flat error body regardless of the declared Content-Type. Its route
+reads the flat error body regardless of the declared Content-Type. The credential
+is redacted from both the transport error and the failure body, and it is never
+a flag default, because `flag.PrintDefaults` renders a non-zero default on `-h`
+and on every parse error. Redirects are refused rather than followed: `net/http`
+strips `Authorization` only when the hostname changes, so a same-host
+different-port `307` would replay the credential and the request body. Its route
 paths are one closed set beside it, so no tool can name a path outside the
 operator plane: nothing reaches the transparent inference catch-all, and no
 restore-adjacent route is exposed. The explorer's `f=dim:id` / `s=` grammar is
 owned once and shared by every scoped tool, and the tools never loop: a
 non-advancing cursor is reported as exhaustion because the aggregate scan budget
-is bounded per call.
+is bounded per call. An empty page is deliberately not exhaustion, because the
+proxy advances its cursor on every row it scanned, including rows the scope
+excluded, so an empty page with an advanced cursor is a page that must be
+continued.
 
-The destructive surface is guarded where the risk lives. A purge needs a
-filter that constrains something (the bodyless delete-everything command is never
-sent), an exact confirmation phrase, and a reviewed count re-checked against a
-fresh count of the same filter; capture refuses to start without durable storage
-because a session would then report success and store nothing. Stopping a
-capture session never deletes stored documents, and the tools say so rather than
-implying otherwise. See the [MCP server guide](mcp.md).
+The destructive surface is guarded where the risk lives. A purge needs a filter
+that constrains something (the bodyless delete-everything command is never sent),
+an exact confirmation phrase, and the opaque `preview_token` that
+`purge_preview` issued for that same filter, its count and an expiry. A count
+cannot bind the two: it is only a number, so two filters matching the same number
+would authorize each other. The token is stateless and HMAC-bound under the
+operator credential, so nothing is persisted, nothing expires on its own, and a
+rotated credential invalidates every outstanding preview. A refusal discloses no
+count, because a refusal that reports the live count is a count oracle a model
+can retry its way through. The residual gap is stated rather than claimed away:
+the re-check and the delete are two requests with no shared transaction, so rows
+committed between them are removed un-previewed. Capture refuses to start without
+durable storage, and refuses a scope name the proxy has never seen, because
+either way the session would report success and store nothing. Stopping a capture
+session deletes nothing, and a purge deletes the stored capture document of every
+request it matches; the tools say which is which rather than implying otherwise.
+Scope names are validated against the vocabulary `GET /admin/debug` reports, so
+neither a mistyped capture scope nor a mistyped throttle provider can quietly
+create a dead session or permanently pollute `known_providers`. See the
+[MCP server guide](mcp.md).
 
 ## Dashboard render owners
 

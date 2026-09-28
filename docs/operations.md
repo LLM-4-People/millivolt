@@ -659,8 +659,11 @@ back. With storage disabled, their memory-only state is intentional.
 `cmd/mcp` serves this whole surface to an LLM over stdio, using the same
 credential and the same routes. It adds no route of its own, and it refuses the
 calls that are unsafe to make without a human in the loop: an empty purge filter,
-a purge without an exact confirmation phrase and a count that matches a real
-preview, and a capture session on a proxy without durable storage. See the
+a purge without an exact confirmation phrase and without the `purge_preview`
+token issued for that same filter, a capture scope naming a value the proxy has
+never seen, a throttle on a provider it has never seen, and a capture session on
+a proxy without durable storage. It never follows a redirect, and it presents the
+credential only in the `Authorization` header. See the
 [MCP server guide](mcp.md).
 
 ### Operator access
