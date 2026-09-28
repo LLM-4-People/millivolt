@@ -26,7 +26,7 @@ case "$mode" in
     for script in scripts/*.sh; do bash -n "$script"; done
     go mod verify
     # Explicit command paths make missing command source fail on a fresh checkout.
-    go list ./cmd/proxy ./cmd/stress ./cmd/release
+    go list ./cmd/proxy ./cmd/mcp ./cmd/stress ./cmd/release
     check_dir="$(mktemp -d /tmp/millivolt-check.XXXXXX)"
     trap 'rm -rf -- "$check_dir"' EXIT
     go build -mod=readonly -o "$check_dir/" ./...

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,13 +40,14 @@ const integrationEnv = "MILLIVOLT_MCP_INTEGRATION"
 // for a disposable scratch instance, not a credential for anything else.
 const integrationToken = "millivolt-mcp-integration-credential"
 
-// integrationPort and integrationDB keep the fixture off the default dev port
-// and scratch database, so this test never restarts or resets an instance an
-// operator already has open.
+// The fixture's port and database are PER RUN. A fixed port and a fixed scratch
+// path made two concurrent runs collide - and the browser-fixtures CI step
+// already occupies the port this one used - so the port is taken from the
+// operating system and the database is unique, keeping this test off any
+// instance an operator already has open. scripts/dev.sh keys its PID file and
+// log on the port, so a unique port is a unique process identity too.
+const integrationDBPrefix = "/tmp/millivolt/millivolt-dev-mcp-"
 const (
-	integrationPort   = "18081"
-	integrationOrigin = "http://127.0.0.1:" + integrationPort
-	integrationDB     = "/tmp/millivolt/millivolt-dev-mcp.db"
 	// fixtureClient is the client label the fixture traffic presents, so the
 	// capture scope and the purge scope are both exact.
 	fixtureClient = "mcp-integration-fixture"
@@ -59,11 +62,15 @@ func devInstance(t *testing.T) *liveTools {
 		t.Skipf("set %s=1 to run the live MCP integration test", integrationEnv)
 	}
 	root := repoRoot(t)
+	origin, err := reserveLoopbackOrigin(t)
+	if err != nil {
+		t.Fatal(err)
+	}
 	// The dev instance shares this process's environment, which is how the
 	// operator credential reaches it.
 	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", integrationToken)
-	t.Setenv("DEV_PORT", integrationPort)
-	t.Setenv("DEV_DB", integrationDB)
+	t.Setenv("DEV_PORT", portOf(t, origin))
+	t.Setenv("DEV_DB", integrationDBPrefix+portOf(t, origin)+".db")
 	t.Setenv("DEV_HOST", "127.0.0.1")
 
 	script := filepath.Join(root, "scripts", "dev.sh")
@@ -80,11 +87,41 @@ func devInstance(t *testing.T) *liveTools {
 		}
 	})
 
-	service, err := NewService(integrationOrigin, integrationToken, DefaultLimits())
+	service, err := NewService(origin, integrationToken, DefaultLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &liveTools{session: connect(t, service), service: service}
+	return &liveTools{session: connect(t, service), service: service, origin: origin}
+}
+
+// reserveLoopbackOrigin takes a loopback port from the operating system and
+// closes it again, which is the only race-free-enough way to get a port no other
+// run is using. It is deliberately not a fixed number: the browser-fixtures CI
+// step already binds one, and a collision there is two jobs silently sharing a
+// proxy and a database.
+func reserveLoopbackOrigin(t *testing.T) (string, error) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	if port < 1024 {
+		return "", fmt.Errorf("reserved port %d is below the range scripts/dev.sh accepts", port)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d", port), nil
+}
+
+func portOf(t *testing.T, origin string) string {
+	t.Helper()
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parsed.Port()
 }
 
 func repoRoot(t *testing.T) string {
@@ -104,6 +141,8 @@ func repoRoot(t *testing.T) string {
 type liveTools struct {
 	session *sdk.ClientSession
 	service *Service
+	// origin is this run's own proxy, never a fixed one.
+	origin string
 }
 
 // invoke calls one tool and returns its structured output.
@@ -120,6 +159,23 @@ func (l *liveTools) invokeError(t *testing.T, name string, arguments map[string]
 		t.Fatalf("%s must fail here, got: %s", name, textOf(t, result))
 	}
 	return textOf(t, result)
+}
+
+// valuesOf reads a values response into a set of the value names it carries.
+func valuesOf(t *testing.T, document map[string]any, dim string) map[string]bool {
+	t.Helper()
+	if text(t, document, "dim") != dim {
+		t.Fatalf("values dim = %v, want %q", document["dim"], dim)
+	}
+	found := map[string]bool{}
+	for _, entry := range array(t, document, "values") {
+		row, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("value entry = %T", entry)
+		}
+		found[text(t, row, "value")] = true
+	}
+	return found
 }
 
 // number reads one numeric field from a tool's structured output.
@@ -252,7 +308,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	}
 
 	// The first fixture request must become a durable row the tools can read.
-	sendFixtureRequest(t, integrationOrigin, upstream)
+	sendFixtureRequest(t, live.origin, upstream)
 	var recordID string
 	eventually(t, "the fixture request to become durable", func() bool {
 		rows := live.invoke(t, "query", map[string]any{
@@ -356,7 +412,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	}
 
 	// A second request while the session is live is what gets captured.
-	sendFixtureRequest(t, integrationOrigin, upstream)
+	sendFixtureRequest(t, live.origin, upstream)
 
 	var captureID string
 	eventually(t, "a captured request to appear", func() bool {
@@ -396,6 +452,47 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 		t.Fatalf("the capture changed across stop: %v then %v", capture["stored_bytes"], again["stored_bytes"])
 	}
 
+	// config_get and values are the two discovery tools the corrected surface
+	// adds, and both must work against a real proxy: config_get is what makes
+	// set_config's own advice followable, and values is what stops a guessed
+	// filter value from becoming a confident zero.
+	configDocument := live.invoke(t, "config_get", map[string]any{})
+	if text(t, configDocument, "revision") == "" {
+		t.Fatalf("config_get must return the revision set_config has to echo: %v", configDocument)
+	}
+	clientNames := valuesOf(t, live.invoke(t, "values", map[string]any{"dim": "client"}), "client")
+	if !clientNames[fixtureClient] {
+		t.Fatalf("values on client must discover the fixture client: %v", clientNames)
+	}
+	vocabularies, isList := reference["vocabularies"].([]any)
+	if !isList || len(vocabularies) == 0 {
+		t.Fatalf("describe must carry a vocabulary per dimension: %v", reference["vocabularies"])
+	}
+	dimensions := map[string]bool{}
+	for _, entry := range vocabularies {
+		vocabulary, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("vocabulary entry = %T", entry)
+		}
+		dimensions[text(t, vocabulary, "dimension")] = true
+	}
+	for _, dimension := range []string{"status", "time", "error", "client", "provider", "model", "tool"} {
+		if !dimensions[dimension] {
+			t.Fatalf("describe is missing the %q vocabulary: %v", dimension, dimensions)
+		}
+	}
+	// A dimension the probe cannot enumerate is refused and named as such, and
+	// the note on a real probe explains where its values DO come from - which is
+	// what stops a model from writing time:24h and reading the empty result as
+	// "no traffic at night".
+	if message := live.invokeError(t, "values", map[string]any{"dim": "time"}); !strings.Contains(message, "not probeable") {
+		t.Fatalf("a derived dimension must be refused by name: %q", message)
+	}
+	probed := live.invoke(t, "values", map[string]any{"dim": "client"})
+	if note := text(t, probed, "note"); !strings.Contains(note, "time and error are not listed here") {
+		t.Fatalf("the values note must explain the derived dimensions: %q", note)
+	}
+
 	preview := live.invoke(t, "purge_preview", map[string]any{
 		"filter": map[string]any{"client": fixtureClient},
 	})
@@ -403,21 +500,45 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	if previewed < 2 {
 		t.Fatalf("the fixture scope must hold both requests, got %v", previewed)
 	}
+	previewToken := text(t, preview, "preview_token")
+	if previewToken == "" {
+		t.Fatalf("the preview must authorize the matching deletion: %v", preview)
+	}
+	// The preview states that captures go too, because they do.
+	if captures := text(t, preview, "captures"); !strings.Contains(captures, "stored capture document is deleted") {
+		t.Fatalf("the preview must warn about captures: %q", captures)
+	}
 	// A purge without the exact confirmation cannot delete anything. The
 	// required argument is enforced by the tool schema before the handler runs,
 	// and a wrong phrase is refused by the handler: both must fail.
 	if message := live.invokeError(t, "purge", map[string]any{
-		"filter":         map[string]any{"client": fixtureClient},
-		"reviewed_count": previewed,
+		"filter":        map[string]any{"client": fixtureClient},
+		"preview_token": previewToken,
 	}); !strings.Contains(message, "confirmation") {
 		t.Fatalf("the refusal must name the missing confirmation: %q", message)
 	}
 	if message := live.invokeError(t, "purge", map[string]any{
-		"filter":         map[string]any{"client": fixtureClient},
-		"confirmation":   "delete everything",
-		"reviewed_count": previewed,
+		"filter":        map[string]any{"client": fixtureClient},
+		"confirmation":  "delete everything",
+		"preview_token": previewToken,
 	}); !strings.Contains(message, PurgeConfirmation) {
 		t.Fatalf("the refusal must name the required phrase: %q", message)
+	}
+	// A token for a DIFFERENT filter must not authorize this one, even though
+	// both match the same rows. This is the bypass a bare count allowed.
+	if message := live.invokeError(t, "purge", map[string]any{
+		"filter":        map[string]any{"provider": "nonexistent-provider"},
+		"confirmation":  PurgeConfirmation,
+		"preview_token": previewToken,
+	}); !strings.Contains(message, "DIFFERENT filter") {
+		t.Fatalf("a token for another filter must refuse: %q", message)
+	}
+	if message := live.invokeError(t, "purge", map[string]any{
+		"filter":        map[string]any{"client": fixtureClient},
+		"confirmation":  PurgeConfirmation,
+		"preview_token": "not-a-token",
+	}); !strings.Contains(message, "preview_token") {
+		t.Fatalf("an unauthorized token must refuse: %q", message)
 	}
 	after := live.invoke(t, "purge_preview", map[string]any{
 		"filter": map[string]any{"client": fixtureClient},

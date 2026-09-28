@@ -69,6 +69,14 @@ jobs:
           trap 'scripts/dev.sh stop' EXIT
           scripts/dev.sh up
           bash scripts/check.sh browser --target "http://${DEV_HOST}:${DEV_PORT}"
+          # The live MCP integration test runs HERE, not in the core job: this
+          # step already has a dev instance and an operator token, and the test
+          # takes a port and a scratch database of its own, so it cannot disturb
+          # the browser fixture. In the core job it would mean a second proxy in
+          # a source-and-unit suite, which is the wrong place for it. It used to
+          # be manual, and a regression in the audit lifecycle or the purge
+          # guards would merge green; it is opt-in only for local runs.
+          MILLIVOLT_MCP_INTEGRATION=1 bash scripts/check.sh go test -count=1 ./internal/mcp/...
 
   container:
     needs: checks
