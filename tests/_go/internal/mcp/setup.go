@@ -305,3 +305,35 @@ func TestListingToolsTruncateWithAMarker(t *testing.T) {
 		}
 	}
 }
+
+// TestQueryReportsTheProxysTotalWhenBothLimitsFire pins the honest number when
+// BOTH clamps withhold rows. The byte clamp runs after the row cap, so its input
+// is already shortened; reporting that intermediate as the total would tell a
+// model a 200-row result out of 500 was complete.
+func TestQueryReportsTheProxysTotalWhenBothLimitsFire(t *testing.T) {
+	rows := make([]string, 0, 12)
+	for i := range 12 {
+		rows = append(rows, `{"id":"r`+string(rune('a'+i))+`","blob":"`+strings.Repeat("x", 200)+`"}`)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+
+	limits := DefaultLimits()
+	limits.QueryMaxRows = 3    // the row cap fires first
+	limits.QueryMaxBytes = 400 // and the byte cap fires second
+	service := newTestService(t, proxy, limits)
+
+	out, err := service.query(context.Background(), QueryInput{SQL: "SELECT * FROM requests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RowCount >= 3 {
+		t.Fatalf("the byte cap must cut below the row cap: %d rows", out.RowCount)
+	}
+	if out.Truncation.Total != 12 {
+		t.Fatalf("the reported total must be the proxy's 12 rows, not the row-capped 3: %+v", out.Truncation)
+	}
+	if !strings.Contains(out.Truncation.Marker, "0 of 12") && !strings.Contains(out.Truncation.Marker, " of 12 rows") {
+		t.Fatalf("the marker must name the proxy's total: %q", out.Truncation.Marker)
+	}
+}

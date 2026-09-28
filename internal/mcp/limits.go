@@ -131,7 +131,12 @@ func clamp[T any](items []T, limit int, marker, advice string) ([]T, Truncation)
 // can act on; the withheld rows are reported with the same explicit marker the
 // row clamp uses, because a silently shortened result would read as a complete
 // one.
-func clampRowsToBytes(rows []map[string]any, budget int, advice string) ([]map[string]any, Truncation) {
+//
+// rows is the already row-capped slice and total is how many rows the proxy
+// produced before that cap, so when BOTH limits fire the reported total is the
+// proxy's, not the smaller intermediate. Understating it would tell a model a
+// result was complete when it was not.
+func clampRowsToBytes(rows []map[string]any, total, budget int, advice string) ([]map[string]any, Truncation) {
 	kept := make([]map[string]any, 0, len(rows))
 	used := 0
 	for _, row := range rows {
@@ -149,14 +154,14 @@ func clampRowsToBytes(rows []map[string]any, budget int, advice string) ([]map[s
 		kept = append(kept, row)
 	}
 	if len(kept) == len(rows) {
-		return list(rows), Truncation{Shown: len(kept), Total: len(rows)}
+		return list(rows), Truncation{Shown: len(kept), Total: total}
 	}
 	return kept, Truncation{
 		Shown:     len(kept),
-		Total:     len(rows),
+		Total:     total,
 		Truncated: true,
 		Marker: fmt.Sprintf("truncated: %d of %d rows returned, about %d of the %d byte result budget; %s",
-			len(kept), len(rows), used, budget, advice),
+			len(kept), total, used, budget, advice),
 	}
 }
 

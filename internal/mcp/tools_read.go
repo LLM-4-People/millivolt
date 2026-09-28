@@ -59,8 +59,9 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 	kept, truncation := clamp(result, limit, "rows", queryAdvice)
 	// The row cap is not a volume bound: a short wide row can be larger than a
 	// long narrow one, so the encoded-size clamp runs after it and is reported
-	// whenever it withheld something.
-	bySize, sizeTruncation := clampRowsToBytes(kept, s.limits.QueryMaxBytes, queryAdvice)
+	// whenever it withheld something. Its total stays the proxy's own row count,
+	// so a result cut by both limits cannot read as complete.
+	bySize, sizeTruncation := clampRowsToBytes(kept, len(result), s.limits.QueryMaxBytes, queryAdvice)
 	if sizeTruncation.Truncated {
 		return &QueryOutput{Rows: bySize, RowCount: len(bySize), Bytes: queryBytes(bySize), Truncation: sizeTruncation}, nil
 	}
