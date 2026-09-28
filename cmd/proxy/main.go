@@ -381,6 +381,12 @@ func main() {
 		},
 		args: os.Args[1:],
 	})
+	// Self-restart eligibility rides the boot payload, so a binary that can
+	// never restart (a -trimpath build, no source tree, no go toolchain) does
+	// not offer a control whose only possible outcome is a refusal. Wired here
+	// because the restarter computes eligibility at construction; the provider
+	// is read per bootstrap, never cached.
+	agg.Restart = rst.EligibilitySnapshot
 	mux.HandleFunc("/admin/restart", rst.handleRestart)
 
 	// A handoff child refreshes the pid file it inherited (scripts/dev.sh

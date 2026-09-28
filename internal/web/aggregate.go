@@ -98,6 +98,12 @@ type AggAPI struct {
 	Throttle func() any // provider limit state (same shape as GET /admin/throttle)
 	Debug    func() any // operator debug sessions (same shape as GET /admin/debug)
 	Storm    func() any // current automatic error-storm protection and recovery
+	// Restart reports whether the graceful self-restart is ELIGIBLE on this
+	// binary, so the dashboard can offer the action only when it can work. A
+	// strict SUBSET of GET /admin/restart's status document, carrying its two
+	// eligibility fields (available, reason) and none of the live phase, pid or
+	// drain state: this is the boot-time verdict, immutable by construction.
+	Restart func() any
 	// ModelCanon serves the effective model-canonicalization rules (single
 	// owner config.CanonicalModel) for the bootstrap payload; the fold reads
 	// it via canonizer() per request. Nil = no canonicalization (raw
@@ -883,6 +889,7 @@ type bootstrapPayload struct {
 	Throttle         any           `json:"throttle,omitempty"`
 	Debug            any           `json:"debug,omitempty"`
 	Storm            any           `json:"storm,omitempty"`
+	Restart          any           `json:"restart,omitempty"`
 	Storage          storageSignal `json:"storage"`
 }
 
@@ -948,6 +955,9 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	}
 	if a.Storm != nil {
 		payload.Storm = a.Storm()
+	}
+	if a.Restart != nil {
+		payload.Restart = a.Restart()
 	}
 	return payload
 }

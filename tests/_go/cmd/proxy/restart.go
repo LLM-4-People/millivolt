@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -143,9 +144,103 @@ func TestModuleRootFrom(t *testing.T) {
 	if _, why := moduleRootFrom(src); why == "" {
 		t.Error("moduleRootFrom(module without cmd/proxy) should be unavailable with a reason")
 	}
-	// Source moved since build → unavailable.
-	if _, why := moduleRootFrom(filepath.Join(dir, "gone", "restart.go")); why == "" {
-		t.Error("moduleRootFrom(missing source) should be unavailable with a reason")
+	// Source moved since build → unavailable, and the diagnosis must SAY so:
+	// that wording is the one an operator can act on (find the checkout).
+	moved := filepath.Join(dir, "gone", "restart.go")
+	if root, why := moduleRootFrom(moved); root != "" || !strings.Contains(why, "source moved since build") {
+		t.Errorf("moduleRootFrom(missing source) = %q, %q; want unavailable naming the moved source", root, why)
+	}
+}
+
+// TestModuleRootForSourceNamesTheRealCause pins the diagnosis a -trimpath
+// build gets. runtime.Caller(0) returns a MODULE-RELATIVE path under
+// -trimpath, which no working directory can resolve; reporting it as "source
+// moved since build" sends the operator hunting a checkout that never moved,
+// and the two causes have opposite remedies (rebuild the binary without the
+// flag, or restart through the process manager - vs. find the tree). The
+// classification is deny-by-default: a relative path is never resolved
+// against the working directory, even when a file of that name exists there.
+func TestModuleRootForSourceNamesTheRealCause(t *testing.T) {
+	// The exact shape the -trimpath build records for this file, plus the
+	// path relative to the package directory the test binary runs in.
+	for _, sourceFile := range []string{
+		"github.com/LLM-4-People/millivolt/cmd/proxy/restart.go",
+		"restart.go",
+		"./restart.go",
+	} {
+		root, why := moduleRootForSource(sourceFile)
+		if root != "" {
+			t.Errorf("moduleRootForSource(%q) = %q; a non-absolute compile-time path must never resolve a root", sourceFile, root)
+		}
+		if !strings.Contains(why, "-trimpath") || !strings.Contains(why, "process manager") {
+			t.Errorf("moduleRootForSource(%q) reason = %q; want it to name -trimpath and the real remedy", sourceFile, why)
+		}
+		if strings.Contains(why, "source moved") {
+			t.Errorf("moduleRootForSource(%q) reason = %q; a trimmed path is not a moved checkout", sourceFile, why)
+		}
+	}
+	// The unavailable verdict is the shared constant, so the status document,
+	// the boot payload and this assertion cannot drift apart.
+	if !strings.Contains(trimpathUnavailReason, "-trimpath") || strings.Contains(trimpathUnavailReason, "source moved") {
+		t.Errorf("trimpathUnavailReason = %q; want the -trimpath diagnosis naming the remedy", trimpathUnavailReason)
+	}
+}
+
+// TestEligibilitySnapshotMatchesAvailability pins the boot-time answer the
+// dashboard renders BEFORE the menu is ever opened: the {available, reason}
+// document must agree with the live predicates in every state the restarter
+// can boot into (eligible, no source, no toolchain), must match the status
+// document served by GET /admin/restart, and must carry exactly those two
+// keys so a later field cannot arrive unrendered.
+func TestEligibilitySnapshotMatchesAvailability(t *testing.T) {
+	root := t.TempDir()
+	for _, tc := range []struct {
+		name, root, goBin, why string
+	}{
+		{"eligible", root, "go", ""},
+		{"no source", "", "", trimpathUnavailReason},
+		{"no toolchain", root, "", ""},
+	} {
+		rs := &restarter{root: tc.root, goBin: tc.goBin, rootWhy: tc.why}
+		body, err := json.Marshal(rs.EligibilitySnapshot())
+		if err != nil {
+			t.Fatalf("%s: marshal eligibility: %v", tc.name, err)
+		}
+		var doc struct {
+			Available bool   `json:"available"`
+			Reason    string `json:"reason"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(body))
+		dec.DisallowUnknownFields()
+		if err := dec.Decode(&doc); err != nil {
+			t.Fatalf("%s: eligibility is not the pinned {available, reason} shape: %v (%s)", tc.name, err, body)
+		}
+		wantAvailable := tc.root != "" && tc.goBin != ""
+		if doc.Available != wantAvailable || doc.Available != rs.available() {
+			t.Errorf("%s: available = %v, want %v (predicate says %v)", tc.name, doc.Available, wantAvailable, rs.available())
+		}
+		if doc.Reason != rs.availReason() {
+			t.Errorf("%s: reason = %q, want the predicate's %q", tc.name, doc.Reason, rs.availReason())
+		}
+		if doc.Available && doc.Reason != "" {
+			t.Errorf("%s: an eligible restarter must report no reason, got %q", tc.name, doc.Reason)
+		}
+		if !doc.Available && doc.Reason == "" {
+			t.Errorf("%s: an unavailable restarter must name its cause", tc.name)
+		}
+		// The boot payload and the polled status document are the same fact;
+		// a page that reads one and then the other must never see a flip.
+		status := rs.status()
+		if status["available"] != doc.Available || status["reason"] != doc.Reason {
+			t.Errorf("%s: status %v/%v disagrees with eligibility %v/%q", tc.name,
+				status["available"], status["reason"], doc.Available, doc.Reason)
+		}
+	}
+	// The two unavailable causes stay distinguishable: the toolchain is only
+	// consulted when the source was located.
+	noTool := (&restarter{root: root, goBin: ""}).availReason()
+	if noTool != "go toolchain not found on PATH" {
+		t.Errorf("no-toolchain reason = %q, want the process-manager-independent toolchain diagnosis", noTool)
 	}
 }
 
