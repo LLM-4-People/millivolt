@@ -70,6 +70,27 @@ func rowString(row map[string]any, column string) string {
 	}
 }
 
+// rowInt64 reads one integer column from a SQL result row, tolerating the mixed
+// scalar types the JSON reader can produce for a SQLite column.
+func rowInt64(row map[string]any, column string) int64 {
+	switch value := row[column].(type) {
+	case float64:
+		return int64(value)
+	case int64:
+		return value
+	case int:
+		return int64(value)
+	case string:
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return parsed
+	default:
+		return 0
+	}
+}
+
 // debugStatus is GET /admin/debug: the capture session state plus the
 // known client/provider/model vocabularies a capture scope accepts.
 type debugStatus struct {

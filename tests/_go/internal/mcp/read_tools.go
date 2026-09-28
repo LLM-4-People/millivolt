@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,6 +24,7 @@ const (
 	quotaPath     = "/admin/quota"
 	configPath    = "/admin/config"
 	reloadPath    = "/admin/reload"
+	restartPath   = "/admin/restart"
 	purgePath     = "/admin/purge"
 	purgeCountPat = "/admin/purge/count"
 )
@@ -44,7 +47,8 @@ func TestReadToolsRequestShape(t *testing.T) {
 		`"rail":{"provider":1},"scope":{"matches":4,"errors":1},"conversation_summary":{"main":1,"sub":0,"unresolved":0}}`)
 	proxy.json(http.MethodGet, chartPath, `{"now_ms":2000,"from_ms":1000,"bucket_ms":1000,"ttft_p":null,"tps_p":null,`+
 		`"ttft_stat":null,"tps_stat":null,"cost_per_mtok":null,"buckets":[{"t":1000,"req":2,"err":0,"rl":1,"in":1,"out":1,"cache":0,"reason":0,"cost":0.1,"ttft":null,"tps":null}]}`)
-	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1","status_code":200}],"model_canon":{},"more":false,"cursor_ms":1500,"cursor_id":"r1"}`)
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1","status_code":200}],"model_canon":{"revision":"rev-1","names":{"demo":"demo","demo-2":"demo"}},`+
+		`"more":false,"cursor_ms":1500,"cursor_id":"r1"}`)
 	proxy.respond(http.MethodGet, prometheusPat, cannedResponse{
 		Status: http.StatusOK, ContentType: "text/plain; version=0.0.4",
 		Body: "# HELP x x\n# TYPE x gauge\nx 1\n",
@@ -340,6 +344,7 @@ func TestBadScopeNeverReachesTheProxy(t *testing.T) {
 // TestRecordsCursorPairing pins the paired cursor rule in both directions.
 func TestRecordsCursorPairing(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 	for _, in := range []RecordsInput{
@@ -372,11 +377,11 @@ func TestRecordsCursorPairing(t *testing.T) {
 }
 
 // TestRecordsStopsOnANonAdvancingCursor is the pagination safety property: the
-// proxy scans a bounded number of rows per call, so a page can be short or
-// empty while more is still true. The tool must report exhaustion instead of
-// inviting an endless loop.
+// ONLY thing that ends a walk is a cursor that stops moving, because that is
+// what would otherwise make the next call repeat this page forever.
 func TestRecordsStopsOnANonAdvancingCursor(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	// more=true, but the cursor is identical to the one that was sent.
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1"}],"more":true,"cursor_ms":100,"cursor_id":"r1"}`)
 	service := newTestService(t, proxy, Limits{})
@@ -391,15 +396,81 @@ func TestRecordsStopsOnANonAdvancingCursor(t *testing.T) {
 	if !page.More {
 		t.Fatal("the proxy's more flag must be reported as received, so the model can see why paging stopped")
 	}
+}
 
-	// A page that returns nothing is exhaustion too, whatever more claims.
-	proxy.json(http.MethodGet, logPath, `{"records":[],"more":true,"cursor_ms":100,"cursor_id":"r1"}`)
-	empty, err := service.records(context.Background(), RecordsInput{BeforeMs: 100, BeforeID: "r1", Limit: 10})
+// TestRecordsContinuesPastAnEmptyPage is the regression for the scan budget. The
+// proxy advances its cursor on every row it SCANNED, including rows the scope
+// filter excluded, so an empty page with an advanced cursor and more true is
+// the ordinary shape of "the budget ran out before a match" - not the end of
+// history. Reporting it as exhaustion silently drops every match behind it.
+//
+// The fixture is the byte-exact page the proxy's own handler test pins as one
+// that must be continued (tests/_go/internal/web/log.go
+// TestLogPageScopeBudgetAdvancesAcrossTimestampTies): page one is zero records,
+// more true, cursor row-0007; page two from that cursor returns seven rows with
+// more false. Both are asserted here, because the tool is what turns those two
+// pages into one answer.
+func TestRecordsContinuesPastAnEmptyPage(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	// The proxy's page one: the scope budget ran out before any target row.
+	proxy.json(http.MethodGet, logPath,
+		`{"records":[],"model_canon":{"revision":"r","names":{}},"more":true,"cursor_ms":1800000000000,"cursor_id":"row-0007"}`)
+	service := newTestService(t, proxy, Limits{})
+
+	first, err := service.records(context.Background(), RecordsInput{Scope: Scope{Filters: []string{"provider:target"}}, Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !empty.Exhausted {
-		t.Fatal("an empty page must be reported exhausted")
+	if first.Returned != 0 || !first.More {
+		t.Fatalf("page one = %+v, want zero records with more true", first)
+	}
+	if first.Exhausted {
+		t.Fatal("an empty page with an advanced cursor is NOT exhaustion: the proxy's own test pins it as a page that must be continued")
+	}
+	if first.NextBeforeID != "row-0007" || first.NextBeforeMs != 1800000000000 {
+		t.Fatalf("the advanced cursor must be handed back for the next page: %+v", first)
+	}
+
+	// Page two, from that cursor, carries the rows. Paging stops there because
+	// the proxy says there is nothing older.
+	rows := make([]string, 0, 7)
+	for i := range 7 {
+		rows = append(rows, `{"id":"target-`+string(rune('a'+i))+`"}`)
+	}
+	proxy.json(http.MethodGet, logPath,
+		`{"records":[`+strings.Join(rows, ",")+`],"more":false,"cursor_ms":1799999999000,"cursor_id":"target-a"}`)
+	second, err := service.records(context.Background(), RecordsInput{
+		Scope:    Scope{Filters: []string{"provider:target"}},
+		BeforeMs: first.NextBeforeMs, BeforeID: first.NextBeforeID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Returned != 7 {
+		t.Fatalf("the continuation lost rows: %+v", second)
+	}
+	// Exhausted is true here for the OTHER reason: the proxy reported no older
+	// rows. That is a different fact from a scan budget that ran out, and both
+	// must end the walk.
+	if !second.Exhausted || second.More {
+		t.Fatalf("more=false must end the walk: %+v", second)
+	}
+	// Both pages carried the same filter, and the second carried the cursor.
+	requests := proxy.requestsFor(http.MethodGet, logPath)
+	if len(requests) != 2 {
+		t.Fatalf("expected two page calls, got %d", len(requests))
+	}
+	for _, request := range requests {
+		if got := request.Query["f"]; len(got) != 1 || got[0] != "provider:target" {
+			t.Fatalf("every page must carry the same scope: %q", got)
+		}
+	}
+	if requests[0].Query.Get("before_id") != "" {
+		t.Fatal("the first page has no cursor")
+	}
+	if requests[1].Query.Get("before_id") != "row-0007" || requests[1].Query.Get("before_ms") != "1800000000000" {
+		t.Fatalf("the continuation must send the cursor page one returned: %q", requests[1].Query.Encode())
 	}
 }
 
@@ -407,6 +478,7 @@ func TestRecordsStopsOnANonAdvancingCursor(t *testing.T) {
 // keeps paging possible until the proxy says otherwise.
 func TestRecordsAdvancesWhileTheCursorMoves(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r2"}],"more":true,"cursor_ms":90,"cursor_id":"r2"}`)
 	service := newTestService(t, proxy, Limits{})
 	page, err := service.records(context.Background(), RecordsInput{BeforeMs: 100, BeforeID: "r1", Limit: 10})
@@ -426,4 +498,342 @@ func TestRecordsAdvancesWhileTheCursorMoves(t *testing.T) {
 	second := proxy.requestsFor(http.MethodGet, logPath)[1]
 	assertQuery(t, second, "before_ms", "90")
 	assertQuery(t, second, "before_id", "r2")
+}
+
+// TestChartCarriesBothPeriodStatBands pins the two period-wide [avg, min, max]
+// arrays the proxy sends beside the percentiles. They were part of the payload
+// all along and had no field, so ttft_stat and tps_stat were dropped silently:
+// a model comparing an average against a median had only the percentiles to
+// work with, and had no way to know the average existed.
+func TestChartCarriesBothPeriodStatBands(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, chartPath, `{"now_ms":3000,"from_ms":1000,"bucket_ms":2000,`+
+		`"ttft_p":[10.5,20.5,30.5],"tps_p":[4,5,6],"ttft_stat":[11,10,12],"tps_stat":[4.5,4,5],`+
+		`"cost_per_mtok":null,"buckets":[{"t":1000,"ttft":[9,10,11]}]}`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.chart(context.Background(), ChartInput{Window: "5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := float64Values(out.TTFTStat); !slices.Equal(got, []float64{11, 10, 12}) {
+		t.Fatalf("ttft_stat = %v, want the period [avg, min, max]", got)
+	}
+	if got := float64Values(out.TPSStat); !slices.Equal(got, []float64{4.5, 4, 5}) {
+		t.Fatalf("tps_stat = %v, want the period [avg, min, max]", got)
+	}
+	// The percentiles still come through, and the two bands are independent.
+	if got := float64Values(out.TTFTp); !slices.Equal(got, []float64{10.5, 20.5, 30.5}) {
+		t.Fatalf("ttft_p = %v", got)
+	}
+}
+
+// TestRecordsCarriesModelCanonAndStorage pins the page-level model_canon map and
+// the storage signal. Grouping by the raw model column splits one canonical
+// family across every spelling, and with storage off the log route scans nothing
+// while the ring still holds history - so an empty page is not the end of it.
+func TestRecordsCarriesModelCanonAndStorage(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1"}],"model_canon":{"revision":"rev-9","names":`+
+		`{"demo-latest":"demo","demo-preview":"demo"}},"more":false,"cursor_ms":10,"cursor_id":"r1"}`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.records(context.Background(), RecordsInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.ModelCanon == nil {
+		t.Fatal("model_canon must reach the tool output: it is what folds raw spellings into one family")
+	}
+	if out.ModelCanon.Revision != "rev-9" || out.ModelCanon.Names["demo-latest"] != "demo" {
+		t.Fatalf("model_canon = %+v", out.ModelCanon)
+	}
+	if !out.Storage.Enabled {
+		t.Fatal("the storage signal must be reported, so a caller knows what this page is backed by")
+	}
+	if !strings.Contains(out.Note, "DURABLE history") {
+		t.Fatalf("note = %q", out.Note)
+	}
+
+	// With storage off the route answers an empty page with more false, which
+	// would otherwise read as the end of history.
+	proxy.json(http.MethodGet, bootstrapPath, storageOffBootstrap)
+	proxy.json(http.MethodGet, logPath, `{"records":[],"more":false,"cursor_ms":0,"cursor_id":""}`)
+	blind, err := service.records(context.Background(), RecordsInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blind.Returned != 0 || !blind.Exhausted {
+		t.Fatalf("a store-less page is still exhaustible: %+v", blind)
+	}
+	if blind.Storage.Enabled {
+		t.Fatal("storage must be reported false")
+	}
+	for _, needle := range []string{"NOT the end of history", "snapshot"} {
+		if !strings.Contains(blind.Note, needle) {
+			t.Fatalf("the note must say %q, got %q", needle, blind.Note)
+		}
+	}
+}
+
+// TestDescribeVocabulariesAreTheProxyOnes pins the value vocabulary describe
+// advertises. It used to list a 3xx status class the proxy never produces, so
+// `f=status:3xx` was a silently empty filter, and it said nothing about the
+// `time` dimension at all - which is a daypart bucket, so `f=time:24h` was a
+// silently empty filter too.
+func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodGet, schemaPath, `[]`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.describe(context.Background(), DescribeInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byDimension := map[string]VocabularyDoc{}
+	for _, vocabulary := range out.Vocabularies {
+		byDimension[vocabulary.Dimension] = vocabulary
+	}
+	// Exactly the classes internal/web statusClass can return: a 3xx never
+	// reaches a recorded row, 499 is its own class, and a status under 200 is
+	// err. See tests/_go/internal/web/aggregate.go TestStatusClassAndBuckets for
+	// the other side of this contract.
+	want := []string{"2xx", "cancel", "4xx", "5xx", "err"}
+	if got := byDimension["status"].Values; len(got) != len(want) {
+		t.Fatalf("status classes = %v, want exactly %v", got, want)
+	}
+	for i, class := range want {
+		if byDimension["status"].Values[i] != class {
+			t.Fatalf("status classes = %v, want exactly %v", byDimension["status"].Values, want)
+		}
+	}
+	if slices.Contains(byDimension["status"].Values, "3xx") {
+		t.Fatal("there is no 3xx status class: advertising one makes f=status:3xx a silently empty filter")
+	}
+	if got, want := byDimension["time"].Values, TimeBuckets; !slices.Equal(got, want) {
+		t.Fatalf("time values = %v, want the daypart buckets %v", got, want)
+	}
+	if !strings.Contains(byDimension["time"].Note, "NOT a duration") {
+		t.Fatalf("the time vocabulary must say it is a bucket, not a duration: %q", byDimension["time"].Note)
+	}
+	if got, want := byDimension["error"].Values, ErrorFilterKeys; !slices.Equal(got, want) {
+		t.Fatalf("error keys = %v, want %v", got, want)
+	}
+	if !strings.Contains(byDimension["error"].Note, "type|code|message") {
+		t.Fatalf("the error grammar must be stated: %q", byDimension["error"].Note)
+	}
+	if !strings.Contains(byDimension["live_statuses"].Note, "s= selector") {
+		t.Fatalf("the s= vocabulary must be distinguished from the status dimension: %q", byDimension["live_statuses"].Note)
+	}
+	for _, dimension := range []string{"client", "provider", "model", "conversation", "key", "tool"} {
+		if _, ok := byDimension[dimension]; !ok {
+			t.Fatalf("describe must state the vocabulary of %q too", dimension)
+		}
+		if !strings.Contains(byDimension[dimension].Note, "values tool") {
+			t.Fatalf("%q must point at the values tool: %q", dimension, byDimension[dimension].Note)
+		}
+	}
+	// Every explorer dimension has a vocabulary entry, so none is undiscoverable.
+	if len(out.Vocabularies) != len(Dimensions)+1 {
+		t.Fatalf("vocabularies = %d, want one per dimension plus the live selector", len(out.Vocabularies))
+	}
+}
+
+// TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom pins the rules that send a
+// model down the wrong path if it does not know them: this build has no unixnow,
+// explore has no window and no cross-tabs, chart cannot group, and the
+// server-side group and bucket caps are invisible to the tool's own truncation
+// flag.
+func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodGet, schemaPath, `[]`)
+	service := newTestService(t, proxy, Limits{})
+	out, err := service.describe(context.Background(), DescribeInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(out.Notes, " ")
+	for _, needle := range []string{
+		"NO unixnow() function",
+		"strftime('%s','now')*1000",
+		"explore has NO time window",
+		"cannot cross-tabulate",
+		"chart is the only windowed tool and cannot group",
+		"query is the only tool that can express a time range",
+		"SERVER-SIDE",
+	} {
+		if !strings.Contains(notes, needle) {
+			t.Fatalf("describe notes must state %q, got %q", needle, notes)
+		}
+	}
+	if out.Limits.QueryMaxBytes != DefaultLimits().QueryMaxBytes {
+		t.Fatalf("the encoded-size clamp must be in the limits: %+v", out.Limits)
+	}
+	// The complete column reference, so an analysis never has to guess a name.
+	body, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, column := range []string{
+		"cache_write_tokens", "turns_user", "chars_tool", "response_headers",
+		"prompt_preview", "response_preview", "client_ip", "client_lang", "method",
+		"rate_limit_remaining", "rate_limit_limit", "had_answer_content", "answer_tokens",
+		"provider_request_id", "provider_server", "req_max_tokens", "req_top_p",
+		"req_service_tier", "req_reasoning_effort",
+		"first_token_at", "last_token_at", "first_answer_at",
+	} {
+		if !strings.Contains(string(body), column) {
+			t.Fatalf("the column reference is missing %q", column)
+		}
+	}
+	// Live tool names come from the records the snapshot already carried, at no
+	// extra request.
+	if len(out.KnownTools) != 0 {
+		t.Fatalf("a snapshot with no records names no tools: %v", out.KnownTools)
+	}
+	proxy.json(http.MethodGet, bootstrapPath, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},`+
+		`"records":[{"id":"n1","tool_names":["read_file","grep"]},{"id":"n2","tool_names":["grep"]}]}`)
+	tools, err := service.describe(context.Background(), DescribeInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(tools.KnownTools, []string{"grep", "read_file"}) {
+		t.Fatalf("known_tools = %v, want the live names in a stable order", tools.KnownTools)
+	}
+}
+
+// TestQueryClampsEncodedSize pins that a query result is bounded by VOLUME as
+// well as by rows. A 200-row SELECT * of the requests table is well over 100k
+// tokens in one result, and the row cap alone would hand all of it to a model.
+func TestQueryClampsEncodedSize(t *testing.T) {
+	rows := make([]string, 0, 10)
+	for i := range 10 {
+		rows = append(rows, `{"id":"r`+string(rune('a'+i))+`","blob":"`+strings.Repeat("x", 200)+`"}`)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+
+	limits := DefaultLimits()
+	limits.QueryMaxBytes = 500
+	service := newTestService(t, proxy, limits)
+
+	out, err := service.query(context.Background(), QueryInput{SQL: "SELECT * FROM requests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RowCount >= 10 {
+		t.Fatalf("the byte clamp must cut a wide result: %d of 10 rows survived", out.RowCount)
+	}
+	if !out.Truncation.Truncated || out.Truncation.Total != 10 {
+		t.Fatalf("truncation = %+v, want 10 produced", out.Truncation)
+	}
+	if !strings.Contains(out.Truncation.Marker, "byte result budget") || !strings.Contains(out.Truncation.Marker, "narrow the SELECT") {
+		t.Fatalf("marker = %q, must name the byte budget and the way to continue", out.Truncation.Marker)
+	}
+	if out.Bytes <= 0 || out.Bytes > 500 {
+		t.Fatalf("bytes = %d, want the clamped encoded size", out.Bytes)
+	}
+	// Every surviving row is a whole row: the result stays valid JSON.
+	for _, row := range out.Rows {
+		if _, err := json.Marshal(row); err != nil {
+			t.Fatalf("a clamped row must stay encodable: %v", err)
+		}
+		if row["blob"] == nil {
+			t.Fatal("a row was cut inside: the clamp must keep whole rows only")
+		}
+	}
+
+	// A result inside the byte budget reports no truncation at all.
+	roomy := newFakeProxy(t)
+	roomy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+	limits.QueryMaxBytes = 1 << 20
+	fit, err := newTestService(t, roomy, limits).query(context.Background(), QueryInput{SQL: "SELECT * FROM requests"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fit.Truncation.Truncated || fit.RowCount != 10 {
+		t.Fatalf("a fitting result must not claim truncation: %+v", fit)
+	}
+}
+
+// TestTruncationAdviceIsPerTool pins that each tool's marker names a continuation
+// that tool actually has. The shared wording told a model to "page with the
+// cursor fields" for tools that have no cursor, which sends it looking for
+// arguments that do not exist.
+func TestTruncationAdviceIsPerTool(t *testing.T) {
+	proxy := newFakeProxy(t)
+	groups := make([]string, 0, explorerMaxGroups+2)
+	for i := range explorerMaxGroups + 2 {
+		groups = append(groups, `{"name":"g`+string(rune('a'+i))+`"}`)
+	}
+	proxy.json(http.MethodGet, explorerPath, `{"dim":"provider","groups":[`+strings.Join(groups, ",")+`]}`)
+	buckets := make([]string, 0, chartMaxBuckets+2)
+	for i := range chartMaxBuckets + 2 {
+		buckets = append(buckets, `{"t":`+strconv.Itoa(i)+`}`)
+	}
+	proxy.json(http.MethodGet, chartPath, `{"bucket_ms":1,"buckets":[`+strings.Join(buckets, ",")+`]}`)
+	records := make([]string, 0, 12)
+	for i := range 12 {
+		records = append(records, `{"id":"r`+string(rune('a'+i))+`"}`)
+	}
+	proxy.json(http.MethodGet, bootstrapPath, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},`+
+		`"records":[`+strings.Join(records, ",")+`]}`)
+	proxy.json(http.MethodGet, logPath, `{"records":[`+strings.Join(records, ",")+`],"more":false,"cursor_ms":5,"cursor_id":"rl"}`)
+	limits := DefaultLimits()
+	limits.PageSize = 5
+	service := newTestService(t, proxy, limits)
+	ctx := context.Background()
+
+	explorer, err := service.explore(ctx, ExploreInput{Dim: "provider"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chart, err := service.chart(ctx, ChartInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.records(ctx, RecordsInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.snapshot(ctx, SnapshotInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tool   string
+		marker string
+		want   string
+	}{
+		{"explore", explorer.Truncation.Marker, "GROUP BY"},
+		{"chart", chart.Truncation.Marker, "shorter window"},
+		{"records", page.Truncation.Marker, "next_before_ms"},
+		{"snapshot", snapshot.Truncation.Marker, "records tool"},
+	} {
+		if !strings.Contains(tc.marker, tc.want) {
+			t.Fatalf("%s marker %q must name %q, its own continuation", tc.tool, tc.marker, tc.want)
+		}
+		if strings.Contains(tc.marker, "cursor fields") {
+			t.Fatalf("%s marker %q must not use the shared cursor wording", tc.tool, tc.marker)
+		}
+	}
+}
+
+// float64Values unwraps a percentile band for comparison, so the assertion is
+// about the numbers and not about pointer identity.
+func float64Values(band []*float64) []float64 {
+	out := make([]float64, 0, len(band))
+	for _, value := range band {
+		if value == nil {
+			out = append(out, 0)
+			continue
+		}
+		out = append(out, *value)
+	}
+	return out
 }

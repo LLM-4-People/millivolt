@@ -7,6 +7,7 @@
 //	--proxy-url       / MILLIVOLT_MCP_PROXY_URL       (for example http://127.0.0.1:8081)
 //	--operator-token  / MILLIVOLT_MCP_OPERATOR_TOKEN  (the proxy's MILLIVOLT_OPERATOR_TOKEN)
 //	--query-max-rows  / MILLIVOLT_MCP_QUERY_MAX_ROWS
+//	--query-max-bytes / MILLIVOLT_MCP_QUERY_MAX_BYTES
 //	--page-size       / MILLIVOLT_MCP_PAGE_SIZE
 //	--capture-max-bytes / MILLIVOLT_MCP_CAPTURE_MAX_BYTES
 //	--query-timeout   / MILLIVOLT_MCP_QUERY_TIMEOUT
@@ -51,14 +52,18 @@ type options struct {
 func parse(args []string, lookupEnv func(string) (string, bool)) (options, error) {
 	defaults := mcp.DefaultLimits()
 	var (
-		queryMaxRows int
-		pageSize     int
-		captureBytes int
-		queryTimeout time.Duration
-		timeout      time.Duration
+		queryMaxRows  int
+		queryMaxBytes int
+		pageSize      int
+		captureBytes  int
+		queryTimeout  time.Duration
+		timeout       time.Duration
 	)
 	var err error
 	if queryMaxRows, err = envInt(lookupEnv, "MILLIVOLT_MCP_QUERY_MAX_ROWS", defaults.QueryMaxRows); err != nil {
+		return options{}, err
+	}
+	if queryMaxBytes, err = envInt(lookupEnv, "MILLIVOLT_MCP_QUERY_MAX_BYTES", defaults.QueryMaxBytes); err != nil {
 		return options{}, err
 	}
 	if pageSize, err = envInt(lookupEnv, "MILLIVOLT_MCP_PAGE_SIZE", defaults.PageSize); err != nil {
@@ -75,7 +80,7 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	}
 	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
 	var o options
-	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
+	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, QueryMaxBytes: queryMaxBytes, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
 	fs.StringVar(&o.proxyURL, "proxy-url", envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", ""),
 		"millivolt proxy origin, for example http://127.0.0.1:8081 (env MILLIVOLT_MCP_PROXY_URL)")
 	// The credential is registered with an EMPTY default and resolved after
@@ -87,6 +92,8 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 		"the proxy's MILLIVOLT_OPERATOR_TOKEN; the value is never echoed in usage output (env MILLIVOLT_MCP_OPERATOR_TOKEN)")
 	fs.IntVar(&o.limits.QueryMaxRows, "query-max-rows", o.limits.QueryMaxRows,
 		"row cap applied to query results before the explicit truncation marker (env MILLIVOLT_MCP_QUERY_MAX_ROWS)")
+	fs.IntVar(&o.limits.QueryMaxBytes, "query-max-bytes", o.limits.QueryMaxBytes,
+		"encoded-size cap on one query result; whole rows are kept until the budget runs out (env MILLIVOLT_MCP_QUERY_MAX_BYTES)")
 	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
 		"default page size for the record and capture listings (env MILLIVOLT_MCP_PAGE_SIZE)")
 	fs.IntVar(&o.limits.CaptureBytes, "capture-max-bytes", o.limits.CaptureBytes,

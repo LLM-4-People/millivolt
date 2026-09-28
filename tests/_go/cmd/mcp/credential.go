@@ -71,7 +71,7 @@ func TestCredentialNeverReachesFlagOutput(t *testing.T) {
 	command.Stderr = &stderr
 	_ = command.Run()
 	usage := stderr.String()
-	for _, flag := range []string{"-operator-token", "-proxy-url", "-query-max-rows", "-page-size", "MILLIVOLT_MCP_OPERATOR_TOKEN"} {
+	for _, flag := range []string{"-operator-token", "-proxy-url", "-query-max-rows", "-page-size", "MILLIVOLT_MCP_QUERY_MAX_BYTES"} {
 		if !strings.Contains(usage, flag) {
 			t.Fatalf("usage must still document %q, got:\n%s", flag, usage)
 		}

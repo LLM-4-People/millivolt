@@ -12,6 +12,10 @@ import (
 type Service struct {
 	client *Client
 	limits Limits
+	// previewToken authorizes a purge against a real preview of the same
+	// filter. It is derived from the operator credential at construction, so a
+	// rotated credential invalidates every outstanding preview.
+	previewToken previewToken
 }
 
 // NewService validates the setup parameters and returns the tool service. It is
@@ -25,7 +29,7 @@ func NewService(proxyURL, operatorToken string, limits Limits) (*Service, error)
 	if err != nil {
 		return nil, err
 	}
-	return &Service{client: client, limits: limits}, nil
+	return &Service{client: client, limits: limits, previewToken: newPreviewToken(operatorToken)}, nil
 }
 
 // Origin is the proxy origin the tools call. It never carries the credential.
@@ -72,42 +76,42 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "describe",
 		Title:       "Describe the millivolt instance",
-		Description: "Start here. Returns the live SQLite schema, the requests/request_debug/meta column reference with units and meaning, the exact SQL health predicates (a 429 alone is not an error), the explorer dimension and status vocabularies, the live known client/provider/model names, the indexes, and every result limit. Without this you cannot write correct SQL: timestamps are Unix milliseconds, cost is USD, and attempts/tool_names are JSON-array text columns.",
+		Description: "Start here. Returns the live SQLite schema, the full requests/request_debug/meta column reference with units and meaning, the exact SQL health predicates (a 429 alone is not an error), the value vocabulary of EVERY filter dimension (including the status classes - there is no 3xx, and 499 is 'cancel' - the time daypart buckets, and the error type|code|message key), the live known client/provider/model names and tool names, the indexes, every result limit, and the working SQL idioms for this build. Without it you cannot write correct SQL: timestamps are Unix milliseconds, cost is USD, attempts/tool_names are JSON-array text columns, unixnow() does not exist (use strftime('%s','now')*1000), and 'time' is a daypart bucket rather than a duration.",
 		Annotations: readOnly("Describe the millivolt instance"),
 	}, s.describe)
 
 	addTool(server, &sdk.Tool{
 		Name:        "query",
 		Title:       "Run a SQL SELECT",
-		Description: "Run ONE bounded SELECT against the durable database and return the rows. Must start with SELECT, contain no ';', and name no ATTACH/DETACH/PRAGMA/LOAD_EXTENSION. Use keyset pagination (WHERE (started_at, id) < (?, ?)) instead of OFFSET for deep history. Rows are truncated with an explicit marker when they exceed max_rows. Returns 503 when durable storage is disabled. This is not a sandbox: it reads the same tables the dashboard reads, including sensitive request_debug.payload bodies.",
+		Description: "Run ONE bounded SELECT against the durable database and return the rows. Must start with SELECT, contain no ';', and name no ATTACH/DETACH/PRAGMA/LOAD_EXTENSION. This is the ONLY tool that can express a time range: use WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour, because unixnow() does not exist in this build. There is no cursor, so page in SQL with keyset pagination (WHERE (started_at, id) < (?, ?)) instead of OFFSET. Rows are clamped on BOTH volume and encoded size, with an explicit marker naming what was withheld, so a wide SELECT * is clamped long before the row cap. Returns 503 when durable storage is disabled. This is not a sandbox: it reads the same tables the dashboard reads, including sensitive request_debug.payload bodies.",
 		Annotations: readOnly("Run a SQL SELECT"),
 	}, s.query)
 
 	addTool(server, &sdk.Tool{
 		Name:        "explore",
 		Title:       "Break history down by dimension",
-		Description: "Faceted breakdown of ALL matching history by one dimension (client, provider, model, conversation, key, status, time, tool, error). Each group carries request count, cost, tokens, error and rate-limit counts, blended $/Mtok and TTFT/speed percentiles (null below 4 samples). Scope with the repeated dim:id filters and the status selector; filters are AND-ed across dimensions and OR-ed within one dimension. Returns at most 24 groups.",
+		Description: "Faceted breakdown of ALL matching history by ONE dimension (client, provider, model, conversation, key, status, time, tool, error). Each group carries request count, cost, tokens, error and rate-limit counts, blended $/Mtok and TTFT/speed percentiles (null below 4 samples). Scope with the repeated dim:id filters and the status selector; filters are AND-ed across dimensions and OR-ed within one dimension, and an unknown value is an EMPTY breakdown rather than an error, so call the values tool first. TWO structural limits: this tool has NO time window (it always folds ALL history) and it breaks down by a SINGLE dimension, so it cannot cross-tabulate; use query with a WHERE on started_at and a GROUP BY for either. The 24-group cap is enforced SERVER-SIDE, so groups can be dropped while truncation.truncated reads false. Call describe for each dimension's value vocabulary.",
 		Annotations: readOnly("Break history down by dimension"),
 	}, s.explore)
 
 	addTool(server, &sdk.Tool{
 		Name:        "chart",
 		Title:       "Read the traffic time series",
-		Description: "Server-authoritative time series over a window ('all' or a canonical positive integer number of minutes; '007', '+5' and '5.0' are rejected), scoped by the same filters as explore. Returns at most 31 clock-aligned buckets with request, error, rate-limit, token, cost, TTFT and speed values. Period percentiles are computed over the whole period, never averaged from bucket percentiles.",
+		Description: "The only time-windowed tool: a server-authoritative series over a window ('all' or a canonical positive integer number of MINUTES; '007', '+5' and '5.0' are rejected), scoped by the same filters as explore. It cannot group by any dimension, so for a window broken down by provider or model use query with a WHERE on started_at and a GROUP BY. Returns at most 31 clock-aligned buckets with request, error, rate-limit, token, cost, TTFT and speed values, plus period-wide ttft_p/tps_p percentiles and ttft_stat/tps_stat [avg, min, max], computed over the whole period and never averaged from buckets. The 31-bucket cap is enforced SERVER-SIDE, so buckets can be dropped while truncation.truncated reads false.",
 		Annotations: readOnly("Read the traffic time series"),
 	}, s.chart)
 
 	addTool(server, &sdk.Tool{
 		Name:        "records",
 		Title:       "Page the durable request log",
-		Description: "One page of finalized records, newest first, from durable history. Page with the paired next_before_ms/next_before_id cursor (both or neither). The server scans a bounded number of rows per call, so a page can be short or empty while more is still true: a non-advancing cursor means exhaustion. Stop when exhausted is true instead of looping.",
+		Description: "One page of finalized records, newest first, from durable history, with the raw-to-canonical model_canon map the server applied to the page. Page with the paired next_before_ms/next_before_id cursor (both or neither). The server scans a bounded number of rows per call and advances the cursor on every row it SCANNED, including rows the scope filter excluded, so an EMPTY page with an advanced cursor and more true is the normal shape of 'the budget ran out before a match': page again. exhausted is true, and only that, exactly when the cursor no longer advances. storage reports whether durable storage backs this at all: with storage.enabled false the route scans nothing, so this page is NOT the end of history and the in-memory ring still holds recent records.",
 		Annotations: readOnly("Page the durable request log"),
 	}, s.records)
 
 	addTool(server, &sdk.Tool{
 		Name:        "snapshot",
 		Title:       "Read the live snapshot",
-		Description: "The dashboard's live snapshot: ring sequence, feed id, in-flight and since-inception totals, the durable-storage signal and the most recent records. A full snapshot is capped at 8 * dash_log_rows records, so older history needs the records tool with its cursor.",
+		Description: "The dashboard's live snapshot: ring sequence, feed id, in-flight and since-inception totals, the durable-storage signal and the most recent records. A full snapshot is capped at 8 * dash_log_rows records and has no cursor of its own, so older history needs the records tool with its cursor. It reads the in-memory RING, so on a proxy with storage off it is the only source of history at all.",
 		Annotations: readOnly("Read the live snapshot"),
 	}, s.snapshot)
 
@@ -128,14 +132,14 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "audit_start",
 		Title:       "Start or edit a capture session",
-		Description: "Start ONE capture session, or edit an existing one by session_id (omitted scope and duration are then preserved). Scope dimensions are AND-ed and names within one dimension are alternatives; there is no unrestricted all-traffic scope. Requires confirm='start capture' and refuses outright when durable storage is disabled, because a session would then report success and capture nothing. Capture stores full request and response bodies. " + retentionNote + ".",
+		Description: "Start ONE capture session, or edit an existing one by session_id (omitted scope and duration are then preserved). Scope dimensions are AND-ed and names within one dimension are alternatives; there is no unrestricted all-traffic scope. Every named client, provider and model must ALREADY be in the vocabulary audit_status reports: a session scoped to a name that matches nothing would report enabled:true and capture nothing, so an unknown name is refused with the known values. Requires confirm='start capture' and refuses outright when durable storage is disabled, for the same reason. Capture stores full request and response bodies. " + retentionNote + ".",
 		Annotations: mutating("Start or edit a capture session"),
 	}, s.auditStart)
 
 	addTool(server, &sdk.Tool{
 		Name:        "audit_stop",
 		Title:       "Stop a capture session",
-		Description: "Stop one capture session by session_id, or every session with stop_all='stop every capture session'. " + retentionNote + "; there is no delete endpoint.",
+		Description: "Stop one capture session by session_id, or every session with stop_all='stop every capture session'. " + retentionNote + ".",
 		Annotations: mutating("Stop a capture session"),
 	}, s.auditStop)
 
@@ -163,14 +167,14 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "set_pause",
 		Title:       "Pause, edit or resume requests",
-		Description: "Park matching NEW requests behind a hold, edit a hold in place by hold_id, or resume (paused=false with no hold_id resumes everything). A hold parks new sends and retries; in-flight requests are never cancelled. Overlapping scopes are rejected rather than silently replaced.",
+		Description: "Park matching NEW requests behind a hold, edit a hold in place by hold_id, or resume (paused=false with no hold_id resumes everything). BLAST RADIUS: a hold with all=true, or a hold that names NO scope at all, is a GLOBAL hold on every client and provider - the proxy treats an omitted scope as all traffic, so leaving every scope field empty is the widest setting this tool has. Narrow it with clients or providers. A hold parks new sends and retries; in-flight requests are never cancelled, and excess waiting work can be refused. Overlapping scopes are rejected rather than silently replaced.",
 		Annotations: mutating("Pause, edit or resume requests"),
 	}, s.setPause)
 
 	addTool(server, &sdk.Tool{
 		Name:        "set_throttle",
 		Title:       "Set or clear provider limits",
-		Description: "Set one provider's budgets across all its clients and keys: concurrency, requests per window and tokens per window. Supplied dimensions merge with the current ones; 0 disables a dimension; clear removes the whole policy. These permit bursts and oversized requests; they are not strict fixed-window quota enforcement.",
+		Description: "Set one provider's budgets across all its clients and keys: concurrency (0..100000), requests per window (0..1000000000) and tokens per window (0..1000000000000). Supplied dimensions merge with the current ones; 0 disables a dimension; clear removes the whole policy. A window is 1s to 24h, and it is REQUIRED whenever a count is set and the provider has no window yet; a window with no count sets nothing and is refused here rather than returning a silent 200. The provider must already be a known provider name, because writing a limit for an unknown one would add that name to the proxy's vocabulary permanently, so the known names are offered instead. These budgets permit bursts and oversized requests; they are not strict fixed-window quota enforcement.",
 		Annotations: mutating("Set or clear provider limits"),
 	}, s.setThrottle)
 
@@ -184,7 +188,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "set_config",
 		Title:       "Patch the configuration",
-		Description: "Apply a revision-checked PARTIAL patch: values carries only the keys to change, and omitted keys are untouched. A supplied list or map replaces that whole field, so read the current document first for structured keys such as providers or model_rules. Leave revision empty to use the current one; a stale revision is rejected with 409. The whole result is validated before the file is written, CLI-overridden keys are stripped, and the response names keys that need a restart. A failed reload still leaves the file written, which the output reports explicitly.",
+		Description: "Apply a revision-checked PARTIAL patch: values carries only the keys to change, and omitted keys are untouched. A supplied list or map replaces that whole field, so call config_get FIRST for structured keys such as providers or model_rules, and pass its revision back. Leave revision empty to use the current one; a stale revision is rejected with 409. The whole result is validated before the file is written, CLI-overridden keys are stripped, and the response names keys that need a restart. The proxy writes the file and only THEN reports a failed reload, so a reload failure comes back as saved=true with the reload error in the output, never as a tool error: the mutation DID succeed and retrying it would fail with 409.",
 		Annotations: mutating("Patch the configuration"),
 	}, s.setConfig)
 
@@ -196,16 +200,30 @@ func (s *Service) Register(server *sdk.Server) {
 	}, s.reloadConfig)
 
 	addTool(server, &sdk.Tool{
+		Name:        "config_get",
+		Title:       "Read the configuration",
+		Description: "The live configuration document: the file's values, the values actually in force after CLI overrides, the built-in defaults, the per-key schema (type, category and documentation), the restart-required set, whether the file is writable at all, and the revision a revision-checked set_config must echo. Call this before set_config: a supplied list or map replaces that whole field, so a structured key patched without reading it first is replaced wholesale.",
+		Annotations: readOnly("Read the configuration"),
+	}, s.configGet)
+
+	addTool(server, &sdk.Tool{
+		Name:        "values",
+		Title:       "List a dimension's values",
+		Description: "The distinct values one filter dimension actually has in durable history, most frequent first, with a request count each: client, provider, model, conversation, key, status, tool, error_type, error_code or error_message. Call it before filtering: an unknown value is an EMPTY result from explore, chart and records rather than an error, so a guess turns a correctable mistake into a confidently wrong answer. Two dimensions are deliberately absent: 'time' is a proxy-side daypart bucket and 'error' a proxy-side type|code|message key, neither of which is a stored column, so describe lists their value spaces instead. For a count of one dimension under a filter on another, use query with a GROUP BY.",
+		Annotations: readOnly("List a dimension's values"),
+	}, s.values)
+
+	addTool(server, &sdk.Tool{
 		Name:        "purge_preview",
 		Title:       "Preview a history deletion",
-		Description: "Count the records a filter would delete, without deleting anything. The filter must constrain at least one field. Run this before purge and pass the count back as reviewed_count: traffic can change the row set between the preview and the deletion, so only the filter is fixed.",
+		Description: "Count the records a filter would delete, without deleting anything, and issue the preview_token that authorizes exactly that deletion. The filter must constrain at least one field. Run this before purge and pass its preview_token back verbatim: the token is bound to THIS filter, THIS count and a short expiry, so it cannot authorize a different filter that happens to match the same number of rows. Residual gap, stated plainly: the count is re-checked immediately before the deletion, but the re-check and the delete are two separate requests with no shared transaction, so live traffic committed between them is deleted without having been previewed. A filter that can reach a captured request DELETES that request's stored capture document too.",
 		Annotations: readOnly("Preview a history deletion"),
 	}, s.purgePreview)
 
 	addTool(server, &sdk.Tool{
 		Name:        "purge",
 		Title:       "Delete history permanently",
-		Description: "PERMANENTLY DELETE matching request history. This is irreversible and the proxy has NO server-side confirmation, NO confirm flag and NO two-step protocol: the credential and this tool's guards are the whole gate. Three guards apply together, and each alone is insufficient. (1) The filter must constrain at least one field; the bodyless command that deletes ALL history is never sent by this tool. (2) confirmation must be the exact phrase 'permanently delete the matching millivolt history'. (3) reviewed_count must equal a purge_preview count for the SAME filter, re-checked immediately before deleting, so a deletion cannot be authorized against a preview of a different row set. Deleted history cannot be recovered from this API. " + purgeNote + ".",
+		Description: "PERMANENTLY DELETE matching request history. This is irreversible and the proxy has NO server-side confirmation, NO confirm flag and NO two-step protocol: the credential and this tool's guards are the whole gate. Three guards apply together, and each alone is insufficient. (1) The filter must constrain at least one field; the bodyless command that deletes ALL history is never sent by this tool. (2) confirmation must be the exact phrase 'permanently delete the matching millivolt history'. (3) preview_token must be the token purge_preview issued for THIS EXACT filter; a bare count is not enough, because two different filters can match the same number of rows. What the token does NOT prevent, stated plainly: the count is re-checked immediately before deleting, and rows committed between that re-check and the delete are removed un-previewed, because the two are separate requests with no shared transaction. Deleting a request also DELETES its stored debug capture document. Deleted history cannot be recovered from this API. " + purgeNote + ".",
 		Annotations: destructive("Delete history permanently"),
 	}, s.purge)
 }

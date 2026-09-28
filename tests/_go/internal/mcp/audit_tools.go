@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+// liveDebugStatus has one session already live, so a create has a prior set to
+// resolve its new id against, and a vocabulary for audit_start to validate.
+const liveDebugStatus = `{"ok":true,"enabled":true,"sessions":[{"id":"s0","ran_ms":1,"captures":0}],` +
+	`"known_clients":["dev"],"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`
+
 const storageOffBootstrap = `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":false},"records":[]}`
 
 // TestAuditStatusReportsStorageAndVocabularies pins the two facts a caller must
@@ -63,10 +68,11 @@ func TestAuditStatusReportsStorageAndVocabularies(t *testing.T) {
 // would start, report success, and capture nothing.
 func TestAuditStartRefusesWithoutDurableStorage(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
 	proxy.json(http.MethodGet, bootstrapPath, storageOffBootstrap)
 	service := newTestService(t, proxy, Limits{})
 	_, err := service.auditStart(context.Background(), AuditStartInput{
-		Clients: []string{"dev"}, Duration: "15m", Confirm: auditConfirmStart,
+		Clients: []string{"dev-traffic"}, Duration: "15m", Confirm: auditConfirmStart,
 	})
 	if err == nil {
 		t.Fatal("starting a capture without durable storage must be refused")
@@ -85,6 +91,7 @@ func TestAuditStartRefusesWithoutDurableStorage(t *testing.T) {
 // duration allowlist, none of which may reach the proxy when violated.
 func TestAuditStartGuards(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
@@ -93,10 +100,10 @@ func TestAuditStartGuards(t *testing.T) {
 		in   AuditStartInput
 		want string
 	}{
-		{"no confirmation", AuditStartInput{Clients: []string{"dev"}}, "confirm must be"},
-		{"wrong confirmation", AuditStartInput{Clients: []string{"dev"}, Confirm: "yes"}, "confirm must be"},
+		{"no confirmation", AuditStartInput{Clients: []string{"dev-traffic"}}, "confirm must be"},
+		{"wrong confirmation", AuditStartInput{Clients: []string{"dev-traffic"}, Confirm: "yes"}, "confirm must be"},
 		{"no scope", AuditStartInput{Confirm: auditConfirmStart}, "at least one of clients, providers or models"},
-		{"bad duration", AuditStartInput{Clients: []string{"dev"}, Confirm: auditConfirmStart, Duration: "30m"}, "15m, 1h, 6h, 12h, 24h"},
+		{"bad duration", AuditStartInput{Clients: []string{"dev-traffic"}, Confirm: auditConfirmStart, Duration: "30m"}, "15m, 1h, 6h, 12h, 24h"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := service.auditStart(ctx, tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -114,13 +121,14 @@ func TestAuditStartGuards(t *testing.T) {
 // substitute an empty array for it.
 func TestAuditStartBodyShape(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[{"id":"s1","clients":["dev"],"ran_ms":1,"captures":0}],`+
 		`"known_clients":["dev"],"known_providers":[],"known_models":[],"ttl":"168h","max_bytes":"1MiB"}`)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 
-	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"dev"}, Duration: "15m", Confirm: auditConfirmStart}); err != nil {
+	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"dev-traffic"}, Duration: "15m", Confirm: auditConfirmStart}); err != nil {
 		t.Fatal(err)
 	}
 	body := decodeBody(t, proxy.requestsFor(http.MethodPost, debugPath)[0])
@@ -158,6 +166,7 @@ func TestAuditStartBodyShape(t *testing.T) {
 // readable conflict rather than a silent success.
 func TestAuditStartSurfacesOverlapConflict(t *testing.T) {
 	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.fail(http.MethodPost, debugPath, http.StatusConflict, "debug session overlaps existing session", "")
 	service := newTestService(t, proxy, Limits{})
@@ -219,8 +228,13 @@ func TestAuditStopGuards(t *testing.T) {
 	if _, present := all["id"]; present {
 		t.Fatalf("stop-all must not carry an id: %v", all)
 	}
-	if !strings.Contains(out.Retention, "no delete") {
+	// The retention note must be true: stopping deletes nothing, and a purge is
+	// the one thing that does.
+	if !strings.Contains(out.Retention, "does NOT delete") {
 		t.Fatalf("the retention note must be in the output: %q", out.Retention)
+	}
+	if !strings.Contains(out.Retention, "a purge does remove the stored capture") {
+		t.Fatalf("the retention note must not claim captures are undeletable: %q", out.Retention)
 	}
 }
 
@@ -395,5 +409,143 @@ func TestAuditCaptureGetErrors(t *testing.T) {
 	_, err := service.auditCaptureGet(context.Background(), AuditCaptureGetInput{RecordID: "gone"})
 	if err == nil || !strings.Contains(err.Error(), "404") || !strings.Contains(err.Error(), "debug capture not found") {
 		t.Fatalf("error = %v, want the proxy's 404", err)
+	}
+}
+
+// TestAuditStartNamesTheSessionItActedOn is the two-session regression. The proxy
+// edits a session IN PLACE, so taking the last session of the returned list
+// reported a DIFFERENT session whenever the edited one was not the newest - and
+// a model that then called audit_stop(session_id: started.id) stopped the wrong
+// capture. With one session live the wrong answer is indistinguishable from the
+// right one, which is why the old test never caught it.
+func TestAuditStartNamesTheSessionItActedOn(t *testing.T) {
+	// A create: one session already live, the new one appears alongside it.
+	create := newFakeProxy(t)
+	create.json(http.MethodGet, debugPath, liveDebugStatus)
+	create.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	create.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[`+
+		`{"id":"s0","ran_ms":1,"captures":0},{"id":"s1","clients":["dev"],"ran_ms":2,"captures":0}],`+
+		`"known_clients":["dev"],"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`)
+	created, err := newTestService(t, create, Limits{}).auditStart(context.Background(), AuditStartInput{
+		Clients: []string{"dev"}, Confirm: auditConfirmStart,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Edited || created.Started.ID != "s1" {
+		t.Fatalf("a create must report the id that appeared: %+v", created)
+	}
+	if len(created.Sessions) != 2 {
+		t.Fatalf("both live sessions must be reported: %+v", created.Sessions)
+	}
+
+	// An edit of the OLDER session, while a newer one is live. The list is
+	// unchanged apart from s0's fields, so "the last one" is the wrong answer.
+	edit := newFakeProxy(t)
+	edit.json(http.MethodGet, debugPath, `{"ok":true,"enabled":true,"sessions":[`+
+		`{"id":"s0","ran_ms":1,"captures":0},{"id":"s1","clients":["dev"],"ran_ms":2,"captures":0}],`+
+		`"known_clients":["dev"],"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`)
+	edit.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	edit.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[`+
+		`{"id":"s0","clients":["dev"],"ran_ms":3,"captures":0},{"id":"s1","clients":["dev"],"ran_ms":2,"captures":0}],`+
+		`"known_clients":["dev"],"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`)
+	edited, err := newTestService(t, edit, Limits{}).auditStart(context.Background(), AuditStartInput{
+		SessionID: "s0", Clients: []string{"dev"}, Confirm: auditConfirmStart,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !edited.Edited || edited.Started.ID != "s0" {
+		t.Fatalf("an edit must report the REQUESTED id, not the newest: %+v", edited)
+	}
+	// And the id it reports is one audit_stop can actually stop.
+	if _, err := newTestService(t, newFakeProxyWithDebugStop(t), Limits{}).auditStop(context.Background(),
+		AuditStopInput{SessionID: edited.Started.ID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// newFakeProxyWithDebugStop answers the one stop this test needs.
+func newFakeProxyWithDebugStop(t *testing.T) *fakeProxy {
+	t.Helper()
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[{"id":"s1","ran_ms":1,"captures":0}],`+
+		`"known_clients":["dev"],"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`)
+	return proxy
+}
+
+// TestAuditStartRefusesAScopeThatMatchesNothing pins the vocabulary guard. A
+// session scoped to a name the proxy has never seen would start, report
+// enabled:true, and capture nothing - a silent no-op presented as success.
+func TestAuditStartRefusesAScopeThatMatchesNothing(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, liveDebugStatus)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	service := newTestService(t, proxy, Limits{})
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name      string
+		in        AuditStartInput
+		want      string
+		wantKnown string
+	}{
+		{"unknown client", AuditStartInput{Clients: []string{"devi"}, Confirm: auditConfirmStart},
+			`clients "devi" is not a known capture scope`, "Known clients: dev"},
+		{"unknown provider", AuditStartInput{Providers: []string{"locla"}, Confirm: auditConfirmStart},
+			`providers "locla" is not a known capture scope`, "Known providers: local"},
+		{"unknown model", AuditStartInput{Models: []string{"gpt-nope"}, Confirm: auditConfirmStart},
+			`models "gpt-nope" is not a known capture scope`, "Known models: demo"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := service.auditStart(ctx, tc.in)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want one mentioning %q", err, tc.want)
+			}
+			// The refusal must offer the vocabulary that would have worked.
+			if !strings.Contains(err.Error(), tc.wantKnown) {
+				t.Fatalf("the refusal must list the known values (%q), got %q", tc.wantKnown, err)
+			}
+		})
+	}
+	if len(proxy.requestsFor(http.MethodPost, debugPath)) != 0 {
+		t.Fatal("a refused scope must not start a session")
+	}
+	// A known name on an edit is accepted, and one known name among several
+	// unknowns is still refused: the check is per name.
+	if _, err := service.auditStart(ctx, AuditStartInput{SessionID: "s0", Clients: []string{"cli"}, Confirm: auditConfirmStart}); err == nil ||
+		!strings.Contains(err.Error(), "not a known capture scope") {
+		t.Fatalf("an unknown name on an edit must be refused too, got %v", err)
+	}
+	// An empty vocabulary is not a reason to refuse every name: a proxy that has
+	// seen nothing would make the tool unusable, not safer.
+	proxy.json(http.MethodGet, debugPath, `{"ok":true,"enabled":false,"sessions":null,`+
+		`"known_clients":null,"known_providers":null,"known_models":null,"ttl":"168h","max_bytes":"1MiB"}`)
+	proxy.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[{"id":"s9","clients":["brand-new"],"ran_ms":1,"captures":0}],`+
+		`"known_clients":null,"known_providers":null,"known_models":null,"ttl":"168h","max_bytes":"1MiB"}`)
+	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"brand-new"}, Confirm: auditConfirmStart}); err != nil {
+		t.Fatalf("an empty vocabulary must not refuse every name: %v", err)
+	}
+}
+
+// TestRetentionNoteIsTrueAboutPurge pins the claim the audit surface used to
+// make and did not deserve: "there is no delete endpoint". There is no
+// capture-specific one, but a purge deletes the stored capture document of every
+// request it matches, and an operator who believes otherwise loses their
+// evidence.
+func TestRetentionNoteIsTrueAboutPurge(t *testing.T) {
+	if strings.Contains(retentionNote, "no delete endpoint") {
+		t.Fatalf("the retention note must not claim captures are undeletable: %q", retentionNote)
+	}
+	for _, needle := range []string{
+		"does NOT delete",
+		"no capture-specific delete endpoint",
+		"a purge does remove the stored capture document of every request it matches",
+	} {
+		if !strings.Contains(retentionNote, needle) {
+			t.Fatalf("the retention note must say %q, got %q", needle, retentionNote)
+		}
+	}
+	if strings.Contains(purgeNote, "debug capture") {
+		t.Fatalf("the purge note must not claim captures survive: %q", purgeNote)
 	}
 }

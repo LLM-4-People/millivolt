@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -18,7 +19,26 @@ type QueryInput struct {
 type QueryOutput struct {
 	Rows       []map[string]any `json:"rows" jsonschema:"result rows, each a flat column-name to value object"`
 	RowCount   int              `json:"row_count" jsonschema:"rows returned after truncation"`
+	Bytes      int              `json:"bytes" jsonschema:"approximate encoded size of the returned rows"`
 	Truncation Truncation       `json:"truncation" jsonschema:"whether rows were withheld, and how to continue"`
+}
+
+// queryAdvice is the one way to continue past a query clamp. It names the two
+// levers that actually reduce volume, because `query` has no cursor: narrow the
+// projection, or aggregate instead of listing.
+const queryAdvice = "narrow the SELECT (fewer columns, a WHERE range, or a GROUP BY aggregate) and re-run; " +
+	"this tool has no cursor, so paging is done in SQL with keyset pagination"
+
+// queryBytes is the approximate encoded size of the returned rows, reported so
+// a model can size its next request without guessing from the row count.
+func queryBytes(rows []map[string]any) int {
+	total := 0
+	for _, row := range rows {
+		if encoded, err := json.Marshal(row); err == nil {
+			total += len(encoded)
+		}
+	}
+	return total
 }
 
 // Query runs one bounded SELECT and truncates client-side with an explicit
@@ -36,8 +56,15 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(result, limit, "rows")
-	return &QueryOutput{Rows: kept, RowCount: len(kept), Truncation: truncation}, nil
+	kept, truncation := clamp(result, limit, "rows", queryAdvice)
+	// The row cap is not a volume bound: a short wide row can be larger than a
+	// long narrow one, so the encoded-size clamp runs after it and is reported
+	// whenever it withheld something.
+	bySize, sizeTruncation := clampRowsToBytes(kept, s.limits.QueryMaxBytes, queryAdvice)
+	if sizeTruncation.Truncated {
+		return &QueryOutput{Rows: bySize, RowCount: len(bySize), Bytes: queryBytes(bySize), Truncation: sizeTruncation}, nil
+	}
+	return &QueryOutput{Rows: kept, RowCount: len(kept), Bytes: queryBytes(kept), Truncation: truncation}, nil
 }
 
 // maxQueryRowsCeiling is an internal sanity bound so a typo cannot ask for a
@@ -83,7 +110,7 @@ func (s *Service) explore(ctx context.Context, in ExploreInput) (*ExploreOutput,
 	if err := s.client.getJSON(ctx, routeExplorer, values, &payload); err != nil {
 		return nil, err
 	}
-	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups")
+	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups", exploreAdvice)
 	return &ExploreOutput{
 		Dim:                 payload.Dim,
 		Total:               payload.Total,
@@ -105,6 +132,28 @@ func validateDimension(dim string) error {
 	return fmt.Errorf("dim %q is unknown; use one of %s", dim, strings.Join(Dimensions, ", "))
 }
 
+// exploreAdvice names the one lever that reduces an explorer's group count:
+// the filter set. The proxy caps groups at the top of the response, so there is
+// no per-call group limit to raise.
+const exploreAdvice = "narrow the filter set (add or drop a dim:id filter) and re-run; " +
+	"the group cap is the proxy's, so use query with a GROUP BY for a wider breakdown"
+
+// chartAdvice names the two levers for a dropped bucket. A shorter window
+// coarsens the same span; the buckets are already server-authoritative, so
+// there is no per-call bucket limit to raise.
+const chartAdvice = "request a shorter window, or read the series from query grouped on a started_at time bucket"
+
+// recordsAdvice names the cursor, which is the only continuation this tool has.
+const recordsAdvice = "page with the next_before_ms and next_before_id pair this tool returned"
+
+// snapshotAdvice points at the durable log page, because the snapshot's recent
+// records have no cursor of their own.
+const snapshotAdvice = "older records come from the records tool, paging with before_ms and before_id"
+
+// prometheusAdvice points at the source of the metric, because a dropped
+// exposition line cannot be resumed.
+const prometheusAdvice = "ask query for the underlying rows, or read the aggregate the metric is built from"
+
 // ChartInput is a time-series request.
 type ChartInput struct {
 	// Window is "all" for all history, or a positive integer number of MINUTES.
@@ -118,8 +167,10 @@ type ChartOutput struct {
 	NowMs       int64            `json:"now_ms" jsonschema:"server clock at render time, unix milliseconds"`
 	FromMs      int64            `json:"from_ms" jsonschema:"clock-aligned window start, unix milliseconds"`
 	BucketMs    int64            `json:"bucket_ms" jsonschema:"exact bucket width in milliseconds"`
-	TTFTp       []*float64       `json:"ttft_p" jsonschema:"period-wide time-to-first-token percentiles"`
-	TPSp        []*float64       `json:"tps_p" jsonschema:"period-wide generation speed percentiles"`
+	TTFTp       []*float64       `json:"ttft_p" jsonschema:"period-wide time-to-first-token percentiles [p50, p95, p99]"`
+	TPSp        []*float64       `json:"tps_p" jsonschema:"period-wide generation speed percentiles [p50, p95, p99]"`
+	TTFTStat    []*float64       `json:"ttft_stat" jsonschema:"period-wide time-to-first-token [avg, min, max] over every captured sample"`
+	TPSStat     []*float64       `json:"tps_stat" jsonschema:"period-wide generation speed [avg, min, max] over every captured sample"`
 	CostPerMTok *float64         `json:"cost_per_mtok" jsonschema:"blended USD per million tokens, cost-reporting requests only"`
 	Buckets     []map[string]any `json:"buckets" jsonschema:"at most 31 buckets; t is the bucket start in unix milliseconds"`
 	Truncation  Truncation       `json:"truncation" jsonschema:"whether buckets were withheld"`
@@ -144,17 +195,21 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 		BucketMs    int64            `json:"bucket_ms"`
 		TTFTP       []*float64       `json:"ttft_p"`
 		TPSP        []*float64       `json:"tps_p"`
+		TTFTStat    []*float64       `json:"ttft_stat"`
+		TPSStat     []*float64       `json:"tps_stat"`
 		CostPerMTok *float64         `json:"cost_per_mtok"`
 		Buckets     []map[string]any `json:"buckets"`
 	}
 	if err := s.client.getJSON(queryCtx, routeChart, values, &payload); err != nil {
 		return nil, err
 	}
-	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets")
+	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets", chartAdvice)
 	return &ChartOutput{
 		NowMs: payload.NowMs, FromMs: payload.FromMs, BucketMs: payload.BucketMs,
-		TTFTp: list(payload.TTFTP), TPSp: list(payload.TPSP), CostPerMTok: payload.CostPerMTok,
-		Buckets: buckets, Truncation: truncation,
+		TTFTp: list(payload.TTFTP), TPSp: list(payload.TPSP),
+		TTFTStat: list(payload.TTFTStat), TPSStat: list(payload.TPSStat),
+		CostPerMTok: payload.CostPerMTok,
+		Buckets:     buckets, Truncation: truncation,
 	}, nil
 }
 
@@ -184,15 +239,26 @@ type RecordsOutput struct {
 	Returned int              `json:"returned" jsonschema:"records in this page"`
 	More     bool             `json:"more" jsonschema:"the proxy believes older rows exist"`
 	// Exhausted is true when paging further cannot make progress, even if More
-	// is true: the proxy scans a bounded number of rows per call, so a short or
-	// empty page with a non-advancing cursor is exhaustion, not a reason to
-	// loop.
-	Exhausted    bool       `json:"exhausted" jsonschema:"true when the cursor cannot advance; stop paging"`
-	NextBeforeMs int64      `json:"next_before_ms,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
-	NextBeforeID string     `json:"next_before_id,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
-	Truncation   Truncation `json:"truncation" jsonschema:"whether records were withheld"`
-	ModelCanon   any        `json:"model_canon,omitempty" jsonschema:"raw-to-canonical model name mapping the server applied"`
+	// is true: the proxy scans a bounded number of rows per call, so a page that
+	// cannot advance the cursor is exhaustion, not a reason to loop. An EMPTY
+	// page is deliberately not exhaustion: an empty page with an advanced cursor
+	// is the normal shape of "the scan budget ran out before a match", and
+	// treating it as the end of history silently drops every match behind it.
+	Exhausted    bool           `json:"exhausted" jsonschema:"true when the cursor cannot advance; stop paging"`
+	NextBeforeMs int64          `json:"next_before_ms,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
+	NextBeforeID string         `json:"next_before_id,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
+	Truncation   Truncation     `json:"truncation" jsonschema:"whether records were withheld"`
+	ModelCanon   *ModelCanonMap `json:"model_canon,omitempty" jsonschema:"the raw-to-canonical model name mapping the server applied to this page"`
+	Storage      StorageInfo    `json:"storage" jsonschema:"durable storage signal; without it this page is not the whole history"`
+	Note         string         `json:"note" jsonschema:"what this page does and does not cover"`
 }
+
+// noStorageNote is what the page says when durable storage is off. With db_path
+// empty the proxy skips its scan loop entirely and answers an empty page with
+// more false, while the in-memory ring still holds recent history: reporting
+// that as the end of history would be a confident wrong answer.
+const noStorageNote = "durable storage is disabled on this proxy (db_path is empty), so this empty page is NOT the end of history: " +
+	"the log route scans nothing. The in-memory ring still holds recent requests; read them with the snapshot tool"
 
 // Records returns one durable page. The caller drives the cursor; this tool
 // never loops on its own, and it reports exhaustion explicitly so a caller
@@ -211,21 +277,32 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	if (in.BeforeMs == 0) != (in.BeforeID == "") {
 		return nil, fmt.Errorf("before_ms and before_id must be sent together, exactly once each")
 	}
+	storage, err := s.client.storageSignal(ctx)
+	if err != nil {
+		return nil, err
+	}
 	page, err := s.client.recordsPage(ctx, in.Scope.query(), in.BeforeMs, in.BeforeID, limit)
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(page.Records, limit, "records")
+	kept, truncation := clamp(page.Records, limit, "records", recordsAdvice)
 	advanced := cursorAdvanced(in.BeforeMs, in.BeforeID, page.CursorMs, page.CursorID)
-	return &RecordsOutput{
+	out := &RecordsOutput{
 		Records:      kept,
 		Returned:     len(kept),
 		More:         page.More,
-		Exhausted:    exhausted(page.More, advanced, len(kept)),
+		Exhausted:    exhausted(page.More, advanced),
 		NextBeforeMs: page.CursorMs,
 		NextBeforeID: page.CursorID,
 		Truncation:   truncation,
-	}, nil
+		ModelCanon:   page.ModelCanon,
+		Storage:      storage,
+		Note:         "one newest-first page of DURABLE history; page with the next cursor pair, and stop when exhausted is true",
+	}
+	if !storage.Enabled {
+		out.Note = noStorageNote
+	}
+	return out, nil
 }
 
 // cursorAdvanced reports whether the proxy's returned cursor differs from the
@@ -238,11 +315,19 @@ func cursorAdvanced(sentMs int64, sentID string, gotMs int64, gotID string) bool
 	return gotMs != sentMs || gotID != sentID
 }
 
-// exhausted is the one owner of the non-advancing-cursor rule: a page that
-// cannot advance the cursor, or that returned nothing, is the end of what this
-// scan budget can reach, whatever `more` claims.
-func exhausted(more, advanced bool, returned int) bool {
-	if returned == 0 || !advanced {
+// exhausted is the one owner of the paging-stop rule: a page whose cursor does
+// not advance is the end of what this scan budget can reach, whatever `more`
+// claims, and so is a page the proxy says is the last one.
+//
+// A page that returned NOTHING is deliberately not exhaustion. The proxy scans a
+// bounded number of rows per call and advances its cursor on every row it
+// SCANNED, including rows the scope filter excluded, so an empty page with an
+// advanced cursor is the ordinary shape of "the budget ran out before a match".
+// Its own handler test pins that shape as a page that must be continued: page
+// one is zero records with more true, page two returns the rows. A
+// non-advancing cursor is already a sufficient loop guard on its own.
+func exhausted(more, advanced bool) bool {
+	if !advanced {
 		return true
 	}
 	return !more
@@ -280,7 +365,7 @@ func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutp
 	if err := s.client.getJSON(ctx, routeBootstrap, nil, &payload); err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(payload.Records, limit, "records")
+	kept, truncation := clamp(payload.Records, limit, "records", snapshotAdvice)
 	return &SnapshotOutput{
 		Seq:           payload.Seq,
 		FeedID:        payload.Feed,
@@ -317,7 +402,7 @@ func (s *Service) prometheus(ctx context.Context, _ PrometheusInput) (*Prometheu
 	}
 	text := strings.TrimRight(string(body), "\n")
 	lines := strings.Split(text, "\n")
-	kept, truncation := clamp(lines, prometheusMaxLines, "exposition lines")
+	kept, truncation := clamp(lines, prometheusMaxLines, "exposition lines", prometheusAdvice)
 	if len(kept) == 1 && kept[0] == "" {
 		kept = nil
 	}

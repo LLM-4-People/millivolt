@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -24,6 +25,12 @@ type Limits struct {
 	// own storage_query_max_rows (and answers 413 past it), which can be much
 	// larger; this is the volume a model can actually read.
 	QueryMaxRows int
+	// QueryMaxBytes bounds the ENCODED size of one `query` result client-side.
+	// The row cap alone is not a volume bound: a 200-row SELECT * of the
+	// requests table measures well over 100k tokens in one result, which a
+	// model cannot read and which is spent on columns it did not ask for. The
+	// clamp keeps whole rows, so a truncated result is still valid JSON.
+	QueryMaxBytes int
 	// PageSize is the default page for records and audit capture listings.
 	PageSize int
 	// CaptureBytes is the size above which a stored capture document is
@@ -42,11 +49,12 @@ type Limits struct {
 // cmd/mcp. They exist only here; no consumer carries a fallback default.
 func DefaultLimits() Limits {
 	return Limits{
-		QueryMaxRows: 200,
-		PageSize:     50,
-		CaptureBytes: 256 << 10,
-		QueryTimeout: 120 * time.Second,
-		Timeout:      30 * time.Second,
+		QueryMaxRows:  200,
+		QueryMaxBytes: 128 << 10,
+		PageSize:      50,
+		CaptureBytes:  256 << 10,
+		QueryTimeout:  120 * time.Second,
+		Timeout:       30 * time.Second,
 	}
 }
 
@@ -55,6 +63,8 @@ func (l Limits) Validate() error {
 	switch {
 	case l.QueryMaxRows < 1:
 		return errors.New("query max rows must be at least 1")
+	case l.QueryMaxBytes < 1:
+		return errors.New("query max bytes must be at least 1")
 	case l.PageSize < 1:
 		return errors.New("page size must be at least 1")
 	case l.CaptureBytes < 1:
@@ -97,9 +107,13 @@ type Truncation struct {
 }
 
 // clamp truncates a slice to limit and returns the marker describing what was
-// withheld. marker names the shape being truncated ("rows", "records") and the
-// advice for continuing, so the model can act on it.
-func clamp[T any](items []T, limit int, marker string) ([]T, Truncation) {
+// withheld. marker names the shape being truncated ("rows", "records") and
+// advice is the ONE way to continue for that shape, so the model acts on it
+// instead of re-running the same oversized request. Advice is per call site on
+// purpose: a generic "narrow the query or page with the cursor fields" is
+// wrong for every tool that has no cursor fields, and actively sends a model
+// looking for arguments its tool does not have.
+func clamp[T any](items []T, limit int, marker, advice string) ([]T, Truncation) {
 	if len(items) <= limit {
 		return list(items), Truncation{Shown: len(items), Total: len(items)}
 	}
@@ -107,8 +121,42 @@ func clamp[T any](items []T, limit int, marker string) ([]T, Truncation) {
 		Shown:     limit,
 		Total:     len(items),
 		Truncated: true,
-		Marker: fmt.Sprintf("truncated: %d of %d %s returned; narrow the query or page with the cursor fields",
-			limit, len(items), marker),
+		Marker: fmt.Sprintf("truncated: %d of %d %s returned; %s",
+			limit, len(items), marker, advice),
+	}
+}
+
+// clampRowsToBytes keeps whole rows while their encoded size fits the budget.
+// It never cuts inside a row, so a clamped result is still valid JSON a model
+// can act on; the withheld rows are reported with the same explicit marker the
+// row clamp uses, because a silently shortened result would read as a complete
+// one.
+func clampRowsToBytes(rows []map[string]any, budget int, advice string) ([]map[string]any, Truncation) {
+	kept := make([]map[string]any, 0, len(rows))
+	used := 0
+	for _, row := range rows {
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			// A row the encoder cannot produce is not measurable, so it cannot
+			// be budgeted; keep it rather than silently dropping data.
+			kept = append(kept, row)
+			continue
+		}
+		if used+len(encoded) > budget {
+			break
+		}
+		used += len(encoded)
+		kept = append(kept, row)
+	}
+	if len(kept) == len(rows) {
+		return list(rows), Truncation{Shown: len(kept), Total: len(rows)}
+	}
+	return kept, Truncation{
+		Shown:     len(kept),
+		Total:     len(rows),
+		Truncated: true,
+		Marker: fmt.Sprintf("truncated: %d of %d rows returned, about %d of the %d byte result budget; %s",
+			len(kept), len(rows), used, budget, advice),
 	}
 }
 

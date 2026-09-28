@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -38,9 +39,12 @@ type AuditSession struct {
 
 // retentionNote is the one statement of what capture stop does and does not do.
 // It is repeated in the audit_start/audit_stop descriptions because the
-// distinction is the one an operator is most likely to get wrong.
-const retentionNote = "stopping a session does NOT delete captures that were already stored: there is no delete " +
-	"endpoint, and a stopped session's documents stay readable by record id until debug_capture_ttl expires"
+// distinction is the one an operator is most likely to get wrong. It used to
+// claim there is "no delete endpoint" at all, which was false: a purge deletes
+// the stored capture documents of every request it matches.
+const retentionNote = "stopping a session does NOT delete captures that were already stored, and they stay readable by record id " +
+	"until debug_capture_ttl expires. There is no capture-specific delete endpoint, but a purge does remove the stored capture " +
+	"document of every request it matches, so a purge is the only way to lose them"
 
 // AuditStatusInput takes no arguments.
 type AuditStatusInput struct{}
@@ -114,7 +118,13 @@ const auditConfirmStart = "start capture"
 
 // AuditStart starts or edits one capture session. It refuses when durable
 // storage is off: the proxy would accept the session, report success, and never
-// store a document, so a silent no-op is worse than a refusal.
+// store a document, so a silent no-op is worse than a refusal. It also refuses a
+// scope name the proxy has never seen, for the same reason: a session scoped to
+// a name that matches nothing reports enabled:true and captures nothing.
+//
+// It reads the session state before and after the change, because the proxy
+// edits a session in place and a create's id is only identifiable as the one
+// that was not there before.
 func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditStartOutput, error) {
 	if in.Confirm != auditConfirmStart {
 		return nil, fmt.Errorf("confirm must be %q: capture stores full request and response bodies and is sensitive", auditConfirmStart)
@@ -123,6 +133,13 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
 	}
 	if err := validateCaptureDuration(in.Duration); err != nil {
+		return nil, err
+	}
+	before, err := s.client.debug(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read the capture session state before starting: %v", err)
+	}
+	if err := requireKnownScope(in.Clients, in.Providers, in.Models, before); err != nil {
 		return nil, err
 	}
 	storage, err := s.client.storageSignal(ctx)
@@ -156,7 +173,41 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 	if err != nil {
 		return nil, err
 	}
-	return auditStateOutput(status, in.SessionID != "", storage, "capture documents stay readable until debug_capture_ttl expires; "+retentionNote), nil
+	return auditStateOutput(status, in.SessionID, before.Sessions, storage,
+		"capture documents stay readable until debug_capture_ttl expires; "+retentionNote), nil
+}
+
+// requireKnownScope refuses a scope name outside the vocabulary the proxy
+// reports, offering the known values. GET /admin/debug is the one owner of
+// those names, and it is the same list a hold's scope is checked against.
+//
+// An empty dimension is not checked: it means "any", which is a scope the proxy
+// accepts and this tool already refuses on a create where every dimension is
+// empty. An empty vocabulary is not checked either, because on a proxy that has
+// seen nothing every name is unknown and refusing all of them would make the
+// tool unusable rather than safer.
+func requireKnownScope(clients, providers, models []string, status *debugStatus) error {
+	for _, check := range []struct {
+		dimension string
+		named     []string
+		known     []string
+	}{
+		{"clients", clients, status.KnownClients},
+		{"providers", providers, status.KnownProviders},
+		{"models", models, status.KnownModels},
+	} {
+		known := list(check.known)
+		if len(known) == 0 {
+			continue
+		}
+		for _, name := range check.named {
+			if !slices.Contains(known, name) {
+				return fmt.Errorf("%s %q is not a known capture scope: a session scoped to a name that matches nothing reports enabled:true and captures nothing. "+
+					"Known %s: %s", check.dimension, name, check.dimension, strings.Join(known, ", "))
+			}
+		}
+	}
+	return nil
 }
 
 // AuditStopInput stops one session, or all of them.
@@ -234,6 +285,10 @@ type AuditCapturesListOutput struct {
 const auditListNote = "the proxy has no capture listing endpoint: this list is a bounded SELECT over requests WHERE debug = 1, " +
 	"so it shows records whose capture document is stored, and nothing that expired or was never captured"
 
+// captureListAdvice names the one continuation this listing has: the same paired
+// cursor the durable log page uses.
+const captureListAdvice = "page with the before_ms and before_id pair this tool returned"
+
 // AuditCapturesList pages captured requests through a bounded SQL probe.
 func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInput) (*AuditCapturesListOutput, error) {
 	limit := in.Limit
@@ -257,14 +312,14 @@ func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInp
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(found, limit, "records")
+	kept, truncation := clamp(found, limit, "records", captureListAdvice)
 	more := len(kept) == limit
 	nextMs, nextID := captureCursor(kept)
 	return &AuditCapturesListOutput{
 		Records:      kept,
 		Returned:     len(kept),
 		More:         more,
-		Exhausted:    exhausted(more, cursorAdvanced(in.BeforeMs, in.BeforeID, nextMs, nextID), len(kept)),
+		Exhausted:    exhausted(more, cursorAdvanced(in.BeforeMs, in.BeforeID, nextMs, nextID)),
 		NextBeforeMs: nextMs,
 		NextBeforeID: nextID,
 		Storage:      storage,
@@ -387,15 +442,42 @@ func auditSessions(sessions []debugSession) []AuditSession {
 	return out
 }
 
-func auditStateOutput(status *debugStatus, edited bool, storage StorageInfo, retention string) *AuditStartOutput {
+// auditStateOutput names the session a start actually acted on.
+//
+// The proxy edits a session IN PLACE (internal/proxy/debug.go replaces the
+// matching entry), so on an edit the answer is the requested id: taking the
+// last session in the returned list reported a DIFFERENT session whenever the
+// edited one was not the newest, and a model that then called
+// audit_stop(session_id: started.id) stopped the wrong capture. On a create the
+// id is resolved as the one that appeared and was not live before.
+func auditStateOutput(status *debugStatus, requested string, before []debugSession, storage StorageInfo, retention string) *AuditStartOutput {
 	return &AuditStartOutput{
-		Started:   AuditSession{ID: firstSessionID(status.Sessions)},
-		Edited:    edited,
+		Started:   AuditSession{ID: resolveStartedSession(requested, before, status.Sessions)},
+		Edited:    requested != "",
 		Storage:   storage,
 		Retention: retention,
 		Sessions:  auditSessions(status.Sessions),
 		Warning:   status.Warning,
 	}
+}
+
+// resolveStartedSession is the one owner of that answer.
+func resolveStartedSession(requested string, before, after []debugSession) string {
+	if requested != "" {
+		return requested
+	}
+	live := map[string]bool{}
+	for _, session := range before {
+		live[session.ID] = true
+	}
+	for _, session := range after {
+		if !live[session.ID] {
+			return session.ID
+		}
+	}
+	// No new id appeared, which the proxy should not do on a create. Report the
+	// newest rather than nothing, so a follow-up stop has something to name.
+	return firstSessionID(after)
 }
 
 func firstSessionID(sessions []debugSession) string {

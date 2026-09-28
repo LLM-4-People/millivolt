@@ -94,10 +94,10 @@ func TestRegisteredToolSurface(t *testing.T) {
 		got[tool.Name] = tool
 	}
 	want := []string{
-		"describe", "query", "explore", "chart", "records", "snapshot", "prometheus",
+		"describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
 		"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
-		"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "reload_config",
-		"purge_preview", "purge",
+		"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
+		"reload_config", "purge_preview", "purge",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("tool count = %d, want %d (%v)", len(got), len(want), keys(got))
@@ -129,10 +129,10 @@ func TestRegisteredToolSurface(t *testing.T) {
 	// Nothing that could reach the inference catch-all, and no restore path.
 	for name := range got {
 		switch name {
-		case "describe", "query", "explore", "chart", "records", "snapshot", "prometheus",
+		case "describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
 			"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
-			"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "reload_config",
-			"purge_preview", "purge":
+			"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
+			"reload_config", "purge_preview", "purge":
 		default:
 			t.Fatalf("unexpected tool %q is registered", name)
 		}
@@ -154,7 +154,7 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, schemaPath, `[{"type":"table","name":"requests","tbl_name":"requests","sql":"CREATE TABLE requests"}]`)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
-	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodGet, debugPath, liveDebugStatus)
 	proxy.json(http.MethodGet, explorerPath, `{"dim":"provider","total":1,"groups":[{"name":"local"}],"rail":{},"scope":{}}`)
 	proxy.json(http.MethodGet, chartPath, `{"now_ms":1,"from_ms":0,"bucket_ms":1,"buckets":[]}`)
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1"}],"more":false,"cursor_ms":1,"cursor_id":"r1"}`)
@@ -162,14 +162,16 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 	proxy.json(http.MethodGet, pausePath, `{"ok":true,"paused":false}`)
 	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"throttles":[],"known_providers":[]}`)
 	proxy.json(http.MethodGet, quotaPath, `{"ok":true}`)
-	proxy.json(http.MethodGet, "/admin/restart", `{"ok":true,"available":true}`)
-	proxy.json(http.MethodGet, configPath, `{"revision":"rev"}`)
+	proxy.json(http.MethodGet, restartPath, `{"ok":true,"available":true}`)
+	proxy.json(http.MethodGet, configPath, `{"revision":"rev","values":{},"effective":{},"defaults":{},`+
+		`"fields":[],"restart_required":[],"writable":true,"path":"/etc/millivolt/proxy.yaml"}`)
 	proxy.json(http.MethodPost, pausePath, `{"ok":true,"paused":true}`)
 	proxy.json(http.MethodPost, throttlePath, `{"ok":true,"throttles":[],"known_providers":[]}`)
 	proxy.json(http.MethodPost, quotaPath, `{"ok":true}`)
 	proxy.json(http.MethodPost, configPath, `{"saved":true,"values":{},"restart_required":[]}`)
 	proxy.json(http.MethodPost, reloadPath, `{"ok":true,"restart_required":[]}`)
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":2}`)
+	proxy.json(http.MethodGet, schemaPath, `[{"value":"dev","requests":2}]`)
 	proxy.json(http.MethodPost, debugPath, `{"ok":true,"enabled":true,"sessions":[{"id":"s1","ran_ms":1,"captures":0}],`+
 		`"known_clients":[],"known_providers":[],"known_models":[],"ttl":"168h","max_bytes":"1MiB"}`)
 
@@ -187,6 +189,8 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 		{"records", map[string]any{"limit": 10}, "records"},
 		{"snapshot", map[string]any{}, "records"},
 		{"prometheus", map[string]any{}, "text"},
+		{"config_get", map[string]any{}, "revision"},
+		{"values", map[string]any{"dim": "client"}, "values"},
 		{"audit_status", map[string]any{}, "sessions"},
 		{"operator_state", map[string]any{}, "pause"},
 		{"purge_preview", map[string]any{"filter": map[string]any{"provider": "local"}}, "count"},
@@ -283,4 +287,45 @@ func keysOf(document map[string]any) []string {
 		out = append(out, key)
 	}
 	return out
+}
+
+// TestSetPauseSchemaStatesTheGlobalBlastRadius pins the one place the tool told
+// a model the opposite of the truth. The schema said "the proxy rejects a hold
+// with no scope at all", which is the safe-sounding half of a global-hold
+// default: the proxy does the opposite, an omitted scope IS a global hold, so
+// leaving every scope field empty parks every client.
+func TestSetPauseSchemaStatesTheGlobalBlastRadius(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tool *sdk.Tool
+	for _, candidate := range listed.Tools {
+		if candidate.Name == "set_pause" {
+			tool = candidate
+		}
+	}
+	if tool == nil {
+		t.Fatal("set_pause is not registered")
+	}
+	if !strings.Contains(tool.Description, "BLAST RADIUS") {
+		t.Fatalf("the tool description must state the blast radius: %q", tool.Description)
+	}
+	if !strings.Contains(tool.Description, "GLOBAL hold") {
+		t.Fatalf("the tool description must say an unscoped hold is global: %q", tool.Description)
+	}
+	// The inferred schema is what the model reads when composing arguments, so
+	// the false claim must be gone from there too.
+	schema, err := json.Marshal(tool.InputSchema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(schema)
+	if strings.Contains(text, "rejects a hold with no scope at all") {
+		t.Fatalf("the schema must not claim a scopeless hold is rejected: %s", text)
+	}
+	if !strings.Contains(text, "the SAME global hold") {
+		t.Fatalf("the `all` schema must say an omitted scope is the same global hold: %s", text)
+	}
 }

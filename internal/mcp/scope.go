@@ -117,15 +117,33 @@ func (s Scope) merge(base url.Values) url.Values {
 	return values
 }
 
+// ModelCanonMap is the raw-to-canonical model name mapping the server applied
+// to a page, exactly as /metrics/agg/log publishes it (internal/web
+// observeModelNames). The proxy owns canonicalization - it comes from the
+// configured model_rules - and a model that groups by the raw model column
+// would otherwise split one canonical family across every spelling. It is a
+// pointer because the field is absent when the page carried no names.
+type ModelCanonMap struct {
+	// Revision is the content identity of the rule set that produced the map.
+	// It changes when the rules change, which is the signal that a page and its
+	// map came from different canonicalizations.
+	Revision string `json:"revision"`
+	// Names maps each raw stored model spelling to its canonical name.
+	Names map[string]string `json:"names"`
+	// Rules is the rule set, present only on the full bootstrap form.
+	Rules []any `json:"rules,omitempty"`
+}
+
 // RecordsPage is one durable newest-first page from /metrics/agg/log. The
 // proxy scans a bounded number of rows per call, so a page can be short or
 // empty while `more` is still true; callers must treat a non-advancing cursor
 // as exhaustion instead of looping.
 type RecordsPage struct {
-	Records  []map[string]any `json:"records"`
-	More     bool             `json:"more"`
-	CursorMs int64            `json:"cursor_ms"`
-	CursorID string           `json:"cursor_id"`
+	Records    []map[string]any `json:"records"`
+	ModelCanon *ModelCanonMap   `json:"model_canon,omitempty"`
+	More       bool             `json:"more"`
+	CursorMs   int64            `json:"cursor_ms"`
+	CursorID   string           `json:"cursor_id"`
 }
 
 // recordsPage fetches one page. beforeMs/beforeID form the paired keyset
