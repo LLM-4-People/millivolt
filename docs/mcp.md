@@ -135,6 +135,18 @@ of choosing a client:
   `Accept: application/json, text/event-stream`. A wildcard that covers both
   (`*/*`, `application/*, text/*`) is accepted too; an `Accept` missing either
   type, or one absent altogether, answers `400`.
+- The accepted protocol versions are the bundled SDK's full set, newest first:
+  `2026-07-28`, `2025-11-25`, `2025-06-18`, `2025-03-26` and `2024-11-05`.
+  This build does not narrow them. A classic `initialize` is answered with the
+  requested version when it is one of the legacy versions (`2025-11-25` and
+  older, verified live) and with `2025-11-25` for any other requested version;
+  `2026-07-28` is served only through the SDK's per-request metadata form.
+- The SDK's localhost DNS-rebinding check is deliberately off. It rejects a
+  loopback connection whose `Host` is not loopback, and the documented
+  reverse-proxied placement preserves the external `Host` while dialing the
+  proxy over loopback, so leaving it on would reject that placement. The
+  endpoint is Bearer-only and the operator gate re-validates the credential on
+  every request, which is the stronger check for an authenticated endpoint.
 
 ### Stdio placement and setup
 
