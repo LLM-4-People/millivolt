@@ -82,9 +82,10 @@ type reservedNamespace struct {
 // reserving both the roots and the subtrees means neither the unauthenticated
 // gate nor an authenticated request can forward a namespace look-alike to the
 // upstream catch-all. Registered exact patterns (session, pause, config,
-// agg/*, ...) keep mux precedence. main installs exactly this set, and the
-// route tests drive the same set, so a dropped /admin, /metrics or /mcp
-// registration fails the default suite instead of only the opt-in live one.
+// agg/*, ...) keep mux precedence. newOperatorMux installs exactly this set,
+// and the route tests drive that same function, so a dropped /admin, /metrics
+// or /mcp registration fails the default suite instead of only the opt-in
+// live one.
 func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNamespace {
 	return []reservedNamespace{
 		{"/admin", http.NotFoundHandler()},
@@ -96,6 +97,23 @@ func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNam
 		{"/mcp", newMCPHandler(gate, dispatch)},
 		{"/mcp/", http.NotFoundHandler()},
 	}
+}
+
+// newOperatorMux builds the route table the proxy serves and installs the
+// reserved operator namespaces on it, returning the guarded handler those
+// routes dispatch through. The guarded handler is built before installation
+// so the MCP endpoint can dispatch its synthesized internal calls through the
+// same gate every external request passes: the caller's Bearer is re-validated
+// in process, and no second credential path exists. main calls this function
+// and the route tests drive the same function, so an installation that main
+// no longer performs is not masked by a test-local rebuild.
+func newOperatorMux(gate *operatorGate) (*http.ServeMux, http.Handler) {
+	mux := http.NewServeMux()
+	handler := protectOperatorRequests(mux, gate)
+	for _, namespace := range operatorNamespaces(gate, handler) {
+		mux.Handle(namespace.pattern, namespace.handler)
+	}
+	return mux, handler
 }
 
 func main() {
@@ -258,15 +276,7 @@ func main() {
 	// credential keeps deny-by-default honest - no silent weaker policy.
 	gate := newOperatorGate(mustOperatorToken())
 
-	mux := http.NewServeMux()
-	// The guarded handler is built before route registration so the MCP
-	// endpoint can dispatch its synthesized internal calls through the same
-	// gate every external request passes: the caller's Bearer is re-validated
-	// in process, and no second credential path exists.
-	handler := protectOperatorRequests(mux, gate)
-	for _, namespace := range operatorNamespaces(gate, handler) {
-		mux.Handle(namespace.pattern, namespace.handler)
-	}
+	mux, handler := newOperatorMux(gate)
 	// The liveness probe is the one open server route besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.

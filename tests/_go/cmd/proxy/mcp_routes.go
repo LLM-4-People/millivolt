@@ -11,12 +11,12 @@ import (
 // TestMCPRouteIsRegisteredOnTheOperatorMux pins the reserved namespace table
 // main installs: the exact patterns and, through the real gate, that a valid
 // Bearer POST to /mcp is answered by the MCP endpoint and never by the
-// inference catch-all. Deleting the /mcp entry from operatorNamespaces fails
-// here in the default suite instead of only in the opt-in live one.
+// inference catch-all. The mux comes from newOperatorMux, the same function
+// main calls, so deleting main's installation or the /mcp entry fails here in
+// the default suite instead of only in the opt-in live one.
 func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
-	mux := http.NewServeMux()
-	handler := protectOperatorRequests(mux, gate)
+	mux, handler := newOperatorMux(gate)
 	namespaces := operatorNamespaces(gate, handler)
 	want := []string{"/admin", "/admin/", "/metrics", "/metrics/", "/mcp", "/mcp/"}
 	if len(namespaces) != len(want) {
@@ -28,9 +28,6 @@ func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
 		}
 	}
 	var upstreamHit bool
-	for _, namespace := range namespaces {
-		mux.Handle(namespace.pattern, namespace.handler)
-	}
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHit = true
 		w.WriteHeader(http.StatusNoContent)

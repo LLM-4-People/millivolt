@@ -102,19 +102,15 @@ func TestOperatorGateRefusesEncodedNamespaceSeparators(t *testing.T) {
 
 // TestOperatorNamespaceLookAlikesNeverReachInference is the end-to-end
 // regression for the escaped-separator gap: the real gate, the real reserved
-// namespace table and a recording inference catch-all. A valid Bearer on a
-// percent-separator namespace look-alike must answer 404 and the catch-all
-// must see nothing, while an encoded character outside the namespaces still
-// reaches inference.
+// namespace table installed by newOperatorMux, and a recording inference
+// catch-all. A valid Bearer on a percent-separator namespace look-alike must
+// answer 404 and the catch-all must see nothing, while an encoded character
+// outside the namespaces still reaches inference.
 func TestOperatorNamespaceLookAlikesNeverReachInference(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
 	var mu sync.Mutex
 	var upstreamHits []string
-	mux := http.NewServeMux()
-	handler := protectOperatorRequests(mux, gate)
-	for _, namespace := range operatorNamespaces(gate, handler) {
-		mux.Handle(namespace.pattern, namespace.handler)
-	}
+	mux, handler := newOperatorMux(gate)
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		upstreamHits = append(upstreamHits, r.Method+" "+r.URL.EscapedPath())
