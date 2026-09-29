@@ -1,6 +1,7 @@
 # MCP server
 
-`cmd/mcp` exposes millivolt's operator and observability API to an LLM over
+`cmd/mcp` (built as `millivolt-mcp`) and the proxy binary's `millivolt mcp`
+subcommand expose millivolt's operator and observability API to an LLM over
 stdio, using the official
 [Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk).
 It is a client of a running proxy: it never starts, stops or restarts the proxy
@@ -64,6 +65,72 @@ Redirects are refused outright. No operator route redirects, and `net/http` stri
 `Authorization` only when the hostname changes, so a same-host different-port or
 subdomain `307`/`308` would replay both the credential and the full request body
 to the redirect target.
+
+### Entrypoints and install paths
+
+Both entrypoints run the same server and resolve the setup surface above
+identically; they differ only in the invocation name they report in usage and
+diagnostics. A leading positional `mcp` is reserved: it used to fall through the
+proxy's argument parser and start the proxy anyway, and it now starts the MCP
+server instead.
+
+Manual host install. Build either binary and point the client at it:
+
+```sh
+go build -o millivolt-mcp ./cmd/mcp
+go build -o millivolt ./cmd/proxy
+```
+
+```json
+{
+  "mcpServers": {
+    "millivolt": {
+      "command": "/path/to/millivolt-mcp",
+      "env": {
+        "MILLIVOLT_MCP_PROXY_URL": "http://127.0.0.1:8080",
+        "MILLIVOLT_MCP_OPERATOR_TOKEN": "the same value the proxy was started with"
+      }
+    }
+  }
+}
+```
+
+For the proxy binary, use its path as `command` and add `"args": ["mcp"]`
+before `env`.
+
+Local Docker. The published image contains the proxy binary, so the MCP server
+runs inside the proxy container and reaches it over the container's loopback:
+
+```sh
+export MILLIVOLT_OPERATOR_TOKEN='the same value the proxy was started with'
+docker exec -i -e MILLIVOLT_MCP_OPERATOR_TOKEN millivolt /millivolt mcp -proxy-url http://127.0.0.1:8080
+```
+
+`-e MILLIVOLT_MCP_OPERATOR_TOKEN` names the variable without a value, so the
+credential is forwarded from the caller's environment and never enters argv or
+the container's configuration. The matching client configuration:
+
+```json
+{
+  "mcpServers": {
+    "millivolt": {
+      "command": "docker",
+      "args": ["exec", "-i", "-e", "MILLIVOLT_MCP_OPERATOR_TOKEN", "millivolt", "/millivolt", "mcp", "-proxy-url", "http://127.0.0.1:8080"],
+      "env": {
+        "MILLIVOLT_MCP_OPERATOR_TOKEN": "the same value the proxy was started with"
+      }
+    }
+  }
+}
+```
+
+Remote Docker. The MCP server runs where the MCP client runs, so build the
+standalone binary there and target the proxy's reachable origin: the published
+host port (`http://host:8080`), a Docker network name when both containers share
+one, or the HTTPS origin from
+[the reverse-proxy guide](reverse-proxy.md). `docker exec` needs local Docker
+access to the machine running the proxy container, which a remote client usually
+does not have; the standalone binary is the alternative.
 
 ## Tools
 
@@ -302,33 +369,12 @@ the same reason. The excerpt itself is whitespace-collapsed and truncated to
 runs up to the 12-byte marker past 4 KiB. Redaction runs before the truncation,
 so a credential straddling the boundary cannot survive as a fragment.
 
-## Example client configuration
+## Try it against a disposable instance
 
-### It is a source-only binary
-
-The `Dockerfile` copies `cmd/proxy` and `internal` only, so the published image
-contains the proxy and not `millivolt-mcp`. Build it from the repository:
-
-```sh
-go build -o millivolt-mcp ./cmd/mcp
-```
-
-```json
-{
-  "mcpServers": {
-    "millivolt": {
-      "command": "millivolt-mcp",
-      "env": {
-        "MILLIVOLT_MCP_PROXY_URL": "http://127.0.0.1:8081",
-        "MILLIVOLT_MCP_OPERATOR_TOKEN": "the same value the proxy was started with"
-      }
-    }
-  }
-}
-```
-
-Run it locally against a disposable instance with the repository's lifecycle
-owner, never the main instance on `:8080`:
+The standalone binary is not in the published image; use `millivolt mcp` inside
+a running container, or build the standalone binary from source. Run either
+locally against a disposable instance with the repository's lifecycle owner,
+never the main instance on `:8080`:
 
 ```sh
 (
@@ -362,7 +408,9 @@ outside that harness on purpose:
   absent from stdout and stderr for `-h`, `--help`, an unknown flag, a bad flag
   value and a bare start, in both the flag and environment forms. An in-process
   check could not have caught that defect, because the leak went to the process's
-  own stderr.
+  own stderr. The same cases run through `millivolt mcp` on the built proxy
+  binary, which also pins that the subcommand prints the MCP usage and not the
+  proxy's.
 - the redirect test stands up a second listener as the redirect target and
   asserts it received nothing, so "we refused the redirect" is an observation
   rather than an assertion about an error string.

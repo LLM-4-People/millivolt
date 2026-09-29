@@ -21,7 +21,7 @@ defines their supported combinations.
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
 | [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
-| [internal/mcp](../internal/mcp) | The stdio MCP client for the operator plane: one HTTP owner (credential, request building, error extraction), one scope-filter owner, the tool set and the destructive-call guards. No route or projection of its own. |
+| [internal/mcp](../internal/mcp) | The stdio MCP client for the operator plane: one HTTP owner (credential, request building, error extraction), one scope-filter owner, the tool set, the process CLI shared by `millivolt-mcp` and `millivolt mcp`, and the destructive-call guards. No route or projection of its own. |
 
 ## Request and scheduling path
 

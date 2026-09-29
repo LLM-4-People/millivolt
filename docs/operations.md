@@ -656,7 +656,8 @@ Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
 
-`cmd/mcp` serves this whole surface to an LLM over stdio, using the same
+`cmd/mcp` and the proxy binary's `millivolt mcp` subcommand serve this whole
+surface to an LLM over stdio, using the same
 credential and the same routes. It adds no route of its own. For its
 irreversible call, the operator credential and the tool's own guards are the
 entire gate: an empty purge filter, a purge without the exact confirmation

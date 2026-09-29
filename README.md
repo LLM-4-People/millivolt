@@ -245,9 +245,10 @@ See the [operator workflows and API routes](docs/operations.md#operator-and-data
 before changing state. A protected listener is essential: these are operator
 actions, not per-user permissions.
 
-To let an LLM run these same analyses and drive the same controls, `cmd/mcp`
-serves the operator API over stdio. It is a client of the routes below, using
-the same credential: see the [MCP server guide](docs/mcp.md).
+To let an LLM run these same analyses and drive the same controls, the
+`millivolt-mcp` binary and the proxy's `millivolt mcp` subcommand serve the
+operator API over stdio. They are clients of the routes below, using the same
+credential: see the [MCP server guide](docs/mcp.md).
 
 ### Customize and deploy
 
