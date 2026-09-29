@@ -375,6 +375,19 @@ check('client labels omit SDK versions consistently',
   w.entityBadge('client', 'opencode/1.18.32').includes('>opencode</span>') &&
   w.clientTipHTML('opencode/1.18.32').includes('>opencode</span>'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Poll the page's own observable state instead of sleeping a fixed time: a
+// loaded runner can stretch a fetch/render round trip past any hard-coded
+// sleep. Returning false on timeout lets the caller's own check()s fail with
+// their labels and the diagnostic dump, so a genuine product failure is not
+// turned into a harness crash.
+async function settleUntil(cond, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() >= deadline) return false;
+    await sleep(10);
+  }
+  return true;
+}
 
 const rows = () => [...d.querySelectorAll('#tbl-requests tr.exp-row[data-id]')].filter(tr => !tr.classList.contains('retry-sub'));
 const fire = (type, data, lastEventId) => {
@@ -1923,7 +1936,14 @@ async function main() {
   Object.defineProperty(box, 'clientHeight', { configurable: true, get() { return 200; } });
   Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 200; } });
   w.navigateTo([{ dim: 'provider', id: 'stale.example' }]);
-  await sleep(50);
+  // Wait for the page's own end state (fetch dispatched, both rows painted,
+  // stats filled) rather than a fixed sleep: under load the scoped fetch had
+  // not resolved after 50ms, so a scheduling delay failed three checks that
+  // the product actually satisfied.
+  await settleUntil(() =>
+    lastLogURL.includes('f=provider%3Astale.example') && rows().length === 2 &&
+    rows()[0].dataset.id === 'stale1' && rows()[1].dataset.id === 'stale0' &&
+    d.getElementById('f-stats').textContent === '2 records');
   check('stale-provider scope probes the store at the newest edge',
     !lastLogURL.includes('before_ms=') && lastLogURL.includes('f=provider%3Astale.example'));
   check('stale-provider rows paint instead of the empty state',
@@ -5654,23 +5674,23 @@ async function main() {
     const sw = isolated.window;
     const stateRows = () => [...sw.document.querySelectorAll('#tbl-requests tr.exp-row[data-id]')];
     try {
-      await sleep(100);
+      await settleUntil(() => stateRows().length === 17);
       check('operator-free HTML seed applies dashboard config on its first paint', stateRows().length === 17);
       sw.fetchBootstrap('resume');
-      await sleep(30);
+      await settleUntil(() => sw.eval('dashCfg.log_rows') === 10 && stateRows().length === 10);
       check('dash-only incremental bootstrap refreshes the log without operator snapshots',
         sw.eval('dashCfg.log_rows') === 10 && stateRows().length === 10);
       sw.navigateTo([{dim: 'model', id: 'canonical-model'}]);
-      await sleep(30);
+      await settleUntil(() => stateRows().length === 1);
       check('model-only bootstrap fixture starts with one in-scope row', stateRows().length === 1);
       payload = {...payload, model_canon: {rules: [{mode: 'exact', from: 'raw-model', to: 'canonical-model'}]}};
       sw.fetchBootstrap('resume');
-      await sleep(30);
+      await settleUntil(() => stateRows().length === 10 && stateRows().some(row => row.dataset.id !== 'state0'));
       check('model-only incremental bootstrap refreshes scoped rows without operator snapshots',
         stateRows().length === 10 && stateRows().some(row => row.dataset.id !== 'state0'));
       payload = {...payload, dash: {dash_log_rows: 20}};
       sw.fetchBootstrap('none');
-      await sleep(30);
+      await settleUntil(() => stateRows().length === 17);
       check('state-only restart bootstrap also refreshes the log without replacing records', stateRows().length === 17);
       let liveRenders = 0;
       const originalLive = sw.renderLive;
