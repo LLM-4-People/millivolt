@@ -282,21 +282,23 @@ func TestOperatorStateMethodGates(t *testing.T) {
 // it parses as RFC 3339 AND carries the UTC Z designator; a zero Until
 // renders no field at all (nil omission is the existing contract).
 func TestOperatorStateUntilRFC3339UTC(t *testing.T) {
-	// Force a non-UTC local zone so the pin catches the dropped .UTC() call
-	// on any machine: with a UTC local zone the mutation is invisible.
+	// The restored deadline itself carries a non-UTC fixed zone, so the pin
+	// catches the dropped .UTC() call on any machine: with a UTC local zone a
+	// deadline stamped through time.Now() would be indistinguishable. Forcing
+	// time.Local here raced the scheduler's timer goroutines reading it via
+	// time.Now(), so the zone rides on Until instead of on the process-global
+	// local zone; restored state is the existing surface that can carry an
+	// absolute deadline with its own Location.
 	zoneShift := time.FixedZone("fixture-shift", 3600)
-	savedLocal := time.Local
-	time.Local = zoneShift
-	defer func() { time.Local = savedLocal }()
+	until := time.Now().Add(15 * time.Minute).In(zoneShift)
 
 	p := New(config.Default(), metrics.Noop{})
-	rec := httptest.NewRecorder()
-	p.HandlePause(rec, httptest.NewRequest(http.MethodPost, "/admin/pause",
-		strings.NewReader(`{"paused":true,"clients":["client-a"],"duration":"15m"}`)))
-	if rec.Code != 200 {
-		t.Fatalf("pause add = %d %s", rec.Code, rec.Body.Bytes())
+	if err := p.applyHolds([]persistedPause{{
+		ID: "pause-fixture", Clients: []string{"client-a"}, Duration: "15m", Until: until,
+	}}); err != nil {
+		t.Fatal(err)
 	}
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	p.HandlePause(rec, httptest.NewRequest(http.MethodGet, "/admin/pause", nil))
 	st := pauseJSON(t, rec)
 	holds, _ := st["holds"].([]any)
@@ -317,11 +319,10 @@ func TestOperatorStateUntilRFC3339UTC(t *testing.T) {
 		}
 	}
 
-	rec = httptest.NewRecorder()
-	p.HandleDebug(rec, httptest.NewRequest(http.MethodPost, "/admin/debug",
-		strings.NewReader(`{"enabled":true,"clients":["client-a"],"duration":"15m"}`)))
-	if rec.Code != 200 {
-		t.Fatalf("debug add = %d %s", rec.Code, rec.Body.Bytes())
+	if err := p.applyDebug([]persistedDebug{{
+		ID: "debug-fixture", Clients: []string{"client-a"}, Duration: "15m", Until: until,
+	}}); err != nil {
+		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
 	p.HandleDebug(rec, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
