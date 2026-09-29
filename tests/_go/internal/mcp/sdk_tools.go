@@ -11,14 +11,18 @@ import (
 )
 
 // connect wires a real MCP server and client over an in-memory transport, the
-// same path a stdio session uses. Everything below exercises the registered
-// tools end to end: schema inference, argument validation, the call, and the
-// structured result.
+// same path a stdio session uses. The server comes from NewServer, the one
+// constructor both entrypoints use, so every test below exercises the
+// production tool registration rather than a parallel one.
 func connect(t *testing.T, service *Service) *sdk.ClientSession {
 	t.Helper()
+	return connectServer(t, NewServer(service))
+}
+
+// connectServer wires a caller-built server to a fresh in-memory client.
+func connectServer(t *testing.T, server *sdk.Server) *sdk.ClientSession {
+	t.Helper()
 	ctx := context.Background()
-	server := sdk.NewServer(&sdk.Implementation{Name: "millivolt", Version: "0.0.0"}, nil)
-	service.Register(server)
 	client := sdk.NewClient(&sdk.Implementation{Name: "mcp-test", Version: "0.0.0"}, nil)
 	serverTransport, clientTransport := sdk.NewInMemoryTransports()
 	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
