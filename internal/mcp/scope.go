@@ -46,6 +46,14 @@ var Dimensions = []string{"client", "provider", "model", "conversation", "key", 
 // maxScopeFilters mirrors the proxy's repeated-filter bound.
 const maxScopeFilters = 64
 
+// statusCodeMin and statusCodeMax bound the s= selector's exact HTTP status
+// code form. The guide quotes both ends, so the drift guard derives its
+// expected phrase from these constants instead of repeating the numbers.
+const (
+	statusCodeMin = 0
+	statusCodeMax = 9999
+)
+
 // Validate applies the grammar the proxy enforces, so a malformed scope is a
 // readable tool message rather than a round trip. Deny by default: an unknown
 // dimension or status is rejected instead of being ignored.
@@ -84,9 +92,9 @@ func validateScopeStatus(status string) error {
 		}
 	}
 	code, err := strconv.Atoi(status)
-	if err != nil || code < 0 || code > 9999 {
-		return fmt.Errorf("status %q must be an exact HTTP status code (0..9999) or one of %s",
-			status, strings.Join(LiveStatusClasses, ", "))
+	if err != nil || code < statusCodeMin || code > statusCodeMax {
+		return fmt.Errorf("status %q must be an exact HTTP status code (%d..%d) or one of %s",
+			status, statusCodeMin, statusCodeMax, strings.Join(LiveStatusClasses, ", "))
 	}
 	return nil
 }

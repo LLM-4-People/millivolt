@@ -577,13 +577,15 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 }
 
 // TestGuidePinsTheLimitAndRedactionOwners pins the hand-written numbers in
-// docs/mcp.md to the constants that own them: the token band, the explorer and
-// chart caps, the credential fragment floor, the nesting bound and the excerpt
-// bound with its truncation marker. Each expected phrase is derived from the
-// owner, so an owner edit fails here until the guide follows, and a guide edit
-// fails too. The owners' own cross-checks live in TestDescribeMirrorsTheProxyOwners
-// and the client tests; this guard covers the hand-written numbers in the
-// guide's prose.
+// docs/mcp.md to the constants that own them: the token band, the status code
+// band, the cancel status code, the explorer and chart caps, the credential
+// fragment floor, the nesting bound and the excerpt bound with its truncation
+// marker. Each expected phrase is derived from the owner, so an owner edit
+// fails here until the guide follows, and a guide edit fails too. The owners'
+// own cross-checks live in TestDescribeMirrorsTheProxyOwners, the web package's
+// TestStatusClassAndBuckets (the classifier-side literal pin for
+// web.CancelStatusCode) and the client tests; this guard covers the
+// hand-written numbers in the guide's prose.
 func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
@@ -599,6 +601,30 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	if band[1] != strconv.Itoa(operatorTokenMinLen) || band[2] != strconv.Itoa(operatorTokenMaxLen) {
 		t.Fatalf("docs/mcp.md states the token band %s to %s, the owner is %d to %d",
 			band[1], band[2], operatorTokenMinLen, operatorTokenMaxLen)
+	}
+
+	// Status code band: internal/mcp/scope.go statusCodeMin/Max, the s=
+	// selector's exact-code bound. The guide wraps the code list across the
+	// sentence, so the derived phrase spans both backticked numbers.
+	statusBand := regexp.MustCompile("exact HTTP status code \\(`([0-9]+)` to `([0-9]+)`\\)").FindStringSubmatch(text)
+	if statusBand == nil {
+		t.Fatal("docs/mcp.md must state the exact HTTP status code band")
+	}
+	if statusBand[1] != strconv.Itoa(statusCodeMin) || statusBand[2] != strconv.Itoa(statusCodeMax) {
+		t.Fatalf("docs/mcp.md states the status code band %s to %s, the owner is %d to %d (internal/mcp scope.go statusCodeMin/Max)",
+			statusBand[1], statusBand[2], statusCodeMin, statusCodeMax)
+	}
+
+	// Cancel status code: internal/web CancelStatusCode, the code statusClass
+	// classifies as "cancel". The guide states the code in parentheses after
+	// the class name.
+	cancel := regexp.MustCompile("`cancel` \\(([0-9]+)\\)").FindStringSubmatch(text)
+	if cancel == nil {
+		t.Fatal("docs/mcp.md must state the cancel status class with its code")
+	}
+	if cancel[1] != strconv.Itoa(web.CancelStatusCode) {
+		t.Fatalf("docs/mcp.md states the cancel code %s, the owner is %d (internal/web CancelStatusCode)",
+			cancel[1], web.CancelStatusCode)
 	}
 
 	// Explorer and chart caps: internal/mcp/describe.go explorerMaxGroups and
