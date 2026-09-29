@@ -1794,6 +1794,14 @@ async function main() {
   await sleep(20);
   check('live insert stays at top after paging', rows()[0].dataset.id === 'bignew');
   check('paged oldest row is not evicted by a live insert', rows().some(tr => tr.dataset.id === 'old000'));
+  // The Clear/Logs preview and durable-pagination suites below install
+  // URL-agnostic fetch wrappers and assert exact fetch counts (a failed
+  // deletion resyncs nothing; every pagination URL is the test's own). The
+  // page's 5s tick must not land inside them: 7b/7c stop the same timer for
+  // their hand-driven cursors, and a captured bootstrap is applied as a log
+  // page (or counted as a resync or post), failing checks the product
+  // satisfies. Re-armed after the pagination block.
+  w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
   box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
   fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,
     records: BIG, counters: { in_flight: 0, total_requests: 80, total_errors: 0 } });
@@ -1912,6 +1920,7 @@ async function main() {
     w.fetch = savedFetch;
     w.scheduleLogFill = savedFill;
   }
+  w.eval('armDashboardTicks()');
 
   // ---- test 10b: the purge re-sync - no removal event exists, so clearAll
   // must fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
