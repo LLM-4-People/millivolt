@@ -902,10 +902,10 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 	}
 }
 
-// TestTruncationAdviceIsPerTool pins that each tool's marker names a continuation
-// that tool actually has. The shared wording told a model to "page with the
-// cursor fields" for tools that have no cursor, which sends it looking for
-// arguments that do not exist.
+// TestTruncationAdviceIsPerTool pins that each marker-emitting tool's marker
+// names a continuation that tool actually has. The shared wording told a model
+// to "page with the cursor fields" for tools that have no cursor, which sends
+// it looking for arguments that do not exist.
 func TestTruncationAdviceIsPerTool(t *testing.T) {
 	proxy := newFakeProxy(t)
 	groups := make([]string, 0, explorerMaxGroups+2)
@@ -920,16 +920,25 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 	proxy.json(http.MethodGet, chartPath, `{"bucket_ms":1,"buckets":[`+strings.Join(buckets, ",")+`]}`)
 	records := make([]string, 0, 12)
 	for i := range 12 {
-		records = append(records, `{"id":"r`+string(rune('a'+i))+`"}`)
+		records = append(records, `{"id":"r`+string(rune('a'+i))+`","started_at":`+strconv.Itoa(i)+`}`)
 	}
 	proxy.json(http.MethodGet, bootstrapPath, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},`+
 		`"records":[`+strings.Join(records, ",")+`]}`)
 	proxy.json(http.MethodGet, logPath, `{"records":[`+strings.Join(records, ",")+`],"more":false,"cursor_ms":5,"cursor_id":"rl"}`)
+	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(records, ",")+`]`)
+	proxy.respond(http.MethodGet, prometheusPat, cannedResponse{
+		Status: http.StatusOK, ContentType: "text/plain",
+		Body: strings.Repeat("x 1\n", prometheusMaxLines+2),
+	})
 	limits := DefaultLimits()
 	limits.PageSize = 5
 	service := newTestService(t, proxy, limits)
 	ctx := context.Background()
 
+	rows, err := service.query(ctx, QueryInput{SQL: "SELECT id FROM requests", MaxRows: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
 	explorer, err := service.explore(ctx, ExploreInput{Dim: "provider"})
 	if err != nil {
 		t.Fatal(err)
@@ -946,15 +955,31 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	prom, err := service.prometheus(ctx, PrometheusInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := service.values(ctx, ValuesInput{Dim: "client", Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captures, err := service.auditCapturesList(ctx, AuditCapturesListInput{Limit: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		tool   string
 		marker string
 		want   string
 	}{
+		{"query", rows.Truncation.Marker, "narrow the SELECT"},
 		{"explore", explorer.Truncation.Marker, "GROUP BY"},
 		{"chart", chart.Truncation.Marker, "shorter window"},
 		{"records", page.Truncation.Marker, "next_before_ms"},
 		{"snapshot", snapshot.Truncation.Marker, "records tool"},
+		{"prometheus", prom.Truncation.Marker, "underlying rows"},
+		{"values", values.Truncation.Marker, "raise limit"},
+		{"audit_captures_list", captures.Truncation.Marker, "next_before_id"},
 	} {
 		if !strings.Contains(tc.marker, tc.want) {
 			t.Fatalf("%s marker %q must name %q, its own continuation", tc.tool, tc.marker, tc.want)
