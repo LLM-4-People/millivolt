@@ -1016,7 +1016,7 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 
 // TestWhitespaceFloodRedactionIsBoundedAndFailsClosed is the regression for the
 // unbounded scan: a failure body that never reaches the collapsed excerpt
-// target used to be scanned in full (up to maxResponseBytes, 64 MiB, through
+// target used to be scanned in full (up to MaxResponseBytes, 64 MiB, through
 // every decoding view). The scan must stop at maxExcerptScanBytes and fail
 // closed, because a credential could sit past the cap.
 func TestWhitespaceFloodRedactionIsBoundedAndFailsClosed(t *testing.T) {

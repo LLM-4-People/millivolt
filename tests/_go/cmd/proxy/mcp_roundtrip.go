@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -127,5 +130,69 @@ func TestInProcessTransportNormalCallReturnsPromptly(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("a normal call took %v", elapsed)
+	}
+}
+
+// TestInProcessRecorderRetainsAtMostTheClientBudget is the memory bound on the
+// in-process recorder: a 100 MiB downstream body used to be buffered whole
+// before the client's 64 MiB read cap applied, so per-call memory was bounded
+// only by each route's own cap. The recorder must retain the client's budget
+// plus the one byte that fires its over-budget check, whatever the handler
+// writes, and its total allocation must stay near that budget.
+func TestInProcessRecorderRetainsAtMostTheClientBudget(t *testing.T) {
+	const chunk = 1 << 20
+	offered := 512 << 20
+	recorder := &inProcessRecorder{header: http.Header{}}
+	block := make([]byte, chunk)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for written := 0; written < offered; written += chunk {
+		n, err := recorder.Write(block)
+		if err != nil || n != chunk {
+			t.Fatalf("Write = %d, %v, want %d accepted bytes", n, err, chunk)
+		}
+	}
+	runtime.ReadMemStats(&after)
+
+	if recorder.body.Len() != inProcessRecorderBufferMax {
+		t.Fatalf("recorder retained %d bytes after %d offered, want the %d byte budget",
+			recorder.body.Len(), offered, inProcessRecorderBufferMax)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 320<<20 {
+		t.Fatalf("the recorder allocated %d bytes while %d were offered; the budget must bound it", allocated, offered)
+	}
+}
+
+// TestInProcessTransportOversizedBodyKeepsTheClientError pins the
+// client-visible behavior over an oversized downstream body: the recorder's
+// new bound must not turn the client's explicit over-budget error into a
+// truncated success or a decode failure.
+func TestInProcessTransportOversizedBodyKeepsTheClientError(t *testing.T) {
+	gate := newOperatorGate(mcpEndpointToken)
+	dispatch := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/metrics/prometheus" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		chunk := make([]byte, 1<<20)
+		for range 100 {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	})
+	endpoint := httptest.NewServer(newMCPHandler(gate, dispatch))
+	t.Cleanup(endpoint.Close)
+
+	session := connectMCPHTTP(t, endpoint.URL+"/mcp", mcpEndpointToken)
+	result := mcpCall(t, session, "prometheus", map[string]any{})
+	if !result.IsError {
+		t.Fatalf("a 100 MiB downstream body must be a tool error, got: %s", mcpText(t, result))
+	}
+	if text := mcpText(t, result); !strings.Contains(text, fmt.Sprintf("%d byte read budget", int64(64<<20))) {
+		t.Fatalf("the tool error must keep the client's read-budget message: %q", text)
 	}
 }

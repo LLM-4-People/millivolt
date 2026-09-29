@@ -102,11 +102,23 @@ func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, er
 // needs. It deliberately does not implement Flusher or Hijacker: the closed
 // tool route set contains no streaming or hijacking endpoint, and pretending
 // to support them would hide a route-set regression instead of failing it.
+//
+// The retained body is capped at inProcessRecorderBufferMax. The MCP client
+// reads at most MaxResponseBytes and treats one byte more as over budget, so
+// retaining that extra byte preserves the client's exact over-budget error for
+// an oversized body while a runaway downstream handler can allocate at most
+// this much; bytes past the cap are discarded, and Write still reports them
+// accepted because the downstream handler owns the answer, not the recorder.
 type inProcessRecorder struct {
 	header http.Header
 	body   bytes.Buffer
 	status int
 }
+
+// inProcessRecorderBufferMax is the byte budget the in-process recorder
+// retains: the client's read budget plus the one byte that makes the client's
+// over-budget check fire. Internal safety constant, not a tunable.
+const inProcessRecorderBufferMax = mcp.MaxResponseBytes + 1
 
 func (r *inProcessRecorder) Header() http.Header { return r.header }
 
@@ -120,7 +132,14 @@ func (r *inProcessRecorder) Write(data []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
-	return r.body.Write(data)
+	written := len(data)
+	if remaining := inProcessRecorderBufferMax - r.body.Len(); remaining > 0 {
+		if len(data) > remaining {
+			data = data[:remaining]
+		}
+		_, _ = r.body.Write(data)
+	}
+	return written, nil
 }
 
 // response renders the recorded answer as the *http.Response the client

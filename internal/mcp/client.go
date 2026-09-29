@@ -48,11 +48,12 @@ const (
 	routePurgeCount   = "/admin/purge/count"
 )
 
-// maxResponseBytes bounds one response body read. An internal guardrail against
-// a runaway payload, not a user-tunable: the proxy already bounds its own
-// surfaces (storage_query_max_bytes for SQL results, debug_capture_max_bytes
-// for a capture document).
-const maxResponseBytes = 64 << 20
+// MaxResponseBytes bounds one response body read. An internal guardrail
+// against a runaway payload, not a user-tunable: the proxy already bounds its
+// own surfaces (storage_query_max_bytes for SQL results, debug_capture_max_bytes
+// for a capture document). The in-process transport exposes it so the recorder
+// it dispatches through never buffers more than this client can read.
+const MaxResponseBytes = 64 << 20
 
 // maxErrorBodyBytes bounds how much of a failure body is read back into a tool
 // message. The proxy's flat {"error": "..."} body is far smaller; the rest of
@@ -62,7 +63,7 @@ const maxErrorBodyBytes = 4 << 10
 // maxExcerptScanBytes hard-caps the raw bytes one excerpt redaction reads. The
 // whitespace collapse only ever shortens text, so reaching the collapsed
 // excerpt target can require walking far more raw bytes than the target: a
-// failure body padded with whitespace used to pull the whole maxResponseBytes
+// failure body padded with whitespace used to pull the whole MaxResponseBytes
 // body through every decoding view. When the collapsed target is not reached
 // within this cap the excerpt fails closed instead, because a credential could
 // sit past the cap; two mebibytes is far beyond any real error page's raw
@@ -437,12 +438,12 @@ func (c *Client) send(ctx context.Context, method, path string, query url.Values
 // readBody reads a bounded body and reports an explicit error instead of a
 // truncated document when the budget is exceeded.
 func readBody(body io.Reader) ([]byte, error) {
-	raw, err := io.ReadAll(io.LimitReader(body, maxResponseBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(body, MaxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read millivolt response: %v", err)
 	}
-	if len(raw) > maxResponseBytes {
-		return nil, fmt.Errorf("millivolt response exceeded the %d byte read budget; narrow the request", maxResponseBytes)
+	if len(raw) > MaxResponseBytes {
+		return nil, fmt.Errorf("millivolt response exceeded the %d byte read budget; narrow the request", MaxResponseBytes)
 	}
 	return raw, nil
 }
