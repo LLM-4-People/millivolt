@@ -19,9 +19,12 @@ const stdioFixtureToken = "mcp-binary-stdio-fixture-credential"
 // TestStdioBinaryServesTheSharedRegistry RUNS the built millivolt-mcp and
 // drives a real stdio session through it: initialize, then tools/list. The
 // list is compared with an in-process NewServer session rather than a repeated
-// count or name list, so reverting internal/mcp/cli.go to a parallel server
-// that does not call NewServer(service) fails here even though the in-process
-// live suite would stay green.
+// count or name list, so a CLI path whose registered surface differs from
+// NewServer's (for example one that drops service.Register, or a NewServer
+// that does) fails here even though the in-process live suite would stay
+// green. The tool list is all a stdio client can observe, so a parallel
+// constructor that registers exactly the same surface is not distinguishable
+// by this test and is not what it guards against.
 func TestStdioBinaryServesTheSharedRegistry(t *testing.T) {
 	binary := buildBinary(t)
 	command := exec.Command(binary)
