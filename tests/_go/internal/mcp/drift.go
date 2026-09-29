@@ -654,10 +654,11 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	// The --operator-token usage says where the VALUE comes from: the proxy's
 	// own ProxyTokenEnv constant, not this server's read variable. The phrase
 	// once named the read variable as the proxy's, sending a user to a variable
-	// the proxy never reads; the usage text, the table row and the
-	// missing-credential setup error are each pinned by an independent literal,
-	// so a rename of the constant fails here instead of silently changing what
-	// the model and the operator read.
+	// the proxy never reads. The usage text and the missing-credential setup
+	// error are each pinned by an independent literal; the docs/mcp.md table
+	// row is compared against an expected sentence derived from ProxyTokenEnv,
+	// so it fails on an owner rename because the hand-written cell does not
+	// move.
 	token := fs.Lookup(flagOperatorToken)
 	if token == nil {
 		t.Fatalf("--%s is not registered", flagOperatorToken)
@@ -670,8 +671,8 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	if token.Usage != wantUsage {
 		t.Fatalf("the --%s usage = %q, want %q", flagOperatorToken, token.Usage, wantUsage)
 	}
-	// The cell is the whole sentence, anchored to the owner constant rather
-	// than a substring search: a row naming MILLIVOLT_OPERATOR_TOKEN_V2 would
+	// The expected cell is the whole sentence derived from the owner constant,
+	// not a substring search: a row naming MILLIVOLT_OPERATOR_TOKEN_V2 would
 	// still contain the real name, so only exact equality pins the source.
 	if got, want := documentedMeaning["--"+flagOperatorToken], "The proxy's own `"+ProxyTokenEnv+"`."; got != want {
 		t.Fatalf("docs/mcp.md's --%s row must read %q, got %q", flagOperatorToken, want, got)
