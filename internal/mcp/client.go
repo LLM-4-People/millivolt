@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -85,11 +86,20 @@ var errRedirectRefused = errors.New("millivolt answered a redirect; no operator 
 func refuseRedirect(*http.Request, []*http.Request) error { return errRedirectRefused }
 
 // Client is the one HTTP owner for the operator plane. Every request it builds
-// carries the Bearer credential; no caller ever formats a header or a URL.
+// carries the Bearer credential; no caller ever formats a header or a URL. Two
+// net/http clients share the transport and the redirect refusal: the generic
+// one imposes Limits.Timeout on every call, and the query one imposes no client
+// timeout, because a full-history read is bounded by its own QueryTimeout
+// context and a shorter generic cap would silently cut the documented bound.
 type Client struct {
 	base  *url.URL
 	token string
 	http  *http.Client
+	// queryHTTP is the same client without the generic Timeout; see
+	// getJSONQuery.
+	queryHTTP *http.Client
+	// queryTimeout bounds one full-history read through getJSONQuery.
+	queryTimeout time.Duration
 }
 
 // Origin is the validated proxy origin the client calls. It never carries the
@@ -129,10 +139,12 @@ func NewClientWithTransport(proxyURL, token string, limits Limits, transport htt
 		return nil, err
 	}
 	client := &http.Client{Timeout: limits.Timeout, CheckRedirect: refuseRedirect}
+	queryClient := &http.Client{CheckRedirect: refuseRedirect}
 	if transport != nil {
 		client.Transport = transport
+		queryClient.Transport = transport
 	}
-	return &Client{base: base, token: token, http: client}, nil
+	return &Client{base: base, token: token, http: client, queryHTTP: queryClient, queryTimeout: limits.QueryTimeout}, nil
 }
 
 // NormalizeProxyURL parses and validates the proxy origin, returning it with
@@ -382,6 +394,18 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 	return c.doJSON(ctx, http.MethodGet, path, query, nil, out)
 }
 
+// getJSONQuery performs one authenticated GET for a full-history read (the
+// chart and explorer folds), bounded by QueryTimeout. The generic client
+// Timeout is deliberately not imposed: it is usually shorter and would silently
+// cut the documented bound. The caller's context still cancels the call if the
+// caller goes away.
+func (c *Client) getJSONQuery(ctx context.Context, path string, query url.Values, out any) error {
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+	_, err := c.doJSONWith(queryCtx, c.queryHTTP, http.MethodGet, path, query, nil, out, nil)
+	return err
+}
+
 // postJSON performs one authenticated POST with a JSON body and decodes the
 // response into out. body is marshaled by the caller-owned request shapes; the
 // proxy applies its single strict administrative decoder to what arrives.
@@ -434,6 +458,12 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 // any route is tolerated: a 409, a 401 and a 500 with no committed document all
 // stay errors.
 func (c *Client) doJSONTolerating(ctx context.Context, method, path string, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
+	return c.doJSONWith(ctx, c.http, method, path, query, body, out, tolerate)
+}
+
+// doJSONWith is the single request/response owner; httpClient selects the
+// deadline policy, the generic client or the query one.
+func (c *Client) doJSONWith(ctx context.Context, httpClient *http.Client, method, path string, query url.Values, body any, out any, tolerate map[int]bool) (int, error) {
 	var payload io.Reader
 	if body != nil {
 		encoded, err := json.Marshal(body)
@@ -442,7 +472,7 @@ func (c *Client) doJSONTolerating(ctx context.Context, method, path string, quer
 		}
 		payload = bytes.NewReader(encoded)
 	}
-	resp, err := c.send(ctx, method, path, query, payload)
+	resp, err := c.sendWith(httpClient, ctx, method, path, query, payload)
 	if err != nil {
 		return 0, err
 	}
@@ -464,10 +494,16 @@ func (c *Client) doJSONTolerating(ctx context.Context, method, path string, quer
 	return resp.StatusCode, nil
 }
 
-// send builds and performs the authenticated request. The credential appears
-// only in the Authorization header: it is never placed in the URL, logged, or
-// echoed into a tool result.
+// send builds and performs the authenticated request with the generic
+// deadline policy.
 func (c *Client) send(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
+	return c.sendWith(c.http, ctx, method, path, query, body)
+}
+
+// sendWith builds and performs the authenticated request with the given
+// deadline policy. The credential appears only in the Authorization header: it
+// is never placed in the URL, logged, or echoed into a tool result.
+func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
 	endpoint := *c.base
 	endpoint.Path = path
 	if len(query) > 0 {
@@ -484,7 +520,7 @@ func (c *Client) send(ctx context.Context, method, path string, query url.Values
 	// The credential is not a cookie: the proxy also mints a session cookie on
 	// a successful Bearer, and reusing that cookie would silently outlive a
 	// rotated token. Every call presents the Bearer explicitly.
-	resp, err := c.http.Do(request)
+	resp, err := httpClient.Do(request)
 	if err != nil {
 		// net/http wraps CheckRedirect's error in *url.Error; unwrap it so the
 		// model reads the refusal itself rather than a request-line dump.

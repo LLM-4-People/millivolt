@@ -224,6 +224,55 @@ func TestExplorerReadIsBoundedByQueryTimeout(t *testing.T) {
 	}
 }
 
+// TestFullHistoryReadIsNotCappedByTheGenericTimeout is the regression for the
+// silent cap: chart and explorer carry a QueryTimeout context, but the shared
+// http.Client{Timeout: limits.Timeout} used to cut every call at the shorter
+// generic bound, so the documented 2m query timeout was really 30s. A read
+// slower than Timeout but inside QueryTimeout must succeed, and an ordinary
+// call must still be cut at Timeout.
+func TestFullHistoryReadIsNotCappedByTheGenericTimeout(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-r.Context().Done():
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"dim":"provider","groups":[],"rail":{},"scope":{}}`))
+	}))
+	defer slow.Close()
+
+	limits := DefaultLimits()
+	limits.Timeout = 50 * time.Millisecond
+	limits.QueryTimeout = 5 * time.Second
+	service, err := NewService(slow.URL, testToken, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := service.explore(context.Background(), ExploreInput{Dim: "provider"}); err != nil {
+		t.Fatalf("a read inside QueryTimeout (%v) must not be cut by Timeout (%v): %v",
+			limits.QueryTimeout, limits.Timeout, err)
+	}
+	if elapsed := time.Since(started); elapsed < 150*time.Millisecond {
+		t.Fatalf("the read returned after %v; the handler was still working, so it cannot be the measured bound", elapsed)
+	}
+
+	// The same blocking handler bounds an ordinary call at the generic Timeout.
+	limits.Timeout = 25 * time.Millisecond
+	ordinary, err := NewService(slow.URL, testToken, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started = time.Now()
+	if _, err := ordinary.query(context.Background(), QueryInput{SQL: "SELECT 1"}); err == nil {
+		t.Fatal("an ordinary call that outlives Timeout must fail")
+	}
+	if elapsed := time.Since(started); elapsed >= limits.Timeout+100*time.Millisecond {
+		t.Fatalf("the ordinary call took %v; Timeout (%v) must bound it, not the handler", elapsed, limits.Timeout)
+	}
+}
+
 // TestRetryAfterIsSanitized pins that the Retry-After header is never copied
 // into a model-visible message verbatim. It is endpoint-controlled text, and
 // `retry after <value>` used to print it unbounded.

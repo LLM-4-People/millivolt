@@ -108,12 +108,10 @@ func (s *Service) explore(ctx context.Context, in ExploreInput) (*ExploreOutput,
 		Scope               map[string]int64 `json:"scope"`
 		ConversationSummary map[string]int   `json:"conversation_summary"`
 	}
-	// The explorer folds ALL history like the chart, so it is bounded by the
-	// same full-history query timeout rather than only by the generic client
-	// timeout every call carries.
-	queryCtx, cancel := context.WithTimeout(ctx, s.limits.QueryTimeout)
-	defer cancel()
-	if err := s.client.getJSON(queryCtx, routeExplorer, values, &payload); err != nil {
+	// The explorer folds ALL history like the chart, so it goes through the
+	// client's query path: bounded by QueryTimeout, not by the generic timeout
+	// every other call carries.
+	if err := s.client.getJSONQuery(ctx, routeExplorer, values, &payload); err != nil {
 		return nil, err
 	}
 	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups", exploreAdvice)
@@ -190,8 +188,6 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 	// what range it answered.
 	base := url.Values{"window": []string{windowOrAll(in.Window)}}
 	values := in.Scope.merge(base)
-	queryCtx, cancel := context.WithTimeout(ctx, s.limits.QueryTimeout)
-	defer cancel()
 	var payload struct {
 		NowMs       int64            `json:"now_ms"`
 		FromMs      int64            `json:"from_ms"`
@@ -203,7 +199,7 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 		CostPerMTok *float64         `json:"cost_per_mtok"`
 		Buckets     []map[string]any `json:"buckets"`
 	}
-	if err := s.client.getJSON(queryCtx, routeChart, values, &payload); err != nil {
+	if err := s.client.getJSONQuery(ctx, routeChart, values, &payload); err != nil {
 		return nil, err
 	}
 	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets", chartAdvice)
