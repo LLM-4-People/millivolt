@@ -682,11 +682,13 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	}
 }
 
-// TestGuidePinsTheFilterVocabularies pins the three hand-written value lists in
-// docs/mcp.md to their owners in internal/mcp: the filter dimensions
-// (Dimensions), the time dayparts (TimeBuckets) and the status classes
-// (StatusClasses). The backticked list after each heading is parsed in order
-// and compared exactly, so a value added to either side fails until both match.
+// TestGuidePinsTheFilterVocabularies pins the four hand-written value lists in
+// docs/mcp.md to their owners: the filter dimensions (Dimensions), the time
+// dayparts (TimeBuckets), the status classes (StatusClasses), all in
+// internal/mcp, and the live in-flight classes (LiveStatusClasses). The
+// backticked list after each heading is parsed in order and compared exactly,
+// so a value added to either side fails until both match. The live-class list
+// is parenthesized rather than sentence-final, so it gets its own parse.
 func TestGuidePinsTheFilterVocabularies(t *testing.T) {
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
@@ -720,5 +722,28 @@ func TestGuidePinsTheFilterVocabularies(t *testing.T) {
 		if !reflect.DeepEqual(listed, tc.want) {
 			t.Fatalf("docs/mcp.md lists %v for the %s, the owner is %v", listed, tc.name, tc.want)
 		}
+	}
+
+	// Live in-flight classes: internal/mcp/scope.go LiveStatusClasses. The
+	// guide states them inside the parentheses after "a live in-flight class",
+	// before the following sentence about the explorer's status classes, so the
+	// parse stops at the closing parenthesis.
+	const liveHeading = "live in-flight class ("
+	liveIndex := strings.Index(text, liveHeading)
+	if liveIndex < 0 {
+		t.Fatalf("docs/mcp.md must keep the live in-flight class list starting %q", liveHeading)
+	}
+	parenthetical := text[liveIndex+len(liveHeading):]
+	if end := strings.Index(parenthetical, ")"); end >= 0 {
+		parenthetical = parenthetical[:end]
+	}
+	matches := regexp.MustCompile("`([a-z0-9]+)`").FindAllStringSubmatch(parenthetical, -1)
+	listed := make([]string, 0, len(matches))
+	for _, match := range matches {
+		listed = append(listed, match[1])
+	}
+	if !reflect.DeepEqual(listed, LiveStatusClasses) {
+		t.Fatalf("docs/mcp.md lists %v for the live in-flight classes, the owner is %v (internal/mcp scope.go LiveStatusClasses)",
+			listed, LiveStatusClasses)
 	}
 }
