@@ -168,11 +168,13 @@ func TestStormQueueRejectionOnQualityResendRecordsDecidedStatus(t *testing.T) {
 	// storm suite pins, so a hard-coded Retry-After cannot pass every leg.
 	cfg.QueueRetryAfter = 7 * time.Second
 	// Request 2's first send waits one backoff and passes: the 250ms backoff
-	// sits 125ms below the 375ms max wait, so timer lateness or a scheduling
-	// stall cannot flip it into the rejection path. The absorb's
-	// quality-failure observation doubles the backoff (500ms, under the 1s
-	// MaxBackoff), so the QUALITY RE-SEND's wait is the one that exceeds the
-	// max wait; that 375ms deadline is a server timer, not a wake race.
+	// leaves a 125ms margin under the 375ms max wait, absorbing ordinary timer
+	// lateness. That margin is a tolerance, not immunity: a stall longer than
+	// it leaves the kick and the deadline both ready and the select may take
+	// either arm. The absorb's quality-failure observation doubles the backoff
+	// (500ms, under the 1s MaxBackoff), so the QUALITY RE-SEND's wait is the
+	// one that exceeds the max wait; that 375ms deadline is a server timer
+	// with the same 125ms window against the 500ms kick.
 	cfg.StormInitialBackoff = 250 * time.Millisecond
 	cfg.StormMaxBackoff = time.Second
 	cfg.StormMaxWait = 375 * time.Millisecond
