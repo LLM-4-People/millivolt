@@ -647,9 +647,11 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	if token.Usage != wantUsage {
 		t.Fatalf("the --%s usage = %q, want %q", flagOperatorToken, token.Usage, wantUsage)
 	}
-	if !strings.Contains(documentedMeaning["--"+flagOperatorToken], proxyTokenEnv) {
-		t.Fatalf("docs/mcp.md's --%s row must name the proxy's %s as the value's source, got %q",
-			flagOperatorToken, proxyTokenEnv, documentedMeaning["--"+flagOperatorToken])
+	// The cell is the whole sentence, anchored to the owner constant rather
+	// than a substring search: a row naming MILLIVOLT_OPERATOR_TOKEN_V2 would
+	// still contain the real name, so only exact equality pins the source.
+	if got, want := documentedMeaning["--"+flagOperatorToken], "The proxy's own `"+proxyTokenEnv+"`."; got != want {
+		t.Fatalf("docs/mcp.md's --%s row must read %q, got %q", flagOperatorToken, want, got)
 	}
 	// The missing-credential setup error names the same source, and it is the
 	// message a user actually reads when the credential is absent. The whole
