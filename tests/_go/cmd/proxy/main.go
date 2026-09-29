@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -471,9 +473,12 @@ func TestOperatorLockoutHoldsAtCap(t *testing.T) {
 // mcp.OperatorTokenMinLen..mcp.OperatorTokenMaxLen, inclusive. The boundary
 // cases are derived from the owner, so a diverging local value fails here. A
 // same-value local literal cannot be told apart by those behavior probes, so
-// the source scan at the end additionally requires loadOperatorToken and
-// bearerToken to read the owner constants at their comparison sites; it does
-// not reach a same-value copy elsewhere in the package. The owner's literal
+// the parsed source is inspected at the end: loadOperatorToken must read the
+// owner's variable name through os.LookupEnv and compare the value against the
+// owner band, and bearerToken must compare against the owner presentation cap.
+// The walk follows same-package helper calls, so extracting those reads into a
+// helper stays green; comments are absent from the AST and formatting is
+// irrelevant, so only real symbol use satisfies the guard. The owner's literal
 // pins live in tests/_go/internal/mcp/drift.go.
 func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 	minToken := strings.Repeat("x", mcp.OperatorTokenMinLen)
@@ -515,46 +520,144 @@ func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 
 	// The behavior probes above cannot distinguish the owner symbols from
 	// same-value local literals, so the two read sites are pinned in the
-	// source: loadOperatorToken owns the variable name and the boot band,
-	// bearerToken owns the presentation cap. Replacing any of these reads or
-	// comparisons with a literal fails here even when its value matches today.
-	source, err := os.ReadFile("operator.go")
+	// parsed source: loadOperatorToken owns the variable name and the boot
+	// band, bearerToken owns the presentation cap. Replacing any of these
+	// reads or comparisons with a literal fails here even when its value
+	// matches today, while comments and formatting cannot satisfy the guard.
+	file, err := parser.ParseFile(token.NewFileSet(), "operator.go", nil, 0)
 	if err != nil {
-		t.Fatalf("read cmd/proxy/operator.go: %v", err)
+		t.Fatalf("parse cmd/proxy/operator.go: %v", err)
 	}
+	uses := collectOperatorOwnerUses(t, file)
 	for _, read := range []struct {
-		name        string
-		start       string
-		end         string
-		expressions []string
+		name string
+		ok   bool
+		want string
 	}{
-		{"loadOperatorToken boot gate", "func loadOperatorToken(", "func mustOperatorToken(",
-			[]string{"os.LookupEnv(mcp.ProxyTokenEnv)", "len(value) < mcp.OperatorTokenMinLen", "len(value) > mcp.OperatorTokenMaxLen"}},
-		{"bearerToken presentation cap", "func bearerToken(", "func (g *operatorGate) sessionMAC(",
-			[]string{"len(token) > mcp.OperatorTokenMaxLen"}},
+		{"loadOperatorToken reads the owner variable name", uses.envLookup, "os.LookupEnv(mcp.ProxyTokenEnv)"},
+		{"loadOperatorToken compares against the owner minimum", uses.bandMin, "mcp.OperatorTokenMinLen"},
+		{"loadOperatorToken compares against the owner maximum", uses.bandMax, "mcp.OperatorTokenMaxLen"},
+		{"bearerToken compares against the owner presentation cap", uses.presentMax, "mcp.OperatorTokenMaxLen"},
 	} {
-		section := sourceSection(t, string(source), read.start, read.end)
-		for _, expression := range read.expressions {
-			if !strings.Contains(section, expression) {
-				t.Errorf("%s no longer reads %s; the operator credential contract must come from internal/mcp, not a local literal",
-					read.name, expression)
-			}
+		if !read.ok {
+			t.Errorf("%s: %s must appear in a real expression of the parsed source; a comment or literal does not carry the contract",
+				read.name, read.want)
 		}
 	}
 }
 
-// sourceSection returns the slice of cmd/proxy/operator.go between two
-// package-level anchors. The overlaid tests run with cmd/proxy as the working
-// directory, so the source is read by name; a moved anchor fails loudly rather
-// than scanning the wrong region.
-func sourceSection(t *testing.T, source, start, end string) string {
+// operatorOwnerUses reports where the internal/mcp owner selectors appear in
+// real expressions of loadOperatorToken and bearerToken: the parsed AST sees
+// symbol use, never comments, and the walk follows same-package helper calls
+// transitively so extracting a helper that still reads the owners stays green.
+type operatorOwnerUses struct {
+	envLookup  bool // os.LookupEnv(mcp.ProxyTokenEnv)
+	bandMin    bool // a comparison with mcp.OperatorTokenMinLen as an operand
+	bandMax    bool // a comparison with mcp.OperatorTokenMaxLen as an operand
+	presentMax bool // bearerToken's comparison with mcp.OperatorTokenMaxLen
+}
+
+// collectOperatorOwnerUses walks the two credential read sites plus every
+// same-package function they call and collects the owner-selector uses. A
+// missing root function fails loudly rather than scanning nothing.
+func collectOperatorOwnerUses(t *testing.T, file *ast.File) operatorOwnerUses {
 	t.Helper()
-	from := strings.Index(source, start)
-	to := strings.Index(source, end)
-	if from < 0 || to <= from {
-		t.Fatalf("cmd/proxy/operator.go no longer has %q before %q; update the owner-symbol guard", start, end)
+	funcs := map[string]*ast.FuncDecl{}
+	for _, decl := range file.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+			funcs[fn.Name.Name] = fn
+		}
 	}
-	return source[from:to]
+	reachable := func(root string) []*ast.FuncDecl {
+		first, ok := funcs[root]
+		if !ok {
+			t.Fatalf("cmd/proxy/operator.go no longer declares %s; update the owner-symbol guard", root)
+		}
+		seen := map[string]bool{root: true}
+		queue := []*ast.FuncDecl{first}
+		out := []*ast.FuncDecl{first}
+		for len(queue) > 0 {
+			current := queue[0]
+			queue = queue[1:]
+			ast.Inspect(current, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok || seen[id.Name] {
+					return true
+				}
+				if callee, ok := funcs[id.Name]; ok {
+					seen[id.Name] = true
+					queue = append(queue, callee)
+					out = append(out, callee)
+				}
+				return true
+			})
+		}
+		return out
+	}
+
+	var uses operatorOwnerUses
+	for _, fn := range reachable("loadOperatorToken") {
+		ast.Inspect(fn, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.CallExpr:
+				if selectorNamed(node.Fun, "os", "LookupEnv") {
+					for _, arg := range node.Args {
+						if selectorNamed(arg, "mcp", "ProxyTokenEnv") {
+							uses.envLookup = true
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				if !comparisonOperator(node.Op) {
+					return true
+				}
+				if selectorNamed(node.X, "mcp", "OperatorTokenMinLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMinLen") {
+					uses.bandMin = true
+				}
+				if selectorNamed(node.X, "mcp", "OperatorTokenMaxLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMaxLen") {
+					uses.bandMax = true
+				}
+			}
+			return true
+		})
+	}
+	for _, fn := range reachable("bearerToken") {
+		ast.Inspect(fn, func(n ast.Node) bool {
+			node, ok := n.(*ast.BinaryExpr)
+			if !ok || !comparisonOperator(node.Op) {
+				return true
+			}
+			if selectorNamed(node.X, "mcp", "OperatorTokenMaxLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMaxLen") {
+				uses.presentMax = true
+			}
+			return true
+		})
+	}
+	return uses
+}
+
+// selectorNamed reports whether expr is the qualified selector pkg.name.
+func selectorNamed(expr ast.Expr, pkg, name string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	ident, ok := sel.X.(*ast.Ident)
+	return ok && ident.Name == pkg && sel.Sel.Name == name
+}
+
+// comparisonOperator reports whether op is a relational comparison, the shape
+// the boot band and the presentation cap are checked with.
+func comparisonOperator(op token.Token) bool {
+	switch op {
+	case token.LSS, token.LEQ, token.GTR, token.GEQ:
+		return true
+	}
+	return false
 }
 
 // TestOperatorTokenEnv owns the boot-credential contract: unset denies the
