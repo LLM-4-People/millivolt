@@ -34,8 +34,8 @@ falls through to the default instead of becoming a broken value.
 | `--timeout` | `MILLIVOLT_MCP_TIMEOUT` | `30s` | Bound on every call to the proxy. |
 
 A malformed environment override fails setup rather than silently using the
-default, and a missing credential, an out-of-band token, or a malformed origin
-exit before any transport exists.
+default, and a missing credential, a token whose length is outside the accepted
+band, or a malformed origin exit before any transport exists.
 
 The token is presented as `Authorization: Bearer <value>` on every request, and
 only there. The session cookie the proxy mints on a successful Bearer is never
