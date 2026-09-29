@@ -272,7 +272,7 @@ type AuditCapturesListOutput struct {
 	Records      []map[string]any `json:"records" jsonschema:"captured requests, newest first, with the record id to pass to audit_capture_get"`
 	Returned     int              `json:"returned" jsonschema:"records in this page"`
 	More         bool             `json:"more" jsonschema:"older rows are believed to exist"`
-	Exhausted    bool             `json:"exhausted" jsonschema:"true when the cursor cannot advance; stop paging"`
+	Exhausted    bool             `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
 	NextBeforeMs int64            `json:"next_before_ms,omitempty" jsonschema:"pass both cursor fields for the next older page"`
 	NextBeforeID string           `json:"next_before_id,omitempty" jsonschema:"pass both cursor fields for the next older page"`
 	Storage      StorageInfo      `json:"storage" jsonschema:"durable storage signal"`

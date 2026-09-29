@@ -239,13 +239,14 @@ type RecordsOutput struct {
 	Records  []map[string]any `json:"records" jsonschema:"one durable record per row, newest first"`
 	Returned int              `json:"returned" jsonschema:"records in this page"`
 	More     bool             `json:"more" jsonschema:"the proxy believes older rows exist"`
-	// Exhausted is true when paging further cannot make progress, even if More
-	// is true: the proxy scans a bounded number of rows per call, so a page that
-	// cannot advance the cursor is exhaustion, not a reason to loop. An EMPTY
-	// page is deliberately not exhaustion: an empty page with an advanced cursor
-	// is the normal shape of "the scan budget ran out before a match", and
-	// treating it as the end of history silently drops every match behind it.
-	Exhausted    bool           `json:"exhausted" jsonschema:"true when the cursor cannot advance; stop paging"`
+	// Exhausted is true when paging further cannot make progress: either the
+	// cursor did not advance (the proxy scans a bounded number of rows per
+	// call, so a page that cannot advance the cursor is exhaustion, not a
+	// reason to loop) or `more` is false. An EMPTY page is deliberately not
+	// exhaustion: an empty page with an advanced cursor is the normal shape of
+	// "the scan budget ran out before a match", and treating it as the end of
+	// history silently drops every match behind it.
+	Exhausted    bool           `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
 	NextBeforeMs int64          `json:"next_before_ms,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
 	NextBeforeID string         `json:"next_before_id,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
 	Truncation   Truncation     `json:"truncation" jsonschema:"whether records were withheld"`

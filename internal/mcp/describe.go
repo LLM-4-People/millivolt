@@ -105,11 +105,15 @@ type PredicateDoc struct {
 // LimitDoc reports the server's result limits.
 type LimitDoc struct {
 	QueryMaxRows        int    `json:"query_max_rows" jsonschema:"this server's client-side cap on query rows"`
+	QueryMaxRowsCeiling int    `json:"query_max_rows_ceiling" jsonschema:"hard client-side ceiling for a query max_rows argument"`
 	QueryMaxBytes       int    `json:"query_max_bytes" jsonschema:"this server's client-side cap on the encoded size of one query result"`
 	LogPageMin          int    `json:"log_page_min" jsonschema:"smallest durable log page the proxy accepts"`
 	LogPageMax          int    `json:"log_page_max" jsonschema:"largest durable log page the proxy accepts"`
+	DefaultPageSize     int    `json:"default_page_size" jsonschema:"default page size for records, values and capture listings"`
 	ExplorerGroups      int    `json:"explorer_max_groups" jsonschema:"maximum groups an explorer response carries"`
 	ChartMaxBuckets     int    `json:"chart_max_buckets" jsonschema:"maximum chart buckets in a response"`
+	PrometheusMaxLines  int    `json:"prometheus_max_lines" jsonschema:"exposition lines this server returns before truncation"`
+	CaptureMaxBytes     int    `json:"capture_max_bytes" jsonschema:"capture document size above which the document is withheld whole"`
 	MaxScopeFilters     int    `json:"max_scope_filters" jsonschema:"maximum repeated filters in one scope"`
 	ServerQueryRowLimit string `json:"server_query_row_limit" jsonschema:"the proxy's own storage_query_max_rows, enforced with HTTP 413"`
 }
@@ -124,20 +128,25 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		KnownTools:   []string{},
 		Limits: LimitDoc{
 			QueryMaxRows:        s.limits.QueryMaxRows,
+			QueryMaxRowsCeiling: maxQueryRowsCeiling,
 			QueryMaxBytes:       s.limits.QueryMaxBytes,
 			LogPageMin:          logPageMin,
 			LogPageMax:          logPageMax,
+			DefaultPageSize:     s.limits.PageSize,
 			ExplorerGroups:      explorerMaxGroups,
 			ChartMaxBuckets:     chartMaxBuckets,
+			PrometheusMaxLines:  prometheusMaxLines,
+			CaptureMaxBytes:     s.limits.CaptureBytes,
 			MaxScopeFilters:     maxScopeFilters,
 			ServerQueryRowLimit: serverQueryRowLimitNote,
 		},
 		Indexes: []string{
-			"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use",
+			"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
 			"idx_requests_provider(provider)",
 			"idx_requests_model(model)",
-			"there is NO index on status_code, error_type, cost or started_at alone: filtering on those scans the table",
-			"request_debug(payload) holds captured request and response BODIES; reading it is sensitive",
+			"idx_request_debug_expires(expires_at): the capture TTL sweep",
+			"idx_request_debug_session(session_id): captures by session",
+			"there is NO index on status_code, error_type or cost: filtering on those scans the table",
 		},
 		Tables:     tableDocs,
 		Predicates: predicates,
@@ -149,7 +158,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			"There is NO unixnow() function in this SQLite build. For a relative window use strftime('%s','now')*1000, " +
 				"for example WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour.",
 			"Use keyset pagination (WHERE (started_at, id) < (?, ?)) rather than OFFSET for deep history; OFFSET degrades on every page.",
-			"For history older than the snapshot window, page /metrics/agg/log with the paired before_ms/before_id cursor. The snapshot is capped at 8 * dash_log_rows records.",
+			"For history older than the snapshot window, use the records tool with its paired before_ms/before_id cursor. The snapshot is capped at 8 * dash_log_rows records.",
 			"dashboard_version is a frontend asset fingerprint, not an API version. There is no API versioning and no published stability contract.",
 			"Filters in the export and purge grammars match raw stored values, never canonicalized model names. " +
 				"The explore, chart and records scope filters are the opposite: they match the CANONICAL model spelling the proxy derives " +
@@ -210,10 +219,11 @@ type DescribeInput struct{}
 
 // StatusClasses are the explorer's status facet values, exactly as the proxy
 // derives them (internal/web statusClass). They are NOT the HTTP class
-// shorthand a reader would guess: there is no 3xx class at all, because a 3xx
-// never reaches a recorded row, and a 499 is its own "cancel" class rather than
-// a 4xx. Listing a 3xx here would make `f=status:3xx` a silently empty filter,
-// and omitting cancel would hide the class every client abort falls into.
+// shorthand a reader would guess: there is no 3xx class at all - anything
+// outside 2xx/4xx/5xx, including every 3xx and any status below 200, falls
+// into "err" - and a 499 is its own "cancel" class rather than a 4xx. Listing
+// a 3xx here would make `f=status:3xx` a silently empty filter, and omitting
+// cancel would hide the class every client abort falls into.
 var StatusClasses = []string{"2xx", "cancel", "4xx", "5xx", "err"}
 
 // TimeBuckets are the values of the `time` dimension: a server-local daypart,
@@ -225,10 +235,11 @@ var TimeBuckets = []string{"night", "work", "evening", "weekend"}
 
 // ErrorFilterKeys are the three fields an `error` filter value is built from. The
 // proxy joins them with '|' in that order (internal/web errorKey), and fills the
-// derived parts: a missing type becomes http_<status> and a missing code becomes
-// the status itself. So an error value looks like
-// "upstream_timeout|429|rate limited", and the parts are the exact stored
-// error_type, error_code and error_msg.
+// derived parts where it can: a missing type becomes http_<status> and a missing
+// code becomes the status. It cannot always fill them (an attempt with no status,
+// or an error with no message), so a part CAN be empty: real keys include
+// "server_error|500|" and "other||". The parts are the stored error_type,
+// error_code and error_msg.
 var ErrorFilterKeys = []string{"type", "code", "message"}
 
 // vocabularies is the one owner of every filter dimension's value space. A
@@ -238,8 +249,8 @@ var vocabularies = []VocabularyDoc{
 	{
 		Dimension: "status",
 		Values:    StatusClasses,
-		Note: "the proxy's own status classes, not HTTP shorthand: there is no 3xx class (a 3xx never reaches a recorded row), " +
-			"499 is 'cancel' and not a 4xx, and a status below 200 is 'err'. " +
+		Note: "the proxy's own status classes, not HTTP shorthand: there is no 3xx class (anything outside 2xx/4xx/5xx, including 3xx and below 200, is 'err'), " +
+			"499 is 'cancel' and not a 4xx. " +
 			"The s= selector is a DIFFERENT vocabulary: an exact code or a live class",
 	},
 	{
@@ -257,7 +268,8 @@ var vocabularies = []VocabularyDoc{
 		Dimension: "error",
 		Values:    ErrorFilterKeys,
 		Note: "a filter value is type|code|message joined with '|', in that order, from the stored error_type, error_code and error_msg. " +
-			"An absent type is written http_<status> and an absent code is written as the status, so the value never has an empty part. " +
+			"The proxy fills a missing type with http_<status> and a missing code with the status where it can, but a part CAN be empty " +
+			"(keys like server_error|500| and other|| exist), so a value is three parts even when one is blank. " +
 			"Use the values tool on error_type, error_code and error_message to discover them",
 	},
 	{

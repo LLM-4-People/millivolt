@@ -627,6 +627,18 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	if !strings.Contains(byDimension["error"].Note, "type|code|message") {
 		t.Fatalf("the error grammar must be stated: %q", byDimension["error"].Note)
 	}
+	// The parts are NOT guaranteed non-empty: errorKey joins typ|code|msg, and
+	// keys like server_error|500| and other|| exist.
+	if !strings.Contains(byDimension["error"].Note, "CAN be empty") {
+		t.Fatalf("the error vocabulary must say a part can be empty: %q", byDimension["error"].Note)
+	}
+	if strings.Contains(byDimension["error"].Note, "never has an empty part") {
+		t.Fatalf("the error vocabulary still claims the false non-empty guarantee: %q", byDimension["error"].Note)
+	}
+	// A 3xx is not a class of its own; statusClass maps it into err.
+	if !strings.Contains(byDimension["status"].Note, "3xx") || strings.Contains(byDimension["status"].Note, "below 200 is 'err'") {
+		t.Fatalf("the status vocabulary must say 3xx and below 200 both fall into err: %q", byDimension["status"].Note)
+	}
 	if !strings.Contains(byDimension["live_statuses"].Note, "s= selector") {
 		t.Fatalf("the s= vocabulary must be distinguished from the status dimension: %q", byDimension["live_statuses"].Note)
 	}
@@ -725,10 +737,43 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 		"chart is the only windowed tool and cannot group",
 		"query is the only tool that can express a time range",
 		"SERVER-SIDE",
+		// The snapshot window pointer must name the tool, not a raw HTTP route
+		// the model has no way to call.
+		"use the records tool",
 	} {
 		if !strings.Contains(notes, needle) {
 			t.Fatalf("describe notes must state %q, got %q", needle, notes)
 		}
+	}
+	if strings.Contains(notes, "/metrics/agg/log") {
+		t.Fatalf("describe must not send the model to a raw HTTP route: %q", notes)
+	}
+	// The index list is a planner reference, not prose: it names the two real
+	// request_debug indexes and does not claim there is no index on started_at
+	// alone (idx_requests_log leads on it).
+	indexes := strings.Join(out.Indexes, " ")
+	for _, needle := range []string{
+		"idx_requests_log(started_at, id)",
+		"idx_request_debug_expires(expires_at)",
+		"idx_request_debug_session(session_id)",
+		"NO index on status_code, error_type or cost",
+	} {
+		if !strings.Contains(indexes, needle) {
+			t.Fatalf("the index reference must state %q, got %q", needle, indexes)
+		}
+	}
+	for _, forbidden := range []string{"request_debug(payload)", "started_at alone"} {
+		if strings.Contains(indexes, forbidden) {
+			t.Fatalf("the index reference still contains %q: %q", forbidden, indexes)
+		}
+	}
+	// Every advertised result limit is present, including the ones the tool
+	// enforces itself rather than the proxy.
+	if out.Limits.QueryMaxRowsCeiling != maxQueryRowsCeiling ||
+		out.Limits.PrometheusMaxLines != prometheusMaxLines ||
+		out.Limits.DefaultPageSize != DefaultLimits().PageSize ||
+		out.Limits.CaptureMaxBytes != DefaultLimits().CaptureBytes {
+		t.Fatalf("the limits must include the self-enforced caps: %+v", out.Limits)
 	}
 	if out.Limits.QueryMaxBytes != DefaultLimits().QueryMaxBytes {
 		t.Fatalf("the encoded-size clamp must be in the limits: %+v", out.Limits)
