@@ -121,6 +121,9 @@ func TestTokenNeverAppearsInToolOutput(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the echoed failure")
 	}
+	// The reflected excerpt is model-visible text, so the credential must be
+	// gone from it, not only from the success payload checked below.
+	assertRedacted(t, testToken, "explore failure", err.Error())
 
 	// Now check the success path: no serialized tool output contains it.
 	proxy.json(http.MethodGet, explorerPath, `{"dim":"provider","total":1,"groups":[{"name":"local"}],"rail":{},"scope":{}}`)
