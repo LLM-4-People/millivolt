@@ -158,12 +158,12 @@ func waitPIDFixture(t *testing.T, pid int, pidFile string) {
 }
 
 // createDevNamespaceFile creates the fixture's dev namespace file
-// exclusively. freeDevNamespaceListener's reservation (a stat) cannot be
-// atomic with this create: between the two, the kernel can hand the same
-// ephemeral port to a concurrent fixture whose dev file then already exists
-// here. O_EXCL surfaces that creator as an error instead of replacing its
-// file, and this helper is the enforce point for the reservation-to-create
-// race.
+// exclusively. freeDevNamespaceListener's bound reservation keeps
+// allocator-based fixtures off the port, but it cannot cover a creator that
+// writes the path without the allocator, such as an explicit-DEV_PORT dev
+// instance that names the same port: this create is the first moment the
+// fixture owns the name. O_EXCL surfaces such a creator as an error instead
+// of replacing its file, and this helper is the enforce point.
 func createDevNamespaceFile(path string) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -176,9 +176,9 @@ func createDevNamespaceFile(path string) error {
 // file is unclaimed. A timed-out run leaks the fixture's namespace file (the
 // test timeout kills the process before deferred cleanup), and the kernel
 // reuses ephemeral port numbers, so a new fixture must skip a leaked name
-// instead of failing its exclusive creation against it. Skipping narrows but
-// never closes the reservation-to-create window; createDevNamespaceFile
-// enforces exclusivity at the create.
+// instead of failing its exclusive creation against it. Skipping handles
+// leaked names only; createDevNamespaceFile still enforces exclusivity at the
+// create against a creator that took the name without the allocator.
 func freeDevNamespaceListener(t *testing.T) net.Listener {
 	t.Helper()
 	for attempt := 0; attempt < 1000; attempt++ {
@@ -202,8 +202,8 @@ func freeDevNamespaceListener(t *testing.T) net.Listener {
 
 // TestCreateDevNamespaceFileIsExclusive pins the guard to O_EXCL: a name that
 // already exists must be refused as os.ErrExist and left untouched, never
-// opened and reused. The pre-created path models the concurrent creator in
-// the reservation-to-create window; removing O_EXCL turns this test red.
+// opened and reused. The pre-created path models the non-allocator creator
+// that takes the name first; removing O_EXCL turns this test red.
 func TestCreateDevNamespaceFileIsExclusive(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "millivolt-dev-fixture.yaml")
 	if err := createDevNamespaceFile(path); err != nil {

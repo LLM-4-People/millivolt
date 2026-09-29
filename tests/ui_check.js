@@ -1800,7 +1800,7 @@ async function main() {
   // page's 5s tick must not land inside them: 7b/7c stop the same timer for
   // their hand-driven cursors, and a captured bootstrap is applied as a log
   // page (or counted as a resync or post), failing checks the product
-  // satisfies. Re-armed after the pagination block.
+  // satisfies. Re-armed after the purge-resync window.
   w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
   box.scrollTop = 0; // full rebuild resets scroll (jsdom keeps the stubbed top)
   fire('snapshot', { feed_id: 'feedB', seq: 81, incremental: false,

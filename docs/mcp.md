@@ -537,7 +537,7 @@ tests run outside that harness on purpose:
 
 The live integration test starts a private instance through
 [scripts/dev.sh](../scripts/dev.sh) on a port and scratch database of its own, so
-two concurrent runs cannot collide, drives the tools through a real MCP session,
+concurrent runs do not share a port or database, drives the tools through a real MCP session,
 and runs a full capture cycle against neutral loopback traffic:
 
 ```sh
