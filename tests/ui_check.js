@@ -618,6 +618,10 @@ async function main() {
   // ---- test 7b: a kpiAgg swap with an EMPTY delta must still repaint the
   // KPI band (the derivation is memoized on the record revision -
   // applyBootstrapState bumps _rev when the aggregate changes).
+  // 7b/7c drive the resume cursor by hand, so stop the page's own 5s tick for
+  // the window: a tick landing while 7b-2's seq-4 stub is installed advances
+  // lastSeq and turns 7c's since=3 premise into since=4. Re-armed after 7c.
+  w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
   const origBootstrap = w.fetch;
   let bootstrapStateApplied = false;
   w.fetch = (url) => {
@@ -716,14 +720,24 @@ async function main() {
   fullPayload = { feed_id: 'feedB', seq: 4,
     records: [{ ...mkRec('fresh4', 200, 1700000103000), __seq: 4 }],
     counters: { in_flight: 0, total_requests: 4, total_errors: 0 } };
-  w.eval("fetchBootstrap('resume')");
-  await sleep(20);
-  check('tick resume URL carries since + feed', bootURL.includes('since=3') && bootURL.includes('feed=feedB'));
+  // Await the page's own fetch and then its painted end state instead of a
+  // fixed sleep: under load the fold landed after 20 ms and failed the check
+  // while the next assertion 20 ms later passed. Capture the URL synchronously
+  // so the check pins this call, not whatever fetch ran last.
+  const resume = w.eval("fetchBootstrap('resume')");
+  const resumeURL = bootURL;
+  await resume;
+  await settleUntil(() => rows().length === 4 && rows()[0].dataset.id === 'fresh4');
+  check('tick resume URL carries since + feed', resumeURL.includes('since=3') && resumeURL.includes('feed=feedB'));
   check('tick resume folds the missed record once', rows().length === 4 && rows()[0].dataset.id === 'fresh4');
-  w.eval("fetchBootstrap('resume')"); // same cursor → the same record replays
-  await sleep(20);
+  await w.eval("fetchBootstrap('resume')"); // already held: the fold must tolerate the replay
+  // Drain any live render the replay fold scheduled before asserting: a
+  // wrongly re-added record bumps the data revision and paints on the next
+  // rAF, which must finish before the no-duplicate check can see it.
+  await settleUntil(() => !w.eval('_renderQueued') && !w.eval('_renderDirty'));
   check('tick replay of the same record never duplicates the row', rows().length === 4);
   w.fetch = origTick;
+  w.eval('armDashboardTicks()');
 
   // ---- test 7d: selection identity survives re-render ticks ----
   // The drawer's selection (drawerId) owns both the drawer's content and
