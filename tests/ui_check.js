@@ -1920,7 +1920,6 @@ async function main() {
     w.fetch = savedFetch;
     w.scheduleLogFill = savedFill;
   }
-  w.eval('armDashboardTicks()');
 
   // ---- test 10b: the purge re-sync - no removal event exists, so clearAll
   // must fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
@@ -1951,6 +1950,12 @@ async function main() {
   w.eval("fetchBootstrap('full')");
   await sleep(30);
   check('post-purge resync restores the fresh snapshot', rows().length === 60);
+  // 10b's wrapper records ANY bootstrap URL, so the page's 5s tick stays
+  // stopped through the whole purge-resync window: a tick resume landing
+  // after clearAll's cursor-less resync overwrites bootURL with since/feed
+  // and fails that check even though the product satisfied it. Re-armed
+  // here, after the restore check, like the 7b/7c windows above.
+  w.eval('armDashboardTicks()');
 
   // ---- test 10c: a scope whose records predate the ring (a provider the
   // user hasn't touched in a while) must page the store from its NEWEST rows -
