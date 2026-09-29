@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -143,22 +144,72 @@ type liveTools struct {
 	service *Service
 	// origin is this run's own proxy, never a fixed one.
 	origin string
+	// invoked records every tool name this run actually called. The test
+	// compares it with the server's registered list at the end, so coverage of
+	// the tool surface is proven by the calls made rather than by a
+	// hand-maintained list of calls somebody must remember to update.
+	invoked map[string]bool
+}
+
+// record notes one tool name before its call, so an expected tool error still
+// counts as the tool having been exercised.
+func (l *liveTools) record(name string) {
+	if l.invoked == nil {
+		l.invoked = map[string]bool{}
+	}
+	l.invoked[name] = true
 }
 
 // invoke calls one tool and returns its structured output.
 func (l *liveTools) invoke(t *testing.T, name string, arguments map[string]any) map[string]any {
 	t.Helper()
+	l.record(name)
 	return structured(t, call(t, l.session, name, arguments))
 }
 
 // invokeError calls one tool expecting a tool error, and returns its text.
 func (l *liveTools) invokeError(t *testing.T, name string, arguments map[string]any) string {
 	t.Helper()
+	l.record(name)
 	result := call(t, l.session, name, arguments)
 	if !result.IsError {
 		t.Fatalf("%s must fail here, got: %s", name, textOf(t, result))
 	}
 	return textOf(t, result)
+}
+
+// assertEveryToolWasInvoked compares the recorded invocations with the tool
+// list the server actually registered, in both directions: a registered tool
+// that no call reached and a call to a name that is not registered are both
+// failures. The set equality is what turns "drives every registered tool"
+// from a claim about this file into a checked property of the live session.
+func (l *liveTools) assertEveryToolWasInvoked(t *testing.T) {
+	t.Helper()
+	listed, err := l.session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := map[string]bool{}
+	for _, tool := range listed.Tools {
+		registered[tool.Name] = true
+	}
+	var missing, unknown []string
+	for name := range registered {
+		if !l.invoked[name] {
+			missing = append(missing, name)
+		}
+	}
+	for name := range l.invoked {
+		if !registered[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(missing) != 0 || len(unknown) != 0 {
+		slices.Sort(missing)
+		slices.Sort(unknown)
+		t.Fatalf("the live test must drive every registered tool: registered but never invoked: %v; invoked but not registered: %v",
+			missing, unknown)
+	}
 }
 
 // valuesOf reads a values response into a set of the value names it carries.
@@ -632,4 +683,8 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	if remaining := number(t, deleted, "remaining_count"); remaining != 0 {
 		t.Fatalf("the fixture rows must be gone, got %v remaining", remaining)
 	}
+
+	// The claim in this file's own name is checked, not asserted by hand: the
+	// set of tools called must equal the set the server registered.
+	live.assertEveryToolWasInvoked(t)
 }
