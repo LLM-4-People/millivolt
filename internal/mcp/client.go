@@ -589,10 +589,9 @@ type decodedByte struct {
 // can encode the credential in more than one way at once, and an ambiguous
 // sequence (`%25` is a literal percent or the first layer of `%2520`) decodes
 // differently per interpretation, so every interpretation is scanned and the
-// matches are unioned.
+// matches are unioned. The final layer is the view's output; the raw view is a
+// one-layer pipeline, so every view is read the same way.
 type credentialView struct {
-	raw  string
-	at   int
 	last *decodeLayer
 }
 
@@ -819,7 +818,7 @@ func hex4(a, b, c, d byte) (uint16, bool) {
 // back to the raw span it was built from.
 func credentialViews(message string, skipSpace bool) []credentialView {
 	views := make([]credentialView, 0, 2*maxPercentLayers+1)
-	views = append(views, credentialView{raw: message, last: &decodeLayer{raw: message, skipSpace: skipSpace}})
+	views = append(views, credentialView{last: &decodeLayer{raw: message, skipSpace: skipSpace}})
 	for layers := 1; layers <= maxPercentLayers; layers++ {
 		views = append(views, decodedView(message, layers, false, skipSpace), decodedView(message, layers, true, skipSpace))
 	}
@@ -842,19 +841,11 @@ func decodedView(message string, layers int, plusSpace, skipSpace bool) credenti
 		layer.plusSpace = plusSpace && pass == layers
 		previous = layer
 	}
-	return credentialView{raw: message, last: previous}
+	return credentialView{last: previous}
 }
 
 // next returns the next decoded byte of the view with its raw range.
 func (v *credentialView) next() (decodedByte, bool) {
-	if v.last == nil {
-		if v.at >= len(v.raw) {
-			return decodedByte{}, false
-		}
-		db := decodedByte{b: v.raw[v.at], start: v.at, end: v.at + 1}
-		v.at++
-		return db, true
-	}
 	return v.last.next()
 }
 
@@ -862,7 +853,7 @@ func (v *credentialView) next() (decodedByte, bool) {
 // its text is not a fixed point, so no match in it can be trusted and the
 // message fails closed instead.
 func (v *credentialView) incomplete() bool {
-	return v.last != nil && v.last.decoded
+	return v.last.decoded
 }
 
 // hexByte decodes a pair of case-insensitive hex digits.
