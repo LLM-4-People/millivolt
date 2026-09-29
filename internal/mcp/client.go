@@ -95,10 +95,31 @@ type Client struct {
 // credential.
 func (c *Client) Origin() string { return c.base.String() }
 
+// InProcessOrigin is the nominal origin of a Client whose requests never leave
+// the process. The name is reserved for private use and cannot resolve on the
+// public internet; it is never dialed, because the caller injects a transport
+// that dispatches every request to the proxy's own handler. It is a named
+// constant rather than a loopback address so no message, log line or tool
+// result suggests a reachable address, and it is never derived from the Host
+// header of the request being served.
+const InProcessOrigin = "http://millivolt.internal"
+
 // NewClient validates the setup parameters and returns the shared client.
 // proxyURL must be an http/https origin with no path, query or fragment, since
 // every operator route lives at the root; a trailing slash is normalized away.
 func NewClient(proxyURL, token string, limits Limits) (*Client, error) {
+	return NewClientWithTransport(proxyURL, token, limits, nil)
+}
+
+// NewClientWithTransport is NewClient with an explicit RoundTripper for the
+// operator plane: a nil transport keeps net/http dialing, while the HTTP MCP
+// endpoint injects one that dispatches each synthesized request straight to
+// the proxy's own handler. The process then never dials itself over the
+// network, and the caller's Bearer credential rides the synthesized request so
+// the proxy's gate re-validates it. Redirect refusal, credential redaction,
+// the response bounds and every other client property stay on this Client,
+// not on the transport, so an injected transport cannot weaken them.
+func NewClientWithTransport(proxyURL, token string, limits Limits, transport http.RoundTripper) (*Client, error) {
 	base, err := NormalizeProxyURL(proxyURL)
 	if err != nil {
 		return nil, err
@@ -106,11 +127,11 @@ func NewClient(proxyURL, token string, limits Limits) (*Client, error) {
 	if err := ValidateOperatorToken(token); err != nil {
 		return nil, err
 	}
-	return &Client{
-		base:  base,
-		token: token,
-		http:  &http.Client{Timeout: limits.Timeout, CheckRedirect: refuseRedirect},
-	}, nil
+	client := &http.Client{Timeout: limits.Timeout, CheckRedirect: refuseRedirect}
+	if transport != nil {
+		client.Transport = transport
+	}
+	return &Client{base: base, token: token, http: client}, nil
 }
 
 // NormalizeProxyURL parses and validates the proxy origin, returning it with

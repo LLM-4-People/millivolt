@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/LLM-4-People/millivolt"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -42,12 +41,7 @@ func Run(program string, args []string, lookupEnv func(string) (string, bool), s
 		return 1
 	}
 
-	server := sdk.NewServer(&sdk.Implementation{
-		Name:    "millivolt",
-		Title:   "millivolt",
-		Version: millivolt.Version(),
-	}, nil)
-	service.Register(server)
+	server := NewServer(service)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

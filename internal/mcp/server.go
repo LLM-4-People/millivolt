@@ -2,7 +2,9 @@ package mcp
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/LLM-4-People/millivolt"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -22,14 +24,35 @@ type Service struct {
 // the single construction path: a caller cannot obtain a Service without a
 // validated origin, a validated credential and a validated limits policy.
 func NewService(proxyURL, operatorToken string, limits Limits) (*Service, error) {
+	return NewServiceWithTransport(proxyURL, operatorToken, limits, nil)
+}
+
+// NewServiceWithTransport is NewService with an explicit client transport; see
+// NewClientWithTransport. The HTTP MCP endpoint uses it to hand every service a
+// transport that stays in process and carries the caller's own credential.
+func NewServiceWithTransport(proxyURL, operatorToken string, limits Limits, transport http.RoundTripper) (*Service, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
-	client, err := NewClient(proxyURL, operatorToken, limits)
+	client, err := NewClientWithTransport(proxyURL, operatorToken, limits, transport)
 	if err != nil {
 		return nil, err
 	}
 	return &Service{client: client, limits: limits, previewToken: newPreviewToken(operatorToken)}, nil
+}
+
+// NewServer builds the MCP server and registers every tool on it. It is the
+// single construction path shared by the stdio entrypoint (cli.go) and the
+// streamable HTTP endpoint, so tool registration lives only in
+// Service.Register and the two entrypoints cannot drift apart.
+func NewServer(service *Service) *sdk.Server {
+	server := sdk.NewServer(&sdk.Implementation{
+		Name:    "millivolt",
+		Title:   "millivolt",
+		Version: millivolt.Version(),
+	}, nil)
+	service.Register(server)
+	return server
 }
 
 // Origin is the proxy origin the tools call. It never carries the credential.
