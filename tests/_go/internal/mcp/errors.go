@@ -411,6 +411,18 @@ func TestValidOversizedFailureBodyKeepsTheDecodedMessage(t *testing.T) {
 	}
 }
 
+// TestFlatErrorValueWinsBeforeLaterStringValues pins the flat {"error": ...}
+// early return in streamedFailureText: once the error key's value is read the
+// walk returns it and never joins later string values. The junk value is
+// inside the scan cap, so without the early return the same body would produce
+// "m xxxxxxxx" instead of the proxy's own message.
+func TestFlatErrorValueWinsBeforeLaterStringValues(t *testing.T) {
+	const body = `{"error":"m","junk":"xxxxxxxx"}`
+	if message := failureMessage(t, testToken, body); message != "m" {
+		t.Fatalf("message = %q, want exactly %q", message, "m")
+	}
+}
+
 // TestRefusedRedirectReplaysNothing is the credential-replay guard. net/http
 // strips Authorization only when the HOSTNAME changes, and the port is not part
 // of that comparison, so a same-host different-port or subdomain 307/308 replays
