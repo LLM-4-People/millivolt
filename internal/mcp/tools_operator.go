@@ -432,16 +432,26 @@ type ConfigGetOutput struct {
 	Revision string `json:"revision" jsonschema:"pass this to set_config; a stale value is rejected with 409"`
 	// Writable is false when the proxy was started with no -config path, in
 	// which case set_config has nowhere to persist and will be refused.
-	Writable   bool           `json:"writable" jsonschema:"false when the proxy has no config file, so set_config cannot persist"`
-	Path       string         `json:"path,omitempty" jsonschema:"the config file this document came from"`
-	Backup     map[string]any `json:"backup,omitempty" jsonschema:"config and database backup availability and policy"`
-	LastReload any            `json:"last_reload,omitempty" jsonschema:"outcome of the most recent configuration application"`
-	Note       string         `json:"note" jsonschema:"how to use this document with set_config"`
+	Writable bool `json:"writable" jsonschema:"false when the proxy has no config file, so set_config cannot persist"`
+	// Overrides names the yaml keys the process pins outside the file (a CLI
+	// flag such as -listen or -db-path). set_config strips them from a patch,
+	// so this is why a patch can be accepted yet not change the running value.
+	Overrides map[string]string `json:"overrides,omitempty" jsonschema:"keys pinned outside the file by the process; set_config strips them from a patch"`
+	// UsageFields and ModelFields are the canonical vocabularies providers may
+	// use for usage_keys and model metadata fields; the proxy published them
+	// and the MCP surface used to drop them.
+	UsageFields []string       `json:"usage_fields,omitempty" jsonschema:"canonical usage field names a provider usage_keys map may name"`
+	ModelFields []string       `json:"model_fields,omitempty" jsonschema:"canonical model metadata field names"`
+	Path        string         `json:"path,omitempty" jsonschema:"the config file this document came from"`
+	Backup      map[string]any `json:"backup,omitempty" jsonschema:"config and database backup availability and policy"`
+	LastReload  any            `json:"last_reload,omitempty" jsonschema:"outcome of the most recent configuration application"`
+	Note        string         `json:"note" jsonschema:"how to use this document with set_config"`
 }
 
 // configNote is the workflow the set_config description points at.
 const configNote = "patch with set_config by sending only the keys to change, plus this revision; " +
-	"a supplied list or map replaces that whole field, so read it here first. Keys equal to their default are still real settings"
+	"a supplied list or map replaces that whole field, so read it here first. Keys equal to their default are still real settings. " +
+	"overrides names the keys the process pins outside the file: set_config strips them from a patch, so a key listed there will not change"
 
 // ConfigGet returns the live configuration document: the values, the running
 // overrides, the defaults, the per-key schema, the restart-required set and the
@@ -454,6 +464,9 @@ func (s *Service) configGet(ctx context.Context, _ ConfigGetInput) (*ConfigGetOu
 	document.Values = object(document.Values)
 	document.Effective = object(document.Effective)
 	document.Defaults = object(document.Defaults)
+	document.Overrides = object(document.Overrides)
+	document.UsageFields = list(document.UsageFields)
+	document.ModelFields = list(document.ModelFields)
 	document.RestartRequired = list(document.RestartRequired)
 	document.Note = configNote
 	return &document, nil

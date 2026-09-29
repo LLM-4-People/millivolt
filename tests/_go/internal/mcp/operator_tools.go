@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -361,6 +362,36 @@ func TestResumeQuotaReportsAnOpenGate(t *testing.T) {
 	if !empty.Resumed || len(empty.Open) != 0 {
 		t.Fatalf("no storms means no open gate: %+v", empty)
 	}
+}
+
+// TestConfigGetCarriesTheProxyPinnedKeys pins the fields the proxy publishes
+// and this tool used to drop. Without overrides a model cannot tell why a
+// patched key did not change (set_config strips CLI-pinned keys), and the two
+// canonical vocabularies are what a usage_keys or model-rules patch must name.
+func TestConfigGetCarriesTheProxyPinnedKeys(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, configPath, `{"revision":"abc","values":{},"effective":{},"defaults":{},`+
+		`"fields":[],"restart_required":[],"writable":true,`+
+		`"overrides":{"listen":"127.0.0.1:8081","db_path":"/tmp/dev.db"},`+
+		`"usage_fields":["input_tokens","output_tokens"],"model_fields":["reasoning_effort"]}`)
+	service := newTestService(t, proxy, Limits{})
+	out, err := service.configGet(context.Background(), ConfigGetInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Overrides["listen"] != "127.0.0.1:8081" || out.Overrides["db_path"] != "/tmp/dev.db" {
+		t.Fatalf("overrides must survive the decode: %+v", out.Overrides)
+	}
+	if !slices.Equal(out.UsageFields, []string{"input_tokens", "output_tokens"}) {
+		t.Fatalf("usage_fields = %v", out.UsageFields)
+	}
+	if !slices.Equal(out.ModelFields, []string{"reasoning_effort"}) {
+		t.Fatalf("model_fields = %v", out.ModelFields)
+	}
+	if !strings.Contains(out.Note, "strips") {
+		t.Fatalf("the note must explain that overrides are stripped from a patch: %q", out.Note)
+	}
+	assertAuth(t, proxy.requestsFor(http.MethodGet, configPath)[0])
 }
 
 // TestSetConfigIsARevisionCheckedPatch pins the read-then-patch behaviour, the

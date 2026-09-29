@@ -202,7 +202,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "config_get",
 		Title:       "Read the configuration",
-		Description: "The live configuration document: the file's values, the values actually in force after CLI overrides, the built-in defaults, the per-key schema (type, category and documentation), the restart-required set, whether the file is writable at all, and the revision a revision-checked set_config must echo. Call this before set_config: a supplied list or map replaces that whole field, so a structured key patched without reading it first is replaced wholesale.",
+		Description: "The live configuration document: the file's values, the values actually in force after CLI overrides, the built-in defaults, the per-key schema (type, category and documentation), the keys pinned outside the file by the process (overrides, which set_config strips), the canonical usage and model metadata field names, the restart-required set, whether the file is writable at all, and the revision a revision-checked set_config must echo. Call this before set_config: a supplied list or map replaces that whole field, so a structured key patched without reading it first is replaced wholesale.",
 		Annotations: readOnly("Read the configuration"),
 	}, s.configGet)
 
