@@ -145,10 +145,12 @@ of choosing a client:
   requested version when it is one of the legacy versions (`2025-11-25` and
   older, verified live) and with `2025-11-25` for any other requested version;
   `2026-07-28` is served only through the SDK's per-request metadata form:
-  the request carries `Mcp-Protocol-Version: 2026-07-28`, a matching
-  `_meta.protocolVersion` with `_meta.clientCapabilities` (`clientInfo` is
-  optional) and the `Mcp-Method` header, and a form missing any required piece
-  answers `400`.
+  the request carries `Mcp-Protocol-Version: 2026-07-28`, matching `_meta` keys
+  `io.modelcontextprotocol/protocolVersion` and
+  `io.modelcontextprotocol/clientCapabilities`
+  (`io.modelcontextprotocol/clientInfo` is optional), and the `Mcp-Method`
+  header. `tools/call` additionally requires an `Mcp-Name` header equal to
+  `params.name`; a form missing any required piece answers `400`.
 - The SDK's localhost DNS-rebinding check is deliberately off. It rejects a
   loopback connection whose `Host` is not loopback, and the documented
   reverse-proxied placement preserves the external `Host` while dialing the
