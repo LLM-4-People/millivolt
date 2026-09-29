@@ -347,10 +347,15 @@ matches, in the same transaction as the request row. A filter that reaches a
 captured request takes its evidence with it. Only a backup taken beforehand
 restores it.
 
-**A scope name must be known.** Every client, provider and model named in
-`audit_start` must already be in the vocabulary `audit_status` reports. A session
-scoped to a name that matches nothing would report `enabled: true` and capture
-nothing, so an unknown name is refused with the known values offered.
+**A scope name must be known when the vocabulary is.** `audit_start` checks
+every client, provider and model against the vocabulary `audit_status` reports.
+When that vocabulary is non-empty, an unknown name is refused with the known
+values offered, because a session scoped to a name that matches nothing would
+report `enabled: true` and capture nothing. An empty vocabulary is the
+exception: a proxy that has seen nothing knows no names, so refusing every name
+would make the tool unusable rather than safer and the check is skipped. A
+vocabulary that cannot be read is not a skip: the start is refused, because the
+guard cannot be applied at all.
 
 **Read-back is by record id.** `audit_capture_get` takes the REQUEST RECORD id
 (`requests.id`), not the session id. There is no listing endpoint, so
