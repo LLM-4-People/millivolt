@@ -357,8 +357,9 @@ func TestErrorBodyExcerptIsBounded(t *testing.T) {
 // TestOversizedFailureBodyDecodeIsBounded is the regression for the unbounded
 // failure-body decode: a 64 MiB nested JSON body was decoded in full before
 // excerpting, about 128 MiB allocated and 200 ms spent to produce the same
-// 4 KiB message. Only the raw region that can reach the excerpt may be
-// decoded, while redaction and truncation keep working on it.
+// 4 KiB message. failureExcerpt now bounds both inputs: the stream decode sees
+// at most maxExcerptScanBytes and stops at the excerpt target, while redaction
+// and truncation keep working on the result.
 func TestOversizedFailureBodyDecodeIsBounded(t *testing.T) {
 	body := []byte(`{"detail":"upstream refused ` + testToken + ` "` + strings.Repeat("x", 64<<20) + `"}`)
 	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}
