@@ -120,9 +120,16 @@ func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, er
 // an oversized body while a runaway downstream handler can allocate at most
 // this much; bytes past the cap are discarded, and Write still reports them
 // accepted because the downstream handler owns the answer, not the recorder.
+//
+// The recorder owns its byte slice instead of a bytes.Buffer because Buffer's
+// grown slice doubles whenever the target is under twice the current capacity:
+// a full buffer needed a second budget (two times 64 MiB) to fit the last
+// byte, so three abandoned calls retained about 402 MB. This growth doubles
+// too, but clamps the new capacity at the budget, so live retention is about
+// one budget; a small body grows the ordinary way and never reaches the clamp.
 type inProcessRecorder struct {
 	header http.Header
-	body   bytes.Buffer
+	body   []byte
 	status int
 }
 
@@ -144,12 +151,26 @@ func (r *inProcessRecorder) Write(data []byte) (int, error) {
 		r.status = http.StatusOK
 	}
 	written := len(data)
-	if remaining := inProcessRecorderBufferMax - r.body.Len(); remaining > 0 {
-		if len(data) > remaining {
-			data = data[:remaining]
-		}
-		_, _ = r.body.Write(data)
+	remaining := inProcessRecorderBufferMax - len(r.body)
+	if remaining <= 0 {
+		return written, nil
 	}
+	if len(data) > remaining {
+		data = data[:remaining]
+	}
+	if need := len(r.body) + len(data); need > cap(r.body) {
+		grown := cap(r.body) * 2
+		if grown < need {
+			grown = need
+		}
+		if grown > inProcessRecorderBufferMax {
+			grown = inProcessRecorderBufferMax
+		}
+		next := make([]byte, len(r.body), grown)
+		copy(next, r.body)
+		r.body = next
+	}
+	r.body = append(r.body, data...)
 	return written, nil
 }
 
@@ -166,7 +187,7 @@ func (r *inProcessRecorder) response(request *http.Request) *http.Response {
 		StatusCode: status,
 		Status:     fmt.Sprintf("%d %s", status, http.StatusText(status)),
 		Header:     r.header,
-		Body:       io.NopCloser(bytes.NewReader(r.body.Bytes())),
+		Body:       io.NopCloser(bytes.NewReader(r.body)),
 		Request:    request,
 	}
 }

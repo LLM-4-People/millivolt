@@ -138,7 +138,9 @@ func TestInProcessTransportNormalCallReturnsPromptly(t *testing.T) {
 // before the client's 64 MiB read cap applied, so per-call memory was bounded
 // only by each route's own cap. The recorder must retain the client's budget
 // plus the one byte that fires its over-budget check, whatever the handler
-// writes, and its total allocation must stay near that budget.
+// writes, and its live backing array must stay about one budget: the
+// bytes.Buffer it used to hold doubled a full buffer, so three abandoned calls
+// retained about 402 MB. A small body must not pay the budget either.
 func TestInProcessRecorderRetainsAtMostTheClientBudget(t *testing.T) {
 	const chunk = 1 << 20
 	offered := 512 << 20
@@ -156,16 +158,31 @@ func TestInProcessRecorderRetainsAtMostTheClientBudget(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 
-	if recorder.body.Len() != inProcessRecorderBufferMax {
+	if len(recorder.body) != inProcessRecorderBufferMax {
 		t.Fatalf("recorder retained %d bytes after %d offered, want the %d byte budget",
-			recorder.body.Len(), offered, inProcessRecorderBufferMax)
+			len(recorder.body), offered, inProcessRecorderBufferMax)
+	}
+	// The live backing array, not just the retained length, must stay about
+	// one budget: a full bytes.Buffer held 128 MiB per recorder.
+	if cap(recorder.body) > inProcessRecorderBufferMax+(1<<20) {
+		t.Fatalf("recorder capacity = %d after %d offered, want about the %d byte budget",
+			cap(recorder.body), offered, inProcessRecorderBufferMax)
 	}
 	// The race-enabled build measures roughly twice the plain allocation, so
 	// the bound carries headroom for it. Without the cap the same fixtures
 	// grow the buffer to the offered size: over 1 GiB plain, over 2 GiB under
-	// race, against at most about 2 * budget here.
+	// race, against a few budgets here.
 	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 768<<20 {
 		t.Fatalf("the recorder allocated %d bytes while %d were offered; the budget must bound it", allocated, offered)
+	}
+
+	small := &inProcessRecorder{header: http.Header{}}
+	if _, err := small.Write(make([]byte, 4<<10)); err != nil {
+		t.Fatal(err)
+	}
+	if len(small.body) != 4<<10 || cap(small.body) > 64<<10 {
+		t.Fatalf("a 4 KiB body retained len %d cap %d; a small body must not allocate the budget",
+			len(small.body), cap(small.body))
 	}
 }
 
