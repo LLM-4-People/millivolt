@@ -314,29 +314,35 @@ func TestSetThrottleDescriptionStatesThePinnedBands(t *testing.T) {
 // TestSetThrottleSchemaTagsStateThePinnedBands parses each band token out of
 // the SetThrottleInput jsonschema tags and compares the whole token to the text
 // derived from the MCP-local constants. A substring check is not enough: a tag
-// widened from "0 to 100000" to "0 to 1000000" still contains the old text, so
-// the parse compares the complete band. The constants themselves are pinned to
-// internal/proxy/throttle.go by the proxy suite's
+// widened from "0 to 100000" to "0 to 1000000" still contains the old text, and
+// an unanchored pattern also accepts the "0 to 100000" inside "10 to 100000",
+// so bandPattern captures the complete band: each number must follow a
+// non-digit and the digit run is consumed whole. The constants themselves are
+// pinned to internal/proxy/throttle.go by the proxy suite's
 // TestMCPThrottleSchemaMirrorsTheProxyBands.
 func TestSetThrottleSchemaTagsStateThePinnedBands(t *testing.T) {
+	bandPattern := regexp.MustCompile(`(?:^|[^0-9])([0-9]+s? to [0-9]+h?)`)
 	window := fmt.Sprintf("%s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour))
 	for _, tc := range []struct {
-		field   string
-		pattern string
-		want    string
+		field string
+		want  string
 	}{
-		{"Concurrency", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitConcurrency)},
-		{"Requests", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitRequests)},
-		{"Tokens", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitTokens)},
-		{"RequestWindow", `[0-9]+s to [0-9]+h`, window},
-		{"TokenWindow", `[0-9]+s to [0-9]+h`, window},
+		{"Concurrency", fmt.Sprintf("0 to %d", maxLimitConcurrency)},
+		{"Requests", fmt.Sprintf("0 to %d", maxLimitRequests)},
+		{"Tokens", fmt.Sprintf("0 to %d", maxLimitTokens)},
+		{"RequestWindow", window},
+		{"TokenWindow", window},
 	} {
 		field, ok := reflect.TypeOf(SetThrottleInput{}).FieldByName(tc.field)
 		if !ok {
 			t.Fatalf("SetThrottleInput has no %s field", tc.field)
 		}
 		tag := string(field.Tag.Get("jsonschema"))
-		if got := regexp.MustCompile(tc.pattern).FindString(tag); got != tc.want {
+		match := bandPattern.FindStringSubmatch(tag)
+		if match == nil {
+			t.Fatalf("SetThrottleInput.%s schema states no band: %q", tc.field, tag)
+		}
+		if got := match[1]; got != tc.want {
 			t.Fatalf("SetThrottleInput.%s schema states the band %q, want %q (owner: the maxLimit*/minLimitWindow constants): %q",
 				tc.field, got, tc.want, tag)
 		}
