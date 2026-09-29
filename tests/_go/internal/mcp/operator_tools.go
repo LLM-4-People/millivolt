@@ -209,29 +209,33 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 	}{
 		{"concurrency above the ceiling", SetThrottleInput{Provider: "local", Concurrency: throttleIntPtr(100_001)}, "concurrency must be 0..100000"},
 		{"requests above the ceiling", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(1_000_000_001)}, "requests must be 0..1000000000"},
-		{"tokens above the ceiling", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(1_000_000_000_001)}, "tokens must be 0..1000000000"},
+		// The exact message, not a substring: "tokens must be 0..1000000000"
+		// is a prefix of the real token ceiling AND the whole requests message,
+		// so a substring check passed when the token band was accidentally
+		// narrowed to the request band.
+		{"tokens above the ceiling", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(1_000_000_000_001)}, "tokens must be 0..1000000000000"},
 		{"negative requests", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(-1)}, "requests must be 0..1000000000"},
-		{"window below the band", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: "500ms"}, "request_window"},
-		{"window above the band", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(5), TokenWindow: "48h"}, "token_window"},
-		{"day form above the band", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(5), TokenWindow: "2d"}, "token_window"},
-		{"unparsable window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: "soon"}, "request_window"},
-		{"empty window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: " "}, "request_window"},
+		{"window below the band", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: "500ms"}, `request_window: window must be 1s..24h0m0s, got "500ms"`},
+		{"window above the band", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(5), TokenWindow: "48h"}, `token_window: window must be 1s..24h0m0s, got "48h"`},
+		{"day form above the band", SetThrottleInput{Provider: "local", Tokens: throttleInt64Ptr(5), TokenWindow: "2d"}, `token_window: window must be 1s..24h0m0s, got "2d"`},
+		{"unparsable window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: "soon"}, `request_window: invalid window "soon"`},
+		{"empty window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: " "}, "request_window: window required"},
 		{
 			"window with no count and no existing count", SetThrottleInput{Provider: "local", RequestWindow: "1m"},
-			"no request count yet",
+			`request_window: provider "local" has no request count yet, so a window alone would set nothing; send requests too`,
 		},
 		{
 			"token window with no count and no existing count", SetThrottleInput{Provider: "local", TokenWindow: "1h"},
-			"no token count yet",
+			`token_window: provider "local" has no token count yet, so a window alone would set nothing; send tokens too`,
 		},
 		{
 			"a body that names no dimension", SetThrottleInput{Provider: "local"},
-			"sets nothing",
+			"send concurrency, requests or tokens: a body that names no dimension sets nothing",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := service.setThrottle(ctx, tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error = %v, want one mentioning %q", err, tc.want)
+			if _, err := service.setThrottle(ctx, tc.in); err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want exactly %q", err, tc.want)
 			}
 		})
 	}
