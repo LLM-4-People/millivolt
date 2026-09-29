@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -278,23 +279,26 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 }
 
 // TestSetThrottleDescriptionStatesThePinnedBands pins the model-visible
-// set_throttle description to the MCP-local band constants. Those constants are
-// the copies the proxy suite's TestMCPThrottleSchemaMirrorsTheProxyBands pins to
-// internal/proxy/throttle.go, and the expected text here is derived from them,
-// so a hand-written description that keeps the old numbers fails when a band
-// changes. The registered tool is checked too, so wiring a literal description
-// in server.go instead of setThrottleDescription fails as well.
+// set_throttle description and the published input schema to independent
+// literals. The description used to be compared against text derived from the
+// same maxLimit* constants it is built from, so a band change moved both sides
+// and the check could not fail; the literals below are the bridge. Which guard
+// owns which fact: the proxy suite's TestMCPThrottleSchemaMirrorsTheProxyBands
+// owns schema tags to internal/proxy/throttle.go, the band test below
+// (TestSetThrottleSchemaTagsStateThePinnedBands) owns tags to the MCP
+// constants, and this test owns the description and the published schema to
+// the literals, so no two of the three can drift without a failure.
 func TestSetThrottleDescriptionStatesThePinnedBands(t *testing.T) {
-	bands := []string{
-		fmt.Sprintf("concurrency (0..%d)", maxLimitConcurrency),
-		fmt.Sprintf("requests per window (0..%d)", maxLimitRequests),
-		fmt.Sprintf("tokens per window (0..%d)", maxLimitTokens),
-		fmt.Sprintf("A window is %s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour)),
-	}
-	for _, band := range bands {
-		if !strings.Contains(setThrottleDescription, band) {
-			t.Fatalf("the set_throttle description must state %q: %q", band, setThrottleDescription)
-		}
+	pins := []struct {
+		property string
+		band     string
+		phrase   string
+	}{
+		{"concurrency", "0 to 100000", "concurrency (0..100000)"},
+		{"requests", "0 to 1000000000", "requests per window (0..1000000000)"},
+		{"tokens", "0 to 1000000000000", "tokens per window (0..1000000000000)"},
+		{"request_window", "1s to 24h", "A window is 1s to 24h"},
+		{"token_window", "1s to 24h", "A window is 1s to 24h"},
 	}
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
@@ -307,6 +311,31 @@ func TestSetThrottleDescriptionStatesThePinnedBands(t *testing.T) {
 		}
 		if tool.Description != setThrottleDescription {
 			t.Fatalf("the registered set_throttle description must be the owner var, got %q", tool.Description)
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal the set_throttle input schema: %v", err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatalf("parse the set_throttle input schema: %v", err)
+		}
+		for _, pin := range pins {
+			property, ok := schema.Properties[pin.property]
+			if !ok {
+				t.Fatalf("the published set_throttle schema has no %s property", pin.property)
+			}
+			if !strings.Contains(property.Description, pin.band) {
+				t.Fatalf("the published %s schema must state %q, got %q",
+					pin.property, pin.band, property.Description)
+			}
+			if !strings.Contains(setThrottleDescription, pin.phrase) {
+				t.Fatalf("the set_throttle description must state %q: %q", pin.phrase, setThrottleDescription)
+			}
 		}
 		return
 	}
