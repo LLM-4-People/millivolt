@@ -142,14 +142,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			MaxScopeFilters:     maxScopeFilters,
 			ServerQueryRowLimit: serverQueryRowLimitNote,
 		},
-		Indexes: []string{
-			"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
-			"idx_requests_provider(provider)",
-			"idx_requests_model(model)",
-			"idx_request_debug_expires(expires_at): the capture TTL sweep",
-			"idx_request_debug_session(session_id): captures by session",
-			"there is NO index on status_code, error_type or cost: filtering on those scans the table",
-		},
+		Indexes:    RequestIndexes,
 		Tables:     tableDocs,
 		Predicates: predicates,
 		Notes: []string{
@@ -243,6 +236,21 @@ var TimeBuckets = []string{"night", "work", "evening", "weekend"}
 // "server_error|500|" and "other||". The parts are the stored error_type,
 // error_code and error_msg.
 var ErrorFilterKeys = []string{"type", "code", "message"}
+
+// RequestIndexes is the published planner reference: the durable indexes a
+// query can use, plus the explicit absence of one on the columns nothing
+// indexes. The durable schema in internal/storage is the owner, and the
+// storage-side TestRequestIndexReferenceMatchesTheDurableSchema test compares
+// this list against the DDL itself in both directions, so an index added,
+// removed or renamed on either side cannot drift.
+var RequestIndexes = []string{
+	"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
+	"idx_requests_provider(provider)",
+	"idx_requests_model(model)",
+	"idx_request_debug_expires(expires_at): the capture TTL sweep",
+	"idx_request_debug_session(session_id): captures by session",
+	"there is NO index on status_code, error_type or cost: filtering on those scans the table",
+}
 
 // vocabularies is the one owner of every filter dimension's value space. A
 // dimension with no closed set says so and points at the values tool, which is
