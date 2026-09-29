@@ -687,8 +687,9 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read cmd/mcp/main.go: %v", err)
 	}
-	// A doc line is `//<tab>--flag / ENV_NAME` with alignment spaces.
-	row := regexp.MustCompile(`^//\t(--[a-z0-9-]+)\s+/\s+([A-Z0-9_]+)`)
+	// A doc line is `//<tab>--flag / ENV_NAME` with alignment spaces; the tail
+	// carries the parenthetical the operator-token line adds.
+	row := regexp.MustCompile(`^//\t(--[a-z0-9-]+)\s+/\s+([A-Z0-9_]+)(.*)$`)
 	documented := map[string]string{}
 	for _, line := range strings.Split(string(doc), "\n") {
 		if match := row.FindStringSubmatch(line); match != nil {
@@ -696,6 +697,16 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 				t.Fatalf("cmd/mcp's package doc lists %s more than once", match[1])
 			}
 			documented[match[1]] = match[2]
+			// The parenthetical names the proxy's own variable, and it is a
+			// hand copy: a substring or suffix check would accept an appended
+			// _LEGACY, so the whole tail must equal the owner constant's
+			// sentence.
+			if match[1] == "--"+flagOperatorToken {
+				wantTail := "(the proxy's " + proxyTokenEnv + ")"
+				if got := strings.TrimSpace(match[3]); got != wantTail {
+					t.Fatalf("cmd/mcp's package doc pairs %s with %q, want %q", match[1], got, wantTail)
+				}
+			}
 		}
 	}
 	if len(documented) == 0 {
