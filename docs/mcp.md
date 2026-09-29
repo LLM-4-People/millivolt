@@ -557,11 +557,12 @@ once), `set_throttle` (a limit set and then cleared), `resume_quota`,
 capture cycle (`audit_start` and `audit_stop`), and the purge path: the
 missing confirmation, the wrong phrase, an unauthorized token and a token
 issued for a different filter each refuse with the row count unchanged, and
-then an authorized purge deletes the fixture rows. The read-only
-`prometheus`, `audit_status`, `audit_captures_list`, `audit_capture_get`,
-`config_get` and `values` are driven in the same run. A successful purge and the
-config write are safe here because the instance, its database and its config
-copy all belong to the test and are discarded.
+then an authorized purge deletes the fixture rows. The read-only tools are
+`describe`, `query`, `explore`, `chart`, `records`, `snapshot`, `prometheus`,
+`audit_status`, `audit_captures_list`, `audit_capture_get`, `operator_state`,
+`config_get`, `values` and `purge_preview`; the run drives each of them. A
+successful purge and the config write are safe here because the instance, its
+database and its config copy all belong to the test and are discarded.
 
 The same run drives the proxy's own `/mcp` endpoint with a real streamable
 HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and

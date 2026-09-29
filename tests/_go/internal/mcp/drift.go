@@ -575,63 +575,106 @@ func TestToolTableMatchesTheRegistry(t *testing.T) {
 	}
 }
 
-// TestStateChangingToolsMatchTheRegistry pins the guide's state-changing tool
-// list to the registry annotations, the one owner of that classification: a
-// tool the registry annotates mutating or destructive is state-changing, a
-// read-only annotated tool is not. The comparison is bidirectional, so moving
-// a tool between the guide's categories, renaming one, or adding a mutating
-// tool without listing it fails here. The guarded sentence is the one with
-// "state-changing tools are " and ending at its first period; its backticked
-// tool names are the guide's set.
-func TestStateChangingToolsMatchTheRegistry(t *testing.T) {
-	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
-	if err != nil {
-		t.Fatalf("read the MCP guide: %v", err)
-	}
-	const heading = "state-changing tools are "
-	index := strings.Index(string(guide), heading)
+// guideToolNames returns the backticked tool names of the guide sentence that
+// follows heading, up to that sentence's first period. The guide has one
+// enumerated sentence per annotation class, so the heading plus the regex are
+// its whole contract.
+func guideToolNames(t *testing.T, guide, heading string) map[string]bool {
+	t.Helper()
+	index := strings.Index(guide, heading)
 	if index < 0 {
 		t.Fatalf("docs/mcp.md must state %q", heading)
 	}
-	sentence := string(guide)[index+len(heading):]
+	sentence := guide[index+len(heading):]
 	if dot := strings.Index(sentence, "."); dot >= 0 {
 		sentence = sentence[:dot]
 	}
 	listed := map[string]bool{}
 	for _, match := range regexp.MustCompile("`([a-z][a-z0-9_]*)`").FindAllStringSubmatch(sentence, -1) {
 		if listed[match[1]] {
-			t.Fatalf("the state-changing list names %s twice", match[1])
+			t.Fatalf("the %q list names %s twice", heading, match[1])
 		}
 		listed[match[1]] = true
 	}
 	if len(listed) == 0 {
-		t.Fatal("the state-changing sentence names no tool")
+		t.Fatalf("the %q sentence names no tool", heading)
 	}
+	return listed
+}
 
+// annotatedTools splits the registered surface by the registry's own
+// annotations: a non-nil DestructiveHint is the mutating-or-destructive set
+// (readOnly sets only ReadOnlyHint), and ReadOnlyHint true is the read-only
+// set. Every registered tool must land in exactly one of the two sets.
+func annotatedTools(t *testing.T) (readOnly, stateChanging map[string]bool) {
+	t.Helper()
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	registered, err := session.ListTools(t.Context(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stateChanging := map[string]bool{}
+	readOnly = map[string]bool{}
+	stateChanging = map[string]bool{}
 	for _, tool := range registered.Tools {
-		// The registry's readOnly annotation sets only ReadOnlyHint; both
-		// mutating and destructive set DestructiveHint (false or true), so a
-		// non-nil destructive hint is exactly the state-changing set.
-		if tool.Annotations != nil && tool.Annotations.DestructiveHint != nil {
+		if tool.Annotations == nil {
+			continue
+		}
+		switch {
+		case tool.Annotations.DestructiveHint != nil:
 			stateChanging[tool.Name] = true
+		case tool.Annotations.ReadOnlyHint:
+			readOnly[tool.Name] = true
 		}
 	}
-	for name := range stateChanging {
-		if !listed[name] {
-			t.Fatalf("the guide's state-changing list omits %s, which the registry annotates mutating or destructive", name)
+	if got := len(readOnly) + len(stateChanging); got != len(registered.Tools) {
+		t.Fatalf("the registry annotates %d of %d tools as read-only or state-changing", got, len(registered.Tools))
+	}
+	return readOnly, stateChanging
+}
+
+// assertGuideSet compares the guide's enumerated set for one annotation class
+// with the registry-derived set in both directions, so a rename, a move
+// between classes, or an unlisted addition fails here.
+func assertGuideSet(t *testing.T, category string, guide, registry map[string]bool) {
+	t.Helper()
+	for name := range registry {
+		if !guide[name] {
+			t.Fatalf("the guide's %s list omits %s, which the registry annotates %s", category, name, category)
 		}
 	}
-	for name := range listed {
-		if !stateChanging[name] {
-			t.Fatalf("the guide lists %s as state-changing, the registry annotates it read-only", name)
+	for name := range guide {
+		if !registry[name] {
+			t.Fatalf("the guide lists %s as %s, the registry annotates it differently", name, category)
 		}
 	}
+}
+
+// TestStateChangingToolsMatchTheRegistry pins the guide's state-changing tool
+// list to the registry annotations, the one owner of that classification: a
+// tool the registry annotates mutating or destructive is state-changing, a
+// read-only annotated tool is not. The guarded sentence is the one with
+// "state-changing tools are " and ending at its first period.
+func TestStateChangingToolsMatchTheRegistry(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	_, stateChanging := annotatedTools(t)
+	assertGuideSet(t, "state-changing", guideToolNames(t, string(guide), "state-changing tools are "), stateChanging)
+}
+
+// TestReadOnlyToolsMatchTheRegistry pins the guide's read-only tool list the
+// same way, against the same registry owner: a read-only annotated tool is
+// read-only, a mutating or destructive one is not. The list enumerated here
+// used to name only some of the read-only tools, and a mutation of an unlisted
+// name changed no behavior any test observed.
+func TestReadOnlyToolsMatchTheRegistry(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	readOnly, _ := annotatedTools(t)
+	assertGuideSet(t, "read-only", guideToolNames(t, string(guide), "read-only tools are"), readOnly)
 }
 
 // TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
