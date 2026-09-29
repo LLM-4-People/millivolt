@@ -232,7 +232,12 @@ func main() {
 	gate := newOperatorGate(mustOperatorToken())
 
 	mux := http.NewServeMux()
-	// The /admin and /metrics namespaces own no unregistered handler:
+	// The guarded handler is built before route registration so the MCP
+	// endpoint can dispatch its synthesized internal calls through the same
+	// gate every external request passes: the caller's Bearer is re-validated
+	// in process, and no second credential path exists.
+	handler := protectOperatorRequests(mux, gate)
+	// The /admin, /metrics and /mcp namespaces own no unregistered handler:
 	// reserving both the roots and the subtrees means neither the
 	// unauthenticated gate nor an authenticated request can ever forward a
 	// namespace look-alike to the upstream catch-all. Registered exact
@@ -241,6 +246,10 @@ func main() {
 	mux.Handle("/admin/", http.NotFoundHandler())
 	mux.Handle("/metrics", http.NotFoundHandler())
 	mux.Handle("/metrics/", http.NotFoundHandler())
+	// The MCP streamable HTTP endpoint is always registered and gated like
+	// /metrics; /mcp/ reserves every look-alike for the 404 handler.
+	mux.Handle("/mcp", newMCPHandler(gate, handler))
+	mux.Handle("/mcp/", http.NotFoundHandler())
 	// The liveness probe is the one open server route besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.
@@ -362,7 +371,6 @@ func main() {
 	srvCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 
-	handler := protectOperatorRequests(mux, gate)
 	httpSrv := newHTTPServer(handler, cfg, srvCtx)
 	// Serve in a goroutine; main blocks on the shutdown signal so we can shut
 	// down gracefully and close storage only after in-flight requests finish.

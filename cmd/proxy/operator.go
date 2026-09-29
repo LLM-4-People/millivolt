@@ -158,16 +158,17 @@ func (g *operatorGate) valid(presented string) bool {
 }
 
 // gatedPath reports whether the request belongs to the dashboard/operator
-// plane. The exact namespace roots are gated too: /admin, /metrics and /dash
-// are millivolt-owned, so a look-alike path can never reach the inference
+// plane. The exact namespace roots are gated too: /admin, /metrics, /dash and
+// /mcp are millivolt-owned, so a look-alike path can never reach the inference
 // catch-all. Everything else (registered /healthz, brand/PWA files and the
 // catch-all) passes untouched.
 func gatedPath(path string) bool {
 	return path == "/" || path == "/index.html" ||
-		path == "/admin" || path == "/metrics" || path == "/dash" ||
+		path == "/admin" || path == "/metrics" || path == "/dash" || path == "/mcp" ||
 		strings.HasPrefix(path, "/dash/") ||
 		strings.HasPrefix(path, "/metrics/") ||
-		strings.HasPrefix(path, "/admin/")
+		strings.HasPrefix(path, "/admin/") ||
+		strings.HasPrefix(path, "/mcp/")
 }
 
 // bearerToken extracts the presented credential verbatim. The scheme is
