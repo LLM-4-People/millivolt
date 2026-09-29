@@ -73,18 +73,17 @@ type inProcessTransport struct {
 // RoundTrip implements http.RoundTripper. The dispatch runs on a bounded
 // deadline: the request context's own deadline when it has one (the client's
 // Timeout and the full-history reads' query timeout both arrive that way),
-// otherwise the configured bound. A handler that ignores its context can no
-// longer hold the request open indefinitely; the proxy's own handlers poll the
-// context, so for them the observable behavior is unchanged.
+// otherwise the configured bound.
 //
-// Residual, stated plainly: returning on the deadline abandons, but does not
-// stop, a handler that never polls its context. That handler keeps running in
-// its own goroutine until it returns on its own, so one abandoned call retains
-// one goroutine, measured at exactly that: the call returns and the dispatch
-// goroutine stays blocked until released. The body it can accumulate in the
-// transport is bounded by inProcessRecorderBufferMax, because inProcessRecorder
-// discards every byte past the cap. Every in-tree handler polls context, so the
-// residual is not reachable through this router today.
+// Residual, stated plainly: the transport returns at its deadline while the
+// dispatched handler may keep running. The pause, throttle, debug and quota
+// handlers, the config write path and the reload path never read r.Context(),
+// and their persistence is bounded only by the store timeout, so the residual
+// is reachable whenever such a handler's store timeout exceeds this transport
+// bound. Every abandoned call holds one goroutine and a bounded recorder until
+// the handler returns: inProcessRecorder discards every byte past
+// inProcessRecorderBufferMax, so the retained body stays bounded even after the
+// call is gone.
 func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	ctx := request.Context()
 	if _, ok := ctx.Deadline(); !ok {
