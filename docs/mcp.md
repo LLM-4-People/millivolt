@@ -548,17 +548,18 @@ It runs in CI as part of the isolated browser-fixtures step, which already has a
 dev instance and an operator token; it is not part of the core source-and-unit
 job, because that job should not have to start a second proxy.
 
-It drives every registered tool against its own disposable instance,
-including the state-changing ones: `prometheus`, `set_pause` (a hold scoped to
-the fixture client, resumed at once), `set_throttle` (a limit set and then
-cleared), `resume_quota`, `set_config` and `reload_config` against the scratch
-config copy, a full capture cycle (`audit_status`, `audit_start`,
-`audit_captures_list`, `audit_capture_get`, `audit_stop`), `config_get`,
-`values`, and the purge path: the missing confirmation, the wrong phrase, an
-unauthorized token and a token issued for a different filter each refuse with
-the row count unchanged, and then an authorized purge deletes the fixture rows.
-A successful purge and the config write are safe here because the instance, its
-database and its config copy all belong to the test and are discarded.
+It drives every registered tool against its own disposable instance. The
+state-changing tools are `set_pause` (a hold scoped to the fixture client,
+resumed at once), `set_throttle` (a limit set and then cleared),
+`resume_quota`, `set_config` and `reload_config` against the scratch config
+copy, a full capture cycle (`audit_start` and `audit_stop`), and the purge
+path: the missing confirmation, the wrong phrase, an unauthorized token and a
+token issued for a different filter each refuse with the row count unchanged,
+and then an authorized purge deletes the fixture rows. The read-only
+`prometheus`, `audit_status`, `audit_captures_list`, `audit_capture_get`,
+`config_get` and `values` are driven in the same run. A successful purge and the
+config write are safe here because the instance, its database and its config
+copy all belong to the test and are discarded.
 
 The same run drives the proxy's own `/mcp` endpoint with a real streamable
 HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and
