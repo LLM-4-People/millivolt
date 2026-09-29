@@ -54,20 +54,47 @@ BIN="$DEV_BASE-bin"
 mkdir -p "$DEV_DIR"
 
 is_running() {
-  [ -f "$PID_FILE" ] || return 1
-  local pid args i
-  pid="$(cat "$PID_FILE")"
+  local pid_file="${1:-$PID_FILE}" pid args i
+  [ -f "$pid_file" ] || return 1
+  pid="$(cat "$pid_file")"
   [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )) || return 1
   [ -r "/proc/$pid/cmdline" ] || return 1
   mapfile -d '' -t args < "/proc/$pid/cmdline"
   # The rebuild child has a new executable name, but inherits this exact flag.
   for ((i=0; i+1<${#args[@]}; i++)); do
-    if [ "${args[i]}" = -pid-file ] && [ "${args[i+1]}" = "$PID_FILE" ]; then
+    if [ "${args[i]}" = -pid-file ] && [ "${args[i+1]}" = "$pid_file" ]; then
       kill -0 "$pid" 2>/dev/null
       return $?
     fi
   done
   return 1
+}
+
+# tracked_ports prints the ports with a live dev instance, comma-separated. It
+# is the discovery half of the no-instance report: DEV_PORT selects one
+# instance, and naming the others keeps "not running" from reading as "nothing
+# is running". It never identifies an instance for termination.
+tracked_ports() {
+  local pid_file port joined=''
+  for pid_file in "$DEV_DIR"/millivolt-dev-*.pid; do
+    [ -e "$pid_file" ] || continue
+    is_running "$pid_file" || continue
+    port="${pid_file##*/millivolt-dev-}"
+    joined+="${joined:+, }${port%.pid}"
+  done
+  printf '%s' "$joined"
+}
+
+# not_running is the single owner of the "no instance for the resolved
+# DEV_PORT" report; stop and status both use it. It only reports, so stop can
+# never terminate an instance the caller did not identify.
+not_running() {
+  local ports; ports="$(tracked_ports)"
+  if [ -n "$ports" ]; then
+    echo "dev instance not running on ${LISTEN}; tracked dev instance ports: $ports (DEV_PORT selects the instance)"
+  else
+    echo "dev instance not running on ${LISTEN} (no running dev instance is tracked; DEV_PORT selects the instance)"
+  fi
 }
 
 stop() {
@@ -78,7 +105,7 @@ stop() {
     if is_running; then kill -9 "$pid" 2>/dev/null || true; fi
     echo "stopped dev instance (pid $pid)"
   else
-    echo "dev instance not running"
+    not_running
   fi
   rm -f "$PID_FILE"
 }
@@ -86,7 +113,7 @@ stop() {
 case "${1:-up}" in
   stop)   stop; exit 0 ;;
   status)
-    if is_running; then echo "dev instance running (pid $(cat "$PID_FILE")) at http://${LISTEN}"; else echo "dev instance not running"; fi
+    if is_running; then echo "dev instance running (pid $(cat "$PID_FILE")) at http://${LISTEN}"; else not_running; fi
     exit 0 ;;
   up|restart|"") ;; # fall through
   *) echo "unknown command: $1 (use: up | stop | status)" >&2; exit 2 ;;
