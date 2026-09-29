@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
@@ -24,15 +26,20 @@ import (
 // nothing is derived from the request Host: the client's nominal origin is the
 // named non-routable constant internal/mcp.InProcessOrigin.
 func newMCPHandler(gate *operatorGate, dispatch http.Handler) http.Handler {
+	// The defaults are the only limits policy on this endpoint: there is no
+	// config knob for it, exactly as there is none for the stdio entrypoint's
+	// defaults. The same policy bounds the Service and the in-process
+	// transport's deadline.
+	limits := mcp.DefaultLimits()
 	streamable := mcp.NewHTTPHandler(func(r *http.Request) *mcp.Service {
 		token, ok := bearerToken(r)
 		if !ok || !gate.valid(token) {
 			return nil
 		}
-		// The defaults are the only limits policy on this endpoint: there is
-		// no config knob for it, exactly as there is none for the stdio
-		// entrypoint's defaults.
-		service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, token, mcp.DefaultLimits(), inProcessTransport{dispatch: dispatch})
+		service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, token, limits, inProcessTransport{
+			dispatch: dispatch,
+			timeout:  limits.Timeout,
+		})
 		if err != nil {
 			// The wrapper validated the same credential this constructor
 			// validates, so a failure here is an internal inconsistency; the
@@ -56,15 +63,39 @@ func newMCPHandler(gate *operatorGate, dispatch http.Handler) http.Handler {
 // routed path can escape to a loopback port or to another host.
 type inProcessTransport struct {
 	dispatch http.Handler
+	// timeout is the deadline enforced when the request context carries none.
+	// In production net/http wraps the context with the client's own Timeout
+	// before calling a transport, so this is the explicit fallback for a
+	// direct RoundTrip.
+	timeout time.Duration
 }
 
-// RoundTrip implements http.RoundTripper. A transport failure cannot occur:
-// the handler either answers or panics, and every response is a complete,
-// bounded body this process already holds.
+// RoundTrip implements http.RoundTripper. The dispatch runs on a bounded
+// deadline: the request context's own deadline when it has one (the client's
+// Timeout and the full-history reads' query timeout both arrive that way),
+// otherwise the configured bound. A handler that ignores its context can no
+// longer hold the request open indefinitely; the proxy's own handlers poll the
+// context, so for them the observable behavior is unchanged.
 func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	ctx := request.Context()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t.timeout)
+		defer cancel()
+		request = request.WithContext(ctx)
+	}
 	recorder := &inProcessRecorder{header: http.Header{}}
-	t.dispatch.ServeHTTP(recorder, request)
-	return recorder.response(request), nil
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t.dispatch.ServeHTTP(recorder, request)
+	}()
+	select {
+	case <-done:
+		return recorder.response(request), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 // inProcessRecorder is the minimal ResponseWriter the in-process dispatch
