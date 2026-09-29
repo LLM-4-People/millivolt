@@ -157,6 +157,32 @@ func waitPIDFixture(t *testing.T, pid int, pidFile string) {
 	}
 }
 
+// freeDevNamespaceListener reserves a loopback listener whose dev namespace
+// file is unclaimed. A timed-out run leaks the fixture's namespace file (the
+// test timeout kills the process before deferred cleanup), and the kernel
+// reuses ephemeral port numbers, so a new fixture must skip a leaked name
+// instead of failing its exclusive creation against it.
+func freeDevNamespaceListener(t *testing.T) net.Listener {
+	t.Helper()
+	for attempt := 0; attempt < 1000; attempt++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, port, err := net.SplitHostPort(ln.Addr().String())
+		if err != nil {
+			ln.Close()
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(devNamespacePath(port) + ".yaml"); errors.Is(err, os.ErrNotExist) {
+			return ln
+		}
+		ln.Close()
+	}
+	t.Fatal("no dev namespace port free of leaked files")
+	return nil
+}
+
 func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 	t.Setenv(mcp.ProxyTokenEnv, "fixture-token")
 	for _, mode := range []string{"ramp", "request failure", "canceled", "cleanup failure", "changed database"} {
@@ -171,7 +197,21 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 			var tags, purged []string
 			var cfg settings
 			var pid, configReads int
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ln := freeDevNamespaceListener(t)
+			defer ln.Close()
+			u, _ := url.Parse("http://" + ln.Addr().String())
+			base := devNamespacePath(u.Port())
+			if err := os.MkdirAll(filepath.Dir(base), 0700); err != nil {
+				t.Fatal(err)
+			}
+			// Exclusive creation and exact cleanup never replace a dev file.
+			file, err := os.OpenFile(base+".yaml", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file.Close()
+			defer os.Remove(base + ".yaml")
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
 				switch r.URL.Path {
@@ -234,20 +274,11 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				}
 			}))
+			server.Listener.Close()
+			server.Listener = ln
+			server.Start()
 			defer server.Close()
 			o.target = server.URL
-			u, _ := url.Parse(server.URL)
-			base := "/tmp/millivolt/millivolt-dev-" + u.Port()
-			if err := os.MkdirAll(filepath.Dir(base), 0700); err != nil {
-				t.Fatal(err)
-			}
-			// Exclusive creation and exact cleanup never replace a dev file.
-			file, err := os.OpenFile(base+".yaml", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if err != nil {
-				t.Fatal(err)
-			}
-			file.Close()
-			defer os.Remove(base + ".yaml")
 			proc := exec.Command(os.Args[0], "-test.run=^TestStressPIDFixture$", "--", "-pid-file", base+".pid")
 			proc.Env = append(os.Environ(), "MILLIVOLT_STRESS_PID_FIXTURE=1")
 			stdin, err := proc.StdinPipe()
