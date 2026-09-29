@@ -56,6 +56,60 @@ const (
 	fixtureClient = "mcp-integration-fixture"
 )
 
+// devScratchPaths returns the files one scripts/dev.sh instance creates for its
+// port, plus this fixture's own scratch database. dev.sh names its binary
+// "$DEV_BASE-bin", not "$DEV_BASE.bin": cleanup that spelled the wrong name left
+// a stale multi-megabyte binary in /tmp/millivolt after every run.
+//
+// The names are not guessed: TestDevScratchPathsMatchDevShOwner checks them
+// against scripts/dev.sh, so a rename in the lifecycle owner fails the suite
+// instead of silently leaking files again.
+func devScratchPaths(port string) []string {
+	base := "/tmp/millivolt/millivolt-dev-" + port
+	return []string{
+		base + ".yaml", base + ".pid", base + ".log", base + "-bin",
+		integrationDBPrefix + port + ".db",
+		integrationDBPrefix + port + ".db-shm",
+		integrationDBPrefix + port + ".db-wal",
+	}
+}
+
+// TestDevScratchPathsMatchDevShOwner pins the integration cleanup to the names
+// the lifecycle owner actually uses. The binary suffix was once written as
+// ".bin" while dev.sh builds "-bin", so each live run leaked its binary.
+func TestDevScratchPathsMatchDevShOwner(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "dev.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// dev.sh builds every port-keyed name from DEV_BASE; these literals are its
+	// side of the contract.
+	for _, owner := range []string{
+		`CONFIG_FILE="$DEV_BASE.yaml"`,
+		`PID_FILE="$DEV_BASE.pid"`,
+		`LOG_FILE="$DEV_BASE.log"`,
+		`BIN="$DEV_BASE-bin"`,
+	} {
+		if !bytes.Contains(script, []byte(owner)) {
+			t.Fatalf("scripts/dev.sh no longer declares %s; devScratchPaths must follow the owner", owner)
+		}
+	}
+	got := map[string]bool{}
+	for _, path := range devScratchPaths("8081") {
+		got[path] = true
+	}
+	for _, want := range []string{
+		"/tmp/millivolt/millivolt-dev-8081.yaml",
+		"/tmp/millivolt/millivolt-dev-8081.pid",
+		"/tmp/millivolt/millivolt-dev-8081.log",
+		"/tmp/millivolt/millivolt-dev-8081-bin",
+	} {
+		if !got[want] {
+			t.Fatalf("devScratchPaths is missing %q, a file scripts/dev.sh creates", want)
+		}
+	}
+}
+
 // devInstance starts the private dev instance and returns the connected tool
 // session. The instance is stopped through scripts/dev.sh when the test ends, on
 // success and on failure alike.
@@ -83,13 +137,7 @@ func devInstance(t *testing.T) *liveTools {
 	// unrelated fixture that exclusively creates the same port-keyed path
 	// (cmd/stress) collide with it.
 	t.Cleanup(func() {
-		base := "/tmp/millivolt/millivolt-dev-" + port
-		for _, path := range []string{
-			base + ".yaml", base + ".pid", base + ".log", base + ".bin",
-			integrationDBPrefix + port + ".db",
-			integrationDBPrefix + port + ".db-shm",
-			integrationDBPrefix + port + ".db-wal",
-		} {
+		for _, path := range devScratchPaths(port) {
 			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				t.Errorf("remove dev scratch %s: %v", path, err)
 			}
