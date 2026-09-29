@@ -437,11 +437,14 @@ func failureMessage(t *testing.T, token, body string) string {
 	return apiErr.Message
 }
 
-// assertNoCredentialFragment fails when any contiguous run of min(8, len(token))
-// bytes of the credential survives anywhere in the message.
+// assertNoCredentialFragment fails when any contiguous run of
+// min(minRedactionRun, len(token)) bytes of the credential survives anywhere in
+// the message. The window comes from the redaction owner, so raising or
+// lowering the fragment floor changes both what redaction removes and what
+// this helper guards; a hardcoded floor would drift from it silently.
 func assertNoCredentialFragment(t *testing.T, token, where, message string) {
 	t.Helper()
-	window := min(8, len(token))
+	window := min(minRedactionRun, len(token))
 	for start := 0; start+window <= len(token); start++ {
 		if fragment := token[start : start+window]; strings.Contains(message, fragment) {
 			t.Fatalf("%s leaked the credential fragment %q: %q", where, fragment, message)
