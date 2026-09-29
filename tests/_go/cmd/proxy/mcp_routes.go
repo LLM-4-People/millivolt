@@ -9,11 +9,11 @@ import (
 )
 
 // TestMCPRouteIsRegisteredOnTheOperatorMux pins the reserved namespace table
-// main installs: the exact patterns and, through the real gate, that a valid
-// Bearer POST to /mcp is answered by the MCP endpoint and never by the
-// inference catch-all. The mux comes from newOperatorMux, the same function
-// main calls, so deleting main's installation or the /mcp entry fails here in
-// the default suite instead of only in the opt-in live one.
+// operatorNamespaces declares and the installation newOperatorMux performs on
+// it: the exact patterns and, through the real gate, that a valid Bearer POST
+// to /mcp is answered by the MCP endpoint and never by the inference
+// catch-all. The test drives newOperatorMux directly and never observes main,
+// so main calling it (or keeping its installation) is not asserted here.
 func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
 	mux, handler := newOperatorMux(gate)
