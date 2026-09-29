@@ -334,6 +334,18 @@ func check(image string) error {
 	if err := daemon.stopClean(ctx, restored); err != nil {
 		return err
 	}
+	// The operator credential must never reach the container's own log: the
+	// MCP subsystem and the gate both run inside the image, and Docker logs
+	// are readable by anything with daemon access.
+	for _, target := range containers {
+		logs, err := command(ctx, "logs", target)
+		if err != nil {
+			return fmt.Errorf("container logs: %w", err)
+		}
+		if bytes.Contains(logs, []byte(smokeToken)) {
+			return fmt.Errorf("the operator credential appeared in container %s logs", target)
+		}
+	}
 	fmt.Printf("container HTTP/config/SQLite/restart/backup/restore smoke passed (%s)\n", runtime.GOARCH)
 	return nil
 }
@@ -654,6 +666,25 @@ func probe(phase string) error {
 	}
 	if served.StatusCode != http.StatusOK || !bytes.Contains(dash, []byte("<html")) {
 		return fmt.Errorf("session-cookie dashboard returned %d, want the HTML shell", served.StatusCode)
+	}
+	// The MCP endpoint ships in the image and is Bearer-only on top of the
+	// operator gate: the authenticated initialize below must answer with the
+	// server identity, and the credential must not be reflected back.
+	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"container-smoke","version":"0"}}}`
+	status, mcpBody, err := do(client, http.MethodPost, "/mcp", []byte(initialize), map[string]string{
+		"Accept": "application/json, text/event-stream",
+	})
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("mcp initialize returned %d, want 200: %s", status, mcpBody)
+	}
+	if !bytes.Contains(mcpBody, []byte(`"serverInfo"`)) || !bytes.Contains(mcpBody, []byte(`"millivolt"`)) {
+		return fmt.Errorf("mcp initialize answer = %q, want the server identity", mcpBody)
+	}
+	if bytes.Contains(mcpBody, []byte(credential)) {
+		return errors.New("the mcp initialize answer echoed the operator credential")
 	}
 	html, err := request(client, http.MethodGet, "/", nil)
 	if err != nil {
