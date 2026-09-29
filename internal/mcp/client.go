@@ -17,8 +17,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 // Route paths. This is the closed set of operator-plane endpoints this server
@@ -166,15 +170,19 @@ func (e *APIError) Error() string {
 
 // newAPIError extracts the proxy's flat {"error": "..."} body REGARDLESS of
 // the declared Content-Type: the operator routes are inconsistent, and some
-// answers with text/plain carrying a JSON body. A body that is not that shape
-// degrades to a bounded, whitespace-collapsed excerpt instead of raw bytes.
+// answers with text/plain carrying a JSON body. Any other JSON shape has every
+// string field decoded and joined before matching, so a credential in a nested
+// document gets the same unescaping the flat shape always got; a body that is
+// not JSON at all degrades to a bounded, whitespace-collapsed excerpt instead
+// of raw bytes.
 //
 // The credential is redacted from the RESULT, not only from the transport
 // error: an endpoint that reflects the Authorization header back into its own
 // failure body would otherwise hand the credential to the model verbatim, and
 // everything this returns is logged and pasted elsewhere. The redaction runs on
 // the full text BEFORE the bound, so a token straddling the bound cannot lose
-// its matching half and survive as a fragment.
+// its matching half and survive as a fragment; redactForExcerpt owns that
+// order and the scan bound.
 func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	message := strings.TrimSpace(string(body))
 	var flat struct {
@@ -182,30 +190,55 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	}
 	if len(body) > 0 && json.Unmarshal(body, &flat) == nil && flat.Error != "" {
 		message = flat.Error
+	} else if decoded, ok := structuredStrings(body); ok {
+		message = decoded
 	}
 	if message != "" {
-		// Redact the FULL, untruncated message before collapsing whitespace and
-		// applying the bound. Bounding first would cut a credential straddling
-		// the boundary in half, and the surviving fragment no longer matches
-		// the whole token, so it would ride into the tool message. Both shapes
-		// get the same treatment: a flat {"error": "<huge>"} is exactly as able
-		// to fill a model context as an unexpected HTML page, and the proxy's
-		// own text can carry newlines.
-		message = redactCredential(message, token)
-		message = strings.Join(strings.Fields(message), " ")
-		// The collapse can CREATE the credential from an echo whose whitespace
-		// does not match the real one (tabs where the token has spaces), so the
-		// redaction runs again on the collapsed text, still before the bound.
-		message = redactCredential(message, token)
-		if len(message) > maxErrorBodyBytes {
-			message = message[:maxErrorBodyBytes] + " [truncated]"
-		}
+		message = redactForExcerpt(message, token)
 	}
 	return &APIError{
 		Status:     resp.StatusCode,
 		Message:    errorMessage(message, resp.StatusCode),
 		RetryAfter: sanitizeRetryAfter(resp.Header.Get("Retry-After")),
 		Challenge:  resp.Header.Get("WWW-Authenticate"),
+	}
+}
+
+// structuredStrings decodes every string value in a JSON failure body and
+// joins them. The flat {"error": "..."} document is handled before this; any
+// other JSON shape used to reach the message as raw text, so a credential
+// inside it arrived still JSON-escaped and no matcher could see it. Decoding
+// the fields first gives the matcher the same text the flat shape gets.
+func structuredStrings(body []byte) (string, bool) {
+	var document any
+	if err := json.Unmarshal(body, &document); err != nil {
+		return "", false
+	}
+	var values []string
+	collectJSONStrings(document, &values)
+	if len(values) == 0 {
+		return "", false
+	}
+	return strings.Join(values, " "), true
+}
+
+// collectJSONStrings walks a decoded JSON document in order, collecting every
+// non-empty string value. Object keys are field names, not values, so they are
+// not collected.
+func collectJSONStrings(value any, values *[]string) {
+	switch typed := value.(type) {
+	case string:
+		if typed != "" {
+			*values = append(*values, typed)
+		}
+	case []any:
+		for _, item := range typed {
+			collectJSONStrings(item, values)
+		}
+	case map[string]any:
+		for _, item := range typed {
+			collectJSONStrings(item, values)
+		}
 	}
 }
 
@@ -388,71 +421,386 @@ const redactionMarker = "[redacted]"
 // single characters or ordinary prose.
 const minRedactionRun = 8
 
+// maxPercentLayers bounds the nested percent encodings the scanner peels.
+// Double encoding is the shape a gateway produces by escaping an already
+// escaped value; a token hidden any deeper than this is outside the forms an
+// operator faces, and the bound keeps the work finite.
+const maxPercentLayers = 3
+
+// credentialFormByteMax is the largest number of raw bytes one credential byte
+// can occupy in a recognized encoded form: a triple percent escape is seven
+// bytes (2*maxPercentLayers+1), and a JSON \u escape of an ASCII byte is six.
+const credentialFormByteMax = 2*maxPercentLayers + 1
+
+// redactForExcerpt is the one redaction pipeline for a failure message that is
+// published as a whitespace-collapsed excerpt: redact, collapse, redact again,
+// then bound. Redacting before the collapse is what keeps a credential from
+// being cut in half by the bound; redacting after it is what catches an echo
+// whose whitespace differs from the credential (tabs where it has spaces),
+// which the collapse itself turns back into the credential.
+//
+// The scan is bounded to the region that can still reach the excerpt. A
+// credential byte can occupy at most credentialFormByteMax raw bytes, so any
+// match that lands inside the first maxErrorBodyBytes collapsed bytes ends
+// within maxErrorBodyBytes + credentialFormByteMax*len(token) collapsed bytes;
+// excerptRegion finds that raw prefix exactly, even through a long whitespace
+// run, because collapsing only ever shortens text.
+func redactForExcerpt(message, token string) string {
+	if message == "" {
+		return message
+	}
+	region := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
+	redacted := redactCredential(region, token)
+	redacted = strings.Join(strings.Fields(redacted), " ")
+	redacted = redactCredential(redacted, token)
+	if len(redacted) > maxErrorBodyBytes {
+		redacted = redacted[:maxErrorBodyBytes] + " [truncated]"
+	}
+	return redacted
+}
+
+// excerptRegion returns the shortest prefix of message whose whitespace
+// collapse still reaches target bytes, or the whole message when it cannot.
+// Collapsing only ever shortens text (a run of whitespace becomes one space,
+// leading and trailing whitespace disappears), so the raw prefix that produces
+// a given collapsed length is found by walking the collapse itself: a fixed
+// raw byte cut would include unreachable text and, with a long whitespace run,
+// exclude a credential the collapse pulls into the excerpt.
+func excerptRegion(message string, target int) string {
+	if target <= 0 || len(message) <= target {
+		return message
+	}
+	collapsed := 0
+	inWord := false
+	for index := 0; index < len(message); {
+		r, size := utf8.DecodeRuneInString(message[index:])
+		if unicode.IsSpace(r) {
+			inWord = false
+			index += size
+			continue
+		}
+		if !inWord {
+			if collapsed > 0 {
+				collapsed++ // the single space between two words
+			}
+			inWord = true
+		}
+		collapsed++
+		index += size
+		if collapsed >= target {
+			return message[:index]
+		}
+	}
+	return message
+}
+
+// rawSpan is the half-open byte range of one match in the original message.
+type rawSpan struct{ start, end int }
+
+// decodedByte is one byte of a decoded view with the raw range it came from. A
+// multi-byte JSON escape produces several decoded bytes that share the whole
+// escape's range, so mapping a match back to the message includes every raw
+// byte the match consumed.
+type decodedByte struct {
+	b          byte
+	start, end int
+}
+
+// credentialView is one decoding interpretation of the message. A reflection
+// can encode the credential in more than one way at once, and an ambiguous
+// sequence (`%25` is a literal percent or the first layer of `%2520`) decodes
+// differently per interpretation, so every view is scanned and the matches are
+// unioned.
+type credentialView struct {
+	raw       string
+	at        int
+	layers    int
+	plusSpace bool
+	json      bool
+	pending   []decodedByte
+}
+
+// credentialViews returns the interpretations the scanner runs: the raw bytes,
+// then percent decoding at each nesting depth, with and without the query `+`
+// form, decoding JSON \u escapes in every decoded view. The raw view covers
+// literal forms (including url.PathEscape and url.QueryEscape output, which is
+// literal text in the message).
+func credentialViews(message string) []credentialView {
+	views := make([]credentialView, 0, 2*maxPercentLayers+1)
+	views = append(views, credentialView{raw: message})
+	for layers := 1; layers <= maxPercentLayers; layers++ {
+		views = append(views,
+			credentialView{raw: message, layers: layers, json: true},
+			credentialView{raw: message, layers: layers, json: true, plusSpace: true},
+		)
+	}
+	return views
+}
+
+// next returns the next decoded byte with its raw range.
+func (v *credentialView) next() (decodedByte, bool) {
+	if len(v.pending) > 0 {
+		out := v.pending[0]
+		v.pending = v.pending[1:]
+		return out, true
+	}
+	if v.at >= len(v.raw) {
+		return decodedByte{}, false
+	}
+	start := v.at
+	switch c := v.raw[v.at]; {
+	case v.json && c == '\\':
+		if r, consumed, ok := decodeJSONEscape(v.raw, v.at); ok {
+			v.at += consumed
+			var encoded [utf8.UTFMax]byte
+			size := utf8.EncodeRune(encoded[:], r)
+			out := decodedByte{b: encoded[0], start: start, end: v.at}
+			for _, extra := range encoded[1:size] {
+				v.pending = append(v.pending, decodedByte{b: extra, start: start, end: v.at})
+			}
+			return out, true
+		}
+	case v.layers > 0 && c == '%':
+		if b, consumed, ok := peelPercent(v.raw, v.at, v.layers); ok {
+			v.at += consumed
+			return decodedByte{b: b, start: start, end: v.at}, true
+		}
+	case v.plusSpace && c == '+':
+		v.at++
+		return decodedByte{b: ' ', start: start, end: v.at}, true
+	}
+	v.at++
+	return decodedByte{b: v.raw[start], start: start, end: v.at}, true
+}
+
+// decodeJSONEscape decodes one JSON \u escape at raw[at], combining a surrogate
+// pair when the next escape completes it. Hex digits are case-insensitive.
+func decodeJSONEscape(raw string, at int) (rune, int, bool) {
+	if at+5 >= len(raw) || raw[at] != '\\' || raw[at+1] != 'u' {
+		return 0, 0, false
+	}
+	first, ok := parseHex4(raw, at+2)
+	if !ok {
+		return 0, 0, false
+	}
+	if utf16.IsSurrogate(rune(first)) && at+11 < len(raw) && raw[at+6] == '\\' && raw[at+7] == 'u' {
+		if second, ok := parseHex4(raw, at+8); ok {
+			if combined := utf16.DecodeRune(rune(first), rune(second)); combined != utf8.RuneError {
+				return combined, 12, true
+			}
+		}
+	}
+	return rune(first), 6, true
+}
+
+// parseHex4 reads four case-insensitive hex digits at raw[at].
+func parseHex4(raw string, at int) (uint16, bool) {
+	if at+3 >= len(raw) {
+		return 0, false
+	}
+	var value uint16
+	for offset := 0; offset < 4; offset++ {
+		digit, ok := hexDigit(raw[at+offset])
+		if !ok {
+			return 0, false
+		}
+		value = value<<4 | uint16(digit)
+	}
+	return value, true
+}
+
+// peelPercent decodes one percent escape at raw[at], peeling up to layers
+// nested encodings: `%2520` is a space at two layers, and `%25` followed by
+// `20` is the literal text `%20` at one. Hex digits are case-insensitive,
+// which is what makes a lower- or mixed-case echo match.
+func peelPercent(raw string, at, layers int) (byte, int, bool) {
+	if at+2 >= len(raw) {
+		return 0, 0, false
+	}
+	value, ok := hexByte(raw[at+1], raw[at+2])
+	if !ok {
+		return 0, 0, false
+	}
+	consumed := 3
+	for layer := 1; value == '%' && layer < layers; layer++ {
+		if at+consumed+1 >= len(raw) {
+			break
+		}
+		next, ok := hexByte(raw[at+consumed], raw[at+consumed+1])
+		if !ok {
+			break
+		}
+		value = next
+		consumed += 2
+	}
+	return value, consumed, true
+}
+
+// hexByte decodes a pair of case-insensitive hex digits.
+func hexByte(high, low byte) (byte, bool) {
+	h, ok := hexDigit(high)
+	if !ok {
+		return 0, false
+	}
+	l, ok := hexDigit(low)
+	if !ok {
+		return 0, false
+	}
+	return h<<4 | l, true
+}
+
+// hexDigit decodes one case-insensitive hex digit.
+func hexDigit(b byte) (byte, bool) {
+	switch {
+	case b >= '0' && b <= '9':
+		return b - '0', true
+	case b >= 'a' && b <= 'f':
+		return b - 'a' + 10, true
+	case b >= 'A' && b <= 'F':
+		return b - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// credentialWindows maps every window-length byte run of the credential to one
+// of its offsets. One witness per run is enough: the scan only extends a match,
+// never chooses the longest of several.
+func credentialWindows(token string) map[uint64]int {
+	window := min(minRedactionRun, len(token))
+	if window == 0 {
+		return nil
+	}
+	windows := make(map[uint64]int, len(token)-window+1)
+	for start := 0; start+window <= len(token); start++ {
+		var key uint64
+		for offset := 0; offset < window; offset++ {
+			key = key<<8 | uint64(token[start+offset])
+		}
+		if _, seen := windows[key]; !seen {
+			windows[key] = start
+		}
+	}
+	return windows
+}
+
+// scanView walks one decoded view and appends the raw range of every match of
+// a credential window or longer to spans. The window slides as one packed
+// integer key, so the scan is linear in the message; a match extends byte by
+// byte to the longest run the token allows, and the raw range comes from the
+// decoded bytes' source spans.
+func scanView(token string, windows map[uint64]int, view *credentialView, spans *[]rawSpan) {
+	window := min(minRedactionRun, len(token))
+	if window == 0 {
+		return
+	}
+	mask := ^uint64(0) >> (64 - uint(8*window))
+	var key uint64
+	var starts [minRedactionRun]int
+	filled, slot := 0, 0
+	advance := func(db decodedByte) {
+		key = (key<<8 | uint64(db.b)) & mask
+		starts[slot] = db.start
+		slot = (slot + 1) % window
+		if filled < window {
+			filled++
+		}
+	}
+	for {
+		db, ok := view.next()
+		if !ok {
+			return
+		}
+		advance(db)
+		if filled < window {
+			continue
+		}
+		offset, hit := windows[key]
+		if !hit {
+			continue
+		}
+		// The oldest byte of the window sits at slot.
+		span := rawSpan{start: starts[slot], end: db.end}
+		length := window
+		var trailing *decodedByte
+		for offset+length < len(token) {
+			next, ok := view.next()
+			if !ok {
+				break
+			}
+			if next.b != token[offset+length] {
+				trailing = &next
+				break
+			}
+			length++
+			span.end = next.end
+		}
+		// A window hit is itself a redactable fragment even when the run
+		// stops there, so the partial extension is removed too.
+		*spans = append(*spans, span)
+		key, filled, slot = 0, 0, 0
+		if trailing != nil {
+			// The mismatching byte belongs to the next window.
+			advance(*trailing)
+		}
+	}
+}
+
+// applySpans replaces every merged match range with the visible marker and
+// returns the message byte-for-byte unchanged when there is none.
+func applySpans(message string, spans []rawSpan) string {
+	if len(spans) == 0 {
+		return message
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start != spans[j].start {
+			return spans[i].start < spans[j].start
+		}
+		return spans[i].end < spans[j].end
+	})
+	var out strings.Builder
+	out.Grow(len(message))
+	last := 0
+	for _, span := range spans {
+		if span.start < last {
+			if span.end <= last {
+				continue
+			}
+			span.start = last
+		}
+		out.WriteString(message[last:span.start])
+		out.WriteString(redactionMarker)
+		last = span.end
+	}
+	out.WriteString(message[last:])
+	return out.String()
+}
+
 // redactCredential removes the operator token from any text that can reach a
 // model or a log. It covers the transport error, where net/http does not echo
 // request headers, and the failure body, where a reflecting endpoint could put
-// the credential back verbatim. Two classes are removed:
+// the credential back verbatim. Every decoded view is scanned, so all of these
+// are removed:
 //
-//   - the token and its url.PathEscape/url.QueryEscape forms, so an endpoint
-//     that percent-encodes the value into a URL still cannot leak it;
-//   - any contiguous fragment of the token at least minRedactionRun bytes
-//     long, so a credential split across two JSON string fields cannot leak a
-//     usable piece.
+//   - the literal token, and any contiguous fragment of it at least
+//     minRedactionRun bytes long, so a credential split across two JSON string
+//     fields cannot leak a usable piece;
+//   - percent-encoded forms at any hex case and up to maxPercentLayers
+//     nesting levels, including the query `+` form of a space;
+//   - JSON \u-escaped forms, the shape a structured error body carries before
+//     its string fields are decoded.
 func redactCredential(message, token string) string {
 	if token == "" || message == "" {
 		return message
 	}
-	// Whole forms first: redacting a fragment first would cut a percent-encoded
-	// form apart, and the whole-form match would then never find it.
-	for _, form := range [3]string{token, url.PathEscape(token), url.QueryEscape(token)} {
-		if form != "" {
-			message = strings.ReplaceAll(message, form, redactionMarker)
-		}
-	}
-	return redactFragments(message, token)
-}
-
-// redactFragments replaces every occurrence of a contiguous token fragment of
-// at least min(8, len(token)) bytes. The scan visits every byte that is not
-// already inside a removed fragment and only emits a byte when the window that
-// starts there is no token fragment, so no fragment of the window length can
-// survive, and every match is removed as one unit rather than in window-sized
-// pieces.
-func redactFragments(message, token string) string {
-	window := min(minRedactionRun, len(token))
-	if window == 0 || len(message) < window {
+	windows := credentialWindows(token)
+	if len(windows) == 0 {
 		return message
 	}
-	// firstOffset maps every window-length substring of the token to one of
-	// its offsets. One witness per hit is enough: the scan only needs to
-	// extend a match, never to choose the longest of several.
-	firstOffset := make(map[string]int, len(token)-window+1)
-	for start := 0; start+window <= len(token); start++ {
-		gram := token[start : start+window]
-		if _, seen := firstOffset[gram]; !seen {
-			firstOffset[gram] = start
-		}
+	var spans []rawSpan
+	for _, view := range credentialViews(message) {
+		scanView(token, windows, &view, &spans)
 	}
-	var out strings.Builder
-	out.Grow(len(message))
-	for i := 0; i < len(message); {
-		end := i + window
-		if end <= len(message) {
-			if offset, hit := firstOffset[message[i:end]]; hit {
-				length := window
-				for offset+length < len(token) && i+length < len(message) &&
-					token[offset+length] == message[i+length] {
-					length++
-				}
-				out.WriteString(redactionMarker)
-				i += length
-				continue
-			}
-		}
-		out.WriteByte(message[i])
-		i++
-	}
-	return out.String()
+	return applySpans(message, spans)
 }
 
 // redact is the one entry point for a caller that decoded a response body

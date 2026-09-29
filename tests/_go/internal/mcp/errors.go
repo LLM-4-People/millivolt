@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -411,6 +412,61 @@ func TestErrorBodyCredentialStraddlingTheExcerptBoundaryIsRedacted(t *testing.T)
 	}
 }
 
+// failureMessage drives one failure body through the client and returns the
+// model-visible message. It fails the test when the call does not fail as an
+// *APIError, so every redaction case shares one error path.
+func failureMessage(t *testing.T, token, body string) string {
+	t.Helper()
+	proxy := newFakeProxy(t)
+	proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+		Status: http.StatusBadGateway, ContentType: "application/json", Body: body,
+	})
+	service, err := NewService(proxy.origin(), token, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
+	if err == nil {
+		t.Fatal("expected the upstream failure")
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("error must be an *APIError, got %T", err)
+	}
+	return apiErr.Message
+}
+
+// assertNoCredentialFragment fails when any contiguous run of min(8, len(token))
+// bytes of the credential survives anywhere in the message.
+func assertNoCredentialFragment(t *testing.T, token, where, message string) {
+	t.Helper()
+	window := min(8, len(token))
+	for start := 0; start+window <= len(token); start++ {
+		if fragment := token[start : start+window]; strings.Contains(message, fragment) {
+			t.Fatalf("%s leaked the credential fragment %q: %q", where, fragment, message)
+		}
+	}
+}
+
+// assertRedacted fails when the credential, any contiguous 8-byte fragment of
+// it, or any named encoded form survives, and when the visible marker is
+// absent. It is the one assertion every redaction case shares.
+func assertRedacted(t *testing.T, token, where, message string, forms ...string) {
+	t.Helper()
+	if strings.Contains(message, token) {
+		t.Fatalf("%s leaked the credential: %q", where, message)
+	}
+	assertNoCredentialFragment(t, token, where, message)
+	for _, form := range forms {
+		if strings.Contains(message, form) {
+			t.Fatalf("%s leaked the credential form %q: %q", where, form, message)
+		}
+	}
+	if !strings.Contains(message, "[redacted]") {
+		t.Fatalf("%s must show the redaction marker: %q", where, message)
+	}
+}
+
 // TestErrorBodyRedactionCoversCredentialForms is the regression for three
 // reflection shapes the whole-token replacement missed: a credential echoed
 // with different whitespace (the whitespace collapse turned the echo back into
@@ -423,79 +479,234 @@ func TestErrorBodyRedactionCoversCredentialForms(t *testing.T) {
 	// tabbed echo. Deliberately not the shared fixture.
 	const token = "alpha beta gamma delta"
 
-	failureMessage := func(t *testing.T, body string) string {
-		t.Helper()
-		proxy := newFakeProxy(t)
-		proxy.respond(http.MethodGet, explorerPath, cannedResponse{
-			Status: http.StatusBadGateway, ContentType: "application/json", Body: body,
-		})
-		service, err := NewService(proxy.origin(), token, DefaultLimits())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
-		if err == nil {
-			t.Fatal("expected the upstream failure")
-		}
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) {
-			t.Fatalf("error must be an *APIError, got %T", err)
-		}
-		return apiErr.Message
-	}
-
-	// assertNoFragment fails when any contiguous run of min(8, len(token))
-	// bytes of the credential survives anywhere in the message.
-	assertNoFragment := func(t *testing.T, where, message string) {
-		t.Helper()
-		window := min(8, len(token))
-		for start := 0; start+window <= len(token); start++ {
-			if fragment := token[start : start+window]; strings.Contains(message, fragment) {
-				t.Fatalf("%s leaked the credential fragment %q: %q", where, fragment, message)
-			}
-		}
-	}
-
 	t.Run("whitespace variant", func(t *testing.T) {
 		tabbed := strings.ReplaceAll(token, " ", "\t")
-		message := failureMessage(t, `{"error":`+quote("upstream echoed "+tabbed)+`}`)
-		if strings.Contains(message, token) {
-			t.Fatalf("the whitespace-collapsed credential survived: %q", message)
-		}
-		if !strings.Contains(message, "[redacted]") {
-			t.Fatalf("the redaction must be visible: %q", message)
-		}
+		message := failureMessage(t, token, `{"error":`+quote("upstream echoed "+tabbed)+`}`)
+		assertRedacted(t, token, "whitespace echo", message)
 	})
 
 	t.Run("percent encoded", func(t *testing.T) {
 		pathForm := url.PathEscape(token)
 		queryForm := url.QueryEscape(token)
-		message := failureMessage(t, "upstream echoed "+pathForm+" and "+queryForm)
-		if strings.Contains(message, pathForm) || strings.Contains(message, queryForm) {
-			t.Fatalf("a percent-encoded credential survived: %q", message)
-		}
-		assertNoFragment(t, "percent-encoded echo", message)
-		if !strings.Contains(message, "[redacted]") {
-			t.Fatalf("the redaction must be visible: %q", message)
-		}
+		message := failureMessage(t, token, "upstream echoed "+pathForm+" and "+queryForm)
+		assertRedacted(t, token, "percent-encoded echo", message, pathForm, queryForm)
 	})
 
 	t.Run("split across two JSON fields", func(t *testing.T) {
 		first, second := token[:12], token[12:]
 		// The nested shape is not the flat {"error": "..."} document, so the
 		// whole body is excerpted and BOTH fragments reach the message.
-		message := failureMessage(t, `{"first":`+quote(first)+`,"second":`+quote(second)+`}`)
-		assertNoFragment(t, "split echo", message)
-		if !strings.Contains(message, "[redacted]") {
-			t.Fatalf("the redaction must be visible: %q", message)
-		}
+		message := failureMessage(t, token, `{"first":`+quote(first)+`,"second":`+quote(second)+`}`)
+		assertRedacted(t, token, "split echo", message)
 	})
 
 	t.Run("control body unchanged", func(t *testing.T) {
 		const control = "the upstream refused the request"
-		message := failureMessage(t, `{"error":`+quote(control)+`}`)
+		message := failureMessage(t, token, `{"error":`+quote(control)+`}`)
 		if message != control {
 			t.Fatalf("a body with no credential must pass through unchanged, got %q", message)
 		}
 	})
+}
+
+// hexCase selects the case an encoded form's hex digits are written in. A
+// reflection can lower, upper or mix the hex of percent and \u escapes, and
+// the matcher must treat the case as insignificant.
+type hexCase int
+
+const (
+	hexUpper hexCase = iota
+	hexLower
+	hexMixed
+)
+
+// foldHex rewrites the case of the two hex digits in every percent escape of a
+// form, leaving the escaped byte and every literal character alone.
+func foldHex(form string, casing hexCase) string {
+	var out strings.Builder
+	out.Grow(len(form))
+	escape := 0
+	for index := 0; index < len(form); {
+		if form[index] == '%' && index+2 < len(form) {
+			pair := form[index+1 : index+3]
+			switch casing {
+			case hexUpper:
+				pair = strings.ToUpper(pair)
+			case hexLower:
+				pair = strings.ToLower(pair)
+			case hexMixed:
+				if escape%2 == 0 {
+					pair = strings.ToLower(pair)
+				} else {
+					pair = strings.ToUpper(pair)
+				}
+			}
+			out.WriteByte('%')
+			out.WriteString(pair)
+			index += 3
+			escape++
+			continue
+		}
+		out.WriteByte(form[index])
+		index++
+	}
+	return out.String()
+}
+
+// jsonEscapeForm renders every rune of the credential as a JSON \u escape.
+func jsonEscapeForm(token string, casing hexCase) string {
+	var out strings.Builder
+	escape := 0
+	for _, r := range token {
+		format := "\\u%04X"
+		switch {
+		case casing == hexLower:
+			format = "\\u%04x"
+		case casing == hexMixed && escape%2 == 1:
+			format = "\\u%04x"
+		}
+		fmt.Fprintf(&out, format, r)
+		escape++
+	}
+	return out.String()
+}
+
+// TestErrorBodyRedactionCoversEncodedCredentialForms is the regression for the
+// encodings an exact-form replacement cannot see: percent escapes in lower or
+// mixed case hex, the query + form, double encoding, and JSON \u escapes in a
+// structured body whose string fields were never decoded (only the flat
+// {"error": ...} document was). Each surviving form is asserted absent by its
+// own text, because an encoded echo carries no plain 8-byte credential run.
+func TestErrorBodyRedactionCoversEncodedCredentialForms(t *testing.T) {
+	// Every character class an encoding rewrites: a plus and a slash (the
+	// base64 alphabet), a space (the query + form), and an equals sign.
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+
+	structured := func(value string) string { return `{"detail":` + quote(value) + `}` }
+	percent := url.PathEscape(token)
+	query := url.QueryEscape(token)
+	doubled := strings.ReplaceAll(percent, "%", "%25")
+
+	splitFirst, splitSecond := token[:10], token[10:]
+	splitFirstForm := foldHex(url.PathEscape(splitFirst), hexLower)
+	splitSecondForm := jsonEscapeForm(splitSecond, hexUpper)
+
+	for _, tc := range []struct {
+		name  string
+		body  string
+		forms []string
+	}{
+		{
+			name:  "percent lower hex",
+			body:  structured("upstream echoed " + foldHex(percent, hexLower)),
+			forms: []string{foldHex(percent, hexLower)},
+		},
+		{
+			name:  "percent mixed hex",
+			body:  structured("upstream echoed " + foldHex(percent, hexMixed)),
+			forms: []string{foldHex(percent, hexMixed)},
+		},
+		{
+			name:  "query plus form with lower hex",
+			body:  structured("upstream echoed " + foldHex(query, hexLower)),
+			forms: []string{foldHex(query, hexLower)},
+		},
+		{
+			name:  "double encoded",
+			body:  structured("upstream echoed " + doubled),
+			forms: []string{doubled},
+		},
+		{
+			name:  "double encoded mixed hex",
+			body:  structured("upstream echoed " + foldHex(doubled, hexMixed)),
+			forms: []string{foldHex(doubled, hexMixed)},
+		},
+		{
+			// The structured string field carries the escapes in the JSON
+			// document itself; only decoding that field before matching sees
+			// the credential.
+			name:  "json escapes upper hex",
+			body:  `{"detail":"upstream echoed ` + jsonEscapeForm(token, hexUpper) + `"}`,
+			forms: []string{jsonEscapeForm(token, hexUpper)},
+		},
+		{
+			name:  "json escapes mixed hex",
+			body:  `{"detail":"upstream echoed ` + jsonEscapeForm(token, hexMixed) + `"}`,
+			forms: []string{jsonEscapeForm(token, hexMixed)},
+		},
+		{
+			// The endpoint JSON-encodes text that already carries \u escape
+			// text, so the decoded field holds a literal backslash-u form that
+			// the matcher must decode itself.
+			name:  "literal json escape text",
+			body:  structured("upstream echoed " + jsonEscapeForm(token, hexUpper)),
+			forms: []string{jsonEscapeForm(token, hexUpper)},
+		},
+		{
+			name:  "flat body with lower hex percent",
+			body:  `{"error":` + quote("upstream echoed "+foldHex(percent, hexLower)) + `}`,
+			forms: []string{foldHex(percent, hexLower)},
+		},
+		{
+			name:  "plain text body with double encoding",
+			body:  "upstream echoed " + foldHex(doubled, hexLower),
+			forms: []string{foldHex(doubled, hexLower)},
+		},
+		{
+			name: "field pair split after decoding",
+			// Each field decodes to one half of the credential: only
+			// unescaping the fields and decoding each view can see either
+			// half, and each half is long enough to matter on its own.
+			body:  `{"first":` + quote(splitFirstForm) + `,"second":` + quote(splitSecondForm) + `}`,
+			forms: []string{splitFirstForm, splitSecondForm},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := failureMessage(t, token, tc.body)
+			assertRedacted(t, token, tc.name, message, tc.forms...)
+		})
+	}
+}
+
+// TestRedactionScansOnlyTheExcerptRegion pins the work bound on the redaction
+// that runs before the excerpt truncation: the scan covers only the region
+// that can reach the published excerpt, not the whole body. A fixed raw byte
+// cut would be both too wide (scanning unreachable text) and too narrow (a
+// long whitespace run can pull a later credential into the excerpt), so the
+// region is found by walking the collapse itself.
+func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
+	const token = testToken
+	target := maxErrorBodyBytes + credentialFormByteMax*len(token)
+
+	// A multi-megabyte body with no credential: the region stops near the
+	// excerpt budget instead of covering the message.
+	message := strings.Repeat("word ", 1<<20)
+	region := excerptRegion(message, target)
+	if len(region) >= len(message) {
+		t.Fatalf("the region covers the whole %d byte message", len(message))
+	}
+	if len(region) > 1<<16 {
+		t.Fatalf("the region is %d bytes for a %d byte message", len(region), len(message))
+	}
+	if collapsed := strings.Join(strings.Fields(region), " "); len(collapsed) < maxErrorBodyBytes {
+		t.Fatalf("the region collapses to %d bytes, below the excerpt budget", len(collapsed))
+	}
+
+	// Whitespace collapse can pull a credential into the excerpt from far
+	// beyond any fixed raw cut, so the region has to cross the run.
+	hidden := strings.Repeat(" ", 1<<20) + token
+	region = excerptRegion(hidden, target)
+	if !strings.Contains(region, token) {
+		t.Fatal("the region must include a credential that whitespace collapse pulls into the excerpt")
+	}
+	redacted := redactForExcerpt(hidden, token)
+	if strings.Contains(redacted, token) || !strings.Contains(redacted, "[redacted]") {
+		t.Fatalf("the whitespace-hidden credential survived: %q", redacted)
+	}
+
+	// The bound itself still holds on a body far larger than the excerpt.
+	bounded := redactForExcerpt(message, token)
+	if len(bounded) > maxErrorBodyBytes+len(" [truncated]") {
+		t.Fatalf("the excerpt is %d bytes, above the %d byte budget", len(bounded), maxErrorBodyBytes)
+	}
 }
