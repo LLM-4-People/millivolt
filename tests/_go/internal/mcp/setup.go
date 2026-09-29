@@ -92,9 +92,13 @@ func TestLimitsValidation(t *testing.T) {
 	}
 }
 
-// TestTokenNeverAppearsInToolOutput pins the confidentiality property across
-// every tool: with a correct credential no output may contain it, and the
-// recorded wire traffic may not carry it anywhere but the Authorization header.
+// TestTokenNeverAppearsInToolOutput pins the confidentiality property on the
+// explore path: a reflected failure excerpt and a success payload never contain
+// the credential, and the recorded wire traffic carries it only in the
+// Authorization header. The other reflection paths are covered where they are
+// driven: the query excerpt by TestErrorBodyIsRedactedOfTheCredential, the
+// config-patch body by TestSetConfigRedactsTheCredentialOnTheToleratedPath, and
+// every registered read tool's output by TestRegisteredToolsReachTheProxy.
 func TestTokenNeverAppearsInToolOutput(t *testing.T) {
 	proxy := newFakeProxy(t)
 	// The fake echoes the credential into its error body, which is the worst
