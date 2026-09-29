@@ -15,6 +15,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/web"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // TestDescribeMirrorsTheProxyOwners pins every fact this server duplicates from
@@ -238,5 +239,35 @@ func TestPurgePhraseHasOneOwner(t *testing.T) {
 	}
 	if !strings.Contains(string(guide), PurgeConfirmation) {
 		t.Fatalf("docs/mcp.md must quote the exact confirmation phrase %q", PurgeConfirmation)
+	}
+}
+
+// TestProtocolVersionsMirrorTheSDK pins the accepted protocol versions listed
+// in docs/mcp.md to the bundled SDK's own list, which is the owner of that set.
+// The guide's hand list used to be unguarded, so a dependency upgrade or a doc
+// edit could silently change what the endpoint accepts or claims to accept.
+func TestProtocolVersionsMirrorTheSDK(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	const heading = "The accepted protocol versions are the bundled SDK's full set, newest first:"
+	index := strings.Index(string(guide), heading)
+	if index < 0 {
+		t.Fatalf("docs/mcp.md must state %q", heading)
+	}
+	// The list is the sentence right after the heading; the next sentence
+	// repeats some versions in prose, so the scan stops at the first period.
+	sentence := string(guide)[index+len(heading):]
+	if dot := strings.Index(sentence, "."); dot >= 0 {
+		sentence = sentence[:dot]
+	}
+	matches := regexp.MustCompile("`([0-9]{4}-[0-9]{2}-[0-9]{2})`").FindAllStringSubmatch(sentence, -1)
+	listed := make([]string, 0, len(matches))
+	for _, match := range matches {
+		listed = append(listed, match[1])
+	}
+	if want := sdk.SupportedProtocolVersions(); !reflect.DeepEqual(listed, want) {
+		t.Fatalf("docs/mcp.md lists %v, the SDK supports %v (owner: github.com/modelcontextprotocol/go-sdk/mcp SupportedProtocolVersions)", listed, want)
 	}
 }
