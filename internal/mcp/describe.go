@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"strconv"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // sortedSet renders a name set in a stable order, so describe output does not
@@ -325,9 +327,14 @@ func observedToolNames(records []map[string]any) []string {
 // because they describe the API this server speaks, and describe must state
 // them even before any query runs; the config-driven storage_query_max_rows is
 // quoted as prose because it is per-deployment.
+//
+// The log page band is derived from the proxy's own config owner rather than
+// restated, so a band change cannot leave a stale number in the reference. The
+// explorer/chart caps have no exported owner (internal/web xpNodeCap and
+// chartMaxBuckets+1), so they remain literals pinned by a contract test.
 const (
-	logPageMin              = 10
-	logPageMax              = 500
+	logPageMin              = config.DashLogRowsMin
+	logPageMax              = config.DashLogRowsMax
 	explorerMaxGroups       = 24
 	chartMaxBuckets         = 31
 	serverQueryRowLimitNote = "storage_query_max_rows (per-deployment, 413 past it); storage_query_max_bytes bounds the encoded result"

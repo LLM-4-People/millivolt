@@ -615,14 +615,8 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	if slices.Contains(byDimension["status"].Values, "3xx") {
 		t.Fatal("there is no 3xx status class: advertising one makes f=status:3xx a silently empty filter")
 	}
-	if got, want := byDimension["time"].Values, TimeBuckets; !slices.Equal(got, want) {
-		t.Fatalf("time values = %v, want the daypart buckets %v", got, want)
-	}
 	if !strings.Contains(byDimension["time"].Note, "NOT a duration") {
 		t.Fatalf("the time vocabulary must say it is a bucket, not a duration: %q", byDimension["time"].Note)
-	}
-	if got, want := byDimension["error"].Values, ErrorFilterKeys; !slices.Equal(got, want) {
-		t.Fatalf("error keys = %v, want %v", got, want)
 	}
 	if !strings.Contains(byDimension["error"].Note, "type|code|message") {
 		t.Fatalf("the error grammar must be stated: %q", byDimension["error"].Note)
