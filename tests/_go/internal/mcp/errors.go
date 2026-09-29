@@ -337,6 +337,31 @@ func TestOversizedFailureBodyDecodeIsBounded(t *testing.T) {
 	}
 }
 
+// TestValidOversizedFailureBodyKeepsTheDecodedMessage is the regression for the
+// region-only decode: a valid JSON body larger than the excerpt region used to
+// be decoded in full, and bounding that decode to the raw region cut the
+// document mid-string, so the flat {"error": ...} message degraded to raw JSON
+// text. The bounded stream decode must keep the message for any body size, and
+// still must not allocate for the body it does not need.
+func TestValidOversizedFailureBodyKeepsTheDecodedMessage(t *testing.T) {
+	const message = "the model did not exist"
+	body := []byte(`{"error":"` + message + `","junk":"` + strings.Repeat("x", 64<<20) + `"}`)
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	apiErr := newAPIError(resp, body, testToken)
+	runtime.ReadMemStats(&after)
+
+	if apiErr.Message != message {
+		t.Fatalf("message = %q, want the decoded %q", apiErr.Message, message)
+	}
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 32<<20 {
+		t.Fatalf("the 64 MiB valid failure body allocated %d bytes; the decode must stop at the excerpt budget", allocated)
+	}
+}
+
 // TestRefusedRedirectReplaysNothing is the credential-replay guard. net/http
 // strips Authorization only when the HOSTNAME changes, and the port is not part
 // of that comparison, so a same-host different-port or subdomain 307/308 replays
@@ -944,9 +969,9 @@ func TestErrorBodyRedactionCoversDoubleJSONEscape(t *testing.T) {
 }
 
 // TestNestedFailureExcerptIsDeterministic pins that a nested-JSON failure body
-// is excerpted in a stable field order. collectJSONStrings used to iterate the
-// decoded Go map, whose order is randomized per run, so the same response
-// produced different model-visible messages; repeating one response must give
+// is excerpted in a stable field order. The walk once iterated the decoded Go
+// map, whose order is randomized per run, so the same response produced
+// different model-visible messages; repeating one response must give
 // byte-identical output.
 func TestNestedFailureExcerptIsDeterministic(t *testing.T) {
 	body := `{"zeta":"upstream said ","alpha":"the request was refused because ",` +

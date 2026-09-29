@@ -228,14 +228,14 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 
 // failureExcerpt extracts the model-visible text from a failure body: the flat
 // {"error": ...} field when present, otherwise the joined string values of the
-// JSON document, otherwise the raw text. Decoding is bounded to the raw region
-// that can still reach the excerpt, because redactForExcerpt scans only the
-// prefix whose whitespace collapse reaches its target and bytes past that
-// prefix can never appear in the published message. A body whose collapse does
+// JSON document, otherwise the raw text. Decoding is bounded twice: the walk
+// reads at most maxExcerptScanBytes of the body, and it stops once the decoded
+// text reaches the excerpt target, so a multi-mebibyte body yields a
+// multi-kibibyte excerpt at multi-kibibyte cost. A body whose raw collapse does
 // not reach the target inside maxExcerptScanBytes fails closed exactly as
-// redactForExcerpt would decide, so it is not decoded at all; the previous
-// implementation decoded a 64 MiB body in full (about 200 ms and 128 MiB) to
-// produce the same 4 KiB excerpt.
+// redactForExcerpt would decide, so it is not decoded at all. Decoding the raw
+// region alone was wrong: a valid JSON body larger than the region was cut
+// mid-string, so the flat message degraded to raw JSON text.
 func failureExcerpt(body []byte, token string) string {
 	if len(body) == 0 {
 		return ""
@@ -252,62 +252,95 @@ func failureExcerpt(body []byte, token string) string {
 		return redactionMarker
 	}
 	decoded := region
-	if len(region) > 0 {
-		var flat struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal([]byte(region), &flat) == nil && flat.Error != "" {
-			decoded = flat.Error
-		} else if structured, ok := structuredStrings([]byte(region)); ok {
-			decoded = structured
-		}
+	if streamed, ok := streamedFailureText(bounded, target); ok {
+		decoded = streamed
 	}
 	return redactForExcerpt(decoded, token)
 }
 
-// structuredStrings decodes every string value in a JSON failure body and
-// joins them. The flat {"error": "..."} document is handled before this; any
-// other JSON shape used to reach the message as raw text, so a credential
-// inside it arrived still JSON-escaped and no matcher could see it. Decoding
-// the fields first gives the matcher the same text the flat shape gets.
-func structuredStrings(body []byte) (string, bool) {
-	var document any
-	if err := json.Unmarshal(body, &document); err != nil {
+// streamedFailureText walks the string values of a JSON failure body with a
+// streaming decoder and returns them joined. It is the one decoder for a valid,
+// or partially valid, JSON body: the flat {"error": ...} value wins as soon as
+// its key is seen, any other string value is collected in document order, and
+// the walk stops once the joined text reaches the excerpt target, so the work
+// is bounded by the excerpt budget rather than the body size. Object keys are
+// field names, not values, so they are not collected. The decoder reports false
+// when the walk yields no usable text (the body is not JSON), so the caller
+// keeps the raw excerpt; a body cut at the scan cap still contributes every
+// complete value before the cut, which is what preserves the message of a large
+// valid body.
+func streamedFailureText(body []byte, budget int) (string, bool) {
+	if len(body) == 0 || budget <= 0 {
 		return "", false
 	}
-	var values []string
-	collectJSONStrings(document, &values)
+	type frame struct {
+		object    bool
+		expectKey bool
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	var (
+		stack    []frame
+		values   []string
+		length   int
+		flatNext bool
+	)
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			// A SyntaxError is a genuinely malformed body and degrades to the
+			// raw excerpt exactly as before. An unexpected EOF is the scan cap
+			// cutting a document, so the complete values before the cut are
+			// still the body's own text and are kept.
+			if err != io.EOF && err != io.ErrUnexpectedEOF {
+				return "", false
+			}
+			break
+		}
+		if delim, ok := token.(json.Delim); ok {
+			flatNext = false
+			switch delim {
+			case '{', '[':
+				if len(stack) > 0 && stack[len(stack)-1].object {
+					stack[len(stack)-1].expectKey = true
+				}
+				stack = append(stack, frame{object: delim == '{', expectKey: delim == '{'})
+			case '}', ']':
+				if len(stack) > 0 {
+					stack = stack[:len(stack)-1]
+				}
+			}
+			continue
+		}
+		value, isString := token.(string)
+		if len(stack) > 0 && stack[len(stack)-1].object && stack[len(stack)-1].expectKey {
+			stack[len(stack)-1].expectKey = false
+			flatNext = isString && len(stack) == 1 && value == "error"
+			continue
+		}
+		if flatNext {
+			flatNext = false
+			if isString && value != "" {
+				return value, true
+			}
+		}
+		if len(stack) > 0 && stack[len(stack)-1].object {
+			stack[len(stack)-1].expectKey = true
+		}
+		if isString && value != "" {
+			if len(values) > 0 {
+				length++
+			}
+			length += len(value)
+			values = append(values, value)
+			if length >= budget {
+				return strings.Join(values, " "), true
+			}
+		}
+	}
 	if len(values) == 0 {
 		return "", false
 	}
 	return strings.Join(values, " "), true
-}
-
-// collectJSONStrings walks a decoded JSON document, collecting every non-empty
-// string value. Object keys are field names, not values, so they are not
-// collected; the fields of an object are walked in sorted key order because a
-// Go map's iteration order is randomized and the joined text is model-visible,
-// so the same response must always produce the same excerpt.
-func collectJSONStrings(value any, values *[]string) {
-	switch typed := value.(type) {
-	case string:
-		if typed != "" {
-			*values = append(*values, typed)
-		}
-	case []any:
-		for _, item := range typed {
-			collectJSONStrings(item, values)
-		}
-	case map[string]any:
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			collectJSONStrings(typed[key], values)
-		}
-	}
 }
 
 // sanitizeRetryAfter keeps only the two shapes HTTP defines for Retry-After,
