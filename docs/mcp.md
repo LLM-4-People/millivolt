@@ -297,9 +297,10 @@ still loses its diagnostics, because a credential could be hidden past the
 bound. The scan is bounded to the region that can still reach the excerpt, and
 the raw bytes it reads are capped; a body whose whitespace collapse does not
 reach the excerpt target inside that cap fails closed to `[redacted]` too, for
-the same reason. The excerpt itself is whitespace-collapsed and capped at 4 KiB
-after redaction, which runs before the cap so a credential straddling it cannot
-survive as a fragment.
+the same reason. The excerpt itself is whitespace-collapsed and truncated to
+4 KiB before the ` [truncated]` marker is appended, so the model-visible text
+runs up to the 12-byte marker past 4 KiB. Redaction runs before the truncation,
+so a credential straddling the boundary cannot survive as a fragment.
 
 ## Example client configuration
 
