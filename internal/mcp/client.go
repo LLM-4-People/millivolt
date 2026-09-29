@@ -200,9 +200,9 @@ func (e *APIError) Error() string {
 	fmt.Fprintf(&b, "millivolt returned HTTP %d: %s", e.Status, e.Message)
 	switch e.Status {
 	case http.StatusUnauthorized:
-		b.WriteString(" (the operator token is missing, wrong, or the session expired; check " + proxyTokenEnv + ")")
+		b.WriteString(" (the operator token is missing, wrong, or the session expired; check " + ProxyTokenEnv + ")")
 	case http.StatusForbidden:
-		b.WriteString(" (the proxy's operator plane is unarmed: it is started without " + proxyTokenEnv + ")")
+		b.WriteString(" (the proxy's operator plane is unarmed: it is started without " + ProxyTokenEnv + ")")
 	case http.StatusTooManyRequests:
 		if e.RetryAfter != "" {
 			fmt.Fprintf(&b, " (retry after %s)", e.RetryAfter)

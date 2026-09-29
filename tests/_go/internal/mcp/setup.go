@@ -27,7 +27,7 @@ func TestSetupValidation(t *testing.T) {
 		{"missing url", "", valid, "proxy URL is required", false},
 		{"missing token", "http://127.0.0.1:8081", "", "operator token is required", false},
 		{"short token", "http://127.0.0.1:8081", "0123456789abcde", "at least 16", false},
-		{"long token", "http://127.0.0.1:8081", strings.Repeat("x", operatorTokenMaxLen+1), "at most 512", false},
+		{"long token", "http://127.0.0.1:8081", strings.Repeat("x", OperatorTokenMaxLen+1), "at most 512", false},
 		{"wrong scheme", "ftp://127.0.0.1:8081", valid, "http or https", false},
 		{"no host", "http://", valid, "must include a host", false},
 		{"path", "http://127.0.0.1:8081/admin", valid, "no path", false},
@@ -54,8 +54,8 @@ func TestSetupValidation(t *testing.T) {
 
 	// The length band is inclusive at both ends, like the proxy's boot check.
 	for _, token := range []string{
-		strings.Repeat("x", operatorTokenMinLen),
-		strings.Repeat("x", operatorTokenMaxLen),
+		strings.Repeat("x", OperatorTokenMinLen),
+		strings.Repeat("x", OperatorTokenMaxLen),
 	} {
 		if _, err := NewService("http://127.0.0.1:8081", token, DefaultLimits()); err != nil {
 			t.Fatalf("a %d character token must be accepted: %v", len(token), err)

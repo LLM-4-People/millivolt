@@ -99,10 +99,15 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 		t.Fatalf("chart bucket cap = %d, want 31 (owner: internal/web chartMaxBuckets+1)", chartMaxBuckets)
 	}
 
-	// Operator token band: cmd/proxy operatorTokenMinLen/MaxLen.
-	if operatorTokenMinLen != 16 || operatorTokenMaxLen != 512 {
-		t.Fatalf("token band = %d..%d, want 16..512 (owner: cmd/proxy operatorTokenMinLen/MaxLen)",
-			operatorTokenMinLen, operatorTokenMaxLen)
+	// Operator token band: OperatorTokenMinLen/MaxLen in this package are the
+	// single owner; cmd/proxy's boot gate reads them.
+	// TestOperatorGateUsesThePublishedTokenContract in tests/_go/cmd/proxy
+	// pins the gate's boundary behavior to the same constants, so a locally
+	// reintroduced literal there fails while this literal pin catches an owner
+	// edit.
+	if OperatorTokenMinLen != 16 || OperatorTokenMaxLen != 512 {
+		t.Fatalf("token band = %d..%d, want 16..512 (owner: internal/mcp OperatorTokenMinLen/MaxLen)",
+			OperatorTokenMinLen, OperatorTokenMaxLen)
 	}
 }
 
@@ -647,7 +652,7 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 		}
 	})
 	// The --operator-token usage says where the VALUE comes from: the proxy's
-	// own proxyTokenEnv constant, not this server's read variable. The phrase
+	// own ProxyTokenEnv constant, not this server's read variable. The phrase
 	// once named the read variable as the proxy's, sending a user to a variable
 	// the proxy never reads; the usage text, the table row and the
 	// missing-credential setup error are each pinned by an independent literal,
@@ -657,7 +662,7 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	if token == nil {
 		t.Fatalf("--%s is not registered", flagOperatorToken)
 	}
-	// The usage text is built from proxyTokenEnv, so comparing it to that same
+	// The usage text is built from ProxyTokenEnv, so comparing it to that same
 	// constant cannot fail on a rename. The whole sentence is asserted against
 	// independent literals instead: a suffixed rename still contains the old
 	// name as a prefix, so only the exact sentence pins the source it names.
@@ -668,7 +673,7 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	// The cell is the whole sentence, anchored to the owner constant rather
 	// than a substring search: a row naming MILLIVOLT_OPERATOR_TOKEN_V2 would
 	// still contain the real name, so only exact equality pins the source.
-	if got, want := documentedMeaning["--"+flagOperatorToken], "The proxy's own `"+proxyTokenEnv+"`."; got != want {
+	if got, want := documentedMeaning["--"+flagOperatorToken], "The proxy's own `"+ProxyTokenEnv+"`."; got != want {
 		t.Fatalf("docs/mcp.md's --%s row must read %q, got %q", flagOperatorToken, want, got)
 	}
 	// The missing-credential setup error names the same source, and it is the
@@ -720,7 +725,7 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 			// _LEGACY, so the whole tail must equal the owner constant's
 			// sentence.
 			if match[1] == "--"+flagOperatorToken {
-				wantTail := "(the proxy's " + proxyTokenEnv + ")"
+				wantTail := "(the proxy's " + ProxyTokenEnv + ")"
 				if got := strings.TrimSpace(match[3]); got != wantTail {
 					t.Fatalf("cmd/mcp's package doc pairs %s with %q, want %q", match[1], got, wantTail)
 				}
@@ -769,14 +774,14 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	}
 	text := string(guide)
 
-	// Operator token band: internal/mcp/limits.go operatorTokenMinLen/MaxLen.
+	// Operator token band: internal/mcp/limits.go OperatorTokenMinLen/MaxLen.
 	band := regexp.MustCompile(`band matches the proxy's own boot check \((\d+) to (\d+)\s+characters\)`).FindStringSubmatch(text)
 	if band == nil {
 		t.Fatal("docs/mcp.md must state the token band sentence")
 	}
-	if band[1] != strconv.Itoa(operatorTokenMinLen) || band[2] != strconv.Itoa(operatorTokenMaxLen) {
+	if band[1] != strconv.Itoa(OperatorTokenMinLen) || band[2] != strconv.Itoa(OperatorTokenMaxLen) {
 		t.Fatalf("docs/mcp.md states the token band %s to %s, the owner is %d to %d",
-			band[1], band[2], operatorTokenMinLen, operatorTokenMaxLen)
+			band[1], band[2], OperatorTokenMinLen, OperatorTokenMaxLen)
 	}
 
 	// Status code band: internal/mcp/scope.go statusCodeMin/Max, the s=

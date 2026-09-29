@@ -8,13 +8,15 @@ import (
 	"time"
 )
 
-// Token length bounds. They mirror the proxy's own boot-time band
-// (cmd/proxy/operator.go operatorTokenMinLen/MaxLen): a credential the proxy
-// would refuse to arm with is not a credential this server can use, and a
-// longer one could never be presented as a Bearer value.
+// Operator token length bounds, the single owner of the credential band: the
+// proxy's boot check (cmd/proxy/operator.go loadOperatorToken) and this
+// server's ValidateOperatorToken both enforce these, and the proxy's
+// bearerToken reads OperatorTokenMaxLen as its presentation cap. A credential
+// the proxy would refuse to arm with is not a credential this server can use,
+// and a longer one could never be presented as a Bearer value.
 const (
-	operatorTokenMinLen = 16
-	operatorTokenMaxLen = 512
+	OperatorTokenMinLen = 16
+	OperatorTokenMaxLen = 512
 )
 
 // Limits are this server's result-size policy. They exist because a model
@@ -84,11 +86,11 @@ func ValidateOperatorToken(token string) error {
 	switch {
 	case token == "":
 		return errors.New("operator token is required: pass --" + flagOperatorToken + " or " + envOperatorToken +
-			" (the proxy's " + proxyTokenEnv + ")")
-	case len(token) < operatorTokenMinLen:
-		return errors.New("operator token must be at least " + strconv.Itoa(operatorTokenMinLen) + " characters")
-	case len(token) > operatorTokenMaxLen:
-		return errors.New("operator token must be at most " + strconv.Itoa(operatorTokenMaxLen) + " characters")
+			" (the proxy's " + ProxyTokenEnv + ")")
+	case len(token) < OperatorTokenMinLen:
+		return errors.New("operator token must be at least " + strconv.Itoa(OperatorTokenMinLen) + " characters")
+	case len(token) > OperatorTokenMaxLen:
+		return errors.New("operator token must be at most " + strconv.Itoa(OperatorTokenMaxLen) + " characters")
 	}
 	return nil
 }

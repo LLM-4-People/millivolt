@@ -90,7 +90,7 @@ const (
 // not reach the rest: docs/mcp.md names the read variables again in its
 // client-configuration prose and examples, and that guide and the parenthetical
 // in cmd/mcp's package doc both spell out the proxy's operator-token variable,
-// proxyTokenEnv. Those repeats are updated by hand.
+// ProxyTokenEnv. Those repeats are updated by hand.
 const (
 	envProxyURL       = "MILLIVOLT_MCP_PROXY_URL"
 	envOperatorToken  = "MILLIVOLT_MCP_OPERATOR_TOKEN"
@@ -102,13 +102,15 @@ const (
 	envRequestTimeout = "MILLIVOLT_MCP_TIMEOUT"
 )
 
-// proxyTokenEnv is the proxy's own operator-token variable. A user supplies its
+// ProxyTokenEnv is the proxy's own operator-token variable. A user supplies its
 // value to this server as MILLIVOLT_MCP_OPERATOR_TOKEN (or --operator-token);
-// this server never reads it. The usage text and the setup error message name
-// it so a user knows where the value comes from, and the docs guard pins the
-// usage text, the setup table row and the setup error message so none can
-// drift back to naming this server's read variable as the proxy's.
-const proxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
+// this server never reads it, but the proxy's boot gate reads exactly this
+// variable, so this one constant is the name both sides use. The usage text and
+// the setup error message name it so a user knows where the value comes from,
+// and the docs guard pins the usage text, the setup table row and the setup
+// error message so none can drift back to naming this server's read variable as
+// the proxy's.
+const ProxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
 
 // registerOptions installs every setup flag on fs, with the current limits as
 // the registration defaults. It is the programmatic owner of the flag names,
@@ -127,7 +129,7 @@ func registerOptions(fs *flag.FlagSet, o *options) {
 	// flag parse error - so a credential used as a flag default is printed in
 	// plaintext to stderr, which an MCP host does not capture.
 	fs.StringVar(&o.operatorToken, flagOperatorToken, "",
-		"the proxy's "+proxyTokenEnv+"; the value is never echoed in usage output (env "+envOperatorToken+")")
+		"the proxy's "+ProxyTokenEnv+"; the value is never echoed in usage output (env "+envOperatorToken+")")
 	fs.IntVar(&o.limits.QueryMaxRows, flagQueryMaxRows, o.limits.QueryMaxRows,
 		"row cap applied to query results before the explicit truncation marker (env "+envQueryMaxRows+")")
 	fs.IntVar(&o.limits.QueryMaxBytes, flagQueryMaxBytes, o.limits.QueryMaxBytes,

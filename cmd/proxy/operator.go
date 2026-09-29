@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // The operator plane is the whole embedded dashboard, standardized as the
@@ -34,22 +35,15 @@ import (
 // single lowest chokepoint every request passes through (main wraps the whole
 // mux with it, including the restart-handoff clone).
 
-// operatorTokenEnv holds the operator credential. It is read once at boot and
-// never enters config.Config, YAML, /admin/config output, snapshots or logs.
-// The restart handoff spawns the child with the parent's environment, so the
+// The operator credential's variable name and length band come from
+// internal/mcp, the one owner the MCP server publishes and enforces:
+// mcp.ProxyTokenEnv is the variable this gate reads, and a credential shorter
+// than mcp.OperatorTokenMinLen or longer than mcp.OperatorTokenMaxLen (the
+// Bearer presentation cap in bearerToken) fails the boot loudly rather than
+// degrading to a weaker policy silently. It is read once at boot and never
+// enters config.Config, YAML, /admin/config output, snapshots or logs. The
+// restart handoff spawns the child with the parent's environment, so the
 // credential survives rebuilds without extra wiring.
-const operatorTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
-
-// operatorTokenMinLen rejects trivially guessable credentials at boot. The
-// gate is fail closed: an unusable credential is a configuration failure, the
-// same class as an invalid config file. operatorTokenMaxLen matches the
-// Bearer presentation cap in bearerToken: a longer configured credential
-// could never be presented and would silently break header auth, so the boot
-// rejects it instead.
-const (
-	operatorTokenMinLen = 16
-	operatorTokenMaxLen = 512
-)
 
 // Session cookie bounds. The cookie exists because EventSource cannot send
 // Authorization headers: it is HttpOnly (script never reads it), SameSite
@@ -85,24 +79,23 @@ const (
 // gate with no credential (compose interpolations routinely yield empty
 // strings, so empty is treated as unset with a warning): every gated request
 // is denied while the liveness probe and inference keep working. A nonempty
-// credential shorter than operatorTokenMinLen or longer than
-// operatorTokenMaxLen fails the boot loudly rather than degrading to a
-// weaker policy silently.
+// credential outside mcp.OperatorTokenMinLen..MaxLen fails the boot loudly
+// rather than degrading to a weaker policy silently.
 func loadOperatorToken() (string, error) {
-	value, ok := os.LookupEnv(operatorTokenEnv)
+	value, ok := os.LookupEnv(mcp.ProxyTokenEnv)
 	switch {
 	case !ok:
-		log.Printf("operator plane disabled: %s is not set, dashboard and admin endpoints deny all requests", operatorTokenEnv)
+		log.Printf("operator plane disabled: %s is not set, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
 		return "", nil
 	case value == "":
-		log.Printf("operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", operatorTokenEnv)
+		log.Printf("operator plane disabled: %s is empty, dashboard and admin endpoints deny all requests", mcp.ProxyTokenEnv)
 		return "", nil
-	case len(value) < operatorTokenMinLen:
-		return "", errors.New(operatorTokenEnv + " must be at least " + strconv.Itoa(operatorTokenMinLen) + " characters")
-	case len(value) > operatorTokenMaxLen:
-		return "", errors.New(operatorTokenEnv + " must be at most " + strconv.Itoa(operatorTokenMaxLen) + " characters")
+	case len(value) < mcp.OperatorTokenMinLen:
+		return "", errors.New(mcp.ProxyTokenEnv + " must be at least " + strconv.Itoa(mcp.OperatorTokenMinLen) + " characters")
+	case len(value) > mcp.OperatorTokenMaxLen:
+		return "", errors.New(mcp.ProxyTokenEnv + " must be at most " + strconv.Itoa(mcp.OperatorTokenMaxLen) + " characters")
 	}
-	log.Printf("operator plane enabled (%s)", operatorTokenEnv)
+	log.Printf("operator plane enabled (%s)", mcp.ProxyTokenEnv)
 	return value, nil
 }
 
@@ -121,7 +114,7 @@ func mustOperatorToken() string {
 // token, and the per-IP failure throttle.
 type operatorGate struct {
 	// armed distinguishes "no credential configured" from a configured
-	// credential: an unset MILLIVOLT_OPERATOR_TOKEN still hashes to a real
+	// credential: an unset mcp.ProxyTokenEnv still hashes to a real
 	// SHA-256 digest, so the flag owns the deny-all state.
 	armed      bool
 	tokenHash  [sha256.Size]byte
@@ -201,7 +194,7 @@ func bearerToken(r *http.Request) (string, bool) {
 		return "", false
 	}
 	token := header[len(prefix):]
-	if token == "" || len(token) > operatorTokenMaxLen {
+	if token == "" || len(token) > mcp.OperatorTokenMaxLen {
 		return "", false
 	}
 	return token, true
@@ -478,7 +471,7 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 // operatorPlaneDisabledMsg is the unarmed-plane denial message shared by the
 // request gate and the session handshake: both answer 403 with it when no
 // operator credential is configured.
-const operatorPlaneDisabledMsg = "operator plane is disabled: set " + operatorTokenEnv + " to enable it"
+const operatorPlaneDisabledMsg = "operator plane is disabled: set " + mcp.ProxyTokenEnv + " to enable it"
 
 // denyOperator is the single denial writer for the operator plane: it owns
 // the Cache-Control: no-store and frame-ancestors CSP denial headers and the

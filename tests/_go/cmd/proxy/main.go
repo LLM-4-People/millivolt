@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 	"github.com/LLM-4-People/millivolt/internal/web"
@@ -462,17 +463,49 @@ func TestOperatorLockoutHoldsAtCap(t *testing.T) {
 	}
 }
 
-// TestOperatorTokenBandMatchesThePublishedReference pins the boot-time
-// credential band, whose owner is operatorTokenMinLen/MaxLen in
-// cmd/proxy/operator.go, to the band the MCP server publishes and enforces
-// (internal/mcp/limits.go operatorTokenMinLen/MaxLen, itself pinned by
-// tests/_go/internal/mcp/drift.go). A min above 16 would refuse a credential
-// the MCP server accepts; a min below it would arm a trivially short one.
-// The mutation round proved nothing failed when the owner moved.
-func TestOperatorTokenBandMatchesThePublishedReference(t *testing.T) {
-	if operatorTokenMinLen != 16 || operatorTokenMaxLen != 512 {
-		t.Fatalf("operator token band = %d..%d, want 16..512 (published by internal/mcp limits)",
-			operatorTokenMinLen, operatorTokenMaxLen)
+// TestOperatorGateUsesThePublishedTokenContract pins the proxy's boot gate to
+// internal/mcp, the one owner of the operator credential contract: the gate
+// reads mcp.ProxyTokenEnv, and its boot band is exactly
+// mcp.OperatorTokenMinLen..mcp.OperatorTokenMaxLen, inclusive. The boundary
+// cases are derived from the owner, so a literal reintroduced in this package
+// (a one-sided divergence) fails here even though the owner's own tests stay
+// green; the owner's literal pins live in tests/_go/internal/mcp/drift.go.
+func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
+	minToken := strings.Repeat("x", mcp.OperatorTokenMinLen)
+	maxToken := strings.Repeat("x", mcp.OperatorTokenMaxLen)
+	for _, tc := range []struct {
+		name  string
+		token string
+		valid bool
+	}{
+		{"below the minimum", minToken[:len(minToken)-1], false},
+		{"at the minimum", minToken, true},
+		{"at the maximum", maxToken, true},
+		{"above the maximum", maxToken + "x", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(mcp.ProxyTokenEnv, tc.token)
+			value, err := loadOperatorToken()
+			if tc.valid {
+				if err != nil || value != tc.token {
+					t.Fatalf("loadOperatorToken rejected the %d-character boundary token: value is %d characters, err=%v",
+						len(tc.token), len(value), err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("loadOperatorToken accepted the %d-character token, outside %d..%d",
+					len(tc.token), mcp.OperatorTokenMinLen, mcp.OperatorTokenMaxLen)
+			}
+		})
+	}
+
+	// Setting only a look-alike name must leave the credential unset: the gate
+	// reads the owner's variable, not a local spelling.
+	t.Setenv(mcp.ProxyTokenEnv, "")
+	t.Setenv(mcp.ProxyTokenEnv+"_LEGACY", minToken)
+	if value, err := loadOperatorToken(); value != "" || err != nil {
+		t.Fatalf("the gate must read exactly %s: value is %d characters, err=%v", mcp.ProxyTokenEnv, len(value), err)
 	}
 }
 
@@ -483,25 +516,25 @@ func TestOperatorTokenEnv(t *testing.T) {
 	if value, err := loadOperatorToken(); value != "" || err != nil {
 		t.Errorf("unset token: value=%q err=%v, want \"\", nil", value, err)
 	}
-	t.Setenv(operatorTokenEnv, "")
+	t.Setenv(mcp.ProxyTokenEnv, "")
 	if value, err := loadOperatorToken(); value != "" || err != nil {
 		t.Errorf("empty token: value=%q err=%v, want \"\", nil (compose interpolations yield empty; treat as unset)", value, err)
 	}
-	t.Setenv(operatorTokenEnv, "short")
+	t.Setenv(mcp.ProxyTokenEnv, "short")
 	if _, err := loadOperatorToken(); err == nil {
 		t.Error("short token: want boot failure")
 	}
-	t.Setenv(operatorTokenEnv, strings.Repeat("x", operatorTokenMaxLen+1))
+	t.Setenv(mcp.ProxyTokenEnv, strings.Repeat("x", mcp.OperatorTokenMaxLen+1))
 	if _, err := loadOperatorToken(); err == nil {
 		t.Error("oversized token: want boot failure (it could never be presented via Bearer)")
 	}
 	const credential = "operator-fixture-credential"
-	t.Setenv(operatorTokenEnv, credential)
+	t.Setenv(mcp.ProxyTokenEnv, credential)
 	value, err := loadOperatorToken()
 	if err != nil || value != credential {
 		t.Errorf("valid token: value=%q err=%v, want %q, nil", value, err, credential)
 	}
-	maxTok := strings.Repeat("x", operatorTokenMaxLen)
+	maxTok := strings.Repeat("x", mcp.OperatorTokenMaxLen)
 	req := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
 	req.Header.Set("Authorization", "Bearer "+maxTok)
 	got, ok := bearerToken(req)
