@@ -575,6 +575,65 @@ func TestToolTableMatchesTheRegistry(t *testing.T) {
 	}
 }
 
+// TestStateChangingToolsMatchTheRegistry pins the guide's state-changing tool
+// list to the registry annotations, the one owner of that classification: a
+// tool the registry annotates mutating or destructive is state-changing, a
+// read-only annotated tool is not. The comparison is bidirectional, so moving
+// a tool between the guide's categories, renaming one, or adding a mutating
+// tool without listing it fails here. The guarded sentence is the one with
+// "state-changing tools are " and ending at its first period; its backticked
+// tool names are the guide's set.
+func TestStateChangingToolsMatchTheRegistry(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	const heading = "state-changing tools are "
+	index := strings.Index(string(guide), heading)
+	if index < 0 {
+		t.Fatalf("docs/mcp.md must state %q", heading)
+	}
+	sentence := string(guide)[index+len(heading):]
+	if dot := strings.Index(sentence, "."); dot >= 0 {
+		sentence = sentence[:dot]
+	}
+	listed := map[string]bool{}
+	for _, match := range regexp.MustCompile("`([a-z][a-z0-9_]*)`").FindAllStringSubmatch(sentence, -1) {
+		if listed[match[1]] {
+			t.Fatalf("the state-changing list names %s twice", match[1])
+		}
+		listed[match[1]] = true
+	}
+	if len(listed) == 0 {
+		t.Fatal("the state-changing sentence names no tool")
+	}
+
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	registered, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateChanging := map[string]bool{}
+	for _, tool := range registered.Tools {
+		// The registry's readOnly annotation sets only ReadOnlyHint; both
+		// mutating and destructive set DestructiveHint (false or true), so a
+		// non-nil destructive hint is exactly the state-changing set.
+		if tool.Annotations != nil && tool.Annotations.DestructiveHint != nil {
+			stateChanging[tool.Name] = true
+		}
+	}
+	for name := range stateChanging {
+		if !listed[name] {
+			t.Fatalf("the guide's state-changing list omits %s, which the registry annotates mutating or destructive", name)
+		}
+	}
+	for name := range listed {
+		if !stateChanging[name] {
+			t.Fatalf("the guide lists %s as state-changing, the registry annotates it read-only", name)
+		}
+	}
+}
+
 // TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
 // claim in the published docs to the registered tool surface, which is the
 // owner: adding or removing a tool must update each mention, and a doc-only
