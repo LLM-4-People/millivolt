@@ -256,14 +256,15 @@ a refusal that reports the live count is a count oracle a model can retry its
 way through. The residual gap is stated rather than claimed away:
 the re-check and the delete are two requests with no shared transaction, so rows
 committed between them are removed un-previewed. Capture refuses to start without
-durable storage, and refuses a scope name the proxy has never seen, because
-either way the session would report success and store nothing. Stopping a capture
-session deletes nothing, and a purge deletes the stored capture document of every
-request it matches; the tools say which is which rather than implying otherwise.
-Scope names are validated against the vocabulary `GET /admin/debug` reports, so
-neither a mistyped capture scope nor a mistyped throttle provider can quietly
-create a dead session or permanently pollute `known_providers`. See the
-[MCP server guide](mcp.md).
+durable storage, and checks a scope name against the vocabulary the proxy
+reports, because either way the session would report success and store nothing.
+Stopping a capture session deletes nothing, and a purge deletes the stored
+capture document of every request it matches; the tools say which is which
+rather than implying otherwise. When that vocabulary is readable and non-empty,
+an unknown capture scope or throttle provider is refused and the known names are
+offered; both checks accept any name when it is empty, and the throttle provider
+check also accepts one when the debug read fails, while the capture tool refuses
+when the same read fails. See the [MCP server guide](mcp.md).
 
 ## Dashboard render owners
 
