@@ -280,7 +280,9 @@ func TestOperatorStateMethodGates(t *testing.T) {
 // explicit UTC() call - the round-seven mutation dropped that call silently,
 // changing the zone without breaking a single test. A value is valid only if
 // it parses as RFC 3339 AND carries the UTC Z designator; a zero Until
-// renders no field at all (nil omission is the existing contract).
+// renders "until":null (the snapshot maps marshal nil directly, and the
+// dashboard's `|| null` / falsy guards treat null as no deadline).
+// TestOperatorStateZeroUntilRendersJSONNull pins that zero shape.
 func TestOperatorStateUntilRFC3339UTC(t *testing.T) {
 	// The restored deadline itself carries a non-UTC fixed zone, so the pin
 	// catches the dropped .UTC() call on any machine: with a UTC local zone a
@@ -343,6 +345,56 @@ func TestOperatorStateUntilRFC3339UTC(t *testing.T) {
 		if _, err := time.Parse(time.RFC3339, s); err != nil {
 			t.Fatalf("debug until[%d] = %q does not parse as RFC 3339: %v", i, s, err)
 		}
+	}
+}
+
+// TestOperatorStateZeroUntilRendersJSONNull pins the zero-Until wire shape on
+// both operator surfaces: rfc3339OrNil returns nil, the snapshot maps marshal
+// it directly, and map values have no omitempty, so the key is present with a
+// JSON null. The dashboard's `st.until || null` and `if (!h.until)` guards
+// treat null exactly like an absent deadline, so null is the real contract;
+// the persisted typed structs keep their own omitempty and are not this wire.
+func TestOperatorStateZeroUntilRendersJSONNull(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	if err := p.applyHolds([]persistedPause{{ID: "pause-indefinite", Clients: []string{"client-a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.applyDebug([]persistedDebug{{ID: "debug-indefinite", Clients: []string{"client-a"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	p.HandlePause(rec, httptest.NewRequest(http.MethodGet, "/admin/pause", nil))
+	if !strings.Contains(rec.Body.String(), `"until":null`) {
+		t.Fatalf("zero pause until must marshal as null: %s", rec.Body.String())
+	}
+	st := pauseJSON(t, rec)
+	if raw, ok := st["until"]; !ok || raw != nil {
+		t.Fatalf("pause document until = %v (present=%t), want present null", raw, ok)
+	}
+	holds, _ := st["holds"].([]any)
+	if len(holds) != 1 {
+		t.Fatalf("pause holds = %v, want the one indefinite hold", st["holds"])
+	}
+	if raw, ok := holds[0].(map[string]any)["until"]; !ok || raw != nil {
+		t.Fatalf("pause hold until = %v (present=%t), want present null", raw, ok)
+	}
+
+	rec = httptest.NewRecorder()
+	p.HandleDebug(rec, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
+	if !strings.Contains(rec.Body.String(), `"until":null`) {
+		t.Fatalf("zero debug until must marshal as null: %s", rec.Body.String())
+	}
+	dst := pauseJSON(t, rec)
+	if raw, ok := dst["until"]; !ok || raw != nil {
+		t.Fatalf("debug document until = %v (present=%t), want present null", raw, ok)
+	}
+	sessions, _ := dst["sessions"].([]any)
+	if len(sessions) != 1 {
+		t.Fatalf("debug sessions = %v, want the one indefinite session", dst["sessions"])
+	}
+	if raw, ok := sessions[0].(map[string]any)["until"]; !ok || raw != nil {
+		t.Fatalf("debug session until = %v (present=%t), want present null", raw, ok)
 	}
 }
 

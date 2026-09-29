@@ -123,7 +123,9 @@ func (s *Server) writeOperatorEditError(w http.ResponseWriter, err, overlap, not
 }
 
 // rfc3339OrNil renders an operator-state timestamp: RFC 3339 UTC, or nil for
-// the zero value (the JSON document then omits the field).
+// the zero value. The snapshot maps are marshalled directly, so a nil value
+// renders "until":null, never an omitted key (map values have no omitempty);
+// the dashboard's `|| null` and falsy guards treat null as no deadline.
 func rfc3339OrNil(t time.Time) any {
 	if t.IsZero() {
 		return nil
