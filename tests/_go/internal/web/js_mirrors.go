@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -788,5 +789,43 @@ func TestDashFiltersStorageKeySingleton(t *testing.T) {
 func TestShellCachePrefixSingleton(t *testing.T) {
 	if got := staticJSLiteralCount(t, "'millivolt-shell-'"); got != 1 {
 		t.Errorf("'millivolt-shell-' appears %d times across the static JS, want exactly 1 (sw.js CACHE_PREFIX is the single owner)", got)
+	}
+}
+
+// TestStaticJSOnlyNamesTheOperatorVariableOwner pins every MILLIVOLT_* word in
+// the embedded static JS to mcp.ProxyTokenEnv, the one owner of the operator
+// credential name. chrome.js's sign-in dialog tells the operator which value
+// to paste, so an owner rename would leave the dashboard pointing at a
+// variable the proxy no longer reads; no static JS runs in the Go suite, so
+// the embedded source is the pin. At least one occurrence must survive: the
+// dialog is the operator's only in-dashboard credential pointer, so dropping
+// every mention fails too.
+func TestStaticJSOnlyNamesTheOperatorVariableOwner(t *testing.T) {
+	pattern := regexp.MustCompile(`MILLIVOLT_[A-Z0-9_]+`)
+	seen := 0
+	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || path.Ext(p) != ".js" {
+			return nil
+		}
+		b, err := staticFS.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for _, name := range pattern.FindAllString(string(b), -1) {
+			seen++
+			if name != mcp.ProxyTokenEnv {
+				t.Errorf("%s names %s; the operator variable owner is %s (internal/mcp ProxyTokenEnv)", p, name, mcp.ProxyTokenEnv)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seen == 0 {
+		t.Fatal("no static JS names the operator variable; the sign-in dialog must tell the operator which value to supply")
 	}
 }
