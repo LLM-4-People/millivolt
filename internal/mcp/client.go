@@ -421,16 +421,27 @@ const redactionMarker = "[redacted]"
 // single characters or ordinary prose.
 const minRedactionRun = 8
 
-// maxPercentLayers bounds the nested percent encodings the scanner peels.
-// Double encoding is the shape a gateway produces by escaping an already
-// escaped value; a token hidden any deeper than this is outside the forms an
-// operator faces, and the bound keeps the work finite.
+// maxPercentLayers bounds the nested encodings the scanner decodes. Three
+// applications is the chain a gateway produces by escaping an already escaped
+// value; a credential hidden any deeper is outside the forms an operator
+// faces, and the bound keeps the work finite. A message whose decoded text
+// still changes after this many passes is not guessed at or published partly
+// decoded: the whole excerpt is replaced by the redaction marker instead.
 const maxPercentLayers = 3
 
+// maxDecodePasses is how many decoding passes one view runs: the
+// maxPercentLayers escape applications the bound allows, plus a final pass
+// that must find nothing left to decode. That last pass is what proves the
+// text is a fixed point; a view whose final pass still decodes something fails
+// closed instead.
+const maxDecodePasses = maxPercentLayers + 1
+
 // credentialFormByteMax is the largest number of raw bytes one credential byte
-// can occupy in a recognized encoded form: a triple percent escape is seven
-// bytes (2*maxPercentLayers+1), and a JSON \u escape of an ASCII byte is six.
-const credentialFormByteMax = 2*maxPercentLayers + 1
+// can occupy in a recognized encoded form. Each decode pass consumes at most
+// six raw bytes for one decoded byte (a JSON \u escape of an ASCII byte), and
+// percent-encoding multiplies the raw size by three, so the bound is six to
+// the power of the number of escape applications.
+const credentialFormByteMax = 6 * 6 * 6
 
 // redactForExcerpt is the one redaction pipeline for a failure message that is
 // published as a whitespace-collapsed excerpt: redact, collapse, redact again,
@@ -509,131 +520,250 @@ type decodedByte struct {
 // credentialView is one decoding interpretation of the message. A reflection
 // can encode the credential in more than one way at once, and an ambiguous
 // sequence (`%25` is a literal percent or the first layer of `%2520`) decodes
-// differently per interpretation, so every view is scanned and the matches are
-// unioned.
+// differently per interpretation, so every interpretation is scanned and the
+// matches are unioned.
 type credentialView struct {
+	raw  string
+	at   int
+	last *decodeLayer
+}
+
+// maxLayerBuffer bounds one decode layer's input queue. One escape needs at
+// most twelve input bytes (a surrogate pair), so the queue is fixed-size and
+// the pipeline allocates nothing per byte.
+const maxLayerBuffer = 12
+
+// decodeLayer is one pass of a decoding pipeline. It pulls (byte, raw range)
+// pairs from its source, decodes the escapes it recognizes, and emits pairs
+// carrying the raw range of everything that produced them. The first layer
+// reads the message; every later layer reads the previous layer's output, so a
+// byte produced by one pass is decoded again by the next. The pipeline is what
+// decodes full-byte nested forms like %25%36%62 (two passes to k), which
+// peeling a single escape cannot see.
+type decodeLayer struct {
+	source    *decodeLayer
 	raw       string
 	at        int
-	layers    int
 	plusSpace bool
-	json      bool
-	pending   []decodedByte
+	exhausted bool
+	in        [maxLayerBuffer]decodedByte
+	inHead    int
+	inLen     int
+	out       [utf8.UTFMax]decodedByte
+	outHead   int
+	outLen    int
+	decoded   bool
 }
 
-// credentialViews returns the interpretations the scanner runs: the raw bytes,
-// then percent decoding at each nesting depth, with and without the query `+`
-// form, decoding JSON \u escapes in every decoded view. The raw view covers
-// literal forms (including url.PathEscape and url.QueryEscape output, which is
-// literal text in the message).
-func credentialViews(message string) []credentialView {
-	views := make([]credentialView, 0, 2*maxPercentLayers+1)
-	views = append(views, credentialView{raw: message})
-	for layers := 1; layers <= maxPercentLayers; layers++ {
-		views = append(views,
-			credentialView{raw: message, layers: layers, json: true},
-			credentialView{raw: message, layers: layers, json: true, plusSpace: true},
-		)
-	}
-	return views
-}
-
-// next returns the next decoded byte with its raw range.
-func (v *credentialView) next() (decodedByte, bool) {
-	if len(v.pending) > 0 {
-		out := v.pending[0]
-		v.pending = v.pending[1:]
-		return out, true
-	}
-	if v.at >= len(v.raw) {
-		return decodedByte{}, false
-	}
-	start := v.at
-	switch c := v.raw[v.at]; {
-	case v.json && c == '\\':
-		if r, consumed, ok := decodeJSONEscape(v.raw, v.at); ok {
-			v.at += consumed
-			var encoded [utf8.UTFMax]byte
-			size := utf8.EncodeRune(encoded[:], r)
-			out := decodedByte{b: encoded[0], start: start, end: v.at}
-			for _, extra := range encoded[1:size] {
-				v.pending = append(v.pending, decodedByte{b: extra, start: start, end: v.at})
+// fill pulls from the source until want bytes are buffered or it is exhausted.
+func (l *decodeLayer) fill(want int) {
+	for l.inLen < want && !l.exhausted {
+		var db decodedByte
+		if l.source == nil {
+			if l.at >= len(l.raw) {
+				l.exhausted = true
+				return
 			}
+			db = decodedByte{b: l.raw[l.at], start: l.at, end: l.at + 1}
+			l.at++
+		} else {
+			next, ok := l.source.next()
+			if !ok {
+				l.exhausted = true
+				return
+			}
+			db = next
+		}
+		l.in[(l.inHead+l.inLen)%maxLayerBuffer] = db
+		l.inLen++
+	}
+}
+
+// peek returns the buffered input byte at index without consuming it.
+func (l *decodeLayer) peek(index int) decodedByte {
+	return l.in[(l.inHead+index)%maxLayerBuffer]
+}
+
+// drop consumes count buffered input bytes.
+func (l *decodeLayer) drop(count int) {
+	l.inHead = (l.inHead + count) % maxLayerBuffer
+	l.inLen -= count
+}
+
+// next returns the next decoded byte with its raw range, or false at the end
+// of the stream.
+func (l *decodeLayer) next() (decodedByte, bool) {
+	for {
+		if l.outLen > 0 {
+			out := l.out[l.outHead]
+			l.outHead = (l.outHead + 1) % utf8.UTFMax
+			l.outLen--
 			return out, true
 		}
-	case v.layers > 0 && c == '%':
-		if b, consumed, ok := peelPercent(v.raw, v.at, v.layers); ok {
-			v.at += consumed
-			return decodedByte{b: b, start: start, end: v.at}, true
+		l.fill(1)
+		if l.inLen == 0 {
+			return decodedByte{}, false
 		}
-	case v.plusSpace && c == '+':
-		v.at++
-		return decodedByte{b: ' ', start: start, end: v.at}, true
-	}
-	v.at++
-	return decodedByte{b: v.raw[start], start: start, end: v.at}, true
-}
-
-// decodeJSONEscape decodes one JSON \u escape at raw[at], combining a surrogate
-// pair when the next escape completes it. Hex digits are case-insensitive.
-func decodeJSONEscape(raw string, at int) (rune, int, bool) {
-	if at+5 >= len(raw) || raw[at] != '\\' || raw[at+1] != 'u' {
-		return 0, 0, false
-	}
-	first, ok := parseHex4(raw, at+2)
-	if !ok {
-		return 0, 0, false
-	}
-	if utf16.IsSurrogate(rune(first)) && at+11 < len(raw) && raw[at+6] == '\\' && raw[at+7] == 'u' {
-		if second, ok := parseHex4(raw, at+8); ok {
-			if combined := utf16.DecodeRune(rune(first), rune(second)); combined != utf8.RuneError {
-				return combined, 12, true
+		head := l.peek(0)
+		if head.b == '\\' {
+			if r, consumed, ok := l.decodeJSON(); ok {
+				span := rawSpan{start: head.start, end: l.peek(consumed - 1).end}
+				l.drop(consumed)
+				l.decoded = true
+				var encoded [utf8.UTFMax]byte
+				size := utf8.EncodeRune(encoded[:], r)
+				for _, b := range encoded[:size] {
+					l.out[(l.outHead+l.outLen)%utf8.UTFMax] = decodedByte{b: b, start: span.start, end: span.end}
+					l.outLen++
+				}
+				continue
 			}
 		}
+		if head.b == '%' {
+			if value, ok := l.decodePercent(); ok {
+				span := rawSpan{start: head.start, end: l.peek(2).end}
+				l.drop(3)
+				l.decoded = true
+				l.out[(l.outHead+l.outLen)%utf8.UTFMax] = decodedByte{b: value, start: span.start, end: span.end}
+				l.outLen++
+				continue
+			}
+		}
+		if l.plusSpace && head.b == '+' {
+			l.drop(1)
+			l.decoded = true
+			l.out[(l.outHead+l.outLen)%utf8.UTFMax] = decodedByte{b: ' ', start: head.start, end: head.end}
+			l.outLen++
+			continue
+		}
+		l.drop(1)
+		return head, true
 	}
-	return rune(first), 6, true
 }
 
-// parseHex4 reads four case-insensitive hex digits at raw[at].
-func parseHex4(raw string, at int) (uint16, bool) {
-	if at+3 >= len(raw) {
+// decodeJSON recognizes one JSON escape at the head of the buffered input:
+// the simple escapes plus \uXXXX, combining a surrogate pair when a second
+// escape completes it. Hex digits are case-insensitive.
+func (l *decodeLayer) decodeJSON() (rune, int, bool) {
+	l.fill(2)
+	if l.inLen < 2 || l.peek(0).b != '\\' {
+		return 0, 0, false
+	}
+	switch l.peek(1).b {
+	case '"', '\\', '/':
+		return rune(l.peek(1).b), 2, true
+	case 'b':
+		return '\b', 2, true
+	case 'f':
+		return '\f', 2, true
+	case 'n':
+		return '\n', 2, true
+	case 'r':
+		return '\r', 2, true
+	case 't':
+		return '\t', 2, true
+	case 'u':
+		l.fill(6)
+		if l.inLen < 6 {
+			return 0, 0, false
+		}
+		first, ok := hex4(l.peek(2).b, l.peek(3).b, l.peek(4).b, l.peek(5).b)
+		if !ok {
+			return 0, 0, false
+		}
+		if utf16.IsSurrogate(rune(first)) {
+			l.fill(12)
+			if l.inLen >= 12 && l.peek(6).b == '\\' && l.peek(7).b == 'u' {
+				if second, ok := hex4(l.peek(8).b, l.peek(9).b, l.peek(10).b, l.peek(11).b); ok {
+					if combined := utf16.DecodeRune(rune(first), rune(second)); combined != utf8.RuneError {
+						return combined, 12, true
+					}
+				}
+			}
+		}
+		return rune(first), 6, true
+	}
+	return 0, 0, false
+}
+
+// decodePercent recognizes one percent escape at the head of the buffered
+// input. It decodes exactly one layer: a produced percent is decoded again by
+// the next pipeline pass, which is what makes nested forms work.
+func (l *decodeLayer) decodePercent() (byte, bool) {
+	l.fill(3)
+	if l.inLen < 3 || l.peek(0).b != '%' {
 		return 0, false
 	}
-	var value uint16
-	for offset := 0; offset < 4; offset++ {
-		digit, ok := hexDigit(raw[at+offset])
-		if !ok {
-			return 0, false
-		}
-		value = value<<4 | uint16(digit)
+	value, ok := hexByte(l.peek(1).b, l.peek(2).b)
+	if !ok {
+		return 0, false
 	}
 	return value, true
 }
 
-// peelPercent decodes one percent escape at raw[at], peeling up to layers
-// nested encodings: `%2520` is a space at two layers, and `%25` followed by
-// `20` is the literal text `%20` at one. Hex digits are case-insensitive,
-// which is what makes a lower- or mixed-case echo match.
-func peelPercent(raw string, at, layers int) (byte, int, bool) {
-	if at+2 >= len(raw) {
-		return 0, 0, false
-	}
-	value, ok := hexByte(raw[at+1], raw[at+2])
+// hex4 reads four case-insensitive hex digits.
+func hex4(a, b, c, d byte) (uint16, bool) {
+	high, ok := hexByte(a, b)
 	if !ok {
-		return 0, 0, false
+		return 0, false
 	}
-	consumed := 3
-	for layer := 1; value == '%' && layer < layers; layer++ {
-		if at+consumed+1 >= len(raw) {
-			break
-		}
-		next, ok := hexByte(raw[at+consumed], raw[at+consumed+1])
-		if !ok {
-			break
-		}
-		value = next
-		consumed += 2
+	low, ok := hexByte(c, d)
+	if !ok {
+		return 0, false
 	}
-	return value, consumed, true
+	return uint16(high)<<8 | uint16(low), true
+}
+
+// credentialViews returns the interpretations the scanner runs: the raw bytes,
+// then a decoding pipeline for each nesting depth, with and without the query
+// `+` form. Every decoded view decodes JSON escapes, because a structured
+// failure body can carry the credential as JSON text at any layer. The raw
+// view covers literal forms (including url.PathEscape and url.QueryEscape
+// output, which is literal text in the message).
+func credentialViews(message string) []credentialView {
+	views := make([]credentialView, 0, 2*maxPercentLayers+1)
+	views = append(views, credentialView{raw: message})
+	for layers := 1; layers <= maxPercentLayers; layers++ {
+		views = append(views, decodedView(message, layers, false), decodedView(message, layers, true))
+	}
+	return views
+}
+
+// decodedView builds the pipeline for one interpretation: maxDecodePasses
+// layers, with the query `+` form applied at the pass that matches the
+// encoding depth it is meant to reverse. Every layer carries the raw range of
+// the input it consumed, so a match in the final text maps back to the message.
+func decodedView(message string, layers int, plusSpace bool) credentialView {
+	var previous *decodeLayer
+	for pass := 1; pass <= maxDecodePasses; pass++ {
+		layer := &decodeLayer{source: previous}
+		if previous == nil {
+			layer.raw = message
+		}
+		layer.plusSpace = plusSpace && pass == layers
+		previous = layer
+	}
+	return credentialView{raw: message, last: previous}
+}
+
+// next returns the next decoded byte of the view with its raw range.
+func (v *credentialView) next() (decodedByte, bool) {
+	if v.last == nil {
+		if v.at >= len(v.raw) {
+			return decodedByte{}, false
+		}
+		db := decodedByte{b: v.raw[v.at], start: v.at, end: v.at + 1}
+		v.at++
+		return db, true
+	}
+	return v.last.next()
+}
+
+// incomplete reports whether the view's final pass still decoded something:
+// its text is not a fixed point, so no match in it can be trusted and the
+// message fails closed instead.
+func (v *credentialView) incomplete() bool {
+	return v.last != nil && v.last.decoded
 }
 
 // hexByte decodes a pair of case-insensitive hex digits.
@@ -784,10 +914,16 @@ func applySpans(message string, spans []rawSpan) string {
 //   - the literal token, and any contiguous fragment of it at least
 //     minRedactionRun bytes long, so a credential split across two JSON string
 //     fields cannot leak a usable piece;
-//   - percent-encoded forms at any hex case and up to maxPercentLayers
-//     nesting levels, including the query `+` form of a space;
-//   - JSON \u-escaped forms, the shape a structured error body carries before
-//     its string fields are decoded.
+//   - percent-encoded forms at any hex case and up to maxPercentLayers escape
+//     applications, including full-byte nested forms and the query `+` form of
+//     a space;
+//   - JSON-escaped forms, including backslash-doubled text and \u escapes.
+//
+// A message that still decodes after maxPercentLayers applications is not
+// published partly decoded: the whole message is replaced by the redaction
+// marker instead. That is the fail-closed path for nesting deeper than the
+// bound, and it is why the coverage claim does not depend on guessing what an
+// undecoded remainder might hide.
 func redactCredential(message, token string) string {
 	if token == "" || message == "" {
 		return message
@@ -799,6 +935,9 @@ func redactCredential(message, token string) string {
 	var spans []rawSpan
 	for _, view := range credentialViews(message) {
 		scanView(token, windows, &view, &spans)
+		if view.incomplete() {
+			return redactionMarker
+		}
 	}
 	return applySpans(message, spans)
 }

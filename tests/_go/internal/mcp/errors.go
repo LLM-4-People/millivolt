@@ -668,6 +668,126 @@ func TestErrorBodyRedactionCoversEncodedCredentialForms(t *testing.T) {
 	}
 }
 
+// percentNest renders every byte of s as a percent escape, depth times over:
+// the full-byte nested form a gateway produces by escaping an already escaped
+// value. Each pass escapes every byte of the previous pass, including the `%`
+// itself, so depth 2 of `k` is `%25%36%42` rather than the contiguous
+// `%256b` a one-escape peel also handles.
+func percentNest(s string, depth int) string {
+	for range depth {
+		var out strings.Builder
+		for _, b := range []byte(s) {
+			fmt.Fprintf(&out, "%%%02X", b)
+		}
+		s = out.String()
+	}
+	return s
+}
+
+// doubleUnescape applies the query unescape an operator (or a model) would
+// apply twice, so a published excerpt that only decodes back to the credential
+// after a second pass is still a leak.
+func doubleUnescape(s string) string {
+	once, err := url.QueryUnescape(s)
+	if err != nil {
+		return s
+	}
+	twice, err := url.QueryUnescape(once)
+	if err != nil {
+		return once
+	}
+	return twice
+}
+
+// TestErrorBodyRedactionCoversFullByteNestedPercent is the regression for the
+// one-layer-short peel: full-byte nested percent encoding at depths 2 and 3
+// used to pass through untouched, because peeling a single escape can only
+// follow `%2520`-style contiguity and never the `%25%36%42` form. The first
+// maxPercentLayers depths must be removed entirely; anything deeper must fail
+// closed with the excerpt replaced, because publishing the undecoded remainder
+// would be exactly the leak the bound exists to stop.
+func TestErrorBodyRedactionCoversFullByteNestedPercent(t *testing.T) {
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+	for _, tc := range []struct {
+		depth      int
+		failClosed bool
+	}{
+		{depth: 1},
+		{depth: 2},
+		{depth: 3},
+		{depth: 4, failClosed: true},
+		{depth: 5, failClosed: true},
+	} {
+		t.Run(strconv.Itoa(tc.depth)+" layers", func(t *testing.T) {
+			encoded := percentNest(token, tc.depth)
+			message := failureMessage(t, token, "upstream echoed "+encoded)
+			if tc.failClosed {
+				if message != redactionMarker {
+					t.Fatalf("nesting past the %d layer bound must replace the excerpt with %q, got %q",
+						maxPercentLayers, redactionMarker, message)
+				}
+				return
+			}
+			assertRedacted(t, token, "full-byte nested echo", message, encoded)
+			if decoded := doubleUnescape(message); strings.Contains(decoded, token) {
+				t.Fatalf("two decodes of the published message recovered the credential: %q", decoded)
+			}
+		})
+	}
+
+	// The fail-closed rule must also hold when the literal credential is
+	// present beside the too-deep form: redacting the literal and publishing
+	// the rest would still leak.
+	encoded := percentNest(token, maxPercentLayers+1)
+	message := failureMessage(t, token, `{"error":`+quote("upstream echoed "+encoded+" and "+token)+`}`)
+	if message != redactionMarker {
+		t.Fatalf("a deeper form beside the literal credential must fail closed, got %q", message)
+	}
+}
+
+// TestErrorBodyRedactionCoversDoubleQueryEscape is the regression for the
+// plus-space pass that only mapped raw `+` characters. A credential escaped
+// twice by url.QueryEscape carries its space as the literal `%2B` of the inner
+// escape, so the first 8 bytes (a usable secret at the project's fragment
+// floor) survived as text that two query-unescapes recovered.
+func TestErrorBodyRedactionCoversDoubleQueryEscape(t *testing.T) {
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+	encoded := url.QueryEscape(url.QueryEscape(token))
+	message := failureMessage(t, token, `{"error":`+quote("upstream echoed "+encoded)+`}`)
+	assertRedacted(t, token, "double QueryEscape echo", message, encoded)
+	decoded := doubleUnescape(message)
+	if !strings.Contains(message, redactionMarker) {
+		t.Fatalf("the double-escaped echo must be redacted: %q", message)
+	}
+	if strings.Contains(decoded, token[:minRedactionRun]) {
+		t.Fatalf("two query-unescapes of the published message expose the credential's first %d bytes: %q",
+			minRedactionRun, decoded)
+	}
+}
+
+// TestErrorBodyRedactionCoversRePercentedPathEscape covers a mixed depth-2
+// form: url.PathEscape output (literal `+`, escaped space, slash, equals and
+// question mark) with every byte then percent-escaped again. Only part of the
+// credential is contiguous under a one-layer peel, so this is the shape that
+// needs the decoding pipeline rather than a deeper single-escape peel.
+func TestErrorBodyRedactionCoversRePercentedPathEscape(t *testing.T) {
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+	encoded := percentNest(url.PathEscape(token), 1)
+	message := failureMessage(t, token, "upstream echoed "+encoded)
+	assertRedacted(t, token, "re-percented PathEscape echo", message, encoded)
+}
+
+// TestErrorBodyRedactionCoversDoubleJSONEscape covers a plain-text body whose
+// credential was JSON-escaped once and then escaped again, so the backslashes
+// are doubled and one pass of \u decoding only yields the inner escape text.
+// The decoding pipeline runs the next pass over that text and removes it.
+func TestErrorBodyRedactionCoversDoubleJSONEscape(t *testing.T) {
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+	twice := strings.ReplaceAll(jsonEscapeForm(token, hexUpper), `\`, `\\`)
+	message := failureMessage(t, token, "upstream echoed "+twice)
+	assertRedacted(t, token, "double JSON-escaped echo", message, twice)
+}
+
 // TestRedactionScansOnlyTheExcerptRegion pins the work bound on the redaction
 // that runs before the excerpt truncation: the scan covers only the region
 // that can reach the published excerpt, not the whole body. A fixed raw byte
