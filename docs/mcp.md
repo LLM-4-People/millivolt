@@ -129,8 +129,10 @@ of choosing a client:
 - The server never sends requests to the client: there is no sampling and no
   elicitation, so a client that waits for a server-initiated request waits
   forever.
-- Every request must send `Accept: application/json, text/event-stream`; a
-  request missing either half answers `400`.
+- Every request must accept both types, for example
+  `Accept: application/json, text/event-stream`. A wildcard that covers both
+  (`*/*`, `application/*, text/*`) is accepted too; an `Accept` missing either
+  type, or one absent altogether, answers `400`.
 
 ### Stdio placement and setup
 
