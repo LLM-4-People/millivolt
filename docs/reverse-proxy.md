@@ -28,9 +28,10 @@ Compose service. Use a maintained NGINX release with the `http2 on` directive
 The sample splits two prefix locations because they do not share an access
 model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 `Authorization` and routing headers, and allowlist API clients. `location /`
-is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`,
+is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`, `/mcp`,
 `/healthz`, `/favicon.ico` and the other brand/PWA files): allowlist operators, and keep `Host` plus the
-session cookie so Settings origin checks and the live feed work. Shared
+session cookie so Settings origin checks and the live feed work. A URL-capable
+MCP client uses this location with `/mcp` appended and its own Bearer header. Shared
 streaming proxy settings live on the `server` so both SSE paths stay
 unbuffered. Prefix `/v1` wins over `/` for `/v1/chat/completions` and
 `/v1/models`; `GET /models` without that prefix follows `location /` unless

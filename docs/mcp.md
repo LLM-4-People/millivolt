@@ -1,26 +1,31 @@
 # MCP server
 
-`cmd/mcp` (built as `millivolt-mcp`) and the proxy binary's `millivolt mcp`
-subcommand expose millivolt's operator and observability API to an LLM over
-stdio, using the official
+`cmd/mcp` (built as `millivolt-mcp`), the proxy binary's `millivolt mcp`
+subcommand, and the proxy's own `/mcp` endpoint expose millivolt's operator and
+observability API to an LLM, using the official
 [Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk).
-It is a client of a running proxy: it never starts, stops or restarts the proxy
-process. Its operator tools can reconfigure a running proxy, but only through
+They are clients of a running proxy: they never start, stop or restart the proxy
+process. Their operator tools can reconfigure a running proxy, but only through
 the same credential and the same routes the dashboard uses.
 
-An MCP client (an editor's agent mode, Claude Desktop, an MCP-capable CLI)
-launches the binary and speaks the protocol over its stdin and stdout. Every
-tool call becomes an authenticated request to the proxy's
-[operator plane](operations.md#operator-and-data-routes), so the dashboard's
-credential is the same credential and the same routes. That makes this a
-convenience surface, not a second control plane: anything it can do, the
-dashboard can do, and anything it refuses, the API refuses too.
+There are two placements, serving the same 22 tools from one implementation:
+
+- URL-capable clients point at the proxy itself and supply only the key, with
+  no local process and no `MILLIVOLT_MCP_PROXY_URL`.
+- Clients that cannot speak URLs launch one of the two stdio binaries.
+
+The `/mcp` endpoint is always on in the proxy process (like `/metrics`; no flag
+or configuration key enables it), operator-gated, and Bearer-only. It forwards
+the caller's own `Authorization: Bearer` credential on its internal calls, so
+the dashboard session cookie is refused there.
 
 ## Setup
 
-Every parameter comes from a flag and an environment variable, flags winning.
-An empty environment value counts as unset, so an empty container interpolation
-falls through to the default instead of becoming a broken value.
+The stdio placements use the surface below; the URL placement above needs only
+the `Authorization` header. Every stdio parameter comes from a flag and an
+environment variable, flags winning. An empty environment value counts as
+unset, so an empty container interpolation falls through to the default instead
+of becoming a broken value.
 
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
@@ -66,9 +71,55 @@ Redirects are refused outright. No operator route redirects, and `net/http` stri
 subdomain `307`/`308` would replay both the credential and the full request body
 to the redirect target.
 
-### Entrypoints and setup
+### URL placement
 
-Both entrypoints run the same server and resolve the setup surface above
+A URL-capable client (an editor agent, a hosted connector, an MCP-capable CLI)
+needs no binary and no environment: it points at the proxy's `/mcp` endpoint
+and presents the operator credential in an `Authorization` header, the same
+credential the dashboard uses.
+
+```json
+{
+  "mcpServers": {
+    "millivolt": {
+      "url": "http://127.0.0.1:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer the same value the proxy was started with"
+      }
+    }
+  }
+}
+```
+
+A remote client uses the reverse-proxied HTTPS origin from
+[the reverse-proxy guide](reverse-proxy.md), with `/mcp` appended:
+
+```json
+{
+  "mcpServers": {
+    "millivolt": {
+      "url": "https://your-hostname/mcp",
+      "headers": {
+        "Authorization": "Bearer the same value the proxy was started with"
+      }
+    }
+  }
+}
+```
+
+The header is the whole setup: the endpoint reads no environment, starts no
+process, and retains no session or credential after the request. Every request
+is independently authenticated, so a missing or wrong Bearer is denied before
+any tool runs, and a request presenting only the dashboard session cookie is
+refused with 403, because the caller's own credential is what the internal
+calls carry. `/mcp/` look-alikes are reserved: an unregistered path answers 404
+and is never forwarded to inference. The published Compose port is
+loopback-only, so it is not a remote origin; remote clients terminate TLS at
+the ingress as in the [reverse-proxy guide](reverse-proxy.md).
+
+### Stdio placement and setup
+
+Both stdio entrypoints run the same server and resolve the setup surface above
 identically; they differ only in the invocation name they report in usage and
 diagnostics. A leading positional `mcp` is reserved: it used to fall through the
 proxy's argument parser and start the proxy anyway, and it now starts the MCP
@@ -177,7 +228,9 @@ semantics below, correct SQL is guesswork.
 
 The routes are a closed set owned beside the HTTP client, so no tool can name
 an arbitrary path: nothing reaches the proxy's transparent inference
-catch-all, and no restore-adjacent route is exposed.
+catch-all, and no restore-adjacent route is exposed. The HTTP endpoint
+dispatches those same calls in process to the proxy's own gated handler, so
+they never leave the process and the gate re-validates the forwarded Bearer.
 
 ### Filters
 
@@ -460,3 +513,10 @@ unauthorized token and a token issued for a different filter each refuse with
 the row count unchanged, and then an authorized purge deletes the fixture rows.
 A successful purge and the config write are safe here because the instance, its
 database and its config copy all belong to the test and are discarded.
+
+The same run drives the proxy's own `/mcp` endpoint with a real streamable
+HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and
+`records` returning the same documents the stdio entrypoint returns, plus the
+auth boundary (401 without a credential, 401 for a wrong Bearer from the shared
+gate, 403 for a cookie-only request or a wrong Bearer beside an admitted
+cookie) and the reserved `/mcp/` look-alike answering 404, never inference.

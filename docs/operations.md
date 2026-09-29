@@ -1,9 +1,9 @@
 # Operations
 
 Read the [security boundary](../SECURITY.md) before exposing the listener.
-The whole embedded dashboard is protected: every dashboard, `/metrics/*` and
-`/admin/*` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential and is
-denied while it is not configured. Only the unauthenticated `/healthz`
+The whole embedded dashboard is protected: every dashboard, `/metrics/*`,
+`/admin/*` and `/mcp` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential
+and is denied while it is not configured. Only the unauthenticated `/healthz`
 liveness probe, origin-root brand/PWA files (`/favicon.ico`, icons,
 `/manifest.webmanifest`, `/sw.js`) and transparent inference stay open; see
 [operator access](#operator-access).
@@ -651,22 +651,25 @@ the credential gates both.
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
 | `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
+| `POST /mcp` | Streamable HTTP MCP endpoint, always registered and operator-gated like `/metrics`. Serves the same 22 tools as `millivolt mcp`. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session or credential is retained between requests. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes are reserved and answer `404`, never inference. |
 
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
 
-`cmd/mcp` and the proxy binary's `millivolt mcp` subcommand serve this whole
-surface to an LLM over stdio, using the same
-credential and the same routes. It adds no route of its own. For its
-irreversible call, the operator credential and the tool's own guards are the
-entire gate: an empty purge filter, a purge without the exact confirmation
-phrase, and a purge without the `purge_preview` token issued for that same
-filter are each refused. It also refuses a capture session on a proxy without
-durable storage, and an unknown name in a capture scope or a throttle provider
-is offered the known values instead; that vocabulary check fails open when the
-proxy's vocabulary is empty or cannot be read. It never follows a redirect, and
-it presents the credential only in the `Authorization` header. See the
+`cmd/mcp`, the proxy binary's `millivolt mcp` subcommand, and the proxy's own
+`/mcp` endpoint serve this whole surface to an LLM, using the same credential
+and the same routes. The `/mcp` endpoint adds no route of its own and dispatches
+each tool call in process through the same gate, so its forwarded Bearer is
+re-validated exactly like an external request. For its irreversible call, the
+operator credential and the tool's own guards are the entire gate: an empty
+purge filter, a purge without the exact confirmation phrase, and a purge
+without the `purge_preview` token issued for that same filter are each refused.
+It also refuses a capture session on a proxy without durable storage, and an
+unknown name in a capture scope or a throttle provider is offered the known
+values instead; that vocabulary check fails open when the proxy's vocabulary is
+empty or cannot be read. It never follows a redirect, and it presents the
+credential only in the `Authorization` header. See the
 [MCP server guide](mcp.md).
 
 ### Operator access
@@ -684,7 +687,10 @@ route:
   credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
   and every `/admin/*` route, including unclassified future admin paths and
-  unsupported methods.
+  unsupported methods, plus the `/mcp` endpoint and its reserved `/mcp/*`
+  look-alikes. A gated MCP request also needs its credential as a Bearer
+  header: the session cookie alone is refused there (`403`), because the
+  caller's credential is forwarded on the endpoint's internal calls.
 
 Present the credential as `Authorization: Bearer <value>`. A valid Bearer
 request also mints a session cookie, because the dashboard's live feed uses
@@ -701,8 +707,8 @@ that cookie through `POST /admin/session` and works without JavaScript; API
 clients can call the same endpoint or simply send the Bearer header on every
 request. An expired cookie re-prompts in the dashboard or reappears as the
 login page on navigation.
-Unregistered `/admin/*` and `/metrics/*` paths are reserved: they answer 404
-and are never forwarded upstream.
+Unregistered `/admin/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
+answer 404 and are never forwarded upstream.
 
 Failed authentications are throttled per source IP (RemoteAddr only;
 forwarded-header chains are never trusted, since no trusted-proxy model

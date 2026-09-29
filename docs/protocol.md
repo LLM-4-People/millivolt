@@ -12,8 +12,8 @@ and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 
 ## Endpoint behavior
 
-The dashboard, embedded assets, `/admin/*` actions, `/healthz` and registered
-`/metrics/*`
+The dashboard, embedded assets, `/admin/*` actions, `/healthz`, the `/mcp` MCP
+endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
 [operations](operations.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. Other paths reach the

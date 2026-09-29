@@ -21,7 +21,7 @@ defines their supported combinations.
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
 | [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
-| [internal/mcp](../internal/mcp) | The stdio MCP client for the operator plane: one HTTP owner (credential, request building, error extraction), one scope-filter owner, the tool set, the process CLI shared by `millivolt-mcp` and `millivolt mcp`, and the destructive-call guards. No route or projection of its own. |
+| [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry shared by the stdio CLI and the proxy's streamable HTTP `/mcp` endpoint, and the destructive-call guards. No route or projection of its own. |
 
 ## Request and scheduling path
 
@@ -231,6 +231,16 @@ is bounded per call. An empty page is deliberately not exhaustion, because the
 proxy advances its cursor on every row it scanned, including rows the scope
 excluded, so an empty page with an advanced cursor is a page that must be
 continued.
+
+The same client serves both entrypoints from one tool registry. The stdio
+placements dial the proxy; the proxy's own `/mcp` endpoint injects a transport
+that dispatches each synthesized request straight to the proxy's gated handler,
+with the caller's Bearer attached so the gate re-validates it, and a named
+non-routable origin (`http://millivolt.internal`) that is never dialed and
+never derived from the request Host. The endpoint is stateless and
+Bearer-only: every POST gets a temporary server session bound to that request's
+credential, nothing survives it, and the dashboard session cookie is refused
+there because a cookie must not create an internal call.
 
 The destructive surface is guarded where the risk lives. A purge needs a filter
 that constrains something (the bodyless delete-everything command is never sent),
