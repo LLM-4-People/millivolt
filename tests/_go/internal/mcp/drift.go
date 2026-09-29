@@ -271,3 +271,35 @@ func TestProtocolVersionsMirrorTheSDK(t *testing.T) {
 		t.Fatalf("docs/mcp.md lists %v, the SDK supports %v (owner: github.com/modelcontextprotocol/go-sdk/mcp SupportedProtocolVersions)", listed, want)
 	}
 }
+
+// TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
+// claim in the published docs to the registered tool surface, which is the
+// owner: adding or removing a tool must update each mention, and a doc-only
+// number edit fails here. The docs keep the number rather than a count-free
+// phrase because the placements read better with it; this guard is what keeps
+// it true.
+func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strconv.Itoa(len(listed.Tools))
+	mentions := regexp.MustCompile(`([0-9]+) tools?\b`)
+	for _, name := range []string{"mcp.md", "operations.md"} {
+		path := filepath.Join("..", "..", "docs", name)
+		guide, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		found := mentions.FindAllStringSubmatch(string(guide), -1)
+		if len(found) == 0 {
+			t.Fatalf("docs/%s no longer states how many tools are served", name)
+		}
+		for _, match := range found {
+			if match[1] != want {
+				t.Fatalf("docs/%s states %s tools, the registry serves %s", name, match[1], want)
+			}
+		}
+	}
+}
