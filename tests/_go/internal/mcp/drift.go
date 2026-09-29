@@ -272,6 +272,71 @@ func TestProtocolVersionsMirrorTheSDK(t *testing.T) {
 	}
 }
 
+// TestToolTableMatchesTheRegistry pins the hand-written tools table in
+// docs/mcp.md to the registered surface: a renamed, missing or extra row fails
+// here, so the published list cannot drift from the tools the server serves.
+// The comparison is bidirectional: a registered tool with no row is as wrong
+// as a row naming a tool the registry does not serve.
+func TestToolTableMatchesTheRegistry(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	const heading = "## Tools"
+	index := strings.Index(string(guide), heading)
+	if index < 0 {
+		t.Fatalf("docs/mcp.md must keep the %q section that lists every tool", heading)
+	}
+	// A tool row starts with its backticked name in the first cell; the header
+	// and separator rows do not match.
+	row := regexp.MustCompile("^\\| `([a-z][a-z0-9_]*)` \\|")
+	seen := map[string]int{}
+	rows := 0
+	started := false
+	for _, line := range strings.Split(string(guide)[index+len(heading):], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "|") {
+			started = true
+			if match := row.FindStringSubmatch(trimmed); match != nil {
+				seen[match[1]]++
+				rows++
+			}
+			continue
+		}
+		if started && trimmed != "" {
+			break
+		}
+	}
+	if rows == 0 {
+		t.Fatal("docs/mcp.md's tools table has no rows naming a tool")
+	}
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, count := range seen {
+		if count > 1 {
+			t.Fatalf("the tools table lists %s %d times", name, count)
+		}
+		registered := false
+		for _, tool := range listed.Tools {
+			if tool.Name == name {
+				registered = true
+				break
+			}
+		}
+		if !registered {
+			t.Fatalf("the tools table lists %s, which the registry does not serve", name)
+		}
+	}
+	for _, tool := range listed.Tools {
+		if seen[tool.Name] == 0 {
+			t.Fatalf("the tools table omits %s, which the registry serves", tool.Name)
+		}
+	}
+}
+
 // TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
 // claim in the published docs to the registered tool surface, which is the
 // owner: adding or removing a tool must update each mention, and a doc-only

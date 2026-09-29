@@ -63,8 +63,8 @@ func TestCredentialServerCacheReusesAndIsolates(t *testing.T) {
 
 // TestNewHTTPHandlerReusesTheServerAcrossRequests is the end-to-end pin for
 // the same reuse through the real handler: the first POST pays the server
-// construction (all 22 tools and their schemas), and every later POST with the
-// same credential pays only the request. The allocation ratio is the
+// construction (every registered tool and its schema), and every later POST
+// with the same credential pays only the request. The allocation ratio is the
 // observation; a handler that rebuilt the server per POST would allocate the
 // construction cost every time.
 func TestNewHTTPHandlerReusesTheServerAcrossRequests(t *testing.T) {

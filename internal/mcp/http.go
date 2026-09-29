@@ -22,8 +22,8 @@ import (
 //
 // The sdk.Server built from an admitted Service is memoized per credential.
 // The SDK explicitly permits getServer to return the same server for repeated
-// requests, and rebuilding it per POST re-registered all 22 tools and their
-// JSON schemas, which measured about 6.8 MiB and 10 ms per call. The cache
+// requests, and rebuilding it per POST re-registered every tool and its
+// JSON schema, which measured about 6.8 MiB and 10 ms per call. The cache
 // holds exactly one credential and one server: a changed credential discards
 // the previous entry, so no server is ever shared across credentials. The
 // credential is used only as the in-memory cache key; it is never logged or
