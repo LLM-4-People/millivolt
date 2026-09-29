@@ -144,9 +144,6 @@ const exploreAdvice = "narrow the filter set (add or drop a dim:id filter) and r
 // there is no per-call bucket limit to raise.
 const chartAdvice = "request a shorter window, or read the series from query grouped on a started_at time bucket"
 
-// recordsAdvice names the cursor, which is the only continuation this tool has.
-const recordsAdvice = "page with the next_before_ms and next_before_id pair this tool returned"
-
 // snapshotAdvice points at the durable log page, because the snapshot's recent
 // records have no cursor of their own.
 const snapshotAdvice = "older records come from the records tool, paging with before_ms and before_id"
@@ -287,7 +284,7 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(page.Records, limit, "records", recordsAdvice)
+	kept, truncation := clamp(page.Records, limit, "records", cursorAdvice)
 	advanced := cursorAdvanced(in.BeforeMs, in.BeforeID, page.CursorMs, page.CursorID)
 	out := &RecordsOutput{
 		Records:      kept,

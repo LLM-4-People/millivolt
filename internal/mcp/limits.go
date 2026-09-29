@@ -106,6 +106,12 @@ type Truncation struct {
 	Marker string `json:"marker,omitempty"`
 }
 
+// cursorAdvice names the one continuation the two paired-cursor listings
+// share: records and audit_captures_list both RETURN next_before_ms and
+// next_before_id and take that pair back as before_ms and before_id. One
+// owner, because a model that pages one listing pages the other the same way.
+const cursorAdvice = "page with the next_before_ms and next_before_id pair this tool returned"
+
 // clamp truncates a slice to limit and returns the marker describing what was
 // withheld. marker names the shape being truncated ("rows", "records") and
 // advice is the ONE way to continue for that shape, so the model acts on it

@@ -111,6 +111,45 @@ func TestPagingToolsNameTheirRealCursorArguments(t *testing.T) {
 			}
 		}
 	}
+
+	// The continuation advice each listing emits must name the pair the tool
+	// RETURNS. audit_captures_list used to tell the model to page with "the
+	// before_ms and before_id pair this tool returned": those are the
+	// arguments, and no output field is ever named that.
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	rows := make([]string, 0, 12)
+	for i := range 12 {
+		rows = append(rows, `{"id":"r`+strconv.Itoa(i)+`","started_at":`+strconv.Itoa(100-i)+`}`)
+	}
+	proxy.json(http.MethodGet, logPath,
+		`{"records":[`+strings.Join(rows, ",")+`],"more":true,"cursor_ms":1,"cursor_id":"rl"}`)
+	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+	limits := DefaultLimits()
+	limits.PageSize = 10
+	service := newTestService(t, proxy, limits)
+	page, err := service.records(t.Context(), RecordsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	captures, err := service.auditCapturesList(t.Context(), AuditCapturesListInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tool   string
+		marker string
+	}{
+		{"records", page.Truncation.Marker},
+		{"audit_captures_list", captures.Truncation.Marker},
+	} {
+		if !strings.Contains(tc.marker, "next_before_ms") || !strings.Contains(tc.marker, "next_before_id") {
+			t.Fatalf("%s advice %q must name the returned next_before_ms/next_before_id pair", tc.tool, tc.marker)
+		}
+		if strings.Contains(tc.marker, "before_ms and before_id pair this tool returned") {
+			t.Fatalf("%s advice %q names the cursor arguments as output fields", tc.tool, tc.marker)
+		}
+	}
 }
 
 // TestSnapshotCapNamesTheRingOwner pins the "8 * dash_log_rows" formula to

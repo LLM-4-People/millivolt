@@ -285,10 +285,6 @@ type AuditCapturesListOutput struct {
 const auditListNote = "the proxy has no capture listing endpoint: this list is a bounded SELECT over requests WHERE debug = 1, " +
 	"so it shows records whose capture document is stored, and nothing that expired or was never captured"
 
-// captureListAdvice names the one continuation this listing has: the same paired
-// cursor the durable log page uses.
-const captureListAdvice = "page with the before_ms and before_id pair this tool returned"
-
 // AuditCapturesList pages captured requests through a bounded SQL probe.
 func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInput) (*AuditCapturesListOutput, error) {
 	limit := in.Limit
@@ -312,7 +308,7 @@ func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInp
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(found, limit, "records", captureListAdvice)
+	kept, truncation := clamp(found, limit, "records", cursorAdvice)
 	more := len(kept) == limit
 	nextMs, nextID := captureCursor(kept)
 	return &AuditCapturesListOutput{
