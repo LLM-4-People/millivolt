@@ -265,7 +265,7 @@ var vocabularies = []VocabularyDoc{
 	},
 	{
 		Dimension: "live_statuses",
-		Values:    liveStatusClasses,
+		Values:    LiveStatusClasses,
 		Note:      "what the s= selector accepts beside an exact HTTP status code; it is not the status dimension",
 	},
 	{

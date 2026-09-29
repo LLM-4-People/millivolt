@@ -20,6 +20,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1041,15 +1042,14 @@ func parseScopeFilters(q url.Values) ([]scopeFilter, bool) {
 	return out, true
 }
 
-// liveStatusFilter is the named in-flight pills the Requests-card status
+// liveStatusClasses are the named in-flight pills the Requests-card status
 // dropdown can send as s= (streaming / paused / throttled / pending). Distinct
-// from explorer status CLASSES (2xx/4xx/…) which travel as f=status:2xx.
+// from explorer status CLASSES (2xx/4xx/…) which travel as f=status:2xx. The
+// slice is the owner the MCP scope mirror is checked against.
+var liveStatusClasses = []string{"paused", "throttled", "streaming", "pending"}
+
 func liveStatusFilter(s string) bool {
-	switch s {
-	case "paused", "throttled", "streaming", "pending":
-		return true
-	}
-	return false
+	return slices.Contains(liveStatusClasses, s)
 }
 
 // parseScope parses a scoping request: explorer filters (f=dim:id, repeated -

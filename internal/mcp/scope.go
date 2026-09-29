@@ -33,9 +33,10 @@ type Scope struct {
 	Status string `json:"status,omitempty" jsonschema:"exact HTTP status code 0..9999, or a live class: streaming, paused, throttled, pending"`
 }
 
-// liveStatusClasses are the in-flight states the Requests-card status selector
-// accepts alongside exact codes.
-var liveStatusClasses = []string{"streaming", "paused", "throttled", "pending"}
+// LiveStatusClasses are the in-flight states the Requests-card status selector
+// accepts alongside exact codes. internal/web owns the same set
+// (LiveStatusClasses); the web-side contract test compares the two exactly.
+var LiveStatusClasses = []string{"streaming", "paused", "throttled", "pending"}
 
 // Dimensions are the explorer's facet dimensions. The proxy owns the canonical
 // set; this list exists so a tool description can name them and so a bad value
@@ -77,7 +78,7 @@ func validateScopeStatus(status string) error {
 	if status == "" {
 		return nil
 	}
-	for _, class := range liveStatusClasses {
+	for _, class := range LiveStatusClasses {
 		if status == class {
 			return nil
 		}
@@ -85,7 +86,7 @@ func validateScopeStatus(status string) error {
 	code, err := strconv.Atoi(status)
 	if err != nil || code < 0 || code > 9999 {
 		return fmt.Errorf("status %q must be an exact HTTP status code (0..9999) or one of %s",
-			status, strings.Join(liveStatusClasses, ", "))
+			status, strings.Join(LiveStatusClasses, ", "))
 	}
 	return nil
 }
