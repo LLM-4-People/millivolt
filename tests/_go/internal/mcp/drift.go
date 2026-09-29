@@ -234,6 +234,26 @@ func TestPurgePhraseHasOneOwner(t *testing.T) {
 	if !strings.Contains(tag, PurgeConfirmation) {
 		t.Fatalf("the confirmation schema tag must carry the owner phrase, got %q", tag)
 	}
+	// The tool description is what the model reads before calling purge, so the
+	// phrase it must echo has to appear there too, not only in the schema.
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := false
+	for _, tool := range listed.Tools {
+		if tool.Name != "purge" {
+			continue
+		}
+		registered = true
+		if !strings.Contains(tool.Description, PurgeConfirmation) {
+			t.Fatalf("the purge tool description must carry the owner phrase %q, got %q", PurgeConfirmation, tool.Description)
+		}
+	}
+	if !registered {
+		t.Fatal("the purge tool is not registered")
+	}
 	path := filepath.Join("..", "..", "docs", "mcp.md")
 	guide, err := os.ReadFile(path)
 	if err != nil {
