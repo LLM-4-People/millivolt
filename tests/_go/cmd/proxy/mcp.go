@@ -98,6 +98,7 @@ func TestMCPSubcommandCredentialNeverReachesOutput(t *testing.T) {
 		{"env supplied, unknown flag", []string{"mcp", "--bogus"}, []string{"MILLIVOLT_MCP_OPERATOR_TOKEN=" + subcommandLeakingToken}},
 		{"env supplied, bad flag value", []string{"mcp", "--timeout", "nope"}, []string{"MILLIVOLT_MCP_OPERATOR_TOKEN=" + subcommandLeakingToken}},
 		{"env supplied, bare start", []string{"mcp"}, []string{"MILLIVOLT_MCP_OPERATOR_TOKEN=" + subcommandLeakingToken}},
+		{"flag supplied, bare start", []string{"mcp", "--operator-token", subcommandLeakingToken}, nil},
 		{"flag supplied, -h", []string{"mcp", "-h", "--operator-token", subcommandLeakingToken}, nil},
 		{"flag supplied, --help", []string{"mcp", "--help", "--operator-token", subcommandLeakingToken}, nil},
 		{"flag supplied, unknown flag", []string{"mcp", "--bogus", "--operator-token", subcommandLeakingToken}, nil},
