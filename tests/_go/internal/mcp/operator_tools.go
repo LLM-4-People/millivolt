@@ -197,6 +197,9 @@ func TestSetThrottleBodyShapeAndClear(t *testing.T) {
 func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	// The provider has no counts yet, so a window-only body would set nothing.
+	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"throttles":[{"provider":"local","requests":0,"tokens":0}],`+
+		`"known_providers":["local"]}`)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 	for _, tc := range []struct {
@@ -214,12 +217,16 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 		{"unparsable window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: "soon"}, "request_window"},
 		{"empty window", SetThrottleInput{Provider: "local", Requests: throttleInt64Ptr(5), RequestWindow: " "}, "request_window"},
 		{
-			"window with no count", SetThrottleInput{Provider: "local", RequestWindow: "1m"},
-			"a window on its own sets nothing",
+			"window with no count and no existing count", SetThrottleInput{Provider: "local", RequestWindow: "1m"},
+			"no request count yet",
 		},
 		{
-			"token window with no count", SetThrottleInput{Provider: "local", TokenWindow: "1h"},
-			"a window on its own sets nothing",
+			"token window with no count and no existing count", SetThrottleInput{Provider: "local", TokenWindow: "1h"},
+			"no token count yet",
+		},
+		{
+			"a body that names no dimension", SetThrottleInput{Provider: "local"},
+			"sets nothing",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -230,6 +237,19 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 	}
 	if len(proxy.requestsFor(http.MethodPost, throttlePath)) != 0 {
 		t.Fatal("a request the proxy would refuse must not be sent at all")
+	}
+	// A window-only change is accepted when the dimension already has a count:
+	// the proxy merges it into the existing policy.
+	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"throttles":[{"provider":"local","requests":5,"tokens":7}],`+
+		`"known_providers":["local"]}`)
+	proxy.json(http.MethodPost, throttlePath, `{"ok":true,"throttles":[],"known_providers":["local"]}`)
+	for _, in := range []SetThrottleInput{
+		{Provider: "local", RequestWindow: "1m"},
+		{Provider: "local", TokenWindow: "2h"},
+	} {
+		if _, err := service.setThrottle(ctx, in); err != nil {
+			t.Fatalf("%+v merges into an existing count and must be accepted: %v", in, err)
+		}
 	}
 	// The bands' own edges are accepted, including the 1s and 24h window ends and
 	// the day form the proxy accepts.
@@ -244,6 +264,35 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 		proxy.json(http.MethodPost, throttlePath, `{"ok":true,"throttles":[],"known_providers":["local"]}`)
 		if _, err := service.setThrottle(ctx, in); err != nil {
 			t.Fatalf("%+v is inside the proxy's bands and must be accepted: %v", in, err)
+		}
+	}
+}
+
+// TestSetThrottleWindowOnlyBodyDoesNotInventACount pins the wire shape of the
+// merge: the window is sent, and no count the caller did not name is added, so
+// the proxy applies the new window to the stored count.
+func TestSetThrottleWindowOnlyBodyDoesNotInventACount(t *testing.T) {
+	const existing = `{"ok":true,"throttles":[{"provider":"local","requests":5,"tokens":9}],"known_providers":["local"]}`
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodGet, throttlePath, existing)
+	proxy.json(http.MethodPost, throttlePath, existing)
+	service := newTestService(t, proxy, Limits{})
+	if _, err := service.setThrottle(context.Background(), SetThrottleInput{Provider: "local", RequestWindow: "1m"}); err != nil {
+		t.Fatal(err)
+	}
+	requests := proxy.requestsFor(http.MethodGet, throttlePath)
+	if len(requests) != 1 {
+		t.Fatalf("a window-only change must read the current policy once, got %d", len(requests))
+	}
+	assertAuth(t, requests[0])
+	body := decodeBody(t, proxy.requestsFor(http.MethodPost, throttlePath)[0])
+	if body["request_window"] != "1m" {
+		t.Fatalf("the window must be sent: %v", body)
+	}
+	for _, absent := range []string{"requests", "tokens", "concurrency"} {
+		if _, present := body[absent]; present {
+			t.Fatalf("a window-only change must not invent %q: %v", absent, body)
 		}
 	}
 }

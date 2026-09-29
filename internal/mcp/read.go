@@ -181,6 +181,35 @@ func (c *Client) debug(ctx context.Context) (*debugStatus, error) {
 	return &status, nil
 }
 
+// throttleLimits is one provider's current counts. Only the two dimensions a
+// window can apply to are read here.
+type throttleLimits struct {
+	requests int64
+	tokens   int64
+}
+
+// throttleLimit reads the provider's current counts from GET /admin/throttle,
+// which is the same document the dashboard renders. A provider with no entry
+// has no policy, which is zero counts.
+func (c *Client) throttleLimit(ctx context.Context, provider string) (throttleLimits, error) {
+	var document struct {
+		Throttles []struct {
+			Provider string `json:"provider"`
+			Requests int64  `json:"requests"`
+			Tokens   int64  `json:"tokens"`
+		} `json:"throttles"`
+	}
+	if err := c.getJSON(ctx, routeThrottle, nil, &document); err != nil {
+		return throttleLimits{}, err
+	}
+	for _, entry := range document.Throttles {
+		if entry.Provider == provider {
+			return throttleLimits{requests: entry.Requests, tokens: entry.Tokens}, nil
+		}
+	}
+	return throttleLimits{}, nil
+}
+
 // captureRecords lists captured request records, newest first. The proxy has no
 // listing endpoint for captures, so the record ids come from a SQL probe over
 // the requests table: `debug = 1` marks a captured request and
