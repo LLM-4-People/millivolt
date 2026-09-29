@@ -863,14 +863,35 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 	if out.Bytes <= 0 || out.Bytes > 500 {
 		t.Fatalf("bytes = %d, want the clamped encoded size", out.Bytes)
 	}
-	// Every surviving row is a whole row: the result stays valid JSON.
-	for _, row := range out.Rows {
-		if _, err := json.Marshal(row); err != nil {
-			t.Fatalf("a clamped row must stay encodable: %v", err)
+	// The clamp keeps an exact whole-row prefix in source order and stops at
+	// the first row that would overflow: a 500-byte budget holds exactly the
+	// first two rows, with their full values, and cannot hold the third.
+	wantBlob := strings.Repeat("x", 200)
+	encodedRow, err := json.Marshal(map[string]any{"id": "ra", "blob": wantBlob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RowCount != 2 || len(out.Rows) != 2 {
+		t.Fatalf("row_count = %d, rows = %d, want the exact two-row prefix that fits the byte budget", out.RowCount, len(out.Rows))
+	}
+	for i, wantID := range []string{"ra", "rb"} {
+		if out.Rows[i]["id"] != wantID {
+			t.Fatalf("rows[%d].id = %v, want %q in source order", i, out.Rows[i]["id"], wantID)
 		}
-		if row["blob"] == nil {
-			t.Fatal("a row was cut inside: the clamp must keep whole rows only")
+		if out.Rows[i]["blob"] != wantBlob {
+			t.Fatalf("rows[%d].blob = %v, want the full %d-byte source value with no in-row cut", i, out.Rows[i]["blob"], len(wantBlob))
 		}
+	}
+	if out.Bytes != 2*len(encodedRow) {
+		t.Fatalf("bytes = %d, want the exact encoded size of the two kept rows (%d)", out.Bytes, 2*len(encodedRow))
+	}
+	next, err := json.Marshal(map[string]any{"id": "rc", "blob": wantBlob})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Bytes+len(next) <= limits.QueryMaxBytes {
+		t.Fatalf("bytes = %d plus the next row (%d) still fits the %d budget: the clamp stopped early",
+			out.Bytes, len(next), limits.QueryMaxBytes)
 	}
 
 	// A result inside the byte budget reports no truncation at all.
