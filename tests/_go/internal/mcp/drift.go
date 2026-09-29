@@ -1,15 +1,18 @@
 package mcp
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/web"
 )
@@ -58,6 +61,20 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	// deliberate edit here too.
 	if logPageMin != 10 || logPageMax != 500 {
 		t.Fatalf("log page band = %d..%d, want 10..500 (owner: internal/config DashLogRowsMin/Max)", logPageMin, logPageMax)
+	}
+
+	// The records limit argument states the same band in prose. Deriving the
+	// expected phrase from the config owner and comparing the parsed band
+	// exactly means a widened or tidied tag cannot keep the old numbers.
+	limitField, ok := reflect.TypeOf(RecordsInput{}).FieldByName("Limit")
+	if !ok {
+		t.Fatal("RecordsInput has no Limit field")
+	}
+	wantLimit := fmt.Sprintf("page size, %d to %d", config.DashLogRowsMin, config.DashLogRowsMax)
+	limitTag := string(limitField.Tag.Get("jsonschema"))
+	if got := regexp.MustCompile(`page size, [0-9]+ to [0-9]+`).FindString(limitTag); got != wantLimit {
+		t.Fatalf("RecordsInput.Limit schema states %q, want %q (owner: internal/config DashLogRowsMin/Max): %q",
+			got, wantLimit, limitTag)
 	}
 
 	// Explorer group cap: internal/web xpNodeCap.

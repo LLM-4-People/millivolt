@@ -3,7 +3,10 @@ package mcp
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
+	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -268,6 +271,74 @@ func TestSetThrottleAppliesTheProxysOwnBands(t *testing.T) {
 		proxy.json(http.MethodPost, throttlePath, `{"ok":true,"throttles":[],"known_providers":["local"]}`)
 		if _, err := service.setThrottle(ctx, in); err != nil {
 			t.Fatalf("%+v is inside the proxy's bands and must be accepted: %v", in, err)
+		}
+	}
+}
+
+// TestSetThrottleDescriptionStatesThePinnedBands pins the model-visible
+// set_throttle description to the MCP-local band constants. Those constants are
+// the copies the proxy suite's TestMCPThrottleSchemaMirrorsTheProxyBands pins to
+// internal/proxy/throttle.go, and the expected text here is derived from them,
+// so a hand-written description that keeps the old numbers fails when a band
+// changes. The registered tool is checked too, so wiring a literal description
+// in server.go instead of setThrottleDescription fails as well.
+func TestSetThrottleDescriptionStatesThePinnedBands(t *testing.T) {
+	bands := []string{
+		fmt.Sprintf("concurrency (0..%d)", maxLimitConcurrency),
+		fmt.Sprintf("requests per window (0..%d)", maxLimitRequests),
+		fmt.Sprintf("tokens per window (0..%d)", maxLimitTokens),
+		fmt.Sprintf("A window is %s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour)),
+	}
+	for _, band := range bands {
+		if !strings.Contains(setThrottleDescription, band) {
+			t.Fatalf("the set_throttle description must state %q: %q", band, setThrottleDescription)
+		}
+	}
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name != "set_throttle" {
+			continue
+		}
+		if tool.Description != setThrottleDescription {
+			t.Fatalf("the registered set_throttle description must be the owner var, got %q", tool.Description)
+		}
+		return
+	}
+	t.Fatal("the set_throttle tool is not registered")
+}
+
+// TestSetThrottleSchemaTagsStateThePinnedBands parses each band token out of
+// the SetThrottleInput jsonschema tags and compares the whole token to the text
+// derived from the MCP-local constants. A substring check is not enough: a tag
+// widened from "0 to 100000" to "0 to 1000000" still contains the old text, so
+// the parse compares the complete band. The constants themselves are pinned to
+// internal/proxy/throttle.go by the proxy suite's
+// TestMCPThrottleSchemaMirrorsTheProxyBands.
+func TestSetThrottleSchemaTagsStateThePinnedBands(t *testing.T) {
+	window := fmt.Sprintf("%s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour))
+	for _, tc := range []struct {
+		field   string
+		pattern string
+		want    string
+	}{
+		{"Concurrency", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitConcurrency)},
+		{"Requests", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitRequests)},
+		{"Tokens", `0 to [0-9]+`, fmt.Sprintf("0 to %d", maxLimitTokens)},
+		{"RequestWindow", `[0-9]+s to [0-9]+h`, window},
+		{"TokenWindow", `[0-9]+s to [0-9]+h`, window},
+	} {
+		field, ok := reflect.TypeOf(SetThrottleInput{}).FieldByName(tc.field)
+		if !ok {
+			t.Fatalf("SetThrottleInput has no %s field", tc.field)
+		}
+		tag := string(field.Tag.Get("jsonschema"))
+		if got := regexp.MustCompile(tc.pattern).FindString(tag); got != tc.want {
+			t.Fatalf("SetThrottleInput.%s schema states the band %q, want %q (owner: the maxLimit*/minLimitWindow constants): %q",
+				tc.field, got, tc.want, tag)
 		}
 	}
 }
