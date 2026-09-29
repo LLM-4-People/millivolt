@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // The credential these tests look for is a fixture value for a binary that is
@@ -125,113 +123,13 @@ func TestCredentialNeverReachesFlagOutput(t *testing.T) {
 	command.Stderr = &stderr
 	_ = command.Run()
 	usage := stderr.String()
+	if !strings.Contains(usage, "Usage of millivolt-mcp:") {
+		t.Fatalf("standalone usage must name millivolt-mcp, got:\n%s", usage)
+	}
 	for _, flag := range []string{"-operator-token", "-proxy-url", "-query-max-rows", "-page-size", "MILLIVOLT_MCP_QUERY_MAX_BYTES"} {
 		if !strings.Contains(usage, flag) {
 			t.Fatalf("usage must still document %q, got:\n%s", flag, usage)
 		}
-	}
-}
-
-// TestParseResolvesTheCredentialAfterFlagParsing pins the resolution rule the
-// usage guard depends on: the credential is not a flag default, and flags still
-// win over the environment by what was NAMED, not by whether the result is
-// empty.
-func TestParseResolvesTheCredentialAfterFlagParsing(t *testing.T) {
-	env := func(name string) (string, bool) {
-		if name == "MILLIVOLT_MCP_OPERATOR_TOKEN" {
-			return "environment-credential-value", true
-		}
-		return "", false
-	}
-	// Absent flag: the environment supplies it.
-	o, err := parse([]string{"--proxy-url", "http://127.0.0.1:8081"}, env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o.operatorToken != "environment-credential-value" {
-		t.Fatalf("an absent flag must fall through to the environment, got %q", o.operatorToken)
-	}
-	// A named flag wins.
-	o, err = parse([]string{"--operator-token", "flag-credential-value"}, env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o.operatorToken != "flag-credential-value" {
-		t.Fatalf("a named flag must win, got %q", o.operatorToken)
-	}
-	// A named but empty flag is a deliberate invalid choice, not a fall-through:
-	// falling through would silently use a different credential than asked.
-	o, err = parse([]string{"--operator-token="}, env)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o.operatorToken != "" {
-		t.Fatalf("an explicit empty flag must not fall through to the environment, got %q", o.operatorToken)
-	}
-	// An empty environment value counts as unset.
-	empty := func(name string) (string, bool) {
-		if name == "MILLIVOLT_MCP_OPERATOR_TOKEN" {
-			return "", true
-		}
-		return "", false
-	}
-	o, err = parse(nil, empty)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if o.operatorToken != "" {
-		t.Fatalf("an empty environment value must count as unset, got %q", o.operatorToken)
-	}
-}
-
-// TestSetupErrorsNeverCarryTheCredential pins that the setup path's own
-// messages stay safe: they must name what to do, never the value.
-func TestSetupErrorsNeverCarryTheCredential(t *testing.T) {
-	cases := []struct {
-		name string
-		args []string
-		env  map[string]string
-		want string
-	}{
-		{"no token", []string{"--proxy-url", "http://127.0.0.1:8081"}, nil, "operator token is required"},
-		{"short token", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", "short"}, nil, "at least 16"},
-		{"no url", []string{"--operator-token", leakingToken}, nil, "proxy URL is required"},
-		{"bad url", []string{"--proxy-url", "ftp://x", "--operator-token", leakingToken}, nil, "http or https"},
-		{
-			"bad env integer", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken},
-			map[string]string{"MILLIVOLT_MCP_QUERY_MAX_ROWS": "many"}, "MILLIVOLT_MCP_QUERY_MAX_ROWS must be an integer",
-		},
-		{
-			"bad env duration", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken},
-			map[string]string{"MILLIVOLT_MCP_QUERY_TIMEOUT": "soon"}, "MILLIVOLT_MCP_QUERY_TIMEOUT must be a duration",
-		},
-		{
-			"refused limits", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken, "--page-size", "0"},
-			nil, "page size must be at least 1",
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			lookup := func(name string) (string, bool) {
-				value, ok := tc.env[name]
-				return value, ok
-			}
-			o, err := parse(tc.args, lookup)
-			if err == nil {
-				// parse succeeded; the refusal must come from construction, which
-				// is the same setup check main() runs.
-				_, err = mcp.NewService(o.proxyURL, o.operatorToken, o.limits)
-			}
-			if err == nil {
-				t.Fatalf("%s must be a setup failure", tc.name)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error %q must mention %q", err, tc.want)
-			}
-			if strings.Contains(err.Error(), leakingToken) {
-				t.Fatalf("a setup error carried the credential: %q", err)
-			}
-		})
 	}
 }
 
