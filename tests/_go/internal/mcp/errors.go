@@ -197,6 +197,8 @@ func TestRetryAfterIsSanitized(t *testing.T) {
 	}{
 		{"seconds", "42", "42"},
 		{"padded seconds", "  42  ", "42"},
+		{"negative seconds", "-42", ""},
+		{"signed seconds", "+42", ""},
 		{"http date", "Wed, 21 Oct 2015 07:28:00 GMT", "Wed, 21 Oct 2015 07:28:00 GMT"},
 		{"arbitrary text", "call the operator at once", ""},
 		{"credential", testToken, ""},

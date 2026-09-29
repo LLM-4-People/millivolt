@@ -216,7 +216,9 @@ func sanitizeRetryAfter(raw string) string {
 		return ""
 	}
 	if len(trimmed) <= 20 {
-		if _, err := strconv.Atoi(trimmed); err == nil {
+		// ParseUint accepts only non-negative ASCII digits: a sign prefix is
+		// not permitted, so "-42" and "+42" are dropped instead of echoed.
+		if _, err := strconv.ParseUint(trimmed, 10, 64); err == nil {
 			return trimmed
 		}
 	}
