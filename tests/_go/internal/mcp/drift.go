@@ -56,11 +56,14 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	}
 
 	// Log page band: internal/config DashLogRowsMin/Max, the dashboard's own
-	// configured page band. describe derives its constants from that owner;
-	// these exact numbers pin the band so a widened config band is a
-	// deliberate edit here too.
-	if logPageMin != 10 || logPageMax != 500 {
-		t.Fatalf("log page band = %d..%d, want 10..500 (owner: internal/config DashLogRowsMin/Max)", logPageMin, logPageMax)
+	// configured page band. describe derives its constants from that owner, so
+	// the check reads the owner too: a mirror that stops deriving (a hardcoded
+	// literal that no longer tracks the config) fails here, while a deliberate
+	// config band change flows through both sides. The prose pin just below
+	// still forces the hand-written schema text to follow the owner.
+	if logPageMin != config.DashLogRowsMin || logPageMax != config.DashLogRowsMax {
+		t.Fatalf("log page band = %d..%d, want %d..%d (owner: internal/config DashLogRowsMin/Max)",
+			logPageMin, logPageMax, config.DashLogRowsMin, config.DashLogRowsMax)
 	}
 
 	// The records limit argument states the same band in prose. Deriving the
