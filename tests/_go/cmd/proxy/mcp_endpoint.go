@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 	"testing"
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // mcpEndpointToken arms the gate of the endpoint under test. It is a fixture
@@ -158,8 +161,11 @@ func TestMCPHTTPEndpointAuthAndInProcessDispatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 22 {
-		t.Fatalf("tools/list = %d tools, want the documented 22", len(listed.Tools))
+	// The endpoint must serve the shared registry, whatever it holds: compare
+	// the HTTP listing against the production NewServer registration rather
+	// than repeating a tool count a tool addition would leave stale.
+	if got, want := toolNameSet(listed), registeredToolNames(t); !maps.Equal(got, want) {
+		t.Fatalf("tools/list over HTTP differs from the shared registry: got %v, want %v", got, want)
 	}
 	document := mcpStructured(t, mcpCall(t, session, "prometheus", map[string]any{}))
 	if lines, ok := document["lines"].(float64); !ok || lines < 1 {
@@ -282,4 +288,41 @@ func mcpText(t *testing.T, result *sdk.CallToolResult) string {
 		}
 	}
 	return b.String()
+}
+
+// toolNameSet reduces a tools/list answer to its name set.
+func toolNameSet(listed *sdk.ListToolsResult) map[string]bool {
+	names := map[string]bool{}
+	for _, tool := range listed.Tools {
+		names[tool.Name] = true
+	}
+	return names
+}
+
+// registeredToolNames lists what the shared NewServer constructor registers,
+// so an endpoint test can compare against the production registry instead of
+// repeating its count or its names.
+func registeredToolNames(t *testing.T) map[string]bool {
+	t.Helper()
+	service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, mcpEndpointToken, mcp.DefaultLimits(), http.DefaultTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	server := mcp.NewServer(service)
+	serverTransport, clientTransport := sdk.NewInMemoryTransports()
+	if _, err := server.Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatal(err)
+	}
+	session, err := sdk.NewClient(&sdk.Implementation{Name: "registry-probe", Version: "0.0.0"}, nil).
+		Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	listed, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toolNameSet(listed)
 }

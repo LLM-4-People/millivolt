@@ -20,8 +20,8 @@ func TestNewServerIsTheSharedRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 22 {
-		t.Fatalf("NewServer registered %d tools, want the documented 22", len(listed.Tools))
+	if len(listed.Tools) != len(registeredToolNames) {
+		t.Fatalf("NewServer registered %d tools, want the pinned surface's %d", len(listed.Tools), len(registeredToolNames))
 	}
 	info := session.InitializeResult().ServerInfo
 	if info == nil || info.Name != "millivolt" || info.Version != millivolt.Version() {

@@ -85,6 +85,17 @@ func textOf(t *testing.T, result *sdk.CallToolResult) string {
 	return b.String()
 }
 
+// registeredToolNames is the pinned public tool surface: a tool added or
+// removed here is a deliberate change to the public surface. It is the one
+// owner of the contract, so count checks elsewhere compare against it instead
+// of repeating a number that a tool addition would leave stale.
+var registeredToolNames = []string{
+	"describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
+	"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
+	"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
+	"reload_config", "purge_preview", "purge",
+}
+
 // TestRegisteredToolSurface pins the whole advertised tool list. A tool added
 // or removed here is a deliberate change to the public surface.
 func TestRegisteredToolSurface(t *testing.T) {
@@ -97,12 +108,7 @@ func TestRegisteredToolSurface(t *testing.T) {
 	for _, tool := range listed.Tools {
 		got[tool.Name] = tool
 	}
-	want := []string{
-		"describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
-		"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
-		"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
-		"reload_config", "purge_preview", "purge",
-	}
+	want := registeredToolNames
 	if len(got) != len(want) {
 		t.Fatalf("tool count = %d, want %d (%v)", len(got), len(want), keys(got))
 	}
@@ -128,13 +134,12 @@ func TestRegisteredToolSurface(t *testing.T) {
 		}
 	}
 	// Nothing that could reach the inference catch-all, and no restore path.
+	pinned := map[string]bool{}
+	for _, name := range registeredToolNames {
+		pinned[name] = true
+	}
 	for name := range got {
-		switch name {
-		case "describe", "query", "values", "explore", "chart", "records", "snapshot", "prometheus",
-			"audit_status", "audit_start", "audit_stop", "audit_captures_list", "audit_capture_get",
-			"operator_state", "set_pause", "set_throttle", "resume_quota", "set_config", "config_get",
-			"reload_config", "purge_preview", "purge":
-		default:
+		if !pinned[name] {
 			t.Fatalf("unexpected tool %q is registered", name)
 		}
 	}

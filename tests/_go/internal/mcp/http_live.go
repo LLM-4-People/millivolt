@@ -13,8 +13,8 @@ import (
 
 // TestLiveHTTPEndpointServesTheSameTools drives the proxy's own streamable
 // HTTP MCP endpoint against a private dev instance: a real URL-capable client
-// initializes, lists the same 22 tools the stdio entrypoint serves, and runs
-// representative reads that must agree with the stdio entrypoint byte for
+// initializes, lists the same tool surface the stdio entrypoint serves, and
+// runs representative reads that must agree with the stdio entrypoint byte for
 // byte, because both come from the one NewServer implementation. The auth
 // boundary is exercised directly: Bearer-only on top of the operator gate,
 // cookie sessions refused, and unregistered /mcp/ look-alikes owned by the
@@ -28,8 +28,8 @@ func TestLiveHTTPEndpointServesTheSameTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed.Tools) != 22 {
-		t.Fatalf("tools/list over HTTP = %d tools, want the documented 22", len(listed.Tools))
+	if len(listed.Tools) != len(registeredToolNames) {
+		t.Fatalf("tools/list over HTTP = %d tools, want the pinned surface's %d", len(listed.Tools), len(registeredToolNames))
 	}
 
 	// One implementation, two entrypoints: with no traffic between the calls,
