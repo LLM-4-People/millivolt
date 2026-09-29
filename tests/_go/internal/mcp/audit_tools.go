@@ -481,11 +481,13 @@ func newFakeProxyWithDebugStop(t *testing.T) *fakeProxy {
 }
 
 // TestAuditStartDescriptionStatesTheVocabularyException pins the model-facing
-// rule to the code and to docs/mcp.md: names are checked only when the
-// vocabulary is non-empty, and a vocabulary that cannot be read refuses the
-// start instead of skipping the check. The description used to state the
-// unconditional rule, so a model on a proxy with an empty vocabulary would
-// believe its names were always refused.
+// vocabulary rule in the registered description: names are checked only when
+// the vocabulary is non-empty, and a vocabulary that cannot be read refuses the
+// start instead of skipping the check. It checks the description only; the
+// refusal limb itself is driven by
+// TestAuditStartRefusesWhenTheCaptureStateCannotBeRead. The description used to
+// state the unconditional rule, so a model on a proxy with an empty vocabulary
+// would believe its names were always refused.
 func TestAuditStartDescriptionStatesTheVocabularyException(t *testing.T) {
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(context.Background(), nil)
@@ -561,6 +563,31 @@ func TestAuditStartRefusesAScopeThatMatchesNothing(t *testing.T) {
 		`"known_clients":null,"known_providers":null,"known_models":null,"ttl":"168h","max_bytes":"1MiB"}`)
 	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"brand-new"}, Confirm: auditConfirmStart}); err != nil {
 		t.Fatalf("an empty vocabulary must not refuse every name: %v", err)
+	}
+}
+
+// TestAuditStartRefusesWhenTheCaptureStateCannotBeRead pins the other limb of
+// the vocabulary rule: the check is skipped only for an EMPTY vocabulary, never
+// for a read failure. A debug read that fails must refuse the start, because a
+// session whose names were never checked could capture nothing while reporting
+// success.
+func TestAuditStartRefusesWhenTheCaptureStateCannotBeRead(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.fail(http.MethodGet, debugPath, http.StatusInternalServerError, "capture state unavailable", "")
+	service := newTestService(t, proxy, Limits{})
+	_, err := service.auditStart(context.Background(), AuditStartInput{
+		Clients: []string{"dev-traffic"}, Confirm: auditConfirmStart,
+	})
+	if err == nil {
+		t.Fatal("a start whose scope vocabulary cannot be read must be refused")
+	}
+	for _, needle := range []string{"read the capture session state before starting", "capture state unavailable"} {
+		if !strings.Contains(err.Error(), needle) {
+			t.Fatalf("error %q must mention %q", err, needle)
+		}
+	}
+	if len(proxy.requestsFor(http.MethodPost, debugPath)) != 0 {
+		t.Fatal("a refused start must not create a session")
 	}
 }
 
