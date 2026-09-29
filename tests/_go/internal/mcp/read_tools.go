@@ -926,6 +926,7 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 		`"records":[`+strings.Join(records, ",")+`]}`)
 	proxy.json(http.MethodGet, logPath, `{"records":[`+strings.Join(records, ",")+`],"more":false,"cursor_ms":5,"cursor_id":"rl"}`)
 	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(records, ",")+`]`)
+	proxy.json(http.MethodGet, capturePath, `{"captured_at":"2026-01-01T00:00:00Z"}`)
 	proxy.respond(http.MethodGet, prometheusPat, cannedResponse{
 		Status: http.StatusOK, ContentType: "text/plain",
 		Body: strings.Repeat("x 1\n", prometheusMaxLines+2),
@@ -967,6 +968,10 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	capture, err := service.auditCaptureGet(ctx, AuditCaptureGetInput{RecordID: "r1", MaxBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		tool   string
 		marker string
@@ -980,6 +985,7 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 		{"prometheus", prom.Truncation.Marker, "underlying rows"},
 		{"values", values.Truncation.Marker, "raise limit"},
 		{"audit_captures_list", captures.Truncation.Marker, "next_before_id"},
+		{"audit_capture_get", capture.Truncation.Marker, "raise max_bytes"},
 	} {
 		if !strings.Contains(tc.marker, tc.want) {
 			t.Fatalf("%s marker %q must name %q, its own continuation", tc.tool, tc.marker, tc.want)
