@@ -342,11 +342,12 @@ func TestToolTableMatchesTheRegistry(t *testing.T) {
 // TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
 // claim in the published docs to the registered tool surface, which is the
 // owner: adding or removing a tool must update each mention, and a doc-only
-// number edit fails here. Every mention form is guarded, including the
-// hyphenated adjective in README.md, and every file that states a count must
-// keep stating one. The docs keep the number rather than a count-free phrase
-// because the placements read better with it; this guard is what keeps it
-// true.
+// number edit fails here. The guarded forms are the hyphenated adjective in
+// README.md ("22-tool") and the separated forms with at most one qualifier
+// word ("22 tools", "22 MCP tools", "22 registered tools"), and every file
+// that states a count must keep stating one. The docs keep the number rather
+// than a count-free phrase because the placements read better with it; this
+// guard is what keeps it true.
 func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
@@ -354,7 +355,9 @@ func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := strconv.Itoa(len(listed.Tools))
-	mentions := regexp.MustCompile(`([0-9]+)(?:-tools?|\s+tools?)\b`)
+	// The optional qualifier word covers the separated forms ("22 MCP tools",
+	// "22 registered tools") that the plain `\s+tools?` alternative missed.
+	mentions := regexp.MustCompile(`([0-9]+)(?:-tools?|[ \t]+(?:[A-Za-z]+[ \t]+)?tools?)\b`)
 	for _, doc := range []struct{ label, path string }{
 		{"README.md", filepath.Join("..", "..", "README.md")},
 		{"docs/mcp.md", filepath.Join("..", "..", "docs", "mcp.md")},
