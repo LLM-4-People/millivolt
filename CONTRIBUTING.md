@@ -86,6 +86,18 @@ CI always runs isolated browser fixtures as well (desktop and mobile). Use
 GitHub check after a push means the gate was skipped or stale: fix, re-run,
 and push only a passing tree.
 
+The browser-fixtures job also runs the live MCP integration test, which
+`scripts/check.sh browser` alone does not run. It is mandatory on the same
+commit:
+
+```sh
+MILLIVOLT_MCP_INTEGRATION=1 scripts/check.sh go test -count=1 ./internal/mcp/...
+```
+
+The test starts a private dev instance through `scripts/dev.sh` on its own
+loopback port and scratch database, drives every registered tool, and stops the
+instance again, so it does not touch the instance the browser check uses.
+
 For changes to configuration, update the Config/default/validation/schema owners
 and regenerate the example as described in [operations](docs/operations.md).
 Do not edit `proxy.yaml`: it may be a running operator's configuration.

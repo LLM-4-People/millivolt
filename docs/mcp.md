@@ -3,7 +3,9 @@
 `cmd/mcp` exposes millivolt's operator and observability API to an LLM over
 stdio, using the official
 [Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk).
-It is a client of a running proxy: it starts, reconfigures and stops nothing.
+It is a client of a running proxy: it never starts, stops or restarts the proxy
+process. Its operator tools can reconfigure a running proxy, but only through
+the same credential and the same routes the dashboard uses.
 
 An MCP client (an editor's agent mode, Claude Desktop, an MCP-capable CLI)
 launches the binary and speaks the protocol over its stdin and stdout. Every
@@ -52,6 +54,11 @@ environment afterwards, decided by which flags were actually named: an explicit
 empty `--operator-token` stays a deliberate (and invalid) choice rather than
 silently falling through to the environment.
 
+`--proxy-url` follows the same rule even though it is not secret: an
+environment value can carry userinfo, so it is not a flag default, it is
+resolved after parsing, and the validation error names the failure without
+restating the value.
+
 Redirects are refused outright. No operator route redirects, and `net/http` strips
 `Authorization` only when the hostname changes, so a same-host different-port or
 subdomain `307`/`308` would replay both the credential and the full request body
@@ -64,7 +71,7 @@ semantics below, correct SQL is guesswork.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, every result limit, and the working SQL idioms for this build. |
+| `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, the complete result-limit set (query rows and bytes, the row ceiling, log page band, default page size, explorer group and chart bucket caps, Prometheus line cap and capture byte budget), and the working SQL idioms for this build. |
 | `query` | One bounded `SELECT`, clamped on both rows and encoded size, truncating with an explicit marker. The only tool that can express a time range. |
 | `values` | The distinct values one dimension has in durable history, most frequent first, so a filter value is discovered rather than guessed. |
 | `explore` | Faceted breakdown over all matching history by one dimension, with at most 24 groups. No time window. |
@@ -82,7 +89,7 @@ semantics below, correct SQL is guesswork.
 | `set_throttle` | Set or clear one provider's budgets. |
 | `resume_quota` | Close one provider's open retry-mode quota gate. |
 | `set_config` | Revision-checked partial configuration patch. |
-| `config_get` | The live configuration document: values, running overrides, defaults, per-key schema, restart-required set and the revision a patch must echo. |
+| `config_get` | The live configuration document: values, running overrides (the keys the process pins outside the file, which `set_config` strips), the canonical usage and model metadata field names, defaults, per-key schema, restart-required set and the revision a patch must echo. |
 | `reload_config` | Re-read the configuration file. |
 | `purge_preview` | Count what a filter would delete, without deleting. |
 | `purge` | Delete matching history permanently. |
@@ -111,10 +118,12 @@ request is sent.
 `(before_ms, before_id)` cursor. Both fields or neither.
 
 The proxy scans a bounded number of rows per call, so a page can be short or
-empty while its `more` flag is still true. A cursor that does not advance means
-the scan budget is exhausted, so every listing reports `exhausted` explicitly.
-Stop when it is true: treating a non-advancing cursor as "keep going" is an
-endless loop, and `exhausted` is what prevents it.
+empty while its `more` flag is still true. `exhausted` is true when the cursor
+did not advance, and also when `more` is false: treat it as "stop paging". A
+non-advancing cursor means the scan budget cannot reach the next row, and
+treating it as "keep going" is an endless loop; an empty page with an advanced
+cursor is instead the normal shape of "the budget ran out before a match", so
+page again.
 
 Deep history needs this rather than `OFFSET`, which degrades on every page.
 
@@ -148,12 +157,14 @@ also in the tool descriptions, which is where a model reads them.
   `WHERE started_at >= strftime('%s','now')*1000 - 3600000` for the last hour.
 - An **unknown filter value is an empty result, not an error.** A misspelled
   client, provider, model, tool, conversation or key produces a confident zero.
-  Call `values` before filtering on one of those.
+  Call `values` before filtering on one of those. Model filters take the
+  **canonical** name the proxy folds from `model_rules` (which is what the
+  `values` tool returns), never a raw stored spelling.
 - `time` is a **daypart bucket**, not a duration: `time:24h` matches nothing. The
   buckets are `night`, `work`, `evening` and `weekend`.
 - `status` takes the proxy's **status classes**, not HTTP shorthand: `2xx`,
-  `cancel` (499), `4xx`, `5xx` and `err` (below 200). There is no `3xx` class,
-  because a 3xx never reaches a recorded row.
+  `cancel` (499), `4xx`, `5xx` and `err` (anything outside those, including
+  3xx and below 200). There is no `3xx` class of its own.
 
 ## Audit semantics
 
@@ -347,11 +358,14 @@ It runs in CI as part of the isolated browser-fixtures step, which already has a
 dev instance and an operator token; it is not part of the core source-and-unit
 job, because that job should not have to start a second proxy.
 
-It drives what a query needs, not every tool. `prometheus`, `set_pause`,
-`set_throttle`, `resume_quota`, `set_config`, `reload_config` and a successful
-`purge` are not exercised against the live instance: several are state-changing,
-and a live `purge` or `set_pause` against a fixture is not something a test
-should do. What the live pass does drive is the whole read path, `config_get`,
-`values`, a full capture cycle, and the purge GUARDS: the missing confirmation,
-the wrong phrase, an unauthorized token and a token issued for a different filter
-must each refuse, and the row count must be unchanged afterwards.
+It drives every registered tool against its own disposable instance,
+including the state-changing ones: `prometheus`, `set_pause` (a hold scoped to
+the fixture client, resumed at once), `set_throttle` (a limit set and then
+cleared), `resume_quota`, `set_config` and `reload_config` against the scratch
+config copy, a full capture cycle (`audit_status`, `audit_start`,
+`audit_captures_list`, `audit_capture_get`, `audit_stop`), `config_get`,
+`values`, and the purge path: the missing confirmation, the wrong phrase, an
+unauthorized token and a token issued for a different filter each refuse with
+the row count unchanged, and then an authorized purge deletes the fixture rows.
+A successful purge and the config write are safe here because the instance, its
+database and its config copy all belong to the test and are discarded.

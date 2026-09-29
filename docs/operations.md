@@ -657,13 +657,15 @@ was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
 
 `cmd/mcp` serves this whole surface to an LLM over stdio, using the same
-credential and the same routes. It adds no route of its own, and it refuses the
-calls that are unsafe to make without a human in the loop: an empty purge filter,
-a purge without an exact confirmation phrase and without the `purge_preview`
-token issued for that same filter, a capture scope naming a value the proxy has
-never seen, a throttle on a provider it has never seen, and a capture session on
-a proxy without durable storage. It never follows a redirect, and it presents the
-credential only in the `Authorization` header. See the
+credential and the same routes. It adds no route of its own. For its
+irreversible call, the operator credential and the tool's own guards are the
+entire gate: an empty purge filter, a purge without the exact confirmation
+phrase, and a purge without the `purge_preview` token issued for that same
+filter are each refused. It also refuses a capture session on a proxy without
+durable storage, and an unknown name in a capture scope or a throttle provider
+is offered the known values instead; that vocabulary check fails open when the
+proxy's vocabulary is empty or cannot be read. It never follows a redirect, and
+it presents the credential only in the `Authorization` header. See the
 [MCP server guide](mcp.md).
 
 ### Operator access
