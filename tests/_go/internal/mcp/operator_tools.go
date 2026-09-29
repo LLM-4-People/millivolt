@@ -311,6 +311,10 @@ func TestSetThrottleRefusesAnUnknownProvider(t *testing.T) {
 	for _, in := range []SetThrottleInput{
 		{Provider: "locla", Concurrency: throttleIntPtr(2)},
 		{Provider: "locla", Clear: true},
+		// A window-only body must not turn the vocabulary refusal into the
+		// misleading "no request count yet" message: the known-provider guard
+		// runs before the stored-count read.
+		{Provider: "locla", RequestWindow: "1m"},
 	} {
 		_, err := service.setThrottle(ctx, in)
 		if err == nil {
@@ -327,6 +331,9 @@ func TestSetThrottleRefusesAnUnknownProvider(t *testing.T) {
 	}
 	if len(proxy.requestsFor(http.MethodPost, throttlePath)) != 0 {
 		t.Fatal("a refused provider must never reach the proxy")
+	}
+	if len(proxy.requestsFor(http.MethodGet, throttlePath)) != 0 {
+		t.Fatal("a refused provider must not read the current policy")
 	}
 	// A known provider is accepted; a clear is checked too, since the proxy
 	// records the name on that path as well.

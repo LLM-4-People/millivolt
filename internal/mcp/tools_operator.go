@@ -249,6 +249,7 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 		return nil, fmt.Errorf("provider is required")
 	}
 	body := map[string]any{"provider": in.Provider}
+	windowOnly := false
 	if in.Clear {
 		body["clear"] = true
 	} else {
@@ -287,25 +288,31 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 		// already has a count. It sets nothing only when the dimension has no
 		// count yet, and the proxy still answers 200, which reads as a
 		// successful change. Refuse exactly that case, mirroring the merge.
-		windowOnly := (in.RequestWindow != "" && in.Requests == nil) || (in.TokenWindow != "" && in.Tokens == nil)
+		windowOnly = (in.RequestWindow != "" && in.Requests == nil) || (in.TokenWindow != "" && in.Tokens == nil)
 		if in.Concurrency == nil && in.Requests == nil && in.Tokens == nil && !windowOnly {
 			return nil, fmt.Errorf("send concurrency, requests or tokens: a body that names no dimension sets nothing")
 		}
-		if windowOnly {
-			current, err := s.client.throttleLimit(ctx, provider)
-			if err != nil {
-				return nil, fmt.Errorf("read the provider's current limits before a window-only change: %v", err)
-			}
-			if in.RequestWindow != "" && in.Requests == nil && current.requests == 0 {
-				return nil, fmt.Errorf("request_window: provider %q has no request count yet, so a window alone would set nothing; send requests too", provider)
-			}
-			if in.TokenWindow != "" && in.Tokens == nil && current.tokens == 0 {
-				return nil, fmt.Errorf("token_window: provider %q has no token count yet, so a window alone would set nothing; send tokens too", provider)
-			}
-		}
 	}
+	// The known-provider guard runs BEFORE the window-only stored-count read.
+	// For an unknown provider the missing count is a symptom, not the cause:
+	// reporting "no request count yet" for a typo would hide the permanent
+	// vocabulary pollution this guard exists to prevent. The guard keeps its
+	// documented fail-open behavior on a debug-read error or an empty
+	// vocabulary.
 	if err := s.requireKnownProvider(ctx, provider); err != nil {
 		return nil, err
+	}
+	if windowOnly {
+		current, err := s.client.throttleLimit(ctx, provider)
+		if err != nil {
+			return nil, fmt.Errorf("read the provider's current limits before a window-only change: %v", err)
+		}
+		if in.RequestWindow != "" && in.Requests == nil && current.requests == 0 {
+			return nil, fmt.Errorf("request_window: provider %q has no request count yet, so a window alone would set nothing; send requests too", provider)
+		}
+		if in.TokenWindow != "" && in.Tokens == nil && current.tokens == 0 {
+			return nil, fmt.Errorf("token_window: provider %q has no token count yet, so a window alone would set nothing; send tokens too", provider)
+		}
 	}
 	var state map[string]any
 	if err := s.client.postJSON(ctx, routeThrottle, body, &state); err != nil {
