@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -261,6 +262,62 @@ func TestPurgePhraseHasOneOwner(t *testing.T) {
 	}
 	if !strings.Contains(string(guide), PurgeConfirmation) {
 		t.Fatalf("docs/mcp.md must quote the exact confirmation phrase %q", PurgeConfirmation)
+	}
+}
+
+// TestAuditPhrasesHaveOneOwner pins the audit confirmation phrases to
+// auditConfirmStart and auditConfirmStopAll: the published input schema, the
+// tool description and the guide must quote the same literal the runtime
+// comparison uses. The schema tag, the description and the guide prose were
+// hand-written copies, so renaming a constant used to change only the guard
+// the handler applies while the model kept reading the old phrase.
+func TestAuditPhrasesHaveOneOwner(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, tool := range listed.Tools {
+		if tool.Name != "audit_start" && tool.Name != "audit_stop" {
+			continue
+		}
+		seen[tool.Name] = true
+		want := auditConfirmStart
+		if tool.Name == "audit_stop" {
+			want = auditConfirmStopAll
+		}
+		// The input schema is what the model reads when composing arguments,
+		// so the literal it must echo has to be the owner phrase there.
+		schema, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal the %s input schema: %v", tool.Name, err)
+		}
+		if !strings.Contains(string(schema), want) {
+			t.Fatalf("the %s input schema must carry the owner phrase %q: %s", tool.Name, want, schema)
+		}
+		if !strings.Contains(tool.Description, want) {
+			t.Fatalf("the %s description must carry the owner phrase %q: %q", tool.Name, want, tool.Description)
+		}
+	}
+	for _, name := range []string{"audit_start", "audit_stop"} {
+		if !seen[name] {
+			t.Fatalf("the %s tool was not inspected; removing it from the loop must not skip the phrase check", name)
+		}
+	}
+	// The guide states the phrases in argument form, which is what an operator
+	// copies into a client configuration.
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	for _, phrase := range []string{
+		fmt.Sprintf("confirm: %q", auditConfirmStart),
+		fmt.Sprintf("stop_all: %q", auditConfirmStopAll),
+	} {
+		if !strings.Contains(string(guide), phrase) {
+			t.Fatalf("docs/mcp.md must quote %q (the audit confirmation owner)", phrase)
+		}
 	}
 }
 
