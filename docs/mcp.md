@@ -514,8 +514,8 @@ The unit suite uses a fake proxy that pins the exact method, path, query and
 `Authorization` header of every tool, maps canned responses onto typed output,
 and covers the error shapes, setup validation, truncation markers, the pagination
 rule and the purge guards. The paging rule has one owner shared with
-`audit_captures_list`, so the two listings cannot disagree. Two of its tests run
-outside that harness on purpose:
+`audit_captures_list`, so the two listings cannot disagree. Several of its
+tests run outside that harness on purpose:
 
 - the credential test **builds the binary and runs it**, asserting the token is
   absent from stdout and stderr for `-h`, `--help`, an unknown flag, a bad flag
