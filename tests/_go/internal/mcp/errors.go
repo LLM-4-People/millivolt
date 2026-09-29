@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -408,4 +409,93 @@ func TestErrorBodyCredentialStraddlingTheExcerptBoundaryIsRedacted(t *testing.T)
 			})
 		}
 	}
+}
+
+// TestErrorBodyRedactionCoversCredentialForms is the regression for three
+// reflection shapes the whole-token replacement missed: a credential echoed
+// with different whitespace (the whitespace collapse turned the echo back into
+// the credential AFTER redaction had already run), the percent-encoded
+// credential, and a credential split across two JSON string fields whose
+// fragments the whole-token match can never see.
+func TestErrorBodyRedactionCoversCredentialForms(t *testing.T) {
+	// A multi-word credential, so every whitespace-separated piece is shorter
+	// than the fragment floor: only the post-collapse redaction can catch the
+	// tabbed echo. Deliberately not the shared fixture.
+	const token = "alpha beta gamma delta"
+
+	failureMessage := func(t *testing.T, body string) string {
+		t.Helper()
+		proxy := newFakeProxy(t)
+		proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+			Status: http.StatusBadGateway, ContentType: "application/json", Body: body,
+		})
+		service, err := NewService(proxy.origin(), token, DefaultLimits())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
+		if err == nil {
+			t.Fatal("expected the upstream failure")
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) {
+			t.Fatalf("error must be an *APIError, got %T", err)
+		}
+		return apiErr.Message
+	}
+
+	// assertNoFragment fails when any contiguous run of min(8, len(token))
+	// bytes of the credential survives anywhere in the message.
+	assertNoFragment := func(t *testing.T, where, message string) {
+		t.Helper()
+		window := min(8, len(token))
+		for start := 0; start+window <= len(token); start++ {
+			if fragment := token[start : start+window]; strings.Contains(message, fragment) {
+				t.Fatalf("%s leaked the credential fragment %q: %q", where, fragment, message)
+			}
+		}
+	}
+
+	t.Run("whitespace variant", func(t *testing.T) {
+		tabbed := strings.ReplaceAll(token, " ", "\t")
+		message := failureMessage(t, `{"error":`+quote("upstream echoed "+tabbed)+`}`)
+		if strings.Contains(message, token) {
+			t.Fatalf("the whitespace-collapsed credential survived: %q", message)
+		}
+		if !strings.Contains(message, "[redacted]") {
+			t.Fatalf("the redaction must be visible: %q", message)
+		}
+	})
+
+	t.Run("percent encoded", func(t *testing.T) {
+		pathForm := url.PathEscape(token)
+		queryForm := url.QueryEscape(token)
+		message := failureMessage(t, "upstream echoed "+pathForm+" and "+queryForm)
+		if strings.Contains(message, pathForm) || strings.Contains(message, queryForm) {
+			t.Fatalf("a percent-encoded credential survived: %q", message)
+		}
+		assertNoFragment(t, "percent-encoded echo", message)
+		if !strings.Contains(message, "[redacted]") {
+			t.Fatalf("the redaction must be visible: %q", message)
+		}
+	})
+
+	t.Run("split across two JSON fields", func(t *testing.T) {
+		first, second := token[:12], token[12:]
+		// The nested shape is not the flat {"error": "..."} document, so the
+		// whole body is excerpted and BOTH fragments reach the message.
+		message := failureMessage(t, `{"first":`+quote(first)+`,"second":`+quote(second)+`}`)
+		assertNoFragment(t, "split echo", message)
+		if !strings.Contains(message, "[redacted]") {
+			t.Fatalf("the redaction must be visible: %q", message)
+		}
+	})
+
+	t.Run("control body unchanged", func(t *testing.T) {
+		const control = "the upstream refused the request"
+		message := failureMessage(t, `{"error":`+quote(control)+`}`)
+		if message != control {
+			t.Fatalf("a body with no credential must pass through unchanged, got %q", message)
+		}
+	})
 }

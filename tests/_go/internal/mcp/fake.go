@@ -138,8 +138,12 @@ func quote(value string) string {
 }
 
 // testToken is a syntactically valid operator credential for the fake proxy.
-// Tests assert it never appears in any tool output.
-const testToken = "test-operator-credential-value"
+// Tests assert it never appears in any tool output. It is deliberately
+// high-entropy: a word-like fixture shares 8-byte runs with ordinary error
+// prose ("operator" inside test-operator-credential-value), and the redaction
+// treats every such run as the credential, so a word-like fixture would make
+// assertions about readable proxy messages test the fixture, not the behavior.
+const testToken = "9f2c7a4e1b8d5f30c6a9e2b7d4f81c53"
 
 // newTestService builds a service pointed at the fake proxy.
 func newTestService(t *testing.T, proxy *fakeProxy, limits Limits) *Service {

@@ -193,6 +193,10 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 		// own text can carry newlines.
 		message = redactCredential(message, token)
 		message = strings.Join(strings.Fields(message), " ")
+		// The collapse can CREATE the credential from an echo whose whitespace
+		// does not match the real one (tabs where the token has spaces), so the
+		// redaction runs again on the collapsed text, still before the bound.
+		message = redactCredential(message, token)
 		if len(message) > maxErrorBodyBytes {
 			message = message[:maxErrorBodyBytes] + " [truncated]"
 		}
@@ -371,15 +375,84 @@ func readBody(body io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
+// redactionMarker replaces every credential form removed from model-visible
+// text. It stays visible on purpose: silent removal leaves an operator
+// wondering why the proxy's own message changed.
+const redactionMarker = "[redacted]"
+
+// minRedactionRun is the shortest contiguous credential fragment treated as
+// the credential itself. An endpoint can split a reflected credential across
+// JSON string fields, and neither half then matches the whole token; eight
+// characters is long enough that such a fragment is a usable secret, and the
+// min() rule keeps an unusually short credential covered without redacting
+// single characters or ordinary prose.
+const minRedactionRun = 8
+
 // redactCredential removes the operator token from any text that can reach a
 // model or a log. It covers the transport error, where net/http does not echo
 // request headers, and the failure body, where a reflecting endpoint could put
-// the credential back verbatim.
+// the credential back verbatim. Two classes are removed:
+//
+//   - the token and its url.PathEscape/url.QueryEscape forms, so an endpoint
+//     that percent-encodes the value into a URL still cannot leak it;
+//   - any contiguous fragment of the token at least minRedactionRun bytes
+//     long, so a credential split across two JSON string fields cannot leak a
+//     usable piece.
 func redactCredential(message, token string) string {
-	if token == "" {
+	if token == "" || message == "" {
 		return message
 	}
-	return strings.ReplaceAll(message, token, "[redacted]")
+	// Whole forms first: redacting a fragment first would cut a percent-encoded
+	// form apart, and the whole-form match would then never find it.
+	for _, form := range [3]string{token, url.PathEscape(token), url.QueryEscape(token)} {
+		if form != "" {
+			message = strings.ReplaceAll(message, form, redactionMarker)
+		}
+	}
+	return redactFragments(message, token)
+}
+
+// redactFragments replaces every occurrence of a contiguous token fragment of
+// at least min(8, len(token)) bytes. The scan visits every byte that is not
+// already inside a removed fragment and only emits a byte when the window that
+// starts there is no token fragment, so no fragment of the window length can
+// survive, and every match is removed as one unit rather than in window-sized
+// pieces.
+func redactFragments(message, token string) string {
+	window := min(minRedactionRun, len(token))
+	if window == 0 || len(message) < window {
+		return message
+	}
+	// firstOffset maps every window-length substring of the token to one of
+	// its offsets. One witness per hit is enough: the scan only needs to
+	// extend a match, never to choose the longest of several.
+	firstOffset := make(map[string]int, len(token)-window+1)
+	for start := 0; start+window <= len(token); start++ {
+		gram := token[start : start+window]
+		if _, seen := firstOffset[gram]; !seen {
+			firstOffset[gram] = start
+		}
+	}
+	var out strings.Builder
+	out.Grow(len(message))
+	for i := 0; i < len(message); {
+		end := i + window
+		if end <= len(message) {
+			if offset, hit := firstOffset[message[i:end]]; hit {
+				length := window
+				for offset+length < len(token) && i+length < len(message) &&
+					token[offset+length] == message[i+length] {
+					length++
+				}
+				out.WriteString(redactionMarker)
+				i += length
+				continue
+			}
+		}
+		out.WriteByte(message[i])
+		i++
+	}
+	return out.String()
 }
 
 // redact is the one entry point for a caller that decoded a response body
