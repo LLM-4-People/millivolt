@@ -208,6 +208,24 @@ const (
 	maxLimitWindow      = 24 * time.Hour
 )
 
+// setThrottleDescription is the model-visible documentation of set_throttle.
+// The bands are formatted from the constants above, so a band change reaches
+// the description automatically and no third hand-written copy can keep the
+// old numbers; the proxy-parity guard pins those constants to
+// internal/proxy/throttle.go.
+var setThrottleDescription = fmt.Sprintf("Set one provider's budgets across all its clients and keys: "+
+	"concurrency (0..%d), requests per window (0..%d) and tokens per window (0..%d). "+
+	"Supplied dimensions merge with the current ones; 0 disables a dimension; clear removes the whole policy. "+
+	"A window is %s to %dh, and it is REQUIRED whenever a count is set and the provider has no window yet. "+
+	"A window-only change (no count) is accepted only when that dimension already has a stored count; "+
+	"when nothing would be set it is refused here rather than returning a silent 200. "+
+	"The provider is checked against the proxy's known-provider vocabulary, because writing a limit for an "+
+	"unknown one would add that name to the proxy's vocabulary permanently, and the known names are offered "+
+	"instead. That check FAILS OPEN: when the vocabulary cannot be read or is empty, an unknown name is "+
+	"accepted rather than refusing every name. These budgets permit bursts and oversized requests; they are "+
+	"not strict fixed-window quota enforcement.",
+	maxLimitConcurrency, maxLimitRequests, maxLimitTokens, minLimitWindow, int(maxLimitWindow/time.Hour))
+
 // throttleWindow parses a limit window the way the proxy's parseLimitWindow
 // does: a Go duration, or an N/1d/2d form it converts to 24-hour units, then the
 // 1s..24h band.

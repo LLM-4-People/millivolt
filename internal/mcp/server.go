@@ -174,7 +174,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "set_throttle",
 		Title:       "Set or clear provider limits",
-		Description: "Set one provider's budgets across all its clients and keys: concurrency (0..100000), requests per window (0..1000000000) and tokens per window (0..1000000000000). Supplied dimensions merge with the current ones; 0 disables a dimension; clear removes the whole policy. A window is 1s to 24h, and it is REQUIRED whenever a count is set and the provider has no window yet. A window-only change (no count) is accepted only when that dimension already has a stored count; when nothing would be set it is refused here rather than returning a silent 200. The provider is checked against the proxy's known-provider vocabulary, because writing a limit for an unknown one would add that name to the proxy's vocabulary permanently, and the known names are offered instead. That check FAILS OPEN: when the vocabulary cannot be read or is empty, an unknown name is accepted rather than refusing every name. These budgets permit bursts and oversized requests; they are not strict fixed-window quota enforcement.",
+		Description: setThrottleDescription,
 		Annotations: mutating("Set or clear provider limits"),
 	}, s.setThrottle)
 
