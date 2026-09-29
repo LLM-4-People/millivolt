@@ -310,17 +310,35 @@ func TestAuditPhrasesHaveOneOwner(t *testing.T) {
 		}
 	}
 	// The guide states the phrases in argument form, which is what an operator
-	// copies into a client configuration.
+	// copies into a client configuration. Every occurrence is checked, not just
+	// the first: the start phrase appears in the tools table and again in the
+	// capture walkthrough, so editing either one alone must fail. The counts
+	// are the two places the guide documents the start phrase and the one place
+	// it documents the stop phrase; a new occurrence must extend this guard
+	// rather than slip past it.
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
 		t.Fatalf("read the MCP guide: %v", err)
 	}
-	for _, phrase := range []string{
-		fmt.Sprintf("confirm: %q", auditConfirmStart),
-		fmt.Sprintf("stop_all: %q", auditConfirmStopAll),
+	for _, expected := range []struct {
+		argument    string
+		phrase      string
+		occurrences int
+	}{
+		{"confirm", auditConfirmStart, 2},
+		{"stop_all", auditConfirmStopAll, 1},
 	} {
-		if !strings.Contains(string(guide), phrase) {
-			t.Fatalf("docs/mcp.md must quote %q (the audit confirmation owner)", phrase)
+		pattern := regexp.MustCompile(regexp.QuoteMeta(expected.argument) + `: "([^"]*)"`)
+		matches := pattern.FindAllStringSubmatch(string(guide), -1)
+		if len(matches) != expected.occurrences {
+			t.Fatalf("docs/mcp.md quotes %s: %d times, want %d (the audit confirmation owner)",
+				expected.argument, len(matches), expected.occurrences)
+		}
+		for _, match := range matches {
+			if match[1] != expected.phrase {
+				t.Fatalf("docs/mcp.md quotes %s: %q, the owner phrase is %q (the audit confirmation owner)",
+					expected.argument, match[1], expected.phrase)
+			}
 		}
 	}
 }
