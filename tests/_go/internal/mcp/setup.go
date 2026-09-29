@@ -28,7 +28,7 @@ func TestSetupValidation(t *testing.T) {
 		{"path", "http://127.0.0.1:8081/admin", valid, "no path"},
 		{"query", "http://127.0.0.1:8081/?a=1", valid, "query or fragment"},
 		{"fragment", "http://127.0.0.1:8081#x", valid, "query or fragment"},
-		{"credentials in url", "http://user:pass@127.0.0.1:8081", valid, "must not carry credentials"},
+		{"credentials in url", "http://user:pass@127.0.0.1:8081", valid, "must not carry credentials; use --" + flagOperatorToken},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewService(tc.url, tc.token, DefaultLimits())

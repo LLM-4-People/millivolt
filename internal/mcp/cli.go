@@ -84,9 +84,13 @@ const (
 // Environment variable names. Each one has one code owner here: the lookup, the
 // flag usage text and the setup-error messages all build from these constants,
 // so a rename cannot leave the published surface disagreeing with the code.
-// Two hand-written repeats exist, docs/mcp.md's setup table and cmd/mcp's
-// package doc, and both are compared with the registered usage text by
-// TestSetupTableMatchesTheFlags and TestPackageSetupDocMatchesTheFlags.
+// Two hand-written repeats are compared with the registered usage text:
+// docs/mcp.md's setup table (TestSetupTableMatchesTheFlags) and cmd/mcp's
+// package doc flag/env list (TestPackageSetupDocMatchesTheFlags). The guards do
+// not reach the rest: docs/mcp.md names the read variables again in its
+// client-configuration prose and examples, and that guide and the parenthetical
+// in cmd/mcp's package doc both spell out the proxy's operator-token variable,
+// proxyTokenEnv. Those repeats are updated by hand.
 const (
 	envProxyURL       = "MILLIVOLT_MCP_PROXY_URL"
 	envOperatorToken  = "MILLIVOLT_MCP_OPERATOR_TOKEN"

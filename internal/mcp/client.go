@@ -172,7 +172,7 @@ func NormalizeProxyURL(raw string) (*url.URL, error) {
 	case parsed.Host == "":
 		return nil, errors.New("proxy URL must include a host, for example http://127.0.0.1:8081")
 	case parsed.User != nil:
-		return nil, errors.New("proxy URL must not carry credentials; use --operator-token")
+		return nil, errors.New("proxy URL must not carry credentials; use --" + flagOperatorToken)
 	case parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "":
 		return nil, errors.New("proxy URL must not carry a query or fragment")
 	case parsed.Path != "" && parsed.Path != "/":
@@ -200,9 +200,9 @@ func (e *APIError) Error() string {
 	fmt.Fprintf(&b, "millivolt returned HTTP %d: %s", e.Status, e.Message)
 	switch e.Status {
 	case http.StatusUnauthorized:
-		b.WriteString(" (the operator token is missing, wrong, or the session expired; check MILLIVOLT_OPERATOR_TOKEN)")
+		b.WriteString(" (the operator token is missing, wrong, or the session expired; check " + proxyTokenEnv + ")")
 	case http.StatusForbidden:
-		b.WriteString(" (the proxy's operator plane is unarmed: it is started without MILLIVOLT_OPERATOR_TOKEN)")
+		b.WriteString(" (the proxy's operator plane is unarmed: it is started without " + proxyTokenEnv + ")")
 	case http.StatusTooManyRequests:
 		if e.RetryAfter != "" {
 			fmt.Fprintf(&b, " (retry after %s)", e.RetryAfter)
