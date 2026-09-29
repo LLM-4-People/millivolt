@@ -29,7 +29,10 @@ import (
 type Scope struct {
 	// Filters are raw `dim:id` strings as the caller wrote them.
 	Filters []string `json:"filters,omitempty" jsonschema:"repeated dim:id filters, AND-ed across dimensions and OR-ed within one dimension"`
-	// Status is the single s= selector, empty for none.
+	// Status is the single s= selector, empty for none. Its published schema
+	// text is a hand copy of the owners below (statusCodeMin/Max and
+	// LiveStatusClasses); the MCP suite's TestScopeSchemaStatesTheOwnerBounds
+	// parses it and fails when either drifts.
 	Status string `json:"status,omitempty" jsonschema:"exact HTTP status code 0..9999, or a live class: streaming, paused, throttled, pending"`
 }
 

@@ -325,6 +325,81 @@ func TestAuditPhrasesHaveOneOwner(t *testing.T) {
 	}
 }
 
+// TestScopeSchemaStatesTheOwnerBounds pins the published Scope.status schema
+// text to the constants that own it. The jsonschema tag is a hand copy of
+// statusCodeMin/Max and LiveStatusClasses, so before this guard a tag edit to
+// 0..10000 or an extra class changed what the model reads while the runtime
+// validation (which reads the owners) stayed correct. The guard parses every
+// tool schema that embeds Scope and compares the description with the owner
+// text; the runtime checks below pin Validate to the same owners, so the
+// schema cannot be widened into accepting anything the owners refuse.
+func TestScopeSchemaStatesTheOwnerBounds(t *testing.T) {
+	want := fmt.Sprintf("exact HTTP status code %d..%d, or a live class: %s",
+		statusCodeMin, statusCodeMax, strings.Join(LiveStatusClasses, ", "))
+
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The explorer, chart and records inputs all embed Scope; the SDK promotes
+	// its tagged fields, so each publishes the same status property.
+	checked := map[string]bool{}
+	for _, tool := range listed.Tools {
+		switch tool.Name {
+		case "explore", "chart", "records":
+		default:
+			continue
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal the %s input schema: %v", tool.Name, err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatalf("parse the %s input schema: %v", tool.Name, err)
+		}
+		property, ok := schema.Properties["status"]
+		if !ok {
+			t.Fatalf("the %s input schema publishes no status property", tool.Name)
+		}
+		if property.Description != want {
+			t.Fatalf("the %s status schema states %q, the owners state %q (statusCodeMin/Max, LiveStatusClasses)",
+				tool.Name, property.Description, want)
+		}
+		checked[tool.Name] = true
+	}
+	for _, name := range []string{"explore", "chart", "records"} {
+		if !checked[name] {
+			t.Fatalf("the %s tool was not inspected; removing it from the loop must not skip the schema check", name)
+		}
+	}
+
+	// Runtime validation reads the owners directly and must not follow a
+	// widened tag: every class passes, both band ends pass, and the first code
+	// beyond the band and an unknown class are refused.
+	for _, class := range LiveStatusClasses {
+		if err := (Scope{Status: class}).Validate(); err != nil {
+			t.Fatalf("Validate(%q) = %v, want nil (LiveStatusClasses owner)", class, err)
+		}
+	}
+	for _, code := range []int{statusCodeMin, statusCodeMax} {
+		if err := (Scope{Status: strconv.Itoa(code)}).Validate(); err != nil {
+			t.Fatalf("Validate(%d) = %v, want nil (statusCodeMin/Max owner)", code, err)
+		}
+	}
+	if err := (Scope{Status: strconv.Itoa(statusCodeMax + 1)}).Validate(); err == nil {
+		t.Fatalf("Validate(%d) must refuse a code beyond statusCodeMax", statusCodeMax+1)
+	}
+	if err := (Scope{Status: "not-a-class"}).Validate(); err == nil {
+		t.Fatal("Validate must refuse a status that is neither a class nor a code")
+	}
+}
+
 // TestProtocolVersionsMirrorTheSDK pins the accepted protocol versions listed
 // in docs/mcp.md to the bundled SDK's own list, which is the owner of that set.
 // The guide's hand list used to be unguarded, so a dependency upgrade or a doc
