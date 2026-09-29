@@ -880,13 +880,13 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 	}
 	// Every fixture row is two plain ASCII string fields, so the bytes the fake
 	// proxy returned for a row are exactly its encoded size under
-	// encoding/json, which changes only the key order (never the length).
-	// The next row must no longer fit: a clamp that stopped before using the
-	// whole budget would report bytes here that still leave room for it.
-	rowSize := len(rows[0])
-	if out.Bytes+rowSize <= limits.QueryMaxBytes {
-		t.Fatalf("bytes = %d plus the next row (%d) still fits the %d budget: the clamp stopped early",
-			out.Bytes, rowSize, limits.QueryMaxBytes)
+	// encoding/json, which changes only the key order (never the length). The
+	// reported byte count must be that encoded size for exactly the two rows
+	// the clamp kept: an accounting that under- or over-reported the retained
+	// volume would misstate how close the result came to the budget.
+	wantBytes := len(rows[0]) + len(rows[1])
+	if out.Bytes != wantBytes {
+		t.Fatalf("bytes = %d, want %d, the encoded size of the two kept rows", out.Bytes, wantBytes)
 	}
 
 	// A result inside the byte budget reports no truncation at all.
