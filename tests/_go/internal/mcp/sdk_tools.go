@@ -165,6 +165,7 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 	proxy.json(http.MethodGet, chartPath, `{"now_ms":1,"from_ms":0,"bucket_ms":1,"buckets":[]}`)
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1"}],"more":false,"cursor_ms":1,"cursor_id":"r1"}`)
 	proxy.respond(http.MethodGet, prometheusPat, cannedResponse{Status: 200, ContentType: "text/plain", Body: "x 1\n"})
+	proxy.json(http.MethodGet, capturePath, `{"id":"c1","started_at":1}`)
 	proxy.json(http.MethodGet, pausePath, `{"ok":true,"paused":false}`)
 	proxy.json(http.MethodGet, throttlePath, `{"ok":true,"throttles":[],"known_providers":[]}`)
 	proxy.json(http.MethodGet, quotaPath, `{"ok":true}`)
@@ -198,6 +199,8 @@ func TestRegisteredToolsReachTheProxy(t *testing.T) {
 		{"config_get", map[string]any{}, "revision"},
 		{"values", map[string]any{"dim": "client"}, "values"},
 		{"audit_status", map[string]any{}, "sessions"},
+		{"audit_captures_list", map[string]any{}, "records"},
+		{"audit_capture_get", map[string]any{"record_id": "c1"}, "document"},
 		{"operator_state", map[string]any{}, "pause"},
 		{"purge_preview", map[string]any{"filter": map[string]any{"provider": "local"}}, "count"},
 	} {
