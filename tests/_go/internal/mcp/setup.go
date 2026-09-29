@@ -18,24 +18,34 @@ func TestSetupValidation(t *testing.T) {
 		url   string
 		token string
 		want  string
+		// exact compares the whole message instead of a substring. The
+		// credential-fragment refusal needs it: a substring check for
+		// "use --operator-token" also accepted a stale suffix such as
+		// "use --operator-token-v0", so a drift there stayed invisible.
+		exact bool
 	}{
-		{"missing url", "", valid, "proxy URL is required"},
-		{"missing token", "http://127.0.0.1:8081", "", "operator token is required"},
-		{"short token", "http://127.0.0.1:8081", "0123456789abcde", "at least 16"},
-		{"long token", "http://127.0.0.1:8081", strings.Repeat("x", operatorTokenMaxLen+1), "at most 512"},
-		{"wrong scheme", "ftp://127.0.0.1:8081", valid, "http or https"},
-		{"no host", "http://", valid, "must include a host"},
-		{"path", "http://127.0.0.1:8081/admin", valid, "no path"},
-		{"query", "http://127.0.0.1:8081/?a=1", valid, "query or fragment"},
-		{"fragment", "http://127.0.0.1:8081#x", valid, "query or fragment"},
-		{"credentials in url", "http://user:pass@127.0.0.1:8081", valid, "must not carry credentials; use --" + flagOperatorToken},
+		{"missing url", "", valid, "proxy URL is required", false},
+		{"missing token", "http://127.0.0.1:8081", "", "operator token is required", false},
+		{"short token", "http://127.0.0.1:8081", "0123456789abcde", "at least 16", false},
+		{"long token", "http://127.0.0.1:8081", strings.Repeat("x", operatorTokenMaxLen+1), "at most 512", false},
+		{"wrong scheme", "ftp://127.0.0.1:8081", valid, "http or https", false},
+		{"no host", "http://", valid, "must include a host", false},
+		{"path", "http://127.0.0.1:8081/admin", valid, "no path", false},
+		{"query", "http://127.0.0.1:8081/?a=1", valid, "query or fragment", false},
+		{"fragment", "http://127.0.0.1:8081#x", valid, "query or fragment", false},
+		{"credentials in url", "http://user:pass@127.0.0.1:8081", valid,
+			"proxy URL must not carry credentials; use --" + flagOperatorToken, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewService(tc.url, tc.token, DefaultLimits())
 			if err == nil {
 				t.Fatalf("setup must fail for %s", tc.name)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
+			if tc.exact {
+				if err.Error() != tc.want {
+					t.Fatalf("error %q must be exactly %q", err, tc.want)
+				}
+			} else if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q must mention %q", err, tc.want)
 			}
 			assertNoToken(t, "setup error", err.Error())
