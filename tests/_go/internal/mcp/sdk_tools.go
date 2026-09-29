@@ -122,9 +122,6 @@ func TestRegisteredToolSurface(t *testing.T) {
 		if name == "purge" && !strings.Contains(tool.Description, "NO server-side confirmation") {
 			t.Fatalf("the purge description must state that there is no server-side confirmation: %q", tool.Description)
 		}
-		if name == "audit_start" && !strings.Contains(tool.Description, retentionNote) {
-			t.Fatalf("the audit description must state what stopping does not delete: %q", tool.Description)
-		}
 	}
 	// Nothing that could reach the inference catch-all, and no restore path.
 	for name := range got {

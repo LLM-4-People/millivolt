@@ -279,10 +279,12 @@ func eventually(t *testing.T, what string, probe func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-// TestLiveDevInstanceExercisesEveryTool drives the registered tools against a
-// real proxy: describe, query, explore, chart, records, snapshot,
-// operator_state, audit_status, a full capture cycle (start, captured request,
-// list, read back, stop) and the purge-preview path.
+// TestLiveDevInstanceExercisesEveryTool drives every registered tool against a
+// real proxy: describe, query, values, explore, chart, records, snapshot,
+// prometheus, the operator reads and mutations, config_get/set_config/
+// reload_config, a full capture cycle (start, captured request, list, read
+// back, stop), and both the purge guards and a successful purge. The mutations
+// run only against this test's own disposable instance and scratch config.
 func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	live := devInstance(t)
 	upstream := fixtureUpstream(t)
@@ -389,6 +391,50 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 		}
 	}
 
+	// prometheus reads the exposition text.
+	prom := live.invoke(t, "prometheus", map[string]any{})
+	if number(t, prom, "lines") < 1 {
+		t.Fatalf("the exposition must carry at least one line: %v", prom)
+	}
+
+	// The mutations below run against this test's own disposable instance.
+	// A pause hold scoped to the fixture client, resumed at once.
+	hold := live.invoke(t, "set_pause", map[string]any{
+		"paused": true, "clients": []any{fixtureClient}, "duration": "15m",
+	})
+	if scope := text(t, hold, "scope"); scope != "clients "+fixtureClient {
+		t.Fatalf("the hold scope must be the fixture client, got %q", scope)
+	}
+	unpaused := live.invoke(t, "set_pause", map[string]any{"paused": false})
+	if unpaused["resumed"] != true {
+		t.Fatalf("resuming every hold must report resumed: %v", unpaused)
+	}
+
+	// set_throttle on a known provider, then clear; resume_quota is a no-op
+	// without an open gate and must still report the gate state. The provider
+	// vocabulary is read from the operator state just fetched: the fixture
+	// traffic has already taught the proxy the upstream label.
+	provider := "integration-fixture-provider"
+	if throttleState, ok := state["throttle"].(map[string]any); ok {
+		if known, ok := throttleState["known_providers"].([]any); ok && len(known) > 0 {
+			if name, ok := known[0].(string); ok && name != "" {
+				provider = name
+			}
+		}
+	}
+	limit := live.invoke(t, "set_throttle", map[string]any{"provider": provider, "concurrency": 4})
+	if _, ok := limit["state"].(map[string]any); !ok {
+		t.Fatalf("set_throttle must report the resulting state: %v", limit)
+	}
+	if note := text(t, limit, "note"); !strings.Contains(note, "not strict fixed-window") {
+		t.Fatalf("set_throttle must state its enforcement semantics: %q", note)
+	}
+	live.invoke(t, "set_throttle", map[string]any{"provider": provider, "clear": true})
+	quota := live.invoke(t, "resume_quota", map[string]any{"provider": provider})
+	if _, ok := quota["resumed"].(bool); !ok {
+		t.Fatalf("resume_quota must report the gate state: %v", quota)
+	}
+
 	status := live.invoke(t, "audit_status", map[string]any{})
 	statusStorage, ok := status["storage"].(map[string]any)
 	if !ok || statusStorage["enabled"] != true {
@@ -460,6 +506,28 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	if text(t, configDocument, "revision") == "" {
 		t.Fatalf("config_get must return the revision set_config has to echo: %v", configDocument)
 	}
+	// set_config writes this test's own scratch config copy, and reload_config
+	// re-reads the same file. The patched value is the one already in force,
+	// so the run does not change the fixture's behavior.
+	effective, ok := configDocument["effective"].(map[string]any)
+	if !ok {
+		t.Fatalf("config_get must carry the effective values: %v", configDocument)
+	}
+	dashRows, ok := effective["dash_log_rows"].(float64)
+	if !ok || dashRows < 1 {
+		t.Fatalf("dash_log_rows must be an effective number: %v", effective["dash_log_rows"])
+	}
+	patched := live.invoke(t, "set_config", map[string]any{
+		"values":   map[string]any{"dash_log_rows": int(dashRows)},
+		"revision": text(t, configDocument, "revision"),
+	})
+	if patched["saved"] != true {
+		t.Fatalf("set_config must persist the patch: %v", patched)
+	}
+	reloaded := live.invoke(t, "reload_config", map[string]any{})
+	if reloaded["ok"] != true {
+		t.Fatalf("reload_config must re-read the config file: %v", reloaded)
+	}
 	clientNames := valuesOf(t, live.invoke(t, "values", map[string]any{"dim": "client"}), "client")
 	if !clientNames[fixtureClient] {
 		t.Fatalf("values on client must discover the fixture client: %v", clientNames)
@@ -508,22 +576,18 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	if captures := text(t, preview, "captures"); !strings.Contains(captures, "stored capture document is deleted") {
 		t.Fatalf("the preview must warn about captures: %q", captures)
 	}
-	// A purge without the exact confirmation cannot delete anything. The
-	// required argument is enforced by the tool schema before the handler runs,
-	// and a wrong phrase is refused by the handler: both must fail.
-	if message := live.invokeError(t, "purge", map[string]any{
+	// A wrong phrase is refused by the handler and the absent argument is
+	// rejected by the schema. The refusal text itself is pinned by the unit
+	// suite; this only proves the live path returns an error result at all.
+	live.invokeError(t, "purge", map[string]any{
 		"filter":        map[string]any{"client": fixtureClient},
 		"preview_token": previewToken,
-	}); !strings.Contains(message, "confirmation") {
-		t.Fatalf("the refusal must name the missing confirmation: %q", message)
-	}
-	if message := live.invokeError(t, "purge", map[string]any{
+	})
+	live.invokeError(t, "purge", map[string]any{
 		"filter":        map[string]any{"client": fixtureClient},
 		"confirmation":  "delete everything",
 		"preview_token": previewToken,
-	}); !strings.Contains(message, PurgeConfirmation) {
-		t.Fatalf("the refusal must name the required phrase: %q", message)
-	}
+	})
 	// A token for a DIFFERENT filter must not authorize this one, even though
 	// both match the same rows. This is the bypass a bare count allowed.
 	if message := live.invokeError(t, "purge", map[string]any{
@@ -547,11 +611,25 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 		t.Fatalf("a refused purge changed history: %v then %v", previewed, after["count"])
 	}
 	// The rows are still readable, which is the observable proof nothing was
-	// deleted.
+	// deleted by the refused calls above.
 	live.invoke(t, "query", map[string]any{
 		"sql": "SELECT id FROM requests WHERE client = " + sqlString(fixtureClient) + " LIMIT 5",
 	})
 	if recordID == "" {
 		t.Fatal("the fixture record id was never established")
+	}
+
+	// The last call is the real deletion, on this disposable instance only:
+	// the whole purge path runs, not just its guards.
+	deleted := live.invoke(t, "purge", map[string]any{
+		"filter":        map[string]any{"client": fixtureClient},
+		"confirmation":  PurgeConfirmation,
+		"preview_token": previewToken,
+	})
+	if deleted["deleted"] != true {
+		t.Fatalf("the authorized purge must delete: %v", deleted)
+	}
+	if remaining := number(t, deleted, "remaining_count"); remaining != 0 {
+		t.Fatalf("the fixture rows must be gone, got %v remaining", remaining)
 	}
 }
