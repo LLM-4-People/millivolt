@@ -76,6 +76,15 @@ type inProcessTransport struct {
 // otherwise the configured bound. A handler that ignores its context can no
 // longer hold the request open indefinitely; the proxy's own handlers poll the
 // context, so for them the observable behavior is unchanged.
+//
+// Residual, stated plainly: returning on the deadline abandons, but does not
+// stop, a handler that never polls its context. That handler keeps running in
+// its own goroutine until it returns on its own, so one abandoned call retains
+// one goroutine, measured at exactly that: the call returns and the dispatch
+// goroutine stays blocked until released. The body it can accumulate in the
+// transport is bounded by inProcessRecorderBufferMax, because inProcessRecorder
+// discards every byte past the cap. Every in-tree handler polls context, so the
+// residual is not reachable through this router today.
 func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	ctx := request.Context()
 	if _, ok := ctx.Deadline(); !ok {
