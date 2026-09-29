@@ -635,8 +635,14 @@ func TestQuota429NotRetried(t *testing.T) {
 	if rec.StatusCode != 429 || rec.ErrorType != "insufficient_quota" || rec.ErrorCode != "insufficient_credits" {
 		t.Errorf("record = %d/%q/%q, want 429/insufficient_quota/insufficient_credits", rec.StatusCode, rec.ErrorType, rec.ErrorCode)
 	}
-	if rec.RateLimited {
-		t.Errorf("RateLimited = true, want false (quota is not a rate limit)")
+	// RateLimited is scheduler metadata ("scheduler wait or 429/503 pacing",
+	// metrics.Record), not the quota classification: a request that queued at
+	// least one millisecond sets it by design, so pinning the literal false
+	// here raced the millisecond-granularity scheduler wait. What this test
+	// owns is that the quota 429 was not paced: Attempts is empty above, so
+	// any RateLimited must be the queue wait - never an absorbed 429/503.
+	if rec.RateLimited && rec.QueueWaitMs <= 0 {
+		t.Errorf("RateLimited = true with QueueWaitMs=0 and no absorbed attempt, want false")
 	}
 	if rec.IsError() {
 		t.Errorf("IsError = true, want false (429 is flow control, never an error)")
