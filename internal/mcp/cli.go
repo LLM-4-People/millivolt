@@ -100,8 +100,10 @@ const (
 
 // proxyTokenEnv is the proxy's own operator-token variable. A user supplies its
 // value to this server as MILLIVOLT_MCP_OPERATOR_TOKEN (or --operator-token);
-// this server never reads it. The setup error message names it so a user knows
-// where the value comes from.
+// this server never reads it. The usage text and the setup error message name
+// it so a user knows where the value comes from, and the docs guard pins the
+// usage phrase so it cannot drift back to naming this server's read variable as
+// the proxy's.
 const proxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
 
 // registerOptions installs every setup flag on fs, with the current limits as
@@ -121,7 +123,7 @@ func registerOptions(fs *flag.FlagSet, o *options) {
 	// flag parse error - so a credential used as a flag default is printed in
 	// plaintext to stderr, which an MCP host does not capture.
 	fs.StringVar(&o.operatorToken, flagOperatorToken, "",
-		"the proxy's "+envOperatorToken+"; the value is never echoed in usage output (env "+envOperatorToken+")")
+		"the proxy's "+proxyTokenEnv+"; the value is never echoed in usage output (env "+envOperatorToken+")")
 	fs.IntVar(&o.limits.QueryMaxRows, flagQueryMaxRows, o.limits.QueryMaxRows,
 		"row cap applied to query results before the explicit truncation marker (env "+envQueryMaxRows+")")
 	fs.IntVar(&o.limits.QueryMaxBytes, flagQueryMaxBytes, o.limits.QueryMaxBytes,

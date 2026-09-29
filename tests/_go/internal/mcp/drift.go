@@ -409,10 +409,12 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	}
 	// A table body row starts with a backticked flag; the header and separator
 	// rows do not match. The default cell is either backticked or the literal
-	// (required) the two credential flags use.
-	row := regexp.MustCompile("^\\| `(--[a-z0-9-]+)` \\| `([A-Z0-9_]+)` \\| (?:(`([^`]+)`)|(\\(required\\))) \\|")
+	// (required) the two credential flags use. The last captured cell is the
+	// meaning column, which the token-source guard below reads.
+	row := regexp.MustCompile("^\\| `(--[a-z0-9-]+)` \\| `([A-Z0-9_]+)` \\| (?:(`([^`]+)`)|(\\(required\\))) \\| (.*) \\|$")
 	documented := map[string]string{}
 	documentedEnv := map[string]string{}
+	documentedMeaning := map[string]string{}
 	for _, line := range strings.Split(section, "\n") {
 		match := row.FindStringSubmatch(strings.TrimSpace(line))
 		if match == nil {
@@ -427,6 +429,7 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 		}
 		documented[match[1]] = def
 		documentedEnv[match[1]] = match[2]
+		documentedMeaning[match[1]] = match[6]
 	}
 	if len(documented) == 0 {
 		t.Fatal("docs/mcp.md's setup table has no flag rows")
@@ -469,6 +472,23 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 			t.Fatalf("--%s has unexpected flag type %T", f.Name, value)
 		}
 	})
+	// The --operator-token usage says where the VALUE comes from: the proxy's
+	// own proxyTokenEnv constant, not this server's read variable. The phrase
+	// once named the read variable as the proxy's, sending a user to a variable
+	// the proxy never reads; both the usage text and the table row carry the
+	// owner constant so the phrase cannot drift back.
+	token := fs.Lookup(flagOperatorToken)
+	if token == nil {
+		t.Fatalf("--%s is not registered", flagOperatorToken)
+	}
+	if !strings.Contains(token.Usage, "the proxy's "+proxyTokenEnv) {
+		t.Fatalf("the --%s usage must name the proxy's %s as the value's source, got %q",
+			flagOperatorToken, proxyTokenEnv, token.Usage)
+	}
+	if !strings.Contains(documentedMeaning["--"+flagOperatorToken], proxyTokenEnv) {
+		t.Fatalf("docs/mcp.md's --%s row must name the proxy's %s as the value's source, got %q",
+			flagOperatorToken, proxyTokenEnv, documentedMeaning["--"+flagOperatorToken])
+	}
 	for name := range documented {
 		if fs.Lookup(strings.TrimPrefix(name, "--")) == nil {
 			t.Fatalf("docs/mcp.md documents %s, which the owner does not register", name)
