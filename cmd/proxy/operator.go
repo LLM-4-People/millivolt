@@ -167,11 +167,20 @@ func (g *operatorGate) valid(presented string) bool {
 func gatedPath(path string) bool {
 	path = strings.ReplaceAll(path, `\`, "/")
 	return path == "/" || path == "/index.html" ||
-		path == "/admin" || path == "/metrics" || path == "/dash" || path == "/mcp" ||
+		path == "/admin" || path == "/metrics" || path == "/dash" ||
 		strings.HasPrefix(path, "/dash/") ||
 		strings.HasPrefix(path, "/metrics/") ||
 		strings.HasPrefix(path, "/admin/") ||
-		strings.HasPrefix(path, "/mcp/")
+		mcpNamespace(path)
+}
+
+// mcpNamespace reports the millivolt-owned /mcp namespace, normalized the same
+// way gatedPath normalizes it. The gate uses it to keep the session cookie off
+// every MCP response: /mcp is Bearer-only, so a cookie minted there would sit
+// unused in an MCP client's cookie jar as a full dashboard credential.
+func mcpNamespace(path string) bool {
+	path = strings.ReplaceAll(path, `\`, "/")
+	return path == "/mcp" || strings.HasPrefix(path, "/mcp/")
 }
 
 // encodedSeparator reports whether an escaped path contains a percent-encoded
@@ -434,7 +443,14 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		credential, hasBearer := bearerToken(r)
 		if hasBearer && gate.valid(credential) {
 			gate.limiter.success(ip)
-			mint(w)
+			if !mcpNamespace(r.URL.Path) {
+				// The MCP endpoint admits only the Bearer and retains
+				// nothing, so minting the 12-hour dashboard session cookie
+				// there would leave a full dashboard credential in an MCP
+				// client's cookie jar for a response that can never use it.
+				// The endpoint's own transport headers are left untouched.
+				mint(w)
+			}
 			sameOrigin.ServeHTTP(w, r)
 			return
 		}

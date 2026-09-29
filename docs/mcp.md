@@ -123,7 +123,9 @@ of choosing a client:
 - `GET` and `DELETE` answer `405` with `Allow: POST`. There is no standalone
   SSE stream and no session to delete.
 - There is no session id: the endpoint never sends `Mcp-Session-Id` and nothing
-  outlives the request, so a client must not expect or send one.
+  outlives the request. No session cookie is minted here either, unlike
+  `/admin`, `/metrics` and `/dash`, so an MCP client's cookie jar gains no
+  dashboard credential; a client must not expect or send a session id.
 - SSE resumption is not offered: no event store exists, so `Last-Event-ID`
   replay is not available.
 - The server never sends requests to the client: there is no sampling and no

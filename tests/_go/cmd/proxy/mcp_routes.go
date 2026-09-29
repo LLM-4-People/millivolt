@@ -55,6 +55,13 @@ func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), "serverInfo") {
 		t.Fatalf("POST /mcp with a valid Bearer: status = %d, body = %q; want the MCP endpoint's initialize answer", response.StatusCode, body)
 	}
+	// The MCP endpoint admits only the Bearer and retains nothing: the shared
+	// gate mints no session cookie here even though it does on /admin,
+	// /metrics and /dash, so an MCP client's cookie jar never gains a
+	// 12-hour dashboard credential.
+	if set := response.Header.Values("Set-Cookie"); len(set) != 0 {
+		t.Fatalf("POST /mcp with a valid Bearer carried Set-Cookie %q; the MCP endpoint must mint no dashboard session", set)
+	}
 	if upstreamHit {
 		t.Fatal("POST /mcp reached the inference catch-all; the route is unregistered")
 	}

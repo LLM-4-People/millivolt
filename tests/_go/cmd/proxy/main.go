@@ -108,6 +108,19 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		if len(set) != 1 || set[0].Name != sessionCookieName || !set[0].HttpOnly || set[0].SameSite != http.SameSiteStrictMode || set[0].Path != "/" {
 			t.Fatalf("bearer success did not mint a strict HttpOnly session cookie: %+v", set)
 		}
+		// The MCP namespace is Bearer-only, so an admitted /mcp request mints
+		// no session cookie: a client's cookie jar must not gain a dashboard
+		// credential for a response that never uses one.
+		w = httptest.NewRecorder()
+		mcpRequest := httptest.NewRequest(http.MethodPost, "http://proxy.example/mcp", nil)
+		mcpRequest.Header.Set("Authorization", "Bearer "+token)
+		h.ServeHTTP(w, mcpRequest)
+		if w.Code != http.StatusNoContent {
+			t.Errorf("admitted /mcp: status=%d want=204", w.Code)
+		}
+		if set := w.Result().Cookies(); len(set) != 0 {
+			t.Fatalf("admitted /mcp minted %d cookies, want none: %+v", len(set), set)
+		}
 		session := httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
 		session.AddCookie(set[0])
 		w = httptest.NewRecorder()
