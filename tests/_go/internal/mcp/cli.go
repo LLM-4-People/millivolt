@@ -157,19 +157,29 @@ func TestProgramNameOwnsUsageAndDiagnostics(t *testing.T) {
 // TestRunFailsFastOnBadSetup pins that an unusable setup exits before any
 // transport exists, and that the diagnostic never contains the credential.
 func TestRunFailsFastOnBadSetup(t *testing.T) {
+	const token = "operator-credential-value"
+
 	for _, tc := range []struct {
 		name   string
 		args   []string
 		lookup func(string) (string, bool)
 		want   string
+		// secret is the credential this row puts in scope, so the no-leak
+		// assertion is live on every row.
+		secret string
 	}{
-		{"no token", []string{"--proxy-url", "http://127.0.0.1:8081"}, env(nil), "operator token is required"},
-		{"no url", []string{"--operator-token", "operator-credential-value"}, env(nil), "proxy URL is required"},
-		{"bad url", []string{"--proxy-url", "ftp://127.0.0.1", "--operator-token", "operator-credential-value"}, env(nil), "http or https"},
-		{"short token", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", "short"}, env(nil), "at least 16"},
-		{"bad limits", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", "operator-credential-value", "--page-size", "0"}, env(nil), "page size"},
+		// The named empty flag blocks the environment value, so the required
+		// refusal fires while a credential is still in scope.
+		{"empty token flag", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token="}, env(map[string]string{"MILLIVOLT_MCP_OPERATOR_TOKEN": token}), "operator token is required", token},
+		{"no url", []string{"--operator-token", token}, env(nil), "proxy URL is required", token},
+		{"bad url", []string{"--proxy-url", "ftp://127.0.0.1", "--operator-token", token}, env(nil), "http or https", token},
+		{"short token", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", shortToken}, env(nil), "at least 16", shortToken},
+		{"bad limits", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", token, "--page-size", "0"}, env(nil), "page size", token},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.secret == "" {
+				t.Fatal("every bad-setup row must name the credential it supplies")
+			}
 			var stderr strings.Builder
 			code := Run("millivolt-mcp", tc.args, tc.lookup, &stderr)
 			if code == 0 {
@@ -178,7 +188,7 @@ func TestRunFailsFastOnBadSetup(t *testing.T) {
 			if !strings.Contains(stderr.String(), tc.want) {
 				t.Fatalf("diagnostic %q must mention %q", stderr.String(), tc.want)
 			}
-			if strings.Contains(stderr.String(), "operator-credential-value") {
+			if strings.Contains(stderr.String(), tc.secret) {
 				t.Fatalf("the credential must never be printed: %q", stderr.String())
 			}
 		})
@@ -241,34 +251,43 @@ func TestParseResolvesTheCredentialAfterFlagParsing(t *testing.T) {
 // is about to refuse; it grants access to nothing.
 const leakingToken = "mcp-setup-output-credential-fixture"
 
+// shortToken is below the operator band. A length refusal must name the band,
+// never the value.
+const shortToken = "operator-cred"
+
 // TestSetupErrorsNeverCarryTheCredential pins that the setup path's own
 // messages stay safe: they must name what to do, never the value.
 func TestSetupErrorsNeverCarryTheCredential(t *testing.T) {
 	cases := []struct {
-		name string
-		args []string
-		env  map[string]string
-		want string
+		name   string
+		args   []string
+		env    map[string]string
+		want   string
+		secret string
 	}{
-		{"no token", []string{"--proxy-url", "http://127.0.0.1:8081"}, nil, "operator token is required"},
-		{"short token", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", "short"}, nil, "at least 16"},
-		{"no url", []string{"--operator-token", leakingToken}, nil, "proxy URL is required"},
-		{"bad url", []string{"--proxy-url", "ftp://x", "--operator-token", leakingToken}, nil, "http or https"},
+		{"empty token flag", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token="},
+			map[string]string{"MILLIVOLT_MCP_OPERATOR_TOKEN": leakingToken}, "operator token is required", leakingToken},
+		{"short token", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", shortToken}, nil, "at least 16", shortToken},
+		{"no url", []string{"--operator-token", leakingToken}, nil, "proxy URL is required", leakingToken},
+		{"bad url", []string{"--proxy-url", "ftp://x", "--operator-token", leakingToken}, nil, "http or https", leakingToken},
 		{
 			"bad env integer", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken},
-			map[string]string{"MILLIVOLT_MCP_QUERY_MAX_ROWS": "many"}, "MILLIVOLT_MCP_QUERY_MAX_ROWS must be an integer",
+			map[string]string{"MILLIVOLT_MCP_QUERY_MAX_ROWS": "many"}, "MILLIVOLT_MCP_QUERY_MAX_ROWS must be an integer", leakingToken,
 		},
 		{
 			"bad env duration", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken},
-			map[string]string{"MILLIVOLT_MCP_QUERY_TIMEOUT": "soon"}, "MILLIVOLT_MCP_QUERY_TIMEOUT must be a duration",
+			map[string]string{"MILLIVOLT_MCP_QUERY_TIMEOUT": "soon"}, "MILLIVOLT_MCP_QUERY_TIMEOUT must be a duration", leakingToken,
 		},
 		{
 			"refused limits", []string{"--proxy-url", "http://127.0.0.1:8081", "--operator-token", leakingToken, "--page-size", "0"},
-			nil, "page size must be at least 1",
+			nil, "page size must be at least 1", leakingToken,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.secret == "" {
+				t.Fatal("every setup-error case must name the credential it supplies")
+			}
 			lookup := func(name string) (string, bool) {
 				value, ok := tc.env[name]
 				return value, ok
@@ -285,7 +304,7 @@ func TestSetupErrorsNeverCarryTheCredential(t *testing.T) {
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error %q must mention %q", err, tc.want)
 			}
-			if strings.Contains(err.Error(), leakingToken) {
+			if strings.Contains(err.Error(), tc.secret) {
 				t.Fatalf("a setup error carried the credential: %q", err)
 			}
 		})
