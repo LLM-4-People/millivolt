@@ -481,7 +481,7 @@ func redactForExcerpt(message, token string) string {
 	if message == "" {
 		return message
 	}
-	region, complete := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
+	region, complete, _ := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
 	if !complete {
 		return redactionMarker
 	}
@@ -499,20 +499,24 @@ func redactForExcerpt(message, token string) string {
 // the region it is allowed to read. The result is false only when the prefix
 // would extend past maxExcerptScanBytes: the cap stops the unbounded work a
 // whitespace flood would otherwise cause, and the caller fails closed because
-// the unscanned remainder could hide a credential. Collapsing only ever
+// the unscanned remainder could hide a credential. The third result reports the
+// raw bytes the collapse walk examined, so a test can pin the work bound
+// instead of only its fail-closed consequence; the walk reads whole runes, so
+// it can examine at most utf8.UTFMax-1 bytes past the cap. Collapsing only ever
 // shortens text (a run of whitespace becomes one space, leading and trailing
 // whitespace disappears), so the raw prefix that produces a given collapsed
 // length is found by walking the collapse itself: a fixed raw byte cut would
 // include unreachable text and, with a long whitespace run, exclude a
 // credential the collapse pulls into the excerpt.
-func excerptRegion(message string, target int) (string, bool) {
+func excerptRegion(message string, target int) (string, bool, int) {
 	if target <= 0 || len(message) <= target {
-		return message, true
+		return message, true, 0
 	}
 	collapsed := 0
 	inWord := false
 	limit := min(len(message), maxExcerptScanBytes)
-	for index := 0; index < limit; {
+	index := 0
+	for index < limit {
 		r, size := utf8.DecodeRuneInString(message[index:])
 		if unicode.IsSpace(r) {
 			inWord = false
@@ -528,13 +532,13 @@ func excerptRegion(message string, target int) (string, bool) {
 		collapsed++
 		index += size
 		if collapsed >= target {
-			return message[:index], true
+			return message[:index], true, index
 		}
 	}
 	if len(message) <= maxExcerptScanBytes {
-		return message, true
+		return message, true, index
 	}
-	return "", false
+	return "", false, index
 }
 
 // rawSpan is the half-open byte range of one match in the original message.

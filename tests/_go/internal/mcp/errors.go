@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // TestErrorPathsProduceReadableToolErrors pins every documented failure shape
@@ -822,6 +823,19 @@ func TestNestedFailureExcerptIsDeterministic(t *testing.T) {
 	}
 }
 
+// assertExcerptScanBounded pins the raw work bound on the excerpt walk: the
+// scan stops at maxExcerptScanBytes and may only finish the rune that starts
+// there, so the bytes it reports examining never exceed the cap by more than
+// one UTF-8 rune. The counter is the guard; a wall-clock budget alone cannot
+// prove the bound because the fail-closed output is identical either way.
+func assertExcerptScanBounded(t *testing.T, examined int) {
+	t.Helper()
+	if limit := maxExcerptScanBytes + utf8.UTFMax - 1; examined > limit {
+		t.Fatalf("the excerpt scan examined %d raw bytes, above the %d byte cap plus one rune (%d)",
+			examined, maxExcerptScanBytes, limit)
+	}
+}
+
 // TestRedactionScansOnlyTheExcerptRegion pins the work bound on the redaction
 // that runs before the excerpt truncation: the scan covers only the region
 // that can reach the published excerpt, not the whole body. A fixed raw byte
@@ -835,9 +849,13 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 	// A multi-megabyte body with no credential: the region stops near the
 	// excerpt budget instead of covering the message.
 	message := strings.Repeat("word ", 1<<20)
-	region, complete := excerptRegion(message, target)
+	region, complete, examined := excerptRegion(message, target)
 	if !complete {
 		t.Fatal("a body whose collapse reaches the target inside the cap must not fail closed")
+	}
+	assertExcerptScanBounded(t, examined)
+	if examined != len(region) {
+		t.Fatalf("the scan reported %d examined bytes for a %d byte region", examined, len(region))
 	}
 	if len(region) >= len(message) {
 		t.Fatalf("the region covers the whole %d byte message", len(message))
@@ -852,9 +870,13 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 	// Whitespace collapse can pull a credential into the excerpt from far
 	// beyond any fixed raw cut, so the region has to cross the run.
 	hidden := strings.Repeat(" ", 1<<20) + token
-	region, complete = excerptRegion(hidden, target)
+	region, complete, examined = excerptRegion(hidden, target)
 	if !complete {
 		t.Fatal("a whitespace-hidden credential inside the scan cap must not fail closed")
+	}
+	assertExcerptScanBounded(t, examined)
+	if examined != len(region) {
+		t.Fatalf("the scan reported %d examined bytes for a %d byte region", examined, len(region))
 	}
 	if !strings.Contains(region, token) {
 		t.Fatal("the region must include a credential that whitespace collapse pulls into the excerpt")
@@ -884,12 +906,17 @@ func TestWhitespaceFloodRedactionIsBoundedAndFailsClosed(t *testing.T) {
 	}
 	target := maxErrorBodyBytes + credentialFormByteMax*len(token)
 
-	region, complete := excerptRegion(message, target)
+	region, complete, examined := excerptRegion(message, target)
 	if complete {
 		t.Fatal("a collapse that never reaches the target inside the cap must fail closed")
 	}
 	if region != "" {
 		t.Fatalf("a failed scan must return no region, got %d bytes", len(region))
+	}
+	assertExcerptScanBounded(t, examined)
+	if examined < maxExcerptScanBytes {
+		t.Fatalf("the flood walk examined %d raw bytes; it must walk to the %d byte cap before failing closed",
+			examined, maxExcerptScanBytes)
 	}
 
 	started := time.Now()
@@ -898,6 +925,8 @@ func TestWhitespaceFloodRedactionIsBoundedAndFailsClosed(t *testing.T) {
 	if got != redactionMarker {
 		t.Fatalf("the whitespace flood must fail closed to %q, got %q", redactionMarker, got)
 	}
+	// The examined-bytes assertion above is the work bound; this time budget is
+	// only a secondary sanity bound on the same path.
 	if elapsed > 2*time.Second {
 		t.Fatalf("the 64 MiB flood took %v; the scan must stop at maxExcerptScanBytes (%d bytes)",
 			elapsed, maxExcerptScanBytes)
