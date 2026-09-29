@@ -40,9 +40,12 @@ func TestLogPageScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
 	// The query deadline must stay a generous real one: a synthetic deadline
 	// inside a synctest bubble sprints past while the single query goroutine
 	// blocks on real SQLite file I/O on a loaded CI runner, fail-closing the
-	// page with 500. A one-hour real budget keeps the row-work assertions
-	// deterministic and can never be expired by runner CPU or disk stalls.
-	s := testStore(t)
+	// page with 500. The hour must ride BOTH the aggregate context below and
+	// the store's own QueryTimeout: storage.withQueryTimeout wraps the handler
+	// context unconditionally, so the shared fixture's one-second cap silently
+	// overrode this one-hour budget and a loaded runner failed it as
+	// "agg log page: context deadline exceeded".
+	s := testStoreWithQueryTimeout(t, time.Hour)
 	start := time.UnixMilli(1_800_000_000_000)
 	for i := range logScanMax + 7 {
 		provider := "other"

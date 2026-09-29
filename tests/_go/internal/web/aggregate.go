@@ -21,14 +21,22 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
-func testStore(t *testing.T) *storage.Store {
+func testStore(t *testing.T) *storage.Store { return testStoreWithQueryTimeout(t, time.Second) }
+
+// testStoreWithQueryTimeout opens the shared aggregate fixture with an explicit
+// storage query budget. storage.withQueryTimeout wraps the handler context
+// unconditionally, so the effective SELECT deadline is the smaller of the
+// store's QueryTimeout and the aggregate's own timeout: a test that passes a
+// wider budget to NewAggAPI gets it only when this fixture carries the same
+// budget.
+func testStoreWithQueryTimeout(t *testing.T, queryTimeout time.Duration) *storage.Store {
 	t.Helper()
 	d := config.Default()
 	s, err := storage.Open(filepath.Join(t.TempDir(), "agg.db"), storage.Options{
 		WriteChanCap:  d.StorageWriteChanCap,
 		BatchCap:      d.StorageBatchCap,
 		FlushInterval: time.Millisecond, // fast drains so tests don't sleep long
-		QueryTimeout:  time.Second,
+		QueryTimeout:  queryTimeout,
 		WriteTrackCap: 64,
 	})
 	if err != nil {
