@@ -248,10 +248,12 @@ an exact confirmation phrase, and the opaque `preview_token` that
 `purge_preview` issued for that same filter, its count and an expiry. A count
 cannot bind the two: it is only a number, so two filters matching the same number
 would authorize each other. The token is stateless and HMAC-bound under the
-operator credential, so nothing is persisted, nothing expires on its own, and a
-rotated credential invalidates every outstanding preview. A refusal discloses no
-count, because a refusal that reports the live count is a count oracle a model
-can retry its way through. The residual gap is stated rather than claimed away:
+operator credential, so nothing is persisted, no server-side cleanup is needed,
+and a rotated credential invalidates every outstanding preview. It carries its
+own expiry, enforced when the token is verified, so a preview authorizes a
+deletion only shortly after it was taken. A refusal discloses no count, because
+a refusal that reports the live count is a count oracle a model can retry its
+way through. The residual gap is stated rather than claimed away:
 the re-check and the delete are two requests with no shared transaction, so rows
 committed between them are removed un-previewed. Capture refuses to start without
 durable storage, and refuses a scope name the proxy has never seen, because
