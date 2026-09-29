@@ -651,7 +651,7 @@ the credential gates both.
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
 | `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
-| `POST /mcp` | Streamable HTTP MCP endpoint, always registered and operator-gated like `/metrics`. Serves the same 22 tools as `millivolt mcp`. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session or credential is retained between requests. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes are reserved and answer `404`, never inference. |
+| `POST /mcp` | Streamable HTTP MCP endpoint, always registered and operator-gated like `/metrics`. Serves the same 22 tools as `millivolt mcp`. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session or credential is retained between requests. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes, including percent-encoded-separator forms, are reserved and answer `404`, never inference. |
 
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
@@ -708,7 +708,10 @@ clients can call the same endpoint or simply send the Bearer header on every
 request. An expired cookie re-prompts in the dashboard or reappears as the
 login page on navigation.
 Unregistered `/admin/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
-answer 404 and are never forwarded upstream.
+answer 404 and are never forwarded upstream. The gate also refuses 404 when an
+owned-namespace path is written with a percent-encoded separator (`%2f` or
+`%5c`, any hex case): the mux cannot route it to the reserved subtree, so it
+would otherwise fall through to inference.
 
 Failed authentications are throttled per source IP (RemoteAddr only;
 forwarded-header chains are never trusted, since no trusted-proxy model

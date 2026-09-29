@@ -71,6 +71,33 @@ func newHTTPServer(handler http.Handler, cfg *config.Config, srvCtx context.Cont
 	}
 }
 
+// reservedNamespace is one reserved operator-plane namespace registration.
+type reservedNamespace struct {
+	pattern string
+	handler http.Handler
+}
+
+// operatorNamespaces returns the reserved operator-namespace registrations.
+// The /admin, /metrics and /mcp namespaces own no unregistered handler:
+// reserving both the roots and the subtrees means neither the unauthenticated
+// gate nor an authenticated request can forward a namespace look-alike to the
+// upstream catch-all. Registered exact patterns (session, pause, config,
+// agg/*, ...) keep mux precedence. main installs exactly this set, and the
+// route tests drive the same set, so a dropped /admin, /metrics or /mcp
+// registration fails the default suite instead of only the opt-in live one.
+func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNamespace {
+	return []reservedNamespace{
+		{"/admin", http.NotFoundHandler()},
+		{"/admin/", http.NotFoundHandler()},
+		{"/metrics", http.NotFoundHandler()},
+		{"/metrics/", http.NotFoundHandler()},
+		// The MCP streamable HTTP endpoint is always registered and gated
+		// like /metrics; /mcp/ reserves every look-alike for the 404 handler.
+		{"/mcp", newMCPHandler(gate, dispatch)},
+		{"/mcp/", http.NotFoundHandler()},
+	}
+}
+
 func main() {
 	// The MCP server ships inside this binary as the `mcp` subcommand. The
 	// dispatch is the very first statement so every existing invocation -
@@ -237,19 +264,9 @@ func main() {
 	// gate every external request passes: the caller's Bearer is re-validated
 	// in process, and no second credential path exists.
 	handler := protectOperatorRequests(mux, gate)
-	// The /admin, /metrics and /mcp namespaces own no unregistered handler:
-	// reserving both the roots and the subtrees means neither the
-	// unauthenticated gate nor an authenticated request can ever forward a
-	// namespace look-alike to the upstream catch-all. Registered exact
-	// patterns (session, pause, config, agg/*, ...) keep mux precedence.
-	mux.Handle("/admin", http.NotFoundHandler())
-	mux.Handle("/admin/", http.NotFoundHandler())
-	mux.Handle("/metrics", http.NotFoundHandler())
-	mux.Handle("/metrics/", http.NotFoundHandler())
-	// The MCP streamable HTTP endpoint is always registered and gated like
-	// /metrics; /mcp/ reserves every look-alike for the 404 handler.
-	mux.Handle("/mcp", newMCPHandler(gate, handler))
-	mux.Handle("/mcp/", http.NotFoundHandler())
+	for _, namespace := range operatorNamespaces(gate, handler) {
+		mux.Handle(namespace.pattern, namespace.handler)
+	}
 	// The liveness probe is the one open server route besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.

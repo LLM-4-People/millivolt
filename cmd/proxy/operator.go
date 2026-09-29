@@ -160,15 +160,27 @@ func (g *operatorGate) valid(presented string) bool {
 // gatedPath reports whether the request belongs to the dashboard/operator
 // plane. The exact namespace roots are gated too: /admin, /metrics, /dash and
 // /mcp are millivolt-owned, so a look-alike path can never reach the inference
-// catch-all. Everything else (registered /healthz, brand/PWA files and the
-// catch-all) passes untouched.
+// catch-all. A decoded backslash is read as a separator alongside a slash: no
+// Go mux pattern does, but upstream proxies and caches historically have, so
+// the namespace test cannot depend on the next hop's reading. Everything else
+// (registered /healthz, brand/PWA files and the catch-all) passes untouched.
 func gatedPath(path string) bool {
+	path = strings.ReplaceAll(path, `\`, "/")
 	return path == "/" || path == "/index.html" ||
 		path == "/admin" || path == "/metrics" || path == "/dash" || path == "/mcp" ||
 		strings.HasPrefix(path, "/dash/") ||
 		strings.HasPrefix(path, "/metrics/") ||
 		strings.HasPrefix(path, "/admin/") ||
 		strings.HasPrefix(path, "/mcp/")
+}
+
+// encodedSeparator reports whether an escaped path contains a percent-encoded
+// path separator (%2f or %5c, any hex case). ServeMux segments an escaped path
+// without decoding separators, so such a path cannot match the reserved
+// namespace subtree and would fall through to the inference catch-all.
+func encodedSeparator(escapedPath string) bool {
+	lower := strings.ToLower(escapedPath)
+	return strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c")
 }
 
 // bearerToken extracts the presented credential verbatim. The scheme is
@@ -356,12 +368,15 @@ func (l *authLimiter) success(ip string) {
 
 // protectOperatorRequests is the operator-plane gate. Order is fixed: open
 // paths pass first (so an unset credential never takes down /healthz or
-// inference), a disabled plane denies everything gated, a verified Bearer or
-// session cookie admits the request before the throttle (a correct
-// credential is proof, not a guess: the lockout must not lock the operator
-// out of their own dashboard), and only then does an active lockout deny
-// wrong-guess traffic. Denied HTML entrypoints get the login page; every
-// other denial is JSON, no-store, identical in shape.
+// inference), a percent-encoded-separator look-alike of an owned namespace is
+// refused 404 before the plane state or any credential is consulted (so no
+// lookup form of the namespace can ever be forwarded), a disabled plane denies
+// everything else gated, a verified Bearer or session cookie admits the
+// request before the throttle (a correct credential is proof, not a guess: the
+// lockout must not lock the operator out of their own dashboard), and only
+// then does an active lockout deny wrong-guess traffic. Denied HTML
+// entrypoints get the login page; every other denial is JSON, no-store,
+// identical in shape.
 func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler {
 	sameOrigin := http.NewCrossOriginProtection().Handler(next)
 	mint := func(w http.ResponseWriter) {
@@ -391,6 +406,16 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		}
 		if !gatedPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
+			return
+		}
+		// An encoded path separator makes a namespace look-alike the mux
+		// cannot route to its reserved subtree, so it would be forwarded to
+		// inference. The owned namespace is reserved absolutely: refuse it
+		// here, at the single gate, before the plane state or any credential
+		// is consulted. A raw backslash is caught too, because EscapedPath
+		// re-encodes it to %5C.
+		if encodedSeparator(r.URL.EscapedPath()) {
+			denyOperator(w, http.StatusNotFound, "reserved operator namespace")
 			return
 		}
 		if !gate.armed {
