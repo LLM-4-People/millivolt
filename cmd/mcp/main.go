@@ -15,7 +15,9 @@
 //
 // The credential is never logged, never placed in a URL, never used as a flag
 // default (flag.PrintDefaults would print it), and never echoed into a tool
-// result. stdout carries the MCP stream only: every diagnostic goes to
+// result. The proxy URL is resolved the same way even though it is not secret:
+// an environment value can carry userinfo, and a usage or error line must not
+// print it either. stdout carries the MCP stream only: every diagnostic goes to
 // stderr, because a stray stdout line would corrupt the protocol.
 package main
 
@@ -81,8 +83,12 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
 	var o options
 	o.limits = mcp.Limits{QueryMaxRows: queryMaxRows, QueryMaxBytes: queryMaxBytes, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
-	fs.StringVar(&o.proxyURL, "proxy-url", envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", ""),
+	fs.StringVar(&o.proxyURL, "proxy-url", "",
 		"millivolt proxy origin, for example http://127.0.0.1:8081 (env MILLIVOLT_MCP_PROXY_URL)")
+	// The proxy URL takes an EMPTY default for the same reason the credential
+	// does: its environment value can carry userinfo, and flag.PrintDefaults
+	// renders `(default "...")` on -h, --help and every parse error, which an
+	// MCP host does not capture. The environment is resolved after parsing.
 	// The credential is registered with an EMPTY default and resolved after
 	// parsing. flag.PrintDefaults renders `(default "...")` for any flag whose
 	// default is not its zero value, and it runs on -h, on --help and on every
@@ -109,6 +115,9 @@ func parse(args []string, lookupEnv func(string) (string, bool)) (options, error
 	// command line, not by whether the resolved value is empty: an explicit
 	// empty --operator-token is a deliberate (and invalid) choice, while an
 	// absent flag falls through to the environment.
+	if !named(fs, "proxy-url") {
+		o.proxyURL = envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", "")
+	}
 	if !named(fs, "operator-token") {
 		o.operatorToken = envString(lookupEnv, "MILLIVOLT_MCP_OPERATOR_TOKEN", "")
 	}

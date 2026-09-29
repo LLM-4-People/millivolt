@@ -185,6 +185,46 @@ func TestRequestTimeoutIsReported(t *testing.T) {
 	}
 }
 
+// TestRetryAfterIsSanitized pins that the Retry-After header is never copied
+// into a model-visible message verbatim. It is endpoint-controlled text, and
+// `retry after <value>` used to print it unbounded.
+func TestRetryAfterIsSanitized(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"seconds", "42", "42"},
+		{"padded seconds", "  42  ", "42"},
+		{"http date", "Wed, 21 Oct 2015 07:28:00 GMT", "Wed, 21 Oct 2015 07:28:00 GMT"},
+		{"arbitrary text", "call the operator at once", ""},
+		{"credential", testToken, ""},
+		{"unbounded digits", strings.Repeat("9", 40), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := newFakeProxy(t)
+			proxy.respond(http.MethodGet, schemaPath, cannedResponse{
+				Status: http.StatusTooManyRequests, ContentType: "application/json",
+				Body:    `{"error":"too many rejected credentials"}`,
+				Headers: map[string]string{"Retry-After": tc.raw},
+			})
+			service := newTestService(t, proxy, Limits{})
+			_, err := service.query(context.Background(), QueryInput{SQL: "SELECT 1"})
+			if err == nil {
+				t.Fatal("expected the 429")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error must be an *APIError, got %T", err)
+			}
+			if apiErr.RetryAfter != tc.want {
+				t.Fatalf("Retry-After = %q, want %q", apiErr.RetryAfter, tc.want)
+			}
+			assertNoToken(t, "429 error", err.Error())
+		})
+	}
+}
+
 // TestErrorBodyExcerptIsBounded pins that an unexpected large non-JSON body is
 // excerpted rather than pasted into a model context in full.
 func TestErrorBodyExcerptIsBounded(t *testing.T) {
@@ -203,6 +243,24 @@ func TestErrorBodyExcerptIsBounded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "[truncated]") {
 		t.Fatalf("a bounded excerpt must say it was truncated: %v", err)
+	}
+
+	// The flat {"error": "..."} shape is bounded too: it used to bypass the
+	// excerpt entirely and could carry a multi-megabyte field straight into a
+	// model context.
+	proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+		Status: http.StatusBadGateway, ContentType: "application/json",
+		Body: `{"error":"` + strings.Repeat("upstream failure ", 4096) + `"}`,
+	})
+	_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
+	if err == nil {
+		t.Fatal("expected the flat error body to fail")
+	}
+	if len(err.Error()) > maxErrorBodyBytes+256 {
+		t.Fatalf("flat error message is %d bytes; it must stay near the %d byte excerpt budget", len(err.Error()), maxErrorBodyBytes)
+	}
+	if !strings.Contains(err.Error(), "[truncated]") {
+		t.Fatalf("a bounded flat error must say it was truncated: %v", err)
 	}
 }
 

@@ -448,6 +448,85 @@ func TestSetConfigIsARevisionCheckedPatch(t *testing.T) {
 	}
 }
 
+// TestSetConfigRedactsTheCredentialOnTheToleratedPath pins the one path that
+// decodes a response body itself. The committed 500 document is not built by
+// newAPIError, so its .error text reached the model unredacted even though the
+// proxy's reload failure can quote the request it just refused.
+func TestSetConfigRedactsTheCredentialOnTheToleratedPath(t *testing.T) {
+	reflected := "settings saved, but reload failed: upstream rejected Bearer " + testToken
+	proxy := newFakeProxy(t)
+	proxy.respond(http.MethodPost, configPath, cannedResponse{
+		Status: http.StatusInternalServerError, ContentType: "application/json",
+		Body: `{"saved":true,"revision":"z","values":{},"restart_required":[],"error":` + quote(reflected) + `}`,
+	})
+	service := newTestService(t, proxy, Limits{})
+	out, err := service.setConfig(context.Background(), SetConfigInput{
+		Values: map[string]any{"history_size": 5}, Revision: "mine",
+	})
+	if err != nil {
+		t.Fatalf("a committed mutation must not be reported as an error: %v", err)
+	}
+	if out.Error == "" || out.Warning == "" {
+		t.Fatalf("the committed failure must still be reported: %+v", out)
+	}
+	assertNoToken(t, "set_config error", out.Error)
+	assertNoToken(t, "set_config warning", out.Warning)
+	if !strings.Contains(out.Error, "[redacted]") {
+		t.Fatalf("the redaction must be visible, not silent removal: %q", out.Error)
+	}
+
+	// The tolerated status whose body reports no save becomes an *APIError;
+	// that message goes through the same redaction.
+	proxy.respond(http.MethodPost, configPath, cannedResponse{
+		Status: http.StatusInternalServerError, ContentType: "application/json",
+		Body: `{"saved":false,"error":` + quote(reflected) + `}`,
+	})
+	_, err = service.setConfig(context.Background(), SetConfigInput{
+		Values: map[string]any{"history_size": 6}, Revision: "mine",
+	})
+	if err == nil {
+		t.Fatal("a 500 with no committed document must stay an error")
+	}
+	assertNoToken(t, "set_config APIError", err.Error())
+	if !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("the failure message must carry the redaction: %v", err)
+	}
+}
+
+// TestResumeQuotaTrimsTheProviderOnce pins the trim. The proxy compares the
+// provider verbatim, so a padded name used to reach a different gate than the
+// response check: resume_quota(" local ") answered resumed=true while the real
+// gate stayed open.
+func TestResumeQuotaTrimsTheProviderOnce(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodPost, quotaPath, `{"enabled":true,"storms":[{"provider":"local","quota":true}]}`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.resumeQuota(context.Background(), ResumeQuotaInput{Provider: " local "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := decodeBody(t, proxy.requestsFor(http.MethodPost, quotaPath)[0])
+	if body["provider"] != "local" {
+		t.Fatalf("the body must carry the trimmed provider: %v", body)
+	}
+	if out.Resumed {
+		t.Fatal("the gate for the trimmed name is still open, so the provider is not resumed")
+	}
+	if len(out.Open) != 1 || out.Open[0] != "local" {
+		t.Fatalf("open_gates = %v", out.Open)
+	}
+	// A trimmed name with no open gate is the ordinary resumed answer.
+	proxy.json(http.MethodPost, quotaPath, `{"enabled":true,"storms":[]}`)
+	closed, err := service.resumeQuota(context.Background(), ResumeQuotaInput{Provider: "  local  "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !closed.Resumed {
+		t.Fatalf("a closed gate must report resumed: %+v", closed)
+	}
+}
+
 // TestReloadConfig pins the one route the dashboard never calls.
 func TestReloadConfig(t *testing.T) {
 	proxy := newFakeProxy(t)

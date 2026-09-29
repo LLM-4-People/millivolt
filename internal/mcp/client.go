@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -106,7 +107,15 @@ func NormalizeProxyURL(raw string) (*url.URL, error) {
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
-		return nil, fmt.Errorf("proxy URL is not a valid URL: %v", err)
+		// The raw value can carry userinfo, and this message reaches stderr and
+		// the model: report the parser's own detail without restating the URL.
+		// A *url.Error's Error() is `parse "<raw>": ...`, so unwrap it; the
+		// inner cause (an invalid port, an invalid escape) never repeats it.
+		var parseErr *url.Error
+		if errors.As(err, &parseErr) && parseErr.Err != nil {
+			return nil, fmt.Errorf("proxy URL is not a valid URL: %v", parseErr.Err)
+		}
+		return nil, errors.New("proxy URL is not a valid URL")
 	}
 	switch {
 	case parsed.Scheme != "http" && parsed.Scheme != "https":
@@ -171,7 +180,11 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	}
 	if len(body) > 0 && json.Unmarshal(body, &flat) == nil && flat.Error != "" {
 		message = flat.Error
-	} else if message != "" {
+	}
+	if message != "" {
+		// Both shapes get the same bound and whitespace collapse: a flat
+		// {"error": "<huge>"} is exactly as able to fill a model context as an
+		// unexpected HTML page, and the proxy's own text can carry newlines.
 		message = strings.Join(strings.Fields(message), " ")
 		if len(message) > maxErrorBodyBytes {
 			message = message[:maxErrorBodyBytes] + " [truncated]"
@@ -180,9 +193,30 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	return &APIError{
 		Status:     resp.StatusCode,
 		Message:    redactCredential(errorMessage(message, resp.StatusCode), token),
-		RetryAfter: resp.Header.Get("Retry-After"),
+		RetryAfter: sanitizeRetryAfter(resp.Header.Get("Retry-After")),
 		Challenge:  resp.Header.Get("WWW-Authenticate"),
 	}
+}
+
+// sanitizeRetryAfter keeps only the two shapes HTTP defines for Retry-After,
+// a delay in seconds or an HTTP date, because the header is copied into a
+// model-visible message verbatim and its value is endpoint-controlled. Any
+// other text is dropped rather than printed: the generic rate-limit message
+// is then shown instead, and no arbitrary content (or credential) can ride in.
+func sanitizeRetryAfter(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if len(trimmed) <= 20 {
+		if _, err := strconv.Atoi(trimmed); err == nil {
+			return trimmed
+		}
+	}
+	if when, err := http.ParseTime(trimmed); err == nil {
+		return when.UTC().Format(http.TimeFormat)
+	}
+	return ""
 }
 
 // errorMessage is the one owner of "the proxy's own text, or the status text
@@ -337,4 +371,12 @@ func redactCredential(message, token string) string {
 		return message
 	}
 	return strings.ReplaceAll(message, token, "[redacted]")
+}
+
+// redact is the one entry point for a caller that decoded a response body
+// itself (the config patch path, where a committed document arrives on a 500).
+// Every model-visible string from such a body goes through it, because the
+// fatal reload text can quote the request the proxy just refused.
+func (c *Client) redact(text string) string {
+	return redactCredential(text, c.token)
 }

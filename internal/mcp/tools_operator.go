@@ -312,13 +312,16 @@ func (s *Service) setThrottle(ctx context.Context, in SetThrottleInput) (*SetThr
 // accepted throttle write, set or clear, so a typo would not fail - it would
 // permanently pollute the set every later validation and every discovery list
 // is built from.
+//
+// This is deliberately not a hard guard: it fails OPEN on a debug-read error
+// and on an empty vocabulary, so an unknown name may be accepted when the
+// vocabulary is unavailable. Refusing then would block a legitimate change on
+// an unrelated failure, and the output still reports the vocabulary the proxy
+// ended up with.
 func (s *Service) requireKnownProvider(ctx context.Context, provider string) error {
 	// GET /admin/debug is the one owner of the names an operator may scope to.
 	status, err := s.client.debug(ctx)
 	if err != nil {
-		// The vocabulary could not be read. Refusing here would block a
-		// legitimate change for an unrelated failure, and the output still
-		// reports the vocabulary the proxy ended up with.
 		return nil
 	}
 	known := list(status.KnownProviders)
@@ -376,10 +379,16 @@ func openQuotaGates(state map[string]any) []string {
 // ResumeQuota closes an open retry-mode quota gate. A provider with no open gate
 // is a no-op state report: the gate may have recovered on its own.
 func (s *Service) resumeQuota(ctx context.Context, in ResumeQuotaInput) (*ResumeQuotaOutput, error) {
-	if strings.TrimSpace(in.Provider) == "" {
+	// Trim ONCE and use the trimmed value everywhere: the proxy compares the
+	// provider verbatim (internal/proxy/quotapause.go), so a padded name would
+	// reach a different gate than the response check below, and
+	// resume_quota(" local ") would report resumed=true while the real gate
+	// stayed open.
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
 		return nil, fmt.Errorf("provider is required")
 	}
-	body := map[string]any{"provider": in.Provider, "resume": true}
+	body := map[string]any{"provider": provider, "resume": true}
 	var state map[string]any
 	if err := s.client.postJSON(ctx, routeQuota, body, &state); err != nil {
 		return nil, err
@@ -389,7 +398,7 @@ func (s *Service) resumeQuota(ctx context.Context, in ResumeQuotaInput) (*Resume
 		out.Warning = warning
 	}
 	out.Open = openQuotaGates(state)
-	out.Resumed = !slices.Contains(out.Open, in.Provider)
+	out.Resumed = !slices.Contains(out.Open, provider)
 	return out, nil
 }
 
@@ -516,12 +525,14 @@ func (s *Service) setConfig(ctx context.Context, in SetConfigInput) (*SetConfigO
 	}
 	if !saved.Saved {
 		// A tolerated status that reports no save is an ordinary failure whose
-		// .error text decoded into the same field; report it as one.
-		return nil, &APIError{Status: status, Message: errorMessage(saved.Error, status)}
+		// .error text decoded into the same field; report it as one. The text
+		// is redacted like every other model-visible string on this path: the
+		// proxy's reload failure can quote the request, credential included.
+		return nil, &APIError{Status: status, Message: s.client.redact(errorMessage(saved.Error, status))}
 	}
 	out := &SetConfigOutput{
 		Saved: saved.Saved, RestartRequired: list(saved.RestartRequired),
-		Values: object(saved.Values), Error: saved.Error,
+		Values: object(saved.Values), Error: s.client.redact(saved.Error),
 	}
 	if out.Error != "" {
 		out.Warning = "the config file was written but the reload failed: " + out.Error

@@ -15,6 +15,60 @@ import (
 // about to be refused or to print usage; it grants access to nothing.
 const leakingToken = "mcp-usage-output-credential-fixture"
 
+// leakingProxyURL carries userinfo, which is exactly the shape a usage or
+// error line must never render. Neither half is a real credential.
+const (
+	leakingUser = "leakuser"
+	leakingPass = "leakpass"
+)
+
+// TestProxyURLCredentialsNeverReachOutput pins the same property for the proxy
+// URL. It used to take its flag default from MILLIVOLT_MCP_PROXY_URL, so
+// `--help` printed `(default "http://leakuser:leakpass@...")`, and a malformed
+// URL echoed the raw value through url.Parse's own error. The default is empty
+// now and the environment is resolved after parsing, and the validation error
+// names the failure without restating the value.
+func TestProxyURLCredentialsNeverReachOutput(t *testing.T) {
+	binary := buildBinary(t)
+	env := []string{
+		"MILLIVOLT_MCP_PROXY_URL=http://" + leakingUser + ":" + leakingPass + "@127.0.0.1:8081",
+		"MILLIVOLT_MCP_OPERATOR_TOKEN=" + leakingToken,
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		url  string
+	}{
+		{"help", []string{"-h"}, "http://" + leakingUser + ":" + leakingPass + "@127.0.0.1:8081"},
+		{"unknown flag", []string{"--bogus"}, "http://" + leakingUser + ":" + leakingPass + "@127.0.0.1:8081"},
+		{"malformed env url", nil, "http://" + leakingUser + ":" + leakingPass + "@127.0.0.1:notaport"},
+		{"malformed flag url", []string{"--proxy-url", "http://" + leakingUser + ":" + leakingPass + "@[::1"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := exec.Command(binary, tc.args...)
+			environment := env
+			if tc.url != "" {
+				environment = []string{
+					"MILLIVOLT_MCP_PROXY_URL=" + tc.url,
+					"MILLIVOLT_MCP_OPERATOR_TOKEN=" + leakingToken,
+				}
+			}
+			command.Env = environmentWithoutCredentials(environment)
+			var stdout, stderr bytes.Buffer
+			command.Stdout = &stdout
+			command.Stderr = &stderr
+			_ = command.Run()
+			for stream, text := range map[string]string{"stdout": stdout.String(), "stderr": stderr.String()} {
+				for _, secret := range []string{leakingUser, leakingPass, leakingToken} {
+					if strings.Contains(text, secret) {
+						t.Fatalf("proxy URL userinfo reached %s in plaintext:\n%s", stream, text)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestCredentialNeverReachesFlagOutput RUNS the built binary and checks both of
 // its streams. Testing parse() in-process is not enough, and was the reason this
 // defect survived: flag.NewFlagSet's Output() defaults to os.Stderr, so a
@@ -75,11 +129,6 @@ func TestCredentialNeverReachesFlagOutput(t *testing.T) {
 		if !strings.Contains(usage, flag) {
 			t.Fatalf("usage must still document %q, got:\n%s", flag, usage)
 		}
-	}
-	if strings.Contains(usage, "default \"") && strings.Contains(usage, "MILLIVOLT_MCP_PROXY_URL=") {
-		// A non-secret default may still be rendered; only the credential's
-		// absence is load-bearing, and the map above already proved it.
-		t.Logf("usage renders a non-secret default: %s", usage)
 	}
 }
 
