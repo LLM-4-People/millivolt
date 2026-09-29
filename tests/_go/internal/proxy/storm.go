@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -347,30 +348,63 @@ func TestStormReloadPreservesBannerOnlyAndResetsPolicy(t *testing.T) {
 	}
 }
 
+// stormDeadlineBody serves the fixture prefix, then blocks until its request
+// context ends (the per-send deadline) and returns that error: an upstream
+// that went silent mid-body, after headers and partial bytes.
+type stormDeadlineBody struct {
+	ctx    context.Context
+	prefix []byte
+}
+
+func (b *stormDeadlineBody) Read(p []byte) (int, error) {
+	if len(b.prefix) > 0 {
+		n := copy(p, b.prefix)
+		b.prefix = b.prefix[n:]
+		return n, nil
+	}
+	<-b.ctx.Done()
+	return 0, b.ctx.Err()
+}
+
+func (b *stormDeadlineBody) Close() error { return nil }
+
 func TestStormExcludesFiredBodyDeadline(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {
-			var calls atomic.Int32
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls.Add(1)
+			synctest.Test(t, func(t *testing.T) {
+				var calls atomic.Int32
+				prefix := `{"choices":[`
+				contentType := "application/json"
 				if stream {
-					w.Header().Set("Content-Type", "text/event-stream")
-					io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
-				} else {
-					io.WriteString(w, `{"choices":[`)
+					prefix = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"
+					contentType = "text/event-stream"
 				}
-				w.(http.Flusher).Flush()
-				<-r.Context().Done()
-			}))
-			defer up.Close()
-			s := New(stormTestConfig(), nil)
-			r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"model-a","stream":%t}`, stream)))
-			r.Header.Set(hdrBaseURL, up.URL)
-			r.Header.Set(hdrTimeout, "20")
-			s.ServeHTTP(httptest.NewRecorder(), r)
-			if status := s.scheduler.StormSnapshot(); calls.Load() != 1 || len(status) != 0 {
-				t.Fatalf("caller-selected body deadline became outage evidence: calls=%d storms=%+v", calls.Load(), status)
-			}
+				s := New(stormTestConfig(), nil)
+				// The in-process transport makes dispatch deterministic. The
+				// deadline is a bubble timer, so it cannot fire before
+				// RoundTrip has returned and the relay is reading the body:
+				// calls==1 holds by construction, not by a timing margin.
+				// Real loopback dispatch raced the 20 ms deadline under load
+				// (the upstream handler goroutine sometimes never ran), which
+				// failed calls==1 while the product invariant under test - a
+				// caller-selected body deadline is not outage evidence - held.
+				s.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					calls.Add(1)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Header:     http.Header{"Content-Type": []string{contentType}},
+						Body:       &stormDeadlineBody{ctx: r.Context(), prefix: []byte(prefix)},
+						Request:    r,
+					}, nil
+				})})
+				r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(fmt.Sprintf(`{"model":"model-a","stream":%t}`, stream)))
+				r.Header.Set(hdrBaseURL, "http://upstream.example")
+				r.Header.Set(hdrTimeout, "20")
+				s.ServeHTTP(httptest.NewRecorder(), r)
+				if status := s.scheduler.StormSnapshot(); calls.Load() != 1 || len(status) != 0 {
+					t.Fatalf("caller-selected body deadline became outage evidence: calls=%d storms=%+v", calls.Load(), status)
+				}
+			})
 		})
 	}
 }
