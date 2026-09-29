@@ -627,7 +627,7 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 		t.Fatalf("the error grammar must be stated: %q", byDimension["error"].Note)
 	}
 	// The parts are NOT guaranteed non-empty: errorKey joins typ|code|msg, and
-	// keys like server_error|500| and other|| exist.
+	// a key like server_error|500| exists.
 	if !strings.Contains(byDimension["error"].Note, "CAN be empty") {
 		t.Fatalf("the error vocabulary must say a part can be empty: %q", byDimension["error"].Note)
 	}

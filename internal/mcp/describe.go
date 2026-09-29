@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"strconv"
+	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
@@ -232,10 +233,17 @@ var TimeBuckets = []string{"night", "work", "evening", "weekend"}
 // proxy joins them with '|' in that order (internal/web errorKey), and fills the
 // derived parts where it can: a missing type becomes http_<status> and a missing
 // code becomes the status. It cannot always fill them (an attempt with no status,
-// or an error with no message), so a part CAN be empty: real keys include
-// "server_error|500|" and "other||". The parts are the stored error_type,
-// error_code and error_msg.
+// or an error with no message), so a part CAN be empty: a real key is
+// "server_error|500|". The parts are the stored error_type, error_code and
+// error_msg.
 var ErrorFilterKeys = []string{"type", "code", "message"}
+
+// ErrorKeyExamples are real error filter keys the proxy's errorKey grammar
+// produces, one per shape the vocabulary note calls out. Each is checked
+// against the owner, internal/web errorEntries plus errorKey, by the web
+// package's TestMCPErrorKeyExamplesAreProducedByTheOwner; a key nothing
+// produces (the old note showed "other||") fails that test.
+var ErrorKeyExamples = []string{"server_error|500|"}
 
 // RequestIndexes is the published planner reference: the durable indexes a
 // query can use, plus the explicit absence of one on the columns nothing
@@ -279,7 +287,7 @@ var vocabularies = []VocabularyDoc{
 		Values:    ErrorFilterKeys,
 		Note: "a filter value is type|code|message joined with '|', in that order, from the stored error_type, error_code and error_msg. " +
 			"The proxy fills a missing type with http_<status> and a missing code with the status where it can, but a part CAN be empty " +
-			"(keys like server_error|500| and other|| exist), so a value is three parts even when one is blank. " +
+			"(a real key is " + strings.Join(ErrorKeyExamples, " or ") + "), so a value is three parts even when one is blank. " +
 			"Use the values tool on error_type, error_code and error_message to discover them",
 	},
 	{
