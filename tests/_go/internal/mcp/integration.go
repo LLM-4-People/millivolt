@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -67,12 +69,32 @@ func devInstance(t *testing.T) *liveTools {
 	if err != nil {
 		t.Fatal(err)
 	}
+	port := portOf(t, origin)
 	// The dev instance shares this process's environment, which is how the
 	// operator credential reaches it.
 	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", integrationToken)
-	t.Setenv("DEV_PORT", portOf(t, origin))
-	t.Setenv("DEV_DB", integrationDBPrefix+portOf(t, origin)+".db")
+	t.Setenv("DEV_PORT", port)
+	t.Setenv("DEV_DB", integrationDBPrefix+port+".db")
 	t.Setenv("DEV_HOST", "127.0.0.1")
+
+	// dev.sh keeps its port-keyed scratch set after a stop, and this run's
+	// port is its own. Registered before the stop cleanup so it runs after it
+	// (t.Cleanup is LIFO): leaving the scratch config behind lets a later,
+	// unrelated fixture that exclusively creates the same port-keyed path
+	// (cmd/stress) collide with it.
+	t.Cleanup(func() {
+		base := "/tmp/millivolt/millivolt-dev-" + port
+		for _, path := range []string{
+			base + ".yaml", base + ".pid", base + ".log", base + ".bin",
+			integrationDBPrefix + port + ".db",
+			integrationDBPrefix + port + ".db-shm",
+			integrationDBPrefix + port + ".db-wal",
+		} {
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("remove dev scratch %s: %v", path, err)
+			}
+		}
+	})
 
 	script := filepath.Join(root, "scripts", "dev.sh")
 	start := exec.Command(script)
