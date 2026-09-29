@@ -157,11 +157,28 @@ func waitPIDFixture(t *testing.T, pid int, pidFile string) {
 	}
 }
 
+// createDevNamespaceFile creates the fixture's dev namespace file
+// exclusively. freeDevNamespaceListener's reservation (a stat) cannot be
+// atomic with this create: between the two, the kernel can hand the same
+// ephemeral port to a concurrent fixture whose dev file then already exists
+// here. O_EXCL surfaces that creator as an error instead of replacing its
+// file, and this helper is the enforce point for the reservation-to-create
+// race.
+func createDevNamespaceFile(path string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	return file.Close()
+}
+
 // freeDevNamespaceListener reserves a loopback listener whose dev namespace
 // file is unclaimed. A timed-out run leaks the fixture's namespace file (the
 // test timeout kills the process before deferred cleanup), and the kernel
 // reuses ephemeral port numbers, so a new fixture must skip a leaked name
-// instead of failing its exclusive creation against it.
+// instead of failing its exclusive creation against it. Skipping narrows but
+// never closes the reservation-to-create window; createDevNamespaceFile
+// enforces exclusivity at the create.
 func freeDevNamespaceListener(t *testing.T) net.Listener {
 	t.Helper()
 	for attempt := 0; attempt < 1000; attempt++ {
@@ -181,6 +198,29 @@ func freeDevNamespaceListener(t *testing.T) net.Listener {
 	}
 	t.Fatal("no dev namespace port free of leaked files")
 	return nil
+}
+
+// TestCreateDevNamespaceFileIsExclusive pins the guard to O_EXCL: a name that
+// already exists must be refused as os.ErrExist and left untouched, never
+// opened and reused. The pre-created path models the concurrent creator in
+// the reservation-to-create window; removing O_EXCL turns this test red.
+func TestCreateDevNamespaceFileIsExclusive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "millivolt-dev-fixture.yaml")
+	if err := createDevNamespaceFile(path); err != nil {
+		t.Fatalf("creating an unclaimed namespace file failed: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := createDevNamespaceFile(path); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("pre-created namespace file was not refused as existing: %v", err)
+	}
+	if content, err := os.ReadFile(path); err != nil || string(content) != "occupied" {
+		t.Fatalf("refused creation must leave the existing file untouched: %q, %v", content, err)
+	}
 }
 
 func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
@@ -204,12 +244,13 @@ func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(base), 0700); err != nil {
 				t.Fatal(err)
 			}
-			// Exclusive creation and exact cleanup never replace a dev file.
-			file, err := os.OpenFile(base+".yaml", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if err != nil {
+			// The reservation check and this create are separated by a
+			// scheduling window; createDevNamespaceFile's O_EXCL refuses a
+			// concurrent creator instead of replacing its dev file, and the
+			// cleanup removes only this fixture's own file.
+			if err := createDevNamespaceFile(base + ".yaml"); err != nil {
 				t.Fatal(err)
 			}
-			file.Close()
 			defer os.Remove(base + ".yaml")
 			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
