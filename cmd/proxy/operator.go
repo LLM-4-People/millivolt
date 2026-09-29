@@ -601,12 +601,16 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 	g.denyBearer(w)
 }
 
-// loginPageHTML is the whole pre-auth surface: self-contained (the gated
+// loginPageTemplate is the whole pre-auth surface: self-contained (the gated
 // /dash assets are unreachable by design). The form works without JavaScript
 // and only forwards the entered value to POST /admin/session. A tiny optional
 // script registers the ungated service worker so the sign-in page is
-// installable before a session cookie exists.
-const loginPageHTML = `<!doctype html>
+// installable before a session cookie exists. The credential prose is not part
+// of the template: loginPageProtectedNotice/loginPageRejectedNotice fill the
+// loginPageMarker slot and interpolate mcp.ProxyTokenEnv, the one owner of the
+// variable name, so an owner rename moves the page instead of leaving the form
+// naming a stale variable.
+const loginPageTemplate = `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -678,7 +682,7 @@ button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
 </div>
 <h1>millivolt</h1>
 </div>
-<p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>
+{{login-notice}}
 <input type="password" name="token" autocomplete="current-password" autofocus aria-label="Operator token" required>
 <button type="submit">Sign in</button>
 </form>
@@ -691,15 +695,28 @@ if (window.isSecureContext && navigator.serviceWorker) {
 </html>
 `
 
-// loginPageRejectedHTML is the same page with a visible rejection notice,
-// served when a form POST carried a wrong credential. The identical silent
-// re-serve read as "nothing happened" and had the operator sign in twice
-// without ever seeing why. Never carried on a first paint: the unauthenticated
-// page cannot reveal that any attempt happened.
-var loginPageRejectedHTML = strings.Replace(loginPageHTML,
-	`<p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>`,
-	`<p class="notice" role="alert">That token was rejected. Enter the current MILLIVOLT_OPERATOR_TOKEN value and try again.</p>
-<p>This dashboard is protected. Enter the MILLIVOLT_OPERATOR_TOKEN value.</p>`, 1)
+// loginPageMarker is the template slot the two notice variants fill.
+const loginPageMarker = "{{login-notice}}"
+
+// loginPageProtectedNotice is the page's ask for the credential. It and
+// loginPageRejectedNotice interpolate mcp.ProxyTokenEnv, so their prose names
+// exactly the variable the boot gate reads, not a hand copy.
+var loginPageProtectedNotice = "<p>This dashboard is protected. Enter the " + mcp.ProxyTokenEnv + " value.</p>"
+
+// loginPageRejectedNotice prefixes the same ask with a visible rejection
+// notice: the identical silent re-serve read as "nothing happened" and had the
+// operator sign in twice without ever seeing why.
+var loginPageRejectedNotice = `<p class="notice" role="alert">That token was rejected. Enter the current ` + mcp.ProxyTokenEnv + ` value and try again.</p>
+` + loginPageProtectedNotice
+
+// loginPageHTML is the clean sign-in page, loginPageRejectedHTML the same page
+// with the rejection notice, served when a form POST carried a wrong
+// credential. The rejected variant is never carried on a first paint: the
+// unauthenticated page cannot reveal that any attempt happened.
+var (
+	loginPageHTML         = strings.Replace(loginPageTemplate, loginPageMarker, loginPageProtectedNotice, 1)
+	loginPageRejectedHTML = strings.Replace(loginPageTemplate, loginPageMarker, loginPageRejectedNotice, 1)
+)
 
 // handleHealthz is GET /healthz: the unauthenticated liveness probe for
 // Docker HEALTHCHECK and load balancers. It reports only that the process is

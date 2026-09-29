@@ -17,10 +17,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 func TestStressTargetSafety(t *testing.T) {
-	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", "fixture-token")
+	t.Setenv(mcp.ProxyTokenEnv, "fixture-token")
 	o := options{levels: "1,8", duration: time.Second, timeout: time.Second, sample: time.Millisecond, chunks: 1, upstreams: 1, maxRSS: 128, token: "fixture-token"}
 	for _, target := range []string{"", "http://127.0.0.1:8080", "http://example.com:8081", "http://0.0.0.0:8081", "http://127.0.0.1:8081/admin/restart", "http://user@127.0.0.1:8081", "http://127.0.0.1:8081?q=x"} {
 		o.target = target
@@ -31,6 +33,22 @@ func TestStressTargetSafety(t *testing.T) {
 	o.target = "http://127.0.0.1:8081"
 	if _, levels, err := validate(o); err != nil || len(levels) != 2 {
 		t.Fatalf("valid dev workload rejected: %v", err)
+	}
+}
+
+// TestStressReadsTheOwnedOperatorVariable pins the tool's credential read and
+// its missing-credential error to mcp.ProxyTokenEnv, the one owner the proxy's
+// boot gate reads: the value is supplied under the owner's name and must be
+// the one read. A hand copy of the literal follows an owner rename instead, so
+// after a rename this test fails while the owner-derived read keeps working.
+func TestStressReadsTheOwnedOperatorVariable(t *testing.T) {
+	t.Setenv(mcp.ProxyTokenEnv, "fixture-token")
+	if got := operatorTokenFromEnv(); got != "fixture-token" {
+		t.Fatalf("operatorTokenFromEnv() = %q, want the value set under %s", got, mcp.ProxyTokenEnv)
+	}
+	t.Setenv(mcp.ProxyTokenEnv, "")
+	if _, _, err := validate(options{target: "http://127.0.0.1:18099"}); err == nil || !strings.Contains(err.Error(), mcp.ProxyTokenEnv) {
+		t.Fatalf("the missing-credential error must name %s: %v", mcp.ProxyTokenEnv, err)
 	}
 }
 
@@ -140,7 +158,7 @@ func waitPIDFixture(t *testing.T, pid int, pidFile string) {
 }
 
 func TestStressRunCleansOnlyOwnedClients(t *testing.T) {
-	t.Setenv("MILLIVOLT_OPERATOR_TOKEN", "fixture-token")
+	t.Setenv(mcp.ProxyTokenEnv, "fixture-token")
 	for _, mode := range []string{"ramp", "request failure", "canceled", "cleanup failure", "changed database"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())

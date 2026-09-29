@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -58,7 +59,7 @@ func main() {
 	flag.Float64Var(&o.maxRSS, "max-rss-mib", 2048, "stop the ramp if sampled proxy RSS exceeds this safety budget")
 	// The final fixture cleanup purges through the gated operator plane, so
 	// the tool needs the same credential the dev instance was started with.
-	o.token = os.Getenv("MILLIVOLT_OPERATOR_TOKEN")
+	o.token = operatorTokenFromEnv()
 	flag.Parse()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -67,6 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+// operatorTokenFromEnv reads the credential from mcp.ProxyTokenEnv, the one
+// owner of the proxy's operator-token variable, so the stress tool follows an
+// owner rename rather than reading a stale hand copy.
+func operatorTokenFromEnv() string { return os.Getenv(mcp.ProxyTokenEnv) }
 
 func validate(o options) (*url.URL, []int, error) {
 	u, err := url.Parse(o.target)
@@ -79,7 +85,7 @@ func validate(o options) (*url.URL, []int, error) {
 		return nil, nil, errors.New("target must be an explicit http://loopback-IP:dev-port URL, never production :8080")
 	}
 	if o.token == "" {
-		return nil, nil, errors.New("MILLIVOLT_OPERATOR_TOKEN is required: the dev instance's operator credential owns fixture cleanup")
+		return nil, nil, errors.New(mcp.ProxyTokenEnv + " is required: the dev instance's operator credential owns fixture cleanup")
 	}
 	if o.duration <= 0 || o.hold < 0 || o.chunks < 1 || o.upstreams < 1 || o.timeout <= o.hold || o.sample <= 0 || o.maxRSS <= 0 || math.IsNaN(o.maxRSS) || math.IsInf(o.maxRSS, 0) {
 		return nil, nil, errors.New("invalid workload or safety bounds")

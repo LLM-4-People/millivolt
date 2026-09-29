@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -540,6 +541,34 @@ func TestOperatorTokenEnv(t *testing.T) {
 	got, ok := bearerToken(req)
 	if !ok || got != maxTok {
 		t.Fatalf("max-length Bearer token: ok=%v len=%d, want accepted", ok, len(got))
+	}
+}
+
+// TestLoginPageNamesTheOwnedOperatorVariable pins the sign-in page's prose to
+// mcp.ProxyTokenEnv, the one owner of the variable name: every MILLIVOLT_*
+// spelling on both served variants must be that constant, and the page must
+// name at least one. Comparing against the owner (rather than a pinned
+// literal) is what makes an owner rename move the page: a stale hand-written
+// copy then differs from the constant and fails here, while the page rendered
+// from the owner follows the new name.
+func TestLoginPageNamesTheOwnedOperatorVariable(t *testing.T) {
+	pattern := regexp.MustCompile(`MILLIVOLT_[A-Z0-9_]+`)
+	for _, page := range []struct {
+		name string
+		html string
+	}{
+		{"login page", loginPageHTML},
+		{"rejected login page", loginPageRejectedHTML},
+	} {
+		names := pattern.FindAllString(page.html, -1)
+		if len(names) == 0 {
+			t.Fatalf("the %s no longer names the operator variable", page.name)
+		}
+		for _, got := range names {
+			if got != mcp.ProxyTokenEnv {
+				t.Fatalf("the %s names %s, the owner is %s", page.name, got, mcp.ProxyTokenEnv)
+			}
+		}
 	}
 }
 
