@@ -38,7 +38,9 @@ const previewTokenDomain = "millivolt-mcp/purge-preview/v1\x00"
 //
 // The token is stateless on purpose. There is no server-side table of pending
 // previews, so nothing has to be persisted, expired or cleaned up, and a token
-// stays verifiable for the whole of a session. It carries everything
+// stays verifiable for its lifetime, previewTokenTTL (15 minutes), not for the
+// whole of a client session: verification refuses it once that window has
+// passed. It carries everything
 // verification needs - the canonicalized filter, the count and an expiry - and
 // is authenticated with an HMAC keyed by the operator credential, so only a
 // holder of that credential can mint one.
