@@ -108,7 +108,12 @@ func (s *Service) explore(ctx context.Context, in ExploreInput) (*ExploreOutput,
 		Scope               map[string]int64 `json:"scope"`
 		ConversationSummary map[string]int   `json:"conversation_summary"`
 	}
-	if err := s.client.getJSON(ctx, routeExplorer, values, &payload); err != nil {
+	// The explorer folds ALL history like the chart, so it is bounded by the
+	// same full-history query timeout rather than only by the generic client
+	// timeout every call carries.
+	queryCtx, cancel := context.WithTimeout(ctx, s.limits.QueryTimeout)
+	defer cancel()
+	if err := s.client.getJSON(queryCtx, routeExplorer, values, &payload); err != nil {
 		return nil, err
 	}
 	groups, truncation := clamp(payload.Groups, explorerMaxGroups, "groups", exploreAdvice)

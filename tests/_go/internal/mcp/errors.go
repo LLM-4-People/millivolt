@@ -189,6 +189,40 @@ func TestRequestTimeoutIsReported(t *testing.T) {
 	}
 }
 
+// TestExplorerReadIsBoundedByQueryTimeout pins that the explorer fold, like the
+// chart, is bounded by the configured QueryTimeout rather than only by the
+// generic client timeout. Both are full-history reads, and the --query-timeout
+// help and docs/mcp.md both state the bound covers the explorer.
+func TestExplorerReadIsBoundedByQueryTimeout(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	limits := DefaultLimits()
+	limits.QueryTimeout = 25 * time.Millisecond
+	limits.Timeout = 5 * time.Second
+	service, err := NewService(server.URL, testToken, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("an explorer read that outlives the query timeout must be an error")
+	}
+	if elapsed > limits.Timeout/2 {
+		t.Fatalf("the explorer read took %v; QueryTimeout (%v) must bound it, not the generic Timeout (%v)",
+			elapsed, limits.QueryTimeout, limits.Timeout)
+	}
+}
+
 // TestRetryAfterIsSanitized pins that the Retry-After header is never copied
 // into a model-visible message verbatim. It is endpoint-controlled text, and
 // `retry after <value>` used to print it unbounded.
