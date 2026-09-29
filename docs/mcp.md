@@ -138,10 +138,12 @@ exactly. The matching client configuration:
 }
 ```
 
-A remote client builds the standalone binary where it runs and targets the
-proxy's reachable origin: the published host port (`http://host:8080`), the
-proxy container's name or host on a shared Docker network, or the HTTPS origin
-from [the reverse-proxy guide](reverse-proxy.md).
+A remote client builds the standalone binary where it runs and targets a
+reachable origin: the reverse-proxied HTTPS origin from
+[the reverse-proxy guide](reverse-proxy.md), or an address the operator has
+deliberately made reachable from the client (for example the proxy container's
+name or host on a shared Docker network). The Compose port is published on
+loopback only (`127.0.0.1`), so the published host port is not a remote origin.
 
 ## Tools
 
