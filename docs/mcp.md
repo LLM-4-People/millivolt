@@ -108,12 +108,12 @@ A remote client uses the reverse-proxied HTTPS origin from
 ```
 
 The header is the whole setup: the endpoint reads no environment, starts no
-process, and retains no session or credential after the request. Every request
-is independently authenticated, so a missing or wrong Bearer is denied before
-any tool runs, and a request presenting only the dashboard session cookie is
-refused with 403, because the caller's own credential is what the internal
-calls carry. `/mcp/` look-alikes are reserved: an unregistered path answers 404
-and is never forwarded to inference. The published Compose port is
+process, and no session cookie or per-request state outlives the request. Every
+request is independently authenticated, so a missing or wrong Bearer is denied
+before any tool runs, and a request presenting only the dashboard session
+cookie is refused with 403, because the caller's own credential is what the
+internal calls carry. `/mcp/` look-alikes are reserved: an unregistered path
+answers 404 and is never forwarded to inference. The published Compose port is
 loopback-only, so it is not a remote origin; remote clients terminate TLS at
 the ingress as in the [reverse-proxy guide](reverse-proxy.md).
 
@@ -122,10 +122,14 @@ of choosing a client:
 
 - `GET` and `DELETE` answer `405` with `Allow: POST`. There is no standalone
   SSE stream and no session to delete.
-- There is no session id: the endpoint never sends `Mcp-Session-Id` and nothing
-  outlives the request. No session cookie is minted here either, unlike
-  `/admin`, `/metrics` and `/dash`, so an MCP client's cookie jar gains no
-  dashboard credential; a client must not expect or send a session id.
+- There is no session id: the endpoint never sends `Mcp-Session-Id`, and no
+  per-request state outlives the request. No session cookie is minted here
+  either, unlike `/admin`, `/metrics` and `/dash`, so an MCP client's cookie
+  jar gains no dashboard credential; a client must not expect or send a session
+  id. The admitted credential does key an in-process cache of the SDK server
+  object, so repeated calls do not rebuild all 22 tool registrations; admitting
+  a different credential replaces it. The credential is only the in-memory
+  cache key: it is never logged or persisted.
 - SSE resumption is not offered: no event store exists, so `Last-Event-ID`
   replay is not available.
 - The server never sends requests to the client: there is no sampling and no
