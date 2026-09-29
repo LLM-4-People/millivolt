@@ -548,3 +548,110 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestGuidePinsTheLimitAndRedactionOwners pins the hand-written numbers in
+// docs/mcp.md to the constants that own them: the token band, the explorer and
+// chart caps, the credential fragment floor and the excerpt bound with its
+// truncation marker. Each expected phrase is derived from the owner, so an
+// owner edit fails here until the guide follows, and a guide edit fails too.
+// The owners' own cross-checks live in TestDescribeMirrorsTheProxyOwners and
+// the client tests; this guard covers the published prose.
+func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	text := string(guide)
+
+	// Operator token band: internal/mcp/limits.go operatorTokenMinLen/MaxLen.
+	band := regexp.MustCompile(`band matches the proxy's own boot check \((\d+) to (\d+)\s+characters\)`).FindStringSubmatch(text)
+	if band == nil {
+		t.Fatal("docs/mcp.md must state the token band sentence")
+	}
+	if band[1] != strconv.Itoa(operatorTokenMinLen) || band[2] != strconv.Itoa(operatorTokenMaxLen) {
+		t.Fatalf("docs/mcp.md states the token band %s to %s, the owner is %d to %d",
+			band[1], band[2], operatorTokenMinLen, operatorTokenMaxLen)
+	}
+
+	// Explorer and chart caps: internal/mcp/describe.go explorerMaxGroups and
+	// chartMaxBuckets.
+	for _, phrase := range []string{
+		fmt.Sprintf("with at most %d groups", explorerMaxGroups),
+		fmt.Sprintf("at most %d clock-aligned buckets", chartMaxBuckets),
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("docs/mcp.md must state %q (the tools table row cap)", phrase)
+		}
+	}
+	caps := regexp.MustCompile(`caps groups at (\d+) and the chart caps buckets\s+at\s+(\d+)\s+SERVER-SIDE`).FindStringSubmatch(text)
+	if caps == nil {
+		t.Fatal("docs/mcp.md must state the server-side group and bucket caps")
+	}
+	if caps[1] != strconv.Itoa(explorerMaxGroups) || caps[2] != strconv.Itoa(chartMaxBuckets) {
+		t.Fatalf("docs/mcp.md states server-side caps %s and %s, the owners are %d and %d",
+			caps[1], caps[2], explorerMaxGroups, chartMaxBuckets)
+	}
+
+	// Credential fragment floor: internal/mcp/client.go minRedactionRun.
+	if phrase := fmt.Sprintf("any contiguous %d-byte fragment", minRedactionRun); !strings.Contains(text, phrase) {
+		t.Fatalf("docs/mcp.md must state %q (the credential fragment floor)", phrase)
+	}
+
+	// Excerpt bound: internal/mcp/client.go maxErrorBodyBytes and
+	// truncationMarker, whose length the guide quotes as well.
+	if maxErrorBodyBytes%1024 != 0 {
+		t.Fatalf("maxErrorBodyBytes = %d is no longer a whole number of KiB; update the guide and this guard", maxErrorBodyBytes)
+	}
+	kib := maxErrorBodyBytes / 1024
+	// The guide wraps "truncated to" and the size onto separate lines, so the
+	// derived phrase starts at the size.
+	for _, phrase := range []string{
+		fmt.Sprintf("%d KiB before the `%s` marker is appended", kib, truncationMarker),
+		fmt.Sprintf("runs up to the %d-byte marker past %d KiB", len(truncationMarker), kib),
+	} {
+		if !strings.Contains(text, phrase) {
+			t.Fatalf("docs/mcp.md must state %q (the excerpt bound)", phrase)
+		}
+	}
+}
+
+// TestGuidePinsTheFilterVocabularies pins the three hand-written value lists in
+// docs/mcp.md to their owners in internal/mcp: the filter dimensions
+// (Dimensions), the time dayparts (TimeBuckets) and the status classes
+// (StatusClasses). The backticked list after each heading is parsed in order
+// and compared exactly, so a value added to either side fails until both match.
+func TestGuidePinsTheFilterVocabularies(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	text := string(guide)
+	for _, tc := range []struct {
+		name    string
+		heading string
+		want    []string
+	}{
+		{"filter dimensions", "`dim` is one of ", Dimensions},
+		{"time dayparts", "buckets are ", TimeBuckets},
+		{"status classes", "not HTTP shorthand: ", StatusClasses},
+	} {
+		index := strings.Index(text, tc.heading)
+		if index < 0 {
+			t.Fatalf("docs/mcp.md must keep the %s sentence starting %q", tc.name, tc.heading)
+		}
+		// The list is the sentence right after the heading; the next sentence
+		// describes the values, so the scan stops at the first period.
+		sentence := text[index+len(tc.heading):]
+		if dot := strings.Index(sentence, "."); dot >= 0 {
+			sentence = sentence[:dot]
+		}
+		matches := regexp.MustCompile("`([a-z0-9]+)`").FindAllStringSubmatch(sentence, -1)
+		listed := make([]string, 0, len(matches))
+		for _, match := range matches {
+			listed = append(listed, match[1])
+		}
+		if !reflect.DeepEqual(listed, tc.want) {
+			t.Fatalf("docs/mcp.md lists %v for the %s, the owner is %v", listed, tc.name, tc.want)
+		}
+	}
+}

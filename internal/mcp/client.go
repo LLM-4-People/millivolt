@@ -553,6 +553,11 @@ func readBody(body io.Reader) ([]byte, error) {
 // wondering why the proxy's own message changed.
 const redactionMarker = "[redacted]"
 
+// truncationMarker ends an excerpt cut at the byte budget. Its length is part
+// of the published bound (the model-visible text runs up to this marker past
+// maxErrorBodyBytes), so it is a named constant the docs guard derives from.
+const truncationMarker = " [truncated]"
+
 // minRedactionRun is the shortest contiguous credential fragment treated as
 // the credential itself. An endpoint can split a reflected credential across
 // JSON string fields, and neither half then matches the whole token; eight
@@ -622,7 +627,7 @@ func redactForExcerpt(message, token string) string {
 	redacted = collapseWhitespace(redacted)
 	redacted = redactCredential(redacted, token)
 	if len(redacted) > maxErrorBodyBytes {
-		redacted = redacted[:maxErrorBodyBytes] + " [truncated]"
+		redacted = redacted[:maxErrorBodyBytes] + truncationMarker
 	}
 	return redacted
 }
