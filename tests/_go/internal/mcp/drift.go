@@ -275,9 +275,11 @@ func TestProtocolVersionsMirrorTheSDK(t *testing.T) {
 // TestDocumentedToolCountMatchesTheRegistry pins every hand-written "N tools"
 // claim in the published docs to the registered tool surface, which is the
 // owner: adding or removing a tool must update each mention, and a doc-only
-// number edit fails here. The docs keep the number rather than a count-free
-// phrase because the placements read better with it; this guard is what keeps
-// it true.
+// number edit fails here. Every mention form is guarded, including the
+// hyphenated adjective in README.md, and every file that states a count must
+// keep stating one. The docs keep the number rather than a count-free phrase
+// because the placements read better with it; this guard is what keeps it
+// true.
 func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
@@ -285,20 +287,23 @@ func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := strconv.Itoa(len(listed.Tools))
-	mentions := regexp.MustCompile(`([0-9]+) tools?\b`)
-	for _, name := range []string{"mcp.md", "operations.md"} {
-		path := filepath.Join("..", "..", "docs", name)
-		guide, err := os.ReadFile(path)
+	mentions := regexp.MustCompile(`([0-9]+)(?:-tools?|\s+tools?)\b`)
+	for _, doc := range []struct{ label, path string }{
+		{"README.md", filepath.Join("..", "..", "README.md")},
+		{"docs/mcp.md", filepath.Join("..", "..", "docs", "mcp.md")},
+		{"docs/operations.md", filepath.Join("..", "..", "docs", "operations.md")},
+	} {
+		guide, err := os.ReadFile(doc.path)
 		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
+			t.Fatalf("read %s: %v", doc.path, err)
 		}
 		found := mentions.FindAllStringSubmatch(string(guide), -1)
 		if len(found) == 0 {
-			t.Fatalf("docs/%s no longer states how many tools are served", name)
+			t.Fatalf("%s no longer states how many tools are served", doc.label)
 		}
 		for _, match := range found {
 			if match[1] != want {
-				t.Fatalf("docs/%s states %s tools, the registry serves %s", name, match[1], want)
+				t.Fatalf("%s states %q, the registry serves %s tools", doc.label, match[0], want)
 			}
 		}
 	}
