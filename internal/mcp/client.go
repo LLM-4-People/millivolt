@@ -274,13 +274,16 @@ func failureExcerpt(body []byte, token string) string {
 // streaming decoder and returns them joined. It is the one decoder for a valid,
 // or partially valid, JSON body: the flat {"error": ...} value wins as soon as
 // its key is seen, any other string value is collected in document order, and
-// the walk stops once the joined text reaches the excerpt target, so the work
-// is bounded by the excerpt budget rather than the body size. Object keys are
-// field names, not values, so they are not collected. The decoder reports false
-// when the walk yields no usable text (the body is not JSON), so the caller
-// keeps the raw excerpt; a body cut at the scan cap still contributes every
-// complete value before the cut, which is what preserves the message of a large
-// valid body.
+// the walk stops once the joined text reaches the excerpt budget. The budget
+// bounds the joined text, not one token: the decoder materializes a complete
+// token before the budget check, so the real input bound is the caller's cap
+// (maxExcerptScanBytes in failureExcerpt) plus the one token in flight when it
+// cuts the stream. Object keys are field names, not values, so they are not
+// collected. The decoder reports false when the walk yields no usable text (a
+// body that is not JSON, or a valid document with no string value such as
+// {"count":1}), so the caller keeps the raw excerpt; a body cut at the scan cap
+// still contributes every complete value before the cut, which is what
+// preserves the message of a large valid body.
 func streamedFailureText(body []byte, budget int) (string, bool) {
 	if len(body) == 0 || budget <= 0 {
 		return "", false
