@@ -762,12 +762,14 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 // docs/mcp.md to the constants that own them: the token band, the status code
 // band, the cancel status code, the explorer and chart caps, the credential
 // fragment floor, the nesting bound and the excerpt bound with its truncation
-// marker. Each expected phrase is derived from the owner, so an owner edit
-// fails here until the guide follows, and a guide edit fails too. The owners'
-// own cross-checks live in TestDescribeMirrorsTheProxyOwners, the web package's
+// marker. The operator boot band also repeats in docs/operations.md's
+// operator-access prose, so that copy is pinned here too. Each expected phrase
+// is derived from the owner, so an owner edit fails here until the prose
+// follows, and a prose edit fails too. The owners' own cross-checks live in
+// TestDescribeMirrorsTheProxyOwners, the web package's
 // TestStatusClassAndBuckets (the classifier-side literal pin, now on the
 // internal/metrics StatusClientClosedRequest owner) and the client tests; this
-// guard covers the hand-written numbers in the guide's prose.
+// guard covers the hand-written numbers in the guides' prose.
 func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
@@ -783,6 +785,23 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	if band[1] != strconv.Itoa(OperatorTokenMinLen) || band[2] != strconv.Itoa(OperatorTokenMaxLen) {
 		t.Fatalf("docs/mcp.md states the token band %s to %s, the owner is %d to %d",
 			band[1], band[2], OperatorTokenMinLen, OperatorTokenMaxLen)
+	}
+
+	// The operator-access section of docs/operations.md repeats the same boot
+	// band by hand; the sentence wraps across a line, so the derived phrase
+	// spans whitespace. It is pinned to the same owner as the guide sentence
+	// above.
+	operations, err := os.ReadFile(filepath.Join("..", "..", "docs", "operations.md"))
+	if err != nil {
+		t.Fatalf("read the operations guide: %v", err)
+	}
+	operationsBand := regexp.MustCompile(`shorter than (\d+)\s+or longer than (\d+) characters fails the boot`).FindStringSubmatch(string(operations))
+	if operationsBand == nil {
+		t.Fatal("docs/operations.md must state the operator boot token band")
+	}
+	if operationsBand[1] != strconv.Itoa(OperatorTokenMinLen) || operationsBand[2] != strconv.Itoa(OperatorTokenMaxLen) {
+		t.Fatalf("docs/operations.md states the boot token band %s to %s, the owner is %d to %d",
+			operationsBand[1], operationsBand[2], OperatorTokenMinLen, OperatorTokenMaxLen)
 	}
 
 	// Status code band: internal/mcp/scope.go statusCodeMin/Max, the s=
