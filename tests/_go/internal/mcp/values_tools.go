@@ -2,9 +2,12 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // TestValuesListsADimensionVocabulary pins the discovery surface. The gap it
@@ -85,6 +88,15 @@ func TestValuesToolProbeIsPinned(t *testing.T) {
 				t.Fatalf("the %q probe %q must contain %q", dim, statement, needle)
 			}
 		}
+		// model is the one dimension folded client-side, so its cap cannot be
+		// applied at the raw level: a LIMIT here would drop spellings whose
+		// merged canonical count belongs in the returned page.
+		if dim == "model" {
+			if strings.Contains(statement, "LIMIT") {
+				t.Fatalf("the model probe must enumerate every raw spelling before folding: %q", statement)
+			}
+			continue
+		}
 		if !strings.HasSuffix(statement, " LIMIT 11") {
 			t.Fatalf("the %q probe must bound itself: %q", dim, statement)
 		}
@@ -109,6 +121,54 @@ func TestValuesToolProbeIsPinned(t *testing.T) {
 	}
 	if len(proxy.requests()) != 0 {
 		t.Fatal("a refused dimension must not reach the proxy")
+	}
+}
+
+// TestValuesModelFoldsThroughTheProxysCanonicalization is the raw-vs-canonical
+// regression. The scope filters match the canonical model name (internal/web
+// fromRecord applies the configured rules), so returning raw stored spellings
+// from values(model) produced a filter that silently matched zero: raw
+// `glm-5.3` matched nothing while canonical `glm-5-3` matched everything. The
+// probe now folds through config.ApplyModelRules - the proxy's own owner - and
+// merges the counts of spellings that collapse together.
+func TestValuesModelFoldsThroughTheProxysCanonicalization(t *testing.T) {
+	rules, err := json.Marshal(map[string]any{"rules": config.DefaultModelRules()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, `{"seq":1,"feed_id":"f","counters":{},"storage":{"enabled":true},"records":[],`+
+		`"model_canon":`+string(rules)+`}`)
+	proxy.json(http.MethodGet, schemaPath, `[{"value":"glm-5.3","requests":3},`+
+		`{"value":"glm-5-3","requests":2},{"value":"vendor/glm-5.3","requests":1}]`)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.values(context.Background(), ValuesInput{Dim: "model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Returned != 1 || len(out.Values) != 1 {
+		t.Fatalf("the three raw spellings collapse into one canonical family: %+v", out.Values)
+	}
+	if out.Values[0].Value != "glm-5-3" || out.Values[0].Requests != 6 {
+		t.Fatalf("values(model) = %+v, want the canonical name with the summed count", out.Values)
+	}
+	for _, value := range out.Values {
+		if value.Value == "glm-5.3" {
+			t.Fatalf("a raw stored spelling must never be returned: %+v", out.Values)
+		}
+	}
+	if !strings.Contains(out.Note, "CANONICAL") {
+		t.Fatalf("the note must say the model filter takes the canonical spelling: %q", out.Note)
+	}
+	// The rules travel on the bootstrap form, and the model probe is not
+	// raw-level bounded: its cap applies after the fold.
+	if len(proxy.requestsFor(http.MethodGet, bootstrapPath)) != 1 {
+		t.Fatalf("the rule set must come from the full bootstrap form: %v", proxy.requests())
+	}
+	statement := proxy.requestsFor(http.MethodGet, schemaPath)[0].Query.Get("q")
+	if !strings.Contains(statement, "model AS value") || strings.Contains(statement, "LIMIT") {
+		t.Fatalf("the model probe must enumerate every raw spelling before folding: %q", statement)
 	}
 }
 

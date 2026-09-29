@@ -151,7 +151,9 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			"Use keyset pagination (WHERE (started_at, id) < (?, ?)) rather than OFFSET for deep history; OFFSET degrades on every page.",
 			"For history older than the snapshot window, page /metrics/agg/log with the paired before_ms/before_id cursor. The snapshot is capped at 8 * dash_log_rows records.",
 			"dashboard_version is a frontend asset fingerprint, not an API version. There is no API versioning and no published stability contract.",
-			"Filters in the export and purge grammars match raw stored values, never canonicalized model names.",
+			"Filters in the export and purge grammars match raw stored values, never canonicalized model names. " +
+				"The explore, chart and records scope filters are the opposite: they match the CANONICAL model spelling the proxy derives " +
+				"from its model_rules, which is what the values tool on dim 'model' enumerates.",
 			"Structural limits worth knowing before you plan a query: explore has NO time window and breaks history down by ONE dimension, " +
 				"so it cannot cross-tabulate; chart is the only windowed tool and cannot group; query is the only tool that can express a time range in SQL. " +
 				"The explorer caps groups at " + strconv.Itoa(explorerMaxGroups) + " and the chart caps buckets at " + strconv.Itoa(chartMaxBuckets) + " SERVER-SIDE, " +
@@ -273,8 +275,8 @@ var vocabularies = []VocabularyDoc{
 	},
 	{
 		Dimension: "model",
-		Note: "the RAW stored spelling, never a canonicalized one; the values tool on dim 'model' enumerates the spellings, and records and " +
-			"chart publish the model_canon map that folds them into canonical families. An unknown value is an EMPTY result, not an error",
+		Note: "the CANONICAL spelling the explore, chart and records filters match, folded through the proxy's configured model_rules; " +
+			"the values tool on dim 'model' enumerates those canonical names. A raw stored spelling matches nothing. An unknown value is an EMPTY result, not an error",
 	},
 	{
 		Dimension: "conversation",

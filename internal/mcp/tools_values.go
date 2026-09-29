@@ -1,12 +1,15 @@
 package mcp
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // valuesDimensions maps every probeable filter dimension to the statement that
@@ -16,10 +19,15 @@ import (
 // read - `time` is a Go-owned daypart bucket and `error` is a Go-owned
 // type|code|message composite - so both are documented in describe instead of
 // being faked in SQL, which would be a second owner drifting from the first.
+//
+// model is the one dimension whose rows are folded before they are returned:
+// the SQL enumerates the RAW stored spellings with no LIMIT, and values()
+// folds and merges them through the proxy's own rule pipeline. A raw-level
+// LIMIT is not valid there because the cap applies to the canonical result.
 var valuesDimensions = map[string]func(limit int) string{
 	"client":        func(limit int) string { return countStatement("client", "", limit) },
 	"provider":      func(limit int) string { return countStatement("provider", "", limit) },
-	"model":         func(limit int) string { return countStatement("model", "", limit) },
+	"model":         func(limit int) string { return countStatement("model", "", 0) },
 	"conversation":  func(limit int) string { return countStatement("conversation_id", "", limit) },
 	"key":           func(limit int) string { return countStatement("key_hash", "", limit) },
 	"status":        func(limit int) string { return countStatement("CAST(status_code AS TEXT)", "", limit) },
@@ -35,13 +43,19 @@ var valuesDimensions = map[string]func(limit int) string{
 }
 
 // countStatement is the one shape every column-valued probe uses. value and
-// where are trusted constants from the table above, never model input.
+// where are trusted constants from the table above, never model input. A
+// non-positive limit omits the LIMIT clause, for the one probe whose cap is
+// applied after a client-side fold.
 func countStatement(value, where string, limit int) string {
 	statement := "SELECT " + value + " AS value, COUNT(*) AS requests FROM requests"
 	if where != "" {
 		statement += " WHERE " + where
 	}
-	return statement + " GROUP BY value ORDER BY requests DESC, value ASC LIMIT " + strconv.Itoa(limit)
+	statement += " GROUP BY value ORDER BY requests DESC, value ASC"
+	if limit > 0 {
+		statement += " LIMIT " + strconv.Itoa(limit)
+	}
+	return statement
 }
 
 // probeableDimensions is the error message's vocabulary, in a stable order.
@@ -59,7 +73,7 @@ type ValuesInput struct {
 
 // ValueCount is one observed value and how many requests carried it.
 type ValueCount struct {
-	Value    string `json:"value" jsonschema:"the exact stored value, which is what a dim:id filter must name"`
+	Value    string `json:"value" jsonschema:"the filter value to name; model values are canonical spellings"`
 	Requests int64  `json:"requests" jsonschema:"requests in durable history carrying this value"`
 }
 
@@ -76,9 +90,10 @@ type ValuesOutput struct {
 // from explore, chart and records, never an error, so discovering the vocabulary
 // first is what keeps a confidently wrong answer from looking right. It also
 // states the two dimensions this tool cannot enumerate, and why.
-const valuesNote = "these are the exact stored values a dim:id filter must name; an unknown value is an EMPTY result, not an error, " +
+const valuesNote = "these are the values a dim:id filter must name exactly; an unknown value is an EMPTY result, not an error, " +
 	"so check here before filtering. Cross-filtered counts (one dimension under a filter on another) need query with a GROUP BY. " +
-	"model values are raw spellings: records and chart publish the model_canon map that folds them into canonical families. " +
+	"model values are CANONICAL spellings, folded through the proxy's configured model_rules: the explore, chart and records " +
+	"filters match the canonical name, so a raw stored spelling such as one with a vendor/ prefix or a dot instead of a dash matches nothing. " +
 	"The status values are raw codes; the status FILTER takes the status classes describe lists, never a code. " +
 	"time and error are not listed here: the time buckets and the error type|code|message keys are derived by the proxy, not stored"
 
@@ -99,6 +114,9 @@ func (s *Service) values(ctx context.Context, in ValuesInput) (*ValuesOutput, er
 	if limit > logPageMax {
 		return nil, fmt.Errorf("limit must be at most %d", logPageMax)
 	}
+	if in.Dim == "model" {
+		return s.modelValues(ctx, limit)
+	}
 	// One extra row is the exact truncation signal: a value exists beyond the
 	// cap, without guessing from a suspiciously full page.
 	rows, err := s.client.querySQL(ctx, build(limit+1))
@@ -111,4 +129,50 @@ func (s *Service) values(ctx context.Context, in ValuesInput) (*ValuesOutput, er
 	}
 	kept, truncation := clamp(found, limit, "values", "raise limit, or ask query for a GROUP BY over the same column")
 	return &ValuesOutput{Dim: in.Dim, Values: kept, Returned: len(kept), Truncation: truncation, Note: valuesNote}, nil
+}
+
+// modelValues enumerates the CANONICAL model vocabulary. The stored model
+// column is the raw spelling, but the explorer, chart and records filters match
+// the canonical name the proxy derives (internal/web fromRecord), so a raw
+// spelling returned here would be a filter that silently matches zero. The rule
+// set travels on the full bootstrap form; this folds every raw spelling through
+// the same config.ApplyModelRules pipeline and merges the counts, so the
+// vocabulary returned is the vocabulary a filter accepts.
+//
+// Every distinct raw spelling is read, because the cap applies to the merged
+// canonical names: a raw-level LIMIT could drop spellings whose summed count
+// belongs in the returned page.
+func (s *Service) modelValues(ctx context.Context, limit int) (*ValuesOutput, error) {
+	exec, err := s.client.modelRules(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read the proxy's model canonicalization rules before enumerating models: %v", err)
+	}
+	rows, err := s.client.querySQL(ctx, valuesDimensions["model"](0))
+	if err != nil {
+		return nil, err
+	}
+	kept, truncation := clamp(foldModelValues(rows, exec), limit, "values", "raise limit, or ask query for a GROUP BY over the same column")
+	return &ValuesOutput{Dim: "model", Values: kept, Returned: len(kept), Truncation: truncation, Note: valuesNote}, nil
+}
+
+// foldModelValues folds each raw spelling through the compiled pipeline and
+// sums the counts of spellings that collapse into one canonical name, in the
+// same most-frequent-first order the SQL probes use.
+func foldModelValues(rows rows, exec []config.ModelRuleExec) []ValueCount {
+	counts := map[string]int64{}
+	for _, row := range rows {
+		canonical := config.ApplyModelRules(exec, rowString(row, "value"))
+		counts[canonical] += rowInt64(row, "requests")
+	}
+	out := make([]ValueCount, 0, len(counts))
+	for value, requests := range counts {
+		out = append(out, ValueCount{Value: value, Requests: requests})
+	}
+	slices.SortFunc(out, func(a, b ValueCount) int {
+		if a.Requests != b.Requests {
+			return cmp.Compare(b.Requests, a.Requests)
+		}
+		return strings.Compare(a.Value, b.Value)
+	})
+	return out
 }

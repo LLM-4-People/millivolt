@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // rows is one SQL result set: the proxy returns a flat object per row, keyed by
@@ -140,8 +142,9 @@ type bootstrapSnapshot struct {
 		TotalReq int64 `json:"total_requests"`
 		TotalErr int64 `json:"total_errors"`
 	} `json:"counters"`
-	Storage storageState     `json:"storage"`
-	Records []map[string]any `json:"records"`
+	Storage    storageState     `json:"storage"`
+	Records    []map[string]any `json:"records"`
+	ModelCanon *ModelCanonMap   `json:"model_canon,omitempty"`
 }
 
 // bootstrap reads the live snapshot for the storage signal and the headline
@@ -152,6 +155,21 @@ func (c *Client) bootstrap(ctx context.Context) (*bootstrapSnapshot, error) {
 		return nil, err
 	}
 	return &snapshot, nil
+}
+
+// modelRules fetches the proxy's effective model-canonicalization rules from
+// the full bootstrap form and compiles them with config.CompileModelRules, the
+// proxy's own semantic owner. An absent rules block is the identity pipeline,
+// which is what the proxy itself folds an empty rule list with.
+func (c *Client) modelRules(ctx context.Context) ([]config.ModelRuleExec, error) {
+	snapshot, err := c.bootstrap(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if snapshot.ModelCanon == nil {
+		return nil, nil
+	}
+	return config.CompileModelRules(snapshot.ModelCanon.Rules), nil
 }
 
 // debug reads the capture session state.

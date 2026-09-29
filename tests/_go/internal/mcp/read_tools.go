@@ -628,6 +628,9 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	if !strings.Contains(byDimension["live_statuses"].Note, "s= selector") {
 		t.Fatalf("the s= vocabulary must be distinguished from the status dimension: %q", byDimension["live_statuses"].Note)
 	}
+	if !strings.Contains(byDimension["model"].Note, "CANONICAL") {
+		t.Fatalf("the model vocabulary must say the scope filter takes the canonical spelling: %q", byDimension["model"].Note)
+	}
 	for _, dimension := range []string{"client", "provider", "model", "conversation", "key", "tool"} {
 		if _, ok := byDimension[dimension]; !ok {
 			t.Fatalf("describe must state the vocabulary of %q too", dimension)

@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // Scope is the one owner of the explorer's filter grammar, shared by the
@@ -130,8 +132,10 @@ type ModelCanonMap struct {
 	Revision string `json:"revision"`
 	// Names maps each raw stored model spelling to its canonical name.
 	Names map[string]string `json:"names"`
-	// Rules is the rule set, present only on the full bootstrap form.
-	Rules []any `json:"rules,omitempty"`
+	// Rules is the rule set, present only on the full bootstrap form. It is
+	// the proxy's own config.ModelRule shape so the client can fold through
+	// config.ApplyModelRules, the same semantic owner the proxy uses.
+	Rules []config.ModelRule `json:"rules,omitempty"`
 }
 
 // RecordsPage is one durable newest-first page from /metrics/agg/log. The
