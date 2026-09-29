@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/storage"
+	"github.com/LLM-4-People/millivolt/internal/web"
 )
 
 const (
@@ -604,11 +605,12 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	for _, vocabulary := range out.Vocabularies {
 		byDimension[vocabulary.Dimension] = vocabulary
 	}
-	// Exactly the classes internal/web statusClass can return: a 3xx never
-	// reaches a recorded row, 499 is its own class, and a status under 200 is
-	// err. See tests/_go/internal/web/aggregate.go TestStatusClassAndBuckets for
-	// the other side of this contract.
-	want := []string{"2xx", "cancel", "4xx", "5xx", "err"}
+	// Exactly the classes internal/web statusClass can return, read from the
+	// exported owner instead of a repeated literal: a 3xx never reaches a
+	// recorded row, 499 is its own class, and a status under 200 is err. See
+	// tests/_go/internal/web/aggregate.go TestStatusClassAndBuckets for the
+	// classifier side of this contract.
+	want := web.StatusClasses
 	if got := byDimension["status"].Values; len(got) != len(want) {
 		t.Fatalf("status classes = %v, want exactly %v", got, want)
 	}

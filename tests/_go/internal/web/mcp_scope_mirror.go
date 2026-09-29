@@ -79,9 +79,14 @@ func TestMCPScopeLiveStatusClassesMirrorTheWebSelector(t *testing.T) {
 	if !slices.Equal(webClasses, mcpClasses) {
 		t.Fatalf("the web selector accepts %v; mcp.LiveStatusClasses lists %v", webClasses, mcpClasses)
 	}
-	for _, class := range mcp.LiveStatusClasses {
-		if !liveStatusFilter(class) {
-			t.Fatalf("the web selector refuses the MCP live class %q", class)
-		}
+}
+
+// TestMCPScopeStatusClassesMirrorTheWebClassifier is the exact pin for the
+// explorer's status facet: StatusClasses owns the vocabulary and statusClass
+// owns the classification, and the MCP reference list is compared to the
+// owner in order, because the describe vocabulary carries that order.
+func TestMCPScopeStatusClassesMirrorTheWebClassifier(t *testing.T) {
+	if !slices.Equal(mcp.StatusClasses, StatusClasses) {
+		t.Fatalf("mcp.StatusClasses = %v, want %v (owner: internal/web statusClass)", mcp.StatusClasses, StatusClasses)
 	}
 }

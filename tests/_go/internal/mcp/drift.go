@@ -21,8 +21,8 @@ import (
 func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	// Status classes: internal/web statusClass returns exactly these five,
 	// with cancel for 499 and err for everything else (3xx included). The
-	// exact list is also pinned in TestDescribeVocabulariesAreTheProxyOnes.
-	if got, want := StatusClasses, []string{"2xx", "cancel", "4xx", "5xx", "err"}; !reflect.DeepEqual(got, want) {
+	// expected list is read from the web owner, not repeated here.
+	if got, want := StatusClasses, web.StatusClasses; !reflect.DeepEqual(got, want) {
 		t.Fatalf("status classes = %v, want %v (owner: internal/web statusClass)", got, want)
 	}
 
@@ -89,15 +89,22 @@ func TestPagingToolsNameTheirRealCursorArguments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seen := map[string]bool{}
 	for _, tool := range listed.Tools {
 		switch tool.Name {
 		case "records", "audit_captures_list":
+			seen[tool.Name] = true
 			if !strings.Contains(tool.Description, "before_ms/before_id cursor") {
 				t.Fatalf("the %s description must name the cursor arguments it accepts: %q", tool.Name, tool.Description)
 			}
 			if strings.Contains(tool.Description, "next_before_ms/next_before_id cursor") {
 				t.Fatalf("the %s description names the output fields as the cursor to send: %q", tool.Name, tool.Description)
 			}
+		}
+	}
+	for _, name := range []string{"records", "audit_captures_list"} {
+		if !seen[name] {
+			t.Fatalf("the %s tool was not inspected; removing it from the loop must not skip the cursor-name check", name)
 		}
 	}
 	for _, typ := range []reflect.Type{reflect.TypeOf(RecordsOutput{}), reflect.TypeOf(AuditCapturesListOutput{})} {

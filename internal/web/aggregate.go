@@ -497,6 +497,15 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 
 // ---------- status / time derivation (Go mirror of the removed client code) ----------
 
+// StatusClasses are the explorer's status facet values, in the order the
+// dashboard publishes them. statusClass below is the classifier that produces
+// exactly this vocabulary, and the web package's TestStatusClassAndBuckets
+// keeps the two tied; the MCP reference list (internal/mcp StatusClasses)
+// mirrors it and is pinned to it by the web package's scope-mirror test.
+// Listing a class here that statusClass cannot return would advertise a
+// silently empty filter.
+var StatusClasses = []string{"2xx", "cancel", "4xx", "5xx", "err"}
+
 func statusClass(s int) string {
 	switch {
 	case s >= 200 && s < 300:

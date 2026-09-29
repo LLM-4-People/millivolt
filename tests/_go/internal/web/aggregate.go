@@ -855,6 +855,23 @@ func TestStatusClassAndBuckets(t *testing.T) {
 			t.Errorf("statusClass(%d) = %q, want %q", status, got, want)
 		}
 	}
+	// The exported vocabulary and the classifier are one owner pair: every
+	// published class must be produced by a case above, and no case may
+	// produce a class the vocabulary does not publish.
+	produced := map[string]bool{}
+	for _, class := range cases {
+		produced[class] = true
+	}
+	for status, class := range cases {
+		if !slices.Contains(StatusClasses, class) {
+			t.Errorf("statusClass(%d) produces %q, which StatusClasses does not publish", status, class)
+		}
+	}
+	for _, class := range StatusClasses {
+		if !produced[class] {
+			t.Errorf("StatusClasses publishes %q, which statusClass never returns", class)
+		}
+	}
 	sat := time.Date(2026, 8, 22, 12, 0, 0, 0, time.Local) // Saturday
 	if got := metrics.TimeBucket(sat); got != "weekend" {
 		t.Errorf("Saturday → %q, want weekend", got)
