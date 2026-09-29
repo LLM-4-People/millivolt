@@ -102,8 +102,8 @@ const (
 // value to this server as MILLIVOLT_MCP_OPERATOR_TOKEN (or --operator-token);
 // this server never reads it. The usage text and the setup error message name
 // it so a user knows where the value comes from, and the docs guard pins the
-// usage phrase so it cannot drift back to naming this server's read variable as
-// the proxy's.
+// usage text, the setup table row and the setup error message so none can
+// drift back to naming this server's read variable as the proxy's.
 const proxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
 
 // registerOptions installs every setup flag on fs, with the current limits as

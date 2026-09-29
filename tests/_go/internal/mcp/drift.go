@@ -475,8 +475,9 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	// The --operator-token usage says where the VALUE comes from: the proxy's
 	// own proxyTokenEnv constant, not this server's read variable. The phrase
 	// once named the read variable as the proxy's, sending a user to a variable
-	// the proxy never reads; both the usage text and the table row carry the
-	// owner constant so the phrase cannot drift back.
+	// the proxy never reads; the usage text, the table row and the
+	// missing-credential setup error all carry the owner constant so the phrase
+	// cannot drift back.
 	token := fs.Lookup(flagOperatorToken)
 	if token == nil {
 		t.Fatalf("--%s is not registered", flagOperatorToken)
@@ -488,6 +489,12 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	if !strings.Contains(documentedMeaning["--"+flagOperatorToken], proxyTokenEnv) {
 		t.Fatalf("docs/mcp.md's --%s row must name the proxy's %s as the value's source, got %q",
 			flagOperatorToken, proxyTokenEnv, documentedMeaning["--"+flagOperatorToken])
+	}
+	// The missing-credential setup error names the same source, and it is the
+	// message a user actually reads when the credential is absent.
+	if err := ValidateOperatorToken(""); err == nil || !strings.Contains(err.Error(), "the proxy's "+proxyTokenEnv+")") {
+		t.Fatalf("ValidateOperatorToken's missing-token error must name the proxy's %s as the value's source, got %v",
+			proxyTokenEnv, err)
 	}
 	for name := range documented {
 		if fs.Lookup(strings.TrimPrefix(name, "--")) == nil {
