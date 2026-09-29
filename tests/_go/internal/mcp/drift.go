@@ -578,11 +578,12 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 
 // TestGuidePinsTheLimitAndRedactionOwners pins the hand-written numbers in
 // docs/mcp.md to the constants that own them: the token band, the explorer and
-// chart caps, the credential fragment floor and the excerpt bound with its
-// truncation marker. Each expected phrase is derived from the owner, so an
-// owner edit fails here until the guide follows, and a guide edit fails too.
-// The owners' own cross-checks live in TestDescribeMirrorsTheProxyOwners and
-// the client tests; this guard covers the published prose.
+// chart caps, the credential fragment floor, the nesting bound and the excerpt
+// bound with its truncation marker. Each expected phrase is derived from the
+// owner, so an owner edit fails here until the guide follows, and a guide edit
+// fails too. The owners' own cross-checks live in TestDescribeMirrorsTheProxyOwners
+// and the client tests; this guard covers the hand-written numbers in the
+// guide's prose.
 func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
@@ -622,6 +623,19 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	// Credential fragment floor: internal/mcp/client.go minRedactionRun.
 	if phrase := fmt.Sprintf("any contiguous %d-byte fragment", minRedactionRun); !strings.Contains(text, phrase) {
 		t.Fatalf("docs/mcp.md must state %q (the credential fragment floor)", phrase)
+	}
+
+	// Nesting bound: internal/mcp/client.go maxPercentLayers, which the guide
+	// quotes as a word and wraps across a line. The word list is deliberate: a
+	// bound that outgrows it must extend this guard rather than silently stop
+	// being pinned.
+	words := []string{"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"}
+	if maxPercentLayers >= len(words) {
+		t.Fatalf("maxPercentLayers = %d is beyond the guard's word list; extend the guard", maxPercentLayers)
+	}
+	if phrase := regexp.MustCompile(words[maxPercentLayers] + `\s+escape\s+applications`); !phrase.MatchString(text) {
+		t.Fatalf("docs/mcp.md must state %q (owner: internal/mcp/client.go maxPercentLayers)",
+			words[maxPercentLayers]+" escape applications")
 	}
 
 	// Excerpt bound: internal/mcp/client.go maxErrorBodyBytes and
