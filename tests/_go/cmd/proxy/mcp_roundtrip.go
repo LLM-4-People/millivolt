@@ -71,8 +71,15 @@ func TestInProcessTransportEnforcesTheRequestDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RoundTrip error = %v (response %v), want the request deadline", err, response)
 	}
-	if elapsed < 100*time.Millisecond {
-		t.Fatalf("RoundTrip returned after %v, before the 100 ms deadline", elapsed)
+	// The context deadline is created before the request is built and the
+	// clock is read, so a scheduler delay between the two can make the
+	// deadline fire a fraction before a full 100 ms is measured (99.8 ms
+	// observed under parallel load). The tolerance keeps the bound honest
+	// without accepting a transport that ignores the deadline: returning well
+	// before it still fails, and the error must still be the deadline's own.
+	const earlyTolerance = 20 * time.Millisecond
+	if elapsed < 100*time.Millisecond-earlyTolerance {
+		t.Fatalf("RoundTrip returned after %v, more than %v before the 100 ms deadline", elapsed, earlyTolerance)
 	}
 	if elapsed > time.Second {
 		t.Fatalf("RoundTrip returned after %v; the deadline must bound it, not the handler", elapsed)
