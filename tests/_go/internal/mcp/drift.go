@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"os"
@@ -61,16 +64,15 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 		t.Fatalf("error filter keys = %v, want %v (owner: internal/web errorKey)", got, want)
 	}
 
-	// Log page band: internal/config DashLogRowsMin/Max, the dashboard's own
-	// configured page band. describe derives its constants from that owner, so
-	// the check reads the owner too: a mirror that stops deriving (a hardcoded
-	// literal that no longer tracks the config) fails here, while a deliberate
-	// config band change flows through both sides. The prose pin just below
-	// still forces the hand-written schema text to follow the owner.
-	if logPageMin != config.DashLogRowsMin || logPageMax != config.DashLogRowsMax {
-		t.Fatalf("log page band = %d..%d, want %d..%d (owner: internal/config DashLogRowsMin/Max)",
-			logPageMin, logPageMax, config.DashLogRowsMin, config.DashLogRowsMax)
-	}
+	// Log page band: internal/config DashLogRowsMin/Max owns the band and
+	// describe.go defines logPageMin/logPageMax from that owner. Comparing the
+	// mirror to the owner is a self-comparison (both sides resolve to the same
+	// constant) and can never fail, and it still passes when the derivation is
+	// replaced by a same-value literal, so the derivation is checked at its
+	// definition site instead. The hand-written RecordsInput.Limit schema text
+	// below is the independent published pin: it must state the owner's band,
+	// so an owner edit forces the prose to follow.
+	assertLogPageBandDerivesFromConfig(t)
 
 	// The records limit argument states the same band in prose. Deriving the
 	// expected phrase from the config owner and comparing the parsed band
@@ -111,6 +113,54 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	if OperatorTokenMinLen != 16 || OperatorTokenMaxLen != 512 {
 		t.Fatalf("token band = %d..%d, want 16..512 (owner: internal/mcp OperatorTokenMinLen/MaxLen)",
 			OperatorTokenMinLen, OperatorTokenMaxLen)
+	}
+}
+
+// assertLogPageBandDerivesFromConfig parses describe.go and requires the log
+// page band constants to be defined from the internal/config owner selectors.
+// Value assertions cannot tell a derived constant from a same-value literal, so
+// the definition site is the only place the derivation can be pinned; a
+// missing, renamed or literal definition fails here, and formatting does not
+// matter because the file is parsed, not scanned.
+func assertLogPageBandDerivesFromConfig(t *testing.T) {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "describe.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse internal/mcp/describe.go: %v", err)
+	}
+	definedFrom := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok || len(value.Names) != len(value.Values) {
+				continue
+			}
+			for i, name := range value.Names {
+				if name.Name != "logPageMin" && name.Name != "logPageMax" {
+					continue
+				}
+				selector, ok := value.Values[i].(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				if pkg, ok := selector.X.(*ast.Ident); ok && pkg.Name == "config" {
+					definedFrom[name.Name] = selector.Sel.Name
+				}
+			}
+		}
+	}
+	for _, want := range []struct{ constant, owner string }{
+		{"logPageMin", "DashLogRowsMin"},
+		{"logPageMax", "DashLogRowsMax"},
+	} {
+		if definedFrom[want.constant] != want.owner {
+			t.Fatalf("describe.go's %s must be defined from internal/config %s, not a same-value literal (found %q)",
+				want.constant, want.owner, definedFrom[want.constant])
+		}
 	}
 }
 
