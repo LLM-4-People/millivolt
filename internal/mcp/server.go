@@ -58,6 +58,11 @@ func NewServer(service *Service) *sdk.Server {
 // Origin is the proxy origin the tools call. It never carries the credential.
 func (s *Service) Origin() string { return s.client.Origin() }
 
+// credentialKey is the server cache key for this service: the admitted
+// operator credential. It is process-fixed and used only as an in-memory key;
+// the value is never rendered, logged or persisted outside this package.
+func (s *Service) credentialKey() string { return s.client.token }
+
 // handler is the shape of every tool implementation in this package. Keeping
 // the plain context-and-input signature means the handlers are ordinary methods
 // that a test can call directly, with no SDK plumbing in the way.
