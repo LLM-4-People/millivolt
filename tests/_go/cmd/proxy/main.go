@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -468,9 +469,12 @@ func TestOperatorLockoutHoldsAtCap(t *testing.T) {
 // internal/mcp, the one owner of the operator credential contract: the gate
 // reads mcp.ProxyTokenEnv, and its boot band is exactly
 // mcp.OperatorTokenMinLen..mcp.OperatorTokenMaxLen, inclusive. The boundary
-// cases are derived from the owner, so a literal reintroduced in this package
-// (a one-sided divergence) fails here even though the owner's own tests stay
-// green; the owner's literal pins live in tests/_go/internal/mcp/drift.go.
+// cases are derived from the owner, so a diverging local value fails here. A
+// same-value local literal cannot be told apart by those behavior probes, so
+// the source scan at the end additionally requires loadOperatorToken and
+// bearerToken to read the owner constants at their comparison sites; it does
+// not reach a same-value copy elsewhere in the package. The owner's literal
+// pins live in tests/_go/internal/mcp/drift.go.
 func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 	minToken := strings.Repeat("x", mcp.OperatorTokenMinLen)
 	maxToken := strings.Repeat("x", mcp.OperatorTokenMaxLen)
@@ -508,6 +512,49 @@ func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 	if value, err := loadOperatorToken(); value != "" || err != nil {
 		t.Fatalf("the gate must read exactly %s: value is %d characters, err=%v", mcp.ProxyTokenEnv, len(value), err)
 	}
+
+	// The behavior probes above cannot distinguish the owner symbols from
+	// same-value local literals, so the two read sites are pinned in the
+	// source: loadOperatorToken owns the variable name and the boot band,
+	// bearerToken owns the presentation cap. Replacing any of these reads or
+	// comparisons with a literal fails here even when its value matches today.
+	source, err := os.ReadFile("operator.go")
+	if err != nil {
+		t.Fatalf("read cmd/proxy/operator.go: %v", err)
+	}
+	for _, read := range []struct {
+		name        string
+		start       string
+		end         string
+		expressions []string
+	}{
+		{"loadOperatorToken boot gate", "func loadOperatorToken(", "func mustOperatorToken(",
+			[]string{"os.LookupEnv(mcp.ProxyTokenEnv)", "len(value) < mcp.OperatorTokenMinLen", "len(value) > mcp.OperatorTokenMaxLen"}},
+		{"bearerToken presentation cap", "func bearerToken(", "func (g *operatorGate) sessionMAC(",
+			[]string{"len(token) > mcp.OperatorTokenMaxLen"}},
+	} {
+		section := sourceSection(t, string(source), read.start, read.end)
+		for _, expression := range read.expressions {
+			if !strings.Contains(section, expression) {
+				t.Errorf("%s no longer reads %s; the operator credential contract must come from internal/mcp, not a local literal",
+					read.name, expression)
+			}
+		}
+	}
+}
+
+// sourceSection returns the slice of cmd/proxy/operator.go between two
+// package-level anchors. The overlaid tests run with cmd/proxy as the working
+// directory, so the source is read by name; a moved anchor fails loudly rather
+// than scanning the wrong region.
+func sourceSection(t *testing.T, source, start, end string) string {
+	t.Helper()
+	from := strings.Index(source, start)
+	to := strings.Index(source, end)
+	if from < 0 || to <= from {
+		t.Fatalf("cmd/proxy/operator.go no longer has %q before %q; update the owner-symbol guard", start, end)
+	}
+	return source[from:to]
 }
 
 // TestOperatorTokenEnv owns the boot-credential contract: unset denies the
@@ -541,6 +588,13 @@ func TestOperatorTokenEnv(t *testing.T) {
 	got, ok := bearerToken(req)
 	if !ok || got != maxTok {
 		t.Fatalf("max-length Bearer token: ok=%v len=%d, want accepted", ok, len(got))
+	}
+	// One byte over the owner maximum must be refused: a presentation cap
+	// widened past the owner on either side would fail this leg.
+	req = httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil)
+	req.Header.Set("Authorization", "Bearer "+maxTok+"x")
+	if got, ok := bearerToken(req); ok {
+		t.Fatalf("one byte over the owner maximum: bearerToken accepted %d characters, want refused", len(got))
 	}
 }
 

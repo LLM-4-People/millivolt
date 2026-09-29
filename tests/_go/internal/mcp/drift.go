@@ -102,9 +102,12 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	// Operator token band: OperatorTokenMinLen/MaxLen in this package are the
 	// single owner; cmd/proxy's boot gate reads them.
 	// TestOperatorGateUsesThePublishedTokenContract in tests/_go/cmd/proxy
-	// pins the gate's boundary behavior to the same constants, so a locally
-	// reintroduced literal there fails while this literal pin catches an owner
-	// edit.
+	// derives its boundary tokens from the same constants, refuses a
+	// one-byte-over-max Bearer and scans cmd/proxy/operator.go to require
+	// loadOperatorToken and bearerToken to read the owner constants at their
+	// comparison sites, so a literal reintroduced in either read fails even
+	// when its value matches today. The guard does not reach a same-value copy
+	// outside those two functions; this literal pin catches an owner edit.
 	if OperatorTokenMinLen != 16 || OperatorTokenMaxLen != 512 {
 		t.Fatalf("token band = %d..%d, want 16..512 (owner: internal/mcp OperatorTokenMinLen/MaxLen)",
 			OperatorTokenMinLen, OperatorTokenMaxLen)
