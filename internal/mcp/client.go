@@ -482,27 +482,38 @@ const maxDecodePasses = maxPercentLayers + 1
 // the power of the number of escape applications.
 const credentialFormByteMax = 6 * 6 * 6
 
+// strippedCredentialFormByteMax is the largest number of collapsed bytes one
+// credential byte can occupy in a whitespace-stripped view: its encoded form
+// (credentialFormByteMax, unchanged by the collapse because escape bytes are
+// not whitespace) plus one skipped whitespace run between any two of those
+// bytes, each run collapsing to a single space. A match found by a stripped
+// view therefore ends within this many collapsed bytes per token byte.
+const strippedCredentialFormByteMax = 2 * credentialFormByteMax
+
 // redactForExcerpt is the one redaction pipeline for a failure message that is
 // published as a whitespace-collapsed excerpt: redact, collapse, redact again,
 // then bound. Redacting before the collapse is what keeps a credential from
-// being cut in half by the bound; redacting after it is what catches an echo
-// whose whitespace differs from the credential (tabs where it has spaces),
-// which the collapse itself turns back into the credential.
+// being cut in half by the bound; the whitespace-stripped views of that pass
+// also catch an echo whose whitespace is interleaved between every credential
+// byte; and redacting after the collapse catches an echo whose whitespace
+// differs from the credential (tabs where it has spaces), which the collapse
+// itself turns back into the credential.
 //
 // The scan is bounded to the region that can still reach the excerpt. A
-// credential byte can occupy at most credentialFormByteMax raw bytes, so any
-// match that lands inside the first maxErrorBodyBytes collapsed bytes ends
-// within maxErrorBodyBytes + credentialFormByteMax*len(token) collapsed bytes;
-// excerptRegion finds that raw prefix exactly, even through a long whitespace
-// run, because collapsing only ever shortens text. The region is capped at
-// maxExcerptScanBytes raw bytes: when the collapsed target is not reached
-// within the cap the scan cannot prove the hidden remainder holds no
+// credential byte can occupy at most credentialFormByteMax raw bytes, and in a
+// whitespace-stripped view at most strippedCredentialFormByteMax collapsed
+// bytes, so any match that lands inside the first maxErrorBodyBytes collapsed
+// bytes ends within maxErrorBodyBytes + strippedCredentialFormByteMax*len(token)
+// collapsed bytes; excerptRegion finds that raw prefix exactly, even through a
+// long whitespace run, because collapsing only ever shortens text. The region
+// is capped at maxExcerptScanBytes raw bytes: when the collapsed target is not
+// reached within the cap the scan cannot prove the hidden remainder holds no
 // credential, so the whole excerpt fails closed rather than publish it.
 func redactForExcerpt(message, token string) string {
 	if message == "" {
 		return message
 	}
-	region, complete, _ := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
+	region, complete, _ := excerptRegion(message, maxErrorBodyBytes+strippedCredentialFormByteMax*len(token))
 	if !complete {
 		return redactionMarker
 	}
@@ -602,6 +613,13 @@ type decodeLayer struct {
 	raw       string
 	at        int
 	plusSpace bool
+	// skipSpace drops ASCII whitespace from the source without emitting
+	// anything. It is set on the first layer of a whitespace-stripped view so
+	// that a credential echoed with whitespace interleaved between every byte
+	// becomes a contiguous run the matcher can see, including whitespace
+	// interleaved inside an escape (the escape is rejoined by this layer and
+	// decoded by the next pass).
+	skipSpace bool
 	exhausted bool
 	in        [maxLayerBuffer]decodedByte
 	inHead    int
@@ -647,6 +665,19 @@ func (l *decodeLayer) drop(count int) {
 	l.inLen -= count
 }
 
+// isInterleavedSpace reports the ASCII whitespace a whitespace-stripped view
+// skips. The collapse of a published excerpt treats any Unicode space as a
+// separator, but an echo that hides a credential behind whitespace does it
+// with ASCII spaces, tabs and newlines; keeping the byte-level test avoids a
+// rune decode on every pipeline byte.
+func isInterleavedSpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\v', '\f':
+		return true
+	}
+	return false
+}
+
 // next returns the next decoded byte with its raw range, or false at the end
 // of the stream.
 func (l *decodeLayer) next() (decodedByte, bool) {
@@ -662,6 +693,10 @@ func (l *decodeLayer) next() (decodedByte, bool) {
 			return decodedByte{}, false
 		}
 		head := l.peek(0)
+		if l.skipSpace && isInterleavedSpace(head.b) {
+			l.drop(1)
+			continue
+		}
 		if head.b == '\\' {
 			if r, consumed, ok := l.decodeJSON(); ok {
 				span := rawSpan{start: head.start, end: l.peek(consumed - 1).end}
@@ -777,11 +812,16 @@ func hex4(a, b, c, d byte) (uint16, bool) {
 // failure body can carry the credential as JSON text at any layer. The raw
 // view covers literal forms (including url.PathEscape and url.QueryEscape
 // output, which is literal text in the message).
-func credentialViews(message string) []credentialView {
+//
+// skipSpace builds the whitespace-stripped family: the source whitespace is
+// dropped before anything is matched, so a credential echoed with whitespace
+// interleaved between every byte becomes one contiguous run whose match maps
+// back to the raw span it was built from.
+func credentialViews(message string, skipSpace bool) []credentialView {
 	views := make([]credentialView, 0, 2*maxPercentLayers+1)
-	views = append(views, credentialView{raw: message})
+	views = append(views, credentialView{raw: message, last: &decodeLayer{raw: message, skipSpace: skipSpace}})
 	for layers := 1; layers <= maxPercentLayers; layers++ {
-		views = append(views, decodedView(message, layers, false), decodedView(message, layers, true))
+		views = append(views, decodedView(message, layers, false, skipSpace), decodedView(message, layers, true, skipSpace))
 	}
 	return views
 }
@@ -790,10 +830,12 @@ func credentialViews(message string) []credentialView {
 // layers, with the query `+` form applied at the pass that matches the
 // encoding depth it is meant to reverse. Every layer carries the raw range of
 // the input it consumed, so a match in the final text maps back to the message.
-func decodedView(message string, layers int, plusSpace bool) credentialView {
+// skipSpace applies only to the first pass, which reads the raw text; every
+// later pass consumes text this pipeline already stripped.
+func decodedView(message string, layers int, plusSpace, skipSpace bool) credentialView {
 	var previous *decodeLayer
 	for pass := 1; pass <= maxDecodePasses; pass++ {
-		layer := &decodeLayer{source: previous}
+		layer := &decodeLayer{source: previous, skipSpace: skipSpace && pass == 1}
 		if previous == nil {
 			layer.raw = message
 		}
@@ -974,7 +1016,11 @@ func applySpans(message string, spans []rawSpan) string {
 //   - percent-encoded forms at any hex case and up to maxPercentLayers escape
 //     applications, including full-byte nested forms and the query `+` form of
 //     a space;
-//   - JSON-escaped forms, including backslash-doubled text and \u escapes.
+//   - JSON-escaped forms, including backslash-doubled text and \u escapes;
+//   - any of the above with whitespace interleaved between every byte: the
+//     whitespace-stripped views match the whitespace-free credential and map
+//     the match back to the raw span it was built from, so the whole
+//     reconstructible echo is replaced, not just the non-whitespace bytes.
 //
 // A message that still decodes after maxPercentLayers applications is not
 // published partly decoded: the whole message is replaced by the redaction
@@ -996,10 +1042,22 @@ func redactCredential(message, token string) string {
 		return message
 	}
 	var spans []rawSpan
-	for _, view := range credentialViews(message) {
+	for _, view := range credentialViews(message, false) {
 		scanView(token, windows, &view, &spans)
 		if view.incomplete() {
 			return redactionMarker
+		}
+	}
+	if stripped := strings.Join(strings.Fields(token), ""); stripped != "" {
+		strippedWindows := windows
+		if stripped != token {
+			strippedWindows = credentialWindows(stripped)
+		}
+		for _, view := range credentialViews(message, true) {
+			scanView(stripped, strippedWindows, &view, &spans)
+			if view.incomplete() {
+				return redactionMarker
+			}
 		}
 	}
 	return applySpans(message, spans)

@@ -452,6 +452,23 @@ func assertNoCredentialFragment(t *testing.T, token, where, message string) {
 	}
 }
 
+// assertNoStrippedCredentialFragment fails when the whitespace-free view of the
+// message still contains a floor-length run of the whitespace-free credential.
+// A contiguous byte check cannot see an echo that interleaves whitespace
+// between every credential character, and such an echo is trivially
+// reconstructible by anyone reading the excerpt.
+func assertNoStrippedCredentialFragment(t *testing.T, token, where, message string) {
+	t.Helper()
+	strippedToken := strings.Join(strings.Fields(token), "")
+	strippedMessage := strings.Join(strings.Fields(message), "")
+	window := min(minRedactionRun, len(strippedToken))
+	for start := 0; start+window <= len(strippedToken); start++ {
+		if fragment := strippedToken[start : start+window]; strings.Contains(strippedMessage, fragment) {
+			t.Fatalf("%s leaked the interleaved credential fragment %q: %q", where, fragment, message)
+		}
+	}
+}
+
 // assertRedacted fails when the credential, any contiguous 8-byte fragment of
 // it, or any named encoded form survives, and when the visible marker is
 // absent. It is the one assertion every redaction case shares.
@@ -511,6 +528,73 @@ func TestErrorBodyRedactionCoversCredentialForms(t *testing.T) {
 			t.Fatalf("a body with no credential must pass through unchanged, got %q", message)
 		}
 	})
+}
+
+// TestErrorBodyRedactionCoversInterleavedWhitespace is the regression for a
+// reflection that interleaves whitespace between every credential character:
+// the exact-token and encoded-form matchers never see such an echo, and the
+// collapse only turns it into single spaces between every character, which is
+// still not the credential. A contiguous fragment check does not catch it
+// either, yet the echo is trivially reconstructible. The scan must match the
+// credential against a whitespace-stripped view of the text and redact the raw
+// span the match came from, whitespace included.
+func TestErrorBodyRedactionCoversInterleavedWhitespace(t *testing.T) {
+	const token = "k9+Qf/2 bZ=x7?Lm3+qA"
+	interleave := func(form, separator string) string {
+		var out strings.Builder
+		for index, r := range form {
+			if index > 0 {
+				out.WriteString(separator)
+			}
+			out.WriteRune(r)
+		}
+		return out.String()
+	}
+	percent := url.PathEscape(token)
+	jsonForm := jsonEscapeForm(token, hexMixed)
+	split := len(token) / 2
+	mixed := interleave(url.PathEscape(token[:split]), " ") + interleave(jsonEscapeForm(token[split:], hexUpper), "\n")
+
+	for _, tc := range []struct {
+		name string
+		form string
+	}{
+		{"spaces", interleave(token, " ")},
+		{"tabs", interleave(token, "\t")},
+		{"newlines", interleave(token, "\n")},
+		{"mixed whitespace", interleave(token, " \t\n")},
+		{"percent encoded with spaces", interleave(percent, " ")},
+		{"json escapes with tabs", interleave(jsonForm, "\t")},
+		{"mixed encoding with interleaving", mixed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			message := failureMessage(t, token, `{"detail":`+quote("upstream echoed "+tc.form)+`}`)
+			assertRedacted(t, token, tc.name, message, tc.form)
+			assertNoStrippedCredentialFragment(t, token, tc.name, message)
+		})
+	}
+
+	// The config patch path decodes its own response body and shares the same
+	// scan, so an interleaved echo in a committed reload failure must be
+	// redacted there too.
+	proxy := newFakeProxy(t)
+	proxy.respond(http.MethodPost, configPath, cannedResponse{
+		Status: http.StatusInternalServerError, ContentType: "application/json",
+		Body: `{"saved":true,"revision":"z","values":{},"restart_required":[],"error":` +
+			quote("reload failed for "+interleave(token, " ")) + `}`,
+	})
+	service, err := NewService(proxy.origin(), token, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := service.setConfig(context.Background(), SetConfigInput{
+		Values: map[string]any{"history_size": 5}, Revision: "mine",
+	})
+	if err != nil {
+		t.Fatalf("a committed mutation must not be reported as an error: %v", err)
+	}
+	assertRedacted(t, token, "set_config interleaved error", out.Error)
+	assertNoStrippedCredentialFragment(t, token, "set_config interleaved error", out.Error)
 }
 
 // hexCase selects the case an encoded form's hex digits are written in. A
