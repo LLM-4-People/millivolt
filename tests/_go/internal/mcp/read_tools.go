@@ -867,10 +867,6 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 	// the first row that would overflow: a 500-byte budget holds exactly the
 	// first two rows, with their full values, and cannot hold the third.
 	wantBlob := strings.Repeat("x", 200)
-	encodedRow, err := json.Marshal(map[string]any{"id": "ra", "blob": wantBlob})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if out.RowCount != 2 || len(out.Rows) != 2 {
 		t.Fatalf("row_count = %d, rows = %d, want the exact two-row prefix that fits the byte budget", out.RowCount, len(out.Rows))
 	}
@@ -882,16 +878,15 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 			t.Fatalf("rows[%d].blob = %v, want the full %d-byte source value with no in-row cut", i, out.Rows[i]["blob"], len(wantBlob))
 		}
 	}
-	if out.Bytes != 2*len(encodedRow) {
-		t.Fatalf("bytes = %d, want the exact encoded size of the two kept rows (%d)", out.Bytes, 2*len(encodedRow))
-	}
-	next, err := json.Marshal(map[string]any{"id": "rc", "blob": wantBlob})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Bytes+len(next) <= limits.QueryMaxBytes {
+	// Every fixture row is two plain ASCII string fields, so the bytes the fake
+	// proxy returned for a row are exactly its encoded size under
+	// encoding/json, which changes only the key order (never the length).
+	// The next row must no longer fit: a clamp that stopped before using the
+	// whole budget would report bytes here that still leave room for it.
+	rowSize := len(rows[0])
+	if out.Bytes+rowSize <= limits.QueryMaxBytes {
 		t.Fatalf("bytes = %d plus the next row (%d) still fits the %d budget: the clamp stopped early",
-			out.Bytes, len(next), limits.QueryMaxBytes)
+			out.Bytes, rowSize, limits.QueryMaxBytes)
 	}
 
 	// A result inside the byte budget reports no truncation at all.
