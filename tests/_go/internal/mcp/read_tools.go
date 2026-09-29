@@ -280,9 +280,12 @@ func TestWindowDefaultsToAllHistory(t *testing.T) {
 	assertQuery(t, proxy.last(t), "window", "all")
 }
 
-// TestChartRejectsNonCanonicalWindowPreFlight is a local fast-fail: the proxy
-// is the authority, but the tool must not send a window it already knows is
-// rejected.
+// TestScopeValidationRejectsBadInput pins Scope.Validate: filters without a
+// dim:id pair, unknown dimensions, non-code or out-of-range statuses and more
+// than maxScopeFilters filters are refused locally, while empty scopes, known
+// status classes, exact codes and a full filter set pass. Chart windows are
+// not checked here or by chart(): it forwards windowOrAll(in.Window) and the
+// proxy's windowParam owns canonicality, refusing "007", "+5" and "5.0".
 func TestScopeValidationRejectsBadInput(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
