@@ -10,10 +10,11 @@ import (
 	"github.com/LLM-4-People/millivolt"
 )
 
-// TestNewServerIsTheSharedRegistry pins the one construction path both
-// entrypoints use: NewServer installs the whole tool surface and carries the
-// shared release identity, so the stdio CLI and the HTTP endpoint cannot drift
-// into two different registries.
+// TestNewServerIsTheSharedRegistry pins the registry NewServer builds: its
+// tool count against the pinned surface and the shared release identity. It
+// drives the in-process transport only, so an entrypoint that bypasses
+// NewServer with a parallel constructor registering an equivalent surface is
+// not distinguishable here.
 func TestNewServerIsTheSharedRegistry(t *testing.T) {
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
