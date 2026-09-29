@@ -667,10 +667,11 @@ purge filter, a purge without the exact confirmation phrase, and a purge
 without the `purge_preview` token issued for that same filter are each refused.
 It also refuses a capture session on a proxy without durable storage, and an
 unknown name in a capture scope or a throttle provider is offered the known
-values instead; that vocabulary check fails open when the proxy's vocabulary is
-empty or cannot be read. It never follows a redirect, and it presents the
-credential only in the `Authorization` header. See the
-[MCP server guide](mcp.md).
+values instead. The throttle provider check fails open when the proxy's
+vocabulary is empty or cannot be read; the capture scope check accepts any name
+when the vocabulary is empty but refuses when the vocabulary cannot be read.
+It never follows a redirect, and it presents the credential only in the
+`Authorization` header. See the [MCP server guide](mcp.md).
 
 ### Operator access
 
