@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -301,6 +302,38 @@ func TestErrorBodyExcerptIsBounded(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "[truncated]") {
 		t.Fatalf("a bounded flat error must say it was truncated: %v", err)
+	}
+}
+
+// TestOversizedFailureBodyDecodeIsBounded is the regression for the unbounded
+// failure-body decode: a 64 MiB nested JSON body was decoded in full before
+// excerpting, about 128 MiB allocated and 200 ms spent to produce the same
+// 4 KiB message. Only the raw region that can reach the excerpt may be
+// decoded, while redaction and truncation keep working on it.
+func TestOversizedFailureBodyDecodeIsBounded(t *testing.T) {
+	body := []byte(`{"detail":"upstream refused ` + testToken + ` "` + strings.Repeat("x", 64<<20) + `"}`)
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	apiErr := newAPIError(resp, body, testToken)
+	runtime.ReadMemStats(&after)
+
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 32<<20 {
+		t.Fatalf("the 64 MiB failure body allocated %d bytes; the decode must be bounded to the excerpt region", allocated)
+	}
+	if len(apiErr.Message) > maxErrorBodyBytes+len(" [truncated]") {
+		t.Fatalf("the excerpt is %d bytes, above the %d byte budget", len(apiErr.Message), maxErrorBodyBytes)
+	}
+	if !strings.Contains(apiErr.Message, "upstream refused") || !strings.Contains(apiErr.Message, "[truncated]") {
+		t.Fatalf("the excerpt must keep the leading diagnostics and state the truncation: %q", apiErr.Message)
+	}
+	if strings.Contains(apiErr.Message, testToken) {
+		t.Fatalf("the credential inside the oversized body survived: %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Message, redactionMarker) {
+		t.Fatalf("the redaction must stay visible in the excerpt: %q", apiErr.Message)
 	}
 }
 

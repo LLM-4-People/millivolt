@@ -217,24 +217,52 @@ func (e *APIError) Error() string {
 // its matching half and survive as a fragment; redactForExcerpt owns that
 // order and the scan bound.
 func newAPIError(resp *http.Response, body []byte, token string) *APIError {
-	message := strings.TrimSpace(string(body))
-	var flat struct {
-		Error string `json:"error"`
-	}
-	if len(body) > 0 && json.Unmarshal(body, &flat) == nil && flat.Error != "" {
-		message = flat.Error
-	} else if decoded, ok := structuredStrings(body); ok {
-		message = decoded
-	}
-	if message != "" {
-		message = redactForExcerpt(message, token)
-	}
+	message := failureExcerpt(body, token)
 	return &APIError{
 		Status:     resp.StatusCode,
 		Message:    errorMessage(message, resp.StatusCode),
 		RetryAfter: sanitizeRetryAfter(resp.Header.Get("Retry-After")),
 		Challenge:  resp.Header.Get("WWW-Authenticate"),
 	}
+}
+
+// failureExcerpt extracts the model-visible text from a failure body: the flat
+// {"error": ...} field when present, otherwise the joined string values of the
+// JSON document, otherwise the raw text. Decoding is bounded to the raw region
+// that can still reach the excerpt, because redactForExcerpt scans only the
+// prefix whose whitespace collapse reaches its target and bytes past that
+// prefix can never appear in the published message. A body whose collapse does
+// not reach the target inside maxExcerptScanBytes fails closed exactly as
+// redactForExcerpt would decide, so it is not decoded at all; the previous
+// implementation decoded a 64 MiB body in full (about 200 ms and 128 MiB) to
+// produce the same 4 KiB excerpt.
+func failureExcerpt(body []byte, token string) string {
+	if len(body) == 0 {
+		return ""
+	}
+	target := excerptTarget(token)
+	bounded, overflow := body, false
+	if len(bounded) > maxExcerptScanBytes {
+		bounded, overflow = bounded[:maxExcerptScanBytes], true
+	}
+	region, _, _ := excerptRegion(string(bounded), target)
+	if overflow && len(collapseWhitespace(region)) < target {
+		// The full body's collapse cannot reach the target inside the scan
+		// cap, so redactForExcerpt would fail closed on it.
+		return redactionMarker
+	}
+	decoded := region
+	if len(region) > 0 {
+		var flat struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(region), &flat) == nil && flat.Error != "" {
+			decoded = flat.Error
+		} else if structured, ok := structuredStrings([]byte(region)); ok {
+			decoded = structured
+		}
+	}
+	return redactForExcerpt(decoded, token)
 }
 
 // structuredStrings decodes every string value in a JSON failure body and
@@ -514,17 +542,35 @@ func redactForExcerpt(message, token string) string {
 	if message == "" {
 		return message
 	}
-	region, complete, _ := excerptRegion(message, maxErrorBodyBytes+strippedCredentialFormByteMax*len(token))
+	region, complete, _ := excerptRegion(message, excerptTarget(token))
 	if !complete {
 		return redactionMarker
 	}
 	redacted := redactCredential(region, token)
-	redacted = strings.Join(strings.Fields(redacted), " ")
+	redacted = collapseWhitespace(redacted)
 	redacted = redactCredential(redacted, token)
 	if len(redacted) > maxErrorBodyBytes {
 		redacted = redacted[:maxErrorBodyBytes] + " [truncated]"
 	}
 	return redacted
+}
+
+// excerptTarget is the collapsed-byte budget one excerpt scan covers: the
+// published excerpt plus the largest collapsed reach a credential match that
+// starts inside the excerpt can have. It is the one owner of that bound, shared
+// by redactForExcerpt and the bounded extraction that decides which raw bytes
+// can still reach the excerpt.
+func excerptTarget(token string) int {
+	return maxErrorBodyBytes + strippedCredentialFormByteMax*len(token)
+}
+
+// collapseWhitespace is the one whitespace collapse for model-visible text: a
+// run of whitespace becomes a single space, leading and trailing whitespace
+// disappears. redactForExcerpt publishes through it, and the bounded
+// extraction measures through it, so the region decision cannot drift from the
+// published bound.
+func collapseWhitespace(message string) string {
+	return strings.Join(strings.Fields(message), " ")
 }
 
 // excerptRegion returns the shortest prefix of message whose whitespace
