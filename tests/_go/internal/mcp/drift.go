@@ -77,6 +77,42 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	}
 }
 
+// TestPagingToolsNameTheirRealCursorArguments pins both paging tools to the
+// argument names the model actually sends. The records description told the
+// model to page with next_before_ms/next_before_id, which are the OUTPUT
+// fields; a model that followed it named arguments the strict input decode
+// refuses. The output schema's own doc had the same confusion ("pass both next
+// cursor fields"), which names no argument at all.
+func TestPagingToolsNameTheirRealCursorArguments(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		switch tool.Name {
+		case "records", "audit_captures_list":
+			if !strings.Contains(tool.Description, "before_ms/before_id cursor") {
+				t.Fatalf("the %s description must name the cursor arguments it accepts: %q", tool.Name, tool.Description)
+			}
+			if strings.Contains(tool.Description, "next_before_ms/next_before_id cursor") {
+				t.Fatalf("the %s description names the output fields as the cursor to send: %q", tool.Name, tool.Description)
+			}
+		}
+	}
+	for _, typ := range []reflect.Type{reflect.TypeOf(RecordsOutput{}), reflect.TypeOf(AuditCapturesListOutput{})} {
+		for _, name := range []string{"NextBeforeMs", "NextBeforeID"} {
+			field, ok := typ.FieldByName(name)
+			if !ok {
+				t.Fatalf("%s has no %s field", typ, name)
+			}
+			if tag := string(field.Tag.Get("jsonschema")); !strings.Contains(tag, "into before_ms and before_id") {
+				t.Fatalf("%s.%s must name the arguments the pair is copied into, got %q", typ, name, tag)
+			}
+		}
+	}
+}
+
 // TestSnapshotCapNamesTheRingOwner pins the "8 * dash_log_rows" formula to
 // web.BootRingCapMul, the exported owner of the snapshot multiplier. The
 // production text states the multiplier as a number because the

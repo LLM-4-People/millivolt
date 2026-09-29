@@ -247,8 +247,8 @@ type RecordsOutput struct {
 	// "the scan budget ran out before a match", and treating it as the end of
 	// history silently drops every match behind it.
 	Exhausted    bool           `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
-	NextBeforeMs int64          `json:"next_before_ms,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
-	NextBeforeID string         `json:"next_before_id,omitempty" jsonschema:"pass both next cursor fields to fetch the next older page"`
+	NextBeforeMs int64          `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
+	NextBeforeID string         `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
 	Truncation   Truncation     `json:"truncation" jsonschema:"whether records were withheld"`
 	ModelCanon   *ModelCanonMap `json:"model_canon,omitempty" jsonschema:"the raw-to-canonical model name mapping the server applied to this page"`
 	Storage      StorageInfo    `json:"storage" jsonschema:"durable storage signal; without it this page is not the whole history"`
