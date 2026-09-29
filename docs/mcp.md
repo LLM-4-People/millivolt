@@ -291,8 +291,13 @@ JSON-escaped forms, including backslash-doubled text and surrogate pairs. Each
 form is decoded to a fixed point before matching: an encoding is either fully
 seen or the excerpt fails closed. Text that still decodes after three escape
 applications is not published partly decoded: the whole excerpt is replaced by
-`[redacted]` instead. The scan is bounded to the region that can still reach
-the excerpt; the excerpt itself is whitespace-collapsed and capped at 4 KiB
+`[redacted]` instead. That bound applies regardless of whether the credential
+appears in the body: a heavily re-encoded failure with no credential in it
+still loses its diagnostics, because a credential could be hidden past the
+bound. The scan is bounded to the region that can still reach the excerpt, and
+the raw bytes it reads are capped; a body whose whitespace collapse does not
+reach the excerpt target inside that cap fails closed to `[redacted]` too, for
+the same reason. The excerpt itself is whitespace-collapsed and capped at 4 KiB
 after redaction, which runs before the cap so a credential straddling it cannot
 survive as a fragment.
 

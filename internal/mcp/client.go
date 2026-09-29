@@ -954,8 +954,14 @@ func applySpans(message string, spans []rawSpan) string {
 // A message that still decodes after maxPercentLayers applications is not
 // published partly decoded: the whole message is replaced by the redaction
 // marker instead. That is the fail-closed path for nesting deeper than the
-// bound, and it is why the coverage claim does not depend on guessing what an
-// undecoded remainder might hide.
+// bound, it applies regardless of whether the token appears anywhere in the
+// message, and it is why the coverage claim does not depend on guessing what
+// an undecoded remainder might hide. The criterion is the text's fixed-point
+// property alone: a heavily re-encoded body with no credential in it still
+// loses its diagnostics, because a credential could be hidden past the bound
+// and the scan cannot tell the two apart. The same criterion bounds the
+// excerpt scan in redactForExcerpt: a body whose collapse does not reach the
+// excerpt target inside maxExcerptScanBytes fails closed too.
 func redactCredential(message, token string) string {
 	if token == "" || message == "" {
 		return message
