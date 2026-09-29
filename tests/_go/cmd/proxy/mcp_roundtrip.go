@@ -160,7 +160,11 @@ func TestInProcessRecorderRetainsAtMostTheClientBudget(t *testing.T) {
 		t.Fatalf("recorder retained %d bytes after %d offered, want the %d byte budget",
 			recorder.body.Len(), offered, inProcessRecorderBufferMax)
 	}
-	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 320<<20 {
+	// The race-enabled build measures roughly twice the plain allocation, so
+	// the bound carries headroom for it. Without the cap the same fixtures
+	// grow the buffer to the offered size: over 1 GiB plain, over 2 GiB under
+	// race, against at most about 2 * budget here.
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 768<<20 {
 		t.Fatalf("the recorder allocated %d bytes while %d were offered; the budget must bound it", allocated, offered)
 	}
 }
