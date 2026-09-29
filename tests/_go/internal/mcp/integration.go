@@ -662,12 +662,25 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 		t.Fatalf("a refused purge changed history: %v then %v", previewed, after["count"])
 	}
 	// The rows are still readable, which is the observable proof nothing was
-	// deleted by the refused calls above.
-	live.invoke(t, "query", map[string]any{
+	// deleted by the refused calls above. The id the durability wait
+	// established must be one of them: the old `recordID == ""` guard could
+	// never fire, because eventually only returns after the probe set it, so
+	// it asserted nothing. A mismatch here fails for real.
+	readable := live.invoke(t, "query", map[string]any{
 		"sql": "SELECT id FROM requests WHERE client = " + sqlString(fixtureClient) + " LIMIT 5",
 	})
-	if recordID == "" {
-		t.Fatal("the fixture record id was never established")
+	found := false
+	for _, entry := range array(t, readable, "rows") {
+		row, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("query row = %T", entry)
+		}
+		if text(t, row, "id") == recordID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the durable record id %q is not among the live rows: %v", recordID, readable)
 	}
 
 	// The last call is the real deletion, on this disposable instance only:
