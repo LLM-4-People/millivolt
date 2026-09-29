@@ -224,8 +224,11 @@ func TestSnapshotCapNamesTheRingOwner(t *testing.T) {
 }
 
 // TestPurgePhraseHasOneOwner pins the confirmation phrase to PurgeConfirmation:
-// the input schema and the tool description must carry it, and the published
-// guide must quote the same literal.
+// the input schema must carry it, the tool description must state the published
+// sentence literally, and the guide must quote the same literal. The
+// description is built from the constant, so comparing it to the constant alone
+// could never fail on a rename; its assertion anchors to the published
+// sentence instead.
 func TestPurgePhraseHasOneOwner(t *testing.T) {
 	field, ok := reflect.TypeOf(PurgeInput{}).FieldByName("Confirmation")
 	if !ok {
@@ -248,8 +251,9 @@ func TestPurgePhraseHasOneOwner(t *testing.T) {
 			continue
 		}
 		registered = true
-		if !strings.Contains(tool.Description, PurgeConfirmation) {
-			t.Fatalf("the purge tool description must carry the owner phrase %q, got %q", PurgeConfirmation, tool.Description)
+		const expectedSentence = "confirmation must be the exact phrase 'permanently delete the matching millivolt history'"
+		if !strings.Contains(tool.Description, expectedSentence) {
+			t.Fatalf("the purge tool description must state %q, got %q", expectedSentence, tool.Description)
 		}
 	}
 	if !registered {
@@ -553,25 +557,34 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 	// own proxyTokenEnv constant, not this server's read variable. The phrase
 	// once named the read variable as the proxy's, sending a user to a variable
 	// the proxy never reads; the usage text, the table row and the
-	// missing-credential setup error all carry the owner constant so the phrase
-	// cannot drift back.
+	// missing-credential setup error are each pinned by an independent literal,
+	// so a rename of the constant fails here instead of silently changing what
+	// the model and the operator read.
 	token := fs.Lookup(flagOperatorToken)
 	if token == nil {
 		t.Fatalf("--%s is not registered", flagOperatorToken)
 	}
-	if !strings.Contains(token.Usage, "the proxy's "+proxyTokenEnv) {
-		t.Fatalf("the --%s usage must name the proxy's %s as the value's source, got %q",
-			flagOperatorToken, proxyTokenEnv, token.Usage)
+	// The usage text is built from proxyTokenEnv, so comparing it to that same
+	// constant cannot fail on a rename. The whole sentence is asserted against
+	// independent literals instead: a suffixed rename still contains the old
+	// name as a prefix, so only the exact sentence pins the source it names.
+	wantUsage := "the proxy's MILLIVOLT_OPERATOR_TOKEN; the value is never echoed in usage output (env MILLIVOLT_MCP_OPERATOR_TOKEN)"
+	if token.Usage != wantUsage {
+		t.Fatalf("the --%s usage = %q, want %q", flagOperatorToken, token.Usage, wantUsage)
 	}
 	if !strings.Contains(documentedMeaning["--"+flagOperatorToken], proxyTokenEnv) {
 		t.Fatalf("docs/mcp.md's --%s row must name the proxy's %s as the value's source, got %q",
 			flagOperatorToken, proxyTokenEnv, documentedMeaning["--"+flagOperatorToken])
 	}
 	// The missing-credential setup error names the same source, and it is the
-	// message a user actually reads when the credential is absent.
-	if err := ValidateOperatorToken(""); err == nil || !strings.Contains(err.Error(), "the proxy's "+proxyTokenEnv+")") {
-		t.Fatalf("ValidateOperatorToken's missing-token error must name the proxy's %s as the value's source, got %v",
-			proxyTokenEnv, err)
+	// message a user actually reads when the credential is absent. The whole
+	// message is asserted because the constant-built message cannot be compared
+	// to its own constants: the flag and environment names come from their
+	// owners, and the proxy variable is an independent literal.
+	wantMissingToken := "operator token is required: pass --" + flagOperatorToken + " or " + envOperatorToken +
+		" (the proxy's MILLIVOLT_OPERATOR_TOKEN)"
+	if err := ValidateOperatorToken(""); err == nil || err.Error() != wantMissingToken {
+		t.Fatalf("ValidateOperatorToken's missing-token error = %v, want %q", err, wantMissingToken)
 	}
 	for name := range documented {
 		if fs.Lookup(strings.TrimPrefix(name, "--")) == nil {
