@@ -59,6 +59,17 @@ const maxResponseBytes = 64 << 20
 // the budget keeps an unexpected HTML error page from filling a model context.
 const maxErrorBodyBytes = 4 << 10
 
+// maxExcerptScanBytes hard-caps the raw bytes one excerpt redaction reads. The
+// whitespace collapse only ever shortens text, so reaching the collapsed
+// excerpt target can require walking far more raw bytes than the target: a
+// failure body padded with whitespace used to pull the whole maxResponseBytes
+// body through every decoding view. When the collapsed target is not reached
+// within this cap the excerpt fails closed instead, because a credential could
+// sit past the cap; two mebibytes is far beyond any real error page's raw
+// reach to the first 4 KiB of collapsed text. The prefix a completed scan
+// returns can exceed the cap by at most one UTF-8 rune.
+const maxExcerptScanBytes = 2 << 20
+
 // errRedirectRefused is returned instead of following a redirect. No operator
 // route redirects, so a redirect answer is a misconfiguration or a hostile
 // endpoint - and following one is exactly the wrong thing to do: net/http
@@ -462,12 +473,18 @@ const credentialFormByteMax = 6 * 6 * 6
 // match that lands inside the first maxErrorBodyBytes collapsed bytes ends
 // within maxErrorBodyBytes + credentialFormByteMax*len(token) collapsed bytes;
 // excerptRegion finds that raw prefix exactly, even through a long whitespace
-// run, because collapsing only ever shortens text.
+// run, because collapsing only ever shortens text. The region is capped at
+// maxExcerptScanBytes raw bytes: when the collapsed target is not reached
+// within the cap the scan cannot prove the hidden remainder holds no
+// credential, so the whole excerpt fails closed rather than publish it.
 func redactForExcerpt(message, token string) string {
 	if message == "" {
 		return message
 	}
-	region := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
+	region, complete := excerptRegion(message, maxErrorBodyBytes+credentialFormByteMax*len(token))
+	if !complete {
+		return redactionMarker
+	}
 	redacted := redactCredential(region, token)
 	redacted = strings.Join(strings.Fields(redacted), " ")
 	redacted = redactCredential(redacted, token)
@@ -478,19 +495,24 @@ func redactForExcerpt(message, token string) string {
 }
 
 // excerptRegion returns the shortest prefix of message whose whitespace
-// collapse still reaches target bytes, or the whole message when it cannot.
-// Collapsing only ever shortens text (a run of whitespace becomes one space,
-// leading and trailing whitespace disappears), so the raw prefix that produces
-// a given collapsed length is found by walking the collapse itself: a fixed
-// raw byte cut would include unreachable text and, with a long whitespace run,
-// exclude a credential the collapse pulls into the excerpt.
-func excerptRegion(message string, target int) string {
+// collapse still reaches target bytes, and whether the scan reached the end of
+// the region it is allowed to read. The result is false only when the prefix
+// would extend past maxExcerptScanBytes: the cap stops the unbounded work a
+// whitespace flood would otherwise cause, and the caller fails closed because
+// the unscanned remainder could hide a credential. Collapsing only ever
+// shortens text (a run of whitespace becomes one space, leading and trailing
+// whitespace disappears), so the raw prefix that produces a given collapsed
+// length is found by walking the collapse itself: a fixed raw byte cut would
+// include unreachable text and, with a long whitespace run, exclude a
+// credential the collapse pulls into the excerpt.
+func excerptRegion(message string, target int) (string, bool) {
 	if target <= 0 || len(message) <= target {
-		return message
+		return message, true
 	}
 	collapsed := 0
 	inWord := false
-	for index := 0; index < len(message); {
+	limit := min(len(message), maxExcerptScanBytes)
+	for index := 0; index < limit; {
 		r, size := utf8.DecodeRuneInString(message[index:])
 		if unicode.IsSpace(r) {
 			inWord = false
@@ -506,10 +528,13 @@ func excerptRegion(message string, target int) string {
 		collapsed++
 		index += size
 		if collapsed >= target {
-			return message[:index]
+			return message[:index], true
 		}
 	}
-	return message
+	if len(message) <= maxExcerptScanBytes {
+		return message, true
+	}
+	return "", false
 }
 
 // rawSpan is the half-open byte range of one match in the original message.

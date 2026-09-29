@@ -835,7 +835,10 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 	// A multi-megabyte body with no credential: the region stops near the
 	// excerpt budget instead of covering the message.
 	message := strings.Repeat("word ", 1<<20)
-	region := excerptRegion(message, target)
+	region, complete := excerptRegion(message, target)
+	if !complete {
+		t.Fatal("a body whose collapse reaches the target inside the cap must not fail closed")
+	}
 	if len(region) >= len(message) {
 		t.Fatalf("the region covers the whole %d byte message", len(message))
 	}
@@ -849,7 +852,10 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 	// Whitespace collapse can pull a credential into the excerpt from far
 	// beyond any fixed raw cut, so the region has to cross the run.
 	hidden := strings.Repeat(" ", 1<<20) + token
-	region = excerptRegion(hidden, target)
+	region, complete = excerptRegion(hidden, target)
+	if !complete {
+		t.Fatal("a whitespace-hidden credential inside the scan cap must not fail closed")
+	}
 	if !strings.Contains(region, token) {
 		t.Fatal("the region must include a credential that whitespace collapse pulls into the excerpt")
 	}
@@ -862,5 +868,97 @@ func TestRedactionScansOnlyTheExcerptRegion(t *testing.T) {
 	bounded := redactForExcerpt(message, token)
 	if len(bounded) > maxErrorBodyBytes+len(" [truncated]") {
 		t.Fatalf("the excerpt is %d bytes, above the %d byte budget", len(bounded), maxErrorBodyBytes)
+	}
+}
+
+// TestWhitespaceFloodRedactionIsBoundedAndFailsClosed is the regression for the
+// unbounded scan: a failure body that never reaches the collapsed excerpt
+// target used to be scanned in full (up to maxResponseBytes, 64 MiB, through
+// every decoding view). The scan must stop at maxExcerptScanBytes and fail
+// closed, because a credential could sit past the cap.
+func TestWhitespaceFloodRedactionIsBoundedAndFailsClosed(t *testing.T) {
+	const token = testToken
+	message := "x" + strings.Repeat(" ", (64<<20)-1-len(token)) + token
+	if len(message) != 64<<20 {
+		t.Fatalf("the fixture is %d bytes, want %d", len(message), 64<<20)
+	}
+	target := maxErrorBodyBytes + credentialFormByteMax*len(token)
+
+	region, complete := excerptRegion(message, target)
+	if complete {
+		t.Fatal("a collapse that never reaches the target inside the cap must fail closed")
+	}
+	if region != "" {
+		t.Fatalf("a failed scan must return no region, got %d bytes", len(region))
+	}
+
+	started := time.Now()
+	got := redactForExcerpt(message, token)
+	elapsed := time.Since(started)
+	if got != redactionMarker {
+		t.Fatalf("the whitespace flood must fail closed to %q, got %q", redactionMarker, got)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("the 64 MiB flood took %v; the scan must stop at maxExcerptScanBytes (%d bytes)",
+			elapsed, maxExcerptScanBytes)
+	}
+	assertNoCredentialFragment(t, token, "whitespace flood", got)
+}
+
+// TestTokenBeyondTheScanCapNeverSurvives pins the fail-closed guarantee for a
+// credential placed past the raw scan cap: the excerpt is the redaction marker
+// and no fragment of the token is published.
+func TestTokenBeyondTheScanCapNeverSurvives(t *testing.T) {
+	const token = testToken
+	message := strings.Repeat(" ", maxExcerptScanBytes+64) + token + strings.Repeat(" ", 64)
+	got := redactForExcerpt(message, token)
+	if got != redactionMarker {
+		t.Fatalf("a token beyond the cap must fail closed to %q, got %q", redactionMarker, got)
+	}
+	assertRedacted(t, token, "token beyond the cap", got)
+}
+
+// TestPlainWhitespaceFloodFailsClosed pins the documented criterion: the cap
+// applies regardless of credential presence, so a whitespace-heavy body with no
+// credential in it still fails closed rather than publish an excerpt that
+// cannot be proven clean.
+func TestPlainWhitespaceFloodFailsClosed(t *testing.T) {
+	message := strings.Repeat(" ", maxExcerptScanBytes+1)
+	if got := redactForExcerpt(message, testToken); got != redactionMarker {
+		t.Fatalf("a whitespace body whose target is not reached must fail closed to %q, got %q",
+			redactionMarker, got)
+	}
+}
+
+// TestTokenInsideTheScanCapIsCaughtAtTheBoundaryOffsets pins that the cap only
+// fails the bodies whose collapse cannot reach the target inside it: a token
+// that ends inside the cap is redacted and the surrounding diagnostics survive,
+// while a token that crosses the cap turns the whole excerpt into the marker.
+func TestTokenInsideTheScanCapIsCaughtAtTheBoundaryOffsets(t *testing.T) {
+	const token = testToken
+	prefix := "start "
+	spaces := func(tail int) int { return maxExcerptScanBytes - len(prefix) - len(token) - tail }
+	for _, tail := range []int{minRedactionRun - 1, 1, 0} {
+		message := prefix + strings.Repeat(" ", spaces(tail)) + token + strings.Repeat("x", tail)
+		if len(message) > maxExcerptScanBytes {
+			t.Fatalf("fixture ends at %d bytes, past the cap", len(message))
+		}
+		got := redactForExcerpt(message, token)
+		if strings.Contains(got, token) {
+			t.Fatalf("a token inside the cap survived: %q", got)
+		}
+		if !strings.Contains(got, "start") || !strings.Contains(got, redactionMarker) {
+			t.Fatalf("a token inside the cap must be redacted without losing the diagnostics: %q", got)
+		}
+		assertNoCredentialFragment(t, token, "token inside the cap", got)
+	}
+	// One byte past the cap: the token crosses the boundary the scan refuses to
+	// read past, so the excerpt fails closed.
+	crossing := prefix + strings.Repeat(" ", spaces(0)+1) + token
+	if len(crossing) <= maxExcerptScanBytes {
+		t.Fatal("the crossing fixture must exceed the cap")
+	}
+	if got := redactForExcerpt(crossing, token); got != redactionMarker {
+		t.Fatalf("a token crossing the cap must fail closed to %q, got %q", redactionMarker, got)
 	}
 }
