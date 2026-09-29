@@ -423,6 +423,39 @@ func TestFlatErrorValueWinsBeforeLaterStringValues(t *testing.T) {
 	}
 }
 
+// TestValidOversizedNonFlatValueDecodeIsBounded pins the scan-cap input bound
+// when no flat error key short-circuits the walk: the first value is one 64 MiB
+// string, which json.Decoder materializes in full before the budget check.
+// failureExcerpt must pass the capped prefix to the decoder, not the whole
+// body, so the allocation stays near the cap rather than the body size and the
+// cut value degrades to the raw region instead of losing the leading text.
+func TestValidOversizedNonFlatValueDecodeIsBounded(t *testing.T) {
+	const prefix = `{"detail":"`
+	const diagnostic = "upstream refused"
+	body := []byte(prefix + diagnostic + strings.Repeat("x", 64<<20) + `"}`)
+	resp := &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{}}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	apiErr := newAPIError(resp, body, testToken)
+	runtime.ReadMemStats(&after)
+
+	if allocated := after.TotalAlloc - before.TotalAlloc; allocated > 32<<20 {
+		t.Fatalf("the 64 MiB non-flat failure body allocated %d bytes; the decode must be bounded to the %d byte scan cap",
+			allocated, maxExcerptScanBytes)
+	}
+	if len(apiErr.Message) > maxErrorBodyBytes+len(" [truncated]") {
+		t.Fatalf("the excerpt is %d bytes, above the %d byte budget", len(apiErr.Message), maxErrorBodyBytes)
+	}
+	if !strings.HasPrefix(apiErr.Message, prefix) || !strings.Contains(apiErr.Message, diagnostic) {
+		t.Fatalf("the excerpt must keep the leading body text: %q", apiErr.Message)
+	}
+	if !strings.Contains(apiErr.Message, "[truncated]") {
+		t.Fatalf("the bounded excerpt must state the truncation: %q", apiErr.Message)
+	}
+}
+
 // TestRefusedRedirectReplaysNothing is the credential-replay guard. net/http
 // strips Authorization only when the HOSTNAME changes, and the port is not part
 // of that comparison, so a same-host different-port or subdomain 307/308 replays
