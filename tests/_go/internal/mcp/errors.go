@@ -788,6 +788,40 @@ func TestErrorBodyRedactionCoversDoubleJSONEscape(t *testing.T) {
 	assertRedacted(t, token, "double JSON-escaped echo", message, twice)
 }
 
+// TestNestedFailureExcerptIsDeterministic pins that a nested-JSON failure body
+// is excerpted in a stable field order. collectJSONStrings used to iterate the
+// decoded Go map, whose order is randomized per run, so the same response
+// produced different model-visible messages; repeating one response must give
+// byte-identical output.
+func TestNestedFailureExcerptIsDeterministic(t *testing.T) {
+	body := `{"zeta":"upstream said ","alpha":"the request was refused because ",` +
+		`"middle":"the key was stale","beta":"and the window had closed"}`
+	proxy := newFakeProxy(t)
+	proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+		Status: http.StatusBadGateway, ContentType: "application/json", Body: body,
+	})
+	service := newTestService(t, proxy, Limits{})
+
+	var first string
+	for attempt := 0; attempt < 32; attempt++ {
+		_, err := service.explore(context.Background(), ExploreInput{Dim: "provider"})
+		if err == nil {
+			t.Fatal("expected the nested failure body")
+		}
+		if attempt == 0 {
+			first = err.Error()
+			continue
+		}
+		if err.Error() != first {
+			t.Fatalf("the same response produced a different excerpt on attempt %d:\nfirst: %q\n now:  %q",
+				attempt, first, err.Error())
+		}
+	}
+	if !strings.Contains(first, "refused") {
+		t.Fatalf("the excerpt lost the proxy's text: %q", first)
+	}
+}
+
 // TestRedactionScansOnlyTheExcerptRegion pins the work bound on the redaction
 // that runs before the excerpt truncation: the scan covers only the region
 // that can reach the published excerpt, not the whole body. A fixed raw byte

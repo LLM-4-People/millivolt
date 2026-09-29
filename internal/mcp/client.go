@@ -222,9 +222,11 @@ func structuredStrings(body []byte) (string, bool) {
 	return strings.Join(values, " "), true
 }
 
-// collectJSONStrings walks a decoded JSON document in order, collecting every
-// non-empty string value. Object keys are field names, not values, so they are
-// not collected.
+// collectJSONStrings walks a decoded JSON document, collecting every non-empty
+// string value. Object keys are field names, not values, so they are not
+// collected; the fields of an object are walked in sorted key order because a
+// Go map's iteration order is randomized and the joined text is model-visible,
+// so the same response must always produce the same excerpt.
 func collectJSONStrings(value any, values *[]string) {
 	switch typed := value.(type) {
 	case string:
@@ -236,8 +238,13 @@ func collectJSONStrings(value any, values *[]string) {
 			collectJSONStrings(item, values)
 		}
 	case map[string]any:
-		for _, item := range typed {
-			collectJSONStrings(item, values)
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			collectJSONStrings(typed[key], values)
 		}
 	}
 }
