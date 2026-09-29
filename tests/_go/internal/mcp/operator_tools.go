@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 // TestOperatorStateReadsFourSurfaces pins the one-call read: pause, limits,
@@ -988,20 +990,39 @@ func TestPurgeRefusalDisclosesNoCount(t *testing.T) {
 	}
 }
 
+// TestPurgeStatusCodeBandMatchesTheProxyOwner pins purgeStatusCodeMax to the
+// band the proxy's own PurgeFilter.Validate enforces (internal/storage/store.go).
+// The local validation test alone hardcodes the message and would stay green
+// while the proxy band moved; probing the owner's boundary makes that drift
+// fail here instead of turning a model's valid filter into a raw 400.
+func TestPurgeStatusCodeBandMatchesTheProxyOwner(t *testing.T) {
+	if err := (storage.PurgeFilter{StatusCode: purgeStatusCodeMax}).Validate(); err != nil {
+		t.Fatalf("the proxy owner refuses the MCP band's top (%d): %v", purgeStatusCodeMax, err)
+	}
+	if err := (storage.PurgeFilter{StatusCode: purgeStatusCodeMax + 1}).Validate(); err == nil {
+		t.Fatalf("the proxy owner accepts %d, above the MCP band's top %d", purgeStatusCodeMax+1, purgeStatusCodeMax)
+	}
+	if err := (storage.PurgeFilter{StatusCode: -1}).Validate(); err == nil {
+		t.Fatal("the proxy owner accepts a negative status code, below the MCP band's floor 0")
+	}
+}
+
 // TestPurgeFilterValidationMatchesTheProxy pins the proxy's own purge-filter
 // rules client-side, so a model gets a corrective message instead of a raw 400
-// for a value the proxy was always going to reject.
+// for a value the proxy was always going to reject. The proxy band is pinned
+// against its owner by TestPurgeStatusCodeBandMatchesTheProxyOwner.
 func TestPurgeFilterValidationMatchesTheProxy(t *testing.T) {
 	proxy := newFakeProxy(t)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
+	statusBand := fmt.Sprintf("status_code must be 0..%d", purgeStatusCodeMax)
 	for _, tc := range []struct {
 		name   string
 		filter PurgeFilterInput
 		want   string
 	}{
-		{"status above the band", PurgeFilterInput{Provider: "p", StatusCode: 1000}, "status_code must be 0..999"},
-		{"negative status", PurgeFilterInput{Provider: "p", StatusCode: -1}, "status_code must be 0..999"},
+		{"status above the band", PurgeFilterInput{Provider: "p", StatusCode: purgeStatusCodeMax + 1}, statusBand},
+		{"negative status", PurgeFilterInput{Provider: "p", StatusCode: -1}, statusBand},
 		{"negative after", PurgeFilterInput{Provider: "p", AfterMs: -1}, "0 or greater"},
 		{"negative before", PurgeFilterInput{Provider: "p", BeforeMs: -1}, "0 or greater"},
 		{"window inverted", PurgeFilterInput{Provider: "p", BeforeMs: 1000, AfterMs: 2000}, "after_ms must be strictly less than before_ms"},
@@ -1025,7 +1046,7 @@ func TestPurgeFilterValidationMatchesTheProxy(t *testing.T) {
 	// The band's own edges and a valid window are accepted.
 	proxy.json(http.MethodPost, purgeCountPat, `{"count":1}`)
 	for _, filter := range []PurgeFilterInput{
-		{Provider: "p", StatusCode: 999},
+		{Provider: "p", StatusCode: purgeStatusCodeMax},
 		{Provider: "p", StatusCode: 1},
 		{Provider: "p", BeforeMs: 1000, AfterMs: 999},
 		{Provider: "p", AfterMs: 5},
