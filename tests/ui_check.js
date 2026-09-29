@@ -2001,7 +2001,9 @@ async function main() {
     ];
     fire('snapshot', { feed_id: 'feedB', seq: 90, incremental: false,
       records: mixed, counters: { in_flight: 0, total_requests: 7, total_errors: 0 } });
-    await sleep(30);
+    // Wait for each fixture's own painted state instead of a fixed sleep: a
+    // loaded runner can stretch a fetch/render round trip past any hard time.
+    await settleUntil(() => rows().length === 7);
     check('the mixed ring paints the default window', rows().length === 7);
     logPage = {
       records: [
@@ -2012,7 +2014,9 @@ async function main() {
     };
     Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 200; } });
     w.navigateTo([{ dim: 'provider', id: 'scope-a.example' }]);
-    await sleep(50);
+    await settleUntil(() =>
+      rows().map(tr => tr.dataset.id).join() === 'sa-ring2,sa-ring1,sa-ring0,sa-old1,sa-old0' &&
+        w.eval('logArchive.length') === 2);
     const scopedIds = rows().map(tr => tr.dataset.id);
     check('the scoped view renders its own ring rows plus its own history rows',
       scopedIds.join() === 'sa-ring2,sa-ring1,sa-ring0,sa-old1,sa-old0' &&
@@ -2020,7 +2024,11 @@ async function main() {
     Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
     logPage = { records: [], more: false, cursor_ms: 0 };
     w.navigateTo([]);
-    await sleep(50);
+    await settleUntil(() =>
+      w.eval('logArchive.length') === 0 && rows().length === 7 &&
+        rows().some(tr => tr.dataset.id === 'p-row3') &&
+        rows().some(tr => tr.dataset.id === 'sa-ring2') &&
+        !rows().some(tr => tr.dataset.id.startsWith('sa-old')));
     check('the default view renders its own ring rows without the scope\'s history',
       w.eval('logArchive.length') === 0 && rows().length === 7 &&
         rows().some(tr => tr.dataset.id === 'p-row3') &&
