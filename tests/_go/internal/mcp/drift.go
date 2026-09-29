@@ -1,7 +1,9 @@
 package mcp
 
 import (
+	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -370,6 +372,103 @@ func TestDocumentedToolCountMatchesTheRegistry(t *testing.T) {
 			if match[1] != want {
 				t.Fatalf("%s states %q, the registry serves %s tools", doc.label, match[0], want)
 			}
+		}
+	}
+}
+
+// TestSetupTableMatchesTheFlags pins the setup table in docs/mcp.md to the
+// programmatic owner: the flag set registerOptions installs and the defaults
+// DefaultLimits() supplies (both resolved by the flag registration itself).
+// A changed default, a renamed flag or a renamed environment variable fails
+// here instead of shipping a guide that no longer sets up the server. The
+// environment name is read from the registered usage text, which is built from
+// the same constant the resolution reads, so the guide, the usage and the
+// lookup cannot disagree.
+func TestSetupTableMatchesTheFlags(t *testing.T) {
+	var o options
+	o.limits = DefaultLimits()
+	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	registerOptions(fs, &o)
+
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	const heading = "## Setup"
+	index := strings.Index(string(guide), heading)
+	if index < 0 {
+		t.Fatalf("docs/mcp.md must keep the %q section that documents the setup surface", heading)
+	}
+	section := string(guide)[index+len(heading):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
+	// A table body row starts with a backticked flag; the header and separator
+	// rows do not match. The default cell is either backticked or the literal
+	// (required) the two credential flags use.
+	row := regexp.MustCompile("^\\| `(--[a-z0-9-]+)` \\| `([A-Z0-9_]+)` \\| (?:(`([^`]+)`)|(\\(required\\))) \\|")
+	documented := map[string]string{}
+	documentedEnv := map[string]string{}
+	for _, line := range strings.Split(section, "\n") {
+		match := row.FindStringSubmatch(strings.TrimSpace(line))
+		if match == nil {
+			continue
+		}
+		if _, duplicate := documented[match[1]]; duplicate {
+			t.Fatalf("the setup table lists %s more than once", match[1])
+		}
+		def := match[4]
+		if def == "" {
+			def = match[5]
+		}
+		documented[match[1]] = def
+		documentedEnv[match[1]] = match[2]
+	}
+	if len(documented) == 0 {
+		t.Fatal("docs/mcp.md's setup table has no flag rows")
+	}
+	usageEnv := regexp.MustCompile(`\(env ([A-Z0-9_]+)\)`)
+	fs.VisitAll(func(f *flag.Flag) {
+		def, ok := documented["--"+f.Name]
+		if !ok {
+			t.Fatalf("docs/mcp.md's setup table omits --%s", f.Name)
+		}
+		match := usageEnv.FindStringSubmatch(f.Usage)
+		if match == nil {
+			t.Fatalf("the --%s usage text must name its environment variable", f.Name)
+		}
+		if got := documentedEnv["--"+f.Name]; got != match[1] {
+			t.Fatalf("docs/mcp.md pairs --%s with %s, the owner uses %s", f.Name, got, match[1])
+		}
+		getter, ok := f.Value.(flag.Getter)
+		if !ok {
+			t.Fatalf("--%s is not a flag.Getter", f.Name)
+		}
+		switch value := getter.Get().(type) {
+		case int:
+			got, err := strconv.Atoi(def)
+			if err != nil || got != value {
+				t.Fatalf("docs/mcp.md states --%s default %q, the owner default is %d", f.Name, def, value)
+			}
+		case time.Duration:
+			got, err := time.ParseDuration(def)
+			if err != nil || got != value {
+				t.Fatalf("docs/mcp.md states --%s default %q, the owner default is %s", f.Name, def, value)
+			}
+		case string:
+			// The two credential flags are deliberately required: the table
+			// says so and the registration leaves them empty.
+			if value != "" || def != "(required)" {
+				t.Fatalf("docs/mcp.md states --%s default %q, the owner default is %q", f.Name, def, value)
+			}
+		default:
+			t.Fatalf("--%s has unexpected flag type %T", f.Name, value)
+		}
+	})
+	for name := range documented {
+		if fs.Lookup(strings.TrimPrefix(name, "--")) == nil {
+			t.Fatalf("docs/mcp.md documents %s, which the owner does not register", name)
 		}
 	}
 }

@@ -66,6 +66,54 @@ type options struct {
 	limits        Limits
 }
 
+// Environment variable names. Each one is stated once: the flag usage text
+// that documents it and the resolution that reads it both come from here, so a
+// rename cannot leave the published surface disagreeing with the code. The
+// setup table in docs/mcp.md is compared with both by
+// TestSetupTableMatchesTheFlags.
+const (
+	envProxyURL       = "MILLIVOLT_MCP_PROXY_URL"
+	envOperatorToken  = "MILLIVOLT_MCP_OPERATOR_TOKEN"
+	envQueryMaxRows   = "MILLIVOLT_MCP_QUERY_MAX_ROWS"
+	envQueryMaxBytes  = "MILLIVOLT_MCP_QUERY_MAX_BYTES"
+	envPageSize       = "MILLIVOLT_MCP_PAGE_SIZE"
+	envCaptureBytes   = "MILLIVOLT_MCP_CAPTURE_MAX_BYTES"
+	envQueryTimeout   = "MILLIVOLT_MCP_QUERY_TIMEOUT"
+	envRequestTimeout = "MILLIVOLT_MCP_TIMEOUT"
+)
+
+// registerOptions installs every setup flag on fs, with the current limits as
+// the registration defaults. It is the programmatic owner of the flag names,
+// defaults and environment names the setup table documents, and parse is its
+// only production caller.
+func registerOptions(fs *flag.FlagSet, o *options) {
+	fs.StringVar(&o.proxyURL, "proxy-url", "",
+		"millivolt proxy origin, for example http://127.0.0.1:8081 (env "+envProxyURL+")")
+	// The proxy URL takes an EMPTY default for the same reason the credential
+	// does: its environment value can carry userinfo, and flag.PrintDefaults
+	// renders `(default "...")` on -h, --help and every parse error, which an
+	// MCP host does not capture. The environment is resolved after parsing.
+	// The credential is registered with an EMPTY default and resolved after
+	// parsing. flag.PrintDefaults renders `(default "...")` for any flag whose
+	// default is not its zero value, and it runs on -h, on --help and on every
+	// flag parse error - so a credential used as a flag default is printed in
+	// plaintext to stderr, which an MCP host does not capture.
+	fs.StringVar(&o.operatorToken, "operator-token", "",
+		"the proxy's "+envOperatorToken+"; the value is never echoed in usage output (env "+envOperatorToken+")")
+	fs.IntVar(&o.limits.QueryMaxRows, "query-max-rows", o.limits.QueryMaxRows,
+		"row cap applied to query results before the explicit truncation marker (env "+envQueryMaxRows+")")
+	fs.IntVar(&o.limits.QueryMaxBytes, "query-max-bytes", o.limits.QueryMaxBytes,
+		"encoded-size cap on one query result; whole rows are kept until the budget runs out (env "+envQueryMaxBytes+")")
+	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
+		"default page size for the record and capture listings (env "+envPageSize+")")
+	fs.IntVar(&o.limits.CaptureBytes, "capture-max-bytes", o.limits.CaptureBytes,
+		"document size above which a capture is withheld whole, in bytes (env "+envCaptureBytes+")")
+	fs.DurationVar(&o.limits.QueryTimeout, "query-timeout", o.limits.QueryTimeout,
+		"bound on a full-history chart or explorer read (env "+envQueryTimeout+")")
+	fs.DurationVar(&o.limits.Timeout, "timeout", o.limits.Timeout,
+		"bound on every call to the proxy (env "+envRequestTimeout+")")
+}
+
 // parse resolves the setup parameters. Flags win over environment variables;
 // an empty environment value is treated as unset so an empty container
 // interpolation falls through to the default rather than to a broken value.
@@ -82,53 +130,29 @@ func parse(program string, args []string, lookupEnv func(string) (string, bool),
 		timeout       time.Duration
 	)
 	var err error
-	if queryMaxRows, err = envInt(lookupEnv, "MILLIVOLT_MCP_QUERY_MAX_ROWS", defaults.QueryMaxRows); err != nil {
+	if queryMaxRows, err = envInt(lookupEnv, envQueryMaxRows, defaults.QueryMaxRows); err != nil {
 		return options{}, err
 	}
-	if queryMaxBytes, err = envInt(lookupEnv, "MILLIVOLT_MCP_QUERY_MAX_BYTES", defaults.QueryMaxBytes); err != nil {
+	if queryMaxBytes, err = envInt(lookupEnv, envQueryMaxBytes, defaults.QueryMaxBytes); err != nil {
 		return options{}, err
 	}
-	if pageSize, err = envInt(lookupEnv, "MILLIVOLT_MCP_PAGE_SIZE", defaults.PageSize); err != nil {
+	if pageSize, err = envInt(lookupEnv, envPageSize, defaults.PageSize); err != nil {
 		return options{}, err
 	}
-	if captureBytes, err = envInt(lookupEnv, "MILLIVOLT_MCP_CAPTURE_MAX_BYTES", defaults.CaptureBytes); err != nil {
+	if captureBytes, err = envInt(lookupEnv, envCaptureBytes, defaults.CaptureBytes); err != nil {
 		return options{}, err
 	}
-	if queryTimeout, err = envDuration(lookupEnv, "MILLIVOLT_MCP_QUERY_TIMEOUT", defaults.QueryTimeout); err != nil {
+	if queryTimeout, err = envDuration(lookupEnv, envQueryTimeout, defaults.QueryTimeout); err != nil {
 		return options{}, err
 	}
-	if timeout, err = envDuration(lookupEnv, "MILLIVOLT_MCP_TIMEOUT", defaults.Timeout); err != nil {
+	if timeout, err = envDuration(lookupEnv, envRequestTimeout, defaults.Timeout); err != nil {
 		return options{}, err
 	}
 	fs := flag.NewFlagSet(program, flag.ContinueOnError)
 	fs.SetOutput(output)
 	var o options
 	o.limits = Limits{QueryMaxRows: queryMaxRows, QueryMaxBytes: queryMaxBytes, PageSize: pageSize, CaptureBytes: captureBytes, QueryTimeout: queryTimeout, Timeout: timeout}
-	fs.StringVar(&o.proxyURL, "proxy-url", "",
-		"millivolt proxy origin, for example http://127.0.0.1:8081 (env MILLIVOLT_MCP_PROXY_URL)")
-	// The proxy URL takes an EMPTY default for the same reason the credential
-	// does: its environment value can carry userinfo, and flag.PrintDefaults
-	// renders `(default "...")` on -h, --help and every parse error, which an
-	// MCP host does not capture. The environment is resolved after parsing.
-	// The credential is registered with an EMPTY default and resolved after
-	// parsing. flag.PrintDefaults renders `(default "...")` for any flag whose
-	// default is not its zero value, and it runs on -h, on --help and on every
-	// flag parse error - so a credential used as a flag default is printed in
-	// plaintext to stderr, which an MCP host does not capture.
-	fs.StringVar(&o.operatorToken, "operator-token", "",
-		"the proxy's MILLIVOLT_OPERATOR_TOKEN; the value is never echoed in usage output (env MILLIVOLT_MCP_OPERATOR_TOKEN)")
-	fs.IntVar(&o.limits.QueryMaxRows, "query-max-rows", o.limits.QueryMaxRows,
-		"row cap applied to query results before the explicit truncation marker (env MILLIVOLT_MCP_QUERY_MAX_ROWS)")
-	fs.IntVar(&o.limits.QueryMaxBytes, "query-max-bytes", o.limits.QueryMaxBytes,
-		"encoded-size cap on one query result; whole rows are kept until the budget runs out (env MILLIVOLT_MCP_QUERY_MAX_BYTES)")
-	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
-		"default page size for the record and capture listings (env MILLIVOLT_MCP_PAGE_SIZE)")
-	fs.IntVar(&o.limits.CaptureBytes, "capture-max-bytes", o.limits.CaptureBytes,
-		"document size above which a capture is withheld whole, in bytes (env MILLIVOLT_MCP_CAPTURE_MAX_BYTES)")
-	fs.DurationVar(&o.limits.QueryTimeout, "query-timeout", o.limits.QueryTimeout,
-		"bound on a full-history chart or explorer read (env MILLIVOLT_MCP_QUERY_TIMEOUT)")
-	fs.DurationVar(&o.limits.Timeout, "timeout", o.limits.Timeout,
-		"bound on every call to the proxy (env MILLIVOLT_MCP_TIMEOUT)")
+	registerOptions(fs, &o)
 	if err := fs.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -137,10 +161,10 @@ func parse(program string, args []string, lookupEnv func(string) (string, bool),
 	// empty --operator-token is a deliberate (and invalid) choice, while an
 	// absent flag falls through to the environment.
 	if !named(fs, "proxy-url") {
-		o.proxyURL = envString(lookupEnv, "MILLIVOLT_MCP_PROXY_URL", "")
+		o.proxyURL = envString(lookupEnv, envProxyURL, "")
 	}
 	if !named(fs, "operator-token") {
-		o.operatorToken = envString(lookupEnv, "MILLIVOLT_MCP_OPERATOR_TOKEN", "")
+		o.operatorToken = envString(lookupEnv, envOperatorToken, "")
 	}
 	if fs.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
