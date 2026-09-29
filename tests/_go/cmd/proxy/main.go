@@ -449,6 +449,20 @@ func TestOperatorLockoutHoldsAtCap(t *testing.T) {
 	}
 }
 
+// TestOperatorTokenBandMatchesThePublishedReference pins the boot-time
+// credential band, whose owner is operatorTokenMinLen/MaxLen in
+// cmd/proxy/operator.go, to the band the MCP server publishes and enforces
+// (internal/mcp/limits.go operatorTokenMinLen/MaxLen, itself pinned by
+// tests/_go/internal/mcp/drift.go). A min above 16 would refuse a credential
+// the MCP server accepts; a min below it would arm a trivially short one.
+// The mutation round proved nothing failed when the owner moved.
+func TestOperatorTokenBandMatchesThePublishedReference(t *testing.T) {
+	if operatorTokenMinLen != 16 || operatorTokenMaxLen != 512 {
+		t.Fatalf("operator token band = %d..%d, want 16..512 (published by internal/mcp limits)",
+			operatorTokenMinLen, operatorTokenMaxLen)
+	}
+}
+
 // TestOperatorTokenEnv owns the boot-credential contract: unset denies the
 // whole plane (armed, no credential); set but empty or too short fails the
 // boot instead of silently degrading to a weaker policy.
