@@ -3,16 +3,20 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -626,5 +630,33 @@ func TestThrottleSnapshotMatchesGET(t *testing.T) {
 	throttles, ok := st["throttles"].([]any)
 	if !ok || len(throttles) != 1 {
 		t.Fatalf("throttles = %v, want 1", st["throttles"])
+	}
+}
+
+// TestMCPThrottleSchemaMirrorsTheProxyBands pins the model-visible throttle
+// argument documentation to the proxy constants that enforce it. The MCP
+// server duplicates the bands so a typo becomes a readable tool message
+// instead of a request the proxy refuses after assembly; the proxy owner is
+// the source, and the schema text is what the model reads, so a band change on
+// either side must fail here.
+func TestMCPThrottleSchemaMirrorsTheProxyBands(t *testing.T) {
+	windowBand := fmt.Sprintf("%s to %dh", minLimitWindow, int(maxLimitWindow/time.Hour))
+	for _, tc := range []struct {
+		field string
+		want  string
+	}{
+		{"Concurrency", "0 to " + strconv.Itoa(maxLimitConcurrency)},
+		{"Requests", "0 to " + strconv.FormatInt(maxLimitRequests, 10)},
+		{"Tokens", "0 to " + strconv.FormatInt(maxLimitTokens, 10)},
+		{"RequestWindow", windowBand},
+		{"TokenWindow", windowBand},
+	} {
+		field, ok := reflect.TypeOf(mcp.SetThrottleInput{}).FieldByName(tc.field)
+		if !ok {
+			t.Fatalf("mcp.SetThrottleInput has no %s field", tc.field)
+		}
+		if tag := string(field.Tag.Get("jsonschema")); !strings.Contains(tag, tc.want) {
+			t.Fatalf("mcp.SetThrottleInput.%s schema %q must state the proxy band %q", tc.field, tag, tc.want)
+		}
 	}
 }
