@@ -172,7 +172,9 @@ func (e *APIError) Error() string {
 // The credential is redacted from the RESULT, not only from the transport
 // error: an endpoint that reflects the Authorization header back into its own
 // failure body would otherwise hand the credential to the model verbatim, and
-// everything this returns is logged and pasted elsewhere.
+// everything this returns is logged and pasted elsewhere. The redaction runs on
+// the full text BEFORE the bound, so a token straddling the bound cannot lose
+// its matching half and survive as a fragment.
 func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	message := strings.TrimSpace(string(body))
 	var flat struct {
@@ -182,9 +184,14 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 		message = flat.Error
 	}
 	if message != "" {
-		// Both shapes get the same bound and whitespace collapse: a flat
-		// {"error": "<huge>"} is exactly as able to fill a model context as an
-		// unexpected HTML page, and the proxy's own text can carry newlines.
+		// Redact the FULL, untruncated message before collapsing whitespace and
+		// applying the bound. Bounding first would cut a credential straddling
+		// the boundary in half, and the surviving fragment no longer matches
+		// the whole token, so it would ride into the tool message. Both shapes
+		// get the same treatment: a flat {"error": "<huge>"} is exactly as able
+		// to fill a model context as an unexpected HTML page, and the proxy's
+		// own text can carry newlines.
+		message = redactCredential(message, token)
 		message = strings.Join(strings.Fields(message), " ")
 		if len(message) > maxErrorBodyBytes {
 			message = message[:maxErrorBodyBytes] + " [truncated]"
@@ -192,7 +199,7 @@ func newAPIError(resp *http.Response, body []byte, token string) *APIError {
 	}
 	return &APIError{
 		Status:     resp.StatusCode,
-		Message:    redactCredential(errorMessage(message, resp.StatusCode), token),
+		Message:    errorMessage(message, resp.StatusCode),
 		RetryAfter: sanitizeRetryAfter(resp.Header.Get("Retry-After")),
 		Challenge:  resp.Header.Get("WWW-Authenticate"),
 	}

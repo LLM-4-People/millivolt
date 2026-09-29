@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -360,4 +361,49 @@ func TestErrorBodyIsRedactedOfTheCredential(t *testing.T) {
 		t.Fatalf("error must be an *APIError, got %T", err)
 	}
 	assertNoToken(t, "APIError.Message", apiErr.Message)
+}
+
+// TestErrorBodyCredentialStraddlingTheExcerptBoundaryIsRedacted is the
+// regression for redaction running AFTER the excerpt bound: a credential that
+// straddles the 4 KiB boundary was cut in half before the full token was
+// matched, so a recognizable fragment of the credential survived in the tool
+// message. The full message must be redacted first and bounded second, for
+// both the structured {"error": ...} shape and the non-JSON excerpt.
+func TestErrorBodyCredentialStraddlingTheExcerptBoundaryIsRedacted(t *testing.T) {
+	// A distinctive credential, so a surviving fragment is unambiguous: none
+	// of the padding characters occurs in it, and the service is built with
+	// this token rather than the shared fixture.
+	const token = "QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ"
+	for _, shape := range []struct {
+		name string
+		body func(string) string
+	}{
+		{"structured", func(message string) string { return `{"error":` + quote(message) + `}` }},
+		{"excerpt", func(message string) string { return message }},
+	} {
+		for offset := 4094; offset <= 4098; offset++ {
+			t.Run(shape.name+"/"+strconv.Itoa(offset), func(t *testing.T) {
+				proxy := newFakeProxy(t)
+				proxy.respond(http.MethodGet, explorerPath, cannedResponse{
+					Status: http.StatusBadGateway, ContentType: "application/json",
+					Body: shape.body(strings.Repeat("X", offset) + token + strings.Repeat("Y", 5000)),
+				})
+				service, err := NewService(proxy.origin(), token, DefaultLimits())
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = service.explore(context.Background(), ExploreInput{Dim: "provider"})
+				if err == nil {
+					t.Fatal("expected the upstream failure")
+				}
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("error must be an *APIError, got %T", err)
+				}
+				if strings.Contains(apiErr.Message, "Q") || strings.Contains(err.Error(), token) {
+					t.Fatalf("a credential fragment survived the excerpt boundary: %q", apiErr.Message)
+				}
+			})
+		}
+	}
 }
