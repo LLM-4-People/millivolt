@@ -396,17 +396,19 @@ var tableDocs = []TableDoc{
 			{Name: "debug_session_id", Type: "TEXT", Meaning: "the capture session that matched"},
 			{Name: "client_disconnected", Type: "INTEGER", Meaning: "1 when the client went away first"},
 			{Name: "path", Type: "TEXT", Meaning: "inbound request path"},
-			{Name: "req_max_tokens", Type: "INTEGER", Meaning: "requested max_tokens; 0 when unset"},
-			{Name: "req_temperature", Type: "REAL", Meaning: "requested temperature; 0 when unset, so 0 and unset are indistinguishable"},
-			{Name: "req_top_p", Type: "REAL", Meaning: "requested top_p; 0 when unset"},
-			{Name: "req_n", Type: "INTEGER", Meaning: "requested number of choices"},
+			{Name: "req_max_tokens", Type: "INTEGER", Meaning: "requested max_tokens; req_param_presence distinguishes unset from an explicit 0"},
+			{Name: "req_temperature", Type: "REAL", Meaning: "requested temperature; req_param_presence distinguishes unset from an explicit 0"},
+			{Name: "req_top_p", Type: "REAL", Meaning: "requested top_p; req_param_presence distinguishes unset from an explicit 0"},
+			{Name: "req_n", Type: "INTEGER", Meaning: "requested number of choices; req_param_presence distinguishes unset from an explicit 0"},
 			{Name: "req_stop", Type: "INTEGER", Meaning: "count of stop sequences requested"},
-			{Name: "req_seed", Type: "INTEGER", Meaning: "requested seed; 0 when unset"},
+			{Name: "req_seed", Type: "INTEGER", Meaning: "requested seed; req_param_presence distinguishes unset from an explicit 0"},
+			{Name: "req_presence_pen", Type: "REAL", Meaning: "requested presence_penalty; req_param_presence distinguishes unset from an explicit 0"},
+			{Name: "req_frequency_pen", Type: "REAL", Meaning: "requested frequency_penalty; req_param_presence distinguishes unset from an explicit 0"},
 			{Name: "req_tools_count", Type: "INTEGER", Meaning: "how many tool definitions the request offered"},
 			{Name: "req_tool_choice", Type: "TEXT", Meaning: "requested tool choice policy"},
-			{Name: "req_parallel_tools", Type: "INTEGER", Meaning: "parallel tool call flag; 0 when unset or off"},
+			{Name: "req_parallel_tools", Type: "INTEGER", Meaning: "parallel tool call flag; req_param_presence distinguishes unset from an explicit false"},
 			{Name: "req_logit_bias", Type: "INTEGER", Meaning: "whether a logit bias was supplied; the values themselves are not stored"},
-			{Name: "req_top_logprobs", Type: "INTEGER", Meaning: "requested top_logprobs"},
+			{Name: "req_top_logprobs", Type: "INTEGER", Meaning: "requested top_logprobs; req_param_presence distinguishes unset from an explicit 0"},
 			{Name: "req_logprobs", Type: "INTEGER", Meaning: "whether logprobs were requested"},
 			{Name: "req_response_format", Type: "TEXT", Meaning: "requested response format, for example json_object"},
 			{Name: "req_service_tier", Type: "TEXT", Meaning: "requested service tier"},
@@ -415,13 +417,18 @@ var tableDocs = []TableDoc{
 			{Name: "req_verbosity", Type: "TEXT", Meaning: "requested verbosity level"},
 			{Name: "req_metadata_keys", Type: "INTEGER", Meaning: "count of client metadata keys; the values are not stored"},
 			{Name: "req_stream_opts", Type: "INTEGER", Meaning: "stream options bitfield as sent by the client"},
+			{Name: "req_param_presence", Type: "INTEGER", Meaning: "bitmask over the nine tracked optional parameters where an explicit 0/false is distinguishable from absent; " +
+				"a NEGATIVE value marks a pre-tracking row where only nonzero values were known"},
 		},
 		Notes: []string{
 			"No index on status_code, error_type or cost: filter on started_at ranges or an indexed column to keep a scan bounded.",
 			"debug = 1 rows are exactly the requests with a readable capture document (until debug_capture_ttl expires), and a purge of those rows " +
 				"deletes the capture document with them.",
-			"The req_* family records the request PARAMETERS the client asked for, not what the upstream did. 0 is used for every unset value, " +
-				"so a 0 cannot be distinguished from an absent one.",
+			"The req_* family records the request PARAMETERS the client asked for, not what the upstream did. Most columns use 0 for an unset value, " +
+				"so 0 and absent read the same there. The exception is the nine optional parameters tracked by req_param_presence: " +
+				"req_max_tokens, req_temperature, req_top_p, req_n, req_presence_pen, req_frequency_pen, req_seed, req_parallel_tools and req_top_logprobs, " +
+				"in bit order from 1 (req_max_tokens) to 256 (req_top_logprobs). Its bit is set when the client sent the parameter, even as an explicit 0 or false; " +
+				"a negative mask means the row predates presence tracking, where only nonzero values were known.",
 			"prompt_preview and response_preview are captured content and are SENSITIVE; with content capture off they are empty.",
 		},
 	},

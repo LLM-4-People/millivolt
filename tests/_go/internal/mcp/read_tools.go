@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 const (
@@ -642,6 +644,60 @@ func TestDescribeVocabulariesAreTheProxyOnes(t *testing.T) {
 	// Every explorer dimension has a vocabulary entry, so none is undiscoverable.
 	if len(out.Vocabularies) != len(Dimensions)+1 {
 		t.Fatalf("vocabularies = %d, want one per dimension plus the live selector", len(out.Vocabularies))
+	}
+}
+
+// TestDescribeDocumentsEveryTrackedRequestParam derives the presence-tracked
+// columns from the durable owner - storage.RequestParamColumns(), the bit
+// mapping in internal/storage/request_params.go whose DDL lives in store.go -
+// rather than a second hand-written list. A column added to presence tracking
+// therefore cannot be missing from the reference, and the old blanket claim
+// that every req_* zero was indistinguishable from absent cannot come back.
+func TestDescribeDocumentsEveryTrackedRequestParam(t *testing.T) {
+	documented := map[string]string{}
+	var notes []string
+	for _, table := range tableDocs {
+		if table.Table != "requests" {
+			continue
+		}
+		for _, column := range table.Columns {
+			documented[column.Name] = column.Meaning
+		}
+		notes = append(notes, table.Notes...)
+	}
+	note := strings.Join(notes, " ")
+	if !strings.Contains(note, "req_param_presence") {
+		t.Fatalf("the requests note must state the presence mask: %q", note)
+	}
+	if strings.Contains(note, "a 0 cannot be distinguished from an absent one") {
+		t.Fatalf("the note still carries the false blanket zero claim: %q", note)
+	}
+	if !strings.Contains(note, "NEGATIVE") && !strings.Contains(note, "negative") {
+		t.Fatalf("the note must state the legacy negative mask: %q", note)
+	}
+	tracked := storage.RequestParamColumns()
+	if len(tracked) == 0 {
+		t.Fatal("the storage owner lists no presence-tracked columns")
+	}
+	seen := map[string]bool{}
+	for _, column := range tracked {
+		if seen[column] {
+			t.Fatalf("duplicate presence-tracked column %q", column)
+		}
+		seen[column] = true
+		meaning, ok := documented[column]
+		if !ok {
+			t.Fatalf("describe is missing the presence-tracked column %q", column)
+		}
+		if !strings.Contains(meaning, "req_param_presence") {
+			t.Fatalf("the meaning of %q must name the presence mask: %q", column, meaning)
+		}
+		if !strings.Contains(note, column) {
+			t.Fatalf("the presence note must name the tracked column %q: %q", column, note)
+		}
+	}
+	if _, ok := documented["req_param_presence"]; !ok {
+		t.Fatal("describe must document the req_param_presence column itself")
 	}
 }
 
