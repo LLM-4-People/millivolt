@@ -38,8 +38,9 @@ exit before any transport exists.
 
 The token is presented as `Authorization: Bearer <value>` on every request, and
 only there. The session cookie the proxy mints on a successful Bearer is never
-used: it would silently outlive a rotated credential. The token never reaches a
-URL, a log line or any tool output.
+used: it would silently outlive a rotated credential. The token is never placed
+in a URL or a log line, and failure text returned to the model is scrubbed
+before it is shown (see [Errors](#errors)).
 
 The token length band matches the proxy's own boot check (16 to 512
 characters). A credential the proxy would refuse to arm with is not a credential
@@ -279,6 +280,21 @@ unreachable proxy, a timeout, and a body that is not the expected document are
 reported the same way. The `.error` field is read regardless of `Content-Type`,
 because the operator routes are inconsistent and some answer `text/plain` with
 a JSON body.
+
+The returned text is scrubbed of the operator credential first, because a
+reflecting endpoint could otherwise put the `Authorization` value into its own
+failure message and hand it to the model. The scrub removes the literal token,
+any contiguous 8-byte fragment of it (so a credential split across two JSON
+string fields leaks no usable piece), percent escapes in any hex case
+(including full-byte nested forms), the query `+` form of a space, and
+JSON-escaped forms, including backslash-doubled text and surrogate pairs. Each
+form is decoded to a fixed point before matching: an encoding is either fully
+seen or the excerpt fails closed. Text that still decodes after three escape
+applications is not published partly decoded: the whole excerpt is replaced by
+`[redacted]` instead. The scan is bounded to the region that can still reach
+the excerpt; the excerpt itself is whitespace-collapsed and capped at 4 KiB
+after redaction, which runs before the cap so a credential straddling it cannot
+survive as a fragment.
 
 ## Example client configuration
 
