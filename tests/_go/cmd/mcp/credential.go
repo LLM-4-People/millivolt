@@ -96,6 +96,10 @@ func TestCredentialNeverReachesFlagOutput(t *testing.T) {
 		{"flag supplied, unknown flag", []string{"--bogus", "--operator-token", leakingToken}, nil},
 		{"flag supplied, bad flag value", []string{"--timeout", "nope", "--operator-token", leakingToken}, nil},
 		{"flag supplied, positional argument", []string{"stray", "--operator-token", leakingToken}, nil},
+		// A bare start with the token on the flag: parse succeeds and setup
+		// fails on the absent proxy URL, so the token passes through the
+		// post-parse diagnostics a bare environment start already covers.
+		{"flag supplied, bare start", []string{"--operator-token", leakingToken}, nil},
 		// The other setup flags must not become a channel for it either.
 		{"operator token before help", []string{"--operator-token", leakingToken, "-h"}, nil},
 	} {
