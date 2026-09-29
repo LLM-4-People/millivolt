@@ -473,13 +473,15 @@ func TestOperatorLockoutHoldsAtCap(t *testing.T) {
 // mcp.OperatorTokenMinLen..mcp.OperatorTokenMaxLen, inclusive. The boundary
 // cases are derived from the owner, so a diverging local value fails here. A
 // same-value local literal cannot be told apart by those behavior probes, so
-// the parsed source is inspected at the end: loadOperatorToken must read the
-// owner's variable name through os.LookupEnv and compare the value against the
-// owner band, and bearerToken must compare against the owner presentation cap.
-// The walk follows same-package helper calls, so extracting those reads into a
-// helper stays green; comments are absent from the AST and formatting is
-// irrelevant, so only real symbol use satisfies the guard. The owner's literal
-// pins live in tests/_go/internal/mcp/drift.go.
+// the parsed source is inspected at the end: loadOperatorToken must assign the
+// result of os.LookupEnv(mcp.ProxyTokenEnv) to a name and compare that value
+// against the owner band inside a decision condition, and bearerToken must
+// compare a presented length against the owner presentation cap in its if
+// condition. The walk follows same-package helper calls, so extracting those
+// reads into a helper stays green; comments are absent from the AST and
+// formatting is irrelevant, so only real symbol use satisfies the guard. A
+// discarded lookup or a discarded comparison is not a decision and fails. The
+// owner's literal pins live in tests/_go/internal/mcp/drift.go.
 func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 	minToken := strings.Repeat("x", mcp.OperatorTokenMinLen)
 	maxToken := strings.Repeat("x", mcp.OperatorTokenMaxLen)
@@ -520,10 +522,11 @@ func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 
 	// The behavior probes above cannot distinguish the owner symbols from
 	// same-value local literals, so the two read sites are pinned in the
-	// parsed source: loadOperatorToken owns the variable name and the boot
-	// band, bearerToken owns the presentation cap. Replacing any of these
-	// reads or comparisons with a literal fails here even when its value
-	// matches today, while comments and formatting cannot satisfy the guard.
+	// parsed source: loadOperatorToken owns the variable name, the assigned
+	// value and the boot band, bearerToken owns the presentation cap.
+	// Replacing any of these reads or comparisons with a literal fails here
+	// even when its value matches today, while comments, discarded
+	// expressions and formatting cannot satisfy the guard.
 	file, err := parser.ParseFile(token.NewFileSet(), "operator.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse cmd/proxy/operator.go: %v", err)
@@ -534,27 +537,32 @@ func TestOperatorGateUsesThePublishedTokenContract(t *testing.T) {
 		ok   bool
 		want string
 	}{
-		{"loadOperatorToken reads the owner variable name", uses.envLookup, "os.LookupEnv(mcp.ProxyTokenEnv)"},
-		{"loadOperatorToken compares against the owner minimum", uses.bandMin, "mcp.OperatorTokenMinLen"},
-		{"loadOperatorToken compares against the owner maximum", uses.bandMax, "mcp.OperatorTokenMaxLen"},
-		{"bearerToken compares against the owner presentation cap", uses.presentMax, "mcp.OperatorTokenMaxLen"},
+		{"loadOperatorToken assigns the owner variable lookup", uses.envLookup, "the assigned result of os.LookupEnv(mcp.ProxyTokenEnv)"},
+		{"loadOperatorToken's decision compares against the owner minimum", uses.bandMin, "mcp.OperatorTokenMinLen against the assigned value"},
+		{"loadOperatorToken's decision compares against the owner maximum", uses.bandMax, "mcp.OperatorTokenMaxLen against the assigned value"},
+		{"bearerToken's if condition compares a length against the owner presentation cap", uses.presentMax, "mcp.OperatorTokenMaxLen against a len() call"},
 	} {
 		if !read.ok {
-			t.Errorf("%s: %s must appear in a real expression of the parsed source; a comment or literal does not carry the contract",
+			t.Errorf("%s: %s must appear in a real decision of the parsed source; a comment, a discarded lookup, a discarded comparison or a same-value literal does not carry the contract",
 				read.name, read.want)
 		}
 	}
 }
 
-// operatorOwnerUses reports where the internal/mcp owner selectors appear in
-// real expressions of loadOperatorToken and bearerToken: the parsed AST sees
-// symbol use, never comments, and the walk follows same-package helper calls
-// transitively so extracting a helper that still reads the owners stays green.
+// operatorOwnerUses reports how the internal/mcp owner selectors enter the
+// credential decisions of loadOperatorToken and bearerToken: the parsed AST
+// sees symbol use, never comments, and the walk follows same-package helper
+// calls transitively so extracting a helper that still reads the owners stays
+// green. The lookup flag requires the os.LookupEnv result to reach a named
+// variable, and the band flags require that variable (also as a helper
+// parameter bound at a call site) to be compared against the owner band inside
+// a decision condition, so a discarded lookup or discarded comparison cannot
+// satisfy the guard even when a same-value literal sits at the live site.
 type operatorOwnerUses struct {
-	envLookup  bool // os.LookupEnv(mcp.ProxyTokenEnv)
-	bandMin    bool // a comparison with mcp.OperatorTokenMinLen as an operand
-	bandMax    bool // a comparison with mcp.OperatorTokenMaxLen as an operand
-	presentMax bool // bearerToken's comparison with mcp.OperatorTokenMaxLen
+	envLookup  bool // os.LookupEnv(mcp.ProxyTokenEnv) assigned to a name
+	bandMin    bool // a decision condition compares that value with mcp.OperatorTokenMinLen
+	bandMax    bool // a decision condition compares that value with mcp.OperatorTokenMaxLen
+	presentMax bool // bearerToken's if condition compares a length with mcp.OperatorTokenMaxLen
 }
 
 // collectOperatorOwnerUses walks the two credential read sites plus every
@@ -579,65 +587,216 @@ func collectOperatorOwnerUses(t *testing.T, file *ast.File) operatorOwnerUses {
 		for len(queue) > 0 {
 			current := queue[0]
 			queue = queue[1:]
-			ast.Inspect(current, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
+			for _, name := range calledFunctions(current, funcs) {
+				if !seen[name] {
+					seen[name] = true
+					queue = append(queue, funcs[name])
+					out = append(out, funcs[name])
 				}
-				id, ok := call.Fun.(*ast.Ident)
-				if !ok || seen[id.Name] {
-					return true
-				}
-				if callee, ok := funcs[id.Name]; ok {
-					seen[id.Name] = true
-					queue = append(queue, callee)
-					out = append(out, callee)
-				}
-				return true
-			})
+			}
 		}
 		return out
 	}
 
 	var uses operatorOwnerUses
-	for _, fn := range reachable("loadOperatorToken") {
-		ast.Inspect(fn, func(n ast.Node) bool {
-			switch node := n.(type) {
-			case *ast.CallExpr:
-				if selectorNamed(node.Fun, "os", "LookupEnv") {
-					for _, arg := range node.Args {
-						if selectorNamed(arg, "mcp", "ProxyTokenEnv") {
-							uses.envLookup = true
-						}
-					}
-				}
-			case *ast.BinaryExpr:
-				if !comparisonOperator(node.Op) {
-					return true
-				}
-				if selectorNamed(node.X, "mcp", "OperatorTokenMinLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMinLen") {
-					uses.bandMin = true
-				}
-				if selectorNamed(node.X, "mcp", "OperatorTokenMaxLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMaxLen") {
-					uses.bandMax = true
-				}
+	load := reachable("loadOperatorToken")
+	tokenNames := lookedUpTokenNames(load, funcs)
+	uses.envLookup = len(tokenNames) > 0
+	for _, fn := range load {
+		walkConditionComparisons(fn, func(cmp *ast.BinaryExpr) {
+			if comparisonWithOwnerValue(cmp, tokenNames, "OperatorTokenMinLen") {
+				uses.bandMin = true
 			}
-			return true
+			if comparisonWithOwnerValue(cmp, tokenNames, "OperatorTokenMaxLen") {
+				uses.bandMax = true
+			}
 		})
 	}
 	for _, fn := range reachable("bearerToken") {
+		walkConditionComparisons(fn, func(cmp *ast.BinaryExpr) {
+			if comparisonWithOwnerLength(cmp, "OperatorTokenMaxLen") {
+				uses.presentMax = true
+			}
+		})
+	}
+	return uses
+}
+
+// calledFunctions returns the names of same-package functions called in fn.
+func calledFunctions(fn *ast.FuncDecl, funcs map[string]*ast.FuncDecl) []string {
+	var names []string
+	ast.Inspect(fn, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if _, ok := funcs[id.Name]; ok {
+			names = append(names, id.Name)
+		}
+		return true
+	})
+	return names
+}
+
+// lookedUpTokenNames returns every name in the reachable graph that receives
+// the result of os.LookupEnv(mcp.ProxyTokenEnv): directly from the assignment,
+// or as a same-package helper parameter bound to such a name at a call site
+// (propagated to a fixpoint). A blank-only assignment yields no names, so a
+// discarded lookup cannot satisfy the guard.
+func lookedUpTokenNames(funcs []*ast.FuncDecl, all map[string]*ast.FuncDecl) map[string]bool {
+	names := map[string]bool{}
+	for _, fn := range funcs {
 		ast.Inspect(fn, func(n ast.Node) bool {
-			node, ok := n.(*ast.BinaryExpr)
-			if !ok || !comparisonOperator(node.Op) {
+			assign, ok := n.(*ast.AssignStmt)
+			if !ok {
 				return true
 			}
-			if selectorNamed(node.X, "mcp", "OperatorTokenMaxLen") || selectorNamed(node.Y, "mcp", "OperatorTokenMaxLen") {
-				uses.presentMax = true
+			for i, rhs := range assign.Rhs {
+				if i >= len(assign.Lhs) || !lookupOfProxyTokenEnv(rhs) {
+					continue
+				}
+				if id, ok := assign.Lhs[i].(*ast.Ident); ok && id.Name != "_" {
+					names[id.Name] = true
+				}
 			}
 			return true
 		})
 	}
-	return uses
+	for changed := true; changed; {
+		changed = false
+		for _, fn := range funcs {
+			ast.Inspect(fn, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				callee, ok := all[id.Name]
+				if !ok || callee.Type.Params == nil {
+					return true
+				}
+				index := 0
+				for _, field := range callee.Type.Params.List {
+					if _, variadic := field.Type.(*ast.Ellipsis); variadic {
+						return true
+					}
+					for _, param := range field.Names {
+						if index < len(call.Args) {
+							if arg, ok := call.Args[index].(*ast.Ident); ok && names[arg.Name] && !names[param.Name] {
+								names[param.Name] = true
+								changed = true
+							}
+						}
+						index++
+					}
+				}
+				return true
+			})
+		}
+	}
+	return names
+}
+
+// lookupOfProxyTokenEnv reports the exact call shape os.LookupEnv(mcp.ProxyTokenEnv).
+func lookupOfProxyTokenEnv(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || !selectorNamed(call.Fun, "os", "LookupEnv") {
+		return false
+	}
+	for _, arg := range call.Args {
+		if selectorNamed(arg, "mcp", "ProxyTokenEnv") {
+			return true
+		}
+	}
+	return false
+}
+
+// walkConditionComparisons visits every relational comparison inside a decision
+// condition of fn: an if condition or a switch case expression. A comparison
+// used as a discarded expression is not a decision and is never visited.
+func walkConditionComparisons(fn *ast.FuncDecl, visit func(*ast.BinaryExpr)) {
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.IfStmt:
+			visitComparisons(node.Cond, visit)
+		case *ast.CaseClause:
+			for _, expr := range node.List {
+				visitComparisons(expr, visit)
+			}
+		}
+		return true
+	})
+}
+
+// visitComparisons visits every relational comparison in one condition subtree.
+func visitComparisons(cond ast.Expr, visit func(*ast.BinaryExpr)) {
+	ast.Inspect(cond, func(n ast.Node) bool {
+		if cmp, ok := n.(*ast.BinaryExpr); ok && comparisonOperator(cmp.Op) {
+			visit(cmp)
+		}
+		return true
+	})
+}
+
+// comparisonWithOwnerValue reports whether cmp compares the owner selector
+// against the looked-up token value itself or its length.
+func comparisonWithOwnerValue(cmp *ast.BinaryExpr, tokenNames map[string]bool, owner string) bool {
+	if selectorNamed(cmp.X, "mcp", owner) {
+		return tokenValueExpr(cmp.Y, tokenNames)
+	}
+	if selectorNamed(cmp.Y, "mcp", owner) {
+		return tokenValueExpr(cmp.X, tokenNames)
+	}
+	return false
+}
+
+// tokenValueExpr reports whether expr is the looked-up token variable or its
+// len() call.
+func tokenValueExpr(expr ast.Expr, tokenNames map[string]bool) bool {
+	if id, ok := expr.(*ast.Ident); ok {
+		return tokenNames[id.Name]
+	}
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || !isLenCall(call) {
+		return false
+	}
+	id, ok := call.Args[0].(*ast.Ident)
+	return ok && tokenNames[id.Name]
+}
+
+// comparisonWithOwnerLength reports whether cmp compares a len() call against
+// the owner selector, the presentation-cap shape bearerToken owns.
+func comparisonWithOwnerLength(cmp *ast.BinaryExpr, owner string) bool {
+	if selectorNamed(cmp.X, "mcp", owner) {
+		return lengthCall(cmp.Y)
+	}
+	if selectorNamed(cmp.Y, "mcp", owner) {
+		return lengthCall(cmp.X)
+	}
+	return false
+}
+
+// lengthCall reports whether expr is a len() call on a named value.
+func lengthCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 1 || !isLenCall(call) {
+		return false
+	}
+	_, ok = call.Args[0].(*ast.Ident)
+	return ok
+}
+
+// isLenCall reports whether call is the builtin len applied to one argument.
+func isLenCall(call *ast.CallExpr) bool {
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "len"
 }
 
 // selectorNamed reports whether expr is the qualified selector pkg.name.
