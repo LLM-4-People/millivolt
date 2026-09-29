@@ -433,13 +433,18 @@ func (c *Client) storageSignal(ctx context.Context) (StorageInfo, error) {
 func auditSessions(sessions []debugSession) []AuditSession {
 	out := make([]AuditSession, 0, len(sessions))
 	for _, session := range sessions {
-		out = append(out, AuditSession{
-			ID: session.ID, Clients: session.Clients, Providers: session.Providers,
-			Models: session.Models, Duration: session.Duration, Until: session.Until,
-			RanMs: session.RanMs, Captures: session.Captures,
-		})
+		out = append(out, auditSession(session))
 	}
 	return out
+}
+
+// auditSession converts one proxy session document into the tool's shape.
+func auditSession(session debugSession) AuditSession {
+	return AuditSession{
+		ID: session.ID, Clients: session.Clients, Providers: session.Providers,
+		Models: session.Models, Duration: session.Duration, Until: session.Until,
+		RanMs: session.RanMs, Captures: session.Captures,
+	}
 }
 
 // auditStateOutput names the session a start actually acted on.
@@ -450,15 +455,32 @@ func auditSessions(sessions []debugSession) []AuditSession {
 // edited one was not the newest, and a model that then called
 // audit_stop(session_id: started.id) stopped the wrong capture. On a create the
 // id is resolved as the one that appeared and was not live before.
+//
+// The answer carries the full session that id resolves to, not just the id:
+// the fields are already in the response, and the alternative is a caller
+// re-reading the session state just to see its scope.
 func auditStateOutput(status *debugStatus, requested string, before []debugSession, storage StorageInfo, retention string) *AuditStartOutput {
+	id := resolveStartedSession(requested, before, status.Sessions)
 	return &AuditStartOutput{
-		Started:   AuditSession{ID: resolveStartedSession(requested, before, status.Sessions)},
+		Started:   startedSession(id, status.Sessions),
 		Edited:    requested != "",
 		Storage:   storage,
 		Retention: retention,
 		Sessions:  auditSessions(status.Sessions),
 		Warning:   status.Warning,
 	}
+}
+
+// startedSession returns the full session the resolved id names. An id the
+// proxy did not return (it should not) stays id-only so a follow-up stop still
+// has something to name.
+func startedSession(id string, sessions []debugSession) AuditSession {
+	for _, session := range sessions {
+		if session.ID == id {
+			return auditSession(session)
+		}
+	}
+	return AuditSession{ID: id}
 }
 
 // resolveStartedSession is the one owner of that answer.

@@ -435,6 +435,9 @@ func TestAuditStartNamesTheSessionItActedOn(t *testing.T) {
 	if created.Edited || created.Started.ID != "s1" {
 		t.Fatalf("a create must report the id that appeared: %+v", created)
 	}
+	if created.Started.RanMs != 2 || len(created.Started.Clients) != 1 || created.Started.Clients[0] != "dev" {
+		t.Fatalf("started must be the whole session in force, not an id: %+v", created.Started)
+	}
 	if len(created.Sessions) != 2 {
 		t.Fatalf("both live sessions must be reported: %+v", created.Sessions)
 	}
@@ -457,6 +460,9 @@ func TestAuditStartNamesTheSessionItActedOn(t *testing.T) {
 	}
 	if !edited.Edited || edited.Started.ID != "s0" {
 		t.Fatalf("an edit must report the REQUESTED id, not the newest: %+v", edited)
+	}
+	if edited.Started.RanMs != 3 || len(edited.Started.Clients) != 1 || edited.Started.Clients[0] != "dev" {
+		t.Fatalf("started must carry the edited session's own fields: %+v", edited.Started)
 	}
 	// And the id it reports is one audit_stop can actually stop.
 	if _, err := newTestService(t, newFakeProxyWithDebugStop(t), Limits{}).auditStop(context.Background(),
