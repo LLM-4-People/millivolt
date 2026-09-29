@@ -145,8 +145,13 @@ func TestDescribeRequestShapeAndOutput(t *testing.T) {
 	if !out.Storage.Enabled || out.KnownProviders[0] != "local" {
 		t.Fatalf("storage/vocabulary mapping = %+v %+v", out.Storage, out.KnownProviders)
 	}
-	if out.Limits.QueryMaxRows != DefaultLimits().QueryMaxRows || out.Limits.LogPageMax != logPageMax {
-		t.Fatalf("limits mapping = %+v", out.Limits)
+	// Exact literals, not the package constants the describe text is assigned
+	// from: comparing against logPageMax or DefaultLimits() moved with the
+	// owner, so changing the owner failed nothing. Owners: internal/config
+	// DashLogRowsMax (log page ceiling) and internal/mcp limits.go
+	// DefaultLimits (query rows and bytes).
+	if out.Limits.QueryMaxRows != 200 || out.Limits.LogPageMax != 500 {
+		t.Fatalf("limits mapping = %+v, want the published query row cap 200 and log page ceiling 500", out.Limits)
 	}
 	// The reference must carry the health predicates and the unit facts, or a
 	// model cannot write correct SQL.
@@ -685,12 +690,12 @@ func TestDescribeDocumentsEveryTrackedRequestParam(t *testing.T) {
 	if len(tracked) == 0 {
 		t.Fatal("the storage owner lists no presence-tracked columns")
 	}
-	seen := map[string]bool{}
+	trackedSet := map[string]bool{}
 	for _, column := range tracked {
-		if seen[column] {
+		if trackedSet[column] {
 			t.Fatalf("duplicate presence-tracked column %q", column)
 		}
-		seen[column] = true
+		trackedSet[column] = true
 		meaning, ok := documented[column]
 		if !ok {
 			t.Fatalf("describe is missing the presence-tracked column %q", column)
@@ -704,6 +709,19 @@ func TestDescribeDocumentsEveryTrackedRequestParam(t *testing.T) {
 	}
 	if _, ok := documented["req_param_presence"]; !ok {
 		t.Fatal("describe must document the req_param_presence column itself")
+	}
+	// Exact equality in the other direction: every column the reference
+	// documents as presence-tracked (its meaning names the mask) must be in the
+	// storage owner's set. Without this, deleting a column from
+	// RequestParamColumns() still passed, because only tracked⊆documented was
+	// checked.
+	for name, meaning := range documented {
+		if name == "req_param_presence" || !strings.Contains(meaning, "req_param_presence") {
+			continue
+		}
+		if !trackedSet[name] {
+			t.Fatalf("describe documents %q as presence-tracked, but storage.RequestParamColumns omits it", name)
+		}
 	}
 }
 
@@ -762,14 +780,18 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 		}
 	}
 	// Every advertised result limit is present, including the ones the tool
-	// enforces itself rather than the proxy.
-	if out.Limits.QueryMaxRowsCeiling != maxQueryRowsCeiling ||
-		out.Limits.PrometheusMaxLines != prometheusMaxLines ||
-		out.Limits.DefaultPageSize != DefaultLimits().PageSize ||
-		out.Limits.CaptureMaxBytes != DefaultLimits().CaptureBytes {
+	// enforces itself rather than the proxy. Pinned to exact literals rather
+	// than the package constants the describe text is assigned from, so a
+	// change on the owning side fails here. Owners: internal/mcp tools_read.go
+	// maxQueryRowsCeiling and prometheusMaxLines, and internal/mcp limits.go
+	// DefaultLimits (page size, capture bytes, query bytes).
+	if out.Limits.QueryMaxRowsCeiling != 100_000 ||
+		out.Limits.PrometheusMaxLines != 400 ||
+		out.Limits.DefaultPageSize != 50 ||
+		out.Limits.CaptureMaxBytes != 262_144 {
 		t.Fatalf("the limits must include the self-enforced caps: %+v", out.Limits)
 	}
-	if out.Limits.QueryMaxBytes != DefaultLimits().QueryMaxBytes {
+	if out.Limits.QueryMaxBytes != 131_072 {
 		t.Fatalf("the encoded-size clamp must be in the limits: %+v", out.Limits)
 	}
 	// The complete column reference, so an analysis never has to guess a name.
