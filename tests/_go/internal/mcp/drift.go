@@ -18,9 +18,11 @@ import (
 )
 
 // TestDescribeMirrorsTheProxyOwners pins every fact this server duplicates from
-// an owner it cannot import (an unexported constant) or deliberately mirrors,
-// so a change on the owning side fails here instead of leaving a
-// plausible-but-wrong reference in describe. Each assertion names its owner.
+// an owner it cannot import (an unexported constant) or deliberately mirrors.
+// An importable owner is compared directly, so a change on the owning side
+// fails here. An unexported cap is pinned by a literal here and by an
+// owner-side literal in tests/_go/internal/web/published_limits.go, so a change
+// on either side fails one of the two. Each assertion names its owner.
 func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	// Status classes: internal/web statusClass returns exactly these five,
 	// with cancel for 499 and err for everything else (3xx included). The
@@ -86,6 +88,9 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	}
 	// Chart bucket cap: the proxy's payload maximum is internal/web
 	// chartMaxBuckets+1 (the clock-aligned start can add one partial bucket).
+	// The owner itself is pinned by TestChartBucketCapMatchesThePublishedReference
+	// in tests/_go/internal/web/published_limits.go, so this literal catches a
+	// mirror edit and that test catches an owner edit.
 	if chartMaxBuckets != 31 {
 		t.Fatalf("chart bucket cap = %d, want 31 (owner: internal/web chartMaxBuckets+1)", chartMaxBuckets)
 	}

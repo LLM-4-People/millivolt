@@ -23,6 +23,20 @@ func TestExplorerNodeCapMatchesThePublishedReference(t *testing.T) {
 	}
 }
 
+// TestChartBucketCapMatchesThePublishedReference pins the traffic chart's
+// per-window bucket cap, whose owner is chartMaxBuckets in
+// internal/web/aggregate.go, to the cap the MCP reference publishes and
+// enforces (internal/mcp describe.go chartMaxBuckets, itself pinned by
+// tests/_go/internal/mcp/drift.go). The published ceiling is the owner plus one
+// clock-aligned partial bucket, so changing the owner without the published
+// reference would advertise a cap the server does not apply. The mutation round
+// proved nothing failed when chartMaxBuckets moved.
+func TestChartBucketCapMatchesThePublishedReference(t *testing.T) {
+	if chartMaxBuckets != 30 {
+		t.Fatalf("chartMaxBuckets = %d, want 30 (published by internal/mcp describe chartMaxBuckets as owner plus one alignment partial)", chartMaxBuckets)
+	}
+}
+
 // TestMCPErrorKeyExamplesAreProducedByTheOwner pins the error filter key
 // examples the MCP reference publishes to keys this package's errorEntries and
 // errorKey actually produce. The old reference showed "other||", which no
