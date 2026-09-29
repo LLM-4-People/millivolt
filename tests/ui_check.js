@@ -230,8 +230,17 @@ const pageOptions = {
       // dedicated /admin/ endpoints serve so state-driven UI stays exercised.
       if (u.includes('/metrics/bootstrap')) {
         const bp = fullPayload;
-        const bsince = new URL(url, 'http://x').searchParams.get('since');
-        const brecs = bsince ? bp.records.filter(r => r.__seq > Number(bsince)) : bp.records;
+        const bparams = new URL(url, 'http://x').searchParams;
+        const bsince = bparams.get('since');
+        // A cursor resume delivers only the requested epoch's rows. Once a
+        // test moved the page's feed, fullPayload still holds the previous
+        // process's ring; serving it under the live feed's identity (below)
+        // would fold records the new process never had. The canned ring
+        // answers only its own feed; a foreign feed has nothing to add.
+        const bsameFeed = !bparams.get('feed') || bparams.get('feed') === bp.feed_id;
+        const brecs = bsince
+          ? (bsameFeed ? bp.records.filter(r => r.__seq > Number(bsince)) : [])
+          : bp.records;
         return Promise.resolve({ ok: true, json: async () => ({
           records: JSON.parse(JSON.stringify(brecs)),
           in_flight_records: bp.in_flight_records,
@@ -3471,13 +3480,14 @@ async function main() {
   fire('snapshot', { feed_id: 'feedC', seq: 1, incremental: false,
     records: [{ ...mkRec('restarted1', 200, 1700000200000) }],
     counters: { in_flight: 0, total_requests: 1, total_errors: 0 } });
-  await sleep(30);
+  // Await the reset's own painted end state and the sweep's config re-pull
+  // instead of a fixed sleep: a loaded runner can stretch either past any
+  // hard time. Both waits return false on timeout, so the checks below still
+  // fail with their labels and the diagnostic dump.
+  await settleUntil(() => rows().length === 1 && rows()[0].dataset.id === 'restarted1');
+  await settleUntil(() => cfgFetches > cfgBefore);
   check('feed change resets the log to the fresh process snapshot', rows().length === 1 && rows()[0].dataset.id === 'restarted1');
   check('feed change sweeps operator state (config re-fetched in place)', cfgFetches > cfgBefore);
-  // Drain the sweep's own refill before yielding: the restart refresh
-  // re-pulls config and rebuilds the settings sheet, and a later landing
-  // would race whatever test opens the sheet next.
-  await sleep(30);
   check('footer clock carries the weekday', /(mon|tues|wednes|thurs|fri|satur|sun)day/i.test(d.getElementById('f-clock').textContent));
 
   // ---- test 14: providers field-map editor ----
