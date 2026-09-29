@@ -117,6 +117,21 @@ and is never forwarded to inference. The published Compose port is
 loopback-only, so it is not a remote origin; remote clients terminate TLS at
 the ingress as in the [reverse-proxy guide](reverse-proxy.md).
 
+The transport is stateless and request/response only, and its limits are part
+of choosing a client:
+
+- `GET` and `DELETE` answer `405` with `Allow: POST`. There is no standalone
+  SSE stream and no session to delete.
+- There is no session id: the endpoint never sends `Mcp-Session-Id` and nothing
+  outlives the request, so a client must not expect or send one.
+- SSE resumption is not offered: no event store exists, so `Last-Event-ID`
+  replay is not available.
+- The server never sends requests to the client: there is no sampling and no
+  elicitation, so a client that waits for a server-initiated request waits
+  forever.
+- Every request must send `Accept: application/json, text/event-stream`; a
+  request missing either half answers `400`.
+
 ### Stdio placement and setup
 
 Both stdio entrypoints run the same server and resolve the setup surface above
