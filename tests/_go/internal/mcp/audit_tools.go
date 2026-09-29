@@ -480,6 +480,37 @@ func newFakeProxyWithDebugStop(t *testing.T) *fakeProxy {
 	return proxy
 }
 
+// TestAuditStartDescriptionStatesTheVocabularyException pins the model-facing
+// rule to the code and to docs/mcp.md: names are checked only when the
+// vocabulary is non-empty, and a vocabulary that cannot be read refuses the
+// start instead of skipping the check. The description used to state the
+// unconditional rule, so a model on a proxy with an empty vocabulary would
+// believe its names were always refused.
+func TestAuditStartDescriptionStatesTheVocabularyException(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := ""
+	for _, tool := range listed.Tools {
+		if tool.Name == "audit_start" {
+			description = tool.Description
+		}
+	}
+	if description == "" {
+		t.Fatal("audit_start is not registered")
+	}
+	for _, needle := range []string{"empty vocabulary", "skipped", "cannot be read", "refused"} {
+		if !strings.Contains(description, needle) {
+			t.Fatalf("the audit_start description must state the vocabulary boundary (%q): %q", needle, description)
+		}
+	}
+	if strings.Contains(description, "must ALREADY be in the vocabulary") {
+		t.Fatalf("the unconditional vocabulary rule must be gone: %q", description)
+	}
+}
+
 // TestAuditStartRefusesAScopeThatMatchesNothing pins the vocabulary guard. A
 // session scoped to a name the proxy has never seen would start, report
 // enabled:true, and capture nothing - a silent no-op presented as success.
