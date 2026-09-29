@@ -653,9 +653,9 @@ func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
 // marker. Each expected phrase is derived from the owner, so an owner edit
 // fails here until the guide follows, and a guide edit fails too. The owners'
 // own cross-checks live in TestDescribeMirrorsTheProxyOwners, the web package's
-// TestStatusClassAndBuckets (the classifier-side literal pin for
-// web.CancelStatusCode) and the client tests; this guard covers the
-// hand-written numbers in the guide's prose.
+// TestStatusClassAndBuckets (the classifier-side literal pin, now on the
+// internal/metrics StatusClientClosedRequest owner) and the client tests; this
+// guard covers the hand-written numbers in the guide's prose.
 func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
@@ -685,16 +685,15 @@ func TestGuidePinsTheLimitAndRedactionOwners(t *testing.T) {
 			statusBand[1], statusBand[2], statusCodeMin, statusCodeMax)
 	}
 
-	// Cancel status code: internal/web CancelStatusCode, the code statusClass
-	// classifies as "cancel". The guide states the code in parentheses after
-	// the class name.
+	// Cancel status code: internal/metrics StatusClientClosedRequest, the one
+	// canonical owner of 499 (the web classifier reads the same constant).
 	cancel := regexp.MustCompile("`cancel` \\(([0-9]+)\\)").FindStringSubmatch(text)
 	if cancel == nil {
 		t.Fatal("docs/mcp.md must state the cancel status class with its code")
 	}
-	if cancel[1] != strconv.Itoa(web.CancelStatusCode) {
-		t.Fatalf("docs/mcp.md states the cancel code %s, the owner is %d (internal/web CancelStatusCode)",
-			cancel[1], web.CancelStatusCode)
+	if cancel[1] != strconv.Itoa(metrics.StatusClientClosedRequest) {
+		t.Fatalf("docs/mcp.md states the cancel code %s, the owner is %d (internal/metrics StatusClientClosedRequest)",
+			cancel[1], metrics.StatusClientClosedRequest)
 	}
 
 	// Explorer and chart caps: internal/mcp/describe.go explorerMaxGroups and

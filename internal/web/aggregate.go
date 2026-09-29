@@ -365,7 +365,7 @@ func errorEntries(r *metrics.Record) []errEnt {
 	// structured error_type, however, observed the upstream's own failure
 	// (an in-band stream error the client aborted around): it produces one
 	// exactly like its 200 twin.
-	if fin != 429 && !(fin == CancelStatusCode && r.ErrorType == "") && (r.ErrorType != "" || fin >= 400) {
+	if fin != 429 && !(fin == metrics.StatusClientClosedRequest && r.ErrorType == "") && (r.ErrorType != "" || fin >= 400) {
 		typ := r.ErrorType
 		if typ == "" {
 			typ = "http_" + strconv.Itoa(fin)
@@ -506,16 +506,15 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 // silently empty filter.
 var StatusClasses = []string{"2xx", "cancel", "4xx", "5xx", "err"}
 
-// CancelStatusCode is the HTTP status statusClass classifies as the "cancel"
-// class: the client's own cancellation. It is exported so the MCP guide guard
-// pins the code the published guide quotes to the classifier that owns it.
-const CancelStatusCode = 499
-
+// statusClass classifies a finalized code into the StatusClasses vocabulary.
+// The cancel class reads the canonical code from internal/metrics
+// (StatusClientClosedRequest), so the classifier, the MCP guide pin and the
+// IsError predicate all use the one owner.
 func statusClass(s int) string {
 	switch {
 	case s >= 200 && s < 300:
 		return "2xx"
-	case s == CancelStatusCode:
+	case s == metrics.StatusClientClosedRequest:
 		return "cancel"
 	case s >= 400 && s < 500:
 		return "4xx"
