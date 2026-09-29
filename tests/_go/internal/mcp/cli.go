@@ -130,6 +130,47 @@ func TestFlagAndEnvironmentSetup(t *testing.T) {
 	})
 }
 
+// TestSetupFlagNamesHaveOneOwner pins the flag-name constants to both the
+// registration and the named() check. Building the command line from the
+// constants means a consistent rename keeps this passing, while a registration
+// or a named() call that respells the old literal either stops defining the
+// flag the command line names or silently drops the named value back to the
+// environment. That was a real hazard: the flag and the docs table row were
+// renamed together, TestSetupTableMatchesTheFlags still passed, and a named
+// proxy URL resolved to the empty fallback because named() checked the stale
+// literal.
+func TestSetupFlagNamesHaveOneOwner(t *testing.T) {
+	const token = "operator-credential-value"
+	registered := &options{limits: DefaultLimits()}
+	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	registerOptions(fs, registered)
+	for _, name := range []string{
+		flagProxyURL, flagOperatorToken, flagQueryMaxRows, flagQueryMaxBytes,
+		flagPageSize, flagCaptureBytes, flagQueryTimeout, flagTimeout,
+	} {
+		if fs.Lookup(name) == nil {
+			t.Fatalf("registerOptions does not register --%s: the registration no longer uses the flag-name constant", name)
+		}
+	}
+	// The two flags resolved after parsing must still win over a set
+	// environment variable. Different values on each side make a dropped named
+	// flag visible instead of coincidentally equal.
+	o, err := parse("millivolt-mcp", []string{
+		"--" + flagProxyURL, "http://127.0.0.1:8082",
+		"--" + flagOperatorToken, token,
+	}, env(map[string]string{
+		envProxyURL:      "http://127.0.0.1:9090",
+		envOperatorToken: "environment-credential-value",
+	}), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.proxyURL != "http://127.0.0.1:8082" || o.operatorToken != token {
+		t.Fatalf("a named flag must resolve through the constants, got proxyURL %q and operatorToken %q", o.proxyURL, o.operatorToken)
+	}
+}
+
 // TestProgramNameOwnsUsageAndDiagnostics pins the invocation parameterization:
 // the flag set and the diagnostic prefix carry the real command line, so
 // millivolt-mcp and `millivolt mcp` each report themselves. The usage text is

@@ -152,7 +152,7 @@ func NewClientWithTransport(proxyURL, token string, limits Limits, transport htt
 func NormalizeProxyURL(raw string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, errors.New("proxy URL is required: pass --proxy-url or MILLIVOLT_MCP_PROXY_URL")
+		return nil, fmt.Errorf("proxy URL is required: pass --%s or %s", flagProxyURL, envProxyURL)
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil {

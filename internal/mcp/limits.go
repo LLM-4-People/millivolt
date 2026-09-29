@@ -83,7 +83,8 @@ func (l Limits) Validate() error {
 func ValidateOperatorToken(token string) error {
 	switch {
 	case token == "":
-		return errors.New("operator token is required: pass --operator-token or MILLIVOLT_MCP_OPERATOR_TOKEN (the proxy's MILLIVOLT_OPERATOR_TOKEN)")
+		return errors.New("operator token is required: pass --" + flagOperatorToken + " or " + envOperatorToken +
+			" (the proxy's " + proxyTokenEnv + ")")
 	case len(token) < operatorTokenMinLen:
 		return errors.New("operator token must be at least " + strconv.Itoa(operatorTokenMinLen) + " characters")
 	case len(token) > operatorTokenMaxLen:

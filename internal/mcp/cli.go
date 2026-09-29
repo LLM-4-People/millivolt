@@ -66,11 +66,27 @@ type options struct {
 	limits        Limits
 }
 
-// Environment variable names. Each one is stated once: the flag usage text
-// that documents it and the resolution that reads it both come from here, so a
-// rename cannot leave the published surface disagreeing with the code. The
-// setup table in docs/mcp.md is compared with both by
-// TestSetupTableMatchesTheFlags.
+// Flag names. registerOptions installs them and parse's named check reads them
+// back through these constants, so the registration and the check always travel
+// together; respelling either one as a literal is what let a renamed flag be
+// registered while the named value was silently resolved away from it.
+const (
+	flagProxyURL      = "proxy-url"
+	flagOperatorToken = "operator-token"
+	flagQueryMaxRows  = "query-max-rows"
+	flagQueryMaxBytes = "query-max-bytes"
+	flagPageSize      = "page-size"
+	flagCaptureBytes  = "capture-max-bytes"
+	flagQueryTimeout  = "query-timeout"
+	flagTimeout       = "timeout"
+)
+
+// Environment variable names. Each one has one code owner here: the lookup, the
+// flag usage text and the setup-error messages all build from these constants,
+// so a rename cannot leave the published surface disagreeing with the code.
+// Two hand-written repeats exist, docs/mcp.md's setup table and cmd/mcp's
+// package doc, and both are compared with the registered usage text by
+// TestSetupTableMatchesTheFlags and TestPackageSetupDocMatchesTheFlags.
 const (
 	envProxyURL       = "MILLIVOLT_MCP_PROXY_URL"
 	envOperatorToken  = "MILLIVOLT_MCP_OPERATOR_TOKEN"
@@ -82,12 +98,18 @@ const (
 	envRequestTimeout = "MILLIVOLT_MCP_TIMEOUT"
 )
 
+// proxyTokenEnv is the proxy's own operator-token variable. A user supplies its
+// value to this server as MILLIVOLT_MCP_OPERATOR_TOKEN (or --operator-token);
+// this server never reads it. The setup error message names it so a user knows
+// where the value comes from.
+const proxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
+
 // registerOptions installs every setup flag on fs, with the current limits as
 // the registration defaults. It is the programmatic owner of the flag names,
 // defaults and environment names the setup table documents, and parse is its
 // only production caller.
 func registerOptions(fs *flag.FlagSet, o *options) {
-	fs.StringVar(&o.proxyURL, "proxy-url", "",
+	fs.StringVar(&o.proxyURL, flagProxyURL, "",
 		"millivolt proxy origin, for example http://127.0.0.1:8081 (env "+envProxyURL+")")
 	// The proxy URL takes an EMPTY default for the same reason the credential
 	// does: its environment value can carry userinfo, and flag.PrintDefaults
@@ -98,19 +120,19 @@ func registerOptions(fs *flag.FlagSet, o *options) {
 	// default is not its zero value, and it runs on -h, on --help and on every
 	// flag parse error - so a credential used as a flag default is printed in
 	// plaintext to stderr, which an MCP host does not capture.
-	fs.StringVar(&o.operatorToken, "operator-token", "",
+	fs.StringVar(&o.operatorToken, flagOperatorToken, "",
 		"the proxy's "+envOperatorToken+"; the value is never echoed in usage output (env "+envOperatorToken+")")
-	fs.IntVar(&o.limits.QueryMaxRows, "query-max-rows", o.limits.QueryMaxRows,
+	fs.IntVar(&o.limits.QueryMaxRows, flagQueryMaxRows, o.limits.QueryMaxRows,
 		"row cap applied to query results before the explicit truncation marker (env "+envQueryMaxRows+")")
-	fs.IntVar(&o.limits.QueryMaxBytes, "query-max-bytes", o.limits.QueryMaxBytes,
+	fs.IntVar(&o.limits.QueryMaxBytes, flagQueryMaxBytes, o.limits.QueryMaxBytes,
 		"encoded-size cap on one query result; whole rows are kept until the budget runs out (env "+envQueryMaxBytes+")")
-	fs.IntVar(&o.limits.PageSize, "page-size", o.limits.PageSize,
+	fs.IntVar(&o.limits.PageSize, flagPageSize, o.limits.PageSize,
 		"default page size for the record and capture listings (env "+envPageSize+")")
-	fs.IntVar(&o.limits.CaptureBytes, "capture-max-bytes", o.limits.CaptureBytes,
+	fs.IntVar(&o.limits.CaptureBytes, flagCaptureBytes, o.limits.CaptureBytes,
 		"document size above which a capture is withheld whole, in bytes (env "+envCaptureBytes+")")
-	fs.DurationVar(&o.limits.QueryTimeout, "query-timeout", o.limits.QueryTimeout,
+	fs.DurationVar(&o.limits.QueryTimeout, flagQueryTimeout, o.limits.QueryTimeout,
 		"bound on a full-history chart or explorer read (env "+envQueryTimeout+")")
-	fs.DurationVar(&o.limits.Timeout, "timeout", o.limits.Timeout,
+	fs.DurationVar(&o.limits.Timeout, flagTimeout, o.limits.Timeout,
 		"bound on every call to the proxy (env "+envRequestTimeout+")")
 }
 
@@ -157,13 +179,13 @@ func parse(program string, args []string, lookupEnv func(string) (string, bool),
 		return options{}, err
 	}
 	// Flags win over the environment, decided by what was actually NAMED on the
-	// command line, not by whether the resolved value is empty: an explicit
-	// empty --operator-token is a deliberate (and invalid) choice, while an
-	// absent flag falls through to the environment.
-	if !named(fs, "proxy-url") {
+	// command line, not by whether the resolved value is empty: an explicitly
+	// named but empty operator-token flag is a deliberate (and invalid) choice,
+	// while an absent flag falls through to the environment.
+	if !named(fs, flagProxyURL) {
 		o.proxyURL = envString(lookupEnv, envProxyURL, "")
 	}
-	if !named(fs, "operator-token") {
+	if !named(fs, flagOperatorToken) {
 		o.operatorToken = envString(lookupEnv, envOperatorToken, "")
 	}
 	if fs.NArg() > 0 {

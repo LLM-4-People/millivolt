@@ -475,3 +475,56 @@ func TestSetupTableMatchesTheFlags(t *testing.T) {
 		}
 	}
 }
+
+// TestPackageSetupDocMatchesTheFlags pins cmd/mcp's package-doc setup list to
+// the registered surface. A doc comment cannot interpolate the constants
+// (package main cannot see them), so that list is a hand-written repeat the
+// owner's guard does not reach; this compares it to the same registration
+// TestSetupTableMatchesTheFlags reads, so a flag or environment rename that
+// updates the code but not the package doc fails here.
+func TestPackageSetupDocMatchesTheFlags(t *testing.T) {
+	var o options
+	o.limits = DefaultLimits()
+	fs := flag.NewFlagSet("millivolt-mcp", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	registerOptions(fs, &o)
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "cmd", "mcp", "main.go"))
+	if err != nil {
+		t.Fatalf("read cmd/mcp/main.go: %v", err)
+	}
+	// A doc line is `//<tab>--flag / ENV_NAME` with alignment spaces.
+	row := regexp.MustCompile(`^//\t(--[a-z0-9-]+)\s+/\s+([A-Z0-9_]+)`)
+	documented := map[string]string{}
+	for _, line := range strings.Split(string(doc), "\n") {
+		if match := row.FindStringSubmatch(line); match != nil {
+			if _, duplicate := documented[match[1]]; duplicate {
+				t.Fatalf("cmd/mcp's package doc lists %s more than once", match[1])
+			}
+			documented[match[1]] = match[2]
+		}
+	}
+	if len(documented) == 0 {
+		t.Fatal("cmd/mcp's package doc no longer lists the setup surface")
+	}
+	usageEnv := regexp.MustCompile(`\(env ([A-Z0-9_]+)\)`)
+	fs.VisitAll(func(f *flag.Flag) {
+		name := "--" + f.Name
+		env, ok := documented[name]
+		if !ok {
+			t.Fatalf("cmd/mcp's package doc omits %s", name)
+		}
+		match := usageEnv.FindStringSubmatch(f.Usage)
+		if match == nil {
+			t.Fatalf("the %s usage text must name its environment variable", name)
+		}
+		if env != match[1] {
+			t.Fatalf("cmd/mcp's package doc pairs %s with %s, the owner uses %s", name, env, match[1])
+		}
+	})
+	for name := range documented {
+		if fs.Lookup(strings.TrimPrefix(name, "--")) == nil {
+			t.Fatalf("cmd/mcp's package doc lists %s, which the owner does not register", name)
+		}
+	}
+}
