@@ -77,13 +77,16 @@ type inProcessTransport struct {
 //
 // Residual, stated plainly: the transport returns at its deadline while the
 // dispatched handler may keep running. The pause, throttle, debug and quota
-// handlers, the config write path and the reload path never read r.Context(),
-// and their persistence is bounded only by the store timeout, so the residual
-// is reachable whenever such a handler's store timeout exceeds this transport
-// bound. Every abandoned call holds one goroutine and a bounded recorder until
-// the handler returns: inProcessRecorder discards every byte past
-// inProcessRecorderBufferMax, so the retained body stays bounded even after the
-// call is gone.
+// handlers never read r.Context(), but their persistence runs through
+// storeQueryCtx(), so each is bounded by the store timeout and the residual is
+// reachable only while that timeout exceeds this transport bound. The config
+// write and reload paths read no context and carry no deadline at all
+// (internal/config admin WriteFile and the reload's
+// RenameProviders(context.Background(), ...)), so their residual has no
+// timeout bound. Every abandoned call holds one goroutine and a bounded
+// recorder until the handler returns: inProcessRecorder discards every byte
+// past inProcessRecorderBufferMax, so the retained body stays bounded even
+// after the call is gone.
 func (t inProcessTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	ctx := request.Context()
 	if _, ok := ctx.Deadline(); !ok {
