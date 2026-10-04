@@ -22,6 +22,7 @@ import (
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -77,20 +78,20 @@ type reservedNamespace struct {
 	handler http.Handler
 }
 
-// operatorNamespaces returns the reserved operator-namespace registrations.
-// The /admin, /metrics and /mcp namespaces own no unregistered handler:
-// reserving both the roots and the subtrees means neither the unauthenticated
-// gate nor an authenticated request can forward a namespace look-alike to the
-// upstream catch-all. The /session root is the registered handshake itself:
-// it is the one open operator route, kept outside /admin so an external
-// authentication layer can front the admin plane without gating millivolt's
-// own login, and its subtree row reserves every unregistered spelling.
-// Registered exact patterns (pause, config, agg/*, ...) keep mux precedence.
-// newOperatorMux installs exactly this set, and the route tests drive that
-// same function, so a dropped /admin, /session, /metrics or /mcp
+// operatorNamespaces returns the reserved operator-namespace registrations,
+// built from the boot config. The /admin, /metrics and /mcp namespaces own no
+// unregistered handler: reserving both the roots and the subtrees means
+// neither the unauthenticated gate nor an authenticated request can forward a
+// namespace look-alike to the upstream catch-all. The /session root is the
+// registered handshake itself: it is the one open operator route, kept outside
+// /admin so an external authentication layer can front the admin plane without
+// gating millivolt's own login, and its subtree row reserves every unregistered
+// spelling. Registered exact patterns (pause, config, agg/*, ...) keep mux
+// precedence. newOperatorMux installs exactly this set, and the route tests
+// drive that same function, so a dropped /admin, /session or /metrics
 // registration fails the default suite instead of only the opt-in live one.
-func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNamespace {
-	return []reservedNamespace{
+func operatorNamespaces(gate *operatorGate, dispatch http.Handler, boot *config.Config) []reservedNamespace {
+	namespaces := []reservedNamespace{
 		{"/admin", http.NotFoundHandler()},
 		{"/admin/", http.NotFoundHandler()},
 		// The session handshake mints the operator cookie; it is exempt
@@ -101,25 +102,33 @@ func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNam
 		{"/session/", http.NotFoundHandler()},
 		{"/metrics", http.NotFoundHandler()},
 		{"/metrics/", http.NotFoundHandler()},
-		// The MCP streamable HTTP endpoint is always registered and gated
-		// like /metrics; /mcp/ reserves every look-alike for the 404 handler.
-		{"/mcp", newMCPHandler(gate, dispatch)},
-		{"/mcp/", http.NotFoundHandler()},
 	}
+	// The MCP streamable HTTP endpoint is registered from the boot config's
+	// mcp_enabled and gated like /metrics. When it is off the root stays
+	// reserved for the 404 handler - the gate passes an authenticated /mcp
+	// to the mux, so an unregistered root would fall through to the inference
+	// catch-all - and /mcp/ reserves every look-alike in either boot.
+	if boot.MCPEnabled {
+		namespaces = append(namespaces, reservedNamespace{"/mcp", newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(boot))})
+	} else {
+		namespaces = append(namespaces, reservedNamespace{"/mcp", http.NotFoundHandler()})
+	}
+	return append(namespaces, reservedNamespace{"/mcp/", http.NotFoundHandler()})
 }
 
 // newOperatorMux builds the route table the proxy serves and installs the
 // reserved operator namespaces on it, returning the guarded handler those
-// routes dispatch through. The guarded handler is built before installation
+// routes dispatch through. boot is the loaded configuration the table is
+// built from once at startup. The guarded handler is built before installation
 // so the MCP endpoint can dispatch its synthesized internal calls through the
 // same gate every external request passes: the caller's Bearer is re-validated
 // in process, and no second credential path exists. main calls this function
 // and the route tests drive the same function, so an installation that main
 // no longer performs is not masked by a test-local rebuild.
-func newOperatorMux(gate *operatorGate) (*http.ServeMux, http.Handler) {
+func newOperatorMux(gate *operatorGate, boot *config.Config) (*http.ServeMux, http.Handler) {
 	mux := http.NewServeMux()
 	handler := protectOperatorRequests(mux, gate)
-	for _, namespace := range operatorNamespaces(gate, handler) {
+	for _, namespace := range operatorNamespaces(gate, handler, boot) {
 		mux.Handle(namespace.pattern, namespace.handler)
 	}
 	return mux, handler
@@ -284,7 +293,7 @@ func main() {
 	// credential keeps deny-by-default honest - no silent weaker policy.
 	gate := newOperatorGate(mustOperatorToken())
 
-	mux, handler := newOperatorMux(gate)
+	mux, handler := newOperatorMux(gate, cfg)
 	// The liveness probe is the one open server route besides inference:
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.

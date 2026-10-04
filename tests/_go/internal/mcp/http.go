@@ -163,7 +163,7 @@ func TestInProcessTransportCarriesTheCallerCredential(t *testing.T) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "millivolt_fixture_metric 1")
 	})
-	service, err := NewServiceWithTransport(InProcessOrigin, testToken, DefaultLimits(), handlerTransport{handler: dispatch})
+	service, err := NewServiceWithTransport(InProcessOrigin, testToken, defaultTestLimits(), handlerTransport{handler: dispatch})
 	if err != nil {
 		t.Fatal(err)
 	}

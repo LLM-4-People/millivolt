@@ -6,6 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // TestMCPHTTPEndpointServesTheReverseProxiedHost pins the deliberate
@@ -17,7 +20,7 @@ import (
 // option off must fail this test.
 func TestMCPHTTPEndpointServesTheReverseProxiedHost(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
-	endpoint := httptest.NewServer(newMCPHandler(gate, http.NotFoundHandler()))
+	endpoint := httptest.NewServer(newMCPHandler(gate, http.NotFoundHandler(), mcp.LimitsFromConfig(config.Default())))
 	t.Cleanup(endpoint.Close)
 
 	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}`

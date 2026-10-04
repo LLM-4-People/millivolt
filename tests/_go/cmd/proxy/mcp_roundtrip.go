@@ -11,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
 // blockingDispatch answers nothing until released. It exists to model a
@@ -212,7 +215,7 @@ func TestInProcessTransportOversizedBodyKeepsTheClientError(t *testing.T) {
 			}
 		}
 	})
-	endpoint := httptest.NewServer(newMCPHandler(gate, dispatch))
+	endpoint := httptest.NewServer(newMCPHandler(gate, dispatch, mcp.LimitsFromConfig(config.Default())))
 	t.Cleanup(endpoint.Close)
 
 	session := connectMCPHTTP(t, endpoint.URL+"/mcp", mcpEndpointToken)

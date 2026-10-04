@@ -151,7 +151,7 @@ func TestConnectionFailureIsReadable(t *testing.T) {
 	origin := dead.URL
 	dead.Close()
 
-	service, err := NewService(origin, testToken, DefaultLimits())
+	service, err := NewService(origin, testToken, defaultTestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestRequestTimeoutIsReported(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.Timeout = 20 * time.Millisecond
 	service, err := NewService(server.URL, testToken, limits)
 	if err != nil {
@@ -192,8 +192,9 @@ func TestRequestTimeoutIsReported(t *testing.T) {
 
 // TestExplorerReadIsBoundedByQueryTimeout pins that the explorer fold, like the
 // chart, is bounded by the configured QueryTimeout rather than only by the
-// generic client timeout. Both are full-history reads, and the --query-timeout
-// help and docs/mcp.md both state the bound covers the explorer.
+// generic client timeout. Both are full-history reads, and the
+// mcp_query_timeout config field and docs/mcp.md both state the bound covers
+// the explorer.
 func TestExplorerReadIsBoundedByQueryTimeout(t *testing.T) {
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +206,7 @@ func TestExplorerReadIsBoundedByQueryTimeout(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.QueryTimeout = 25 * time.Millisecond
 	limits.Timeout = 5 * time.Second
 	service, err := NewService(server.URL, testToken, limits)
@@ -242,7 +243,7 @@ func TestFullHistoryReadIsNotCappedByTheGenericTimeout(t *testing.T) {
 	}))
 	defer slow.Close()
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.Timeout = 50 * time.Millisecond
 	limits.QueryTimeout = 5 * time.Second
 	service, err := NewService(slow.URL, testToken, limits)
@@ -580,7 +581,7 @@ func TestErrorBodyCredentialStraddlingTheExcerptBoundaryIsRedacted(t *testing.T)
 					Status: http.StatusBadGateway, ContentType: "application/json",
 					Body: shape.body(strings.Repeat("X", offset) + token + strings.Repeat("Y", 5000)),
 				})
-				service, err := NewService(proxy.origin(), token, DefaultLimits())
+				service, err := NewService(proxy.origin(), token, defaultTestLimits())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -609,7 +610,7 @@ func failureMessage(t *testing.T, token, body string) string {
 	proxy.respond(http.MethodGet, explorerPath, cannedResponse{
 		Status: http.StatusBadGateway, ContentType: "application/json", Body: body,
 	})
-	service, err := NewService(proxy.origin(), token, DefaultLimits())
+	service, err := NewService(proxy.origin(), token, defaultTestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -770,7 +771,7 @@ func TestErrorBodyRedactionCoversInterleavedWhitespace(t *testing.T) {
 		Body: `{"saved":true,"revision":"z","values":{},"restart_required":[],"error":` +
 			quote("reload failed for "+interleave(token, " ")) + `}`,
 	})
-	service, err := NewService(proxy.origin(), token, DefaultLimits())
+	service, err := NewService(proxy.origin(), token, defaultTestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

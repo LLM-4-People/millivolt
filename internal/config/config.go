@@ -314,6 +314,20 @@ type Config struct {
 	// The archive is buffered; this is the admit/reject ceiling, not a heap guarantee.
 	BackupMaxBytes ByteSize `yaml:"backup_max_bytes" json:"backup_max_bytes"`
 
+	// ---- MCP endpoint ----
+	// The operator-gated /mcp LLM tool endpoint. mcp_enabled registers the
+	// route at boot or keeps it reserved for the 404 handler; the limits are
+	// the result-size policy its tools clamp with (mcp.LimitsFromConfig is
+	// the mapping). Restart required: the route table and the endpoint's
+	// services are built once from the loaded config.
+	MCPEnabled         bool          `yaml:"mcp_enabled" json:"mcp_enabled"`
+	MCPPageSize        int           `yaml:"mcp_page_size" json:"mcp_page_size"`
+	MCPQueryMaxRows    int           `yaml:"mcp_query_max_rows" json:"mcp_query_max_rows"`
+	MCPQueryMaxBytes   ByteSize      `yaml:"mcp_query_max_bytes" json:"mcp_query_max_bytes"`
+	MCPCaptureMaxBytes ByteSize      `yaml:"mcp_capture_max_bytes" json:"mcp_capture_max_bytes"`
+	MCPQueryTimeout    time.Duration `yaml:"mcp_query_timeout" json:"mcp_query_timeout"`
+	MCPTimeout         time.Duration `yaml:"mcp_timeout" json:"mcp_timeout"`
+
 	// ---- HTTP server timeouts ----
 	// ReadHeaderTimeout guards against slowloris; IdleTimeout bounds keep-alive
 	// idle connections. There is deliberately no WriteTimeout: it would kill
@@ -768,6 +782,15 @@ const (
 	// Settings backup archive band (Validate, overlay, Schema).
 	BackupMaxBytesMin = 1 << 20 // 1 MiB
 	BackupMaxBytesMax = 4 << 30 // 4 GiB
+	// MCP endpoint result-size floors (Validate, Schema, and internal/mcp's
+	// Limits.Validate). The same single-owner constants are what the
+	// endpoint enforces at service construction, so the config boundary and
+	// the endpoint cannot drift apart; internal/mcp limits.go carries no
+	// second copy.
+	MCPPageSizeMin        = 1
+	MCPQueryMaxRowsMin    = 1
+	MCPQueryMaxBytesMin   = 1
+	MCPCaptureMaxBytesMin = 1
 )
 
 // Discovery limits bound upstream metadata work, not total Go heap usage.
@@ -881,6 +904,18 @@ func Default() *Config {
 		StorageQueryMaxBytes: 8 << 20,
 		StorageQueryMaxRows:  10000,
 		BackupMaxBytes:       1 << 30,
+
+		// The MCP endpoint's shipped policy: on by default (the route stays
+		// reserved for the 404 handler when off), with the result-size
+		// policy a model can read. mcp.LimitsFromConfig maps these onto
+		// the endpoint's Limits.
+		MCPEnabled:         true,
+		MCPPageSize:        50,
+		MCPQueryMaxRows:    200,
+		MCPQueryMaxBytes:   128 << 10,
+		MCPCaptureMaxBytes: 256 << 10,
+		MCPQueryTimeout:    2 * time.Minute,
+		MCPTimeout:         30 * time.Second,
 
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
@@ -1141,6 +1176,9 @@ func (c *Config) Validate() error {
 	if err := validateQueryLimits(c); err != nil {
 		return err
 	}
+	if err := validateMCPLimits(c); err != nil {
+		return err
+	}
 	if err := checkByteSize("backup_max_bytes", c.BackupMaxBytes, BackupMaxBytesMin, BackupMaxBytesMax); err != nil {
 		return err
 	}
@@ -1166,6 +1204,8 @@ func (c *Config) Validate() error {
 		"read_header_timeout":    c.ReadHeaderTimeout,
 		"idle_timeout":           c.IdleTimeout,
 		"debug_capture_ttl":      c.DebugCaptureTTL,
+		"mcp_query_timeout":      c.MCPQueryTimeout,
+		"mcp_timeout":            c.MCPTimeout,
 	}
 	for _, name := range sortedKeys(durs) {
 		if d := durs[name]; d < 0 {
@@ -1184,6 +1224,8 @@ func (c *Config) Validate() error {
 		{"conversation_idle_gap", c.ConversationIdleGap},
 		{"storage_flush_interval", c.StorageFlushInterval},
 		{"storage_query_timeout", c.StorageQueryTimeout},
+		{"mcp_query_timeout", c.MCPQueryTimeout},
+		{"mcp_timeout", c.MCPTimeout},
 	}
 	for _, f := range posDurs {
 		if f.d <= 0 {
@@ -1719,6 +1761,29 @@ func validateQueryLimits(c *Config) error {
 			return errRange(limit.key,
 				strconv.FormatInt(int64(limit.min), 10), strconv.FormatInt(int64(limit.max), 10), strconv.FormatInt(int64(limit.value), 10))
 		}
+	}
+	return nil
+}
+
+// validateMCPLimits checks the MCP endpoint's result-size floors at the config
+// boundary. The constants are the single band owner: internal/mcp's
+// Limits.Validate enforces the same ones at service construction, so the
+// Settings write path and the endpoint cannot drift apart. The two mcp
+// timeouts join the positive-duration list in Validate instead.
+func validateMCPLimits(c *Config) error {
+	if c.MCPPageSize < MCPPageSizeMin {
+		return fmt.Errorf("mcp_page_size: must be >= %d, got %d", MCPPageSizeMin, c.MCPPageSize)
+	}
+	if c.MCPQueryMaxRows < MCPQueryMaxRowsMin {
+		return fmt.Errorf("mcp_query_max_rows: must be >= %d, got %d", MCPQueryMaxRowsMin, c.MCPQueryMaxRows)
+	}
+	if c.MCPQueryMaxBytes < MCPQueryMaxBytesMin {
+		return fmt.Errorf("mcp_query_max_bytes: must be >= %s, got %s",
+			FormatByteSize(MCPQueryMaxBytesMin), FormatByteSize(int64(c.MCPQueryMaxBytes)))
+	}
+	if c.MCPCaptureMaxBytes < MCPCaptureMaxBytesMin {
+		return fmt.Errorf("mcp_capture_max_bytes: must be >= %s, got %s",
+			FormatByteSize(MCPCaptureMaxBytesMin), FormatByteSize(int64(c.MCPCaptureMaxBytes)))
 	}
 	return nil
 }

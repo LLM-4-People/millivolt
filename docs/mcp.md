@@ -7,11 +7,12 @@ It is a client of a running proxy: it never starts, stops or restarts the proxy
 process. Its operator tools can reconfigure a running proxy, but only through
 the same credential and the same routes the dashboard uses.
 
-The endpoint serves 22 tools from one implementation. It is always on in the
-proxy process (like `/metrics`; no flag or configuration key enables it),
-operator-gated, and Bearer-only. It forwards the caller's own
-`Authorization: Bearer` credential on its internal calls, so the dashboard
-session cookie is refused there.
+The endpoint serves 22 tools from one implementation. It is operator-gated
+and Bearer-only, enabled by default: `mcp_enabled: false` removes it from the
+process (the route stays reserved, answering 404 and never inference; restart
+to apply), and the limits are config fields in the `mcp` category. It
+forwards the caller's own `Authorization: Bearer` credential on its internal
+calls, so the dashboard session cookie is refused there.
 
 The token length band matches the proxy's own boot check (16 to 512
 characters). A credential the proxy would refuse to arm with is not a

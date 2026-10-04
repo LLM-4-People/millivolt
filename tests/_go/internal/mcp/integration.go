@@ -158,7 +158,7 @@ func devInstance(t *testing.T) *liveTools {
 		}
 	})
 
-	service, err := NewService(origin, integrationToken, DefaultLimits())
+	service, err := NewService(origin, integrationToken, defaultTestLimits())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3881,6 +3881,50 @@ async function main() {
     delete w.__settingsUxRestore;
   }
 
+  // ---- MCP settings category pin: the schema-driven mcp category must render
+  // the enable switch and the six limit fields, every row restart-required, the
+  // rail badge resolving through the SETTINGS_CAT_REF mcp entry (the tool
+  // entity icon, not the server fallback), and the category banner naming the
+  // restart.
+  {
+    const doc = {
+      revision: 'mcp-r1',
+      fields: [
+        { key: 'mcp_enabled', category: 'mcp', label: 'Enable MCP endpoint', help: 'Register the streamable HTTP MCP endpoint at /mcp.', kind: 'bool', hot_reload: false },
+        { key: 'mcp_page_size', category: 'mcp', label: 'Page size', help: 'Default page for the records and capture listings.', kind: 'int', min: 1, hot_reload: false },
+        { key: 'mcp_query_max_rows', category: 'mcp', label: 'Query result rows', help: 'Row cap on one query tool result.', kind: 'int', min: 1, hot_reload: false },
+        { key: 'mcp_query_max_bytes', category: 'mcp', label: 'Query result bytes', help: 'Encoded-size cap on one query tool result.', kind: 'bytes', min: 1, hot_reload: false },
+        { key: 'mcp_capture_max_bytes', category: 'mcp', label: 'Capture max bytes', help: 'Capture document size above which the document is withheld whole.', kind: 'bytes', min: 1, hot_reload: false },
+        { key: 'mcp_query_timeout', category: 'mcp', label: 'Query timeout', help: 'Bounds one proxy read that is not the bounded SQL reader.', kind: 'duration', hot_reload: false },
+        { key: 'mcp_timeout', category: 'mcp', label: 'Request timeout', help: 'Bounds every in-process call to the proxy.', kind: 'duration', hot_reload: false },
+      ],
+      categories: [{ id: 'mcp', label: 'MCP', help: 'The operator-gated /mcp LLM tool endpoint.' }],
+      values: { mcp_enabled: true, mcp_page_size: 50, mcp_query_max_rows: 200, mcp_query_max_bytes: '128KiB', mcp_capture_max_bytes: '256KiB', mcp_query_timeout: '2m', mcp_timeout: '30s' },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.__mcpDoc = doc;
+    w.eval("settingsDoc = window.__mcpDoc; settingsCat = 'mcp'; fillSettingsForm(settingsDoc)");
+    d.getElementById('settings-sheet').hidden = false;
+    const box = d.getElementById('settings-fields');
+    const switchEl = box.querySelector('input.st-switch[data-key="mcp_enabled"]');
+    const mcpRows = [...box.querySelectorAll('.st-row[data-cat="mcp"]')];
+    const limitRows = ['mcp_page_size', 'mcp_query_max_rows', 'mcp_query_max_bytes', 'mcp_capture_max_bytes', 'mcp_query_timeout', 'mcp_timeout']
+      .map(k => box.querySelector(`.st-row[data-key="${k}"]`));
+    check('the mcp category renders the enable switch checked and the six limit fields',
+      !!switchEl && switchEl.checked && limitRows.every(r => !!r && !!r.querySelector('[data-st-scalar]')) &&
+      mcpRows.length === 7);
+    check('every mcp row is restart-required and the category banner says so',
+      mcpRows.every(r => r.dataset.hot === '0') &&
+      d.querySelector('#settings-pane-hd .st-banner').textContent === 'takes a process restart');
+    check('the mcp rail badge resolves through SETTINGS_CAT_REF to the tool entity',
+      d.querySelector('[data-st-cat="mcp"] .ent-ic').textContent === w.eval('ENTITY_TYPES.tool.icon') &&
+      d.querySelector('[data-st-cat="mcp"] .rail-n').textContent === '7');
+    w.__mcpDoc = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__mcpDoc; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__mcpDoc;
+  }
+
   // Settings transactions: preserve drafts across late loads/saves and reject
   // incomplete numeric/map edits rather than silently turning them into zeros
   // or deleting entries. HTTP is stubbed; no running YAML is modified.

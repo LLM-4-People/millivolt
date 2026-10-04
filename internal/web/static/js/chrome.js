@@ -645,6 +645,7 @@ const SETTINGS_CAT_REF = {
   format:       { dim: 'model' },
   storage:    { dim: 'key' },
   backup:     { dim: null, icon: '⬇', color: 'var(--accent)' },
+  mcp:        { dim: 'tool' },
   dashboard:  { dim: 'time' },
   models:     { dim: 'model' },
   providers:  { dim: 'provider' },

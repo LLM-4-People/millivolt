@@ -25,11 +25,11 @@ import (
 // exactly as it did on the transport request. No loopback origin is dialed and
 // nothing is derived from the request Host: the client's nominal origin is the
 // named non-routable constant internal/mcp.InProcessOrigin.
-func newMCPHandler(gate *operatorGate, dispatch http.Handler) http.Handler {
-	// The defaults are the only limits policy on this endpoint: there is no
-	// config knob for it. The same policy bounds the Service and the
-	// in-process transport's deadline.
-	limits := mcp.DefaultLimits()
+//
+// limits is the boot config's mcp category (mcp.LimitsFromConfig): the same
+// policy bounds the Service and the in-process transport's deadline, and the
+// values are validated at the config boundary before the boot reaches here.
+func newMCPHandler(gate *operatorGate, dispatch http.Handler, limits mcp.Limits) http.Handler {
 	streamable := mcp.NewHTTPHandler(func(r *http.Request) *mcp.Service {
 		token, ok := bearerToken(r)
 		if !ok || !gate.valid(token) {

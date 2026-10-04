@@ -147,10 +147,10 @@ func TestDescribeRequestShapeAndOutput(t *testing.T) {
 		t.Fatalf("storage/vocabulary mapping = %+v %+v", out.Storage, out.KnownProviders)
 	}
 	// Exact literals, not the package constants the describe text is assigned
-	// from: comparing against logPageMax or DefaultLimits() moved with the
-	// owner, so changing the owner failed nothing. Owners: internal/config
-	// DashLogRowsMax (log page ceiling) and internal/mcp limits.go
-	// DefaultLimits (query rows and bytes).
+	// from: comparing against the owning constants moved with the owner, so
+	// changing the owner failed nothing. Owners: internal/config DashLogRowsMax
+	// (log page ceiling) and internal/config Default(), mapped through
+	// mcp.LimitsFromConfig (query rows and bytes).
 	if out.Limits.QueryMaxRows != 200 || out.Limits.LogPageMax != 500 {
 		t.Fatalf("limits mapping = %+v, want the published query row cap 200 and log page ceiling 500", out.Limits)
 	}
@@ -797,8 +797,9 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 	// enforces itself rather than the proxy. Pinned to exact literals rather
 	// than the package constants the describe text is assigned from, so a
 	// change on the owning side fails here. Owners: internal/mcp tools_read.go
-	// maxQueryRowsCeiling and prometheusMaxLines, and internal/mcp limits.go
-	// DefaultLimits (page size, capture bytes, query bytes).
+	// maxQueryRowsCeiling and prometheusMaxLines, and internal/config
+	// Default(), mapped through mcp.LimitsFromConfig (page size, capture
+	// bytes, query bytes).
 	if out.Limits.QueryMaxRowsCeiling != 100_000 ||
 		out.Limits.PrometheusMaxLines != 400 ||
 		out.Limits.DefaultPageSize != 50 ||
@@ -852,7 +853,7 @@ func TestQueryClampsEncodedSize(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.QueryMaxBytes = 500
 	service := newTestService(t, proxy, limits)
 
@@ -940,7 +941,7 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 		Status: http.StatusOK, ContentType: "text/plain",
 		Body: strings.Repeat("x 1\n", prometheusMaxLines+2),
 	})
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.PageSize = 5
 	service := newTestService(t, proxy, limits)
 	ctx := context.Background()

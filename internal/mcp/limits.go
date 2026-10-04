@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // Operator token length bounds, the single owner of the credential band: the
@@ -27,6 +29,10 @@ const ProxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
 // Limits are this server's result-size policy. They exist because a model
 // cannot read ten thousand rows: every listing tool defaults to a small page
 // and every payload is truncated with an explicit marker rather than silently.
+// In production the values come from the boot config's mcp category through
+// LimitsFromConfig; internal/config Default() owns the defaults and Validate
+// below enforces internal/config's band constants, so this package carries no
+// second copy of either.
 type Limits struct {
 	// QueryMaxRows bounds a `query` result client-side. The proxy enforces its
 	// own storage_query_max_rows (and answers 413 past it), which can be much
@@ -52,30 +58,35 @@ type Limits struct {
 	Timeout time.Duration
 }
 
-// DefaultLimits are the MCP tools' built-in result-size policy. They exist
-// only here; no consumer carries a fallback default.
-func DefaultLimits() Limits {
+// LimitsFromConfig builds the endpoint's limits policy from the boot config's
+// mcp category. It is the single owner of which config field feeds which
+// limit; the values and their floors live in internal/config (Default and the
+// band constants), so this only maps.
+func LimitsFromConfig(c *config.Config) Limits {
 	return Limits{
-		QueryMaxRows:  200,
-		QueryMaxBytes: 128 << 10,
-		PageSize:      50,
-		CaptureBytes:  256 << 10,
-		QueryTimeout:  120 * time.Second,
-		Timeout:       30 * time.Second,
+		QueryMaxRows:  c.MCPQueryMaxRows,
+		QueryMaxBytes: int(c.MCPQueryMaxBytes),
+		PageSize:      c.MCPPageSize,
+		CaptureBytes:  int(c.MCPCaptureMaxBytes),
+		QueryTimeout:  c.MCPQueryTimeout,
+		Timeout:       c.MCPTimeout,
 	}
 }
 
-// Validate rejects a limits set that could not page or could hang.
+// Validate rejects a limits set that could not page or could hang. The floors
+// are internal/config's band constants, the same single owner config.Validate
+// enforces on the mcp_* fields, so the config boundary and this constructor
+// guard cannot drift apart.
 func (l Limits) Validate() error {
 	switch {
-	case l.QueryMaxRows < 1:
-		return errors.New("query max rows must be at least 1")
-	case l.QueryMaxBytes < 1:
-		return errors.New("query max bytes must be at least 1")
-	case l.PageSize < 1:
-		return errors.New("page size must be at least 1")
-	case l.CaptureBytes < 1:
-		return errors.New("capture bytes must be at least 1")
+	case l.QueryMaxRows < config.MCPQueryMaxRowsMin:
+		return fmt.Errorf("query max rows must be at least %d", config.MCPQueryMaxRowsMin)
+	case l.QueryMaxBytes < config.MCPQueryMaxBytesMin:
+		return fmt.Errorf("query max bytes must be at least %d", config.MCPQueryMaxBytesMin)
+	case l.PageSize < config.MCPPageSizeMin:
+		return fmt.Errorf("page size must be at least %d", config.MCPPageSizeMin)
+	case l.CaptureBytes < config.MCPCaptureMaxBytesMin:
+		return fmt.Errorf("capture bytes must be at least %d", config.MCPCaptureMaxBytesMin)
 	case l.QueryTimeout <= 0:
 		return errors.New("query timeout must be greater than zero")
 	case l.Timeout <= 0:

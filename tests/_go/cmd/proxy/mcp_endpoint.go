@@ -14,6 +14,7 @@ import (
 
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/mcp"
 )
 
@@ -75,7 +76,7 @@ func TestMCPHTTPEndpointAuthAndInProcessDispatch(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
 	var mu sync.Mutex
 	var records []dispatchRecord
-	endpoint := httptest.NewServer(newMCPHandler(gate, recordingMCPDispatch(&mu, &records)))
+	endpoint := httptest.NewServer(newMCPHandler(gate, recordingMCPDispatch(&mu, &records), mcp.LimitsFromConfig(config.Default())))
 	t.Cleanup(endpoint.Close)
 
 	initialize := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}`
@@ -200,7 +201,7 @@ func TestMCPHTTPEndpointRefusesRedirectsInProcess(t *testing.T) {
 		w.Header().Set("Location", "http://elsewhere.example/credential")
 		w.WriteHeader(http.StatusTemporaryRedirect)
 	})
-	endpoint := httptest.NewServer(newMCPHandler(gate, redirect))
+	endpoint := httptest.NewServer(newMCPHandler(gate, redirect, mcp.LimitsFromConfig(config.Default())))
 	t.Cleanup(endpoint.Close)
 
 	session := connectMCPHTTP(t, endpoint.URL+"/mcp", mcpEndpointToken)
@@ -304,7 +305,7 @@ func toolNameSet(listed *sdk.ListToolsResult) map[string]bool {
 // repeating its count or its names.
 func registeredToolNames(t *testing.T) map[string]bool {
 	t.Helper()
-	service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, mcpEndpointToken, mcp.DefaultLimits(), http.DefaultTransport)
+	service, err := mcp.NewServiceWithTransport(mcp.InProcessOrigin, mcpEndpointToken, mcp.LimitsFromConfig(config.Default()), http.DefaultTransport)
 	if err != nil {
 		t.Fatal(err)
 	}

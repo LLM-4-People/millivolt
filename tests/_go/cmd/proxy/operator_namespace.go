@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // TestGatedPathReadsBackslashAsSeparator pins the namespace membership rule
@@ -113,7 +115,7 @@ func TestOperatorNamespaceLookAlikesNeverReachInference(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
 	var mu sync.Mutex
 	var upstreamHits []string
-	mux, handler := newOperatorMux(gate)
+	mux, handler := newOperatorMux(gate, config.Default())
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		upstreamHits = append(upstreamHits, r.Method+" "+r.URL.EscapedPath())
@@ -176,7 +178,7 @@ func TestMetricsPprofRoutesServeOnlyThroughTheOperatorGate(t *testing.T) {
 	var mu sync.Mutex
 	var upstreamHits []string
 	server := func(gate *operatorGate) *httptest.Server {
-		mux, handler := newOperatorMux(gate)
+		mux, handler := newOperatorMux(gate, config.Default())
 		registerPprofRoutes(mux)
 		mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()

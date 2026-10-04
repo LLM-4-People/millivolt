@@ -115,6 +115,13 @@ func TestDefaultHasNoZeroTunables(t *testing.T) {
 		"backup_max_bytes":        c.BackupMaxBytes > 0,
 		"read_header":             c.ReadHeaderTimeout > 0,
 		"idle_timeout":            c.IdleTimeout > 0,
+		"mcp_enabled":             c.MCPEnabled,
+		"mcp_page_size":           c.MCPPageSize > 0,
+		"mcp_query_max_rows":      c.MCPQueryMaxRows > 0,
+		"mcp_query_max_bytes":     c.MCPQueryMaxBytes > 0,
+		"mcp_capture_max_bytes":   c.MCPCaptureMaxBytes > 0,
+		"mcp_query_timeout":       c.MCPQueryTimeout > 0,
+		"mcp_timeout":             c.MCPTimeout > 0,
 	}
 	for k, ok := range checks {
 		if !ok {

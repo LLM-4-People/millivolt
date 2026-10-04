@@ -221,7 +221,7 @@ func TestPagingToolsNameTheirRealCursorArguments(t *testing.T) {
 	proxy.json(http.MethodGet, logPath,
 		`{"records":[`+strings.Join(rows, ",")+`],"more":true,"cursor_ms":1,"cursor_id":"rl"}`)
 	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.PageSize = 10
 	service := newTestService(t, proxy, limits)
 	page, err := service.records(t.Context(), RecordsInput{})

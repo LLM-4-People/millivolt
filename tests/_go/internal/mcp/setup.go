@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // TestSetupValidation pins the fail-fast rules: a missing credential or a
@@ -36,7 +39,7 @@ func TestSetupValidation(t *testing.T) {
 			"proxy URL must not carry credentials", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewService(tc.url, tc.token, DefaultLimits())
+			_, err := NewService(tc.url, tc.token, defaultTestLimits())
 			if err == nil {
 				t.Fatalf("setup must fail for %s", tc.name)
 			}
@@ -56,7 +59,7 @@ func TestSetupValidation(t *testing.T) {
 		strings.Repeat("x", OperatorTokenMinLen),
 		strings.Repeat("x", OperatorTokenMaxLen),
 	} {
-		if _, err := NewService("http://127.0.0.1:8081", token, DefaultLimits()); err != nil {
+		if _, err := NewService("http://127.0.0.1:8081", token, defaultTestLimits()); err != nil {
 			t.Fatalf("a %d character token must be accepted: %v", len(token), err)
 		}
 	}
@@ -64,7 +67,7 @@ func TestSetupValidation(t *testing.T) {
 	// Trailing slashes normalize to a bare origin, and the origin never carries
 	// the credential.
 	for _, raw := range []string{"http://127.0.0.1:8081/", "  http://127.0.0.1:8081/  ", "http://127.0.0.1:8081"} {
-		service, err := NewService(raw, valid, DefaultLimits())
+		service, err := NewService(raw, valid, defaultTestLimits())
 		if err != nil {
 			t.Fatalf("%q must normalize: %v", raw, err)
 		}
@@ -91,13 +94,36 @@ func TestLimitsValidation(t *testing.T) {
 		{"no timeout", func(l *Limits) { l.Timeout = 0 }, "request timeout"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			limits := DefaultLimits()
+			limits := defaultTestLimits()
 			tc.mutate(&limits)
 			if _, err := NewService("http://127.0.0.1:8081", "0123456789abcdef", limits); err == nil ||
 				!strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("limits error = %v, want one mentioning %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestConfigDefaultLimitsAreTheEndpointPolicy re-homes the removed
+// DefaultLimits pin: the shipped limits values have exactly one owner,
+// internal/config Default(), and LimitsFromConfig is the mapping onto the
+// endpoint's Limits. Exact literals, not the owning constants, so a change
+// on the owning side fails here.
+func TestConfigDefaultLimitsAreTheEndpointPolicy(t *testing.T) {
+	got := LimitsFromConfig(config.Default())
+	want := Limits{
+		QueryMaxRows:  200,
+		QueryMaxBytes: 128 << 10,
+		PageSize:      50,
+		CaptureBytes:  256 << 10,
+		QueryTimeout:  2 * time.Minute,
+		Timeout:       30 * time.Second,
+	}
+	if got != want {
+		t.Fatalf("LimitsFromConfig(config.Default()) = %+v, want the shipped policy %+v", got, want)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("the shipped policy must validate: %v", err)
 	}
 }
 
@@ -172,7 +198,7 @@ func TestQueryTruncatesWithAnExplicitMarker(t *testing.T) {
 	body.WriteString("]")
 	proxy.json(http.MethodGet, schemaPath, body.String())
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.QueryMaxRows = 5
 	service := newTestService(t, proxy, limits)
 
@@ -266,7 +292,7 @@ func TestListingToolsTruncateWithAMarker(t *testing.T) {
 		Body: strings.Repeat("metric 1\n", prometheusMaxLines+10),
 	})
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.PageSize = 5
 	service := newTestService(t, proxy, limits)
 	ctx := context.Background()
@@ -334,7 +360,7 @@ func TestQueryReportsTheProxysTotalWhenBothLimitsFire(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
 
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.QueryMaxRows = 3    // the row cap fires first
 	limits.QueryMaxBytes = 400 // and the byte cap fires second
 	service := newTestService(t, proxy, limits)

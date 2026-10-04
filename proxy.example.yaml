@@ -523,6 +523,54 @@ storage_query_max_rows: 10000
 #   type: bytes · range 1MiB..4GiB · default 1GiB
 backup_max_bytes: 1GiB
 
+# ---- MCP ----
+# The operator-gated /mcp LLM tool endpoint: mcp_enabled registers the route or keeps it
+# reserved (404, never inference), and the limits bound what its tools return to a model.
+# Restart to apply; the route table and the endpoint's services are built once at boot.
+# Register the streamable HTTP MCP endpoint at /mcp for LLM tool clients, operator-gated
+# and Bearer-only like /metrics. Off keeps the route reserved (404, never inference); the
+# /mcp/ look-alike reservation and the operator gate stay either way. Restart required.
+# Hot-reload: NO (restart required).
+#   type: bool · default true
+mcp_enabled: true
+
+# Default page for the records, values and audit capture listings the endpoint serves to a
+# model. Restart required.
+# Hot-reload: NO (restart required).
+#   type: int · range >= 1 · default 50
+mcp_page_size: 50
+
+# Client-side row cap on one query tool result; the proxy's own storage_query_max_rows
+# answers 413 first. Restart required.
+# Hot-reload: NO (restart required).
+#   type: int · range >= 1 · default 200
+mcp_query_max_rows: 200
+
+# Client-side cap on the encoded size of one query tool result. Keeps whole rows,
+# truncating with an explicit marker rather than silently. Restart required.
+# Hot-reload: NO (restart required).
+#   type: bytes · range >= 1B · default 128KiB
+mcp_query_max_bytes: 128KiB
+
+# Size above which a stored capture document is withheld whole from the audit_capture_get
+# tool; a document that large is more than a model should read in one call. Restart
+# required.
+# Hot-reload: NO (restart required).
+#   type: bytes · range >= 1B · default 256KiB
+mcp_capture_max_bytes: 256KiB
+
+# Bounds one proxy read the endpoint makes that is not the proxy's own bounded SQL reader
+# (a full-history chart or explorer fold can take seconds). Must be > 0. Restart required.
+# Hot-reload: NO (restart required).
+#   type: duration · range > 0s · default 2m
+mcp_query_timeout: 2m
+
+# Bounds every in-process call the endpoint's tools make to the proxy, including
+# mutations. Must be > 0. Restart required.
+# Hot-reload: NO (restart required).
+#   type: duration · range > 0s · default 30s
+mcp_timeout: 30s
+
 # ---- Dashboard ----
 # Live-view cadence and request-log window. Hot-reloads; open dashboards pick up the next
 # tick.

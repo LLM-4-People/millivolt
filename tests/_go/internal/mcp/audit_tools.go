@@ -247,7 +247,7 @@ func TestAuditCapturesListPagesThroughSQL(t *testing.T) {
 	proxy.json(http.MethodGet, schemaPath,
 		`[{"id":"c2","started_at":1700,"status_code":200,"provider":"local","model":"demo","client":"dev","debug_session_id":"s1","cost":0.1},`+
 			`{"id":"c1","started_at":1600,"status_code":500,"provider":"local","model":"demo","client":"dev","debug_session_id":"s1","cost":0}]`)
-	limits := DefaultLimits()
+	limits := defaultTestLimits()
 	limits.PageSize = 2
 	service := newTestService(t, proxy, limits)
 

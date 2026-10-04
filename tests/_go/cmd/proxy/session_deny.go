@@ -21,6 +21,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // brokenDeadlineWriter reports a read-deadline failure that is not
@@ -133,7 +135,7 @@ func TestSessionPlaneDenialsCarryNoStoreAndCSP(t *testing.T) {
 
 	t.Run("moved route and retired spelling through the installed table", func(t *testing.T) {
 		gate := newOperatorGate(token)
-		_, handler := newOperatorMux(gate)
+		_, handler := newOperatorMux(gate, config.Default())
 		endpoint := httptest.NewServer(handler)
 		t.Cleanup(endpoint.Close)
 		post := func(target, origin string) *http.Response {

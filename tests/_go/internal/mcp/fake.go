@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // fakeProxy is the deterministic stand-in for a running millivolt. It records
@@ -145,11 +147,19 @@ func quote(value string) string {
 // assertions about readable proxy messages test the fixture, not the behavior.
 const testToken = "9f2c7a4e1b8d5f30c6a9e2b7d4f81c53"
 
+// defaultTestLimits returns the limits the canonical config defaults build.
+// DefaultLimits used to live in this package; the defaults now have exactly
+// one owner, internal/config Default(), and LimitsFromConfig is the mapping,
+// so tests that need the shipped policy derive it instead of restating it.
+func defaultTestLimits() Limits {
+	return LimitsFromConfig(config.Default())
+}
+
 // newTestService builds a service pointed at the fake proxy.
 func newTestService(t *testing.T, proxy *fakeProxy, limits Limits) *Service {
 	t.Helper()
 	if limits == (Limits{}) {
-		limits = DefaultLimits()
+		limits = defaultTestLimits()
 	}
 	service, err := NewService(proxy.origin(), testToken, limits)
 	if err != nil {
