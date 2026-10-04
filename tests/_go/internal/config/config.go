@@ -587,6 +587,9 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"history_size too big", "history_size: 2000000"},
 		{"max_request_bytes too small", "max_request_bytes: 10"},
 		{"max_request_bytes negative", "max_request_bytes: -1"},
+		{"go_memory_limit too small", "go_memory_limit: 16MiB"},
+		{"go_memory_limit negative", "go_memory_limit: -1"},
+		{"go_memory_limit too big", "go_memory_limit: 2TiB"},
 		{"negative pool size", "max_conns_per_host: -1"},
 		{"idle-per-host zero", "max_idle_conns_per_host: 0"},
 		{"idle-per-host exceeds conns", "max_conns_per_host: 10\nmax_idle_conns_per_host: 20"},
@@ -754,6 +757,8 @@ func TestValidateAcceptsValidValues(t *testing.T) {
 		{"thinking retries disabled", "thinking_retries: 0"},
 		{"thinking retries max", "thinking_retries: 3"},
 		{"boundary values", "history_size: 1\nconversation_max_open: 1\nqueue_retry_after: 0s"},
+		{"go memory limit floor", "go_memory_limit: 32MiB"},
+		{"go memory limit disabled", "go_memory_limit: 0"},
 		{"provider alias merge", "provider_aliases:\n  old.example: new.example\n  legacy.example: new.example"},
 	}
 	for _, tc := range cases {

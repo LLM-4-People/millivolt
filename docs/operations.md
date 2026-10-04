@@ -1130,6 +1130,14 @@ record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 (process RSS after readiness), without a live instance; the
 [performance workflow](../CONTRIBUTING.md#performance-evidence) owns the commands.
 
+`go_memory_limit` is the operator's steady-state RSS lever: a soft cap on Go
+runtime managed memory (heap, stacks, runtime structures) applied once at
+startup. The default `0` leaves the runtime unbounded and keeps
+`GOMEMLIMIT`/`GOGC` environment control; a set value overrides the environment
+for the process lifetime. The limit is soft - exceeding it makes the collector
+more aggressive (capped near 50% of CPU time) instead of failing requests - and
+bounds Go-managed memory only, never SQLite's page cache or OS overhead.
+
 Use the [isolated performance workflow](../CONTRIBUTING.md#performance-evidence)
 and report the exact source/image revision, platform, CPU resources, configuration,
 history size and workload. Distinguish idle from loaded CPU/RSS, cold from warm

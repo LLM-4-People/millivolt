@@ -53,6 +53,17 @@ type Config struct {
 	// Zero waits indefinitely.
 	RestartDrainTimeout time.Duration `yaml:"restart_drain_timeout" json:"restart_drain_timeout"`
 
+	// MemoryLimit is a soft cap on the Go runtime's total managed memory
+	// (heap, stacks, runtime structures), applied once at startup through
+	// the runtime's memory-limit mechanism. Zero leaves the runtime
+	// unbounded and keeps operator GOMEMLIMIT/GOGC environment control; a
+	// set value overrides the environment for the process lifetime. The
+	// limit is soft: exceeding it makes the collector more aggressive
+	// (capped near 50% of CPU time) instead of failing requests. It bounds
+	// Go-managed memory only, never SQLite's page cache or OS overhead.
+	// Restart required.
+	MemoryLimit ByteSize `yaml:"go_memory_limit" json:"go_memory_limit"`
+
 	// MaxRequestBytes caps the size of an inbound request body that the proxy
 	// will buffer to discover routing metadata. Larger bodies are rejected.
 	MaxRequestBytes ByteSize `yaml:"max_request_bytes" json:"max_request_bytes"`
@@ -738,6 +749,12 @@ const (
 	// Inbound body band (Validate, overlay, Schema).
 	MaxRequestBytesMin = 1024
 	MaxRequestBytesMax = 1 << 30
+	// Soft runtime memory-limit band (Validate, overlay, Schema). The floor
+	// rejects limits below a fresh process's own documented footprint
+	// (~20 MiB idle), which could only force continuous collection; the
+	// ceiling is a plausible single-process budget, not a physical limit.
+	MemoryLimitMin = 32 << 20
+	MemoryLimitMax = 1 << 40
 	// Debug capture retention / size bands (Validate, overlay, Schema).
 	DebugCaptureTTLMin      = time.Hour
 	DebugCaptureTTLMax      = 7 * 24 * time.Hour
@@ -794,6 +811,7 @@ func Default() *Config {
 		HistorySize:         10000,
 		ShutdownTimeout:     5 * time.Second,
 		RestartDrainTimeout: 10 * time.Minute,
+		MemoryLimit:         0, // 0 = unbounded; operator GOMEMLIMIT/GOGC env control
 
 		MaxRequestBytes:         32 << 20, // 32 MiB
 		UpstreamTimeout:         5 * time.Minute,
@@ -1046,6 +1064,11 @@ func (c *Config) Validate() error {
 	}
 	if err := checkByteSize("max_request_bytes", c.MaxRequestBytes, MaxRequestBytesMin, MaxRequestBytesMax); err != nil {
 		return err
+	}
+	if c.MemoryLimit != 0 {
+		if err := checkByteSize("go_memory_limit", c.MemoryLimit, MemoryLimitMin, MemoryLimitMax); err != nil {
+			return err
+		}
 	}
 	if c.DebugCaptureTTL < DebugCaptureTTLMin || c.DebugCaptureTTL > DebugCaptureTTLMax {
 		return errRange("debug_capture_ttl", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))

@@ -73,6 +73,14 @@ read_header_timeout: 10s
 #   type: duration · range >= 0s (0s = no timeout) · default 2m
 idle_timeout: 2m
 
+# Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup.
+# 0 leaves it unbounded and keeps GOMEMLIMIT/GOGC env control; a set value overrides the
+# env. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails
+# requests. Does not bound SQLite's page cache or OS overhead. Restart required.
+# Hot-reload: NO (restart required).
+#   type: bytes · range 32MiB..1024GiB (0B = unbounded) · default 0B
+go_memory_limit: 0B
+
 # ---- Request ----
 # Inbound body cap, SSRF allowlist, optional body-preview, and debug-capture retention.
 # Inbound body the proxy will buffer to read routing metadata. Larger bodies are rejected

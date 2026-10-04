@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -188,6 +189,13 @@ func main() {
 	logDroppedConfigKeys(*configPath, skipped)
 	recordReloadStatus(true, "", skipped, nil)
 	applyCLIOverrides(cfg)
+	// The soft runtime memory limit is startup-only by design: it must be
+	// active before the startup projection preload allocates its burst, and
+	// an unset value never calls the API so operator GOMEMLIMIT/GOGC
+	// environment variables keep control (config.go owns the semantics).
+	if cfg.MemoryLimit > 0 {
+		debug.SetMemoryLimit(int64(cfg.MemoryLimit))
+	}
 
 	buf := metrics.NewBuffer(cfg.HistorySize)
 

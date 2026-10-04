@@ -173,7 +173,17 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 		}
 	case KindBytes:
 		n := int64(base.fieldValue(f.Key).(ByteSize))
-		for _, cand := range []int64{n + 1024, n - 1024} {
+		// The schema band is a candidate too: zero-default fields need a
+		// sample inside their floor/ceiling, which default +/- 1 KiB cannot
+		// reach.
+		cands := []int64{n + 1024, n - 1024}
+		if f.Min != nil {
+			cands = append(cands, int64(*f.Min))
+		}
+		if f.Max != nil {
+			cands = append(cands, int64(*f.Max))
+		}
+		for _, cand := range cands {
 			trial := base.Clone()
 			trial.fieldRV(f.Key).SetInt(cand)
 			if trial.Validate() == nil {
