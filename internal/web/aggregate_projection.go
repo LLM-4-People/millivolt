@@ -31,6 +31,18 @@ type historyProjection struct {
 	data projectionData
 }
 
+// growRows appends with exact capacity instead of append's doubling. The
+// rows slice is the projection's largest retained block; amortized doubling
+// leaves up to 2x spare capacity live on it for the process lifetime. Exact
+// growth pays the same amortized copy count without retaining the slack.
+func growRows(dst, add []contrib) []contrib {
+	if cap(dst)-len(dst) < len(add) {
+		grown := make([]contrib, len(dst)+len(add))
+		dst = grown[:copy(grown, dst)]
+	}
+	return append(dst, add...)
+}
+
 // PreloadHistory moves the one initial durable decode ahead of HTTP readiness.
 // It preloads the shared data source, not hardcoded default dashboard views.
 // A failed preload publishes nothing; later reads can retry the same builder.
@@ -127,11 +139,9 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) e
 			data.ids[c.id] = struct{}{}
 		}
 	}
-	if full {
-		data.rows = incoming
-	} else {
-		data.rows = append(data.rows, incoming...)
-	}
+	// growRows covers the full rebuild (dst empty) and the delta append with
+	// one owner; spare capacity never exceeds the incoming batch.
+	data.rows = growRows(data.rows, incoming)
 	data.metrics.append(data.rows, previousRows)
 	data.cursor, data.version = next, version
 	// Keep the PRE-scan version. If a commit landed during materialization,

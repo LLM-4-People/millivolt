@@ -225,7 +225,7 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 					}
 				}
 				interned := footprintHeap() - base
-				p.rows = incoming
+				p.rows = growRows(nil, incoming)
 				p.metrics.append(p.rows, 0)
 				ordered := footprintHeap() - base
 				// Same liveness anchor as above: the staged projection must
