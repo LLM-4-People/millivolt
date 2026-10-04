@@ -191,7 +191,6 @@ type contrib struct {
 	out        int64
 	cacheR     int64
 	reason     int64
-	answer     int64
 	tools      int64
 	ttft       int64
 	tps        float64
@@ -243,7 +242,6 @@ func fromRecord(r *metrics.Record, mcz *modelCanonizer) contrib {
 		out:        r.Usage.OutputTokens,
 		cacheR:     r.Usage.CacheReadTokens,
 		reason:     r.Usage.ReasoningTokens,
-		answer:     r.AnswerTokens,
 		tools:      int64(r.ToolCalls),
 		ttft:       r.TTFTMs,
 		tps:        recordTPS(r),
@@ -310,7 +308,7 @@ func recordTPS(r *metrics.Record) float64 {
 // must stay in lockstep between rowColumns and scanContrib.
 const rowColumns = `id, started_at, status_code, error_type, error_code, error_msg, attempts,
 	client, provider, model, key_hash, conversation_id, parent_conversation_id,
-	input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, answer_tokens,
+	input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
 	tool_calls, cost, ttft_ms, overall_tps, gen_tps, tool_names`
 
 // scanContrib decodes one scanned row into a contrib (rowColumns order).
@@ -322,7 +320,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	var attemptsJSON, toolNamesJSON []byte
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
 		&c.client, &c.prov, &c.model, &c.key, &c.conv, &c.parentConv,
-		&c.in, &c.out, &c.cacheR, &c.reason, &c.answer,
+		&c.in, &c.out, &c.cacheR, &c.reason,
 		&c.tools, &c.cost, &ttft, &overall, &gen, &toolNamesJSON); err != nil {
 		return c, err
 	}
