@@ -1225,8 +1225,15 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 		t.Fatal("second request never hit upstream")
 	}
 	// request base 100ms × 0.75–1.25 = 75–125ms. Leftover attempt 200ms
-	// × 0.75 = 150ms - the 140ms cap sits in that gap.
-	if elapsed := secondFirst.Sub(t0); elapsed < 60*time.Millisecond {
+	// × 0.75 = 150ms - the 140ms cap sits in that gap. The floor measures
+	// the pacing window's REMAINDER at the second request's arrival:
+	// FailSend armed the deadline while the first request's response
+	// finished, before t0, so an arming-to-t0 machine stall subtracts
+	// from the measured wait (one observed failure measured 44.37ms, a
+	// ~31ms stall against the minimum 75ms arm). The 40ms floor absorbs
+	// ~35ms of stall and still discriminates: an unpaced send arrives in
+	// ~1-5ms, failing the floor by >=35ms.
+	if elapsed := secondFirst.Sub(t0); elapsed < 40*time.Millisecond {
 		t.Fatalf("next first send in %v; exhausted retryable must wait ~base request backoff", elapsed)
 	}
 	if elapsed := secondFirst.Sub(t0); elapsed > 140*time.Millisecond {

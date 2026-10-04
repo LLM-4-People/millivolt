@@ -25,7 +25,8 @@ window to have elevated errors. The banner shows that active-model evidence;
 its attempt percentage differs from the Errors chart's affected-request rate.
 It clears when protection recovers and can be hidden independently in Settings.
 See [configuration and behavior](operations.md#error-storm-protection).
-The static captures below predate this optional banner.
+The static captures below show no banner because the capture session has no
+active incident; the banner stays hidden until protection fires.
 
 ## Timelines
 
@@ -71,7 +72,8 @@ rows. Every tile keeps one fixed size whatever it carries - spark or not,
 one share line or two, and the no-data skeleton swaps in without moving the
 card - and the band sits at its natural height at the top of the card.
 Only the time-range control applies. This preset has
-no static capture yet; the gallery images below predate it.
+no static capture yet; the gallery capture selects the plotted presets only,
+so no tiles capture exists.
 
 ### Traffic
 

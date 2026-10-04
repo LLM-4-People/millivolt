@@ -1077,8 +1077,8 @@ async function main() {
   w.toggleLogsMenu({ stopPropagation() {} });
   check('logs menu closes on second toggle', logsMenu.hidden);
   check('logs close clears aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'false');
-  // equal-size icon buttons: all five header actions share one min-width
-  const hdrIds = ['btn-pause', 'btn-debug', 'btn-limits', 'btn-logs', 'btn-settings'];
+  // equal-size icon buttons: all six header actions share one min-width
+  const hdrIds = ['btn-pause', 'btn-debug', 'btn-limits', 'btn-logs', 'btn-restart', 'btn-settings'];
   const bts = hdrIds.map(id => d.getElementById(id));
   const styles = bts.map(b => w.getComputedStyle(b).minWidth);
   check('header action buttons share one min-width', styles.every(s => s === styles[0] && s) && styles[0] !== 'auto');

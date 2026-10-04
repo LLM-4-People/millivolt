@@ -937,11 +937,11 @@ breaking change for scripts that consumed the plain JSON download: there is
 no uncompressed fallback, so scripted consumers must decompress the artifact
 first.
 
-Both database deletions live in Settings, in the storage category, and
-nowhere else. Delete matching uses the same filter/count owner as the export,
-and its scope is the chosen filter; Delete everything wipes the whole
-database. Deletion requires confirmation in the dashboard; it does not happen
-when the sheet opens. A selected filter makes a read-only
+In the dashboard, both database deletions live in Settings, in the storage
+category, and nowhere else. Delete matching uses the same filter/count owner
+as the export, and its scope is the chosen filter; Delete everything wipes
+the whole database. Deletion requires confirmation in the dashboard; it does
+not happen when the sheet opens. A selected filter makes a read-only
 `POST /admin/purge/count` preview. Current traffic can change the count
 before the action, but the UI retains the previewed age cutoff rather than
 silently moving it. The filter selections reset every time the sheet

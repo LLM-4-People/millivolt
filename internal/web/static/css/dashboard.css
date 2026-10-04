@@ -163,7 +163,7 @@
   .hdr-btn-label { display: none; }
   #btn-nav { display: none; min-width: var(--hdr-btn); width: var(--hdr-btn); height: var(--hdr-btn); padding: 0;
     align-items: center; justify-content: center; }
-  /* Narrow viewports: brand + hamburger only. The seven actions live in a
+  /* Narrow viewports: brand + hamburger only. The six actions live in a
      labeled panel so they cannot force horizontal scrolling. */
   @media (max-width: 800px) {
     header { padding: 0 14px; gap: 10px; }

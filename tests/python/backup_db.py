@@ -5,6 +5,7 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import tempfile
@@ -299,6 +300,49 @@ class BackupTest(unittest.TestCase):
                 connection.close()
                 self.source.unlink()
                 self.destination.unlink()
+
+    def test_migration_zero_columns_are_the_store_lineage_tail(self):
+        # The derive accepts a migration-ancestor source by projecting each
+        # MIGRATION_ZERO_COLUMNS name as exactly the migration's zero
+        # backfill, and that projection is only truthful while the tuple
+        # equals the migration's own lineage: the tail of migrate's needed
+        # slice in internal/storage/store.go. This is the mechanical
+        # contract between the two sides: a migration column added,
+        # removed or reordered must move scripts/backup_db.py's
+        # MIGRATION_ZERO_COLUMNS and the Go needed-slice tail in the same
+        # change, or this test fails. The window is the slice tail, never a
+        # DDL-shape filter over the whole slice: older entries share the
+        # zero-DDL shape (rate_limit_remaining) without being lineage
+        # columns, and req_param_presence concatenates a DDL constant.
+        source = (ROOT / 'internal' / 'storage' / 'store.go').read_text(encoding='utf-8')
+        declaration = 'needed := []struct{ name, ddl string }{'
+        head = source.find(declaration)
+        self.assertNotEqual(head, -1,
+                             'migrate\'s needed slice declaration not found in '
+                             'internal/storage/store.go; if the migration list moved, '
+                             'update this guard and MIGRATION_ZERO_COLUMNS together')
+        entries = []
+        for line in source[head + len(declaration):].splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped == '}':
+                break
+            match = re.fullmatch(r'\{"([a-z0-9_]+)", (.+)\},', stripped)
+            self.assertIsNotNone(match, 'unparsed needed-slice entry: ' + stripped)
+            entries.append(match.groups())
+        tail = entries[-len(subject.MIGRATION_ZERO_COLUMNS):]
+        self.assertEqual([name for name, _ in tail], list(subject.MIGRATION_ZERO_COLUMNS),
+                         'scripts/backup_db.py MIGRATION_ZERO_COLUMNS no longer equals the '
+                         'tail of migrate\'s needed slice in internal/storage/store.go; both '
+                         'sides must move together: add, remove or reorder the migration '
+                         'column in the Go slice and this tuple in the same change')
+        for name, ddl in tail:
+            self.assertEqual(
+                ddl, '"ALTER TABLE requests ADD COLUMN ' + name + ' INTEGER NOT NULL DEFAULT 0"',
+                name + ' must migrate with exactly the zero backfill the derive projects; '
+                'keep the Go needed-slice entry and scripts/backup_db.py\'s '
+                'MIGRATION_ZERO_COLUMNS in sync')
 
     def test_non_migration_column_loss_still_fails_closed(self):
         # Only the zero-backfilled migration columns may be absent. Losing
