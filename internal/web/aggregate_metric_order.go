@@ -16,6 +16,7 @@ type metricSample[T ~int64 | ~float64] struct {
 type projectionMetrics struct {
 	ttft []metricSample[int64]
 	tps  []metricSample[float64]
+	dec  []metricSample[int64]
 }
 
 func validMetricSample[T ~int64 | ~float64](value T) bool {
@@ -31,6 +32,7 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	}
 	wait := make([]metricSample[int64], 0, len(rows)-from)
 	speed := make([]metricSample[float64], 0, len(rows)-from)
+	decode := make([]metricSample[int64], 0, len(rows)-from)
 	for i := from; i < len(rows); i++ {
 		c := &rows[i]
 		if validMetricSample(c.ttft) {
@@ -39,9 +41,13 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 		if validMetricSample(c.tps) {
 			speed = append(speed, metricSample[float64]{row: uint32(i), value: c.tps})
 		}
+		if validMetricSample(c.dec) {
+			decode = append(decode, metricSample[int64]{row: uint32(i), value: c.dec})
+		}
 	}
 	m.ttft = mergeMetricOrder(m.ttft, wait)
 	m.tps = mergeMetricOrder(m.tps, speed)
+	m.dec = mergeMetricOrder(m.dec, decode)
 }
 
 func mergeMetricOrder[T ~int64 | ~float64](old, added []metricSample[T]) []metricSample[T] {

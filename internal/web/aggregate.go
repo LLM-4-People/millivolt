@@ -194,6 +194,7 @@ type contrib struct {
 	tools      int64
 	ttft       int64
 	tps        float64
+	dec        int64
 	client     string
 	prov       string
 	model      string
@@ -245,6 +246,7 @@ func fromRecord(r *metrics.Record, mcz *modelCanonizer) contrib {
 		tools:      int64(r.ToolCalls),
 		ttft:       r.TTFTMs,
 		tps:        recordTPS(r),
+		dec:        recordDecodeMs(r),
 		client:     r.Client,
 		prov:       r.Provider,
 		model:      mcz.model(r.Model),
@@ -303,13 +305,29 @@ func recordTPS(r *metrics.Record) float64 {
 	return r.DecodeTPS
 }
 
+// recordDecodeMs is the decode window: last_token_at - first_token_at, the
+// exact span GenThroughput measures tokens over. Both timestamps are truncated
+// to milliseconds the same way storage's timeToMilli writes them, so a ring
+// record and its stored row always agree. 0 (either timestamp absent, or a
+// non-positive window) is an invalid sample - the same >0 gate validMetricSample
+// applies to ttft/tps excludes it downstream.
+func recordDecodeMs(r *metrics.Record) int64 {
+	if r.FirstTokenAt.IsZero() || r.LastTokenAt.IsZero() {
+		return 0
+	}
+	return r.LastTokenAt.UnixMilli() - r.FirstTokenAt.UnixMilli()
+}
+
 // rowColumns is the SELECT list the chart and explorer scans stream. It is
 // the single owner of which columns dashboard aggregates may read; key order
-// must stay in lockstep between rowColumns and scanContrib.
+// must stay in lockstep between rowColumns and scanContrib. The trailing
+// decode_ms entry is a DERIVED expression over existing durable columns (the
+// operator recipe's decode window), not a new schema column.
 const rowColumns = `id, started_at, status_code, error_type, error_code, error_msg, attempts,
 	client, provider, model, key_hash, conversation_id, parent_conversation_id,
 	input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
-	tool_calls, cost, ttft_ms, overall_tps, gen_tps, tool_names`
+	tool_calls, cost, ttft_ms, overall_tps, gen_tps, tool_names,
+	(last_token_at - first_token_at) AS decode_ms`
 
 // scanContrib decodes one scanned row into a contrib (rowColumns order).
 func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
@@ -321,7 +339,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
 		&c.client, &c.prov, &c.model, &c.key, &c.conv, &c.parentConv,
 		&c.in, &c.out, &c.cacheR, &c.reason,
-		&c.tools, &c.cost, &ttft, &overall, &gen, &toolNamesJSON); err != nil {
+		&c.tools, &c.cost, &ttft, &overall, &gen, &toolNamesJSON, &c.dec); err != nil {
 		return c, err
 	}
 	c.model = mcz.model(c.model)
@@ -622,6 +640,7 @@ type chartBucketJSON struct {
 	Cost   float64    `json:"cost"`
 	TTFT   []*float64 `json:"ttft"` // [p50, p95, p99]; nil entries below pctMinSamples samples
 	TPS    []*float64 `json:"tps"`
+	Dec    []*float64 `json:"dec"` // decode window (last_token_at - first_token_at), same triple shape
 }
 
 type chartPayload struct {
@@ -630,6 +649,7 @@ type chartPayload struct {
 	BucketMs   int64             `json:"bucket_ms"` // exact integer bucket width - single source of truth
 	TTFTP      []*float64        `json:"ttft_p"`    // period-wide [p50, p95, p99] (the totals strip)
 	TPSP       []*float64        `json:"tps_p"`
+	DecP       []*float64        `json:"dec_p"`
 	TTFTStat   []*float64        `json:"ttft_stat"` // period-wide [avg, min, max] over every captured sample
 	TPSStat    []*float64        `json:"tps_stat"`
 	CostPerMTk *float64          `json:"cost_per_mtok"` // period blended price; SAME rule as the KPI band (cost-reporting requests only)
@@ -639,7 +659,7 @@ type chartPayload struct {
 type bAcc struct {
 	t, req, err, rl, in, out, cache, reason int64
 	cost                                    float64
-	ttftN, tpsN                             int
+	ttftN, tpsN, decN                       int
 }
 
 // chartFold accumulates one scoped chart series over a stream of
@@ -653,8 +673,10 @@ type chartFold struct {
 	costInOut  float64 // in+out of cost-REPORTING requests only
 	extraTTFT  []int64 // only unflushed/ring values; durable samples stay in the shared order
 	extraTPS   []float64
+	extraDec   []int64
 	ttftBucket []uint8
 	tpsBucket  []uint8
+	decBucket  []uint8
 	membership []uint8
 	order      projectionMetrics
 	statusCode string
@@ -744,17 +766,25 @@ func (f *chartFold) fold(c *contrib) error {
 			f.tpsBucket = append(f.tpsBucket, uint8(idx+1))
 		}
 	}
+	if validMetricSample(c.dec) {
+		b.decN++
+		if c.rowIndex == 0 {
+			f.extraDec = append(f.extraDec, c.dec)
+			f.decBucket = append(f.decBucket, uint8(idx+1))
+		}
+	}
 	return nil
 }
 
 func (f *chartFold) payload(now int64) chartPayload {
 	out := make([]chartBucketJSON, f.count)
-	ttftCounts, tpsCounts := make([]int, f.count), make([]int, f.count)
+	ttftCounts, tpsCounts, decCounts := make([]int, f.count), make([]int, f.count), make([]int, f.count)
 	for i, b := range f.buckets {
-		ttftCounts[i], tpsCounts[i] = b.ttftN, b.tpsN
+		ttftCounts[i], tpsCounts[i], decCounts[i] = b.ttftN, b.tpsN, b.decN
 	}
 	ttft, periodTTFT := rankPercentiles(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
 	tps, periodTPS := rankPercentiles(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
+	dec, periodDec := rankPercentiles(f.order.dec, f.membership, decCounts, f.extraDec, f.decBucket)
 	ttftStat := metricStats(f.order.ttft, f.membership, f.extraTTFT, f.ttftBucket, f.count)
 	tpsStat := metricStats(f.order.tps, f.membership, f.extraTPS, f.tpsBucket, f.count)
 	for i, b := range f.buckets {
@@ -762,10 +792,11 @@ func (f *chartFold) payload(now int64) chartPayload {
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
 		o.TTFT = ttft[i]
 		o.TPS = tps[i]
+		o.Dec = dec[i]
 		out[i] = o
 	}
 	return chartPayload{NowMs: now, FromMs: f.from, BucketMs: f.step,
-		TTFTP: periodTTFT, TPSP: periodTPS, TTFTStat: ttftStat, TPSStat: tpsStat,
+		TTFTP: periodTTFT, TPSP: periodTPS, DecP: periodDec, TTFTStat: ttftStat, TPSStat: tpsStat,
 		CostPerMTk: metrics.ScaledRatio(f.cost, f.costInOut, 1e6), Buckets: out}
 }
 

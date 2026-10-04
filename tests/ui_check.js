@@ -117,12 +117,12 @@ const chartStep = 120000; // the 60m window's ladder step (2m)
 const chartFrom = chartNow - 3600000 - ((chartNow - 3600000) % chartStep);
 let chartPayload = {
   now_ms: chartNow, from_ms: chartFrom, bucket_ms: chartStep,
-  ttft_p: [null, null, null], tps_p: [null, null, null],
+  ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
   ttft_stat: null, tps_stat: null,
   buckets: Array.from({ length: Math.ceil((chartNow - chartFrom) / chartStep) }, (_, i) => ({
     t: chartFrom + i * chartStep,
     req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
-    ttft: [null, null, null], tps: [null, null, null],
+    ttft: [null, null, null], tps: [null, null, null], dec: [null, null, null],
   })),
 };
 let restartState = { restarted: false, postCount: 0, statusGate: null, postGate: null, status: {} };
@@ -509,7 +509,7 @@ async function main() {
       renderCard('conversation',{tools:undefined}).querySelector('.xp-node-kpis').textContent.includes('calls -') &&
       renderCard('conversation',{tools:null}).querySelector('.xp-node-kpis').textContent.includes('calls -'));
     check('conversation KPI slots stay a stable economics-then-wait row', (() => {
-      const want = ['cost','per Mtok','tok','calls','ttft'];
+      const want = ['cost','tok','calls','ttft'];
       const spans = [...renderCard('conversation',{tools:3}).querySelectorAll('.xp-node-kpis > span')];
       return spans.length === want.length && want.every((w, i) => spans[i].textContent.startsWith(w));
     })());
@@ -2213,11 +2213,11 @@ async function main() {
   const BUCKET_MS = 120000;
   const mkChart = () => ({
     from_ms: CHART_FROM, now_ms: CHART_FROM + 30 * BUCKET_MS, bucket_ms: BUCKET_MS,
-    ttft_p: [null, null, null], tps_p: [null, null, null],
+    ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
     buckets: Array.from({ length: 30 }, (_, i) => ({
       t: CHART_FROM + i * BUCKET_MS,
       req: 0, err: 0, rl: 0, in: 0, out: 0, cache: 0, reason: 0, cost: 0,
-      ttft: [null, null, null], tps: [null, null, null],
+      ttft: [null, null, null], tps: [null, null, null], dec: [null, null, null],
     })),
   });
   // Explicit renders own dirty consumption, including no-data boot renders.
@@ -2381,21 +2381,22 @@ async function main() {
   check('hiding a token series nulls its column, count stable', dataTok2.length === 6 && dataTok2[2].every(v => v === null) && dataTok2[1][tokSlot] === 100 && dataTok2[3][tokSlot] === 10 && dataTok2[4][tokSlot] === 60);
   w.eval('chartView.hidden = {}');
 
-  // Speed + latency: one selected percentile per metric. A bucket plots only
-  // when BOTH measurements exist at that percentile (a null in either line is
-  // a gap point, not a zero); unmeasured buckets compact away like empty bar
-  // slots instead of stranding gap points in dead space.
+  // Speed + latency: one selected percentile per metric (speed, TTFT and
+  // the decode window). A bucket plots only when EVERY measurement exists at
+  // that percentile (a null in any line is a gap point, not a zero);
+  // unmeasured buckets compact away like empty bar slots instead of
+  // stranding gap points in dead space.
   w.eval(`
     chartView.preset = 'latency'; chartView.pct = 95;
     chartAgg.buckets[2].req = 1;
-    chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100.25, 200.75, 300.5];
+    chartAgg.buckets[2].ttft = [10, 20, 30]; chartAgg.buckets[2].tps = [100.25, 200.75, 300.5]; chartAgg.buckets[2].dec = [40, 80, 120];
     chartAgg.buckets[7].req = 1;
     chartAgg.buckets[7].ttft = [1, 2, 3];
     chartAgg.buckets[9].req = 1;
-    chartAgg.buckets[9].ttft = [null, 5, null]; chartAgg.buckets[9].tps = [null, 50, null];
+    chartAgg.buckets[9].ttft = [null, 5, null]; chartAgg.buckets[9].tps = [null, 50, null]; chartAgg.buckets[9].dec = [null, 60, null];
   `);
   const dataLat = w.eval('chartData()');
-  check('speed + latency keeps only buckets with both measurements',
+  check('speed + latency keeps only buckets with every measurement',
     dataLat[0].length === 2 && dataLat[0][0] === 0.5 && dataLat[0][1] === 1.5);
   check('compacted points keep their true bucket times for ticks and hover', w.eval(`(() => {
     const ticks = chartXValues({data: [chartData()[0]]}, [0.5, 1.5]);
@@ -2403,25 +2404,26 @@ async function main() {
       ticks.join() === [chartXTick(chartAgg.buckets[2].t), chartXTick(chartAgg.buckets[9].t)].join();
   })()`));
   check('speed + latency reads only the selected percentile, preserving fractional speed',
-    dataLat.length === 3 && dataLat[1][0] === 200.75 && dataLat[2][0] === 20 && dataLat[1][1] === 50 && dataLat[2][1] === 5);
+    dataLat.length === 4 && dataLat[1][0] === 200.75 && dataLat[2][0] === 20 && dataLat[3][0] === 80 && dataLat[1][1] === 50 && dataLat[2][1] === 5 && dataLat[3][1] === 60);
   check('speed + latency uses independent unit-honest axes without bands', w.eval(`(() => {
     const opts = upOpts(640, 210);
     return opts.axes[1].scale === 'ytps' && opts.axes[2].scale === 'yttft' &&
-      opts.series.length === 3 && opts.series[1].scale === 'ytps' && opts.series[2].scale === 'yttft' &&
-      opts.series[1].label === 'speed' && opts.series[2].label === 'latency' && !opts.bands;
+      opts.series.length === 4 && opts.series[1].scale === 'ytps' && opts.series[2].scale === 'yttft' && opts.series[3].scale === 'yttft' &&
+      opts.series[1].label === 'speed' && opts.series[2].label === 'latency' && opts.series[3].label === 'decode' && !opts.bands;
   })()`));
   check('a bucket missing one measurement never plots, even with that line hidden', w.eval(`(() => {
     chartView.hidden = {latency:['tps']};
     const d = chartData();
     chartView.hidden = {};
-    return d[0].length === 2 && d[1].every(v => v === null) && d[2][0] === 20 && d[2][1] === 5;
+    return d[0].length === 2 && d[1].every(v => v === null) && d[2][0] === 20 && d[2][1] === 5 && d[3][0] === 80 && d[3][1] === 60;
   })()`));
   const isolatedOpts = w.eval('upOpts(370, 210)');
-  const [innerPoint, outerPoint] = isolatedOpts.series.slice(1).map(s => s.points);
-  check('coincident isolated lines use an inner filled point and transparent outer ring',
+  const [innerPoint, outerPoint, outerPoint2] = isolatedOpts.series.slice(1).map(s => s.points);
+  check('coincident isolated lines use an inner filled point and transparent outer rings',
     innerPoint.width === 0 && innerPoint.fill === isolatedOpts.series[1].stroke &&
     outerPoint.fill === 'transparent' && outerPoint.width > 0 &&
-    outerPoint.size / 2 - outerPoint.width > innerPoint.size / 2);
+    outerPoint.size / 2 - outerPoint.width > innerPoint.size / 2 &&
+    outerPoint2.fill === 'transparent' && outerPoint2.width > 0 && outerPoint2.size > outerPoint.size);
   check('isolated marker identity is stable when an earlier line is hidden', w.eval(`(() => {
     const hidden = chartView.hidden;
     const before = upOpts(370, 210).series.slice(1).map(s => s.points);
@@ -2430,8 +2432,8 @@ async function main() {
     chartView.hidden = hidden;
     return before.every((p, i) => p.size === after[i].size && p.width === after[i].width && p.fill === after[i].fill);
   })()`));
-  for (const si of [1, 2]) {
-    const marks = isolatedOpts.series[si].points.filter?.({ data: [[0], [9.928], [1]] }, si);
+  for (const si of [1, 2, 3]) {
+    const marks = isolatedOpts.series[si].points.filter?.({ data: [[0], [9.928], [1], [3.5]] }, si);
     check(`a single ${isolatedOpts.series[si].label} sample has a visible point`, marks?.join() === '0');
   }
   for (const [values, expected] of [
@@ -2455,20 +2457,23 @@ async function main() {
   `));
   check('ttft formatter treats 0 as absent', w.eval('fmtTTFT(0) === "-" && fmtTTFT(undefined) === "-" && fmtTTFT(1) === "1ms"'));
 
-  // Both period totals follow the one percentile control, not bucket means
-  // and not a second always-p50 baseline. Names never repeat the dropdown.
+  // All three period totals follow the one percentile control, not bucket
+  // means and not a second always-p50 baseline. Names never repeat the
+  // dropdown.
   w.eval(`
     chartView.preset = 'latency';
-    chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5];
+    chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5]; chartAgg.dec_p = [440, 550, 660];
   `);
   const latTotals = w.eval('chartTotals()');
-  check('speed + latency totals show only selected period values', latTotals.includes('202.75 tok/s') && latTotals.includes('220ms') && !latTotals.includes('101.25') && !latTotals.includes('110ms') && !/p(?:50|95|99)/.test(latTotals));
-  for (const [pct, speed, ttft, totalSpeed, totalTTFT, kept] of [[50, 100.25, 10, 101.25, 110, 1], [99, 300.5, 30, 303.5, 330, 1]]) {
+  check('speed + latency totals show only selected period values',
+    latTotals.includes('202.75 tok/s') && latTotals.includes('220ms') && latTotals.includes('550ms') &&
+    !latTotals.includes('101.25') && !latTotals.includes('110ms') && !latTotals.includes('440ms') && !/p(?:50|95|99)/.test(latTotals));
+  for (const [pct, speed, ttft, dec, totalSpeed, totalTTFT, totalDec, kept] of [[50, 100.25, 10, 40, 101.25, 110, 440, 1], [99, 300.5, 30, 120, 303.5, 330, 660, 1]]) {
     w.setChartPct(String(pct));
     const data = w.eval('chartData()'), totals = w.eval('chartTotals()');
-    check(`percentile dropdown chooses both series and period totals at ${pct}`,
-      data.length === 3 && data[0].length === kept && data[1][0] === speed && data[2][0] === ttft &&
-      totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms'));
+    check(`percentile dropdown chooses every series and period total at ${pct}`,
+      data.length === 4 && data[0].length === kept && data[1][0] === speed && data[2][0] === ttft && data[3][0] === dec &&
+      totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms') && totals.includes(totalDec + 'ms'));
   }
   w.setChartPct('95');
   // blank state: zero merged traffic reads as empty
@@ -2548,7 +2553,7 @@ async function main() {
     tokens: ['inTok', 'outTok', 'reason', 'cache', 'cachePct'],
     errors: ['err', 'errRate'],
     cost: ['cost', 'req'],
-    latency: ['tps', 'ttft'],
+    latency: ['tps', 'ttft', 'dec'],
   };
   for (const [p, want] of Object.entries(pct50Want)) {
     w.eval(`chartView.preset = '${p}'; chartView.pct = 50;`);
@@ -2557,8 +2562,8 @@ async function main() {
   }
   for (const pct of [95, 99]) {
     w.eval(`chartView.preset = 'latency'; chartView.pct = ${pct};`);
-    check(`speed + latency keeps two lines at pct=${pct}`,
-      w.eval('chartPlan().meta.map(m => m.spec.id).join()') === 'tps,ttft');
+    check(`speed + latency keeps all three lines at pct=${pct}`,
+      w.eval('chartPlan().meta.map(m => m.spec.id).join()') === 'tps,ttft,dec');
   }
 
   // ---- test 11d: grouped bars occupy separate, centered intervals ----
@@ -2606,32 +2611,40 @@ async function main() {
   check('legend hide nulls the column, column count stable',
     dataLeg.length === 3 && dataLeg[2].every(v => v === null) && dataLeg[1][0] === 3);
 
-  w.eval("chartView.preset = 'latency'; chartView.pct = 95; chartView.hidden = {}; chartAgg.buckets[5].ttft = [10, 20, 30]; chartAgg.buckets[5].tps = [100, 200, 300]");
+  w.eval("chartView.preset = 'latency'; chartView.pct = 95; chartView.hidden = {}; chartAgg.buckets[5].ttft = [10, 20, 30]; chartAgg.buckets[5].tps = [100, 200, 300]; chartAgg.buckets[5].dec = [70, 140, 210]");
   w.renderChart();
   const legTTFT = () => d.querySelector('#traffic-legend .leg-item[data-series="ttft"]');
-  check('speed + latency legend has two pressed toggles with no repeated percentile labels',
-    [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.dataset.series).join() === 'tps,ttft' &&
-    [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.textContent).join() === 'speed,latency' &&
+  const legDec = () => d.querySelector('#traffic-legend .leg-item[data-series="dec"]');
+  check('speed + latency legend has three pressed toggles with no repeated percentile labels',
+    [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.dataset.series).join() === 'tps,ttft,dec' &&
+    [...d.querySelectorAll('#traffic-legend .leg-item')].map(b => b.textContent).join() === 'speed,latency,decode' &&
     [...d.querySelectorAll('#traffic-legend .leg-item')].every(b => b.getAttribute('aria-pressed') === 'true'));
   const dataLegLat = w.eval('chartData()');
   check('speed + latency legend controls the selected value for each metric',
-    dataLegLat.length === 3 && dataLegLat[0].length === 1 && dataLegLat[1][0] === 200 && dataLegLat[2][0] === 20);
+    dataLegLat.length === 4 && dataLegLat[0].length === 1 && dataLegLat[1][0] === 200 && dataLegLat[2][0] === 20 && dataLegLat[3][0] === 140);
   legTTFT().click();
   const dataLegLatHidden = w.eval('chartData()');
   check('latency toggle hides only its line and exposes its unpressed state',
     legTTFT().getAttribute('aria-pressed') === 'false' && legTTFT().classList.contains('off') &&
-    dataLegLatHidden.length === 3 && dataLegLatHidden[0].length === 1 && dataLegLatHidden[1][0] === 200 && dataLegLatHidden[2].every(v => v === null));
+    dataLegLatHidden.length === 4 && dataLegLatHidden[0].length === 1 && dataLegLatHidden[1][0] === 200 && dataLegLatHidden[2].every(v => v === null) && dataLegLatHidden[3][0] === 140);
   legTTFT().click();
   check('latency metric toggle restores only its own line',
-    legTTFT().getAttribute('aria-pressed') === 'true' && w.eval('chartData()[1][0] === 200 && chartData()[2][0] === 20'));
+    legTTFT().getAttribute('aria-pressed') === 'true' && w.eval('chartData()[1][0] === 200 && chartData()[2][0] === 20 && chartData()[3][0] === 140'));
+  legDec().click();
+  const dataLegDecHidden = w.eval('chartData()');
+  check('decode toggle hides only its own line and keeps the shared duration axis',
+    legDec().getAttribute('aria-pressed') === 'false' && legDec().classList.contains('off') &&
+    dataLegDecHidden.length === 4 && dataLegDecHidden[0].length === 1 && dataLegDecHidden[3].every(v => v === null) &&
+    dataLegDecHidden[1][0] === 200 && dataLegDecHidden[2][0] === 20);
+  legDec().click();
   const pctControl = d.getElementById('chart-pct');
-  check('the percentile control names both plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed and latency'));
+  check('the percentile control names the plotted metrics without a second owner', pctControl.getAttribute('aria-label') === 'Percentile' && pctControl.title.includes('speed, latency and decode'));
   pctControl.value = '99';
   pctControl.dispatchEvent(new w.Event('change', { bubbles: true }));
-  check('the percentile dropdown updates both plotted lines together', w.eval('chartView.pct === 99 && chartData()[1][0] === 300 && chartData()[2][0] === 30'));
+  check('the percentile dropdown updates every plotted line together', w.eval('chartView.pct === 99 && chartData()[1][0] === 300 && chartData()[2][0] === 30 && chartData()[3][0] === 210'));
   w.eval(`upOpts(640, 210).hooks.setCursor[0]({data: chartData(), cursor: {idx: 0, left: 100}, bbox: {width: 640}})`);
-  check('hover shows one speed and one latency value with no percentile duplication',
-    [...d.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join() === 'speed300 tok/s,latency30ms' &&
+  check('hover shows one value per plotted metric with no percentile duplication',
+    [...d.querySelectorAll('#chart-hover .chart-hover-row')].map(el => el.textContent).join() === 'speed300 tok/s,latency30ms,decode210ms' &&
     !/p(?:50|95|99)/.test(d.getElementById('chart-hover').textContent));
   w.eval(`chartView.hidden = {}; storage.set('dash.chart', JSON.stringify({preset: 'latency', pct: 99, window: '10080', hidden: {latency: ['ttft', 'dur', 'ttftP50', 'req']}})); loadChartView();`);
   check('saved latency selection survives while obsolete band/duration and foreign series ids are discarded',
@@ -2650,6 +2663,13 @@ async function main() {
   check('toggling again restores the series and re-persists',
     w.eval('chartView.hidden.latency.join() === "ttft"') &&
     JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden.latency.join() === 'ttft');
+  w.toggleChartSeries('dec');
+  check('the decode series flips under the same preset key and persists',
+    w.eval('chartView.hidden.latency.join() === "ttft,dec"') &&
+    JSON.parse(w.eval('storage.get("dash.chart")') || '{}').hidden.latency.join() === 'ttft,dec');
+  w.toggleChartSeries('dec');
+  check('toggling decode back restores it under the same contract',
+    w.eval('chartView.hidden.latency.join() === "ttft"'));
   w.eval("chartView.preset = 'overview'; chartView.hidden = {};");
   w.toggleSummaryMetric('cost');
   check('a picker flip hides its metric under the overview key, not the preset id',
@@ -2686,7 +2706,7 @@ async function main() {
     w.setChartPct('99');
     check("setChartPct persists the merged view and re-renders",
       w.eval('chartView.pct') === 99 && savedView().pct === 99 && savedView().preset === 'latency' &&
-        w.eval('chartData()[1][0]') === 300 && w.eval('chartData()[2][0]') === 30);
+        w.eval('chartData()[1][0]') === 300 && w.eval('chartData()[2][0]') === 30 && w.eval('chartData()[3][0]') === 210);
     w.setChartPct('42');
     check('setChartPct rejects unlisted percentiles without touching the view',
       w.eval('chartView.pct') === 99 && savedView().pct === 99);

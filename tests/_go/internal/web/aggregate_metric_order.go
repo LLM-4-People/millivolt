@@ -98,20 +98,20 @@ func TestRankPercentilesRandomized(t *testing.T) {
 
 func TestProjectionMetricAppendImmutable(t *testing.T) {
 	rows := []contrib{
-		{ttft: 40, tps: 4}, {ttft: 10, tps: 1}, {ttft: 0, tps: math.NaN()},
-		{ttft: -3, tps: math.Inf(1)}, {ttft: 30, tps: 3}, {ttft: 20, tps: 2},
-		{ttft: 10, tps: 0}, {ttft: 0, tps: math.Inf(-1)},
+		{ttft: 40, tps: 4, dec: 400}, {ttft: 10, tps: 1, dec: 100}, {ttft: 0, tps: math.NaN(), dec: 0},
+		{ttft: -3, tps: math.Inf(1), dec: -3}, {ttft: 30, tps: 3, dec: 0}, {ttft: 20, tps: 2, dec: 200},
+		{ttft: 10, tps: 0, dec: 10}, {ttft: 0, tps: math.Inf(-1), dec: 1000},
 	}
 	var m projectionMetrics
 	m.append(rows[:4], 0)
 	first := m
-	beforeWait, beforeSpeed := slices.Clone(m.ttft), slices.Clone(m.tps)
+	beforeWait, beforeSpeed, beforeDec := slices.Clone(m.ttft), slices.Clone(m.tps), slices.Clone(m.dec)
 	m.append(rows, 4)
-	if !slices.Equal(first.ttft, beforeWait) || !slices.Equal(first.tps, beforeSpeed) {
+	if !slices.Equal(first.ttft, beforeWait) || !slices.Equal(first.tps, beforeSpeed) || !slices.Equal(first.dec, beforeDec) {
 		t.Fatal("append mutated a previously published order")
 	}
-	if len(m.ttft) != 5 || len(m.tps) != 4 {
-		t.Fatalf("invalid sample accepted: ttft=%v tps=%v", m.ttft, m.tps)
+	if len(m.ttft) != 5 || len(m.tps) != 4 || len(m.dec) != 5 {
+		t.Fatalf("invalid sample accepted: ttft=%v tps=%v dec=%v", m.ttft, m.tps, m.dec)
 	}
 	check := func(n int, row uint32, value float64, expected float64) {
 		t.Helper()
@@ -131,9 +131,15 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 			t.Fatal("TPS merge is not sorted")
 		}
 	}
+	for i, sample := range m.dec {
+		check(i, sample.row, float64(sample.value), float64(rows[sample.row].dec))
+		if i > 0 && m.dec[i-1].value > sample.value {
+			t.Fatal("decode merge is not sorted")
+		}
+	}
 	previous := m
 	m.append(rows, len(rows))
-	if &m.ttft[0] != &previous.ttft[0] || &m.tps[0] != &previous.tps[0] {
+	if &m.ttft[0] != &previous.ttft[0] || &m.tps[0] != &previous.tps[0] || &m.dec[0] != &previous.dec[0] {
 		t.Fatal("empty catch-up needlessly copied orders")
 	}
 	mask, counts := []uint8{1, 1, 0, 0, 1, 1, 1, 0}, []int{5}
@@ -141,6 +147,14 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 	want := sortedSampleOracle([]int64{10, 10, 20, 30, 40}, 50, 95, 99)
 	if !reflect.DeepEqual(period, want) || !reflect.DeepEqual(buckets[0], want) {
 		t.Fatal("merged order produced incorrect exact percentiles")
+	}
+	// The decode order ranks its own sample population: rows 0,1,5,6 pass
+	// both the validity gate and the mask (row 4's zero window is invalid,
+	// row 7's 1000ms window is masked out), so counts differ from ttft's.
+	decBuckets, decPeriod := rankPercentiles(m.dec, mask, []int{4}, nil, nil)
+	decWant := sortedSampleOracle([]int64{10, 100, 200, 400}, 50, 95, 99)
+	if !reflect.DeepEqual(decPeriod, decWant) || !reflect.DeepEqual(decBuckets[0], decWant) {
+		t.Fatalf("decode order ranks = %v / %v, want %v", decPeriod, decBuckets[0], decWant)
 	}
 }
 

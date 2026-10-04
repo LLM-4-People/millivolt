@@ -48,9 +48,22 @@ def sse_body(content: bytes) -> bytes:
     }
     return (
         'data: {"choices":[{"delta":{"content":"fixture"},"finish_reason":null}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"."},"finish_reason":null}]}\n\n'
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":' + json.dumps(usage) + '}\n\n'
         'data: [DONE]\n\n'
     ).encode()
+
+
+# The SSE body splits at the marker below: the driver writes the head, flushes,
+# pauses, then writes the tail, so first_token_at and last_token_at differ and
+# the chart's decode window has real samples. A single write would collapse
+# both timestamps and leave the decode series empty.
+SSE_SPLIT = 'data: {"choices":[{"delta":{"content":"."}'
+
+def sse_parts(body: bytes):
+    payload = sse_body(body)
+    head, _, tail = payload.partition(SSE_SPLIT.encode())
+    return head, SSE_SPLIT.encode() + tail
 
 
 class Upstream(BaseHTTPRequestHandler):
@@ -70,7 +83,15 @@ class Upstream(BaseHTTPRequestHandler):
                 err = b'{"error":{"message":"rate limited","type":"rate_limit_error","code":429}}'
                 self._send(429, 'application/json', err)
                 return
-        self._send(200, 'text/event-stream', sse_body(body))
+        head, tail = sse_parts(body)
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/event-stream')
+        self.send_header('Content-Length', str(len(head) + len(tail)))
+        self.end_headers()
+        self.wfile.write(head)
+        self.wfile.flush()
+        time.sleep(0.05)  # guarantees a measurable positive decode window
+        self.wfile.write(tail)
 
     def _send(self, status, ctype, payload):
         self.send_response(status)

@@ -7,7 +7,8 @@
 // exact integer bucket_ms and each bucket's start edge t.
 // Rendering follows the aggregated-bucket convention: per-bucket sums
 // (requests/errors/tokens/cost) render as bars (discrete sums, not smooth
-// data), speed and latency render as lines at the selected percentile,
+// data), speed and latency (TTFT and the decode window) render as lines at
+// the selected percentile,
 // and percentage rates (error rate, cache hit) render as % lines on
 // a pinned 0–100 right axis - never a % series on a count scale.
 // CHART_WINDOWS / CHART_PCTS are the single owners of the chart window and
@@ -164,6 +165,8 @@ const CHART_SERIES = [
     title: 'Output tokens per second over wall time; decode-window speed when overall throughput is unavailable.' },
   { id: 'ttft', metric: 'ttft', label: 'latency', color: 'accent', fmt: fmtDur,
     title: 'Time to first token, including reasoning or answer content.' },
+  { id: 'dec',  metric: 'dec',  label: 'decode',  color: 'accent2', fmt: fmtDur,
+    title: 'Token generation window, from the first token to the last - the span decode speed measures.' },
 ];
 
 // Preset registry: the curated combinations the dropdown offers. `series` is
@@ -195,13 +198,14 @@ const CHART_PRESETS = [
     series: [['inTok', 'y'], ['outTok', 'y'], ['reason', 'y'], ['cache', 'y'], ['cachePct', 'pct']],
   },
   {
-    // Speed + latency: both lines must read the same requests, so only
-    // buckets carrying BOTH measurements at the selected percentile plot -
-    // a bucket missing either is dropped (and empty intervals compact
-    // away) instead of stranding gap points in dead space.
+    // Speed + latency: every line must read the same requests, so only
+    // buckets carrying ALL measurements at the selected percentile plot -
+    // a bucket missing any is dropped (and empty intervals compact
+    // away) instead of stranding gap points in dead space. TTFT and the
+    // decode window are both durations, so they share the right axis.
     id: 'latency', label: 'Speed + latency', requireAll: true,
-    left: { scale: 'ytps', fmt: fmt, label: 'Speed (tok/s)' }, right: { scale: 'yttft', fmt: fmtDur, label: 'Latency (TTFT)' },
-    series: [['tps', 'ytps'], ['ttft', 'yttft']],
+    left: { scale: 'ytps', fmt: fmt, label: 'Speed (tok/s)' }, right: { scale: 'yttft', fmt: fmtDur, label: 'Latency / decode (ms)' },
+    series: [['tps', 'ytps'], ['ttft', 'yttft'], ['dec', 'yttft']],
   },
   {
     id: 'errors', label: 'Errors',

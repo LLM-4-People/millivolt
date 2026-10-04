@@ -988,7 +988,8 @@ with the blended per-Mtok price, the errors / 429 pair, and average latency /
 speed over every measured request with each metric's low-high sample range);
 Traffic compares requests/errors; Tokens separates available input/output/reasoning/cache
 usage and tracks the cache-hit share of input on a percentage axis; Speed + latency
-uses independent throughput/TTFT axes; Errors compares
+plots throughput on its own axis with TTFT and the decode window (first token to
+last, the span decode speed measures) sharing a duration axis; Errors compares
 error count/rate; Cost places reported USD spend beside request volume. One
 percentile selection controls the timing series (the Overview keeps only the
 time-range control). Period readouts are computed from period samples, not

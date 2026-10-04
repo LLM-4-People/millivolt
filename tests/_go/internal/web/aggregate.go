@@ -281,10 +281,14 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	// bucket's p50 = 25, p95 = 38.5, p99 = 39.7 (linear interp). Identical
 	// starts keep all four in ONE bucket wherever clock alignment puts the
 	// edges; 30m back is inside the 60m window for any aligned from. Each
-	// carries 6 cached-token reads → the bucket's cache fold = 24.
+	// carries 6 cached-token reads → the bucket's cache fold = 24. Each also
+	// streams a decode window of 100..400ms (first to last token) → the
+	// bucket's dec p50 = 250, p95 = 385, p99 = 397.
 	for i, v := range []int64{10, 20, 30, 40} {
 		r := mkRec(string(rune('t'+i)), now.Add(-30*time.Minute), 200, "", nil, v, 200, 10, 10, 6, 0)
 		r.OverallTPS, r.DecodeTPS = float64(v)+0.5, 900 // overall wins, floats survive storage
+		r.FirstTokenAt = r.Start.Add(time.Duration(v) * time.Millisecond)
+		r.LastTokenAt = r.FirstTokenAt.Add(time.Duration(100*(i+1)) * time.Millisecond)
 		s.Record(r)
 	}
 	// 1 error 10 minutes ago: its bucket has 1 sample < pctMinSamples → the
@@ -335,7 +339,7 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 			rich = m
 		} else if m["req"].(float64) > 0 {
 			// A <pctMinSamples-sample bucket suppresses percentiles entirely.
-			for _, k := range []string{"ttft", "tps"} {
+			for _, k := range []string{"ttft", "tps", "dec"} {
 				for _, x := range m[k].([]any) {
 					if x != nil {
 						t.Fatalf("bucket with %v requests has non-null %s: %v", m["req"], k, m[k])
@@ -363,6 +367,14 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	if speed[0] == nil || speed[0].(float64) != 25.5 || speed[1].(float64) != 39 || math.Abs(speed[2].(float64)-40.2) > 1e-9 {
 		t.Fatalf("tps pct = %v, want [25.5 39 40.2]", speed)
 	}
+	// decode window pct of [100,200,300,400]: p50 250, p95 385, p99 397
+	// (linear interp, same R7 machinery; the error and 429 fixtures carry no
+	// token timestamps so they contribute no dec samples here).
+	dc := rich["dec"].([]any)
+	if dc[0] == nil || dc[0].(float64) != 250 || dc[1].(float64) != 385 ||
+		math.Abs(dc[2].(float64)-397) > 1e-9 {
+		t.Fatalf("dec pct = %v, want [250 385 397]", dc)
+	}
 	if _, exists := rich["dur"]; exists {
 		t.Fatal("removed duration series still serialized")
 	}
@@ -387,7 +399,10 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	}
 	// Period-wide percentile triples (the totals strip): all 5 samples clear
 	// the ≥4 gate - ttft [5,10,20,30,40] → p50 20, p95 38, p99 39.6;
-	// tps [5.5,10.5,20.5,30.5,40.5] → p50 20.5, p95 38.5, p99 40.1.
+	// tps [5.5,10.5,20.5,30.5,40.5] → p50 20.5, p95 38.5, p99 40.1. The
+	// decode window only has the 4 streamed samples [100,200,300,400] - the
+	// ttft-only error and 429 fixtures contribute none - so dec_p is the
+	// same [250, 385, 397] as the rich bucket.
 	tp := p["ttft_p"].([]any)
 	if tp[0] == nil || tp[0].(float64) != 20 || tp[1].(float64) != 38 ||
 		math.Abs(tp[2].(float64)-39.6) > 1e-9 {
@@ -396,6 +411,10 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	sp := p["tps_p"].([]any)
 	if sp[0] == nil || sp[0].(float64) != 20.5 || sp[1].(float64) != 38.5 || math.Abs(sp[2].(float64)-40.1) > 1e-9 {
 		t.Fatalf("tps_p = %v, want [20.5 38.5 40.1]", sp)
+	}
+	dp := p["dec_p"].([]any)
+	if dp[0] == nil || dp[0].(float64) != 250 || dp[1].(float64) != 385 || math.Abs(dp[2].(float64)-397) > 1e-9 {
+		t.Fatalf("dec_p = %v, want [250 385 397] (only the streamed requests sample)", dp)
 	}
 	if _, exists := p["dur_p"]; exists {
 		t.Fatal("removed period duration still serialized")
@@ -637,7 +656,7 @@ func TestChartZeroTrafficPayloadShape(t *testing.T) {
 			if m["req"].(float64) != 0 || m["err"].(float64) != 0 || m["rl"].(float64) != 0 || m["cost"].(float64) != 0 {
 				t.Fatalf("window %s: zero-traffic bucket %d is not zero-filled: %v", win, i, m)
 			}
-			for _, k := range []string{"ttft", "tps"} {
+			for _, k := range []string{"ttft", "tps", "dec"} {
 				for _, x := range m[k].([]any) {
 					if x != nil {
 						t.Fatalf("window %s: zero-traffic bucket %d has non-null %s", win, i, k)
@@ -699,6 +718,128 @@ func TestChartTimingStats(t *testing.T) {
 	p = get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=15&f=client:missing")
 	if p["ttft_stat"] != nil || p["tps_stat"] != nil {
 		t.Fatalf("out-of-scope timing stats = %v / %v, want nil", p["ttft_stat"], p["tps_stat"])
+	}
+}
+
+// TestChartDecodeWindow pins the decode-time series end to end: the sample
+// domain is last_token_at - first_token_at (exactly the gen_tps measurement
+// window), so streamed requests that finished producing tokens contribute
+// while non-streaming requests, aborted streams (first token, no last) and
+// zero-width windows (first token == last token) never do - independently of
+// ttft, which needs only the first token. Bucket and period triples use the
+// same R7 machinery and the >= pctMinSamples suppression gate as ttft/tps,
+// on the durable scan path; the ring path (fromRecord) is pinned by parity.
+// A destructive purge must drop every decode sample with the rebuilt
+// projection's fresh metric orders.
+func TestChartDecodeWindow(t *testing.T) {
+	s := testStore(t)
+	now := time.Now()
+	// Bucket A (30m back): five streamed requests with decode windows
+	// 100..500ms → dec p50 300, p95 480, p99 496 (linear interp).
+	streamed := func(id string, at time.Time, window time.Duration) *metrics.Record {
+		r := mkRec(id, at, 200, "", nil, 10, 400, 10, 10, 0, 0)
+		r.FirstTokenAt = r.Start.Add(10 * time.Millisecond)
+		r.LastTokenAt = r.FirstTokenAt.Add(window)
+		return r
+	}
+	for i := range 5 {
+		s.Record(streamed(fmt.Sprintf("stream-%d", i), now.Add(-30*time.Minute), time.Duration(100*(i+1))*time.Millisecond))
+	}
+	// Bucket B (10m back): six requests, only three with a real decode
+	// window. ttft sees five samples (the three streamed + the aborted
+	// stream + the zero-width stream, all of which reached a first token)
+	// → a non-null ttft triple; dec sees three → below pctMinSamples, so
+	// the dec triple must stay all-null beside ttft's live one.
+	s.Record(streamed("b-1", now.Add(-10*time.Minute), 50*time.Millisecond))
+	s.Record(streamed("b-2", now.Add(-10*time.Minute), 60*time.Millisecond))
+	s.Record(streamed("b-3", now.Add(-10*time.Minute), 70*time.Millisecond))
+	aborted := mkRec("b-aborted", now.Add(-10*time.Minute), 200, "", nil, 10, 400, 10, 10, 0, 0)
+	aborted.FirstTokenAt = aborted.Start.Add(10 * time.Millisecond) // stream never produced a last token
+	s.Record(aborted)
+	s.Record(streamed("b-zero-width", now.Add(-10*time.Minute), 0)) // first token == last token
+	s.Record(mkRec("b-non-stream", now.Add(-10*time.Minute), 200, "", nil, 0, 400, 10, 10, 0, 0))
+	waitTotals(t, s, 11)
+	api := NewAggAPI(metrics.NewBuffer(16), s, time.Second)
+
+	p := get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=60")
+	var rich, mixed map[string]any
+	for _, b := range p["buckets"].([]any) {
+		m := b.(map[string]any)
+		switch m["req"].(float64) {
+		case 5:
+			rich = m
+		case 6:
+			mixed = m
+		}
+	}
+	if rich == nil || mixed == nil {
+		t.Fatalf("fixture buckets missing: rich=%v mixed=%v", rich, mixed)
+	}
+	dc := rich["dec"].([]any)
+	if dc[0] == nil || dc[0].(float64) != 300 || dc[1].(float64) != 480 || math.Abs(dc[2].(float64)-496) > 1e-9 {
+		t.Fatalf("streamed bucket dec = %v, want [300 480 496]", dc)
+	}
+	for _, x := range mixed["dec"].([]any) {
+		if x != nil {
+			t.Fatalf("mixed bucket dec = %v, want all-null (3 samples < pctMinSamples while ttft stays live: %v)", mixed["dec"], mixed["ttft"])
+		}
+	}
+	if tt := mixed["ttft"].([]any); tt[0] == nil {
+		t.Fatalf("mixed bucket ttft = %v, want the live 5-sample triple beside a suppressed dec", mixed["ttft"])
+	}
+	// Period dec_p ranks every streamed window: [50,60,70,100,200,300,400,500]
+	// → p50 150, p95 465, p99 493 (interpolation float dust tolerated).
+	dp := p["dec_p"].([]any)
+	if dp[0] == nil || dp[0].(float64) != 150 || math.Abs(dp[1].(float64)-465) > 1e-9 || math.Abs(dp[2].(float64)-493) > 1e-9 {
+		t.Fatalf("dec_p = %v, want [150 465 493]", dp)
+	}
+
+	// Ring parity: the same streamed records folded through fromRecord (a
+	// store-less aggregate) land the same bucket triple.
+	buf := metrics.NewBuffer(8)
+	for i := range 5 {
+		buf.Record(streamed(fmt.Sprintf("ring-%d", i), now.Add(-30*time.Minute), time.Duration(100*(i+1))*time.Millisecond))
+	}
+	ringAPI := NewAggAPI(buf, nil, time.Second)
+	rp := get(t, http.HandlerFunc(ringAPI.HandleAggChart), "/metrics/agg/chart?window=60")
+	var ringRich map[string]any
+	for _, b := range rp["buckets"].([]any) {
+		m := b.(map[string]any)
+		if m["req"].(float64) == 5 {
+			ringRich = m
+		}
+	}
+	if ringRich == nil {
+		t.Fatal("ring path lost the five streamed requests")
+	}
+	dec := ringRich["dec"].([]any)
+	if dec[0] == nil || dec[0].(float64) != 300 || dec[1].(float64) != 480 || math.Abs(dec[2].(float64)-496) > 1e-9 {
+		t.Fatalf("ring bucket dec = %v, want the durable path's [300 480 496]", dec)
+	}
+
+	// Destructive invalidation: a full purge rebuilds the projection from an
+	// empty history - the third metric order must not survive it.
+	if _, err := s.Clear(t.Context(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	p = get(t, http.HandlerFunc(api.HandleAggChart), "/metrics/agg/chart?window=60")
+	var req float64
+	for _, b := range p["buckets"].([]any) {
+		m := b.(map[string]any)
+		req += m["req"].(float64)
+		for _, x := range m["dec"].([]any) {
+			if x != nil {
+				t.Fatal("post-purge bucket carries a decode sample")
+			}
+		}
+	}
+	if req != 0 {
+		t.Fatalf("post-purge req = %v, want 0", req)
+	}
+	for _, x := range p["dec_p"].([]any) {
+		if x != nil {
+			t.Fatal("post-purge dec_p carries a decode sample")
+		}
 	}
 }
 

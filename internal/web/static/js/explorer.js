@@ -454,11 +454,14 @@ function nodeKpis(dim, e) {
         + kpiNum('cost', fmtMoney(e.cost))
         + kpiBlend(e);
     case 'conversation':
-      // Session economics and wait. Cache/tps average away across mixed turns;
-      // volume is already the headline. Tool calls count invocations, never
-      // requests: a chat-only conversation keeps its real 0 and only a missing
-      // field renders the shared '-' placeholder.
-      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e)
+      // Session economics, volume and wait. Cache/tps average away across
+      // mixed turns; blended per-Mtok is derivable from cost+tok and its
+      // slot is what keeps the KPI row on one line - a second line makes
+      // lineage-bearing cards taller than the one-band gallery (browser
+      // contract: rowFullyVisible). Tool calls count invocations, never
+      // requests: a chat-only conversation keeps its real 0 and only a
+      // missing field renders the shared '-' placeholder.
+      return kpiNum('cost', fmtMoney(e.cost)) + kpiTok(e)
         + kpiNum('calls', fmt(e.tools)) + kpiTtft(e);
     case 'model':
       // Token-family slots together: in/out and the cached-prompt share.

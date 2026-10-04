@@ -21,12 +21,19 @@ from playwright.async_api import async_playwright
 from .support import operator_headers, operator_signin, require
 
 DEV_DIR = Path('/tmp/millivolt')  # Reserved dev.sh namespace, never arbitrary data.
-BODY = (
-    b'data: {"choices":[{"delta":{"content":"fixture"},"finish_reason":null}]}\n\n'
+# Two content deltas with a flushed gap between them: the first delta stamps
+# first_token_at, the second stamps last_token_at, so every fixture request
+# contributes a real decode-window sample to the chart. A single-chunk stream
+# has first == last and no decode window at all.
+BODY_HEAD = b'data: {"choices":[{"delta":{"content":"fixture"},"finish_reason":null}]}\n\n'
+BODY_TAIL = (
+    b'data: {"choices":[{"delta":{"content":"."},"finish_reason":null}]}\n\n'
     b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
     b'"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.001}}\n\n'
     b'data: [DONE]\n\n'
 )
+# The composed fixture the response-integrity checks compare against.
+BODY = BODY_HEAD + BODY_TAIL
 # A provider-style 429 body for throttle-marked fixture requests: the upstream
 # alternates 429→200 per marked body, so each one recovers on its first retry
 # (an absorbed attempt). That exercises the chart's rate-limit fold with the
@@ -50,11 +57,15 @@ class Upstream(BaseHTTPRequestHandler):
                 return
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
-        self.send_header('Content-Length', str(len(BODY)))
+        self.send_header('Content-Length', str(len(BODY_HEAD) + len(BODY_TAIL)))
         self.end_headers()
-        # Fixture delay guarantees a measurable positive TTFT on fast hosts.
+        # Fixture delay guarantees a measurable positive TTFT on fast hosts;
+        # the flushed split write guarantees a measurable decode window too.
         time.sleep(0.02)
-        self.wfile.write(BODY)
+        self.wfile.write(BODY_HEAD)
+        self.wfile.flush()
+        time.sleep(0.05)
+        self.wfile.write(BODY_TAIL)
 
     def log_message(self, *args):
         pass
@@ -185,7 +196,7 @@ async def check(base, screenshot):
                         # case stays independent of calendar-minute
                         # boundaries - paints both lines across the plot.
                         state = await page.evaluate('''async () => {
-                            const bucket = chartAgg.buckets.find(b => b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite));
+                            const bucket = chartAgg.buckets.find(b => b.tps.every(Number.isFinite) && b.ttft.every(Number.isFinite) && b.dec.every(Number.isFinite));
                             if (!bucket) throw new Error('fixture has no percentile-bearing bucket');
                             const bm = chartAgg.bucket_ms;
                             chartAgg = {...chartAgg, buckets:[bucket], from_ms:bucket.t, now_ms:bucket.t+bm};
@@ -209,7 +220,8 @@ async def check(base, screenshot):
                             const five = Array.from({length:5}, (_, k) => ({...bucket,
                                 t: bucket.t + k*bm,
                                 tps: bucket.tps.map(v => v * (1 + k/10)),
-                                ttft: bucket.ttft.map(v => v * (1 + (4-k)/10))}));
+                                ttft: bucket.ttft.map(v => v * (1 + (4-k)/10)),
+                                dec: bucket.dec.map(v => v * (1 + (4-k)/10))}));
                             chartAgg = {...chartAgg, buckets:five, from_ms:bucket.t, now_ms:bucket.t+5*bm};
                             renderChart();
                             // uPlot commits setData in a microtask; inspect
@@ -248,7 +260,7 @@ async def check(base, screenshot):
                 state = await page.evaluate('''async () => {
                     const full = window.__fullChart;
                     const idx = ['50','95','99'].indexOf(document.getElementById('chart-pct').value);
-                    const measured = full.buckets.filter(b => Number.isFinite(b.tps?.[idx]) && Number.isFinite(b.ttft?.[idx]));
+                    const measured = full.buckets.filter(b => Number.isFinite(b.tps?.[idx]) && Number.isFinite(b.ttft?.[idx]) && Number.isFinite(b.dec?.[idx]));
                     chartAgg = {...full};
                     renderChart();
                     await new Promise(requestAnimationFrame);
