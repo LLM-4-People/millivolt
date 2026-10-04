@@ -954,3 +954,46 @@ func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
 		t.Fatalf("backup without storage: status=%d body=%s, want 400", rr.Code, rr.Body.String())
 	}
 }
+
+// TestDBStageDirNamesLiveStoreVolumeAfterReloadPathChange pins the staging
+// volume's owner. db_path is startup-bound, so a reload that changes it
+// swaps the config snapshot while the running store keeps its boot path:
+// dbStageDir must name the live database's volume (the store's), never the
+// not-yet-active config value, while replace-mode restore keeps staging at
+// the live config's path - the next restart opens the persisted db_path.
+func TestDBStageDirNamesLiveStoreVolumeAfterReloadPathChange(t *testing.T) {
+	store, _, dbPath, _ := openLiveStoreFixture(t)
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+	next := config.Default()
+	next.DBPath = filepath.Join(t.TempDir(), "next.db")
+	// The reload's whole-struct snapshot swap (reloadConfig does
+	// *liveCfg = *cloned under liveMu) with a changed, startup-bound
+	// db_path: the running store still has the boot path.
+	*liveCfg = *next
+	got, err := dbStageDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Dir(dbPath); got != want {
+		t.Fatalf("dbStageDir = %q, want the live store's volume %q", got, want)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restart, err := restoreDatabase(t.Context(), data, "replace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !restart {
+		t.Fatal("replace restore reported restart=false, want true")
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(next.DBPath)); err != nil {
+		t.Fatalf("replace did not stage at the live config's db_path: %v", err)
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
+		t.Fatal("replace staged at the store's boot path, want the config path")
+	}
+}

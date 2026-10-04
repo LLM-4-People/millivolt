@@ -24,6 +24,15 @@ func PendingSnapshotPath(path string) string {
 	return path + pendingSnapshotSuffix
 }
 
+// DBPath is the running database's own file: the boot-time path the store
+// opened, not the reloadable db_path config value (db_path is startup-bound,
+// so a reload that changes it leaves the live database at its boot path
+// until the process restarts). Its directory is the volume that owns
+// database-sized transient staging; see stageDir.
+func (s *Store) DBPath() string {
+	return s.path
+}
+
 // stageDir is where database-sized transient files are staged: the live
 // database's own volume, which is contractually sized to hold the database
 // and a packed copy of it. A generic /tmp is a small tmpfs in hardened

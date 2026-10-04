@@ -676,7 +676,13 @@ func openCursorStream(w http.ResponseWriter, rec *metrics.Record, id, model stri
 // FinalAttemptAt admission stamp and the transport timing openCursorHTTP
 // adopted from its returned response roll back to their pre-re-ask values;
 // a successful re-ask re-stamps both with its own, like the generic quality
-// loops' adopted attempt.
+// loops' adopted attempt. The rollback governs the finalized record, not
+// the pending views: while the re-ask is in flight its own send can publish
+// updates (absorbTransportRetry's live retry publish and the retryable-HTTP
+// publish in openCursorHTTP's send loop, plus the storm admission-wait
+// publishes), so a transient pending view can briefly carry the in-flight
+// re-ask's admission stamp. Durable state is unaffected: finalization (the
+// ServeHTTP defer) runs only after this restore.
 func (s *Server) reaskAfterVoid(run *providerformat.CursorRun, rec *metrics.Record, reask func() (*providerformat.CursorRun, error)) *providerformat.CursorRun {
 	s.cursorRuns.drop(run)
 	run.Close()

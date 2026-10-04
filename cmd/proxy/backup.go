@@ -259,15 +259,19 @@ func backupCap() int64 {
 // dbStageDir is where transient SQLite snapshot files are staged for operator
 // backup and restore: the live database's own volume, contractually sized to
 // hold the database and a packed copy of it. A generic /tmp is a small tmpfs
-// in hardened deployments and must not cap the backup contract.
+// in hardened deployments and must not cap the backup contract. The live
+// database belongs to the store, not the reloadable config: db_path is
+// startup-bound, so after a reload changes it the running store keeps its
+// boot path, and the staging volume follows the store's own file. No store
+// means no live database to size the contract against, so staging answers
+// ErrStorageDisabled.
 func dbStageDir() (string, error) {
 	liveMu.Lock()
-	cfg := liveCfg
-	liveMu.Unlock()
-	if cfg == nil || cfg.DBPath == "" {
+	defer liveMu.Unlock()
+	if liveStore == nil {
 		return "", storage.ErrStorageDisabled
 	}
-	return filepath.Dir(cfg.DBPath), nil
+	return filepath.Dir(liveStore.DBPath()), nil
 }
 
 // stageDirOr400 stages a database member for the self-check when one is
@@ -381,10 +385,13 @@ func restoreConfig(raw []byte, mode string) ([]string, error) {
 
 func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool, err error) {
 	liveMu.Lock()
-	cfg := liveCfg
+	dbPath := ""
+	if liveCfg != nil {
+		dbPath = liveCfg.DBPath
+	}
 	store := liveStore
 	liveMu.Unlock()
-	if cfg == nil || cfg.DBPath == "" {
+	if dbPath == "" {
 		return false, storage.ErrStorageDisabled
 	}
 	if mode == "merge" {
@@ -394,7 +401,12 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 		_, _, err := store.MergeSnapshot(ctx, raw)
 		return false, err
 	}
-	return true, storage.StageSnapshot(cfg.DBPath, raw)
+	// Replace stages next to the live CONFIG's db_path, not the running
+	// store's boot file: the staged snapshot applies at the next restart,
+	// which opens the persisted db_path (startup-bound), so the restore
+	// targets the path that boot will actually open - a reload that changed
+	// db_path stages the new volume while the store keeps the old one.
+	return true, storage.StageSnapshot(dbPath, raw)
 }
 
 func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive, stageDir string) {

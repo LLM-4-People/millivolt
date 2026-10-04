@@ -1090,16 +1090,17 @@ with `localtime` for the host's zone. The recipes below earn their keep in
 the derived shapes no dashboard surface computes: the outlier ratio, the
 write/read ratio, the latency decompositions. Their ingredient aggregates
 are conceded up front, the way the decode window already is: the explorer
-sums per-group counts and cache reads (its N and Cache fields) and a
-per-group blended $/Mtok (its cost_per_mtok KPI, the same cost-reporting
+sums per-group counts and cache reads (its `N` and `Cache` fields) and a
+per-group blended $/Mtok (its `cost_per_mtok` KPI, the same cost-reporting
 in+out rule), and the chart's dec series samples the shared decode window
 (`last_token_at - first_token_at`) that recipe 1 decomposes latency
 around. Several of the columns a recipe reads do overlap the aggregate
-scans: ttft_ms, reasoning_tokens, status_code, attempts, output_tokens and
-cache_read_tokens all appear in the dashboard's scan lists. The recipes'
-private reading set, which no aggregate scan reads, is queue_wait_ms,
-first_answer_at, retry_after_ms, cache_write_tokens, the chars_* columns,
-total_tokens, req_max_tokens, duration_ms and retries. Each recipe is a
+scans: `ttft_ms`, `reasoning_tokens`, `status_code`, `attempts`,
+`output_tokens` and `cache_read_tokens` all appear in the dashboard's scan
+lists. The recipes' private reading set, which no aggregate scan reads, is
+`queue_wait_ms`, `first_answer_at`, `retry_after_ms`,
+`cache_write_tokens`, the `chars_*` columns, `total_tokens`,
+`req_max_tokens`, `duration_ms` and `retries`. Each recipe is a
 question, the SQL that answers it, and how to read the result.
 
 **Where did the time go on a slow request?**
