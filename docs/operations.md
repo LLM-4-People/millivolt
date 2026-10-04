@@ -1120,6 +1120,16 @@ ring and pending state, and the history/cardinality costs documented under
 changes that footprint. Retained history and observed identities have no universal
 process-memory cap; configuration limits must be evaluated together.
 
+The startup preload decodes every stored row once, so its transient allocations
+(SQL strings, attempts and tool-name JSON) exceed the retained projection several
+times over. The process returns those burst pages to the OS immediately after the
+preload completes; idle RSS after readiness reflects retained state, not the
+startup burst. The projection's per-record retained footprint is measured
+reproducibly by `BenchmarkProjectionFootprint` (retained and transient bytes per
+record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
+(process RSS after readiness), without a live instance; the
+[performance workflow](../CONTRIBUTING.md#performance-evidence) owns the commands.
+
 Use the [isolated performance workflow](../CONTRIBUTING.md#performance-evidence)
 and report the exact source/image revision, platform, CPU resources, configuration,
 history size and workload. Distinguish idle from loaded CPU/RSS, cold from warm

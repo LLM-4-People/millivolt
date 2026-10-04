@@ -261,6 +261,14 @@ establish sustained production capacity. The current storage contract and
 capacity caveats live in [operations](docs/operations.md#storage-and-accounting).
 Use the existing `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`
 for isolated writer/contention comparisons; neither replaces a real HTTP run.
+For the analytical projection's memory, use the self-seeded
+`BenchmarkProjectionFootprint` (retained and transient bytes per stored record)
+and `BenchmarkProjectionProcessRSS` (process RSS after readiness) from the test
+overlay; they need no running instance:
+
+```sh
+scripts/check.sh go test -run='^$' -bench='BenchmarkProjection' -count=1 ./internal/web
+```
 
 ## Versioning and publication
 
