@@ -677,6 +677,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w = debugTap.wrapWriter(w)
 	}
 	defer pacer.Stop()
+	// hookMu serializes the four lifecycle-hook bodies below. The scheduler
+	// fires them from two goroutines: a seeded hold dispatches OnHold on the
+	// AddHold caller's goroutine (fireSeededHold) while the request's own
+	// wait loop fires the throttle pair, and the hold hooks serialize
+	// against each other under the scheduler's holdCountMu but the throttle
+	// pair runs outside it - so the proxy owns this fence. Every body is a
+	// leaf section (record flag write + live publish) that never re-enters
+	// the scheduler, so the lock order holdCountMu -> hookMu -> buffer stays
+	// cycle-free.
+	var hookMu sync.Mutex
 	hooks := scheduler.WaiterHooks{
 		Client:    rec.Client,
 		Provider:  rec.Provider,
@@ -687,20 +697,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 		OnHold: func() {
+			hookMu.Lock()
 			rec.Paused = true
 			s.publishUpdate(rec)
+			hookMu.Unlock()
 		},
 		OnUnhold: func() {
+			hookMu.Lock()
 			rec.Paused = false
 			s.publishUpdate(rec)
+			hookMu.Unlock()
 		},
 		OnThrottle: func() {
+			hookMu.Lock()
 			rec.Throttled = true
 			s.publishUpdate(rec)
+			hookMu.Unlock()
 		},
 		OnUnthrottle: func() {
+			hookMu.Lock()
 			rec.Throttled = false
 			s.publishUpdate(rec)
+			hookMu.Unlock()
 		},
 	}
 	// Park storm work before per-key concurrency so an affected model does
