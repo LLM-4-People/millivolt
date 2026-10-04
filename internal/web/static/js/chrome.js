@@ -794,9 +794,17 @@ function fillSettingsForm(doc) {
       : `<span class="ent" style="--ent:${vis.color}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb">${escapeHtml(c.label)}</span></span>`;
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
-  box.innerHTML = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key])).join('') + settingsBackupHTML(doc);
+  // The storage pane also owns the whole-database delete: the action row
+  // rides the same innerHTML rebuild as every field and the backup rows,
+  // inserted after the storage fields so DOM order follows category order.
+  const rows = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key]));
+  const purgeAt = doc.fields.reduce((at, f, i) => f.category === 'storage' ? i + 1 : at, -1);
+  if (purgeAt >= 0) rows.splice(purgeAt, 0, settingsPurgeRowHTML());
+  box.innerHTML = rows.join('') + settingsBackupHTML(doc);
   box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
   wireBackupPane();
+  const purgeAllBtn = $('btn-purge-all');
+  if (purgeAllBtn) purgeAllBtn.disabled = _purgeBusy;
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
   // rule count - the same pass the delegated events run on every edit.
@@ -831,6 +839,23 @@ function settingsBackupHTML(doc) {
   html += backupDiffRowsHTML(doc);
   html += backupRestoreRowHTML(b);
   return html;
+}
+
+// The storage category's whole-database delete, moved from the header
+// Clear menu (which keeps only the scoped action). It renders like the
+// backup action rows, joins the category filter, the search haystack and
+// the rail badge count through its data-cat/label/help attributes, and -
+// like the backup rows - carries no data-key, so it never dirties the
+// form or joins value collection. Clicks arrive through the settings
+// sheet's delegated handler.
+function settingsPurgeRowHTML() {
+  return `<div class="st-row st-block" data-cat="storage" data-purge="all" data-label="delete everything purge database storage history" data-help="permanently delete all metrics history: the live ring and the entire durable database; cannot be undone">
+    <div class="st-name">Delete everything</div>
+    <div class="st-ctl">
+      <div class="st-backup-actions"><button type="button" class="btn btn-danger-solid" id="btn-purge-all">Delete everything</button></div>
+      <span class="st-hint">permanently delete ALL metrics history: the live ring and the entire durable database; cannot be undone</span>
+    </div>
+  </div>`;
 }
 
 function backupMemberCheck(id, label, enabled) {
@@ -3081,7 +3106,7 @@ function wireSettingsDelegation() {
   if (!box || box.dataset.provWired) return;
   box.dataset.provWired = '1';
   const dirty = e => {
-    if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]'))) return;
+    if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]') || e.target.closest('[data-purge]'))) return;
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
   };
   box.addEventListener('input', e => {
@@ -3194,6 +3219,7 @@ function wireSettingsDelegation() {
     if (e.target && e.target.id === 'btn-backup-restore') { const f = $('backup-file'); if (f) f.click(); return; }
     if (e.target && e.target.id === 'btn-backup-apply') { runBackupApply(); return; }
     if (e.target && e.target.id === 'btn-backup-cancel') { runBackupCancel(); return; }
+    if (e.target && e.target.id === 'btn-purge-all') { purgeAll(); return; }
     providersEditorClick(e);
   });
   // Clicks outside the add-menu close it (the menu lives in the sheet, but
@@ -4509,22 +4535,28 @@ async function clearFiltered() {
   return purgeMetrics(preview.filter);
 }
 
-// clearAll wipes everything (the original Clear behavior).
-async function clearAll() {
+// purgeAll is the settings sheet's whole-database delete (the storage
+// category's action row). It shares purgeMetrics and its in-flight gate
+// with clearFiltered, and reports through the sheet's status line
+// instead of the menu's count preview, which belongs to the menu surface.
+async function purgeAll() {
   if (_purgeBusy) return;
-  const n = (lastData?.records || []).length;
-  if (!confirm(`Permanently delete ALL metrics history?\n\n${fmt(n)} records in view + the entire database will be wiped. This cannot be undone.`)) return;
-  return purgeMetrics(null);
+  if (!confirm('Permanently delete ALL metrics history?\n\nThe entire database will be wiped. This cannot be undone.')) return;
+  settingsStatus('deleting');
+  if (await purgeMetrics(null, settingsStatus)) settingsStatus('all metrics history deleted', 'ok');
 }
 
 // Confirmed success is the only path that clears UI state. The same gate
-// handles full/filtered deletion, disables repeat submits, and reports failures.
-async function purgeMetrics(filter) {
+// handles full/filtered deletion from either surface, disables repeat
+// submits, and reports failures to the invoking surface: the menu's
+// count preview or the settings status line.
+async function purgeMetrics(filter, report) {
   const fail = 'could not delete records';
   if (_purgeBusy) return;
   _purgeBusy = true;
   $('btn-clear-filtered').disabled = true;
-  $('btn-clear-all').disabled = true;
+  const purgeAllBtn = $('btn-purge-all');
+  if (purgeAllBtn) purgeAllBtn.disabled = true;
   document.querySelectorAll('#clear-menu select').forEach(el => { el.disabled = true; });
   try {
     const options = {method: 'POST'};
@@ -4540,11 +4572,17 @@ async function purgeMetrics(filter) {
     // render, superseding any stale in-flight tick. No optimistic local wipe.
     refreshAggregates();
     fetchBootstrap('full');
+    return true;
   } catch (err) {
-    $('clear-count').textContent = String(err.message || fail);
+    const msg = String(err.message || fail);
+    if (report) report(msg); else $('clear-count').textContent = msg;
+    return false;
   } finally {
     _purgeBusy = false;
-    $('btn-clear-all').disabled = false;
+    // Re-query: fillSettingsForm may have rebuilt the row mid-flight, and
+    // only the instance currently in the document must end up enabled.
+    const freshPurgeBtn = $('btn-purge-all');
+    if (freshPurgeBtn) freshPurgeBtn.disabled = false;
     $('btn-clear-filtered').disabled = !previewedFilter('cf');
     document.querySelectorAll('#clear-menu select').forEach(el => { el.disabled = false; });
   }

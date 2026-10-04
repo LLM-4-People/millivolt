@@ -245,11 +245,13 @@ the recent rows currently loaded in the browser. No export was downloaded here.
 
 ### Clear
 
-Clear shares those filter controls for deletion. The action preview identifies
-the accepted selection; deleting is not a way to reset a chart window.
-The screenshot leaves every filter empty and executes no deletion.
+Clear shares those filter controls for scoped deletion; Delete matching is the
+menu's only action. The action preview identifies the accepted selection;
+deleting is not a way to reset a chart window. Whole-database deletion lives
+in Settings under Storage, not in this menu. The screenshot leaves every
+filter empty and executes no deletion.
 
-![Clear menu with scoped deletion filters and explicit destructive actions](images/menus/clear.png)
+![Clear menu with scoped deletion filters and its single destructive action](images/menus/clear.png)
 
 ### Restart
 
@@ -294,7 +296,10 @@ Tune them for the upstream and workload; the picture uses the public example.
 Storage settings control the SQLite writer and its bounded queue/batches.
 Metrics persistence is best-effort under sustained overload; a successful
 inference response does not prove its record was stored. The dashboard reports
-process-local storage drops.
+process-local storage drops. The category also carries Delete everything, the
+whole-database purge that moved here from the Clear menu: after a
+confirmation it permanently deletes all metrics history, the live ring and the
+entire durable database, and it cannot be undone.
 
 ![Storage Settings with bounded writer, queue and persistence controls](images/settings/storage.png)
 

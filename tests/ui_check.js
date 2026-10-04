@@ -1728,10 +1728,48 @@ async function main() {
   const js = w.getComputedStyle(d.querySelector('#logs-menu .clear-actions'));
   check('menu action row splits ends-wise', js.justifyContent === 'space-between');
   const dlAll = [...d.querySelectorAll('#logs-menu .clear-actions button')].find(b => b.textContent.includes('Download all'));
-  const delAll = [...d.querySelectorAll('#clear-menu .clear-actions button')].find(b => b.textContent.includes('Delete everything'));
   check('download all is the red-outline variant', dlAll && dlAll.classList.contains('btn-danger-outline'));
-  check('delete everything is the solid-red variant', delAll && delAll.classList.contains('btn-danger-solid'));
   w.toggleLogsMenu({ stopPropagation() {} });
+
+  // ---- test 9b: the whole-database delete moved off the Clear menu into
+  // the settings sheet's storage category. The Clear menu keeps only the
+  // scoped action; the moved control renders through the real
+  // fillSettingsForm pipeline and behaves like every other action row.
+  {
+    const doc = {
+      revision: 'purge-r1',
+      fields: [{ key: 'storage_batch_cap', category: 'storage', label: 'Batch cap', help: 'writer batch bound', kind: 'int', hot_reload: true }],
+      categories: [{ id: 'storage', label: 'Storage', help: 'durable writes' }],
+      values: { storage_batch_cap: 5 },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.__purgeDoc = doc;
+    w.eval('settingsDoc = window.__purgeDoc; fillSettingsForm(settingsDoc)');
+    const row = d.querySelector('#settings-fields [data-purge="all"]');
+    const purgeBtn = d.getElementById('btn-purge-all');
+    check('the whole-database delete renders as a storage-category action row',
+      !!row && row.dataset.cat === 'storage' && !row.hidden && row.classList.contains('st-block') &&
+      !!row.querySelector('.st-backup-actions') &&
+      row.querySelector('.st-hint').textContent.includes('permanently delete ALL metrics history'));
+    check('delete everything is the solid-red variant',
+      purgeBtn && purgeBtn.classList.contains('btn-danger-solid'));
+    check('the purge row joins the rail badge count',
+      d.querySelector('#settings-rail [data-st-cat="storage"] .rail-n').textContent === '2');
+    const search = d.getElementById('settings-q');
+    search.value = 'purge';
+    w.filterSettings();
+    check('the purge row joins the search haystack',
+      !row.hidden && d.getElementById('settings-pane-hd').textContent.includes('1 match'));
+    search.value = '';
+    w.filterSettings();
+    purgeBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
+    purgeBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
+    const collected = w.collectSettingsValues();
+    check('the purge row never dirties the form or joins value collection',
+      w.settingsDirtyCount() === 0 && d.getElementById('btn-settings-revert').disabled &&
+      d.getElementById('btn-settings-apply').disabled &&
+      Object.keys(collected).length === 1 && collected.storage_batch_cap === 5);
+  }
 
   // ---- test 10: infinite-scroll grows the log window, then pages the store ----
   const BIG = Array.from({ length: 80 }, (_, i) => mkRec('big' + String(i).padStart(3, '0'), 200, 1800000000000 + i * 1000));
@@ -1884,19 +1922,41 @@ async function main() {
       rows().every((row, i) => row === selectedRows[i]));
     let replyPurge, posts = 0;
     w.fetch = () => { posts++; return new Promise(resolve => { replyPurge = resolve; }); };
-    const first = w.clearAll();
-    w.clearAll();
+    const first = w.clearFiltered();
+    w.purgeAll();
     w.clearFiltered();
     check('all destructive actions share one in-flight gate', posts === 1 &&
-      d.getElementById('btn-clear-all').disabled && d.getElementById('btn-clear-filtered').disabled);
+      d.getElementById('btn-purge-all').disabled && d.getElementById('btn-clear-filtered').disabled);
+    // A mid-flight settings refill must not resurrect an enabled purge
+    // button: the fresh render inherits the busy state, and the purge's
+    // epilogue re-enables whichever instance is current.
+    w.eval('fillSettingsForm(settingsDoc)');
+    check('a mid-flight settings refill renders the purge button still disabled',
+      d.getElementById('btn-purge-all').disabled);
     replyPurge({ok: false, json: async () => ({error: 'still rejected'})});
     await first;
+    check('the purge epilogue re-enables the re-rendered button',
+      !d.getElementById('btn-purge-all').disabled);
     d.getElementById('cf-age').value = '';
     d.getElementById('lf-age').value = '';
     d.getElementById('lf-provider').value = '';
     w.fetch = savedFetch;
     await w.updateClearCount();
     await w.updateLogsCount();
+    // The settings surface reports through its own status line: a
+    // settings-origin failure must never write the menu's count preview.
+    let replySettingsPurge;
+    w.fetch = () => new Promise(resolve => { replySettingsPurge = resolve; });
+    const settingsPurge = w.purgeAll();
+    check('the settings purge announces its start through the sheet status',
+      d.getElementById('settings-count').textContent === 'deleting');
+    replySettingsPurge({ok: false, json: async () => ({error: 'nope'})});
+    await settingsPurge;
+    check('a failed settings purge reports through the sheet status, not the menu count',
+      d.getElementById('settings-count').textContent === 'nope' &&
+      d.getElementById('clear-count').textContent === '' &&
+      !d.getElementById('btn-purge-all').disabled);
+    w.fetch = savedFetch;
     d.getElementById('clear-menu').hidden = true;
   }
 
@@ -1937,12 +1997,12 @@ async function main() {
     w.scheduleLogFill = savedFill;
   }
 
-  // ---- test 10b: the purge re-sync - no removal event exists, so clearAll
-  // must fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
+  // ---- test 10b: the purge re-sync - no removal event exists, so the
+  // whole-database delete (now the settings sheet's storage action) must
+  // fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
   // the deletions) and the empty post-purge snapshot IS the wipe render.
   fullPayload = { feed_id: 'feedB', seq: 0, records: [],
     counters: { in_flight: 0, total_requests: 0, total_errors: 0 } };
-  let purgeURL = '';
   const origPurge = w.fetch;
   w.fetch = (url, opts) => {
     const u = String(url);
@@ -1951,14 +2011,23 @@ async function main() {
     return origPurge(url, opts);
   };
   let purgePOST = false;
-  await w.clearAll();
+  let confirmText = '';
+  const origConfirm = w.confirm;
+  w.confirm = m => { confirmText = String(m); return true; };
+  await w.purgeAll();
   await sleep(30);
+  w.confirm = origConfirm;
   w.fetch = origPurge;
-  check('clearAll POSTs the purge endpoint', purgePOST === true);
+  check('the settings purge POSTs the purge endpoint', purgePOST === true);
+  check('the settings purge confirms the whole-database wipe without the log-view count',
+    confirmText.includes('The entire database will be wiped.') && !confirmText.includes('records in view'));
   check('purge resync bootstrap is cursor-less (no since/feed)',
     bootURL.includes('/metrics/bootstrap') && !bootURL.includes('since=') && !bootURL.includes('feed='));
   check('the empty post-purge snapshot IS the wipe render', rows().length === 0);
   check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0);
+  check('the settings purge reports completion through the sheet status',
+    d.getElementById('settings-count').textContent === 'all metrics history deleted' &&
+    d.getElementById('settings-count').classList.contains('ok'));
   // Restore a live view so the later suites run against real state.
   fullPayload = { feed_id: 'feedB', seq: 80,
     records: BIG.map((r, i) => ({ ...r, __seq: i + 1 })),
@@ -1968,7 +2037,7 @@ async function main() {
   check('post-purge resync restores the fresh snapshot', rows().length === 60);
   // 10b's wrapper records ANY bootstrap URL, so the page's 5s tick stays
   // stopped through the whole purge-resync window: a tick resume landing
-  // after clearAll's cursor-less resync overwrites bootURL with since/feed
+  // after the purge's cursor-less resync overwrites bootURL with since/feed
   // and fails that check even though the product satisfied it. Re-armed
   // here, after the restore check, like the 7b/7c windows above.
   w.eval('armDashboardTicks()');

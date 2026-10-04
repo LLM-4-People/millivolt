@@ -91,7 +91,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
-| Storage | Writer queue/batches/flush cadence and restricted-query time/output limits. |
+| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible whole-database delete. |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch and the result-size limits its tools clamp with. Restart to apply. |
 | Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
@@ -937,11 +937,13 @@ a breaking change for scripts that consumed the plain JSON download: there is
 no uncompressed fallback, so scripted consumers must decompress the artifact
 first.
 
-Clear uses the same filter/count owner. Deletion requires confirmation in the
+Clear uses the same filter/count owner, and its Delete matching is scoped to
+the chosen filter. Deletion requires confirmation in the
 dashboard; it does not happen when the menu opens. A selected filter makes a
 read-only `POST /admin/purge/count` preview. Current traffic can change the
 count before the action, but the UI retains the previewed age cutoff rather
-than silently moving it. Delete everything is irreversible without a backup.
+than silently moving it. The whole-database delete lives in Settings (Storage
+category, Delete everything); it is irreversible without a backup.
 
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters
