@@ -1073,6 +1073,175 @@ quantiles use the ring's sample contract, which differs from dashboard R7 histor
 percentiles. Metric names and units are exposed with HELP/TYPE metadata at
 `/metrics/prometheus`; [prometheus.go](../internal/metrics/prometheus.go) owns them.
 
+### Operator recipes
+
+The gated query route (`GET /metrics/query?q=`, above) and the [MCP](mcp.md)
+`query` tool both take exactly one `SELECT` with no statement separator, and
+results are bounded by `storage_query_max_rows` and
+`storage_query_max_bytes`; an over-budget result is an error on the route, so
+keep wide scans behind a `started_at` window or a `LIMIT`. Column meanings
+come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
+relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
+calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
+with `localtime` for the host's zone. None of the computations below feed a
+dashboard aggregate; they read raw request columns the aggregates never scan.
+Each recipe is a question, the SQL that answers it, and how to read the result.
+
+**Where did the time go on a slow request?**
+
+```sql
+SELECT started_at, duration_ms, queue_wait_ms, retries,
+       first_token_at - started_at AS pre_token_ms,
+       ttft_ms,
+       last_token_at - first_token_at AS decode_ms,
+       started_at + duration_ms - last_token_at AS tail_ms
+FROM requests
+WHERE started_at >= strftime('%s','now')*1000 - 3600000
+  AND first_token_at > 0
+ORDER BY duration_ms DESC
+LIMIT 20
+```
+
+`pre_token_ms` is the wait the caller felt, including queue and retry waits;
+`ttft_ms` is measured from the final upstream attempt, so a retried request
+shows a small ttft beside a large `pre_token_ms`. `decode_ms` is the
+streaming window and `tail_ms` what remains after the last token, where a
+millisecond of rounding noise is normal. A request that produced no token
+has nothing to decompose, hence the `first_token_at > 0` gate.
+
+**How long did a model think before answering?**
+
+```sql
+SELECT started_at, model, reasoning_tokens,
+       first_answer_at - first_token_at AS thinking_ms
+FROM requests
+WHERE started_at >= strftime('%s','now')*1000 - 3600000
+  AND first_answer_at > 0
+ORDER BY thinking_ms DESC
+LIMIT 20
+```
+
+`thinking_ms` spans the first token of any kind, reasoning included, to the
+first answer token; 0 means the first token already was the answer.
+`first_answer_at` is streaming-only, so non-streaming responses and
+tool-call-only streams keep 0 and stay outside the gate.
+
+**How long does an agent idle between conversation turns?**
+
+```sql
+SELECT conversation_id, started_at,
+       started_at - LAG(started_at + duration_ms)
+         OVER (PARTITION BY conversation_id ORDER BY started_at) AS idle_ms
+FROM requests
+WHERE started_at >= strftime('%s','now')*1000 - 86400000
+  AND conversation_id != ''
+ORDER BY conversation_id, started_at
+```
+
+`idle_ms` is the gap between one request's end and the next request's start
+inside the same conversation; the first turn has no predecessor and stays
+null. Order by `idle_ms DESC` instead to surface the biggest stalls first.
+
+**What retried before the client saw a response?**
+
+```sql
+SELECT r.started_at, r.id, r.retries, r.status_code AS final_status,
+       j.value->>'status_code' AS attempt_status,
+       j.value->>'at' AS attempt_at,
+       j.value->>'retry_after_ms' AS retry_after_ms
+FROM requests r, json_each(r.attempts) j
+WHERE r.started_at >= strftime('%s','now')*1000 - 86400000
+  AND json_array_length(r.attempts) > 0
+ORDER BY r.started_at, j.key
+```
+
+One row per absorbed attempt, oldest first. The `json_array_length` gate is
+required: `attempts` defaults to the JSON literal `null`, and `json_each`
+over that literal still yields a row. `retry_after_ms` appears when the
+provider sent a `Retry-After` header.
+
+**Did a conversation's cache writes pay for themselves?**
+
+```sql
+SELECT conversation_id, COUNT(*) AS requests,
+       SUM(cache_write_tokens) AS cache_written,
+       SUM(cache_read_tokens) AS cache_read,
+       CASE WHEN SUM(cache_read_tokens) > 0
+            THEN ROUND(1.0 * SUM(cache_write_tokens) / SUM(cache_read_tokens), 2)
+       END AS write_per_read
+FROM requests
+WHERE conversation_id != ''
+GROUP BY conversation_id
+ORDER BY cache_written DESC, cache_read DESC
+LIMIT 20
+```
+
+`write_per_read` at or below 1 means the reads repaid the writes; reads with
+no writes ride a cache somebody else warmed. A conversation with writes and
+no reads paid for a prompt that never came back.
+
+**When does traffic arrive?**
+
+```sql
+SELECT strftime('%w', started_at/1000, 'unixepoch', 'localtime') AS weekday,
+       strftime('%H', started_at/1000, 'unixepoch', 'localtime') AS hour,
+       COUNT(*) AS requests, SUM(cost) AS cost,
+       ROUND(AVG(duration_ms), 1) AS avg_ms
+FROM requests
+GROUP BY weekday, hour
+ORDER BY weekday, hour
+```
+
+`weekday` is `0` (Sunday) through `6` and `hour` is two digits in the host's
+local zone; drop `localtime` for UTC. Cost is USD, summed as stored.
+
+**How far does the token estimate drift?**
+
+```sql
+SELECT model, COUNT(*) AS requests,
+       ROUND(AVG((chars_system + chars_user + chars_assistant + chars_tool) / 4), 1) AS avg_chars_est,
+       ROUND(AVG(input_tokens), 1) AS avg_input,
+       ROUND(AVG(1.0 * input_tokens /
+            ((chars_system + chars_user + chars_assistant + chars_tool) / 4)), 3) AS input_vs_chars4,
+       ROUND(AVG(1.0 * total_tokens /
+            ((chars_system + chars_user + chars_assistant + chars_tool) / 4 + req_max_tokens)), 3) AS total_vs_est
+FROM requests
+WHERE input_tokens > 0
+  AND chars_system + chars_user + chars_assistant + chars_tool > 0
+GROUP BY model
+ORDER BY input_vs_chars4 DESC
+```
+
+The scheduler reserves prompt chars/4 plus `req_max_tokens` when the client
+sent one. `input_vs_chars4` compares real input tokens with the chars/4
+share, and `total_vs_est` compares settled total tokens with the full
+reservation. A ratio far from 1 on a well-represented model means the
+reservation systematically over- or under-reserves for it.
+
+**Which requests paid far above their model's blended rate?**
+
+```sql
+SELECT o.model, o.id, o.started_at,
+       ROUND(1e6 * o.cost / (o.input_tokens + o.output_tokens), 2) AS per_mtok,
+       ROUND(1e6 * a.cost_sum / a.tok_sum, 2) AS model_avg_per_mtok,
+       ROUND((1e6 * o.cost / (o.input_tokens + o.output_tokens)) /
+             (1e6 * a.cost_sum / a.tok_sum), 2) AS ratio
+FROM requests o
+JOIN (SELECT model, SUM(cost) AS cost_sum,
+             SUM(input_tokens + output_tokens) AS tok_sum
+      FROM requests WHERE cost > 0 GROUP BY model) a ON a.model = o.model
+WHERE o.cost > 0 AND o.input_tokens + o.output_tokens > 0
+ORDER BY ratio DESC
+LIMIT 10
+```
+
+`per_mtok` is the request's own rate over its in+out tokens, and `ratio`
+scales it against the model's blended average, computed over cost-reporting
+requests only so unpriced traffic cannot dilute it. A ratio far above 1
+marks expensive outliers such as cache misses or long-tail pricing; flip the
+sort to find the bargains. SQLite has no `median()`, which is why the
+blended average plus a sorted ratio stands in for it.
+
 ## Storage and accounting
 
 SQLite retains finalized records; the ring and pending registry support live

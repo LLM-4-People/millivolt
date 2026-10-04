@@ -455,8 +455,11 @@ function nodeKpis(dim, e) {
         + kpiBlend(e);
     case 'conversation':
       // Session economics and wait. Cache/tps average away across mixed turns;
-      // volume is already the headline.
-      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e) + kpiTtft(e);
+      // volume is already the headline. Tool calls count invocations, never
+      // requests: a chat-only conversation keeps its real 0 and only a missing
+      // field renders the shared '-' placeholder.
+      return kpiNum('cost', fmtMoney(e.cost)) + kpiBlend(e) + kpiTok(e)
+        + kpiNum('calls', fmt(e.tools)) + kpiTtft(e);
     case 'model':
       // Token-family slots together: in/out and the cached-prompt share.
       // Cache renders like client/provider - an unreported hit rate shows

@@ -330,6 +330,8 @@ also in the tool descriptions, which is where a model reads them.
   `unixnow()` in this SQLite build, so a relative window is
   `strftime('%s','now')*1000`, for example
   `WHERE started_at >= strftime('%s','now')*1000 - 3600000` for the last hour.
+  Ready-to-run analysis SQL for exactly these time-ranged questions is
+  collected in the [operator recipes](operations.md#operator-recipes).
 - An **unknown filter value is an empty result, not an error.** A misspelled
   client, provider, model, tool, conversation or key produces a confident zero.
   Call `values` before filtering on one of those. Model filters take the

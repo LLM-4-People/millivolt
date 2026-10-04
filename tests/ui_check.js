@@ -497,6 +497,22 @@ async function main() {
         !card.querySelector('.xp-node-kpis').textContent.includes('errors'));
     }
     for(const dim of ['status','key']) check(`${dim} retains its error-rate KPI`,renderCard(dim).querySelector('.xp-node-kpis').textContent.includes('err rate'));
+    // The conversation card renders the wire's per-group tool-call sum with
+    // the tool dimension's exact KPI: a chat-only conversation keeps the real 0
+    // (never a fabricated gap), a missing field keeps the shared '-'
+    // placeholder, and the slot order stays a stable economics-then-wait row.
+    check('conversation card renders the wire tools KPI like the tool dimension',
+      renderCard('conversation').querySelector('.xp-node-kpis').textContent.includes('calls 0') &&
+      renderCard('conversation',{tools:47}).querySelector('.xp-node-kpis').textContent.includes('calls 47') &&
+      renderCard('tool',{tools:47}).querySelector('.xp-node-kpis').textContent.includes('calls 47'));
+    check('conversation tools KPI keeps the shared placeholder for an empty field',
+      renderCard('conversation',{tools:undefined}).querySelector('.xp-node-kpis').textContent.includes('calls -') &&
+      renderCard('conversation',{tools:null}).querySelector('.xp-node-kpis').textContent.includes('calls -'));
+    check('conversation KPI slots stay a stable economics-then-wait row', (() => {
+      const want = ['cost','per Mtok','tok','calls','ttft'];
+      const spans = [...renderCard('conversation',{tools:3}).querySelectorAll('.xp-node-kpis > span')];
+      return spans.length === want.length && want.every((w, i) => spans[i].textContent.startsWith(w));
+    })());
     // shareBar: the % flows through the pct/pctCap owner, so a
     // strictly-sub-1 fraction can never round up to a false '100%' and a
     // full fraction is a true 100. An unmeasured share (zero denominator)
