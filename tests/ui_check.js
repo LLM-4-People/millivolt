@@ -776,9 +776,12 @@ async function main() {
     const selRec = { ...mkRec('sel-live', 200, 1700000104000) };
     delete selRec.status_code;
     fire('begin', { record: selRec, in_flight: 1 });
-    // The begin upsert schedules the coalesced rAF render; poll for the
-    // painted end state (the expanding row) instead of a fixed sleep.
-    await settleUntil(() => expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
+    // The begin upsert schedules the coalesced rAF render that paints the
+    // row itself; the pending-row template never carries the expanding
+    // class (that is the drawer-selection highlight, painted
+    // synchronously by openDrawer on the next line and proven by the
+    // check after it). Poll for the painted row, not the highlight.
+    await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]'));
     w.openDrawer('sel-live');
     check('opening a request row selects it in the drawer and highlights exactly its row',
       d.getElementById('drawer').classList.contains('open') &&
