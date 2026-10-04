@@ -14,6 +14,7 @@ import (
 	"net/http/httptrace"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -949,6 +950,12 @@ func withSendTimeout(ctx context.Context, timeout time.Duration) (context.Contex
 // bidi transport) reads ContextClientTrace and fires GotConn with its own
 // reused flag and GotFirstResponseByte.
 type upstreamTiming struct {
+	// mu guards every field: httptrace fires the connect hooks on the
+	// transport's dial goroutines, and a Happy-Eyeballs losing dial can stamp
+	// ConnectDone while the request goroutine has already adopted the winning
+	// connection's observations. Dial events are rare per attempt, so a small
+	// mutex is the obviously-correct owner.
+	mu        sync.Mutex
 	start     time.Time // the attempt's send start (post-admission)
 	connectS  time.Time // first ConnectStart (Happy Eyeballs can dial more than once)
 	connectD  time.Time // last ConnectDone: the whole dial phase, fallbacks included
@@ -966,19 +973,37 @@ type upstreamTiming struct {
 func (u *upstreamTiming) trace() *httptrace.ClientTrace {
 	return &httptrace.ClientTrace{
 		ConnectStart: func(network, addr string) {
+			u.mu.Lock()
+			defer u.mu.Unlock()
 			if u.connectS.IsZero() {
 				u.connectS = time.Now()
 			}
 		},
-		ConnectDone: func(network, addr string, err error) { u.connectD = time.Now() },
+		ConnectDone: func(network, addr string, err error) {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.connectD = time.Now()
+		},
 		TLSHandshakeStart: func() {
+			u.mu.Lock()
+			defer u.mu.Unlock()
 			if u.tlsS.IsZero() {
 				u.tlsS = time.Now()
 			}
 		},
-		TLSHandshakeDone: func(state tls.ConnectionState, err error) { u.tlsD = time.Now() },
-		GotConn:          func(info httptrace.GotConnInfo) { u.reused = info.Reused },
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.tlsD = time.Now()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			u.mu.Lock()
+			defer u.mu.Unlock()
+			u.reused = info.Reused
+		},
 		GotFirstResponseByte: func() {
+			u.mu.Lock()
+			defer u.mu.Unlock()
 			if u.firstByte.IsZero() {
 				u.firstByte = time.Now()
 			}
@@ -993,6 +1018,8 @@ func (u *upstreamTiming) trace() *httptrace.ClientTrace {
 // reserved for "not observed", and an interval so short the clock resolved
 // it to zero still means the hooks fired - observed, never absent.
 func (u *upstreamTiming) adopt(rec *metrics.Record) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
 	rec.UpstreamConnectMs = observedMs(u.connectS, u.connectD)
 	rec.UpstreamTLSMs = observedMs(u.tlsS, u.tlsD)
 	rec.UpstreamTTFBMs = observedMs(u.start, u.firstByte)
