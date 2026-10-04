@@ -167,7 +167,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		h := protectOperatorRequests(next, newOperatorGate(token))
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
-		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) {
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/session"`) {
 			t.Fatalf("GET / without credential: status=%d want=401 login page", w.Code)
 		}
 		if !strings.Contains(w.Body.String(), "box-sizing: border-box") {
@@ -180,7 +180,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 			`name="apple-mobile-web-app-capable" content="yes"`,
 			`name="theme-color" content="#1b1826"`,
 			`navigator.serviceWorker.register('/sw.js'`,
-			`action="/admin/session"`,
+			`action="/session"`,
 		} {
 			if !strings.Contains(body, needle) {
 				t.Errorf("login page missing %q", needle)
@@ -228,7 +228,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		// The liveness probe and the inference catch-all stay open while the
 		// plane is disabled; the session handshake hands off to its own
 		// handler, which denies an unarmed plane (asserted below).
-		for _, target := range []string{"/healthz", "/favicon.ico", "/v1/chat/completions", "/admin/session"} {
+		for _, target := range []string{"/healthz", "/favicon.ico", "/v1/chat/completions", "/session"} {
 			r := httptest.NewRequest(http.MethodPost, "http://proxy.example"+target, nil)
 			w := httptest.NewRecorder()
 			h.ServeHTTP(w, r)
@@ -240,18 +240,18 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 
 	t.Run("session handshake mints cookies", func(t *testing.T) {
 		gate := newOperatorGate(token)
-		h := gate.handleAdminSession
+		h := gate.handleOperatorSession
 		// An unarmed plane never mints cookies.
 		w := httptest.NewRecorder()
-		disabled := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session", nil)
+		disabled := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", nil)
 		disabled.Header.Set("Authorization", "Bearer "+token)
-		newOperatorGate("").handleAdminSession(w, disabled)
+		newOperatorGate("").handleOperatorSession(w, disabled)
 		if w.Code != http.StatusForbidden {
 			t.Errorf("disabled session handshake: status=%d want=403", w.Code)
 		}
 		// Bearer handshake: 204 + cookie.
 		w = httptest.NewRecorder()
-		bearer := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session", nil)
+		bearer := httptest.NewRequest(http.MethodPost, "http://proxy.example/session", nil)
 		bearer.Header.Set("Authorization", "Bearer "+token)
 		h(w, bearer)
 		if w.Code != http.StatusNoContent || len(w.Result().Cookies()) != 1 {
@@ -259,7 +259,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		}
 		// Form handshake: 303 + cookie (the no-JS login flow).
 		w = httptest.NewRecorder()
-		form := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session",
+		form := httptest.NewRequest(http.MethodPost, "http://proxy.example/session",
 			strings.NewReader("token="+url.QueryEscape(token)))
 		form.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		h(w, form)
@@ -273,11 +273,11 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		// notice (a silent re-serve reads as "nothing happened" and had the
 		// operator sign in twice without ever seeing why), API gets JSON.
 		w = httptest.NewRecorder()
-		bad := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session",
+		bad := httptest.NewRequest(http.MethodPost, "http://proxy.example/session",
 			strings.NewReader("token=wrong-credential"))
 		bad.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		h(w, bad)
-		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) {
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/session"`) {
 			t.Errorf("wrong form credential: status=%d want=401 login page", w.Code)
 		}
 		if !strings.Contains(w.Body.String(), `role="alert"`) ||
@@ -296,16 +296,16 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 		// post with no token field is a clean page too - the rejection
 		// notice is about a presented token, and none was.
 		w = httptest.NewRecorder()
-		h(w, httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session", nil))
+		h(w, httptest.NewRequest(http.MethodPost, "http://proxy.example/session", nil))
 		if w.Code != http.StatusUnauthorized {
 			t.Errorf("empty session post: status=%d want=401", w.Code)
 		}
 		w = httptest.NewRecorder()
-		emptyForm := httptest.NewRequest(http.MethodPost, "http://proxy.example/admin/session",
+		emptyForm := httptest.NewRequest(http.MethodPost, "http://proxy.example/session",
 			strings.NewReader(""))
 		emptyForm.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		h(w, emptyForm)
-		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/admin/session"`) ||
+		if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `action="/session"`) ||
 			strings.Contains(w.Body.String(), "That token was rejected") {
 			t.Errorf("empty form post: status=%d want=401 clean login page", w.Code)
 		}

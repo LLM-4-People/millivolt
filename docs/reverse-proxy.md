@@ -28,8 +28,9 @@ Compose service. Use a maintained NGINX release with the `http2 on` directive
 The sample splits two prefix locations because they do not share an access
 model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 `Authorization` and routing headers, and allowlist API clients. `location /`
-is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`, `/mcp`,
-`/healthz`, `/favicon.ico` and the other brand/PWA files): allowlist operators, and keep `Host` plus the
+is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`,
+`/session`, `/mcp`, `/healthz`, `/favicon.ico` and the other brand/PWA files):
+allowlist operators, and keep `Host` plus the
 session cookie so Settings origin checks and the live feed work. A URL-capable
 MCP client uses this location with `/mcp` appended and its own Bearer header. Shared
 streaming proxy settings live on the `server` so both SSE paths stay
@@ -98,6 +99,14 @@ inference" while leaving `/` on Bearer: that still overwrites the provider key.
 The same separation applies to other ingress-only credentials: do not forward
 them to an LLM provider. Clients must support your ingress authentication and
 the proxy's custom routing headers.
+
+The session handshake lives at `/session`, outside the admin plane, which
+supports one specific pattern: an external authentication layer may front
+`/admin/*` alone, because millivolt's own login stays reachable and the
+mutation and settings routes become double-gated, the external layer plus
+millivolt's credential. Operators fronting `/admin` this way must still pass
+the session cookie and `Host` through to the proxy, since the dashboard's
+fetch-based mutations rely on both.
 
 ## Container networking and other ingress servers
 

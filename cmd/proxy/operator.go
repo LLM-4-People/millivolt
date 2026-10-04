@@ -151,19 +151,21 @@ func (g *operatorGate) valid(presented string) bool {
 }
 
 // gatedPath reports whether the request belongs to the dashboard/operator
-// plane. The exact namespace roots are gated too: /admin, /metrics, /dash and
-// /mcp are millivolt-owned, so a look-alike path can never reach the inference
-// catch-all. A decoded backslash is read as a separator alongside a slash: no
-// Go mux pattern does, but upstream proxies and caches historically have, so
-// the namespace test cannot depend on the next hop's reading. Everything else
-// (registered /healthz, brand/PWA files and the catch-all) passes untouched.
+// plane. The exact namespace roots are gated too: /admin, /session, /metrics,
+// /dash and /mcp are millivolt-owned, so a look-alike path can never reach the
+// inference catch-all. A decoded backslash is read as a separator alongside a
+// slash: no Go mux pattern does, but upstream proxies and caches historically
+// have, so the namespace test cannot depend on the next hop's reading.
+// Everything else (registered /healthz, brand/PWA files and the catch-all)
+// passes untouched.
 func gatedPath(path string) bool {
 	path = strings.ReplaceAll(path, `\`, "/")
 	return path == "/" || path == "/index.html" ||
-		path == "/admin" || path == "/metrics" || path == "/dash" ||
+		path == "/admin" || path == "/session" || path == "/metrics" || path == "/dash" ||
 		strings.HasPrefix(path, "/dash/") ||
 		strings.HasPrefix(path, "/metrics/") ||
 		strings.HasPrefix(path, "/admin/") ||
+		strings.HasPrefix(path, "/session/") ||
 		mcpNamespace(path)
 }
 
@@ -396,13 +398,14 @@ func protectOperatorRequests(next http.Handler, gate *operatorGate) http.Handler
 		http.SetCookie(w, cookie)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// The session handshake is the one /admin route that must stay
+		// The session handshake is the one operator route that must stay
 		// reachable without a credential: it is how a credential becomes a
 		// cookie. It owns its throttling and runs behind its own
-		// same-origin checks (registered in main). The exemption requires
-		// the path to be canonical in both the decoded and escaped views so
-		// an encoded-slash look-alike can never ride it.
-		if r.URL.Path == "/admin/session" && r.URL.EscapedPath() == "/admin/session" {
+		// same-origin checks (registered in the reserved-namespace table).
+		// The exemption requires the path to be canonical in both the
+		// decoded and escaped views so an encoded-slash look-alike can
+		// never ride it.
+		if r.URL.Path == "/session" && r.URL.EscapedPath() == "/session" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -508,13 +511,13 @@ func (g *operatorGate) denyBearer(w http.ResponseWriter) {
 	denyOperator(w, http.StatusUnauthorized, "operator token required")
 }
 
-// handleAdminSession is POST /admin/session: the one open operator-plane
+// handleOperatorSession is POST /session: the one open operator-plane
 // route, because it is the handshake that mints the session cookie. It
 // accepts the credential as a Bearer header (API clients) or as the single
 // "token" form field (the login page works without JavaScript), throttles
 // wrong candidates like every other gated request, and never reveals which
 // of the two was wrong.
-func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request) {
+func (g *operatorGate) handleOperatorSession(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		denyOperator(w, http.StatusMethodNotAllowed, "POST only")
@@ -603,7 +606,7 @@ func (g *operatorGate) handleAdminSession(w http.ResponseWriter, r *http.Request
 
 // loginPageTemplate is the whole pre-auth surface: self-contained (the gated
 // /dash assets are unreachable by design). The form works without JavaScript
-// and only forwards the entered value to POST /admin/session. A tiny optional
+// and only forwards the entered value to POST /session. A tiny optional
 // script registers the ungated service worker so the sign-in page is
 // installable before a session cookie exists. The credential prose is not part
 // of the template: loginPageProtectedNotice/loginPageRejectedNotice fill the
@@ -669,7 +672,7 @@ button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
 </style>
 </head>
 <body>
-<form method="post" action="/admin/session">
+<form method="post" action="/session">
 <div class="brand">
 <div class="logo" aria-hidden="true">
 <svg width="18" height="18" viewBox="0 0 18 18" fill="none">

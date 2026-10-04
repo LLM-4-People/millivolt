@@ -82,15 +82,24 @@ type reservedNamespace struct {
 // The /admin, /metrics and /mcp namespaces own no unregistered handler:
 // reserving both the roots and the subtrees means neither the unauthenticated
 // gate nor an authenticated request can forward a namespace look-alike to the
-// upstream catch-all. Registered exact patterns (session, pause, config,
-// agg/*, ...) keep mux precedence. newOperatorMux installs exactly this set,
-// and the route tests drive that same function, so a dropped /admin, /metrics
-// or /mcp registration fails the default suite instead of only the opt-in
-// live one.
+// upstream catch-all. The /session root is the registered handshake itself:
+// it is the one open operator route, kept outside /admin so an external
+// authentication layer can front the admin plane without gating millivolt's
+// own login, and its subtree row reserves every unregistered spelling.
+// Registered exact patterns (pause, config, agg/*, ...) keep mux precedence.
+// newOperatorMux installs exactly this set, and the route tests drive that
+// same function, so a dropped /admin, /session, /metrics or /mcp
+// registration fails the default suite instead of only the opt-in live one.
 func operatorNamespaces(gate *operatorGate, dispatch http.Handler) []reservedNamespace {
 	return []reservedNamespace{
 		{"/admin", http.NotFoundHandler()},
 		{"/admin/", http.NotFoundHandler()},
+		// The session handshake mints the operator cookie; it is exempt
+		// from the credential gate by definition and owns its own failure
+		// throttling and same-origin wrapper. /session/ reserves every
+		// unregistered subpath for the 404 handler.
+		{"/session", http.NewCrossOriginProtection().Handler(http.HandlerFunc(gate.handleOperatorSession))},
+		{"/session/", http.NotFoundHandler()},
 		{"/metrics", http.NotFoundHandler()},
 		{"/metrics/", http.NotFoundHandler()},
 		// The MCP streamable HTTP endpoint is always registered and gated
@@ -289,9 +298,6 @@ func main() {
 	// Docker HEALTHCHECK and load balancers cannot carry the operator
 	// credential. Depth (storage, feeds) stays on the gated dashboard.
 	mux.HandleFunc("/healthz", handleHealthz)
-	// The session handshake mints the operator cookie; it is exempt from the
-	// credential gate by definition and owns its own failure throttling.
-	mux.Handle("/admin/session", http.NewCrossOriginProtection().Handler(http.HandlerFunc(gate.handleAdminSession)))
 	// The SSE feed is not gzipped (it flushes event-by-event; every other
 	// dashboard route is buffered text and compresses).
 	mux.Handle("/metrics/live/stream", http.HandlerFunc(buf.HandleStream))

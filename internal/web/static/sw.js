@@ -1,7 +1,8 @@
 // millivolt dashboard service worker. Cache name is stamped with the
 // dashboard content identity so a rebuild drops the previous shell.
 // The worker never caches live HTML or operator/inference APIs: / is
-// operator-gated (login vs bootstrap) and /metrics /admin /v1 stream.
+// operator-gated (login vs bootstrap) and /metrics /admin /session /v1
+// stream.
 // Cached shell keys share CACHE_PREFIX; the stamped version completes it.
 const CACHE_PREFIX = 'millivolt-shell-';
 const CACHE = CACHE_PREFIX + '__DASHBOARD_VERSION__';
@@ -25,6 +26,7 @@ function livePath(pathname) {
     pathname === '/healthz' || pathname === '/models' ||
     pathname === '/sw.js' ||
     pathname === '/admin' || pathname.startsWith('/admin/') ||
+    pathname === '/session' || pathname.startsWith('/session/') ||
     pathname === '/metrics' || pathname.startsWith('/metrics/') ||
     pathname === '/v1' || pathname.startsWith('/v1/');
 }

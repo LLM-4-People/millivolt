@@ -269,6 +269,8 @@ func TestPWAInstallability(t *testing.T) {
 	for _, needle := range []string{
 		"pathname === '/admin'",
 		"pathname.startsWith('/admin/')",
+		"pathname === '/session'",
+		"pathname.startsWith('/session/')",
 		"pathname === '/metrics'",
 		"pathname.startsWith('/metrics/')",
 		"pathname === '/v1'",

@@ -93,7 +93,7 @@ async def operator_signin(context, base):
     The dashboard page and its EventSource authenticate with the HttpOnly
     cookie; harness requests may also send the Bearer header directly.
     """
-    response = await context.request.post(base + '/admin/session',
+    response = await context.request.post(base + '/session',
                                           form={'token': operator_token()})
     require(response.ok, 'operator sign-in failed: ' + str(response.status))
 

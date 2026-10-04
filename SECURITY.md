@@ -31,7 +31,7 @@ by the HttpOnly session cookie. This does not
 prevent direct non-browser reads or secure a publicly reachable listener.
 Explicit non-browser calls remain supported; gated endpoints need the
 `Authorization: Bearer` credential or a session cookie minted through
-`POST /admin/session`.
+`POST /session`.
 
 ## Upstream destinations and credentials
 

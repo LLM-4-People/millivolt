@@ -16,12 +16,12 @@ import (
 // historically read it as one, so the reserved namespace cannot depend on the
 // next hop's reading.
 func TestGatedPathReadsBackslashAsSeparator(t *testing.T) {
-	for _, path := range []string{`/mcp\xyz`, `\admin\pause`, `/metrics\`} {
+	for _, path := range []string{`/mcp\xyz`, `\admin\pause`, `/session\xyz`, `/metrics\`} {
 		if !gatedPath(path) {
 			t.Errorf("gatedPath(%q) = false, want true (backslash read as separator)", path)
 		}
 	}
-	for _, path := range []string{`/v1\chat`, `/mcp-x`, `/adminx`} {
+	for _, path := range []string{`/v1\chat`, `/mcp-x`, `/adminx`, `/sessionx`} {
 		if gatedPath(path) {
 			t.Errorf("gatedPath(%q) = true, want false", path)
 		}
@@ -59,7 +59,8 @@ func TestOperatorGateRefusesEncodedNamespaceSeparators(t *testing.T) {
 	h := protectOperatorRequests(next, newOperatorGate(mcpEndpointToken))
 	for _, target := range []string{
 		"/mcp%2fxyz", "/mcp%2Fxyz", "/mcp%5cxyz", "/mcp/a%5Cb",
-		"/admin%2fpause", "/metrics%2fprometheus", "/metrics/pprof%2fheap",
+		"/admin%2fpause", "/session%2fxyz", "/session%5cxyz",
+		"/metrics%2fprometheus", "/metrics/pprof%2fheap",
 		"/dash%2fapp.js",
 	} {
 		request := httptest.NewRequest(http.MethodPost, "http://proxy.example"+target, nil)
@@ -142,6 +143,7 @@ func TestOperatorNamespaceLookAlikesNeverReachInference(t *testing.T) {
 
 	for _, target := range []string{
 		"/mcp%2fxyz", "/mcp%2Fxyz", "/mcp%5cxyz", "/admin%2fpause",
+		"/session%2fxyz", "/session%5cxyz",
 		"/metrics%2fprometheus", "/metrics/pprof%2fheap", "/dash%2fapp.js",
 	} {
 		if status := post(target, mcpEndpointToken); status != http.StatusNotFound {

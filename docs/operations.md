@@ -631,8 +631,8 @@ the credential gates both.
 | `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
-| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*` or `/v1`. |
-| `POST /admin/session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. |
+| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*`, `/session/*` or `/v1`. |
+| `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
@@ -704,7 +704,8 @@ proxy.yaml, so it cannot leak through Settings, `-print-config`,
 The gate is deny by default and lives in one chokepoint in front of every
 route:
 
-- Open: `GET /healthz`, origin-root brand/PWA files (`/favicon.ico`, icons,
+- Open: `GET /healthz`, the `POST /session` login handshake (the one open
+  operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
   `/manifest.webmanifest`, `/sw.js`) and transparent inference. Provider
   credentials ride the same header name and are never inspected by the gate.
 - Gated: the dashboard HTML and `/dash/*` assets, every `/metrics/*` surface
@@ -725,11 +726,11 @@ millivolt's listener is plain HTTP, and the documented TLS deployments
 terminate at the ingress, where the remaining loopback hop is trusted-local.
 Do not expose the listener over plaintext networks anyway. The login page
 served for unauthenticated dashboard visits exchanges the entered value for
-that cookie through `POST /admin/session` and works without JavaScript; API
+that cookie through `POST /session` and works without JavaScript; API
 clients can call the same endpoint or simply send the Bearer header on every
 request. An expired cookie re-prompts in the dashboard or reappears as the
 login page on navigation.
-Unregistered `/admin/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
+Unregistered `/admin/*`, `/session/*`, `/metrics/*` and `/mcp/*` paths are reserved: they
 answer 404 and are never forwarded upstream. The gate also refuses 404 when an
 owned-namespace path is written with a percent-encoded separator (`%2f` or
 `%5c`, any hex case): the mux cannot route it to the reserved subtree, so it

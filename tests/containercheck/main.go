@@ -629,10 +629,10 @@ func probe(phase string) error {
 	if err != nil {
 		return err
 	}
-	if status != http.StatusUnauthorized || !bytes.Contains(login, []byte(`action="/admin/session"`)) || !bytes.Contains(login, []byte(`rel="manifest"`)) {
+	if status != http.StatusUnauthorized || !bytes.Contains(login, []byte(`action="/session"`)) || !bytes.Contains(login, []byte(`rel="manifest"`)) {
 		return fmt.Errorf("ungated dashboard returned %d, want the 401 login page", status)
 	}
-	session, err := http.NewRequest(http.MethodPost, smokeAddress+"/admin/session", strings.NewReader("token="+url.QueryEscape(credential)))
+	session, err := http.NewRequest(http.MethodPost, smokeAddress+"/session", strings.NewReader("token="+url.QueryEscape(credential)))
 	if err != nil {
 		return err
 	}

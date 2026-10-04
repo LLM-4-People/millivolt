@@ -8,12 +8,13 @@ No endpoint/API-key registry is required. Read
 [Security](../SECURITY.md): routing credentials do not authorize operator access,
 and the whole dashboard plane is gated by `MILLIVOLT_OPERATOR_TOKEN`
 ([operator access](operations.md#operator-access)); only `/healthz`,
-`/favicon.ico` (and the other origin-root brand/PWA files) and the relay stay open.
+`/favicon.ico` (and the other origin-root brand/PWA files), the `/session`
+login handshake and the relay stay open.
 
 ## Endpoint behavior
 
-The dashboard, embedded assets, `/admin/*` actions, `/healthz`, the `/mcp` MCP
-endpoint and registered `/metrics/*`
+The dashboard, embedded assets, `/admin/*` actions, `/healthz`, the `/session`
+login handshake, the `/mcp` MCP endpoint and registered `/metrics/*`
 routes belong to millivolt. Their methods and meanings are listed in
 [operations](operations.md#operator-and-data-routes). `GET /v1/models` and
 `GET /models` use the discovery path described below. Other paths reach the

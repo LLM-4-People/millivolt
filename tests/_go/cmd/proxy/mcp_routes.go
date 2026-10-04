@@ -18,7 +18,7 @@ func TestMCPRouteIsRegisteredOnTheOperatorMux(t *testing.T) {
 	gate := newOperatorGate(mcpEndpointToken)
 	mux, handler := newOperatorMux(gate)
 	namespaces := operatorNamespaces(gate, handler)
-	want := []string{"/admin", "/admin/", "/metrics", "/metrics/", "/mcp", "/mcp/"}
+	want := []string{"/admin", "/admin/", "/session", "/session/", "/metrics", "/metrics/", "/mcp", "/mcp/"}
 	if len(namespaces) != len(want) {
 		t.Fatalf("reserved namespace count = %d, want %d", len(namespaces), len(want))
 	}

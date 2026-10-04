@@ -180,7 +180,7 @@ func (b liveBearerRoundTripper) RoundTrip(request *http.Request) (*http.Response
 // session cookie as a request header value.
 func mintLiveSessionCookie(t *testing.T, origin string) string {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, origin+"/admin/session", nil)
+	request, err := http.NewRequest(http.MethodPost, origin+"/session", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -124,12 +124,12 @@ of choosing a client:
   SSE stream and no session to delete.
 - There is no session id: the endpoint never sends `Mcp-Session-Id`, and no
   per-request state outlives the request. No session cookie is minted here
-  either, unlike `/admin`, `/metrics` and `/dash`, so an MCP client's cookie
-  jar gains no dashboard credential; a client must not expect or send a session
-  id. The admitted credential does key an in-process cache of the SDK server
-  object, so repeated calls do not rebuild all 22 tool registrations; admitting
-  a different credential replaces it. The credential is only the in-memory
-  cache key: it is never logged or persisted.
+  either, unlike `/admin`, `/session`, `/metrics` and `/dash`, so an MCP client's
+  cookie jar gains no dashboard credential; a client must not expect or send a
+  session id. The admitted credential does key an in-process cache of the SDK
+  server object, so repeated calls do not rebuild all 22 tool registrations;
+  admitting a different credential replaces it. The credential is only the
+  in-memory cache key: it is never logged or persisted.
 - SSE resumption is not offered: no event store exists, so `Last-Event-ID`
   replay is not available.
 - The server never sends requests to the client: there is no sampling and no
