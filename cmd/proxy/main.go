@@ -337,6 +337,10 @@ func main() {
 	mux.Handle("/metrics/agg/log", aggGet(agg.HandleLogPage))
 	mux.Handle("/metrics/bootstrap", aggGet(agg.HandleBootstrap))
 	registerLogRoutes(mux, buf, store)
+	// Profiling evidence for CPU/RAM work: the standard handlers under the
+	// same operator gate as every /metrics route (pprof.go owns the mounting
+	// contract).
+	registerPprofRoutes(mux)
 
 	// Operator pause: in-flight requests finish, new ones queue until resume.
 	// The dashboard Pause/Resume button is the UI for this.

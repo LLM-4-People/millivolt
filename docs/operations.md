@@ -651,11 +651,32 @@ the credential gates both.
 | `GET /metrics/live/stream` | Replayable finalized SSE feed plus ephemeral pending lifecycle/reset events. |
 | `GET /metrics/agg/chart`, `/explorer`, `/log` | Scoped history chart, faceted explorer, and durable log paging. |
 | `GET /metrics/prometheus` | Prometheus exposition over the in-memory ring, not durable since-inception dashboard totals. |
+| `GET /metrics/pprof/` | Standard Go profiling handlers behind the same credential as every `/metrics` route: the index listing plus the `profile` (CPU), `heap`, `allocs`, `goroutine`, `block`, `mutex` and `threadcreate` profiles at `/metrics/pprof/<name>`. Unregistered subpaths answer the reserved namespace 404, never inference. See the capture workflow below the route table. |
 | `POST /mcp` | Streamable HTTP MCP endpoint, always registered and operator-gated like `/metrics`. Serves the same 22 tools as `millivolt mcp`. Bearer-only: the gate admits the session cookie on gated paths, but this endpoint refuses a cookie-only request (`403`) and forwards the caller's own Bearer on its in-process calls to the routes above, so no session cookie or per-request state is retained between requests; the admitted credential keys an in-memory cache of its SDK server object (never logged or persisted) so repeated calls do not rebuild it. Stateless: `GET`/`DELETE` answer `405`. `/mcp/...` look-alikes are reserved and answer `404`, never inference, and a reserved-namespace spelling whose separator is written single-encoded (`%2f` or `%5c`, any hex case) is refused the same way. A double-encoded separator (`%252f`) is not a reserved-namespace spelling: it decodes to a literal `%2f` inside one segment, so it can reach neither the MCP handler nor a reserved namespace and is ordinary inference traffic. |
 
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
 back. With storage disabled, their memory-only state is intentional.
+
+The profiling subtree is operator-gated like every `/metrics` route: an
+unarmed plane answers 403, a wrong credential 401, and a reserved-namespace
+spelling with an encoded separator answers the reserved 404. `go tool pprof`
+cannot send an `Authorization` header, so fetch the profile with curl and
+analyze the file against a locally built binary. Against the dev instance
+([`scripts/dev.sh`](../scripts/dev.sh), loopback `127.0.0.1:8081`):
+
+```sh
+go build -o /tmp/millivolt-profiling ./cmd/proxy
+curl -fsS -H "Authorization: Bearer $MILLIVOLT_OPERATOR_TOKEN" \
+  -o /tmp/cpu.pprof 'http://127.0.0.1:8081/metrics/pprof/profile?seconds=30'
+go tool pprof /tmp/millivolt-profiling /tmp/cpu.pprof
+```
+
+The `seconds=N` parameter on `/metrics/pprof/profile` is the capture window:
+that one request stays open for the whole window while samples accumulate. A
+process runs one CPU profile at a time, so a second concurrent `profile`
+request fails with 500 until the first finishes. On `/metrics/pprof/heap`,
+`gc=1` forces a garbage collection cycle before the sample.
 
 `cmd/mcp`, the proxy binary's `millivolt mcp` subcommand, and the proxy's own
 `/mcp` endpoint serve this whole surface to an LLM, using the same credential
