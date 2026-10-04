@@ -254,11 +254,12 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 }
 
 // BenchmarkStoreDiskBytes reports the durable SQLite bytes retained per
-// stored record: the database file plus its WAL sidecar after the final
-// flush, before Close folds the WAL back in. Row payload, the unique id
-// index, the three secondary indexes, the projection triggers' state and the
-// marshaled response-header JSON are all inside the number; it is the
-// disk-side twin of the projection benchmarks above.
+// stored record: the database file, its WAL sidecar and the shared-memory
+// WAL index after the final flush, before Close folds the WAL back in. Row
+// payload, the unique id index, the three secondary indexes, the projection
+// triggers' state and the marshaled response-header JSON are all inside the
+// number; it is the disk-side twin of the projection benchmarks above. The
+// database and WAL must exist; the rebuildable shm index may be absent.
 func BenchmarkStoreDiskBytes(b *testing.B) {
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
@@ -266,9 +267,14 @@ func BenchmarkStoreDiskBytes(b *testing.B) {
 			for b.Loop() {
 				var total int64
 				for _, suffix := range []string{"", "-wal", "-shm"} {
-					if fi, err := os.Stat(path + suffix); err == nil {
-						total += fi.Size()
+					fi, err := os.Stat(path + suffix)
+					if err != nil {
+						if os.IsNotExist(err) && suffix == "-shm" {
+							continue
+						}
+						b.Fatal(err)
 					}
+					total += fi.Size()
 				}
 				per := float64(total) / float64(n)
 				b.ReportMetric(per, "B/record")
