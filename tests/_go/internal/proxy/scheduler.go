@@ -943,7 +943,21 @@ func TestRetrySerializesSameKey(t *testing.T) {
 }
 
 // TestConsecutiveFailuresDoubleBackoff: exhausted requests on the same
-// provider+key wait base, then 2×base, before the next first send.
+// provider+key wait base, then 2×base, before the next first send. The
+// timings are scaled so every bound dwarfs the proven S=80ms machine-stall
+// class (round 8 reproduced ~45-80ms scheduler-starved gaps): FailSend arms
+// the pacing deadline before this test reads its clock, so a pre-read stall
+// subtracts from the measured remainder. Base 600ms arms a 450-750ms window
+// (observed remainder floor 450-80=370ms; the 350ms floor keeps margin, and
+// an unpaced send at ~1-5ms fails it by ~345ms). The doubled 1200ms arms
+// 900-1500ms (floor 900-80=820ms; the 800ms bound keeps margin and still
+// catches a not-doubled second pace, which without a post-deadline wake
+// stall observes at most ~750ms armed plus turnaround ~753ms - a full S=80ms
+// wake stall can push that tail past the bound, which is inherent: the
+// correct class observes >=820ms, so any flake-free floor must sit below
+// 820ms and 800ms maximizes the margin). The want-immediate ceilings absorb
+// one S plus turnaround slack; a wrongly paced first request would wait
+// >= 370ms.
 func TestConsecutiveFailuresDoubleBackoff(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -953,8 +967,8 @@ func TestConsecutiveFailuresDoubleBackoff(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 0
-	cfg.BaseBackoff = 80 * time.Millisecond
-	cfg.MaxBackoff = 400 * time.Millisecond
+	cfg.BaseBackoff = 600 * time.Millisecond
+	cfg.MaxBackoff = 2 * time.Second
 	p := New(cfg, metrics.Noop{})
 	srv := httptest.NewServer(p)
 	defer srv.Close()
@@ -977,17 +991,29 @@ func TestConsecutiveFailuresDoubleBackoff(t *testing.T) {
 		return time.Since(start)
 	}
 
-	if elapsed := do(); elapsed > 50*time.Millisecond {
+	if elapsed := do(); elapsed > 120*time.Millisecond {
 		t.Fatalf("first exhaust waited %v, want immediate", elapsed)
 	}
-	if elapsed := do(); elapsed < 50*time.Millisecond {
-		t.Fatalf("second request in %v; first fail should pace ~80ms", elapsed)
+	if elapsed := do(); elapsed < 350*time.Millisecond {
+		t.Fatalf("second request in %v; first fail should pace the 600ms base (450-750ms armed window, floor absorbs an 80ms stall)", elapsed)
 	}
-	if elapsed := do(); elapsed < 100*time.Millisecond {
-		t.Fatalf("third request in %v; second fail should pace ~160ms", elapsed)
+	if elapsed := do(); elapsed < 800*time.Millisecond {
+		t.Fatalf("third request in %v; second fail should pace the doubled 1200ms (900-1500ms armed window)", elapsed)
 	}
 }
 
+// TestRecoveredRequestResetsBackoff: the consecutive-request backoff must
+// survive a failed request's own recovery flip (the leftover doubled window
+// still paces the next request) and reset only after that request succeeds,
+// so the request after the recovered 200 is immediate. Same scaling and
+// S=80ms stall arithmetic as TestConsecutiveFailuresDoubleBackoff: do#2
+// observes the 600ms base window (450-750ms armed, remainder floor
+// 450-80=370ms, bound 350ms), do#3 observes the leftover doubled 1200ms
+// window (900-1500ms armed, remainder floor 900-80=820ms, bound 800ms; an
+// early reset that cleared the window at the flip would send immediately
+// and fail it), and do#4 must be immediate: the success reset the backoff,
+// and the smallest competing window a reset regression could leave is the
+// same 1200ms class (observed >= 820ms), far above the 120ms ceiling.
 func TestRecoveredRequestResetsBackoff(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
@@ -1004,8 +1030,8 @@ func TestRecoveredRequestResetsBackoff(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 0
-	cfg.BaseBackoff = 80 * time.Millisecond
-	cfg.MaxBackoff = 400 * time.Millisecond
+	cfg.BaseBackoff = 600 * time.Millisecond
+	cfg.MaxBackoff = 2 * time.Second
 	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 	defer srv.Close()
 
@@ -1024,17 +1050,17 @@ func TestRecoveredRequestResetsBackoff(t *testing.T) {
 		return resp.StatusCode, time.Since(start)
 	}
 
-	if code, elapsed := do(); code != 502 || elapsed > 50*time.Millisecond {
+	if code, elapsed := do(); code != 502 || elapsed > 120*time.Millisecond {
 		t.Fatalf("first exhaust status=%d waited %v, want immediate 502", code, elapsed)
 	}
-	if code, elapsed := do(); code != 502 || elapsed < 50*time.Millisecond {
-		t.Fatalf("second exhaust status=%d in %v; first FailSend should pace ~80ms", code, elapsed)
+	if code, elapsed := do(); code != 502 || elapsed < 350*time.Millisecond {
+		t.Fatalf("second exhaust status=%d in %v; first FailSend should pace the 600ms base (450-750ms armed window)", code, elapsed)
 	}
 	fail.Store(false)
-	if code, elapsed := do(); code != 200 || elapsed < 100*time.Millisecond {
-		t.Fatalf("recovery status=%d in %v; leftover request backoff should still pace ~160ms", code, elapsed)
+	if code, elapsed := do(); code != 200 || elapsed < 800*time.Millisecond {
+		t.Fatalf("recovery status=%d in %v; leftover doubled request backoff should still pace the 1200ms window (900-1500ms armed)", code, elapsed)
 	}
-	if code, elapsed := do(); code != 200 || elapsed > 50*time.Millisecond {
+	if code, elapsed := do(); code != 200 || elapsed > 120*time.Millisecond {
 		t.Fatalf("request after recovered 200 status=%d waited %v, want immediate", code, elapsed)
 	}
 }
@@ -1135,6 +1161,10 @@ func TestQuota429MaxRetriesZeroDoesNotPace(t *testing.T) {
 	}
 }
 
+// TestConsecutiveExhausted429sDoubleBackoff: the 429 flavor of
+// TestConsecutiveFailuresDoubleBackoff - identical scaling, windows and
+// bound arithmetic (base 600ms arms 450-750ms, doubled 1200ms arms
+// 900-1500ms, floors absorb the S=80ms stall class).
 func TestConsecutiveExhausted429sDoubleBackoff(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -1144,8 +1174,8 @@ func TestConsecutiveExhausted429sDoubleBackoff(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 0
-	cfg.BaseBackoff = 80 * time.Millisecond
-	cfg.MaxBackoff = 400 * time.Millisecond
+	cfg.BaseBackoff = 600 * time.Millisecond
+	cfg.MaxBackoff = 2 * time.Second
 	srv := httptest.NewServer(New(cfg, metrics.Noop{}))
 	defer srv.Close()
 
@@ -1167,14 +1197,14 @@ func TestConsecutiveExhausted429sDoubleBackoff(t *testing.T) {
 		return time.Since(start)
 	}
 
-	if elapsed := do(); elapsed > 50*time.Millisecond {
+	if elapsed := do(); elapsed > 120*time.Millisecond {
 		t.Fatalf("first exhausted 429 waited %v, want immediate", elapsed)
 	}
-	if elapsed := do(); elapsed < 50*time.Millisecond {
-		t.Fatalf("second 429 in %v; first fail should pace ~80ms", elapsed)
+	if elapsed := do(); elapsed < 350*time.Millisecond {
+		t.Fatalf("second 429 in %v; first fail should pace the 600ms base (450-750ms armed window, floor absorbs an 80ms stall)", elapsed)
 	}
-	if elapsed := do(); elapsed < 100*time.Millisecond {
-		t.Fatalf("third 429 in %v; second fail should pace ~160ms", elapsed)
+	if elapsed := do(); elapsed < 800*time.Millisecond {
+		t.Fatalf("third 429 in %v; second fail should pace the doubled 1200ms (900-1500ms armed window)", elapsed)
 	}
 }
 
@@ -1193,8 +1223,8 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.MaxRetries = 2
-	cfg.BaseBackoff = 100 * time.Millisecond
-	cfg.MaxBackoff = 400 * time.Millisecond
+	cfg.BaseBackoff = 800 * time.Millisecond
+	cfg.MaxBackoff = 2 * time.Second
 	p := New(cfg, metrics.Noop{})
 	srv := httptest.NewServer(p)
 	defer srv.Close()
@@ -1217,27 +1247,37 @@ func TestExhaustedRetriesPaceNextFirstSend(t *testing.T) {
 		t.Fatalf("first request hits = %d, want 3", got)
 	}
 	// The exhausted retryable failure grows the REQUEST backoff to base
-	// (100ms) and clears the owner's attempt streak; the pacing of the next
+	// (800ms) and clears the owner's attempt streak; the pacing of the next
 	// first send below is the behavioral proof of both.
 	t0 := time.Now()
 	do()
 	if secondFirst.IsZero() {
 		t.Fatal("second request never hit upstream")
 	}
-	// request base 100ms × 0.75–1.25 = 75–125ms. Leftover attempt 200ms
-	// × 0.75 = 150ms - the 140ms cap sits in that gap. The floor measures
-	// the pacing window's REMAINDER at the second request's arrival:
-	// FailSend armed the deadline while the first request's response
-	// finished, before t0, so an arming-to-t0 machine stall subtracts
-	// from the measured wait (one observed failure measured 44.37ms, a
-	// ~31ms stall against the minimum 75ms arm). The 40ms floor absorbs
-	// ~35ms of stall and still discriminates: an unpaced send arrives in
-	// ~1-5ms, failing the floor by >=35ms.
-	if elapsed := secondFirst.Sub(t0); elapsed < 40*time.Millisecond {
-		t.Fatalf("next first send in %v; exhausted retryable must wait ~base request backoff", elapsed)
+	// Request base 800ms × 0.75-1.25 arms a 600-1000ms pacing window.
+	// S=80ms is the proven machine-stall class (round 8 reproduced
+	// ~45-80ms scheduler-starved gaps). The floor measures the pacing
+	// window's REMAINDER at the second request's arrival: FailSend armed
+	// the deadline while the first request's response finished, before
+	// t0, so an arming-to-t0 stall subtracts from the measured wait. The
+	// armed minimum 600ms minus S leaves a 520ms observed-remainder floor;
+	// the 500ms bound keeps margin, and an unpaced send arrives in ~1-5ms,
+	// failing it by ~495ms. The ceiling covers the correct-path maximum
+	// 1000ms plus one post-read stall S and scheduling slack. Every wrong
+	// class arms at least the doubled/leftover band - requestBackoff
+	// mis-grown to 1600ms, or the uncleared 1600ms attempt streak pacing
+	// this send - whose 1600×0.75=1200ms armed minimum observes
+	// >=1200-80=1120ms, above the cap; a pacing that grabbed MaxBackoff
+	// (2s arms 1500-2500ms) lands further above it. The cap therefore
+	// still discriminates requestBackoff misgrowth, streak-clearing
+	// regressions and MaxBackoff misapplication; this fixture's upstream
+	// sends no Retry-After hint, so hint leakage is not a class it can
+	// observe.
+	if elapsed := secondFirst.Sub(t0); elapsed < 500*time.Millisecond {
+		t.Fatalf("next first send in %v; exhausted retryable must wait ~base request backoff (armed 600-1000ms, floor absorbs an 80ms stall)", elapsed)
 	}
-	if elapsed := secondFirst.Sub(t0); elapsed > 140*time.Millisecond {
-		t.Fatalf("next first send waited %v; must be request backoff (~100ms), not leftover attempt (200ms+)", elapsed)
+	if elapsed := secondFirst.Sub(t0); elapsed > 1100*time.Millisecond {
+		t.Fatalf("next first send waited %v; must be request base backoff (armed 600-1000ms), not doubled/leftover (armed >=1200ms) or MaxBackoff (1500-2500ms)", elapsed)
 	}
 }
 

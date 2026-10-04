@@ -229,9 +229,14 @@ func TestRateLimitPacing(t *testing.T) {
 	s := New(Options{})
 	ctx := context.Background()
 
-	// Pace the group by 100ms (Trip's window; Acquire does not consult the
-	// send token, only the pacing deadline).
-	s.Trip("k", 100*time.Millisecond)
+	// Pace the group by 1s (Trip's window; Acquire does not consult the
+	// send token, only the pacing deadline). Trip arms the deadline
+	// verbatim, unjittered, before the start read below, so the measured
+	// wait is the window remainder: 1000ms minus the read turnaround. The
+	// proven S=80ms machine-stall class (round 8 reproduced ~45-80ms
+	// scheduler-starved gaps) leaves a 920ms observed-remainder floor; the
+	// 900ms bound keeps margin, and an unpaced acquire returns in ~1ms.
+	s.Trip("k", time.Second)
 
 	start := time.Now()
 	release, err := s.AcquireWith(ctx, "k", 0, WaiterHooks{})
@@ -241,7 +246,7 @@ func TestRateLimitPacing(t *testing.T) {
 	elapsed := time.Since(start)
 	release(0)
 
-	if elapsed < 90*time.Millisecond {
+	if elapsed < 900*time.Millisecond {
 		t.Errorf("acquire returned too fast: %v; rate-limit pacing not honored", elapsed)
 	}
 }

@@ -244,7 +244,7 @@
   @media (prefers-reduced-motion: reduce) { .rs-step.active .rs-dot { animation: none; } }
   .lim-src { font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
   .lim-src.header { color: var(--accent2); }
-  /* Header dropdown menus (Pause / Limits / Logs / Clear icons): pick a scope, act. */
+  /* Header dropdown menus (Pause / Debug / Limits / Logs / Restart icons): pick a scope, act. */
   .menu-wrap { position: relative; }
   .hdr-menu {
     position: absolute; right: 0;

@@ -776,7 +776,9 @@ async function main() {
     const selRec = { ...mkRec('sel-live', 200, 1700000104000) };
     delete selRec.status_code;
     fire('begin', { record: selRec, in_flight: 1 });
-    await sleep(20); // the live row paints on the coalesced render
+    // The begin upsert schedules the coalesced rAF render; poll for the
+    // painted end state (the expanding row) instead of a fixed sleep.
+    await settleUntil(() => expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
     w.openDrawer('sel-live');
     check('opening a request row selects it in the drawer and highlights exactly its row',
       d.getElementById('drawer').classList.contains('open') &&
@@ -784,7 +786,13 @@ async function main() {
         expandingRows().length === 1 && expandingRows()[0].dataset.id === 'sel-live');
     const nodeBefore = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
     fire('end', { record: { ...mkRec('sel-live', 200, 1700000104000), duration_ms: 999 }, in_flight: 0 });
-    await sleep(20);
+    // The end upsert schedules the coalesced rAF pass that replaces the
+    // row's node group in place; poll for the flushed end state (a fresh
+    // node that keeps the expanding highlight).
+    await settleUntil(() => {
+      const n = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
+      return !!n && n !== nodeBefore && n.classList.contains('expanding');
+    });
     const nodeAfter = d.querySelector('#tbl-requests tr.exp-row[data-id="sel-live"]');
     check('the selected row keeps its highlight when its own node is re-rendered',
       nodeBefore && nodeAfter && nodeBefore !== nodeAfter &&
@@ -1103,7 +1111,9 @@ async function main() {
   // the authoritative match; the raw-scope heuristic only serves records
   // the stamp does not reach.
   fire('record', { ...mkRec('dbg-stamped-rec'), debug: true, debug_session_id: 'dbg-stamped' }, '5');
-  await sleep(20); // the record row paints on the coalesced live render
+  // The record upsert schedules the coalesced rAF render; poll for the
+  // painted end state (the row's dbg pill) instead of a fixed sleep.
+  await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]'));
   check('a stamped debug record renders the dbg pill on its row',
     !!d.querySelector('#tbl-requests tr.exp-row[data-id="dbg-stamped-rec"] .pill.debug[data-edit-debug]'));
   w.eval("debugState = {...debugState, enabled: true, sessions: [" +
