@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"math"
+	"runtime/debug"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -46,10 +47,21 @@ func growRows(dst, add []contrib) []contrib {
 // PreloadHistory moves the one initial durable decode ahead of HTTP readiness.
 // It preloads the shared data source, not hardcoded default dashboard views.
 // A failed preload publishes nothing; later reads can retry the same builder.
+// The startup decode allocates several times the retained projection (per-row
+// SQL strings, attempts and tool-name JSON become garbage after interning);
+// one forced collection and scavenge returns those burst pages to the OS
+// immediately instead of leaving them resident until the background scavenger
+// gets there. Later full rebuilds (destructive changes) must NOT do this:
+// they run on the query path, where a forced GC would add a stop-the-world
+// pause to a live request.
 func (a *AggAPI) PreloadHistory(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
-	return a.withProjection(ctx, func(*projectionData) error { return nil })
+	if err := a.withProjection(ctx, func(*projectionData) error { return nil }); err != nil {
+		return err
+	}
+	debug.FreeOSMemory()
+	return nil
 }
 
 // withProjection holds one read lease for metadata preparation AND iteration.
