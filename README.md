@@ -247,10 +247,8 @@ actions, not per-user permissions.
 
 To let an LLM run these same analyses and drive the same controls, the proxy
 serves the same 22-tool MCP server at its operator-gated `/mcp` endpoint, so a
-URL-capable client needs only the endpoint URL and the operator token as a
-Bearer header. Hosts that cannot speak URLs use the `millivolt-mcp` binary or
-the proxy's `millivolt mcp` subcommand over stdio with the same credential: see
-the [MCP server guide](docs/mcp.md).
+client needs only the endpoint URL and the operator token as a Bearer header:
+see the [MCP server guide](docs/mcp.md).
 
 ### Customize and deploy
 

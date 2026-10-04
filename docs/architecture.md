@@ -21,7 +21,7 @@ defines their supported combinations.
 | [internal/format](../internal/format) | Explicit native wire translation and Connect/protobuf framing. |
 | [internal/storage](../internal/storage/store.go) | Asynchronous SQLite writing, schema/read fidelity, totals, purge fence, packed snapshots and bounded queries. |
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
-| [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry shared by the stdio CLI and the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
+| [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
 ## Request and scheduling path
 
@@ -217,9 +217,8 @@ graph. Parent pivots remain exact namespace-qualified leaves.
 The HTTP client in [internal/mcp](../internal/mcp) owns the operator credential,
 request building, the bounded response read and the `.error` extraction that
 reads the flat error body regardless of the declared Content-Type. The credential
-is redacted from both the transport error and the failure body, and it is never
-a flag default, because `flag.PrintDefaults` renders a non-zero default on `-h`
-and on every parse error. Redirects are refused rather than followed: `net/http`
+is redacted from both the transport error and the failure body. Redirects are
+refused rather than followed: `net/http`
 strips `Authorization` only when the hostname changes, so a same-host
 different-port `307` would replay the credential and the request body. Its route
 paths are one closed set beside it, so no tool can name a path outside the
@@ -232,9 +231,9 @@ proxy advances its cursor on every row it scanned, including rows the scope
 excluded, so an empty page with an advanced cursor is a page that must be
 continued.
 
-The same client serves both entrypoints from one tool registry. The stdio
-placements dial the proxy; the proxy's own `/mcp` endpoint injects a transport
-that dispatches each synthesized request straight to the proxy's gated handler,
+The same client backs the whole tool registry. The proxy's own `/mcp` endpoint
+injects a transport that dispatches each synthesized request straight to the
+proxy's gated handler,
 with the caller's Bearer attached so the gate re-validates it, and a named
 non-routable origin (`http://millivolt.internal`) that is never dialed and
 never derived from the request Host. The endpoint is stateless and

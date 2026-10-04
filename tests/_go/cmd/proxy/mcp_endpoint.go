@@ -67,7 +67,7 @@ func recordingMCPDispatch(mu *sync.Mutex, records *[]dispatchRecord) http.Handle
 }
 
 // TestMCPHTTPEndpointAuthAndInProcessDispatch is the endpoint contract: a
-// valid Bearer serves the same tool surface as stdio, the caller's credential
+// valid Bearer serves the registered tool surface, the caller's credential
 // rides every in-process call, the nominal origin is never derived from the
 // request Host, and a cookie-only or credential-less request can never create
 // an internal call.

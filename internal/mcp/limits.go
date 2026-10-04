@@ -19,6 +19,11 @@ const (
 	OperatorTokenMaxLen = 512
 )
 
+// ProxyTokenEnv is the proxy's own operator-token variable. The proxy's boot
+// gate reads exactly this variable; this server never reads it, but its
+// credential messages name it so a user knows where the value comes from.
+const ProxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
+
 // Limits are this server's result-size policy. They exist because a model
 // cannot read ten thousand rows: every listing tool defaults to a small page
 // and every payload is truncated with an explicit marker rather than silently.
@@ -47,8 +52,8 @@ type Limits struct {
 	Timeout time.Duration
 }
 
-// DefaultLimits are the built-in defaults for the flag/env surface in
-// cmd/mcp. They exist only here; no consumer carries a fallback default.
+// DefaultLimits are the MCP tools' built-in result-size policy. They exist
+// only here; no consumer carries a fallback default.
 func DefaultLimits() Limits {
 	return Limits{
 		QueryMaxRows:  200,
@@ -85,8 +90,7 @@ func (l Limits) Validate() error {
 func ValidateOperatorToken(token string) error {
 	switch {
 	case token == "":
-		return errors.New("operator token is required: pass --" + flagOperatorToken + " or " + envOperatorToken +
-			" (the proxy's " + ProxyTokenEnv + ")")
+		return errors.New("operator token is required: pass the proxy's " + ProxyTokenEnv + " value")
 	case len(token) < OperatorTokenMinLen:
 		return errors.New("operator token must be at least " + strconv.Itoa(OperatorTokenMinLen) + " characters")
 	case len(token) > OperatorTokenMaxLen:

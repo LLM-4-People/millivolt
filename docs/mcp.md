@@ -1,77 +1,28 @@
 # MCP server
 
-`cmd/mcp` (built as `millivolt-mcp`), the proxy binary's `millivolt mcp`
-subcommand, and the proxy's own `/mcp` endpoint expose millivolt's operator and
+The proxy's own `/mcp` endpoint exposes millivolt's operator and
 observability API to an LLM, using the official
 [Model Context Protocol Go SDK](https://github.com/modelcontextprotocol/go-sdk).
-They are clients of a running proxy: they never start, stop or restart the proxy
-process. Their operator tools can reconfigure a running proxy, but only through
+It is a client of a running proxy: it never starts, stops or restarts the proxy
+process. Its operator tools can reconfigure a running proxy, but only through
 the same credential and the same routes the dashboard uses.
 
-There are two placements, serving the same 22 tools from one implementation:
-
-- URL-capable clients point at the proxy itself and supply only the key, with
-  no local process and no `MILLIVOLT_MCP_PROXY_URL`.
-- Clients that cannot speak URLs launch one of the two stdio binaries.
-
-The `/mcp` endpoint is always on in the proxy process (like `/metrics`; no flag
-or configuration key enables it), operator-gated, and Bearer-only. It forwards
-the caller's own `Authorization: Bearer` credential on its internal calls, so
-the dashboard session cookie is refused there.
-
-## Setup
-
-The stdio placements use the surface below; the URL placement above needs only
-the `Authorization` header. Every stdio parameter comes from a flag and an
-environment variable, flags winning. An empty environment value counts as
-unset, so an empty container interpolation falls through to the default instead
-of becoming a broken value.
-
-| Flag | Environment variable | Default | Meaning |
-| --- | --- | --- | --- |
-| `--proxy-url` | `MILLIVOLT_MCP_PROXY_URL` | (required) | Proxy origin, for example `http://127.0.0.1:8081`. A trailing slash is normalized away; a path, query, fragment or embedded credential is refused, because every operator route lives at the root. |
-| `--operator-token` | `MILLIVOLT_MCP_OPERATOR_TOKEN` | (required) | The proxy's own `MILLIVOLT_OPERATOR_TOKEN`. |
-| `--query-max-rows` | `MILLIVOLT_MCP_QUERY_MAX_ROWS` | `200` | Row cap applied to a `query` result. |
-| `--query-max-bytes` | `MILLIVOLT_MCP_QUERY_MAX_BYTES` | `131072` | Encoded-size cap on one `query` result. Whole rows are kept until the budget runs out, so a clamped result is still valid JSON. |
-| `--page-size` | `MILLIVOLT_MCP_PAGE_SIZE` | `50` | Default page for the record and capture listings. |
-| `--capture-max-bytes` | `MILLIVOLT_MCP_CAPTURE_MAX_BYTES` | `262144` | Document size above which a capture is withheld whole instead of being returned. |
-| `--query-timeout` | `MILLIVOLT_MCP_QUERY_TIMEOUT` | `2m` | Bound on a full-history chart or explorer read. |
-| `--timeout` | `MILLIVOLT_MCP_TIMEOUT` | `30s` | Bound on every call to the proxy. |
-
-A malformed environment override fails setup rather than silently using the
-default, and a missing credential, a token whose length is outside the accepted
-band, or a malformed origin exit before any transport exists.
-
-The token is presented as `Authorization: Bearer <value>` on every request, and
-only there. The session cookie the proxy mints on a successful Bearer is never
-used: it would silently outlive a rotated credential. The token is never placed
-in a URL or a log line, and failure text returned to the model is scrubbed
-before it is shown (see [Errors](#errors)).
+The endpoint serves 22 tools from one implementation. It is always on in the
+proxy process (like `/metrics`; no flag or configuration key enables it),
+operator-gated, and Bearer-only. It forwards the caller's own
+`Authorization: Bearer` credential on its internal calls, so the dashboard
+session cookie is refused there.
 
 The token length band matches the proxy's own boot check (16 to 512
-characters). A credential the proxy would refuse to arm with is not a credential
-this server can use.
-
-The credential is never a flag default. `flag.PrintDefaults` renders
-`(default "...")` for any flag whose default is not its zero value, and it runs
-on `-h`, on `--help` and on every flag parse error, so a credential registered as
-a default would be printed in plaintext to stderr, which an MCP host does not
-capture. The flag carries an empty default and the value is resolved from the
-environment afterwards, decided by which flags were actually named: an explicit
-empty `--operator-token` stays a deliberate (and invalid) choice rather than
-silently falling through to the environment.
-
-`--proxy-url` follows the same rule even though it is not secret: an
-environment value can carry userinfo, so it is not a flag default, it is
-resolved after parsing, and the validation error names the failure without
-restating the value.
+characters). A credential the proxy would refuse to arm with is not a
+credential this server can use.
 
 Redirects are refused outright. No operator route redirects, and `net/http` strips
 `Authorization` only when the hostname changes, so a same-host different-port or
 subdomain `307`/`308` would replay both the credential and the full request body
 to the redirect target.
 
-### URL placement
+## URL placement
 
 A URL-capable client (an editor agent, a hosted connector, an MCP-capable CLI)
 needs no binary and no environment: it points at the proxy's `/mcp` endpoint
@@ -157,85 +108,6 @@ of choosing a client:
   proxy over loopback, so leaving it on would reject that placement. The
   endpoint is Bearer-only and the operator gate re-validates the credential on
   every request, which is the stronger check for an authenticated endpoint.
-
-### Stdio placement and setup
-
-Both stdio entrypoints run the same server and resolve the setup surface above
-identically; they differ only in the invocation name they report in usage and
-diagnostics. A leading positional `mcp` is reserved: it used to fall through the
-proxy's argument parser and start the proxy anyway, and it now starts the MCP
-server instead.
-
-Build one of the two binaries; every placement below sets the same two
-environment variables, either in the MCP client's `env` block or in the
-environment it inherits:
-
-```sh
-go build -o millivolt-mcp ./cmd/mcp
-go build -o millivolt ./cmd/proxy
-```
-
-- `MILLIVOLT_MCP_PROXY_URL` is whatever address reaches the proxy from where
-  the MCP server runs. A native install uses loopback
-  (`http://127.0.0.1:8080`) or the reverse-proxied HTTPS origin from
-  [the reverse-proxy guide](reverse-proxy.md). Inside the proxy container it is
-  always `http://127.0.0.1:8080`, the container's own loopback.
-- `MILLIVOLT_MCP_OPERATOR_TOKEN` is the proxy's own `MILLIVOLT_OPERATOR_TOKEN`.
-
-A native client points `command` at `millivolt-mcp`; for the proxy binary, use
-its path as `command` and add `"args": ["mcp"]` before `env`:
-
-```json
-{
-  "mcpServers": {
-    "millivolt": {
-      "command": "/path/to/millivolt-mcp",
-      "env": {
-        "MILLIVOLT_MCP_PROXY_URL": "http://127.0.0.1:8080",
-        "MILLIVOLT_MCP_OPERATOR_TOKEN": "the same value the proxy was started with"
-      }
-    }
-  }
-}
-```
-
-The published image contains the proxy binary, so the same server also runs
-inside the proxy container and reaches it over the container's own loopback.
-`docker exec` needs local Docker access to the machine running the container,
-which a remote client usually does not have; the standalone binary is the
-alternative. The container is the bundled Compose container, named `millivolt`
-(a plain `docker run` needs `--name millivolt`):
-
-```sh
-export MILLIVOLT_MCP_OPERATOR_TOKEN='the same value the proxy was started with'
-docker exec -i -e MILLIVOLT_MCP_OPERATOR_TOKEN -e MILLIVOLT_MCP_PROXY_URL=http://127.0.0.1:8080 millivolt /millivolt mcp
-```
-
-`-e MILLIVOLT_MCP_OPERATOR_TOKEN` names the variable without a value, so the
-credential is forwarded from the caller's environment and never enters argv or
-the container's configuration; the exported name must match the forwarded name
-exactly. The matching client configuration:
-
-```json
-{
-  "mcpServers": {
-    "millivolt": {
-      "command": "docker",
-      "args": ["exec", "-i", "-e", "MILLIVOLT_MCP_OPERATOR_TOKEN", "-e", "MILLIVOLT_MCP_PROXY_URL=http://127.0.0.1:8080", "millivolt", "/millivolt", "mcp"],
-      "env": {
-        "MILLIVOLT_MCP_OPERATOR_TOKEN": "the same value the proxy was started with"
-      }
-    }
-  }
-}
-```
-
-A remote client builds the standalone binary where it runs and targets a
-reachable origin: the reverse-proxied HTTPS origin from
-[the reverse-proxy guide](reverse-proxy.md), or an address the operator has
-deliberately made reachable from the client (for example the proxy container's
-name or host on a shared Docker network). The Compose port is published on
-loopback only (`127.0.0.1`), so the published host port is not a remote origin.
 
 ## Tools
 
@@ -485,10 +357,9 @@ so a credential straddling the boundary cannot survive as a fragment.
 
 ## Try it against a disposable instance
 
-The standalone binary is not in the published image; use `millivolt mcp` inside
-a running container, or build the standalone binary from source. Run either
-locally against a disposable instance with the repository's lifecycle owner,
-never the main instance on `:8080`:
+Run the endpoint locally against a disposable instance with the repository's
+lifecycle owner, never the main instance on `:8080`, and drive it with one
+stateless POST:
 
 ```sh
 (
@@ -496,19 +367,24 @@ never the main instance on `:8080`:
   trap 'scripts/dev.sh stop' EXIT
   export MILLIVOLT_OPERATOR_TOKEN='dev-instance-credential'
   scripts/dev.sh
-  MILLIVOLT_MCP_PROXY_URL=http://127.0.0.1:8081 \
-    MILLIVOLT_MCP_OPERATOR_TOKEN="$MILLIVOLT_OPERATOR_TOKEN" \
-    go run ./cmd/mcp
+  curl -fsS -X POST http://127.0.0.1:8081/mcp \
+    -H "Authorization: Bearer $MILLIVOLT_OPERATOR_TOKEN" \
+    -H 'Accept: application/json, text/event-stream' \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 )
 ```
 
+The answer carries the server identity. A full client session is the client
+configuration above pointed at `http://127.0.0.1:8081/mcp`; a request without
+the Bearer credential answers 401 from the operator gate.
+
 ## Security
 
-This server holds an operator credential, which is the whole dashboard plane:
-pause, limits, configuration, restart, purge. Treat its configuration as
-sensitive, keep it out of shared repositories, and prefer an environment
-variable over a command-line flag so the credential does not land in a process
-listing. See [Security](../SECURITY.md).
+The endpoint is driven with an operator credential, which is the whole
+dashboard plane: pause, limits, configuration, restart, purge. Treat the client
+configuration that carries it as sensitive and keep it out of shared
+repositories. See [Security](../SECURITY.md).
 
 ## Verification
 
@@ -516,23 +392,9 @@ The unit suite uses a fake proxy that pins the exact method, path, query and
 `Authorization` header of every tool, maps canned responses onto typed output,
 and covers the error shapes, setup validation, truncation markers, the pagination
 rule and the purge guards. The paging rule has one owner shared with
-`audit_captures_list`, so the two listings cannot disagree. Several of its
-tests run outside that harness on purpose:
+`audit_captures_list`, so the two listings cannot disagree. One of its tests
+runs outside that harness on purpose:
 
-- the credential test **builds the binary and runs it**, asserting the token is
-  absent from stdout and stderr for `-h`, `--help`, an unknown flag, a bad flag
-  value and a bare start, in both the flag and environment forms. An in-process
-  check could not have caught that defect, because the leak went to the process's
-  own stderr. The same cases run through `millivolt mcp` on the built proxy
-  binary and each must carry the `millivolt mcp:` invocation prefix on stderr,
-  so a silent fall-through to the proxy fails the test instead of passing an
-  absence-only assertion. The setup-and-usage test pins the MCP usage itself:
-  help prints `Usage of millivolt mcp:` with `-operator-token` and without the
-  proxy's `print-config`, and a tokenless start fails with
-  `millivolt mcp: setup:`. Both tests run the built binary under a deadline in
-  a scratch working directory whose config pins any fall-through to an
-  ephemeral loopback port, so a dispatch regression fails promptly and cannot
-  bind `:8080` or write into the repository.
 - the redirect test stands up a second listener as the redirect target and
   asserts it received nothing, so "we refused the redirect" is an observation
   rather than an assertion about an error string.
@@ -568,7 +430,7 @@ database and its config copy all belong to the test and are discarded.
 
 The same run drives the proxy's own `/mcp` endpoint with a real streamable
 HTTP client: `initialize`, `tools/list` (22 tools), and `describe` and
-`records` returning the same documents the stdio entrypoint returns, plus the
+`records` returning the same documents the in-process session returns, plus the
 auth boundary (401 without a credential, 401 for a wrong Bearer from the shared
 gate, 403 for a cookie-only request or a wrong Bearer beside an admitted
 cookie) and the reserved `/mcp/` look-alike answering 404, never inference.

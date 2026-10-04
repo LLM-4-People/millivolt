@@ -10,10 +10,9 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// connect wires a real MCP server and client over an in-memory transport, the
-// same path a stdio session uses. The server comes from NewServer, the one
-// constructor both entrypoints use, so every test below exercises the
-// production tool registration rather than a parallel one.
+// connect wires a real MCP server and client over an in-memory transport.
+// The server comes from NewServer, the one construction path, so every test
+// below exercises the production tool registration rather than a parallel one.
 func connect(t *testing.T, service *Service) *sdk.ClientSession {
 	t.Helper()
 	return connectServer(t, NewServer(service))

@@ -42,9 +42,9 @@ func NewServiceWithTransport(proxyURL, operatorToken string, limits Limits, tran
 }
 
 // NewServer builds the MCP server and registers every tool on it. It is the
-// single construction path shared by the stdio entrypoint (cli.go) and the
-// streamable HTTP endpoint, so tool registration lives only in
-// Service.Register and the two entrypoints cannot drift apart.
+// single construction path: the streamable HTTP endpoint and every test
+// session share it, so tool registration lives only in Service.Register and
+// no parallel registration can drift apart.
 func NewServer(service *Service) *sdk.Server {
 	server := sdk.NewServer(&sdk.Implementation{
 		Name:    "millivolt",

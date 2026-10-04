@@ -13,12 +13,12 @@ import (
 
 // TestLiveHTTPEndpointServesTheSameTools drives the proxy's own streamable
 // HTTP MCP endpoint against a private dev instance: a real URL-capable client
-// initializes, lists the same tool surface the stdio entrypoint serves, and
-// runs representative reads that must agree with the stdio entrypoint byte for
-// byte, because both come from the one NewServer implementation. The auth
-// boundary is exercised directly: Bearer-only on top of the operator gate,
-// cookie sessions refused, and unregistered /mcp/ look-alikes owned by the
-// reserved namespace rather than forwarded to inference. It is opt-in through
+// initializes, lists the registered tool surface, and runs representative
+// reads that must agree with the in-process session byte for byte, because
+// both come from the one NewServer implementation. The auth boundary is
+// exercised directly: Bearer-only on top of the operator gate, cookie sessions
+// refused, and unregistered /mcp/ look-alikes owned by the reserved namespace
+// rather than forwarded to inference. It is opt-in through
 // MILLIVOLT_MCP_INTEGRATION like the other live test; see integration.go.
 func TestLiveHTTPEndpointServesTheSameTools(t *testing.T) {
 	live := devInstance(t)
@@ -32,8 +32,9 @@ func TestLiveHTTPEndpointServesTheSameTools(t *testing.T) {
 		t.Fatalf("tools/list over HTTP = %d tools, want the pinned surface's %d", len(listed.Tools), len(registeredToolNames))
 	}
 
-	// One implementation, two entrypoints: with no traffic between the calls,
-	// describe and records must return identical documents.
+	// One implementation: with no traffic between the calls, describe and
+	// records must return identical documents over the endpoint and over the
+	// in-process session.
 	for _, tc := range []struct {
 		tool      string
 		arguments map[string]any
@@ -42,10 +43,10 @@ func TestLiveHTTPEndpointServesTheSameTools(t *testing.T) {
 		{"records", map[string]any{"limit": 10}},
 	} {
 		viaHTTP := canonicalDocument(t, structured(t, call(t, session, tc.tool, tc.arguments)))
-		viaStdio := canonicalDocument(t, live.invoke(t, tc.tool, tc.arguments))
-		if viaHTTP != viaStdio {
-			t.Fatalf("%s differs between the HTTP and stdio entrypoints:\nHTTP:  %s\nstdio: %s",
-				tc.tool, viaHTTP, viaStdio)
+		viaInProcess := canonicalDocument(t, live.invoke(t, tc.tool, tc.arguments))
+		if viaHTTP != viaInProcess {
+			t.Fatalf("%s differs between the HTTP endpoint and the in-process session:\nHTTP:        %s\nin-process:  %s",
+				tc.tool, viaHTTP, viaInProcess)
 		}
 	}
 

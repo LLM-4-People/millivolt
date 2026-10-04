@@ -1,6 +1,6 @@
-// Package mcp wraps millivolt's operator and observability HTTP surface as a
-// stdio MCP server, so an LLM can run analytical queries against a running
-// proxy and drive its safe operator controls.
+// Package mcp wraps millivolt's operator and observability HTTP surface as an
+// MCP server, so an LLM can run analytical queries against a running proxy
+// and drive its safe operator controls.
 //
 // One owner per concern, deliberately: Client owns authentication, request
 // building, response decoding and error extraction; Scope owns the explorer's
@@ -115,15 +115,11 @@ func (c *Client) Origin() string { return c.base.String() }
 // header of the request being served.
 const InProcessOrigin = "http://millivolt.internal"
 
-// NewClient validates the setup parameters and returns the shared client.
-// proxyURL must be an http/https origin with no path, query or fragment, since
-// every operator route lives at the root; a trailing slash is normalized away.
-func NewClient(proxyURL, token string, limits Limits) (*Client, error) {
-	return NewClientWithTransport(proxyURL, token, limits, nil)
-}
-
-// NewClientWithTransport is NewClient with an explicit RoundTripper for the
-// operator plane: a nil transport keeps net/http dialing, while the HTTP MCP
+// NewClientWithTransport validates the setup parameters and returns the
+// shared client. proxyURL must be an http/https origin with no path, query
+// or fragment, since every operator route lives at the root; a trailing
+// slash is normalized away. The explicit RoundTripper serves the operator
+// plane: a nil transport keeps net/http dialing, while the HTTP MCP
 // endpoint injects one that dispatches each synthesized request straight to
 // the proxy's own handler. The process then never dials itself over the
 // network, and the caller's Bearer credential rides the synthesized request so
@@ -152,7 +148,7 @@ func NewClientWithTransport(proxyURL, token string, limits Limits, transport htt
 func NormalizeProxyURL(raw string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
-		return nil, fmt.Errorf("proxy URL is required: pass --%s or %s", flagProxyURL, envProxyURL)
+		return nil, errors.New("proxy URL is required")
 	}
 	parsed, err := url.Parse(trimmed)
 	if err != nil {
@@ -172,7 +168,7 @@ func NormalizeProxyURL(raw string) (*url.URL, error) {
 	case parsed.Host == "":
 		return nil, errors.New("proxy URL must include a host, for example http://127.0.0.1:8081")
 	case parsed.User != nil:
-		return nil, errors.New("proxy URL must not carry credentials; use --" + flagOperatorToken)
+		return nil, errors.New("proxy URL must not carry credentials")
 	case parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "":
 		return nil, errors.New("proxy URL must not carry a query or fragment")
 	case parsed.Path != "" && parsed.Path != "/":

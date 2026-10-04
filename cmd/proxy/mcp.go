@@ -27,9 +27,8 @@ import (
 // named non-routable constant internal/mcp.InProcessOrigin.
 func newMCPHandler(gate *operatorGate, dispatch http.Handler) http.Handler {
 	// The defaults are the only limits policy on this endpoint: there is no
-	// config knob for it, exactly as there is none for the stdio entrypoint's
-	// defaults. The same policy bounds the Service and the in-process
-	// transport's deadline.
+	// config knob for it. The same policy bounds the Service and the
+	// in-process transport's deadline.
 	limits := mcp.DefaultLimits()
 	streamable := mcp.NewHTTPHandler(func(r *http.Request) *mcp.Service {
 		token, ok := bearerToken(r)

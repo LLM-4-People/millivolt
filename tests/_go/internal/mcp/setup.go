@@ -19,9 +19,8 @@ func TestSetupValidation(t *testing.T) {
 		token string
 		want  string
 		// exact compares the whole message instead of a substring. The
-		// credential-fragment refusal needs it: a substring check for
-		// "use --operator-token" also accepted a stale suffix such as
-		// "use --operator-token-v0", so a drift there stayed invisible.
+		// credential refusal needs it: a substring check also accepted a
+		// stale suffix, so a drift there stayed invisible.
 		exact bool
 	}{
 		{"missing url", "", valid, "proxy URL is required", false},
@@ -34,7 +33,7 @@ func TestSetupValidation(t *testing.T) {
 		{"query", "http://127.0.0.1:8081/?a=1", valid, "query or fragment", false},
 		{"fragment", "http://127.0.0.1:8081#x", valid, "query or fragment", false},
 		{"credentials in url", "http://user:pass@127.0.0.1:8081", valid,
-			"proxy URL must not carry credentials; use --" + flagOperatorToken, true},
+			"proxy URL must not carry credentials", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewService(tc.url, tc.token, DefaultLimits())

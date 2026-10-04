@@ -22,7 +22,6 @@ import (
 	"github.com/LLM-4-People/millivolt"
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
-	"github.com/LLM-4-People/millivolt/internal/mcp"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 	"github.com/LLM-4-People/millivolt/internal/storage"
@@ -127,14 +126,6 @@ func newOperatorMux(gate *operatorGate) (*http.ServeMux, http.Handler) {
 }
 
 func main() {
-	// The MCP server ships inside this binary as the `mcp` subcommand. The
-	// dispatch is the very first statement so every existing invocation -
-	// flags, -version, -print-config, a bare start - is untouched; a bare
-	// positional "mcp" used to fall through to the proxy and is now this
-	// documented subcommand.
-	if len(os.Args) > 1 && os.Args[1] == "mcp" {
-		os.Exit(mcp.Run("millivolt mcp", os.Args[2:], os.LookupEnv, os.Stderr))
-	}
 	configPath := flag.String("config", "proxy.yaml", "path to config file (empty for built-in defaults)")
 	printConfig := flag.Bool("print-config", false, "print documented built-in defaults as YAML and exit without loading configuration")
 	printExampleConfig := flag.Bool("print-example-config", false, "print the documented example with enabled provider profiles and exit without loading configuration")
