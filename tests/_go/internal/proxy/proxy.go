@@ -255,11 +255,13 @@ func TestBodyPreserved(t *testing.T) {
 	if rec.ResponseBytes != int64(len(received)) {
 		t.Errorf("ResponseBytes = %d, want %d (the completion bytes the client received)", rec.ResponseBytes, len(received))
 	}
-	// Non-streaming requests get no FirstTokenAt, so upstream_ttfb_ms is
-	// their ONLY upstream timing: the header wait of the adopted attempt,
-	// plus its fresh-dial facts (connect observed, plaintext, not pooled).
+	// Non-streaming requests get no FirstTokenAt (ttft_ms stays 0), so
+	// upstream_ttfb_ms is the only upstream TIMING such a response carries:
+	// the header wait of the adopted attempt. connect/tls/reused still stamp
+	// that attempt's transport facts on streamed and non-streamed requests
+	// alike: connect observed on this fresh dial, plaintext, not pooled.
 	if rec.UpstreamTTFBMs <= 0 {
-		t.Errorf("UpstreamTTFBMs = %d, want > 0 (the non-streaming attempt's only upstream timing)", rec.UpstreamTTFBMs)
+		t.Errorf("UpstreamTTFBMs = %d, want > 0 (the only upstream timing on a response that never streams a token)", rec.UpstreamTTFBMs)
 	}
 	if rec.UpstreamConnectMs <= 0 {
 		t.Errorf("UpstreamConnectMs = %d, want > 0 (fresh dial to the test upstream)", rec.UpstreamConnectMs)

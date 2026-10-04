@@ -2180,15 +2180,28 @@ async function main() {
   // an explicit false still shows, exactly like client disconnected.
   check('the drawer renders the upstream attempt timing decomposition', (() => {
     const trace = w.formatDetail({ ...mkRec('h2trace'), upstream_ttfb_ms: 12, upstream_connect_ms: 3, upstream_conn_reused: true });
+    const tls = w.formatDetail({ ...mkRec('h2tls'), upstream_tls_ms: 7 });
     const plain = w.formatDetail({ ...mkRec('h2plain') });
     return trace.includes('<span class="k">upstream ttfb</span><span class="v">12 ms</span>') &&
       trace.includes('<span class="k">upstream connect</span><span class="v">3 ms</span>') &&
       trace.includes('<span class="k">reused connection</span><span class="v">true</span>') &&
       !trace.includes('<span class="k">upstream tls</span>') &&
+      tls.includes('<span class="k">upstream tls</span><span class="v">7 ms</span>') &&
       !plain.includes('<span class="k">upstream ttfb</span>') &&
       !plain.includes('<span class="k">upstream connect</span>') &&
       !plain.includes('<span class="k">upstream tls</span>') &&
       !plain.includes('<span class="k">reused connection</span>');
+  })());
+  // kvBool's documented contract: a stored false is a rendered "false" row,
+  // never an absent one - pinned for both flags that ride it (the transport
+  // pool-hit fact, and the wire-compression fact inside the header section,
+  // which needs captured headers to render at all).
+  check('stored-false transport flags render explicit false rows', (() => {
+    const off = w.formatDetail({ ...mkRec('h2false'), upstream_conn_reused: false });
+    const gzoff = w.formatDetail({ ...mkRec('h2gzoff'), upstream_gzip: false,
+      response_headers: { 'content-type': ['application/json'] } });
+    return off.includes('<span class="k">reused connection</span><span class="v">false</span>') &&
+      gzoff.includes('<span class="k">upstream gzip</span><span class="v">false</span>');
   })());
   check('explorer cost uses cents with a unit-neutral per-token label',
     w.kpiBlend({cost_per_mtok: 0.025}).includes('2.5¢') && !w.kpiBlend({cost_per_mtok: 0.025}).includes('$/Mtok'));
@@ -3099,6 +3112,12 @@ async function main() {
     check("traffic without timing samples paints its own blank, not 'no traffic yet'",
       w.eval('chartData()') === null && w.eval('chartIsEmpty()') === false &&
       !box.querySelector('div.uplot') && w.eval('window.__blankMsgs').at(-1) === 'no speed + latency samples yet');
+    // The axes section renders ahead of the mount gate (chartChromeSync),
+    // so the latency preset names its dual axes even on the blank: speed on
+    // the left, decode latency on the right.
+    check('the latency preset names its axes: speed left, decode latency right',
+      d.getElementById('chart-axes').textContent.includes('Speed (tok/s)') &&
+      d.getElementById('chart-axes').textContent.includes('Latency / decode (ms)'));
     // restore: tear the mounted plot down, unspy, clear overrides + state
     w.eval("if (_up) { _up.destroy(); _up = null; } drawBlank = window.__drawBlankOrig; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
     for (const c of box.querySelectorAll('canvas.chart-blank')) c.remove();

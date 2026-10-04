@@ -170,6 +170,7 @@ type ChartOutput struct {
 	BucketMs    int64            `json:"bucket_ms" jsonschema:"exact bucket width in milliseconds"`
 	TTFTp       []*float64       `json:"ttft_p" jsonschema:"period-wide time-to-first-token percentiles [p50, p95, p99]"`
 	TPSp        []*float64       `json:"tps_p" jsonschema:"period-wide generation speed percentiles [p50, p95, p99]"`
+	DecP        []*float64       `json:"dec_p" jsonschema:"period-wide decode-window percentiles [p50, p95, p99]"`
 	TTFTStat    []*float64       `json:"ttft_stat" jsonschema:"period-wide time-to-first-token [avg, min, max] over every captured sample"`
 	TPSStat     []*float64       `json:"tps_stat" jsonschema:"period-wide generation speed [avg, min, max] over every captured sample"`
 	CostPerMTok *float64         `json:"cost_per_mtok" jsonschema:"blended USD per million tokens, cost-reporting requests only"`
@@ -194,6 +195,7 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 		BucketMs    int64            `json:"bucket_ms"`
 		TTFTP       []*float64       `json:"ttft_p"`
 		TPSP        []*float64       `json:"tps_p"`
+		DecP        []*float64       `json:"dec_p"`
 		TTFTStat    []*float64       `json:"ttft_stat"`
 		TPSStat     []*float64       `json:"tps_stat"`
 		CostPerMTok *float64         `json:"cost_per_mtok"`
@@ -205,7 +207,7 @@ func (s *Service) chart(ctx context.Context, in ChartInput) (*ChartOutput, error
 	buckets, truncation := clamp(payload.Buckets, chartMaxBuckets, "buckets", chartAdvice)
 	return &ChartOutput{
 		NowMs: payload.NowMs, FromMs: payload.FromMs, BucketMs: payload.BucketMs,
-		TTFTp: list(payload.TTFTP), TPSp: list(payload.TPSP),
+		TTFTp: list(payload.TTFTP), TPSp: list(payload.TPSP), DecP: list(payload.DecP),
 		TTFTStat: list(payload.TTFTStat), TPSStat: list(payload.TPSStat),
 		CostPerMTok: payload.CostPerMTok,
 		Buckets:     buckets, Truncation: truncation,

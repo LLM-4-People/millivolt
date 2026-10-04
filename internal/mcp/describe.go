@@ -148,7 +148,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		Predicates: predicates,
 		Notes: []string{
 			"Timestamps are Unix MILLISECONDS, not seconds: started_at, first_token_at, last_token_at, first_answer_at, first_reasoning_at and final_attempt_at.",
-			"ttft_ms, duration_ms, processing_ms, queue_wait_ms and retry_after_ms are integer milliseconds.",
+			"ttft_ms, duration_ms, processing_ms, queue_wait_ms, retry_after_ms, upstream_connect_ms, upstream_tls_ms and upstream_ttfb_ms are integer milliseconds.",
 			"cost is USD. overall_tps and gen_tps are tokens per second.",
 			"attempts and tool_names are JSON-array TEXT columns: use json_each(attempts) or json_extract(attempts, '$[0].status_code').",
 			"There is NO unixnow() function in this SQLite build. For a relative window use strftime('%s','now')*1000, " +
@@ -246,18 +246,20 @@ var ErrorFilterKeys = []string{"type", "code", "message"}
 var ErrorKeyExamples = []string{"server_error|500|"}
 
 // RequestIndexes is the published planner reference: the durable indexes a
-// query can use, plus the explicit absence of one on the columns nothing
-// indexes. The durable schema in internal/storage is the owner, and the
-// storage-side TestRequestIndexReferenceMatchesTheDurableSchema test compares
-// this list against the DDL itself in both directions, so an index added,
-// removed or renamed on either side cannot drift.
+// query can use, plus the explicit statement that nothing else is indexed -
+// status_code, error_type and cost are the named exemplars, and any column
+// the listed indexes do not cover is unindexed too. The durable schema in
+// internal/storage is the owner, and the storage-side
+// TestRequestIndexReferenceMatchesTheDurableSchema test compares this list
+// against the DDL itself in both directions, so an index added, removed or
+// renamed on either side cannot drift.
 var RequestIndexes = []string{
 	"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
 	"idx_requests_provider(provider)",
 	"idx_requests_model(model)",
 	"idx_request_debug_expires(expires_at): the capture TTL sweep",
 	"idx_request_debug_session(session_id): captures by session",
-	"there is NO index on status_code, error_type or cost: filtering on those scans the table",
+	"there is NO index on status_code, error_type or cost - nor on any column the indexes above do not cover; filtering on anything else scans the table",
 }
 
 // vocabularies is the one owner of every filter dimension's value space. A
@@ -378,21 +380,21 @@ var tableDocs = []TableDoc{
 			{Name: "started_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "request start; the ordering key for keyset pagination"},
 			{Name: "first_token_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first streamed token; 0 when nothing streamed"},
 			{Name: "last_token_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the last token, so ttft_ms is first_token_at - started_at"},
-			{Name: "chunks", Type: "INTEGER", Meaning: "count of content-bearing SSE chunks of the analyzed stream (content, reasoning and tool-call deltas); 0 for non-streamed requests"},
+			{Name: "chunks", Type: "INTEGER", Meaning: "count of content-bearing SSE chunks the generic relay's stream analyzer observed (content, reasoning and tool-call deltas); the cursor bridge synthesizes its frames itself and never populates this, so streamed cursor rows keep 0 - as do non-streamed requests"},
 			{Name: "first_answer_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first non-empty assistant content, when any; 0 for a tool-call-only answer"},
-			{Name: "first_reasoning_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first reasoning (thinking) token of the analyzed stream; 0 when the stream carried no reasoning block"},
+			{Name: "first_reasoning_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first reasoning-bearing chunk of the analyzed stream - for example a reasoning content delta, a Responses reasoning or reasoning-summary text delta, a Gemini thought marker, or a thinking-block start; not literally a token; 0 when the stream carried no reasoning block, and always 0 on the cursor surface whose bridge synthesizes frames itself and never stamps it"},
 			{Name: "duration_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "end to end client-visible duration"},
 			{Name: "ttft_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "time to first token, measured from the successful attempt when retries happened"},
 			{Name: "processing_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "provider-reported server processing time"},
 			{Name: "queue_wait_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "time parked in the scheduler queue"},
 			{Name: "retry_after_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "upstream Retry-After hint on a 429"},
 			{Name: "request_bytes", Type: "INTEGER", Unit: "bytes", Meaning: "size of the client's inbound request body, before any proxy rewrite or format translation"},
-			{Name: "response_bytes", Type: "INTEGER", Unit: "bytes", Meaning: "body bytes the relay wrote to the client socket for the returned response (the final adopted attempt; relayed error bodies count, proxy-synthesized status-line error envelopes do not)"},
+			{Name: "response_bytes", Type: "INTEGER", Unit: "bytes", Meaning: "delivered response body bytes: relayed upstream body bytes (error bodies included) count; proxy-synthesized error signaling - status-line envelopes and the in-band SSE rejection pairs emitted in place of a response - and pacer keepalives do not; the degenerate terminal-region substitution counts because it replaces content the client would otherwise receive; the cursor bridge synthesizes the whole response itself, so it counts every body byte it emits, error bodies included"},
 			{Name: "upstream_gzip", Type: "INTEGER", Meaning: "1 when the upstream response arrived gzip-compressed and the transport auto-decompressed it; the only wire-compression fact retained, because auto-decompress strips Content-Encoding and Content-Length from the stored response headers - compression is otherwise invisible"},
 			{Name: "upstream_connect_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "TCP dial time (httptrace ConnectStart to ConnectDone) of the final adopted attempt; 0 when the connection was reused from the pool and no dial happened"},
 			{Name: "upstream_tls_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "TLS handshake time of the final adopted attempt; 0 when the connection was reused or the upstream was plaintext"},
-			{Name: "upstream_ttfb_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "time from the adopted attempt's send start to the first byte of response headers; like ttft_ms it describes the successful attempt, never the absorbed failures before it, and it is the only upstream timing a non-streamed response carries"},
-			{Name: "upstream_conn_reused", Type: "INTEGER", Meaning: "flag: 1 when the adopted attempt rode a pooled connection (httptrace GotConn Reused), 0 on a fresh dial; absorbed failed attempts never reach these four upstream_* columns - they follow final_attempt_at's adopted-attempt semantics, and a hook that never fired legitimately leaves the timing at 0 (not observed), never an error"},
+			{Name: "upstream_ttfb_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "time from the adopted attempt's send start to the first byte of response headers; like ttft_ms it describes the successful attempt, never the absorbed failures before it, and on the generic relay it is the only upstream timing a non-streamed response carries (ttft_ms stays 0 there), while connect, tls and reused stamp the same attempt's transport facts on streamed and non-streamed requests alike; cursor-format requests stamp ttft_ms per synthesized delta, so there it is an additional fact, not the only one"},
+			{Name: "upstream_conn_reused", Type: "INTEGER", Meaning: "flag: 1 when the adopted attempt rode a pooled connection (httptrace GotConn Reused), 0 on a fresh dial; the four upstream_* columns describe the adopted attempt's transport on streamed and non-streamed requests alike, and absorbed failed attempts never reach them - they follow final_attempt_at's adopted-attempt semantics, and a hook that never fired legitimately leaves the timing at 0 (not observed), never an error"},
 			{Name: "input_tokens", Type: "INTEGER", Meaning: "prompt tokens billed"},
 			{Name: "output_tokens", Type: "INTEGER", Meaning: "completion tokens billed"},
 			{Name: "total_tokens", Type: "INTEGER", Meaning: "input + output tokens"},
@@ -518,6 +520,27 @@ var tableDocs = []TableDoc{
 			{Name: "sql", Type: "TEXT", Meaning: "exact DDL"},
 		},
 	},
+}
+
+// RequestsColumnNames lists the requests columns the describe reference
+// documents, derived from tableDocs so it can never drift from the published
+// reference. The durable schema in internal/storage is the owner, and the
+// storage-side TestDescribeDocumentsEveryRequestsColumn gate compares this
+// list against PRAGMA table_info on a freshly migrated store in both
+// directions, so a column added to the schema, or a documented name that
+// no longer exists, fails loudly instead of misleading a query author.
+func RequestsColumnNames() []string {
+	for _, table := range tableDocs {
+		if table.Table != "requests" {
+			continue
+		}
+		names := make([]string, 0, len(table.Columns))
+		for _, column := range table.Columns {
+			names = append(names, column.Name)
+		}
+		return names
+	}
+	return nil
 }
 
 // predicates are the health predicates, quoted exactly. They mirror the proxy's

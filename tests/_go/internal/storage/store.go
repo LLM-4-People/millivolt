@@ -589,6 +589,10 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 	if _, err := db0.Exec(oldRequestsSchema); err != nil {
 		t.Fatal(err)
 	}
+	// Seed history BEFORE the migration Open, the exact production shape an
+	// ALTER TABLE ADD COLUMN ... DEFAULT 0 populated: the row below must
+	// read every newer column as its zero default after Open migrates it.
+	insertLegacyRow(t, db0, "legacy-zero", 200, 1_700_000_000_000)
 	db0.Close()
 
 	s, err := Open(path, testOpts)
@@ -596,6 +600,26 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		t.Fatalf("open after old schema: %v", err)
 	}
 	defer s.Close()
+
+	// The pre-migration row reads the nine columns the migrations added as
+	// 0: chunks, first_reasoning_at, request_bytes, response_bytes,
+	// upstream_gzip, upstream_connect_ms, upstream_tls_ms,
+	// upstream_ttfb_ms and upstream_conn_reused (upstream_gzip and
+	// upstream_conn_reused are booleans stored as integers, so 0 is the
+	// false default the same way).
+	legacy, err := s.Query(t.Context(), "SELECT chunks, first_reasoning_at, request_bytes, response_bytes, upstream_gzip, upstream_connect_ms, upstream_tls_ms, upstream_ttfb_ms, upstream_conn_reused FROM requests WHERE id='legacy-zero'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy) != 1 {
+		t.Fatalf("legacy rows = %d, want 1", len(legacy))
+	}
+	for _, column := range []string{"chunks", "first_reasoning_at", "request_bytes", "response_bytes",
+		"upstream_gzip", "upstream_connect_ms", "upstream_tls_ms", "upstream_ttfb_ms", "upstream_conn_reused"} {
+		if legacy[0][column] != int64(0) {
+			t.Errorf("legacy row %s = %v, want 0 (the migration's column default)", column, legacy[0][column])
+		}
+	}
 
 	rec := &metrics.Record{
 		ID: "m1", Provider: "p", Model: "m", KeyHash: "k", UserAgent: "ua",

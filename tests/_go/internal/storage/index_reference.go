@@ -55,6 +55,9 @@ func TestRequestIndexReferenceMatchesTheDurableSchema(t *testing.T) {
 		}
 	}
 	// The published claim that nothing indexes these columns must stay true.
+	// The list is the named exemplar subset the reference calls out, not the
+	// full unindexed set: every column the declared indexes do not cover is
+	// unindexed too, so the reference states the class, not just these three.
 	unindexed := []string{"status_code", "error_type", "cost"}
 	for name, columns := range declared {
 		for _, column := range unindexed {

@@ -158,8 +158,13 @@ type Record struct {
 	AnswerTokens  int64     `json:"answer_tokens"` // completion_tokens - reasoning_tokens
 	FirstAnswerAt time.Time `json:"first_answer_at,omitempty"`
 	// FirstReasoningAt is the absolute unix-millisecond time of the first
-	// reasoning ("thinking") token of the analyzed stream; 0 when the stream
-	// carried no reasoning block (or the request was not streamed).
+	// reasoning-BEARING chunk of the analyzed stream - for example a
+	// reasoning content delta, a Responses reasoning or reasoning-summary
+	// text delta, a Gemini thought marker, or a thinking-block start; not
+	// literally a token. The generic relay's SSE analyzer owns it; the
+	// cursor bridge synthesizes frames itself and never stamps it, so
+	// streamed cursor rows keep 0. It is also 0 when the stream carried
+	// no reasoning block (or the request was not streamed).
 	FirstReasoningAt int64 `json:"first_reasoning_at,omitempty"`
 
 	// HadAnswerContent records whether the response carried answer text content
@@ -183,9 +188,11 @@ type Record struct {
 
 	// Chunks is the count of content-bearing SSE chunks of the analyzed
 	// stream (content, reasoning and tool-call deltas; role/keepalive/
-	// terminal/usage frames are not content-bearing). 0 for non-streamed
-	// requests. It is the raw stream telemetry behind the no-usage token
-	// fallbacks in Fill.
+	// terminal/usage frames are not content-bearing). The generic relay's
+	// SSE analyzer owns it; the cursor bridge synthesizes frames itself and
+	// never populates it, so streamed cursor rows keep 0 - as do
+	// non-streamed requests. It is the raw stream telemetry behind the
+	// no-usage token fallbacks in Fill.
 	Chunks int64 `json:"chunks,omitempty"`
 
 	// RequestBytes is the size of the client's inbound request body,
@@ -194,22 +201,31 @@ type Record struct {
 	// them, so it always describes the client's upload.
 	RequestBytes int64 `json:"request_bytes,omitempty"`
 
-	// ResponseBytes is the number of response body bytes the relay handed
-	// to the client socket for the returned response. It accumulates at the
-	// relay write sites (streamBody's writeOut/hold releases, nonStreamBody,
-	// commitSpooledBody, the translated body write, streamBodyTranslated,
-	// the raw-copy fallbacks through disconnectWriter, and the cursor
-	// bridge's counting writer) and NEVER resets across an in-request
-	// attempt change, because only bytes the client writer accepted are
-	// counted: on the non-streaming quality surface the abandoned attempts
-	// wrote nothing (their bodies are spooled before any write), so the
-	// accumulated total is the adopted attempt's body alone; on the
-	// streaming rescue surface the abandoned attempt's role/keepalive/
-	// reasoning frames genuinely reached the client and the fresh attempt
-	// appends behind them, so the accumulated total IS the bytes the client
-	// received. Proxy-synthesized status-line error envelopes (http.Error
-	// 502s, queue-full 429s, the SSE pacer's keepalives) are not body relay
-	// and are not counted.
+	// ResponseBytes is the number of delivered response body bytes: the
+	// body bytes the relay handed to the client socket for the returned
+	// response, relayed upstream error bodies included. It accumulates at
+	// the relay write sites (streamBody's write_out/hold releases,
+	// nonStreamBody, commitSpooledBody, the translated body write,
+	// streamBodyTranslated, the raw-copy fallbacks through
+	// disconnectWriter, and the cursor bridge's counting writer) and NEVER
+	// resets across an in-request attempt change, because only bytes the
+	// client writer accepted are counted: on the non-streaming quality
+	// surface the abandoned attempts wrote nothing (their bodies are
+	// spooled before any write), so the accumulated total is the adopted
+	// attempt's body alone; on the streaming rescue surface the abandoned
+	// attempt's role/keepalive/reasoning frames genuinely reached the client
+	// and the fresh attempt appends behind them, so the accumulated total
+	// IS the bytes the client received. Proxy-synthesized signaling is NOT
+	// body relay and is NOT counted, in every rendering: the status-line
+	// error envelopes (http.Error 502s, queue-full and storm 429s) and the
+	// in-band SSE rejection pairs (error frame + [DONE] emitted in place of
+	// a response), plus the SSE pacer's keepalives. The one counted
+	// proxy-synthesized pair is the degenerate terminal-region substitution
+	// (emitDegenerateSSE): it replaces withheld content the client would
+	// otherwise have received, so it is delivered body, not signaling. The
+	// cursor surface is the deliberate exception: the bridge synthesizes the
+	// whole response itself, so its counting writer counts every body byte
+	// it emits, error bodies included.
 	ResponseBytes int64 `json:"response_bytes,omitempty"`
 
 	// UpstreamGzip records that the upstream response arrived gzip-compressed
@@ -231,14 +247,16 @@ type Record struct {
 	// it: a failed attempt's trace dies with its context, so a request whose
 	// retries all failed keeps these fields at 0. upstream_ttfb_ms measures
 	// from the adopted attempt's own send start (the same anchor as
-	// final_attempt_at) to the first byte of response headers, giving
-	// non-streaming requests their only upstream timing; connect is the
-	// attempt's dial phase (0 when the connection was reused, no dial
-	// happened); tls is its handshake (0 when reused or plaintext). All are
-	// integer milliseconds where 0 means "not observed": a hook that never
-	// fired leaves 0, and a partially observed attempt (for example a dial
-	// that never completed) legitimately carries only the parts that did -
-	// partial states are observations, never errors.
+	// final_attempt_at) to the first byte of response headers, so it is the
+	// only upstream timing a response that never streams a token carries
+	// (ttft_ms stays 0 there), while connect, tls and reused stamp the same
+	// attempt's transport facts on streamed and non-streamed requests alike;
+	// connect is the attempt's dial phase (0 when the connection was reused,
+	// no dial happened); tls is its handshake (0 when reused or plaintext).
+	// All are integer milliseconds where 0 means "not observed": a hook that
+	// never fired leaves 0, and a partially observed attempt (for example a
+	// dial that never completed) legitimately carries only the parts that
+	// did - partial states are observations, never errors.
 	UpstreamConnectMs  int64 `json:"upstream_connect_ms,omitempty"`
 	UpstreamTLSMs      int64 `json:"upstream_tls_ms,omitempty"`
 	UpstreamTTFBMs     int64 `json:"upstream_ttfb_ms,omitempty"`

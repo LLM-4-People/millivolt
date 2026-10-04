@@ -125,7 +125,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "chart",
 		Title:       "Read the traffic time series",
-		Description: "The only time-windowed tool: a server-authoritative series over a window ('all' or a canonical positive integer number of MINUTES; '007', '+5' and '5.0' are rejected), scoped by the same filters as explore. It cannot group by any dimension, so for a window broken down by provider or model use query with a WHERE on started_at and a GROUP BY. Returns at most 31 clock-aligned buckets with request, error, rate-limit, token, cost, TTFT and speed values, plus period-wide ttft_p/tps_p percentiles and ttft_stat/tps_stat [avg, min, max], computed over the whole period and never averaged from buckets. The 31-bucket cap is enforced SERVER-SIDE, so buckets can be dropped while truncation.truncated reads false.",
+		Description: "The only time-windowed tool: a server-authoritative series over a window ('all' or a canonical positive integer number of MINUTES; '007', '+5' and '5.0' are rejected), scoped by the same filters as explore. It cannot group by any dimension, so for a window broken down by provider or model use query with a WHERE on started_at and a GROUP BY. Returns at most 31 clock-aligned buckets with request, error, rate-limit, token, cost, TTFT, speed and decode values, plus period-wide ttft_p/tps_p/dec_p percentiles and ttft_stat/tps_stat [avg, min, max], computed over the whole period and never averaged from buckets. The 31-bucket cap is enforced SERVER-SIDE, so buckets can be dropped while truncation.truncated reads false.",
 		Annotations: readOnly("Read the traffic time series"),
 	}, s.chart)
 

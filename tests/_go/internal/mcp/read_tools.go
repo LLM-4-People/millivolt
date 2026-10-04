@@ -203,8 +203,8 @@ func TestCannedResponsesMapOntoToolOutput(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, explorerPath, `{"dim":"model","total":9,"error_total":2,"groups":[{"name":"m1","n":9,"cost":1.5,"err_final":2}],`+
 		`"rail":{"model":1},"scope":{"matches":9,"errors":2},"conversation_summary":{"main":3,"sub":1,"unresolved":0}}`)
-	proxy.json(http.MethodGet, chartPath, `{"now_ms":3000,"from_ms":1000,"bucket_ms":2000,"ttft_p":[10.5,20.5,30.5],"tps_p":null,`+
-		`"ttft_stat":[11,10,12],"tps_stat":null,"cost_per_mtok":0.25,"buckets":[{"t":1000,"req":3,"err":1,"rl":2,"in":10,"out":5,"cache":2,"reason":1,"cost":0.3,"ttft":[9,10,11],"tps":[4,5,6]}]}`)
+	proxy.json(http.MethodGet, chartPath, `{"now_ms":3000,"from_ms":1000,"bucket_ms":2000,"ttft_p":[10.5,20.5,30.5],"tps_p":null,"dec_p":[12.5,25.5,37.5],`+
+		`"ttft_stat":[11,10,12],"tps_stat":null,"cost_per_mtok":0.25,"buckets":[{"t":1000,"req":3,"err":1,"rl":2,"in":10,"out":5,"cache":2,"reason":1,"cost":0.3,"ttft":[9,10,11],"tps":[4,5,6],"dec":[7,8,9]}]}`)
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r9"},{"id":"r8"}],"model_canon":{"a":"b"},"more":true,"cursor_ms":1400,"cursor_id":"r8"}`)
 	proxy.json(http.MethodGet, bootstrapPath, `{"seq":42,"feed_id":"feed-z","counters":{"in_flight":2,"total_requests":99,"total_errors":7},`+
 		`"storage":{"enabled":true,"dropped":3,"totals_degraded":true},"records":[{"id":"n1"},{"id":"n0"}]}`)
@@ -230,6 +230,9 @@ func TestCannedResponsesMapOntoToolOutput(t *testing.T) {
 	}
 	if chart.BucketMs != 2000 || len(chart.TTFTp) != 3 || chart.CostPerMTok == nil || *chart.CostPerMTok != 0.25 {
 		t.Fatalf("chart output = %+v", chart)
+	}
+	if got := float64Values(chart.DecP); !slices.Equal(got, []float64{12.5, 25.5, 37.5}) {
+		t.Fatalf("dec_p = %v, want the proxy's period decode percentiles", got)
 	}
 	if len(chart.Buckets) != 1 || chart.Buckets[0]["req"].(float64) != 3 {
 		t.Fatalf("chart buckets = %+v", chart.Buckets)
@@ -515,12 +518,15 @@ func TestRecordsAdvancesWhileTheCursorMoves(t *testing.T) {
 // arrays the proxy sends beside the percentiles. They were part of the payload
 // all along and had no field, so ttft_stat and tps_stat were dropped silently:
 // a model comparing an average against a median had only the percentiles to
-// work with, and had no way to know the average existed.
+// work with, and had no way to know the average existed. The decode-window
+// percentile band dec_p rides the same assertion: it is the third period
+// series the payload carries, and dropping it back to ttft/tps only would be
+// equally silent.
 func TestChartCarriesBothPeriodStatBands(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, chartPath, `{"now_ms":3000,"from_ms":1000,"bucket_ms":2000,`+
-		`"ttft_p":[10.5,20.5,30.5],"tps_p":[4,5,6],"ttft_stat":[11,10,12],"tps_stat":[4.5,4,5],`+
-		`"cost_per_mtok":null,"buckets":[{"t":1000,"ttft":[9,10,11]}]}`)
+		`"ttft_p":[10.5,20.5,30.5],"tps_p":[4,5,6],"dec_p":[1.5,2.5,3.5],"ttft_stat":[11,10,12],"tps_stat":[4.5,4,5],`+
+		`"cost_per_mtok":null,"buckets":[{"t":1000,"ttft":[9,10,11],"dec":[9,10,11]}]}`)
 	service := newTestService(t, proxy, Limits{})
 
 	out, err := service.chart(context.Background(), ChartInput{Window: "5"})
@@ -533,9 +539,12 @@ func TestChartCarriesBothPeriodStatBands(t *testing.T) {
 	if got := float64Values(out.TPSStat); !slices.Equal(got, []float64{4.5, 4, 5}) {
 		t.Fatalf("tps_stat = %v, want the period [avg, min, max]", got)
 	}
-	// The percentiles still come through, and the two bands are independent.
+	// The percentiles still come through, and the bands are independent.
 	if got := float64Values(out.TTFTp); !slices.Equal(got, []float64{10.5, 20.5, 30.5}) {
 		t.Fatalf("ttft_p = %v", got)
+	}
+	if got := float64Values(out.DecP); !slices.Equal(got, []float64{1.5, 2.5, 3.5}) {
+		t.Fatalf("dec_p = %v, want the period decode percentiles", got)
 	}
 }
 

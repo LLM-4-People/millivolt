@@ -467,6 +467,23 @@ func TestAnalyzerToolCalls(t *testing.T) {
 	if rec.ToolCalls != 2 {
 		t.Errorf("ToolCalls = %d, want 2", rec.ToolCalls)
 	}
+	// The tool-call-only stream's per-stream telemetry: every delta is a
+	// content-bearing chunk, none is generation, the no-usage fallback
+	// derives the output count from the chunks, and no answer content ever
+	// arrived (the gate FinalizeRecord uses to keep completion tokens from
+	// reading as generation).
+	if rec.Chunks != 3 {
+		t.Errorf("Chunks = %d, want 3 (every tool-call delta is content-bearing)", rec.Chunks)
+	}
+	if rec.GenTokens != 0 {
+		t.Errorf("GenTokens = %d, want 0 (a tool-call-only stream has no generation chunks)", rec.GenTokens)
+	}
+	if rec.Usage.OutputTokens != 3 {
+		t.Errorf("OutputTokens = %d, want 3 (the chunk fallback counts the deltas)", rec.Usage.OutputTokens)
+	}
+	if rec.HadAnswerContent {
+		t.Error("HadAnswerContent = true, want false (no content delta ever arrived)")
+	}
 }
 
 func TestAnalyzerDONE(t *testing.T) {

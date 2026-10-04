@@ -1084,9 +1084,14 @@ keep wide scans behind a `started_at` window or a `LIMIT`. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
-with `localtime` for the host's zone. None of the computations below feed a
-dashboard aggregate; they read raw request columns the aggregates never scan.
-Each recipe is a question, the SQL that answers it, and how to read the result.
+with `localtime` for the host's zone. None of the computations below is a
+dashboard aggregate: the chart, explorer and KPI surfaces never compute
+these shapes. The exception proving the rule is the shared decode window
+(`last_token_at - first_token_at`), which the chart's dec series samples
+too; recipe 1 merely decomposes latency around it. Several of the columns
+a recipe reads do overlap what the aggregate scans read; the columns
+unique to each recipe never enter an aggregate at all. Each recipe is a
+question, the SQL that answers it, and how to read the result.
 
 **Where did the time go on a slow request?**
 
@@ -1124,8 +1129,11 @@ LIMIT 20
 
 `thinking_ms` spans the first token of any kind, reasoning included, to the
 first answer token; 0 means the first token already was the answer.
-`first_answer_at` is streaming-only, so non-streaming responses and
-tool-call-only streams keep 0 and stay outside the gate.
+`first_answer_at` is streaming-only on the generic relay; cursor-format
+non-streaming requests set it (the bridge synthesizes each delta and tracks
+it via cursorTrackDelta), and such rows legitimately enter the gate because
+`first_token_at` is stamped by the same helper. Tool-call-only streams keep
+0 and stay outside the gate.
 
 **How long does an agent idle between conversation turns?**
 
@@ -1158,8 +1166,10 @@ ORDER BY r.started_at, j.key
 
 One row per absorbed attempt, oldest first. The `json_array_length` gate is
 required: `attempts` defaults to the JSON literal `null`, and `json_each`
-over that literal still yields a row. `retry_after_ms` appears when the
-provider sent a `Retry-After` header.
+over that literal still yields a row. `retry_after_ms` appears (nonzero)
+when the provider sent a `Retry-After` header or a ratelimit-reset header
+(`x-ratelimit-reset-requests`/`-tokens`, `anthropic-ratelimit-requests-reset`,
+`anthropic-ratelimit-tokens-reset`), bounded by the proxy's hint ceiling.
 
 **Did a conversation's cache writes pay for themselves?**
 
