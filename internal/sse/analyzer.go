@@ -444,6 +444,12 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	rec.FirstTokenAt = a.firstTokenAt
 	rec.LastTokenAt = a.lastTokenAt
 	rec.FirstAnswerAt = a.firstAnswerAt
+	// First reasoning-token time, persisted as absolute unix ms (0 = the
+	// stream carried no reasoning block). The zero time must map to 0, never
+	// to time.Time{}.UnixMilli()'s sentinel for year 1.
+	if !a.firstReasoningAt.IsZero() {
+		rec.FirstReasoningAt = a.firstReasoningAt.UnixMilli()
+	}
 	// The stream carried answer text content when a content chunk arrived
 	// (firstAnswerAt set). This flags content PRESENCE for the tool-call-only
 	// detection in FinalizeRecord - which must distinguish it from a mixed
@@ -451,6 +457,9 @@ func (a *Analyzer) Fill(rec *metrics.Record) {
 	rec.HadAnswerContent = !a.firstAnswerAt.IsZero()
 	rec.FinishReason = a.finishReason
 	rec.ToolCalls = a.toolCalls
+	// The raw count of content-bearing chunks of this stream, persisted as
+	// its own record column; the token fallbacks below already derive from it.
+	rec.Chunks = a.chunkCount
 	// Generation tokens (reasoning + answer content), excluding tool-call
 	// argument chunks. When the provider sends no usage blob, chunkCount is the
 	// token fallback - but it counts tool-arg chunks, which are not generation,

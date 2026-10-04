@@ -2142,6 +2142,19 @@ async function main() {
       detail.includes('<span class="k">ttft</span><span class="v">-</span>') &&
       !detail.includes('>0ms<');
   })());
+  // The drawer's Performance section renders the analyzer's per-stream
+  // telemetry beside the timing rows: chunks as a plain integer, first
+  // thinking through the shared clock-time formatter (fmtT output is
+  // locale-dependent, so only presence and a rendered value are pinned),
+  // and neither row renders when the record carries no value.
+  check('the drawer renders chunks and first thinking beside the timing rows', (() => {
+    const streamed = w.formatDetail({ ...mkRec('perf-stream'), chunks: 42, first_reasoning_at: 1700000005000 });
+    const plain = w.formatDetail({ ...mkRec('perf-plain') });
+    return streamed.includes('<span class="k">chunks</span><span class="v">42</span>') &&
+      /<span class="k">first thinking<\/span><span class="v">[^<]+<\/span>/.test(streamed) &&
+      !plain.includes('<span class="k">chunks</span>') &&
+      !plain.includes('<span class="k">first thinking</span>');
+  })());
   check('explorer cost uses cents with a unit-neutral per-token label',
     w.kpiBlend({cost_per_mtok: 0.025}).includes('2.5¢') && !w.kpiBlend({cost_per_mtok: 0.025}).includes('$/Mtok'));
   // shareText owns every summary/plotted share row: a zero denominator means

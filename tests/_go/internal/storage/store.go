@@ -354,6 +354,8 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 		Cost:               0.0123,
 		AnswerTokens:       30,
 		FirstAnswerAt:      now.Add(800 * time.Millisecond),
+		FirstReasoningAt:   now.Add(100 * time.Millisecond).UnixMilli(),
+		Chunks:             64,
 		HadAnswerContent:   true,
 		ReqMaxTokens:       ptr(1024),
 		ReqTemperature:     ptr(0.7),
@@ -410,6 +412,15 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	}
 	if !r.FirstAnswerAt.Equal(now.Add(800 * time.Millisecond)) {
 		t.Errorf("FirstAnswerAt = %v, want %v", r.FirstAnswerAt, now.Add(800*time.Millisecond))
+	}
+	// The analyzer's per-stream telemetry survives the restart as its own
+	// columns: the content-bearing chunk count and the first reasoning-token
+	// time (unix ms; 0 = no reasoning block).
+	if r.Chunks != 64 {
+		t.Errorf("Chunks = %d, want 64", r.Chunks)
+	}
+	if r.FirstReasoningAt != now.Add(100*time.Millisecond).UnixMilli() {
+		t.Errorf("FirstReasoningAt = %d, want %d", r.FirstReasoningAt, now.Add(100*time.Millisecond).UnixMilli())
 	}
 	if r.DecodeTPS == 0 || r.OverallTPS == 0 {
 		t.Errorf("TPS fields lost: DecodeTPS=%v OverallTPS=%v", r.DecodeTPS, r.OverallTPS)
@@ -566,6 +577,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		ID: "m1", Provider: "p", Model: "m", KeyHash: "k", UserAgent: "ua",
 		StatusCode: 200, Start: time.Now(), End: time.Now(),
 		ToolCalls: 1, ErrorCode: "invalid_api_key", RateLimitRemaining: 42, Cost: 0.01,
+		Chunks: 7, FirstReasoningAt: 1_700_000_000_000,
 	}
 	metrics.FinalizeRecord(rec)
 	s.Record(rec)
@@ -576,7 +588,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost FROM requests WHERE id='m1'")
+	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost, chunks, first_reasoning_at FROM requests WHERE id='m1'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,6 +600,12 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 	}
 	if rows[0]["rate_limit_remaining"] != int64(42) {
 		t.Errorf("rate_limit_remaining = %v", rows[0]["rate_limit_remaining"])
+	}
+	if rows[0]["chunks"] != int64(7) {
+		t.Errorf("chunks = %v, want 7 (migrated column round-trips)", rows[0]["chunks"])
+	}
+	if rows[0]["first_reasoning_at"] != int64(1_700_000_000_000) {
+		t.Errorf("first_reasoning_at = %v, want 1700000000000 (migrated column round-trips)", rows[0]["first_reasoning_at"])
 	}
 }
 

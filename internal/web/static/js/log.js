@@ -734,7 +734,9 @@ function formatDetail(r) {
     kv('tps', r.overall_tps ? r.overall_tps.toFixed(1) + ' tok/s' : ''),
     kv('first token', fmtT(r.first_token_at)),
     kv('last token', fmtT(r.last_token_at)),
+    kv('first thinking', fmtT(r.first_reasoning_at)),
     kv('first answer', fmtT(r.first_answer_at)),
+    kv('chunks', r.chunks),
     kv('finish', escapeHtml(r.finish_reason)),
     kv('cost', r.cost ? fmtMoney(r.cost) : '', 'var(--warn)'),
   ]));

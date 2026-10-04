@@ -147,7 +147,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		Tables:     tableDocs,
 		Predicates: predicates,
 		Notes: []string{
-			"Timestamps are Unix MILLISECONDS, not seconds: started_at, first_token_at, last_token_at, first_answer_at and final_attempt_at.",
+			"Timestamps are Unix MILLISECONDS, not seconds: started_at, first_token_at, last_token_at, first_answer_at, first_reasoning_at and final_attempt_at.",
 			"ttft_ms, duration_ms, processing_ms, queue_wait_ms and retry_after_ms are integer milliseconds.",
 			"cost is USD. overall_tps and gen_tps are tokens per second.",
 			"attempts and tool_names are JSON-array TEXT columns: use json_each(attempts) or json_extract(attempts, '$[0].status_code').",
@@ -378,7 +378,9 @@ var tableDocs = []TableDoc{
 			{Name: "started_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "request start; the ordering key for keyset pagination"},
 			{Name: "first_token_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first streamed token; 0 when nothing streamed"},
 			{Name: "last_token_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the last token, so ttft_ms is first_token_at - started_at"},
+			{Name: "chunks", Type: "INTEGER", Meaning: "count of content-bearing SSE chunks of the analyzed stream (content, reasoning and tool-call deltas); 0 for non-streamed requests"},
 			{Name: "first_answer_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first non-empty assistant content, when any; 0 for a tool-call-only answer"},
+			{Name: "first_reasoning_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "absolute time of the first reasoning (thinking) token of the analyzed stream; 0 when the stream carried no reasoning block"},
 			{Name: "duration_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "end to end client-visible duration"},
 			{Name: "ttft_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "time to first token, measured from the successful attempt when retries happened"},
 			{Name: "processing_ms", Type: "INTEGER", Unit: "milliseconds", Meaning: "provider-reported server processing time"},

@@ -25,10 +25,11 @@ BACKUP_PAGES = 256
 # This explicit publication policy is intentionally not inferred from SQLite
 # affinity: a future column must be reviewed before its values can be exposed.
 INTEGER_FIELDS = frozenset('''
-stream status_code started_at duration_ms ttft_ms first_token_at last_token_at
+stream status_code started_at duration_ms ttft_ms first_token_at last_token_at chunks
 tool_calls input_tokens output_tokens total_tokens cache_read_tokens
 cache_write_tokens reasoning_tokens client_disconnected rate_limit_remaining
 rate_limit_limit turns_user turns_assistant turns_tool answer_tokens first_answer_at
+first_reasoning_at
 gen_tokens had_answer_content processing_ms queue_wait_ms rate_limited retries
 retry_after_ms req_max_tokens req_tools_count req_n req_stop req_logprobs req_seed
 req_parallel_tools req_logit_bias req_top_logprobs req_thinking req_metadata_keys

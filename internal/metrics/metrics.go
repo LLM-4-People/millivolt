@@ -157,6 +157,10 @@ type Record struct {
 	// the time when the first answer (non-reasoning) token arrives separately.
 	AnswerTokens  int64     `json:"answer_tokens"` // completion_tokens - reasoning_tokens
 	FirstAnswerAt time.Time `json:"first_answer_at,omitempty"`
+	// FirstReasoningAt is the absolute unix-millisecond time of the first
+	// reasoning ("thinking") token of the analyzed stream; 0 when the stream
+	// carried no reasoning block (or the request was not streamed).
+	FirstReasoningAt int64 `json:"first_reasoning_at,omitempty"`
 
 	// HadAnswerContent records whether the response carried answer text content
 	// (role:"assistant" content parts), independent of timing - set for BOTH
@@ -176,6 +180,13 @@ type Record struct {
 	// the chunk-count fallback); when it doesn't, GenTokens = content+reasoning
 	// chunks (tool-arg chunks excluded). See Fill / FinalizeRecord.
 	GenTokens int64 `json:"gen_tokens,omitempty"`
+
+	// Chunks is the count of content-bearing SSE chunks of the analyzed
+	// stream (content, reasoning and tool-call deltas; role/keepalive/
+	// terminal/usage frames are not content-bearing). 0 for non-streamed
+	// requests. It is the raw stream telemetry behind the no-usage token
+	// fallbacks in Fill.
+	Chunks int64 `json:"chunks,omitempty"`
 
 	// LLM request parameters parsed from the request body. These are the fields
 	// that define the request shape; they carry no message content.

@@ -853,3 +853,84 @@ func TestAnalyzerGenTokensDefersToUsage(t *testing.T) {
 		t.Errorf("OutputTokens = %d, want 9 (from usage, not chunk count)", rec.Usage.OutputTokens)
 	}
 }
+
+// Fill persists the two per-stream telemetry values the analyzer computes and
+// used to discard: the content-bearing chunk count (Record.Chunks) and the
+// first reasoning-token time (Record.FirstReasoningAt, absolute unix ms).
+func TestAnalyzerFillPersistsChunksAndFirstReasoningAt(t *testing.T) {
+	t0 := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	tReason := t0.Add(300 * time.Millisecond)
+	tTool := tReason.Add(time.Second)
+	tAnswer := t0.Add(2 * time.Second)
+
+	// Reasoning + tool-call + answer stream with no usage blob: chunks counts
+	// every content-bearing chunk, first_reasoning_at marks the first
+	// reasoning one, and the no-usage fallbacks keep deriving from the count.
+	var a Analyzer
+	for _, l := range []struct {
+		line string
+		at   time.Time
+	}{
+		{`data: {"choices":[{"delta":{"role":"assistant","reasoning_content":""}}]}`, t0},
+		{`data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}`, tReason},
+		{`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"f","arguments":"{}"}}]}}]}`, tTool},
+		{`data: {"choices":[{"delta":{"content":"the answer"}}]}`, tAnswer},
+		{`data: [DONE]`, tAnswer},
+	} {
+		a.Feed([]byte(l.line), l.at)
+	}
+	var rec metrics.Record
+	a.Fill(&rec)
+	if rec.Chunks != 3 {
+		t.Errorf("Chunks = %d, want 3 (reasoning + tool-call + answer; the empty role chunk is not content-bearing)", rec.Chunks)
+	}
+	if rec.FirstReasoningAt != tReason.UnixMilli() {
+		t.Errorf("FirstReasoningAt = %d, want %d (the first reasoning chunk)", rec.FirstReasoningAt, tReason.UnixMilli())
+	}
+	if rec.GenTokens != 2 {
+		t.Errorf("GenTokens = %d, want 2 (fallback keeps excluding the tool-arg chunk)", rec.GenTokens)
+	}
+	if rec.Usage.OutputTokens != 3 {
+		t.Errorf("OutputTokens = %d, want 3 (chunk fallback counts all content-bearing chunks)", rec.Usage.OutputTokens)
+	}
+
+	// A plain content stream carries no reasoning block: first_reasoning_at
+	// stays 0 while chunks still counts the content.
+	var b Analyzer
+	b.Feed([]byte(`data: {"choices":[{"delta":{"content":"hi"}}]}`), t0)
+	b.Feed([]byte(`data: {"choices":[{"delta":{"content":"there"}}]}`), tAnswer)
+	var plain metrics.Record
+	b.Fill(&plain)
+	if plain.FirstReasoningAt != 0 {
+		t.Errorf("FirstReasoningAt = %d, want 0 on a stream with no reasoning block", plain.FirstReasoningAt)
+	}
+	if plain.Chunks != 2 {
+		t.Errorf("Chunks = %d, want 2 (plain content chunks)", plain.Chunks)
+	}
+
+	// An empty stream persists 0/0.
+	var c Analyzer
+	c.Feed([]byte(`data: [DONE]`), t0)
+	var empty metrics.Record
+	c.Fill(&empty)
+	if empty.Chunks != 0 || empty.FirstReasoningAt != 0 {
+		t.Errorf("empty stream: Chunks/FirstReasoningAt = %d/%d, want 0/0", empty.Chunks, empty.FirstReasoningAt)
+	}
+
+	// With a usage blob the chunk count is still persisted; only GenTokens
+	// defers to FinalizeRecord's usage-based derivation.
+	var d Analyzer
+	d.Feed([]byte(`data: {"choices":[{"delta":{"reasoning_content":"r"}}]}`), tReason)
+	d.Feed([]byte(`data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}`), tAnswer)
+	var used metrics.Record
+	d.Fill(&used)
+	if used.Chunks != 2 {
+		t.Errorf("Chunks = %d with usage present, want 2 (the count persists beside the usage)", used.Chunks)
+	}
+	if used.FirstReasoningAt != tReason.UnixMilli() {
+		t.Errorf("FirstReasoningAt = %d with usage present, want %d", used.FirstReasoningAt, tReason.UnixMilli())
+	}
+	if used.GenTokens != 0 {
+		t.Errorf("GenTokens = %d, want 0 (usage present; FinalizeRecord derives it)", used.GenTokens)
+	}
+}
