@@ -117,12 +117,13 @@ func footprintRecord(i int) *metrics.Record {
 // chunked by the queue capacity and flushed between chunks, exactly like the
 // storage writer benchmark's discipline; the dropped counter and a counted
 // projection scan then verify the fixture fail-closed instead of assuming it.
-func footprintStore(b *testing.B, n int) (*storage.Store, *config.Config) {
+func footprintStore(b *testing.B, n int) (*storage.Store, *config.Config, string) {
 	b.Helper()
 	d := config.Default()
 	opts := storage.Options{WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
 		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout}
-	s, err := storage.Open(filepath.Join(b.TempDir(), "footprint.db"), opts)
+	path := filepath.Join(b.TempDir(), "footprint.db")
+	s, err := storage.Open(path, opts)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -153,7 +154,7 @@ func footprintStore(b *testing.B, n int) (*storage.Store, *config.Config) {
 	if counted != n {
 		b.Fatalf("footprint fixture seeded %d rows, want %d", counted, n)
 	}
-	return s, d
+	return s, d, path
 }
 
 // footprintHeap settles the heap before reading live bytes; the second GC
@@ -181,7 +182,7 @@ func footprintTotalAlloc() uint64 {
 func BenchmarkProjectionFootprint(b *testing.B) {
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
-			s, d := footprintStore(b, n)
+			s, d, _ := footprintStore(b, n)
 			for b.Loop() {
 				// The api and its ring predate the baseline so the "built"
 				// delta carries projection state only, not the fixed ring/
@@ -252,6 +253,31 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 	}
 }
 
+// BenchmarkStoreDiskBytes reports the durable SQLite bytes retained per
+// stored record: the database file plus its WAL sidecar after the final
+// flush, before Close folds the WAL back in. Row payload, the unique id
+// index, the three secondary indexes, the projection triggers' state and the
+// marshaled response-header JSON are all inside the number; it is the
+// disk-side twin of the projection benchmarks above.
+func BenchmarkStoreDiskBytes(b *testing.B) {
+	for _, n := range footprintSizes {
+		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
+			_, _, path := footprintStore(b, n)
+			for b.Loop() {
+				var total int64
+				for _, suffix := range []string{"", "-wal", "-shm"} {
+					if fi, err := os.Stat(path + suffix); err == nil {
+						total += fi.Size()
+					}
+				}
+				per := float64(total) / float64(n)
+				b.ReportMetric(per, "B/record")
+				b.ReportMetric(float64(total)/(1<<20), "MiB-total")
+			}
+		})
+	}
+}
+
 // BenchmarkProjectionProcessRSS reproduces the documented idle "after
 // readiness" row: seed, preload, settle, then read this process's resident
 // pages. The benchmark binary carries the test framework and every linked
@@ -263,7 +289,7 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 func BenchmarkProjectionProcessRSS(b *testing.B) {
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
-			s, d := footprintStore(b, n)
+			s, d, _ := footprintStore(b, n)
 			for b.Loop() {
 				api := NewAggAPI(metrics.NewBuffer(d.HistorySize), s, d.StorageQueryTimeout)
 				api.ModelCanon = d.ModelCanon
