@@ -90,8 +90,13 @@ func (d *contribDimensions) intern(c *contrib) {
 	}
 	c.toolIDs = make([]uint32, len(c.toolsL))
 	for i, name := range c.toolsL {
-		c.toolIDs[i] = d.dict[dimTool].intern(name)
-		d.dict[dimTool].counts[c.toolIDs[i]]++
+		id := d.dict[dimTool].intern(name)
+		c.toolIDs[i] = id
+		// Share the dictionary's canonical bytes, like the single-valued
+		// label fields above: per-row decode copies become garbage instead
+		// of staying live for the history's lifetime.
+		c.toolsL[i] = d.dict[dimTool].names[id]
+		d.dict[dimTool].counts[id]++
 	}
 	c.errorIDs = make([]uint32, len(c.ent))
 	for i, ent := range c.ent {
