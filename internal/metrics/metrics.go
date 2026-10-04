@@ -222,6 +222,28 @@ type Record struct {
 	// wire compression - this flag is the only retained fact about it.
 	UpstreamGzip bool `json:"upstream_gzip,omitempty"`
 
+	// UpstreamConnectMs / UpstreamTLSMs / UpstreamTTFBMs decompose the
+	// transport time of the FINAL adopted upstream attempt via
+	// net/http/httptrace, and UpstreamConnReused carries that attempt's
+	// pool-hit fact (0 = fresh dial). Like TTFT - which is measured from the
+	// successful attempt when retries happened - they describe the attempt
+	// whose response the relay adopted, never the absorbed failures before
+	// it: a failed attempt's trace dies with its context, so a request whose
+	// retries all failed keeps these fields at 0. upstream_ttfb_ms measures
+	// from the adopted attempt's own send start (the same anchor as
+	// final_attempt_at) to the first byte of response headers, giving
+	// non-streaming requests their only upstream timing; connect is the
+	// attempt's dial phase (0 when the connection was reused, no dial
+	// happened); tls is its handshake (0 when reused or plaintext). All are
+	// integer milliseconds where 0 means "not observed": a hook that never
+	// fired leaves 0, and a partially observed attempt (for example a dial
+	// that never completed) legitimately carries only the parts that did -
+	// partial states are observations, never errors.
+	UpstreamConnectMs  int64 `json:"upstream_connect_ms,omitempty"`
+	UpstreamTLSMs      int64 `json:"upstream_tls_ms,omitempty"`
+	UpstreamTTFBMs     int64 `json:"upstream_ttfb_ms,omitempty"`
+	UpstreamConnReused bool  `json:"upstream_conn_reused,omitempty"`
+
 	// LLM request parameters parsed from the request body. These are the fields
 	// that define the request shape; they carry no message content.
 	ReqMaxTokens    *int     `json:"req_max_tokens,omitempty"`

@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
 	"math"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"time"
@@ -922,6 +924,94 @@ func withSendTimeout(ctx context.Context, timeout time.Duration) (context.Contex
 	return context.WithTimeout(ctx, timeout)
 }
 
+// upstreamTiming decomposes ONE upstream send attempt's transport time via
+// net/http/httptrace: the dial phase (ConnectStart to ConnectDone), the TLS
+// handshake (TLSHandshakeStart to TLSHandshakeDone), the wait for the first
+// byte of response headers (the attempt's own send start to
+// GotFirstResponseByte), and the pool-hit fact (GotConn's
+// GotConnInfo.Reused). start is the attempt's send start - attemptStart,
+// stamped by admitSendAttempt after every admission gate - so
+// upstream_ttfb_ms anchors exactly where FinalAttemptAt/TTFT anchor.
+//
+// The struct lives on the stack of ONE attempt and is wired into that
+// attempt's own context: an abandoned attempt's trace dies with its context,
+// so the record is only ever stamped by adopt at the points where a send
+// driver returns the attempt whose response the client will receive - the
+// same adoption FinalAttemptAt follows. Attempts absorbed inside the drivers
+// (429/5xx/transport) never reach an adoption point, so their observations
+// are dropped wholesale and the fields keep describing the last adopted
+// attempt.
+//
+// Both transports in use fire these hooks: the stdlib net/http transport
+// fires ConnectStart/ConnectDone (via the nettrace context value
+// httptrace.WithClientTrace installs), the TLS handshake pair, GotConn with
+// GotConnInfo.Reused and GotFirstResponseByte; x/net/http2 (the cursor
+// bidi transport) reads ContextClientTrace and fires GotConn with its own
+// reused flag and GotFirstResponseByte.
+type upstreamTiming struct {
+	start     time.Time // the attempt's send start (post-admission)
+	connectS  time.Time // first ConnectStart (Happy Eyeballs can dial more than once)
+	connectD  time.Time // last ConnectDone: the whole dial phase, fallbacks included
+	tlsS      time.Time
+	tlsD      time.Time
+	firstByte time.Time
+	reused    bool
+}
+
+// trace returns the httptrace.ClientTrace whose closures stamp this
+// attempt's observations. Each hook is a plain timestamp: a hook that never
+// fires (no dial on a pooled connection, no handshake on plaintext, no
+// headers on a transport failure) simply leaves its zero value, and adopt
+// renders that as "not observed".
+func (u *upstreamTiming) trace() *httptrace.ClientTrace {
+	return &httptrace.ClientTrace{
+		ConnectStart: func(network, addr string) {
+			if u.connectS.IsZero() {
+				u.connectS = time.Now()
+			}
+		},
+		ConnectDone: func(network, addr string, err error) { u.connectD = time.Now() },
+		TLSHandshakeStart: func() {
+			if u.tlsS.IsZero() {
+				u.tlsS = time.Now()
+			}
+		},
+		TLSHandshakeDone: func(state tls.ConnectionState, err error) { u.tlsD = time.Now() },
+		GotConn:          func(info httptrace.GotConnInfo) { u.reused = info.Reused },
+		GotFirstResponseByte: func() {
+			if u.firstByte.IsZero() {
+				u.firstByte = time.Now()
+			}
+		},
+	}
+}
+
+// adopt stamps the record with this attempt's four observations. It runs
+// only when the attempt's response is the one the relay commits to, so the
+// persisted fields describe the final adopted attempt. Every observed
+// positive interval rounds up to 1ms like FinalizeRecord's TTFT: 0 is
+// reserved for "not observed", and an interval so short the clock resolved
+// it to zero still means the hooks fired - observed, never absent.
+func (u *upstreamTiming) adopt(rec *metrics.Record) {
+	rec.UpstreamConnectMs = observedMs(u.connectS, u.connectD)
+	rec.UpstreamTLSMs = observedMs(u.tlsS, u.tlsD)
+	rec.UpstreamTTFBMs = observedMs(u.start, u.firstByte)
+	rec.UpstreamConnReused = u.reused
+}
+
+// observedMs renders one hook-pair interval as integer milliseconds: 0 only
+// when either timestamp is missing (the hook never fired - "not observed");
+// a stamped pair is an observation, so it never reports below 1ms.
+func observedMs(start, end time.Time) int64 {
+	if start.IsZero() || end.IsZero() {
+		return 0
+	}
+	if ms := end.Sub(start).Milliseconds(); ms > 0 {
+		return ms
+	}
+	return 1
+}
+
 // admitSendAttempt gates one upstream send attempt on the retry-driver
 // admission policy shared by the generic relay and the cursor bidi driver:
 // the WaitSend hold rule (the opening send honors operator holds when it is
@@ -1052,8 +1142,11 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// Per-send deadline: X-Proxy-Timeout-Ms bounds this ONE send (the
 		// Do below and the returned body), anchored on the attemptStart the
 		// admission helper stamped - a fresh budget per attempt, never eaten
-		// by the waits above.
-		attemptCtx, attemptCancel := withSendTimeout(ctx, t.timeout)
+		// by the waits above. The attempt's httptrace decomposition rides the
+		// same context, so an abandoned attempt's trace dies with it (see
+		// upstreamTiming).
+		timing := upstreamTiming{start: attemptStart}
+		attemptCtx, attemptCancel := withSendTimeout(httptrace.WithClientTrace(ctx, timing.trace()), t.timeout)
 		// Rebuild the upstream request (body can't be reused across retries).
 		upstream, err := s.buildUpstreamRequest(attemptCtx, r, t, key, body)
 		if err != nil {
@@ -1121,6 +1214,10 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 						rec.FinalAttemptAt = attemptStart
 					}
 					end(false)
+					// This response reaches the client: adopt this attempt's
+					// transport timing (the failed attempts before it never
+					// touched the record).
+					timing.adopt(rec)
 					// Re-serve the captured bytes so the client still gets the
 					// full error body verbatim.
 					resp.Body = io.NopCloser(bytes.NewReader(errBody))
@@ -1157,10 +1254,14 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		if !retryable || ordinary >= maxRetries && !s.allowStormRetry(ctx, active) {
 			// This is the attempt whose response reaches the client: TTFT is
 			// measured from here, so a retried request shows the successful
-			// attempt's responsiveness, not the accumulated retry delay.
+			// attempt's responsiveness, not the accumulated retry delay. The
+			// httptrace decomposition is adopted the same way: the record
+			// keeps this attempt's dial/handshake/header-wait facts, and the
+			// absorbed attempts' traces died with their contexts.
 			if attempt > 0 {
 				rec.FinalAttemptAt = attemptStart
 			}
+			timing.adopt(rec)
 			end(isRetryable(resp.StatusCode))
 			if errBody != nil {
 				if peekLeftOpen {

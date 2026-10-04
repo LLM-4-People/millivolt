@@ -135,6 +135,10 @@ CREATE TABLE IF NOT EXISTS requests (
 	request_bytes INTEGER NOT NULL DEFAULT 0,
 	response_bytes INTEGER NOT NULL DEFAULT 0,
 	upstream_gzip INTEGER NOT NULL DEFAULT 0,
+	upstream_connect_ms INTEGER NOT NULL DEFAULT 0,
+	upstream_tls_ms INTEGER NOT NULL DEFAULT 0,
+	upstream_ttfb_ms INTEGER NOT NULL DEFAULT 0,
+	upstream_conn_reused INTEGER NOT NULL DEFAULT 0,
 	finish_reason TEXT NOT NULL,
 	error_type TEXT NOT NULL,
 	error_msg TEXT NOT NULL,
@@ -1017,6 +1021,10 @@ func migrate(db *sql.DB) error {
 		{"request_bytes", "ALTER TABLE requests ADD COLUMN request_bytes INTEGER NOT NULL DEFAULT 0"},
 		{"response_bytes", "ALTER TABLE requests ADD COLUMN response_bytes INTEGER NOT NULL DEFAULT 0"},
 		{"upstream_gzip", "ALTER TABLE requests ADD COLUMN upstream_gzip INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_connect_ms", "ALTER TABLE requests ADD COLUMN upstream_connect_ms INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_tls_ms", "ALTER TABLE requests ADD COLUMN upstream_tls_ms INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_ttfb_ms", "ALTER TABLE requests ADD COLUMN upstream_ttfb_ms INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_conn_reused", "ALTER TABLE requests ADD COLUMN upstream_conn_reused INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range needed {
 		if _, ok := cols[c.name]; !ok {
@@ -1082,6 +1090,7 @@ const recordColumns = `
 		stream, status_code,
 		started_at, duration_ms, ttft_ms, first_token_at, last_token_at, chunks,
 		request_bytes, response_bytes, upstream_gzip,
+		upstream_connect_ms, upstream_tls_ms, upstream_ttfb_ms, upstream_conn_reused,
 		finish_reason, error_type, error_msg, error_code, tool_calls,
 		input_tokens, output_tokens, total_tokens, cache_read_tokens,
 		cache_write_tokens, reasoning_tokens, client_disconnected,
@@ -1123,6 +1132,7 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 		&r.ClientIP, &r.ClientLang, &r.Stream,
 		&r.StatusCode, &startMs, &durMs, &ttftMs, &firstMs, &lastMs, &r.Chunks,
 		&r.RequestBytes, &r.ResponseBytes, &r.UpstreamGzip,
+		&r.UpstreamConnectMs, &r.UpstreamTLSMs, &r.UpstreamTTFBMs, &r.UpstreamConnReused,
 		&r.FinishReason, &r.ErrorType, &r.ErrorMsg, &r.ErrorCode, &r.ToolCalls,
 		&r.Usage.InputTokens, &r.Usage.OutputTokens, &r.Usage.TotalTokens,
 		&r.Usage.CacheReadTokens, &r.Usage.CacheWrite, &r.Usage.ReasoningTokens,

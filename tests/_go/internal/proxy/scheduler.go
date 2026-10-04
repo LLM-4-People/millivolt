@@ -471,6 +471,25 @@ func TestRetryTTFTIsFinalAttempt(t *testing.T) {
 	if rec.DurationMs < rec.TTFTMs+350 {
 		t.Errorf("DurationMs = %d, want >= TTFT(%d)+350 (includes retry backoff)", rec.DurationMs, rec.TTFTMs)
 	}
+	// The httptrace decomposition follows the same adopted-attempt anchor:
+	// upstream_ttfb_ms is the winning attempt's own header wait (~120ms -
+	// its handler sleeps before writing anything), never the total since
+	// rec.Start (>= ~375ms of backoff plus the failed attempt, which the
+	// FinalAttemptAt delta below proves was real). And the FRESH DIAL
+	// belonged to the failed 502 attempt, whose trace died with its context:
+	// the adopted attempt rode that pooled connection - connect 0, reused.
+	if rec.UpstreamTTFBMs < 100 || rec.UpstreamTTFBMs > 400 {
+		t.Errorf("UpstreamTTFBMs = %d, want 100..400 (the winning attempt's own header wait, not the retry-inclusive total)", rec.UpstreamTTFBMs)
+	}
+	if rec.FinalAttemptAt.Sub(rec.Start) < 300*time.Millisecond {
+		t.Fatalf("FinalAttemptAt - Start = %v, want >= 300ms (the discriminator: an Start-anchored ttfb would exceed it)", rec.FinalAttemptAt.Sub(rec.Start))
+	}
+	if rec.UpstreamConnectMs != 0 || !rec.UpstreamConnReused {
+		t.Errorf("UpstreamConnectMs/ConnReused = %d/%v, want 0/true (the adopted attempt rode the failed attempt's pooled connection; the fresh dial died with it)", rec.UpstreamConnectMs, rec.UpstreamConnReused)
+	}
+	if rec.UpstreamTLSMs != 0 {
+		t.Errorf("UpstreamTLSMs = %d, want 0 (plaintext upstream: the TLS hook never fired)", rec.UpstreamTLSMs)
+	}
 }
 
 func TestTransparentTransportErrorRetry(t *testing.T) {

@@ -741,6 +741,15 @@ function formatDetail(r) {
     kv('chunks', r.chunks),
     kv('finish', escapeHtml(r.finish_reason)),
     kv('cost', r.cost ? fmtMoney(r.cost) : '', 'var(--warn)'),
+    // The adopted attempt's transport decomposition (httptrace): plain
+    // integer milliseconds where 0/absent means the hook never fired (pooled
+    // connection, plaintext upstream) so the row hides; the pool-hit fact
+    // renders through kvBool, so a stored false still shows like every
+    // other record flag.
+    kv('upstream ttfb', r.upstream_ttfb_ms ? r.upstream_ttfb_ms + ' ms' : ''),
+    kv('upstream connect', r.upstream_connect_ms ? r.upstream_connect_ms + ' ms' : ''),
+    kv('upstream tls', r.upstream_tls_ms ? r.upstream_tls_ms + ' ms' : ''),
+    kvBool('reused connection', r.upstream_conn_reused),
   ]));
 
   if (r.tool_calls || (r.tool_names && r.tool_names.length)) {

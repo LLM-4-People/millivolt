@@ -359,6 +359,10 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 		RequestBytes:       4096,
 		ResponseBytes:      8192,
 		UpstreamGzip:       true,
+		UpstreamConnectMs:  12,
+		UpstreamTLSMs:      34,
+		UpstreamTTFBMs:     120,
+		UpstreamConnReused: true,
 		HadAnswerContent:   true,
 		ReqMaxTokens:       ptr(1024),
 		ReqTemperature:     ptr(0.7),
@@ -433,6 +437,14 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	}
 	if !r.UpstreamGzip {
 		t.Error("UpstreamGzip = false, want true (the transport auto-decompressed the upstream body)")
+	}
+	// The adopted attempt's httptrace decomposition survives the restart as
+	// its own columns: dial, TLS handshake, header-wait and the pool-hit flag.
+	if r.UpstreamConnectMs != 12 || r.UpstreamTLSMs != 34 || r.UpstreamTTFBMs != 120 {
+		t.Errorf("UpstreamConnectMs/TLSMs/TTFBMs = %d/%d/%d, want 12/34/120", r.UpstreamConnectMs, r.UpstreamTLSMs, r.UpstreamTTFBMs)
+	}
+	if !r.UpstreamConnReused {
+		t.Error("UpstreamConnReused = false, want true (the adopted attempt rode a pooled connection)")
 	}
 	if r.DecodeTPS == 0 || r.OverallTPS == 0 {
 		t.Errorf("TPS fields lost: DecodeTPS=%v OverallTPS=%v", r.DecodeTPS, r.OverallTPS)
@@ -591,6 +603,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		ToolCalls: 1, ErrorCode: "invalid_api_key", RateLimitRemaining: 42, Cost: 0.01,
 		Chunks: 7, FirstReasoningAt: 1_700_000_000_000,
 		RequestBytes: 1234, ResponseBytes: 5678, UpstreamGzip: true,
+		UpstreamConnectMs: 3, UpstreamTLSMs: 0, UpstreamTTFBMs: 44, UpstreamConnReused: true,
 	}
 	metrics.FinalizeRecord(rec)
 	s.Record(rec)
@@ -601,7 +614,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost, chunks, first_reasoning_at, request_bytes, response_bytes, upstream_gzip FROM requests WHERE id='m1'")
+	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost, chunks, first_reasoning_at, request_bytes, response_bytes, upstream_gzip, upstream_connect_ms, upstream_tls_ms, upstream_ttfb_ms, upstream_conn_reused FROM requests WHERE id='m1'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,6 +641,18 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 	}
 	if rows[0]["upstream_gzip"] != int64(1) {
 		t.Errorf("upstream_gzip = %v, want 1 (migrated column round-trips)", rows[0]["upstream_gzip"])
+	}
+	if rows[0]["upstream_connect_ms"] != int64(3) {
+		t.Errorf("upstream_connect_ms = %v, want 3 (migrated column round-trips)", rows[0]["upstream_connect_ms"])
+	}
+	if rows[0]["upstream_tls_ms"] != int64(0) {
+		t.Errorf("upstream_tls_ms = %v, want 0 (plaintext upstream: the hook never fired)", rows[0]["upstream_tls_ms"])
+	}
+	if rows[0]["upstream_ttfb_ms"] != int64(44) {
+		t.Errorf("upstream_ttfb_ms = %v, want 44 (migrated column round-trips)", rows[0]["upstream_ttfb_ms"])
+	}
+	if rows[0]["upstream_conn_reused"] != int64(1) {
+		t.Errorf("upstream_conn_reused = %v, want 1 (migrated column round-trips)", rows[0]["upstream_conn_reused"])
 	}
 }
 

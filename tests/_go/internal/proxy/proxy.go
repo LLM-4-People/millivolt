@@ -130,6 +130,23 @@ func TestPassthroughStreaming(t *testing.T) {
 	if rec.UpstreamGzip {
 		t.Error("UpstreamGzip = true on an identity upstream, want false")
 	}
+	// The adopted attempt's httptrace decomposition on a fresh plaintext
+	// dial: the dial and the header wait were observed (sub-ms positives
+	// round up to 1), no TLS handshake ran (the httptest upstream is
+	// plaintext; no TLS fixture exists in the tree, so that hook pair is
+	// exercised by construction only), and the connection was fresh.
+	if rec.UpstreamTTFBMs <= 0 {
+		t.Errorf("UpstreamTTFBMs = %d, want > 0 (the attempt waited for response headers)", rec.UpstreamTTFBMs)
+	}
+	if rec.UpstreamConnectMs <= 0 {
+		t.Errorf("UpstreamConnectMs = %d, want > 0 (fresh dial to the test upstream)", rec.UpstreamConnectMs)
+	}
+	if rec.UpstreamTLSMs != 0 {
+		t.Errorf("UpstreamTLSMs = %d, want 0 (plaintext upstream: the TLS hook never fired)", rec.UpstreamTLSMs)
+	}
+	if rec.UpstreamConnReused {
+		t.Error("UpstreamConnReused = true on a fresh dial, want false")
+	}
 }
 
 func TestAnthropicStyleAuthRewrite(t *testing.T) {
@@ -237,6 +254,21 @@ func TestBodyPreserved(t *testing.T) {
 	}
 	if rec.ResponseBytes != int64(len(received)) {
 		t.Errorf("ResponseBytes = %d, want %d (the completion bytes the client received)", rec.ResponseBytes, len(received))
+	}
+	// Non-streaming requests get no FirstTokenAt, so upstream_ttfb_ms is
+	// their ONLY upstream timing: the header wait of the adopted attempt,
+	// plus its fresh-dial facts (connect observed, plaintext, not pooled).
+	if rec.UpstreamTTFBMs <= 0 {
+		t.Errorf("UpstreamTTFBMs = %d, want > 0 (the non-streaming attempt's only upstream timing)", rec.UpstreamTTFBMs)
+	}
+	if rec.UpstreamConnectMs <= 0 {
+		t.Errorf("UpstreamConnectMs = %d, want > 0 (fresh dial to the test upstream)", rec.UpstreamConnectMs)
+	}
+	if rec.UpstreamTLSMs != 0 {
+		t.Errorf("UpstreamTLSMs = %d, want 0 (plaintext upstream: the TLS hook never fired)", rec.UpstreamTLSMs)
+	}
+	if rec.UpstreamConnReused {
+		t.Error("UpstreamConnReused = true on a fresh dial, want false")
 	}
 }
 

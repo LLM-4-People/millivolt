@@ -44,6 +44,10 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 		// the attempt whose body the client received (captureUpstreamHeaders
 		// re-captures after every successful re-send).
 		if n == 1 {
+			// The void attempt is SLOW: its (empty) answer sits ~150ms out,
+			// so an upstream_ttfb_ms anchored anywhere but the re-send's own
+			// start would carry the delay and fail the assertion below.
+			time.Sleep(150 * time.Millisecond)
 			w.Header().Set("X-Request-Id", "req-first")
 			w.WriteHeader(200)
 			w.Write([]byte(voidBody))
@@ -104,6 +108,25 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	}
 	if rec.RequestBytes != int64(len(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)) {
 		t.Errorf("RequestBytes = %d, want the sent request body length", rec.RequestBytes)
+	}
+	// The httptrace decomposition describes the RE-SEND (the adopted
+	// attempt), like every other record-level fact above: upstream_ttfb_ms
+	// measures from the re-send's own start, not from the request start, so
+	// the slow void attempt's ~150ms header delay is absent (FinalAttemptAt -
+	// Start proves that delay was really on the wire timeline). The void
+	// attempt's fresh dial also died with its context: the re-send rode the
+	// pooled connection, so connect is 0 and reused is set.
+	if rec.UpstreamTTFBMs <= 0 || rec.UpstreamTTFBMs >= 100 {
+		t.Errorf("UpstreamTTFBMs = %d, want 0 < ttfb < 100 (the re-send's own header wait, not the void's ~150ms)", rec.UpstreamTTFBMs)
+	}
+	if rec.FinalAttemptAt.Sub(rec.Start) < 100*time.Millisecond {
+		t.Fatalf("FinalAttemptAt - Start = %v, want >= 100ms (the void's delay is on the request timeline, so the ttfb bound above discriminates)", rec.FinalAttemptAt.Sub(rec.Start))
+	}
+	if rec.UpstreamConnectMs != 0 || !rec.UpstreamConnReused {
+		t.Errorf("UpstreamConnectMs/ConnReused = %d/%v, want 0/true (the re-send rode the void attempt's pooled connection; the fresh dial died with it)", rec.UpstreamConnectMs, rec.UpstreamConnReused)
+	}
+	if rec.UpstreamTLSMs != 0 {
+		t.Errorf("UpstreamTLSMs = %d, want 0 (plaintext upstream: the TLS hook never fired)", rec.UpstreamTLSMs)
 	}
 }
 

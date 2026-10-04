@@ -22,6 +22,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strings"
 	"time"
 
@@ -366,8 +367,12 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		}
 		// Each attempt has its own duplex body and cancellation. Closing both
 		// pipe ends also releases a priming writer when no transport consumed it.
+		// The attempt's httptrace decomposition rides the same request context
+		// (x/net/http2 reads it from req.Context()), so an abandoned attempt's
+		// trace dies with it - see upstreamTiming in relay.go, the shared owner.
+		timing := upstreamTiming{start: attemptStart}
 		pr, pw := io.Pipe()
-		upstreamCtx, cancel := context.WithCancel(context.Background())
+		upstreamCtx, cancel := context.WithCancel(httptrace.WithClientTrace(context.Background(), timing.trace()))
 		upstreamCancel := func() { cancel(); pr.Close(); pw.Close() }
 		req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, cursorRunURL(t), pr)
 		if err != nil {
@@ -412,6 +417,12 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		if !retryable || !s.allowStormRetry(ctx, active) {
 			stopRead()
 			failed = retryable
+			// This response reaches the caller (the client or the re-ask's
+			// run): adopt this attempt's transport timing. Like the
+			// FinalAttemptAt stamp above, the record ends up describing the
+			// last attempt whose response was adopted - a later re-ask
+			// overwrites, an absorbed attempt never reaches here.
+			timing.adopt(state.rec)
 			return resp, pw, upstreamCancel, nil
 		}
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes))

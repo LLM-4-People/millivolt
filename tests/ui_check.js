@@ -2173,6 +2173,23 @@ async function main() {
       !plain.includes('<span class="k">upstream gzip</span>') &&
       !plain.includes('<h4>Response headers</h4>');
   })());
+  // The drawer's Performance section renders the adopted attempt's httptrace
+  // decomposition beside the timing rows: plain integer milliseconds (the
+  // processing-row style, "N ms"), a 0/absent hook value hides its row (0
+  // means "not observed"), and the pool-hit fact renders through kvBool so
+  // an explicit false still shows, exactly like client disconnected.
+  check('the drawer renders the upstream attempt timing decomposition', (() => {
+    const trace = w.formatDetail({ ...mkRec('h2trace'), upstream_ttfb_ms: 12, upstream_connect_ms: 3, upstream_conn_reused: true });
+    const plain = w.formatDetail({ ...mkRec('h2plain') });
+    return trace.includes('<span class="k">upstream ttfb</span><span class="v">12 ms</span>') &&
+      trace.includes('<span class="k">upstream connect</span><span class="v">3 ms</span>') &&
+      trace.includes('<span class="k">reused connection</span><span class="v">true</span>') &&
+      !trace.includes('<span class="k">upstream tls</span>') &&
+      !plain.includes('<span class="k">upstream ttfb</span>') &&
+      !plain.includes('<span class="k">upstream connect</span>') &&
+      !plain.includes('<span class="k">upstream tls</span>') &&
+      !plain.includes('<span class="k">reused connection</span>');
+  })());
   check('explorer cost uses cents with a unit-neutral per-token label',
     w.kpiBlend({cost_per_mtok: 0.025}).includes('2.5¢') && !w.kpiBlend({cost_per_mtok: 0.025}).includes('$/Mtok'));
   // shareText owns every summary/plotted share row: a zero denominator means
