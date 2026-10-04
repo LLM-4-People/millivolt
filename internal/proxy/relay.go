@@ -143,6 +143,7 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 				// recorded without losing their payload.
 				break
 			}
+			rec.ResponseBytes += int64(n)
 			// Keep a bounded prefix. Large documents can exceed this capture
 			// and then have unavailable metrics; forwarding remains verbatim.
 			if len(buf)+n <= nonStreamCaptureMax {
@@ -232,6 +233,8 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 	w.WriteHeader(resp.StatusCode)
 	if _, werr := w.Write(spooled); werr != nil {
 		markClientGone(rec)
+	} else {
+		rec.ResponseBytes += int64(len(spooled))
 	}
 	analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
 }
@@ -251,6 +254,10 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 // ordering), with the record adoption (the status, the >=400 error detail,
 // the upstream headers, the final attempt time) already run here - the
 // single owner of the tail both quality loops used to duplicate.
+// ResponseBytes is deliberately NOT reset by this adoption: on this surface
+// the abandoned attempts wrote nothing (the spool precedes every write), so
+// the accumulated total already equals the adopted attempt's body alone -
+// "the bytes the client received".
 func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *http.Request, t *target, key string, body []byte, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks, at metrics.RetryAttempt, old *http.Response) (next *http.Response, nextCancel context.CancelFunc, ok bool) {
 	rec.Attempts = append(rec.Attempts, at)
 	rec.Retries++
@@ -387,6 +394,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			w.WriteHeader(resp.StatusCode)
 			if _, werr := w.Write(out); werr != nil {
 				markClientGone(rec)
+			} else {
+				rec.ResponseBytes += int64(len(out))
 			}
 			return
 		}
@@ -405,6 +414,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			w.WriteHeader(resp.StatusCode)
 			if _, werr := w.Write(spooled); werr != nil {
 				markClientGone(rec)
+			} else {
+				rec.ResponseBytes += int64(len(spooled))
 			}
 			resp.Body.Close()
 			return
@@ -630,7 +641,11 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		}
 		// ServeHTTP's defer still binds the FIRST body (and its per-send
 		// cancel). Own this attempt's body + cancel; LIFO closes the body,
-		// then cancels the send deadline.
+		// then cancels the send deadline. ResponseBytes keeps ACCUMULATING
+		// across this adoption (unlike the non-streaming twin): the abandoned
+		// attempt's role/keepalive/reasoning frames genuinely reached the
+		// client and the fresh stream appends behind them, so the running
+		// total stays "the bytes the client received".
 		resp = next
 		defer nextCancel()
 		defer next.Body.Close()
@@ -786,12 +801,18 @@ func readUpstreamMeta(h http.Header) upstreamMeta {
 
 // captureUpstreamHeaders refreshes the record's upstream header metadata -
 // the redacted audit headers, provider request id/server/processing time and
-// echoed model, and rate-limit state - from the given response. ServeHTTP
-// captures for the first response; the quality loops re-capture after every
-// successful re-send so the record describes the attempt whose body the
-// client actually received.
+// echoed model, rate-limit state, and the transport's auto-decompress fact -
+// from the given response. ServeHTTP captures for the first response; the
+// quality loops re-capture after every successful re-send so the record
+// describes the attempt whose body the client actually received.
 func captureUpstreamHeaders(resp *http.Response, rec *metrics.Record, authHeader string) {
 	rec.ResponseHeaders = captureHeaders(resp.Header, authHeader)
+	// The wire-compression fact lives only here: on auto-decompress the
+	// transport deletes Content-Encoding and Content-Length from the header
+	// map, so the captured headers cannot show it. resp.Uncompressed is set
+	// by the transport exactly when it decoded a gzip body, and it is read
+	// before the relay consumes the body.
+	rec.UpstreamGzip = resp.Uncompressed
 	m := readUpstreamMeta(resp.Header)
 	rec.ProviderRequestID = m.RequestID
 	rec.ProviderServer = m.Server
@@ -1377,6 +1398,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			markClientGone(rec)
 			return
 		}
+		rec.ResponseBytes += int64(len(frame))
 		a.Feed(line, time.Now())
 		flusher.Flush()
 	}
@@ -1527,6 +1549,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			clientGone()
 			return false
 		}
+		rec.ResponseBytes += int64(len(o))
 		if bytes.IndexByte(o, '\n') >= 0 {
 			flusher.Flush()
 		}
@@ -1587,6 +1610,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				clientGone()
 				return false
 			}
+			rec.ResponseBytes += int64(len(hold))
 		}
 		hold = hold[:0]
 		holding = false
@@ -1689,6 +1713,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						clientGone()
 						return rescueNone
 					}
+					rec.ResponseBytes += int64(len(hold))
 					flusher.Flush()
 					hold = hold[:0]
 					holding = false
@@ -1752,6 +1777,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						clientGone()
 						return rescueNone
 					}
+					rec.ResponseBytes += int64(len(hold))
 					hold = hold[:0]
 				}
 				if !writeOut() {
@@ -1811,9 +1837,15 @@ func emitDegenerateSSE(w http.ResponseWriter, a *sse.Analyzer, now time.Time, co
 			markClientGone(rec)
 			return
 		}
+		// The substituted frames replace a terminal region the client never
+		// saw, so they are the bytes the client received - count them, never
+		// the withheld originals.
+		rec.ResponseBytes += int64(len(line))
 	}
 	a.Feed([]byte("data: [DONE]"), now)
 	if _, werr := io.WriteString(w, sse.DoneFrame); werr != nil {
 		markClientGone(rec)
+	} else {
+		rec.ResponseBytes += int64(len(sse.DoneFrame))
 	}
 }

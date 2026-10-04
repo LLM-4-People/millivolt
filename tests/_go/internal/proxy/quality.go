@@ -96,6 +96,15 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	if rec.ProviderRequestID != "req-second" {
 		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
 	}
+	// The adopted-retry byte count: only the ADOPTED attempt's body was ever
+	// written (the void was absorbed pre-write), so response_bytes equals the
+	// healthy body alone - never the union with the abandoned void body.
+	if rec.ResponseBytes != int64(len(realBody)) {
+		t.Errorf("ResponseBytes = %d, want %d (the adopted attempt's body only, not the void's too)", rec.ResponseBytes, len(realBody))
+	}
+	if rec.RequestBytes != int64(len(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)) {
+		t.Errorf("RequestBytes = %d, want the sent request body length", rec.RequestBytes)
+	}
 }
 
 type closeCountBody struct {
@@ -248,6 +257,16 @@ func TestQualityRetrySkipsLargeBody(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (no quality retry on large bodies)", n)
+	}
+	// The overflow shape: past the spool cap the body commits to verbatim
+	// relay through nonStreamBody (spooled prefix + live remainder), so the
+	// full oversized body is accounted.
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("recorded %d records, want 1", len(recs))
+	}
+	if recs[0].ResponseBytes != int64(len(big)) {
+		t.Errorf("ResponseBytes = %d, want %d (the overflowed body relayed verbatim)", recs[0].ResponseBytes, len(big))
 	}
 }
 
@@ -579,6 +598,13 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 	}
 	if rec.ProviderRequestID != "req-second" {
 		t.Fatalf("record must carry the re-send's provider metadata, got request id %q", rec.ProviderRequestID)
+	}
+	// The rescue ACCUMULATES (never resets): the abandoned attempt's role
+	// chunk genuinely reached the client and the fresh stream appended
+	// behind it, so response_bytes is the whole wire content the client
+	// received - not the adopted attempt's frames alone.
+	if rec.ResponseBytes != int64(len(got)) {
+		t.Errorf("ResponseBytes = %d, want %d (the full appended wire content across the rescue)", rec.ResponseBytes, len(got))
 	}
 }
 

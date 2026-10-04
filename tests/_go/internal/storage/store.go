@@ -356,6 +356,9 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 		FirstAnswerAt:      now.Add(800 * time.Millisecond),
 		FirstReasoningAt:   now.Add(100 * time.Millisecond).UnixMilli(),
 		Chunks:             64,
+		RequestBytes:       4096,
+		ResponseBytes:      8192,
+		UpstreamGzip:       true,
 		HadAnswerContent:   true,
 		ReqMaxTokens:       ptr(1024),
 		ReqTemperature:     ptr(0.7),
@@ -421,6 +424,15 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	}
 	if r.FirstReasoningAt != now.Add(100*time.Millisecond).UnixMilli() {
 		t.Errorf("FirstReasoningAt = %d, want %d", r.FirstReasoningAt, now.Add(100*time.Millisecond).UnixMilli())
+	}
+	// The wire-size trio survives the restart as its own columns: the
+	// inbound request body size, the relayed response body size, and the
+	// transport's auto-decompress fact.
+	if r.RequestBytes != 4096 || r.ResponseBytes != 8192 {
+		t.Errorf("RequestBytes/ResponseBytes = %d/%d, want 4096/8192", r.RequestBytes, r.ResponseBytes)
+	}
+	if !r.UpstreamGzip {
+		t.Error("UpstreamGzip = false, want true (the transport auto-decompressed the upstream body)")
 	}
 	if r.DecodeTPS == 0 || r.OverallTPS == 0 {
 		t.Errorf("TPS fields lost: DecodeTPS=%v OverallTPS=%v", r.DecodeTPS, r.OverallTPS)
@@ -578,6 +590,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		StatusCode: 200, Start: time.Now(), End: time.Now(),
 		ToolCalls: 1, ErrorCode: "invalid_api_key", RateLimitRemaining: 42, Cost: 0.01,
 		Chunks: 7, FirstReasoningAt: 1_700_000_000_000,
+		RequestBytes: 1234, ResponseBytes: 5678, UpstreamGzip: true,
 	}
 	metrics.FinalizeRecord(rec)
 	s.Record(rec)
@@ -588,7 +601,7 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s2.Close()
-	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost, chunks, first_reasoning_at FROM requests WHERE id='m1'")
+	rows, err := s2.Query(t.Context(), "SELECT error_code, rate_limit_remaining, cost, chunks, first_reasoning_at, request_bytes, response_bytes, upstream_gzip FROM requests WHERE id='m1'")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,6 +619,15 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 	}
 	if rows[0]["first_reasoning_at"] != int64(1_700_000_000_000) {
 		t.Errorf("first_reasoning_at = %v, want 1700000000000 (migrated column round-trips)", rows[0]["first_reasoning_at"])
+	}
+	if rows[0]["request_bytes"] != int64(1234) {
+		t.Errorf("request_bytes = %v, want 1234 (migrated column round-trips)", rows[0]["request_bytes"])
+	}
+	if rows[0]["response_bytes"] != int64(5678) {
+		t.Errorf("response_bytes = %v, want 5678 (migrated column round-trips)", rows[0]["response_bytes"])
+	}
+	if rows[0]["upstream_gzip"] != int64(1) {
+		t.Errorf("upstream_gzip = %v, want 1 (migrated column round-trips)", rows[0]["upstream_gzip"])
 	}
 }
 

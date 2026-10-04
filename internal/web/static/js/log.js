@@ -644,6 +644,8 @@ function formatDetail(r) {
     kv('started', fmtT(r.start)),
     kv('ended', fmtT(r.end)),
     kv('duration', r.duration_ms != null ? fmtDur(r.duration_ms) : ''),
+    kv('request bytes', r.request_bytes),
+    kv('response bytes', r.response_bytes),
   ]));
 
   S.push(sec('Client', [
@@ -799,7 +801,13 @@ function formatDetail(r) {
   }
 
   const hrows = detailHeaderRows(r.response_headers);
-  if (hrows) S.push(`<div class="detail-section"><h4>Response headers</h4>${hrows}</div>`);
+  // upstream gzip renders with the wire facts: the transport strips
+  // Content-Encoding/Content-Length when it auto-decompresses, so the header
+  // map alone cannot show the response was compressed on the wire.
+  if (hrows || r.upstream_gzip) {
+    S.push(`<div class="detail-section"><h4>Response headers</h4>` +
+      kvBool('upstream gzip', r.upstream_gzip) + hrows + `</div>`);
+  }
 
   if (r.debug) {
     S.push(`<div class="detail-section" id="drawer-debug">` + debugSectionHead(r.id) + `<div class="preview-box" id="drawer-debug-body">loading capture…</div></div>`);

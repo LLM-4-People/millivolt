@@ -86,10 +86,12 @@ func proxyServer(t *testing.T) *httptest.Server {
 func TestPassthroughStreaming(t *testing.T) {
 	upstream, captured := mockUpstream(t, true)
 	defer upstream.Close()
-	srv := proxyServer(t)
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
 	defer srv.Close()
 
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	reqBody := `{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer sk-test-key")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
 	req.Header.Set("Content-Type", "application/json")
@@ -111,6 +113,22 @@ func TestPassthroughStreaming(t *testing.T) {
 	}
 	if captured.path != "/v1/chat/completions" {
 		t.Errorf("upstream path = %q", captured.path)
+	}
+	// The wire-size trio on a plain identity stream: the request body size,
+	// the summed SSE frame bytes the relay wrote, and no auto-decompress.
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("recorded %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.RequestBytes != int64(len(reqBody)) {
+		t.Errorf("RequestBytes = %d, want %d (the sent request body length)", rec.RequestBytes, len(reqBody))
+	}
+	if rec.ResponseBytes != int64(len(want)) {
+		t.Errorf("ResponseBytes = %d, want %d (the summed SSE frame bytes relayed)", rec.ResponseBytes, len(want))
+	}
+	if rec.UpstreamGzip {
+		t.Error("UpstreamGzip = true on an identity upstream, want false")
 	}
 }
 
@@ -188,7 +206,8 @@ func TestMissingBaseURL(t *testing.T) {
 func TestBodyPreserved(t *testing.T) {
 	upstream, captured := mockUpstream(t, false)
 	defer upstream.Close()
-	srv := proxyServer(t)
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
 	defer srv.Close()
 
 	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`
@@ -200,10 +219,24 @@ func TestBodyPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	received, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 
 	if captured.body != body {
 		t.Errorf("request body mutated:\n got %q\nwant %q", captured.body, body)
+	}
+	// The non-streaming wire sizes: the inbound request body and the
+	// completion JSON the relay spooled and wrote verbatim.
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("recorded %d records, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.RequestBytes != int64(len(body)) {
+		t.Errorf("RequestBytes = %d, want %d (the sent request body length)", rec.RequestBytes, len(body))
+	}
+	if rec.ResponseBytes != int64(len(received)) {
+		t.Errorf("ResponseBytes = %d, want %d (the completion bytes the client received)", rec.ResponseBytes, len(received))
 	}
 }
 

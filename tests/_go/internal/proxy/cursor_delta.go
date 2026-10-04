@@ -2,11 +2,14 @@ package proxy
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 // A Cursor tool-call turn with streamed text before the call is a MIXED
@@ -89,5 +92,37 @@ func TestOpenCursorStreamOpeningDeltaDisconnect(t *testing.T) {
 	}
 	if rec.FinishReason != "stop" {
 		t.Errorf("FinishReason = %q, want stop (the turn itself finished normally)", rec.FinishReason)
+	}
+}
+
+// TestCursorCountWriterCountsBodyBytes pins the cursor bridge's
+// synthesized-output count: the wrapper applied at the two drive entries
+// accumulates every body byte the surface writes (streamed frames, [DONE],
+// the JSON completion) into ResponseBytes, while header and status writes
+// are not body bytes, and a failed write delivered nothing so it counts
+// nothing. The bridge synthesizes the client's whole response, so these
+// written bytes ARE the response body.
+func TestCursorCountWriterCountsBodyBytes(t *testing.T) {
+	rec := &metrics.Record{}
+	inner := httptest.NewRecorder()
+	w := cursorCountWriter{ResponseWriter: inner, rec: rec}
+	w.WriteHeader(http.StatusOK) // status, not body: must not count
+	if _, err := io.WriteString(w, "data: {}\n\n"); err != nil {
+		t.Fatal(err)
+	}
+	w.Flush()
+	if _, err := io.WriteString(w, sse.DoneFrame); err != nil {
+		t.Fatal(err)
+	}
+	want := int64(len("data: {}\n\n") + len(sse.DoneFrame))
+	if rec.ResponseBytes != want {
+		t.Errorf("ResponseBytes = %d, want %d (the synthesized frames the surface wrote)", rec.ResponseBytes, want)
+	}
+	// A failed write delivers nothing: only accepted bytes count.
+	if _, err := (cursorCountWriter{ResponseWriter: failingSSEWriter{}, rec: rec}).Write([]byte("data: more\n\n")); err == nil {
+		t.Fatal("the failing writer must report the write error")
+	}
+	if rec.ResponseBytes != want {
+		t.Errorf("ResponseBytes = %d after a failed write, want %d (unchanged)", rec.ResponseBytes, want)
 	}
 }

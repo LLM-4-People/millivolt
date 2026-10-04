@@ -943,7 +943,10 @@ func headerIntValue(h http.Header, names ...string) (val int, ok bool) {
 // disconnectWriter wraps a downstream ResponseWriter so a write error records
 // the client as gone (markClientGone: client_disconnected + 499 only while no
 // error outcome is decided - matching the accounting the analyzer streaming
-// paths do) and lets io.Copy abort on the failed write.
+// paths do) and lets io.Copy abort on the failed write. Its Write also
+// accumulates the accepted bytes into the record's ResponseBytes, so the
+// raw-copy relay fallbacks (the io.Copy sites in relay.go) report
+// response_bytes exactly like the explicit write loops.
 type disconnectWriter struct {
 	w   http.ResponseWriter
 	rec *metrics.Record
@@ -951,7 +954,9 @@ type disconnectWriter struct {
 
 func (d disconnectWriter) Write(p []byte) (int, error) {
 	n, err := d.w.Write(p)
-	if err != nil {
+	if err == nil {
+		d.rec.ResponseBytes += int64(n)
+	} else {
 		markClientGone(d.rec)
 	}
 	return n, err
@@ -1098,6 +1103,11 @@ func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, re
 	if int64(len(body)) > maxBytes {
 		return nil, nil, &http.MaxBytesError{Limit: maxBytes}
 	}
+	// The inbound body size: one assignment on the bytes already in hand -
+	// no second read, no timing change (Start below still excludes upload).
+	// Stamped before the metadata decode so invalid-JSON passthrough
+	// requests carry their body size too.
+	rec.RequestBytes = int64(len(body))
 	// Request timing excludes upload, but includes the unified metadata decode
 	// and any later format translation. This is the sole Start owner.
 	rec.Start = time.Now()

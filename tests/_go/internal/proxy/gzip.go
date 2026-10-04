@@ -15,6 +15,11 @@ import (
 
 // TestGzipUpstream verifies that when the upstream sends gzip-encoded SSE, the
 // proxy decompresses it for metrics and relays readable bytes to the client.
+// It also pins the wire-size trio for a gzip'd upstream: request_bytes is the
+// sent body length, response_bytes is the decompressed SSE the client
+// received, and upstream_gzip carries the transport's auto-decompress fact
+// (the stored response headers cannot show it: the transport deletes
+// Content-Encoding and Content-Length when it decodes).
 func TestGzipUpstream(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -34,7 +39,8 @@ func TestGzipUpstream(t *testing.T) {
 	srv := httptest.NewServer(New(config.Default(), buf))
 	defer srv.Close()
 
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
+	reqBody := `{"model":"m","stream":true}`
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer sk-test")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
 	req.Header.Set("Content-Type", "application/json")
@@ -69,5 +75,14 @@ func TestGzipUpstream(t *testing.T) {
 	}
 	if rec.FinishReason != "stop" {
 		t.Errorf("FinishReason = %q", rec.FinishReason)
+	}
+	if rec.RequestBytes != int64(len(reqBody)) {
+		t.Errorf("RequestBytes = %d, want %d (the sent request body length)", rec.RequestBytes, len(reqBody))
+	}
+	if rec.ResponseBytes != int64(len(body)) {
+		t.Errorf("ResponseBytes = %d, want %d (the decompressed SSE bytes the client received)", rec.ResponseBytes, len(body))
+	}
+	if !rec.UpstreamGzip {
+		t.Error("UpstreamGzip = false, want true (the transport decoded the gzip body)")
 	}
 }

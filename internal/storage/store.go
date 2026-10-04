@@ -132,6 +132,9 @@ CREATE TABLE IF NOT EXISTS requests (
 	first_token_at INTEGER NOT NULL,
 	last_token_at INTEGER NOT NULL,
 	chunks INTEGER NOT NULL DEFAULT 0,
+	request_bytes INTEGER NOT NULL DEFAULT 0,
+	response_bytes INTEGER NOT NULL DEFAULT 0,
+	upstream_gzip INTEGER NOT NULL DEFAULT 0,
 	finish_reason TEXT NOT NULL,
 	error_type TEXT NOT NULL,
 	error_msg TEXT NOT NULL,
@@ -1011,6 +1014,9 @@ func migrate(db *sql.DB) error {
 		{"req_param_presence", "ALTER TABLE requests ADD COLUMN " + requestParamPresenceDDL},
 		{"chunks", "ALTER TABLE requests ADD COLUMN chunks INTEGER NOT NULL DEFAULT 0"},
 		{"first_reasoning_at", "ALTER TABLE requests ADD COLUMN first_reasoning_at INTEGER NOT NULL DEFAULT 0"},
+		{"request_bytes", "ALTER TABLE requests ADD COLUMN request_bytes INTEGER NOT NULL DEFAULT 0"},
+		{"response_bytes", "ALTER TABLE requests ADD COLUMN response_bytes INTEGER NOT NULL DEFAULT 0"},
+		{"upstream_gzip", "ALTER TABLE requests ADD COLUMN upstream_gzip INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, c := range needed {
 		if _, ok := cols[c.name]; !ok {
@@ -1075,6 +1081,7 @@ const recordColumns = `
 		id, provider, model, key_hash, user_agent, client, client_ip, client_lang,
 		stream, status_code,
 		started_at, duration_ms, ttft_ms, first_token_at, last_token_at, chunks,
+		request_bytes, response_bytes, upstream_gzip,
 		finish_reason, error_type, error_msg, error_code, tool_calls,
 		input_tokens, output_tokens, total_tokens, cache_read_tokens,
 		cache_write_tokens, reasoning_tokens, client_disconnected,
@@ -1115,6 +1122,7 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 		&r.ID, &r.Provider, &r.Model, &r.KeyHash, &r.UserAgent, &r.Client,
 		&r.ClientIP, &r.ClientLang, &r.Stream,
 		&r.StatusCode, &startMs, &durMs, &ttftMs, &firstMs, &lastMs, &r.Chunks,
+		&r.RequestBytes, &r.ResponseBytes, &r.UpstreamGzip,
 		&r.FinishReason, &r.ErrorType, &r.ErrorMsg, &r.ErrorCode, &r.ToolCalls,
 		&r.Usage.InputTokens, &r.Usage.OutputTokens, &r.Usage.TotalTokens,
 		&r.Usage.CacheReadTokens, &r.Usage.CacheWrite, &r.Usage.ReasoningTokens,

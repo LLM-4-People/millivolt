@@ -188,6 +188,40 @@ type Record struct {
 	// fallbacks in Fill.
 	Chunks int64 `json:"chunks,omitempty"`
 
+	// RequestBytes is the size of the client's inbound request body,
+	// captured once by readRequest on the bytes it already read - before
+	// the request-overrides rewrite and any format translation can replace
+	// them, so it always describes the client's upload.
+	RequestBytes int64 `json:"request_bytes,omitempty"`
+
+	// ResponseBytes is the number of response body bytes the relay handed
+	// to the client socket for the returned response. It accumulates at the
+	// relay write sites (streamBody's writeOut/hold releases, nonStreamBody,
+	// commitSpooledBody, the translated body write, streamBodyTranslated,
+	// the raw-copy fallbacks through disconnectWriter, and the cursor
+	// bridge's counting writer) and NEVER resets across an in-request
+	// attempt change, because only bytes the client writer accepted are
+	// counted: on the non-streaming quality surface the abandoned attempts
+	// wrote nothing (their bodies are spooled before any write), so the
+	// accumulated total is the adopted attempt's body alone; on the
+	// streaming rescue surface the abandoned attempt's role/keepalive/
+	// reasoning frames genuinely reached the client and the fresh attempt
+	// appends behind them, so the accumulated total IS the bytes the client
+	// received. Proxy-synthesized status-line error envelopes (http.Error
+	// 502s, queue-full 429s, the SSE pacer's keepalives) are not body relay
+	// and are not counted.
+	ResponseBytes int64 `json:"response_bytes,omitempty"`
+
+	// UpstreamGzip records that the upstream response arrived gzip-compressed
+	// and Go's transport transparently decompressed it (buildUpstreamRequest
+	// drops Accept-Encoding so the transport adds its own gzip preference).
+	// It is captured at response admission by captureUpstreamHeaders, the
+	// single owner of response metadata: the transport deletes
+	// Content-Encoding and Content-Length from the header map on
+	// auto-decompress, so the captured response headers cannot show the
+	// wire compression - this flag is the only retained fact about it.
+	UpstreamGzip bool `json:"upstream_gzip,omitempty"`
+
 	// LLM request parameters parsed from the request body. These are the fields
 	// that define the request shape; they carry no message content.
 	ReqMaxTokens    *int     `json:"req_max_tokens,omitempty"`

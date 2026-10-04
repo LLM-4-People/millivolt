@@ -693,6 +693,67 @@ func TestNonStreamClientAbortMidSpooledWriteKeepsInBandError(t *testing.T) {
 	if rec.ErrorType != "invalid_request_error" {
 		t.Errorf("the spooled in-band error must survive the mid-write abort: type=%q", rec.ErrorType)
 	}
+	// The failed write reached no client, so response_bytes stays zero: only
+	// bytes the client writer accepts are counted.
+	if rec.ResponseBytes != 0 {
+		t.Errorf("ResponseBytes = %d, want 0 (a failed write delivered nothing)", rec.ResponseBytes)
+	}
+}
+
+// TestErrorBodyRelayCountsBytes pins the wire-size accounting for a relayed
+// upstream error: a 5xx body is response relay too, so response_bytes must
+// count it - through nonStreamBody for a JSON error body and through the
+// raw-copy fallback (disconnectWriter's counting) for an event-stream error
+// body. The request side counts its own body; the identity upstream leaves
+// upstream_gzip unset.
+func TestErrorBodyRelayCountsBytes(t *testing.T) {
+	const errBody = `{"error":{"type":"server_error","message":"boom"}}`
+	const reqBody = `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	for _, ct := range []string{"application/json", "text/event-stream"} {
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", ct)
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(errBody))
+		}))
+		cfg := config.Default()
+		cfg.MaxRetries = 0 // the 500 is final - no absorbed retry muddies the byte count
+		buf := metrics.NewBuffer(10)
+		srv := httptest.NewServer(New(cfg, buf))
+
+		req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(reqBody))
+		req.Header.Set("Authorization", "Bearer sk-key")
+		req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			upstream.Close()
+			srv.Close()
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusInternalServerError || string(body) != errBody {
+			upstream.Close()
+			srv.Close()
+			t.Fatalf("%s: status=%d body=%q, want the 500 error body relayed verbatim", ct, resp.StatusCode, body)
+		}
+		srv.Close()
+		upstream.Close()
+
+		recs := waitForRecord(t, buf, 1)
+		if len(recs) != 1 {
+			t.Fatalf("%s: recorded %d records, want 1", ct, len(recs))
+		}
+		rec := recs[0]
+		if rec.ResponseBytes != int64(len(errBody)) {
+			t.Errorf("%s: ResponseBytes = %d, want %d (the relayed error body counts)", ct, rec.ResponseBytes, len(errBody))
+		}
+		if rec.RequestBytes != int64(len(reqBody)) {
+			t.Errorf("%s: RequestBytes = %d, want %d", ct, rec.RequestBytes, len(reqBody))
+		}
+		if rec.UpstreamGzip {
+			t.Errorf("%s: UpstreamGzip = true on an identity upstream, want false", ct)
+		}
+	}
 }
 
 // Anthropic shape on a byte-transparent stream: event:error + data line with

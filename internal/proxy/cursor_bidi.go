@@ -534,12 +534,44 @@ func (s *Server) setCursorHeaders(req *http.Request, t *target, key string) {
 	req.Header.Set("Content-Type", "application/connect+proto")
 }
 
+// cursorCountWriter counts every body byte the cursor surface writes into the
+// record's ResponseBytes. The bridge SYNTHESIZES the client's whole response
+// (the upstream is an enveloped Connect exchange, never a relayed body), so
+// unlike the generic relay's per-site accumulation there is no upstream body
+// to measure: the bytes the client received are exactly the bytes this
+// surface writes. Wrapping w at the two drive entries covers both the
+// streamed emitters (deltas, finish, usage, [DONE], in-band errors) and the
+// single-JSON completion; header/status writes are not body bytes and are
+// not counted. Flush and Unwrap keep the pacer reachable through the wrap
+// (pacerOf and the flusher assertions walk them).
+type cursorCountWriter struct {
+	http.ResponseWriter
+	rec *metrics.Record
+}
+
+func (c cursorCountWriter) Write(p []byte) (int, error) {
+	n, err := c.ResponseWriter.Write(p)
+	if err == nil {
+		c.rec.ResponseBytes += int64(n)
+	}
+	return n, err
+}
+
+func (c cursorCountWriter) Flush() {
+	if f, ok := c.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (c cursorCountWriter) Unwrap() http.ResponseWriter { return c.ResponseWriter }
+
 // driveRun drives a fresh run's first turn and renders the outcome as OpenAI
 // SSE (stream=true) or a single JSON completion (stream=false). On a tool call
 // it parks the run for a later request to resume. resumeRequest marks a
 // continuation (empty resume_action) turn, eligible for void detection; reask
 // (optional) opens a fresh-user re-ask run when that turn voids.
 func (s *Server) driveRun(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, stream bool, rec *metrics.Record, rr cursorTurnRender, resumeRequest bool, reask func() (*providerformat.CursorRun, error)) {
+	w = cursorCountWriter{ResponseWriter: w, rec: rec}
 	id := "cursor-" + providerformat.UUID4()
 	if stream {
 		s.serveRunStream(ctx, w, run, id, rec, rr, resumeRequest, reask)
@@ -550,6 +582,7 @@ func (s *Server) driveRun(ctx context.Context, w http.ResponseWriter, run *provi
 
 // driveParkedRun resumes a parked run with the tool results from this request.
 func (s *Server) driveParkedRun(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, results []cursorToolResult, steerText string, stream bool, rec *metrics.Record, rr cursorTurnRender) {
+	w = cursorCountWriter{ResponseWriter: w, rec: rec}
 	id := "cursor-" + providerformat.UUID4()
 	if stream {
 		s.serveResumeStream(ctx, w, run, results, steerText, id, rec, rr)

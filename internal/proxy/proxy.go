@@ -461,6 +461,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), status)
 		return
 	}
+	// Hold the inbound body size readRequest captured: the rewrite engine
+	// below can replace the body bytes and the translate branch replaces the
+	// whole record, but request_bytes must keep describing the client's
+	// upload (the stream/model pattern - re-stamped on the final record at
+	// the metadata wiring).
+	reqBytes := rec.RequestBytes
 
 	// Cursor clients send FUSED display model ids (thinking level + tier
 	// baked into the name). Record the canonical base id instead so the
@@ -599,6 +605,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.Method = r.Method
 	rec.ClientLang = clientLang(r)
 	rec.Stream = stream
+	rec.RequestBytes = reqBytes
 	fillClientMeta(r, t, rec)
 	// Group into a conversation: explicit X-Proxy-Session wins; then the
 	// tracked sub-conversations param (k:); otherwise auto-group by
