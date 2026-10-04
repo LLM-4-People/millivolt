@@ -1,6 +1,6 @@
 module github.com/LLM-4-People/millivolt
 
-go 1.26.6
+go 1.27.0
 
 require (
 	github.com/klauspost/compress v1.18.0
