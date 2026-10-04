@@ -477,7 +477,7 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   resyncOperatorSurfaces('throttle');
 }
 
-const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-clear': 'clear-menu', 'btn-restart': 'restart-menu' };
+const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-restart': 'restart-menu' };
 function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
   let closed = false;
@@ -794,17 +794,30 @@ function fillSettingsForm(doc) {
       : `<span class="ent" style="--ent:${vis.color}"><span class="ent-ic" aria-hidden="true">${vis.icon}</span><span class="ent-lb">${escapeHtml(c.label)}</span></span>`;
     return `<button type="button" class="st-rail-item${on}" style="--ent:${vis.color}" data-st-cat="${escapeHtml(c.id)}" aria-current="${c.id === settingsCat ? 'page' : 'false'}">${badge}<span class="rail-n">${n}</span></button>`;
   }).join('');
-  // The storage pane also owns the whole-database delete: the action row
-  // rides the same innerHTML rebuild as every field and the backup rows,
-  // inserted after the storage fields so DOM order follows category order.
+  // The storage pane also owns both database deletions: the scoped
+  // delete-matching block and the whole-database action row ride the same
+  // innerHTML rebuild as every field and the backup rows, inserted after
+  // the storage fields so DOM order follows category order - least
+  // destructive first.
   const rows = doc.fields.map(f => settingsFieldHTML(f, values[f.key], defaults[f.key], overrides[f.key]));
   const purgeAt = doc.fields.reduce((at, f, i) => f.category === 'storage' ? i + 1 : at, -1);
-  if (purgeAt >= 0) rows.splice(purgeAt, 0, settingsPurgeRowHTML());
+  if (purgeAt >= 0) rows.splice(purgeAt, 0, settingsDeleteRowHTML(), settingsPurgeRowHTML());
   box.innerHTML = rows.join('') + settingsBackupHTML(doc);
   box.querySelectorAll('[data-st-scalar]').forEach(validateSettingsScalar);
   wireBackupPane();
   const purgeAllBtn = $('btn-purge-all');
   if (purgeAllBtn) purgeAllBtn.disabled = _purgeBusy;
+  if (purgeAt >= 0) {
+    // The rebuilt selects start empty (settingsDeleteRowHTML): repopulate
+    // their options from the current records, then restart the count
+    // preview from the fresh, empty selection.
+    populateFilterMenu('del');
+    updateDelCount();
+    // A refill during a purge must not resurrect enabled controls: the
+    // fresh instances inherit the busy state, and the purge's epilogue
+    // re-enables whichever instance is current.
+    document.querySelectorAll('#settings-fields [data-purge="matching"] select').forEach(el => { el.disabled = _purgeBusy; });
+  }
   syncProvMenuList(box.querySelector('.st-row[data-key="providers"]'));
   // Initial paint for every rules editor: validation states, preview bench,
   // rule count - the same pass the delegated events run on every edit.
@@ -841,13 +854,44 @@ function settingsBackupHTML(doc) {
   return html;
 }
 
-// The storage category's whole-database delete, moved from the header
-// Clear menu (which keeps only the scoped action). It renders like the
-// backup action rows, joins the category filter, the search haystack and
-// the rail badge count through its data-cat/label/help attributes, and -
-// like the backup rows - carries no data-key, so it never dirties the
-// form or joins value collection. Clicks arrive through the settings
-// sheet's delegated handler.
+// The storage category's scoped delete, moved out of the header Clear
+// menu (the header no longer carries any deletion control). It renders
+// through the fillSettingsForm pipeline like the backup action rows,
+// joins the category filter, the search haystack and the rail badge count
+// through its data-cat/label/help attributes, and - like the backup rows -
+// carries no data-key, so it never dirties the form or joins value
+// collection. Clicks arrive through the settings sheet's delegated
+// handler. The selects start EMPTY on every rebuild on purpose: the
+// refill resets any previous selection - a stale invisible filter must
+// never arm a destructive default - and fillSettingsForm's
+// populateFilterMenu('del') restores the current option values.
+function settingsDeleteRowHTML() {
+  return `<div class="st-row st-block" data-cat="storage" data-purge="matching" data-label="delete matching purge filtered records storage history" data-help="delete only the records matching the chosen provider, model, client, status, errors, debug and age filters; a live count previews the deletion; cannot be undone">
+    <div class="st-name">Delete matching</div>
+    <div class="st-ctl">
+      <div class="st-del-opts">
+        <label>provider <select id="del-provider"></select></label>
+        <label>model <select id="del-model"></select></label>
+        <label>client <select id="del-client"></select></label>
+        <label>status <select id="del-status"></select></label>
+        <label>errors <select id="del-errors"></select></label>
+        <label>debug <select id="del-debug"></select></label>
+        <label>older than <select id="del-age"></select></label>
+      </div>
+      <span class="st-del-count" id="del-count"></span>
+      <div class="st-backup-actions"><button type="button" class="btn btn-danger" id="btn-del-matching" disabled>Delete matching</button></div>
+      <span class="st-hint">delete only the records matching the chosen provider, model, client, status, errors, debug and age filters; a live count previews the deletion; cannot be undone</span>
+    </div>
+  </div>`;
+}
+
+// The storage category's whole-database delete, the scoped block's
+// companion action. It renders like the backup action rows, joins the
+// category filter, the search haystack and the rail badge count through
+// its data-cat/label/help attributes, and - like the backup rows -
+// carries no data-key, so it never dirties the form or joins value
+// collection. Clicks arrive through the settings sheet's delegated
+// handler.
 function settingsPurgeRowHTML() {
   return `<div class="st-row st-block" data-cat="storage" data-purge="all" data-label="delete everything purge database storage history" data-help="permanently delete all metrics history: the live ring and the entire durable database; cannot be undone">
     <div class="st-name">Delete everything</div>
@@ -1375,18 +1419,11 @@ function costChipHTML(path) {
   return `<span class="prov-chip" data-cost="${escapeHtml(path)}"><span class="prov-chip-p">${escapeHtml(path)}</span><button type="button" class="prov-x" data-prov-chip-rm aria-label="remove ${escapeHtml(path)}">✕</button></span>`;
 }
 
-// The provider card's remove icon is the header Clear button's trash
-// glyph, cloned at render time (the brandLogoSVG precedent) so the
-// geometry stays authored once, in index.html. The clone drops the
-// header-only .hdr-ico class; .prov-x svg owns this surface's stroke and
-// size, and unlike the brand logo there are no ids to rewrite.
-function trashIconSVG() {
-  const svg = document.querySelector('#btn-clear svg');
-  if (!svg) return '';
-  const clone = svg.cloneNode(true);
-  clone.removeAttribute('class');
-  return clone.outerHTML;
-}
+// The provider card's remove icon is one 16x16 glyph authored as a markup
+// constant, like PROV_CHEV_SVG below (the trash geometry lost its header
+// Clear button when deletion moved into the settings sheet). The constant
+// carries no class; .prov-x svg owns this surface's stroke and size.
+const PROV_TRASH_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 5.4h9.6"/><path d="M6.1 5.4V4.3A1.2 1.2 0 0 1 7.3 3.1h1.4A1.2 1.2 0 0 1 9.9 4.3v1.1"/><path d="M4.2 5.4l.7 7.4a1 1 0 0 0 1 .8h5.2a1 1 0 0 0 1-.8l.7-7.4"/></svg>';
 const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>';
 
 // mappingRowHTML renders one canonical-field → custom-path row for both
@@ -1429,7 +1466,7 @@ function providerCardHTML(label, p) {
   // cascades the following sections into each other (the models section
   // once rendered nested inside usage keys).
   return `<div class="st-prov">` +
-    `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${trashIconSVG()}</button></div>` +
+    `<div class="prov-hd"><span class="prov-ic" style="--ent:${ENTITY_TYPES.provider.color}" aria-hidden="true">☁</span><input class="sp-label" value="${escapeHtml(label)}" placeholder="provider label - registrable domain of the base URL, e.g. nano-gpt.com" aria-label="provider label"><button type="button" class="prov-chev" data-prov-collapse aria-expanded="true" aria-label="collapse or expand ${escapeHtml(label)}" title="collapse / expand">${PROV_CHEV_SVG}</button><button type="button" class="prov-x" data-prov-rm aria-label="remove provider" title="remove provider">${PROV_TRASH_SVG}</button></div>` +
     `<div class="prov-body">` +
     `<div class="prov-sec"><div class="prov-lb"><span>cost keys</span><span class="prov-sub">dotted JSON path from the response root - e.g. usage.cost</span></div>` +
     `<div class="prov-chips">${costs.map(costChipHTML).join('')}</div>` +
@@ -3132,6 +3169,11 @@ function wireSettingsDelegation() {
   });
   box.addEventListener('change', e => {
     validateSettingsScalar(e.target);
+    // The delete-matching block owns its count preview: any select change
+    // re-counts through the shared preview owner. The early return also
+    // keeps the destructive block out of the per-row dirty marking (the
+    // [data-purge] exclusion in dirty() is the second half of that).
+    if (e.target.closest && e.target.closest('[data-purge="matching"]')) { updateDelCount(); return; }
     if (e.target.closest && e.target.closest('[data-backup="restore"]')) {
       if (e.target.id === 'backup-file') return;
       if (backupBusy) return;
@@ -3220,6 +3262,7 @@ function wireSettingsDelegation() {
     if (e.target && e.target.id === 'btn-backup-apply') { runBackupApply(); return; }
     if (e.target && e.target.id === 'btn-backup-cancel') { runBackupCancel(); return; }
     if (e.target && e.target.id === 'btn-purge-all') { purgeAll(); return; }
+    if (e.target && e.target.id === 'btn-del-matching') { deleteMatching(); return; }
     providersEditorClick(e);
   });
   // Clicks outside the add-menu close it (the menu lives in the sheet, but
@@ -3946,8 +3989,8 @@ let dbgModelGroups = [];
 // groupByCanonical is the one fold of raw model spellings into canonical
 // groups: deduped input, one canonicalModel pass per name, each group's
 // variants sorted. Both grouped surfaces build on it - the debug
-// checklist (dbgGroupedModels below) and the Clear/Logs model optgroups
-// (populateFilterMenu) - while each keeps its own projection
+// checklist (dbgGroupedModels below) and the delete/download model
+// optgroups (populateFilterMenu) - while each keeps its own projection
 // (display-name groups vs raw-value optgroups).
 function groupByCanonical(names) {
   const byGroup = new Map();
@@ -4394,18 +4437,19 @@ function doFilter() {
   fetchExplorer();
 }
 
-// ---------- safe delete (Clear ▾ menu) ----------
-// The Clear button opens a menu to delete all records or a filtered subset
-// (by provider / model / client / status / errors / debug / age), with a live
-// count preview before anything is deleted. Every request is one self-contained
-// row (retries live in the row's attempts JSON), so a filtered delete can never
-// leave orphan entries. The Logs ▾ menu reuses the same filter options (and
-// the same backend count endpoint) for choosing exactly what to download.
+// ---------- safe delete (settings sheet, storage category) ----------
+// Both database deletions live in the settings sheet's storage category:
+// Delete matching removes a filtered subset (by provider / model / client /
+// status / errors / debug / age) with a live count preview before anything is
+// deleted, and Delete everything wipes the whole database. Every request is
+// one self-contained row (retries live in the row's attempts JSON), so a
+// filtered delete can never leave orphan entries. The Logs ▾ menu reuses the
+// same filter options (and the same backend count endpoint) for choosing
+// exactly what to download.
 
 function toggleFilterMenu(e, menuId, prefix, refresh) {
-  toggleHdrMenu(e, menuId, () => populateFilterMenu(prefix), refresh);
+  toggleHdrMenu(e, menuId, () => populateFilterMenu(prefix, refresh), refresh);
 }
-function toggleClearMenu(e) { toggleFilterMenu(e, 'clear-menu', 'cf', updateClearCount); }
 // Use the dispatch path: a delegated action may replace/detach its target
 // before this later document listener runs. Live ancestry then lies about
 // where the click originated; the composed event path remains stable.
@@ -4418,15 +4462,19 @@ document.addEventListener('click', e => {
   if (!inside('#chart-metrics')) setMetricsMenuOpen(false);
 });
 
-// populateFilterMenu fills a filter menu's dropdowns from the current record
-// set (shared by the Clear and Logs menus - same options, same values).
+// populateFilterMenu fills a filter surface's dropdowns from the current
+// record set (shared by the Logs menu and the settings sheet's
+// delete-matching block - same options, same values). onChange wires the
+// per-select count refresh for surfaces without their own delegated
+// listener (the logs menu); the settings block passes none because its
+// #settings-fields change delegation owns the refresh.
 const FILTER_ERRORS = [['', 'any'], ['1', 'only errors']];
 const FILTER_DEBUG = [['', 'any'], ['1', 'only debug']];
 // Filter ages reuse the shared hour wording for '1h'; the longer spans are
 // deliberately day/week wording in the age context, not clock arithmetic.
 const FILTER_AGES = [['', '-'], ['1h', DURATION_LABELS['1h']], ['24h', '1 day'], ['168h', '1 week']];
 
-function populateFilterMenu(prefix) {
+function populateFilterMenu(prefix, onChange) {
   const recs = lastData?.records || [];
   const fill = (id, vals, label = v => v) => {
     const el = $(id);
@@ -4438,8 +4486,9 @@ function populateFilterMenu(prefix) {
   fill(prefix+'-status', [...new Set(recs.map(r => r.status_code))].sort((a,b)=>a-b).map(String));
   // The model select groups spelling variants under their canonical group
   // (an <optgroup> per multi-variant group) so the same model clusters
-  // visually - but each <option> keeps its raw value: Clear/Logs filter on
-  // the exact stored spelling, and the grouping never widens a delete.
+  // visually - but each <option> keeps its raw value: delete/download
+  // filters match the exact stored spelling, and the grouping never widens
+  // a delete.
   {
     const el = $(prefix+'-model');
     const cur = el.value;
@@ -4465,12 +4514,12 @@ function populateFilterMenu(prefix) {
   fillSelectPairs($(prefix+'-errors'), FILTER_ERRORS, errCur);
   fillSelectPairs($(prefix+'-debug'), FILTER_DEBUG, dbgCur);
   fillSelectPairs($(prefix+'-age'), FILTER_AGES, ageCur);
-  const onCh = prefix === 'cf' ? updateClearCount : updateLogsCount;
-  [prefix+'-provider', prefix+'-model', prefix+'-client', prefix+'-status', prefix+'-errors', prefix+'-debug', prefix+'-age'].forEach(id => { $(id).onchange = onCh; });
+  if (onChange) [prefix+'-provider', prefix+'-model', prefix+'-client', prefix+'-status', prefix+'-errors', prefix+'-debug', prefix+'-age'].forEach(id => { $(id).onchange = onChange; });
 }
 
-// filterFromUI reads a menu (by id prefix: cf = clear, lf = logs) into a
-// filter object matching the backend PurgeFilter JSON shape.
+// filterFromUI reads a filter surface (by id prefix: del = the settings
+// sheet's delete-matching block, lf = the logs menu) into a filter object
+// matching the backend PurgeFilter JSON shape.
 function filterFromUI(prefix, now = Date.now()) {
   const age = parseGoDuration($(prefix+'-age').value);
   return {
@@ -4487,11 +4536,12 @@ function clearFilterActive(f) {
   return f.provider || f.model || f.client || f.status_code || f.has_error || f.debug || f.before_ms;
 }
 
-// updateFilterCount POSTs /admin/purge/count for a Clear/Logs menu and
-// writes the preview into elId / enables btnId. phrase(count) is the label.
-// Each menu owns its latest preview, including the exact older-than instant.
-// Empty selections invalidate it too. Actions reuse this predicate, never a
-// newly calculated Date.now() that would widen the confirmed deletion.
+// updateFilterCount POSTs /admin/purge/count for the Logs menu or the
+// delete-matching block and writes the preview into elId / enables btnId.
+// phrase(count) is the label. Each surface owns its latest preview,
+// including the exact older-than instant. Empty selections invalidate it
+// too. Actions reuse this predicate, never a newly calculated Date.now()
+// that would widen the confirmed deletion.
 const _filterPreviews = new Map();
 let _purgeBusy = false;
 function filterSelection(prefix) { return JSON.stringify(filterFromUI(prefix, 0)); }
@@ -4514,7 +4564,7 @@ async function updateFilterCount(prefix, elId, btnId, phrase) {
     if (!Number.isSafeInteger(d.count) || d.count < 0) throw new Error(d.error || fail);
     preview.count = d.count;
     el.textContent = phrase(d.count);
-    $(btnId).disabled = d.count === 0 || prefix === 'cf' && _purgeBusy;
+    $(btnId).disabled = d.count === 0 || prefix === 'del' && _purgeBusy;
   } catch (e) {
     if (_filterPreviews.get(prefix) === preview && preview.selection === filterSelection(prefix)) {
       el.textContent = String(e.message || fail);
@@ -4522,42 +4572,48 @@ async function updateFilterCount(prefix, elId, btnId, phrase) {
   }
 }
 function recPhrase(n) { return fmt(n) + ' record' + (n === 1 ? '' : 's'); }
-function updateClearCount() {
-  return updateFilterCount('cf', 'clear-count', 'btn-clear-filtered', n => 'will delete ' + recPhrase(n));
+function updateDelCount() {
+  return updateFilterCount('del', 'del-count', 'btn-del-matching', n => 'will delete ' + recPhrase(n));
 }
 
-// clearFiltered deletes only the records matching the chosen filter.
-async function clearFiltered() {
+// deleteMatching deletes only the records matching the chosen filter (the
+// settings sheet's scoped delete; the storage category's Delete everything
+// row is the whole-database companion). Both actions announce through the
+// sheet's status line and share purgeMetrics' in-flight gate.
+async function deleteMatching() {
   if (_purgeBusy) return;
-  const preview = previewedFilter('cf');
-  if (!preview) return updateClearCount();
+  const preview = previewedFilter('del');
+  if (!preview) return updateDelCount();
   if (!confirm(`Delete ${recPhrase(preview.count)} matching the selected filter?\n\nThis cannot be undone.`)) return;
-  return purgeMetrics(preview.filter);
+  settingsStatus('deleting');
+  if (await purgeMetrics(preview.filter)) settingsStatus(recPhrase(preview.count) + ' deleted', 'ok');
 }
 
 // purgeAll is the settings sheet's whole-database delete (the storage
-// category's action row). It shares purgeMetrics and its in-flight gate
-// with clearFiltered, and reports through the sheet's status line
-// instead of the menu's count preview, which belongs to the menu surface.
+// category's Delete everything action row). It shares purgeMetrics and its
+// in-flight gate with deleteMatching, and reports through the sheet's
+// status line; the delete-matching block's count preview belongs to its
+// own scoped surface.
 async function purgeAll() {
   if (_purgeBusy) return;
   if (!confirm('Permanently delete all metrics history?\n\nThe entire database will be wiped. This cannot be undone.')) return;
   settingsStatus('deleting');
-  if (await purgeMetrics(null, settingsStatus)) settingsStatus('all metrics history deleted', 'ok');
+  if (await purgeMetrics(null)) settingsStatus('all metrics history deleted', 'ok');
 }
 
 // Confirmed success is the only path that clears UI state. The same gate
-// handles full/filtered deletion from either surface, disables repeat
-// submits, and reports failures to the invoking surface: the menu's
-// count preview or the settings status line.
-async function purgeMetrics(filter, report) {
+// handles full/filtered deletion from either action, disables repeat
+// submits, and reports failures to the settings status line - the one
+// surface both actions now live on.
+async function purgeMetrics(filter) {
   const fail = 'could not delete records';
   if (_purgeBusy) return;
   _purgeBusy = true;
-  $('btn-clear-filtered').disabled = true;
+  const delBtn = $('btn-del-matching');
+  if (delBtn) delBtn.disabled = true;
   const purgeAllBtn = $('btn-purge-all');
   if (purgeAllBtn) purgeAllBtn.disabled = true;
-  document.querySelectorAll('#clear-menu select').forEach(el => { el.disabled = true; });
+  document.querySelectorAll('#settings-fields [data-purge="matching"] select').forEach(el => { el.disabled = true; });
   try {
     const options = {method: 'POST'};
     if (filter) { options.headers = JSON_HEADERS; options.body = JSON.stringify(filter); }
@@ -4565,7 +4621,10 @@ async function purgeMetrics(filter, report) {
     if (result.ok !== true) throw new Error(result.error || fail);
     _filterPreviews.clear();
     $('btn-logs-filtered').disabled = true;
-    hideHdrMenu('clear-menu');
+    // The scoped block's preview text describes records that just ceased
+    // to exist; the next sheet fill rebuilds it empty either way.
+    const delPreview = $('del-count');
+    if (delPreview) delPreview.textContent = '';
     closeDrawer(); lastRender = {};
     lastSeq = 0;
     // No removal event exists: the forced full bootstrap is the post-purge
@@ -4574,17 +4633,18 @@ async function purgeMetrics(filter, report) {
     fetchBootstrap('full');
     return true;
   } catch (err) {
-    const msg = String(err.message || fail);
-    if (report) report(msg); else $('clear-count').textContent = msg;
+    settingsStatus(String(err.message || fail));
     return false;
   } finally {
     _purgeBusy = false;
-    // Re-query: fillSettingsForm may have rebuilt the row mid-flight, and
-    // only the instance currently in the document must end up enabled.
+    // Re-query: fillSettingsForm may have rebuilt the rows mid-flight, and
+    // a closed or unfilled sheet has none of them - only the instances
+    // currently in the document must end up in the right state.
     const freshPurgeBtn = $('btn-purge-all');
     if (freshPurgeBtn) freshPurgeBtn.disabled = false;
-    $('btn-clear-filtered').disabled = !previewedFilter('cf');
-    document.querySelectorAll('#clear-menu select').forEach(el => { el.disabled = false; });
+    const freshDelBtn = $('btn-del-matching');
+    if (freshDelBtn) freshDelBtn.disabled = !previewedFilter('del');
+    document.querySelectorAll('#settings-fields [data-purge="matching"] select').forEach(el => { el.disabled = false; });
   }
 }
 
@@ -4614,10 +4674,11 @@ function refreshAfterRestart(bootstrapApplied = false) {
 }
 
 // ---------- log export (Logs ▾ menu) ----------
-// Pick exactly what to download: the same filter dimensions as Clear (provider
-// / model / client / status / errors / debug / age), applied and previewed
-// against the full database via the shared count endpoint - the export then
-// streams the same rows the preview announced. "Download all" exports everything.
+// Pick exactly what to download: the same filter dimensions as the
+// delete-matching block (provider / model / client / status / errors /
+// debug / age), applied and previewed against the full database via the
+// shared count endpoint - the export then streams the same rows the
+// preview announced. "Download all" exports everything.
 
 function toggleLogsMenu(e) { toggleFilterMenu(e, 'logs-menu', 'lf', updateLogsCount); }
 

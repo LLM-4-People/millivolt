@@ -243,16 +243,6 @@ the recent rows currently loaded in the browser. No export was downloaded here.
 
 ![Logs menu with full-history export filters and download actions](images/menus/logs.png)
 
-### Clear
-
-Clear shares those filter controls for scoped deletion; Delete matching is the
-menu's only action. The action preview identifies the accepted selection;
-deleting is not a way to reset a chart window. Whole-database deletion lives
-in Settings under Storage, not in this menu. The screenshot leaves every
-filter empty and executes no deletion.
-
-![Clear menu with scoped deletion filters and its single destructive action](images/menus/clear.png)
-
 ### Restart
 
 Source deployments can rebuild and restart through a staged handoff. The menu
@@ -296,12 +286,14 @@ Tune them for the upstream and workload; the picture uses the public example.
 Storage settings control the SQLite writer and its bounded queue/batches.
 Metrics persistence is best-effort under sustained overload; a successful
 inference response does not prove its record was stored. The dashboard reports
-process-local storage drops. The category also carries Delete everything, the
-whole-database purge that moved here from the Clear menu: after a
-confirmation it permanently deletes all metrics history, the live ring and the
-entire durable database, and it cannot be undone.
+process-local storage drops. The category also carries both database
+deletion controls, which live here and nowhere else: Delete matching removes
+only the records matching its provider, model, client, status, errors, debug
+and age filters after a live count preview and a confirmation, and Delete
+everything permanently deletes all metrics history, the live ring and the
+entire durable database. Neither action can be undone.
 
-![Storage Settings with bounded writer, queue and persistence controls](images/settings/storage.png)
+![Storage Settings with bounded writer, queue, persistence and deletion controls](images/settings/storage.png)
 
 ### Provider compatibility
 

@@ -237,9 +237,8 @@ independent billing or a complete compliance audit log.
 | Limits | Set provider-wide concurrency, requests-per-window and tokens-per-window policies; inspect their source and remaining budgets. |
 | Debug | Start a scoped capture session with timed or manual stop. Captured bodies are opt-in, bounded, retained separately and still sensitive. |
 | Logs | Download all or exactly filtered finalized records as a gzip artifact of JSON (the compressed export; no uncompressed fallback). |
-| Clear | Preview and confirm a filtered deletion of the chosen records. Newer completions are protected by the deletion fence. |
 | Restart | On supported source deployments, rebuild and hand off after draining active work. Busy controls and progress reflect the actual restart state. |
-| Settings | Configure error storm protection, search configuration, edit typed fields/maps/rules, review restart markers, apply revision-checked changes and run the storage category's whole-database delete. |
+| Settings | Configure error storm protection, search configuration, edit typed fields/maps/rules, review restart markers, apply revision-checked changes and run the storage category's database deletes: Delete matching with a live count preview, and the whole-database Delete everything. Newer completions are protected by the deletion fence. |
 
 See the [operator workflows and API routes](docs/operations.md#operator-and-data-routes)
 before changing state. A protected listener is essential: these are operator

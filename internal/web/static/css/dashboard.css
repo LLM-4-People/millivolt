@@ -745,6 +745,13 @@
   .st-check { display: flex; align-items: center; gap: 8px; font: 12px/1.3 var(--sans); color: var(--text); }
   .st-backup-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
   .st-backup-actions .btn-accent { margin-left: auto; }
+  /* The storage category's delete-matching block: the scoped delete's
+     filter grid (the same seven rows the Logs menu carries) and its live
+     count preview, rendered like the backup action rows. */
+  .st-del-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .st-del-opts label { display: flex; flex-direction: column; gap: 3px; font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em; }
+  .st-del-opts select { width: 100%; font-size: 11px; padding: 4px 6px; font-family: var(--mono); }
+  .st-del-count { font: 10px/1.4 var(--mono); color: var(--warn); min-height: 14px; }
   .st-name { font: 600 12px/1.3 var(--sans); color: var(--text); display: flex; align-items: center; gap: 8px; min-width: 0; overflow-wrap: anywhere; }
   .st-name[for] { cursor: pointer; }
   .st-pill {
@@ -1044,6 +1051,7 @@
     .st-live { display: none; }
     .st-row { grid-template-columns: 1fr; gap: 6px; }
     .st-row:has(.st-switch) .st-ctl { align-items: flex-start; }
+    .st-del-opts { grid-template-columns: 1fr; }
     .st-hd input[type="search"] { max-width: none; }
     .ro-rule-head { grid-template-columns: auto auto; align-items: start; }
     .ro-summary, .ro-head-actions { grid-column: 1 / -1; width: 100%; }

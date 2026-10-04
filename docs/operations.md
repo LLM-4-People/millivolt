@@ -91,7 +91,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
 | Format translation | Native-adapter defaults, Cursor parked-run lifetime and heartbeat. |
-| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible whole-database delete. |
+| Storage | Writer queue/batches/flush cadence, restricted-query time/output limits and the irreversible database deletes (filtered and whole-database). |
 | Backup | Size cap for one Settings backup download or restore upload. |
 | MCP | The operator-gated `/mcp` LLM tool endpoint: the enable switch, the result-size limits its tools clamp with, and the call timeouts. Restart to apply. |
 | Dashboard | Request-log page size, KPI/chart/explorer refresh cadence and background refresh while its tab is hidden. |
@@ -834,8 +834,8 @@ without disabling protection.
 Changing a storm policy resets its samples/incidents and wakes waiters to
 re-evaluate the new policy. Banner visibility alone preserves detector state.
 A reset does not cancel work already sent or erase request history. Restart
-starts detection afresh, and queued requests do not persist. History Clear does
-not reset live outage protection.
+starts detection afresh, and queued requests do not persist. History deletion
+does not reset live outage protection.
 
 Storage stays outside the detector: fixed 64 time buckets retain counters per
 scope, with oldest-edge precision within approximately `storm_window / 64`.
@@ -921,7 +921,7 @@ are redacted.
 Exports/backups can outlive the configured retention period. See
 [Security](../SECURITY.md#upstream-destinations-and-credentials).
 
-### Logs and Clear
+### Logs and deletion
 
 Logs downloads finalized request records as JSON, not the process's stderr log
 and not a complete administrative audit trail. With durable storage it reads the
@@ -932,18 +932,21 @@ choose Download all. A debug-only export can include retained capture sidecars.
 The download is always a gzip artifact named `millivolt-logs-<timestamp>.json.gz`;
 gunzip it to read the JSON array of records. Compression is applied at the
 export writer itself, so every export shape (filtered, all or debug-only,
-from the ring or durable storage) downloads compressed the same way. This is
-a breaking change for scripts that consumed the plain JSON download: there is
+from the ring or durable storage) downloads compressed the same way. This is a
+breaking change for scripts that consumed the plain JSON download: there is
 no uncompressed fallback, so scripted consumers must decompress the artifact
 first.
 
-Clear uses the same filter/count owner, and its Delete matching is scoped to
-the chosen filter. Deletion requires confirmation in the
-dashboard; it does not happen when the menu opens. A selected filter makes a
-read-only `POST /admin/purge/count` preview. Current traffic can change the
-count before the action, but the UI retains the previewed age cutoff rather
-than silently moving it. The whole-database delete lives in Settings (Storage
-category, Delete everything); it is irreversible without a backup.
+Both database deletions live in Settings, in the storage category, and
+nowhere else. Delete matching uses the same filter/count owner as the export,
+and its scope is the chosen filter; Delete everything wipes the whole
+database. Deletion requires confirmation in the dashboard; it does not happen
+when the sheet opens. A selected filter makes a read-only
+`POST /admin/purge/count` preview. Current traffic can change the count
+before the action, but the UI retains the previewed age cutoff rather than
+silently moving it. The filter selections reset every time the sheet
+refills, so a stale invisible filter never arms a destructive default.
+Both actions are irreversible without a backup.
 
 Export/delete filters are exact raw record fields, not display-name model
 canonicalization. The API also supports conversation/error-type/time filters

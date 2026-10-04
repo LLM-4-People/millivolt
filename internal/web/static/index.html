@@ -200,30 +200,6 @@
         </div>
       </div>
     </div>
-    <div class="menu-wrap">
-      <button class="btn" id="btn-clear" onclick="toggleClearMenu(event)" aria-haspopup="menu" aria-controls="clear-menu" aria-expanded="false" aria-label="Clear" title="Clear">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.2 5.4h9.6"/><path d="M6.1 5.4V4.3A1.2 1.2 0 0 1 7.3 3.1h1.4A1.2 1.2 0 0 1 9.9 4.3v1.1"/><path d="M4.2 5.4l.7 7.4a1 1 0 0 0 1 .8h5.2a1 1 0 0 0 1-.8l.7-7.4"/></svg>
-        <span class="hdr-btn-label">Clear</span>
-      </button>
-      <div class="hdr-menu" id="clear-menu" hidden>
-        <div class="clear-menu-hd">Delete records…</div>
-        <div class="clear-opts">
-          <label>provider <select id="cf-provider"></select></label>
-          <label>model <select id="cf-model"></select></label>
-          <label>client <select id="cf-client"></select></label>
-          <label>status <select id="cf-status"></select></label>
-          <label>errors <select id="cf-errors"></select></label>
-          <label>debug <select id="cf-debug"></select></label>
-          <label>older than <select id="cf-age"></select></label>
-        </div>
-        <div class="clear-menu-ft">
-          <span class="clear-count" id="clear-count"></span>
-          <div class="clear-actions">
-            <button class="btn btn-danger" id="btn-clear-filtered" onclick="clearFiltered()">Delete matching</button>
-          </div>
-        </div>
-      </div>
-    </div>
     <div class="menu-wrap" id="restart-wrap">
       <button class="btn" id="btn-restart" onclick="toggleRestartMenu(event)" aria-haspopup="menu" aria-controls="restart-menu" aria-expanded="false" aria-label="Restart" title="Restart">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.97-4.23"/><path d="M13.6 2.4v2.9h-2.9"/></svg>

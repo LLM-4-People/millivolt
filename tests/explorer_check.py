@@ -308,8 +308,8 @@ async def capture_history(args):
                 await page.set_viewport_size({'width': 1440, 'height': 900})
                 # Opening these menus is read-only with empty filter controls.
                 # The mutation and external-origin guards remain unchanged.
-                for kind in ('pause', 'debug', 'limits', 'logs', 'clear', 'restart'):
-                    prefix = {'logs': 'lf', 'clear': 'cf'}.get(kind)
+                for kind in ('pause', 'debug', 'limits', 'logs', 'restart'):
+                    prefix = {'logs': 'lf'}.get(kind)
                     if prefix:
                         require(await page.evaluate('''prefix =>
                             [...document.querySelectorAll('[id^="' + prefix + '-"]')].every(el => !el.value)''',

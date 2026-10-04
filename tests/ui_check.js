@@ -1022,12 +1022,17 @@ async function main() {
 
   // ---- test 8: Logs menu (filter menu + export URL) ----
   const logsMenu = d.getElementById('logs-menu');
-  const clearMenu = d.getElementById('clear-menu');
   check('logs menu starts hidden', logsMenu && logsMenu.hidden);
   w.toggleLogsMenu({ stopPropagation() {} });
   check('logs menu opens', !logsMenu.hidden);
   check('logs open sets aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'true');
-  check('opening logs closes clear', clearMenu.hidden);
+  // The whole Clear control moved into the settings sheet's storage
+  // category: the header must not keep the button, the menu, or a
+  // HEADER_MENUS registration for either.
+  check('the header carries no clear control',
+    !d.getElementById('btn-clear') && !d.getElementById('clear-menu'));
+  check('the header menu registry carries no clear entry',
+    !w.eval('Object.entries(HEADER_MENUS).some(([b, m]) => b === "btn-clear" || m === "clear-menu")'));
   check('logs menu populated from records', d.querySelector('#lf-provider option[value="p"]') !== null);
   // ---- R25 L4-1 freeze row: the export has been a gzip artifact with no
   // plain-JSON fallback since wave 17, so the menu header must say so.
@@ -1035,26 +1040,32 @@ async function main() {
   // "(JSON)" label cannot return.
   check('logs menu header states the gzip export format',
     d.querySelector('#logs-menu .clear-menu-hd').textContent === 'Download logs (JSON, gzip)…');
-  // ---- L4-C8 pin: the Logs (lf-) and Clear (cf-) filter menus are one row
-  // set modulo the id prefix. The static HTML row lists must stay identical
-  // (same label texts, same per-row select ids after the prefix), and the
-  // runtime fill (populateFilterMenu, already prefix-parameterized) must
-  // write the same option values into both menus from one record set.
+  // ---- L4-C8 pin: the Logs menu (lf-) and the settings sheet's
+  // delete-matching block (del-) are one row set modulo the id prefix.
+  // The row lists must stay identical (same label texts, same per-row
+  // select ids after the prefix), and the runtime fill
+  // (populateFilterMenu, already prefix-parameterized) must write the
+  // same option values into both surfaces from one record set.
   {
     const skelDoc = new JSDOM(fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8')).window.document;
-    const filterRows = menu => [...menu.querySelectorAll('.clear-opts label')].map(l => [
+    const filterRows = root => [...root.querySelectorAll('label')].map(l => [
       l.textContent.replace(/\s+/g, ' ').trim(),
-      l.querySelector('select').id.replace(/^[cl]f-/, ''),
+      l.querySelector('select').id.replace(/^(lf|del)-/, ''),
     ]);
     const lfRows = filterRows(skelDoc.getElementById('logs-menu'));
-    const cfRows = filterRows(skelDoc.getElementById('clear-menu'));
-    check('the logs and clear menus render one prefix-identical filter row set',
-      lfRows.length === 7 && JSON.stringify(lfRows) === JSON.stringify(cfRows));
-    w.populateFilterMenu('cf');
-    const optValues = pre => ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']
-      .map(name => [...d.getElementById(pre + '-' + name).options].map(o => o.value));
-    check('both filter menus fill the same option values per row',
-      JSON.stringify(optValues('lf')) === JSON.stringify(optValues('cf')));
+    const delHost = d.createElement('div');
+    delHost.innerHTML = w.eval('settingsDeleteRowHTML()');
+    d.body.appendChild(delHost);
+    try {
+      const delRows = filterRows(delHost);
+      check('the logs menu and the settings delete block render one prefix-identical filter row set',
+        lfRows.length === 7 && JSON.stringify(lfRows) === JSON.stringify(delRows));
+      w.populateFilterMenu('del');
+      const optValues = pre => ['provider', 'model', 'client', 'status', 'errors', 'debug', 'age']
+        .map(name => [...d.getElementById(pre + '-' + name).options].map(o => o.value));
+      check('both filter surfaces fill the same option values per row',
+        JSON.stringify(optValues('lf')) === JSON.stringify(optValues('del')));
+    } finally { delHost.remove(); }
   }
   check('export URL encodes the filter', w.logsExportURL({ provider: 'openai', status_code: 429, has_error: false, debug: false, before_ms: 0, model: '', client: '' }) === '/metrics/export?provider=openai&status_code=429');
   check('empty filter exports everything', w.logsExportURL({ provider: '', model: '', client: '', status_code: 0, has_error: false, debug: false, before_ms: 0 }) === '/metrics/export');
@@ -1067,7 +1078,7 @@ async function main() {
   check('logs menu closes on second toggle', logsMenu.hidden);
   check('logs close clears aria-expanded', d.getElementById('btn-logs').getAttribute('aria-expanded') === 'false');
   // equal-size icon buttons: all five header actions share one min-width
-  const hdrIds = ['btn-pause', 'btn-debug', 'btn-limits', 'btn-logs', 'btn-clear', 'btn-settings'];
+  const hdrIds = ['btn-pause', 'btn-debug', 'btn-limits', 'btn-logs', 'btn-settings'];
   const bts = hdrIds.map(id => d.getElementById(id));
   const styles = bts.map(b => w.getComputedStyle(b).minWidth);
   check('header action buttons share one min-width', styles.every(s => s === styles[0] && s) && styles[0] !== 'auto');
@@ -1278,25 +1289,27 @@ async function main() {
     dfm.querySelectorAll('input[type=checkbox]').length === 2);
   w.applyModelCanon(modelFixture(DEF_RULES, canonNames), true);
   w.eval("debugState.known_models = ['m']");
-  // Clear/Logs model select: spelling variants cluster under a canonical
-  // <optgroup>, but every <option> keeps its RAW value (exact delete).
+  // The shared delete/download model select (populateFilterMenu fills the
+  // logs menu and the settings delete block alike): spelling variants
+  // cluster under a canonical <optgroup>, but every <option> keeps its RAW
+  // value (exact delete).
   const modelSelHTML = w.eval(`(() => {
     const saved = lastData;
     lastData = { records: [{ model: 'glm-5.3' }, { model: 'glm-5-3' }, { model: 'grok-4.6' }] };
-    populateFilterMenu('cf');
-    const html = document.getElementById('cf-model').innerHTML;
+    populateFilterMenu('lf');
+    const html = document.getElementById('lf-model').innerHTML;
     lastData = saved;
     return html;
   })()`);
-  check('clear-menu model options cluster variants under canonical optgroups',
+  check('filter model options cluster variants under canonical optgroups',
     modelSelHTML.includes('<optgroup label="glm-5-3 (2)"') &&
     modelSelHTML.includes('value="glm-5.3"') && modelSelHTML.includes('value="glm-5-3"') &&
     modelSelHTML.includes('value="grok-4.6"') && !modelSelHTML.includes('value="glm-5-3 (2)"'));
   const clientSelHTML = w.eval(`(() => {
     const saved = lastData;
     lastData = { records: [{ client: 'opencode/1.18.32' }, { client: 'team/2fa' }] };
-    populateFilterMenu('cf');
-    const html = document.getElementById('cf-client').innerHTML;
+    populateFilterMenu('lf');
+    const html = document.getElementById('lf-client').innerHTML;
     lastData = saved;
     return html;
   })()`);
@@ -1731,10 +1744,11 @@ async function main() {
   check('download all is the red-outline variant', dlAll && dlAll.classList.contains('btn-danger-outline'));
   w.toggleLogsMenu({ stopPropagation() {} });
 
-  // ---- test 9b: the whole-database delete moved off the Clear menu into
-  // the settings sheet's storage category. The Clear menu keeps only the
-  // scoped action; the moved control renders through the real
-  // fillSettingsForm pipeline and behaves like every other action row.
+  // ---- test 9b: every database deletion control lives in the settings
+  // sheet's storage category (the header Clear menu is gone): the scoped
+  // delete-matching block first, then the whole-database Delete everything
+  // row. Both render through the real fillSettingsForm pipeline and
+  // behave like every other action row.
   {
     const doc = {
       revision: 'purge-r1',
@@ -1747,28 +1761,52 @@ async function main() {
     w.eval('settingsDoc = window.__purgeDoc; fillSettingsForm(settingsDoc)');
     const row = d.querySelector('#settings-fields [data-purge="all"]');
     const purgeBtn = d.getElementById('btn-purge-all');
+    const delRow = d.querySelector('#settings-fields [data-purge="matching"]');
+    const delBtn = d.getElementById('btn-del-matching');
     check('the whole-database delete renders as a storage-category action row',
       !!row && row.dataset.cat === 'storage' && !row.hidden && row.classList.contains('st-block') &&
       !!row.querySelector('.st-backup-actions') &&
       row.querySelector('.st-hint').textContent.includes('permanently delete all metrics history'));
     check('delete everything is the solid-red variant',
       purgeBtn && purgeBtn.classList.contains('btn-danger-solid'));
-    check('the purge row joins the rail badge count',
-      d.querySelector('#settings-rail [data-st-cat="storage"] .rail-n').textContent === '2');
+    check('the scoped delete renders as a storage-category action block before Delete everything',
+      !!delRow && delRow.dataset.cat === 'storage' && !delRow.hidden && delRow.classList.contains('st-block') &&
+      delRow.querySelectorAll('.st-del-opts select').length === 7 &&
+      [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(delRow) <
+        [...d.querySelectorAll('#settings-fields .st-row[data-cat="storage"]')].indexOf(row));
+    check('delete matching is the light-red variant and starts disabled with an empty preview',
+      delBtn && delBtn.classList.contains('btn-danger') && delBtn.disabled &&
+      d.getElementById('del-count').textContent === '');
+    check('both delete blocks join the rail badge count',
+      d.querySelector('#settings-rail [data-st-cat="storage"] .rail-n').textContent === '3');
     const search = d.getElementById('settings-q');
     search.value = 'purge';
     w.filterSettings();
-    check('the purge row joins the search haystack',
-      !row.hidden && d.getElementById('settings-pane-hd').textContent.includes('1 match'));
+    check('both delete blocks join the search haystack',
+      !row.hidden && !delRow.hidden && d.getElementById('settings-pane-hd').textContent.includes('2 matches'));
     search.value = '';
     w.filterSettings();
+    d.getElementById('del-provider').value = 'p';
+    d.getElementById('del-provider').dispatchEvent(new w.Event('change', { bubbles: true }));
+    await settleUntil(() => !delBtn.disabled);
+    check('a select change re-counts the live preview through the delegated listener',
+      d.getElementById('del-count').textContent === 'will delete 3 records' && !delBtn.disabled);
     purgeBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
     purgeBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
+    delBtn.dispatchEvent(new w.Event('input', { bubbles: true }));
+    delBtn.dispatchEvent(new w.Event('change', { bubbles: true }));
     const collected = w.collectSettingsValues();
-    check('the purge row never dirties the form or joins value collection',
+    check('the delete blocks never dirty the form or join value collection',
       w.settingsDirtyCount() === 0 && d.getElementById('btn-settings-revert').disabled &&
       d.getElementById('btn-settings-apply').disabled &&
       Object.keys(collected).length === 1 && collected.storage_batch_cap === 5);
+    // Selections reset on every sheet fill: a stale invisible filter must
+    // never arm a destructive default.
+    w.eval('fillSettingsForm(settingsDoc)');
+    check('a sheet refill resets the selection, the preview and the button',
+      d.getElementById('del-provider').value === '' &&
+      d.getElementById('del-count').textContent === '' &&
+      d.getElementById('btn-del-matching').disabled);
   }
 
   // ---- test 10: infinite-scroll grows the log window, then pages the store ----
@@ -1863,26 +1901,25 @@ async function main() {
   check('full resync after paging resets to page size', rows().length === 60);
   check('resync drops store-paged rows', !rows().some(tr => tr.dataset.id === 'old000'));
 
-  // Clear/Logs preview ownership and failed mutations: exercise each actual
+  // Delete/Logs preview ownership and failed mutations: exercise each actual
   // handler, with controlled out-of-order requests and a fixed preview cutoff.
   {
     const savedFetch = w.fetch;
-    w.populateFilterMenu('cf');
     w.populateFilterMenu('lf');
-    d.getElementById('cf-provider').value = 'p';
+    d.getElementById('del-provider').value = 'p';
     let replyCount;
     w.fetch = () => new Promise(resolve => { replyCount = resolve; });
-    const oldCount = w.updateClearCount();
-    check('delete matching remains disabled while count is pending', d.getElementById('btn-clear-filtered').disabled);
-    d.getElementById('cf-provider').value = '';
-    await w.updateClearCount();
+    const oldCount = w.updateDelCount();
+    check('delete matching remains disabled while count is pending', d.getElementById('btn-del-matching').disabled);
+    d.getElementById('del-provider').value = '';
+    await w.updateDelCount();
     replyCount({ok: true, json: async () => ({count: 99})});
     await oldCount;
     check('an old count cannot overwrite an empty selection or re-enable delete',
-      d.getElementById('btn-clear-filtered').disabled && d.getElementById('clear-count').textContent === '');
+      d.getElementById('btn-del-matching').disabled && d.getElementById('del-count').textContent === '');
 
-    check('Logs/Clear age options use duration tokens',
-      ['cf', 'lf'].every(prefix => {
+    check('Delete/Logs age options use duration tokens',
+      ['del', 'lf'].every(prefix => {
         const el = d.getElementById(prefix + '-age');
         return !!el.querySelector('option[value="1h"]') &&
           !!el.querySelector('option[value="24h"]') &&
@@ -1892,19 +1929,18 @@ async function main() {
           !el.querySelector('option[value="604800000"]') &&
           !el.querySelector('option[value="7d"]');
       }));
-    d.getElementById('cf-age').value = '1h';
+    d.getElementById('del-age').value = '1h';
     d.getElementById('lf-age').value = '1h';
     const pendingCounts = [];
     w.fetch = () => new Promise(resolve => pendingCounts.push(resolve));
-    const clearCount = w.updateClearCount(), logsCount = w.updateLogsCount();
+    const delCount = w.updateDelCount(), logsCount = w.updateLogsCount();
     pendingCounts[1]({ok: true, json: async () => ({count: 4})});
     pendingCounts[0]({ok: true, json: async () => ({count: 3})});
-    await Promise.all([clearCount, logsCount]);
-    check('Logs and Clear counts do not supersede each other',
-      d.getElementById('clear-count').textContent.includes('3 records') && d.getElementById('logs-count').textContent.includes('4 records'));
-    const preview = w.previewedFilter('cf');
+    await Promise.all([delCount, logsCount]);
+    check('Logs and Delete counts do not supersede each other',
+      d.getElementById('del-count').textContent.includes('3 records') && d.getElementById('logs-count').textContent.includes('4 records'));
+    const preview = w.previewedFilter('del');
     const selectedRows = rows().slice();
-    d.getElementById('clear-menu').hidden = false;
     let submitted, resyncs = 0;
     w.fetch = async (url, options) => {
       if (String(url).includes('/admin/purge')) {
@@ -1915,36 +1951,49 @@ async function main() {
       return savedFetch(url, options);
     };
     await sleep(5);
-    await w.clearFiltered();
+    await w.deleteMatching();
     check('filtered deletion uses the previewed cutoff, not a later time', submitted.before_ms === preview.filter.before_ms);
-    check('failed deletion reports its error without wiping or resyncing the log', resyncs === 0 &&
-      !d.getElementById('clear-menu').hidden && d.getElementById('clear-count').textContent === 'delete rejected' &&
+    check('failed deletion reports through the sheet status without wiping or resyncing the log', resyncs === 0 &&
+      d.getElementById('settings-count').textContent === 'delete rejected' &&
+      d.getElementById('del-count').textContent === 'will delete 3 records' &&
+      !d.getElementById('btn-del-matching').disabled &&
       rows().every((row, i) => row === selectedRows[i]));
     let replyPurge, posts = 0;
     w.fetch = () => { posts++; return new Promise(resolve => { replyPurge = resolve; }); };
-    const first = w.clearFiltered();
+    const first = w.deleteMatching();
     w.purgeAll();
-    w.clearFiltered();
+    w.deleteMatching();
     check('all destructive actions share one in-flight gate', posts === 1 &&
-      d.getElementById('btn-purge-all').disabled && d.getElementById('btn-clear-filtered').disabled);
-    // A mid-flight settings refill must not resurrect an enabled purge
-    // button: the fresh render inherits the busy state, and the purge's
+      d.getElementById('btn-purge-all').disabled && d.getElementById('btn-del-matching').disabled);
+    check('the seven delete selects disable with the shared gate',
+      [...d.querySelectorAll('#settings-fields [data-purge="matching"] select')].every(s => s.disabled));
+    // A mid-flight settings refill must not resurrect enabled purge
+    // controls: the fresh render inherits the busy state, and the purge's
     // epilogue re-enables whichever instance is current.
     w.eval('fillSettingsForm(settingsDoc)');
-    check('a mid-flight settings refill renders the purge button still disabled',
-      d.getElementById('btn-purge-all').disabled);
+    check('a mid-flight settings refill renders both actions and the selects still disabled',
+      d.getElementById('btn-purge-all').disabled && d.getElementById('btn-del-matching').disabled &&
+      [...d.querySelectorAll('#settings-fields [data-purge="matching"] select')].every(s => s.disabled));
     replyPurge({ok: false, json: async () => ({error: 'still rejected'})});
     await first;
-    check('the purge epilogue re-enables the re-rendered button',
-      !d.getElementById('btn-purge-all').disabled);
-    d.getElementById('cf-age').value = '';
+    check('the purge epilogue re-enables the re-rendered button and selects; the unarmed delete button stays disabled',
+      !d.getElementById('btn-purge-all').disabled &&
+      ![...d.querySelectorAll('#settings-fields [data-purge="matching"] select')].some(s => s.disabled) &&
+      d.getElementById('btn-del-matching').disabled);
+    d.getElementById('del-age').value = '';
     d.getElementById('lf-age').value = '';
     d.getElementById('lf-provider').value = '';
     w.fetch = savedFetch;
-    await w.updateClearCount();
+    await w.updateDelCount();
     await w.updateLogsCount();
-    // The settings surface reports through its own status line: a
-    // settings-origin failure must never write the menu's count preview.
+    // Arm a fresh scoped preview, then prove a settings-origin failure
+    // reports through the sheet status and never writes the delete
+    // block's count preview.
+    d.getElementById('del-age').value = '1h';
+    await w.updateDelCount();
+    check('the delete preview arms from the live count',
+      d.getElementById('del-count').textContent === 'will delete 3 records' &&
+      !d.getElementById('btn-del-matching').disabled);
     let replySettingsPurge;
     w.fetch = () => new Promise(resolve => { replySettingsPurge = resolve; });
     const settingsPurge = w.purgeAll();
@@ -1952,12 +2001,14 @@ async function main() {
       d.getElementById('settings-count').textContent === 'deleting');
     replySettingsPurge({ok: false, json: async () => ({error: 'nope'})});
     await settingsPurge;
-    check('a failed settings purge reports through the sheet status, not the menu count',
+    check('a failed settings purge reports through the sheet status, not the delete preview',
       d.getElementById('settings-count').textContent === 'nope' &&
-      d.getElementById('clear-count').textContent === '' &&
-      !d.getElementById('btn-purge-all').disabled);
+      d.getElementById('del-count').textContent === 'will delete 3 records' &&
+      !d.getElementById('btn-purge-all').disabled && !d.getElementById('btn-del-matching').disabled);
+    // Leave the block disarmed for the suites that follow.
     w.fetch = savedFetch;
-    d.getElementById('clear-menu').hidden = true;
+    d.getElementById('del-age').value = '';
+    await w.updateDelCount();
   }
 
   // Durable pagination is independent of the ring, including timestamp ties,
@@ -3710,16 +3761,20 @@ async function main() {
   const menu = prow.querySelector('.prov-menu');
   check('add button sits in the title row, lowercase', !!topBtn && topBtn.textContent === '+ add provider' && topBtn.closest('.st-name') === prow.querySelector('.st-name'));
   check('remove is a recycle-bin icon', !!card.querySelector('[data-prov-rm] svg'));
-  // trashIconSVG clones the header Clear button's glyph at render time: the
-  // geometry (every path d) must stay authored once, in index.html, and the
-  // header-only .hdr-ico class must stay stripped (the .prov-x svg owns this
-  // surface's stroke and size).
+  // The provider card's trash icon is the PROV_TRASH_SVG markup constant
+  // (the header Clear button that used to own this geometry is gone): the
+  // rendered card icon must match the constant's paths exactly and carry
+  // no class (the .prov-x svg owns this surface's stroke and size).
   {
-    const hdrPaths = [...d.getElementById('btn-clear').querySelectorAll('svg path')].map(p => p.getAttribute('d'));
-    const clone = card.querySelector('[data-prov-rm] svg');
-    check('the card trash icon is the header glyph, minus the header class',
-      JSON.stringify([...clone.querySelectorAll('path')].map(p => p.getAttribute('d'))) === JSON.stringify(hdrPaths) &&
-      clone.getAttribute('class') === null);
+    const constPaths = w.eval(`(() => {
+      const host = document.createElement('div');
+      host.innerHTML = PROV_TRASH_SVG;
+      return [...host.querySelectorAll('path')].map(p => p.getAttribute('d'));
+    })()`);
+    const icon = card.querySelector('[data-prov-rm] svg');
+    check('the card trash icon renders the constant glyph, class-free',
+      JSON.stringify([...icon.querySelectorAll('path')].map(p => p.getAttribute('d'))) === JSON.stringify(constPaths) &&
+      icon.getAttribute('class') === null);
   }
   // The 16x16 down-chevron is one glyph authored twice as markup: the
   // explorer dimension picker's caret (index-adjacent, .hdr-ico family) and
