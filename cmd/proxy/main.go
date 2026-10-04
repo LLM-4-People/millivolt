@@ -30,9 +30,11 @@ import (
 )
 
 // Package-level state shared by the reload endpoint/handler and the reload
-// helper. liveCfg is the live config (updated in place on reload so the next
-// reload diffs against the latest applied values); liveProxy is the running
-// proxy server; liveConfigPath is the -config flag value.
+// helper. liveCfg is the live config (repointed to a fresh clone on reload
+// so the next reload diffs against the latest applied values, never
+// written in place: the boot object it starts as is the proxy's immutable
+// boot snapshot); liveProxy is the running proxy server; liveConfigPath is
+// the -config flag value.
 var (
 	liveMu             sync.Mutex
 	liveCfg            *config.Config
@@ -430,9 +432,9 @@ func main() {
 		server:   httpSrv,
 		cloneServer: func() *http.Server {
 			// The clone is built on the failed-handoff resume path, which
-			// can overlap a SIGHUP or admin reload swapping the live config
-			// in place; the timeout reads share liveMu with reloadConfig
-			// (the drainTimeout precedent below).
+			// can overlap a SIGHUP or admin reload repointing the live
+			// config to a fresh object; the timeout reads share liveMu with
+			// reloadConfig (the drainTimeout precedent below).
 			liveMu.Lock()
 			readHeaderTimeout, idleTimeout := liveCfg.ReadHeaderTimeout, liveCfg.IdleTimeout
 			liveMu.Unlock()
@@ -694,8 +696,9 @@ func applyCLIOverrides(cfg *config.Config) {
 // startup-bound fields that changed (listen, storage write pipeline, Open/AggAPI
 // query timeout, HTTP server timeouts, history size): those consumers stay at
 // boot values, but the snapshot is still swapped (GET effective shows them)
-// and they are reported as restart_required. The current cfg is updated in
-// place so a second reload diffs against the latest snapshot.
+// and they are reported as restart_required. The live cfg pointer is
+// repointed to a fresh clone so a second reload diffs against the latest
+// snapshot.
 func reloadConfig() ([]string, error) {
 	liveMu.Lock()
 	defer liveMu.Unlock()
@@ -738,9 +741,17 @@ func reloadConfig() ([]string, error) {
 	// in-memory-only instance must stay unlimited (the ring is all
 	// history; the paging fallback is dead without a store).
 	applySnapshotLimit(liveBuf, liveStore, fresh.DashLogRows)
-	// Keep the shared cfg in sync so the next reload diffs against the latest.
-	cloned := fresh.Clone()
-	*liveCfg = *cloned
+	// Keep the shared cfg in sync so the next reload diffs against the
+	// latest. Publish a NEW object, never a whole-struct write through the
+	// boot pointer: the object proxy.New captured is the immutable boot
+	// snapshot every in-flight request reads unlocked, so an in-place write
+	// races those readers (round-5 regression, pinned under -race in
+	// tests/_go/cmd/proxy/reload_race.go). This clone is a separate object
+	// from the one Reload received, so the server's snapshot and the live
+	// config never alias each other's mutable future; with the swap the
+	// boot object is never written again, as immutable as every later
+	// snapshot.
+	liveCfg = fresh.Clone()
 	recordReloadStatus(true, "", dropped, skipped)
 	return skipped, nil
 }

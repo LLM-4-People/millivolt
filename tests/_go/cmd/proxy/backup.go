@@ -968,10 +968,10 @@ func TestDBStageDirNamesLiveStoreVolumeAfterReloadPathChange(t *testing.T) {
 	liveStore = store
 	next := config.Default()
 	next.DBPath = filepath.Join(t.TempDir(), "next.db")
-	// The reload's whole-struct snapshot swap (reloadConfig does
-	// *liveCfg = *cloned under liveMu) with a changed, startup-bound
-	// db_path: the running store still has the boot path.
-	*liveCfg = *next
+	// The reload's snapshot publication (reloadConfig repoints liveCfg to
+	// a fresh clone under liveMu) with a changed, startup-bound db_path:
+	// the running store still has the boot path.
+	liveCfg = next
 	got, err := dbStageDir()
 	if err != nil {
 		t.Fatal(err)
