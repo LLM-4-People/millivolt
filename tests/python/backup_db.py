@@ -61,6 +61,16 @@ class BackupTest(unittest.TestCase):
                            [record[name] for name in self.columns])
         connection.commit()
 
+    def ancestor_source_db(self, drop):
+        """A migration-ancestor source: the current schema minus drop columns."""
+        connection = sqlite3.connect(self.source)
+        self.addCleanup(connection.close)
+        columns = [name for name in self.columns if name not in frozenset(drop)]
+        definitions = [name + ' ' + subject.FIELD_TYPES[name]
+                       + (' PRIMARY KEY' if name == 'id' else '') for name in columns]
+        connection.execute('CREATE TABLE requests (' + ','.join(definitions) + ')')
+        return connection, columns
+
     def copy(self):
         subject.backup(self.source, self.destination, docs_safe=True)
         return subject.verify_docs_copy(self.destination)
@@ -255,6 +265,48 @@ class BackupTest(unittest.TestCase):
                 connection = self.source_db()
                 connection.execute(ddl)
                 connection.commit()
+                with self.assertRaisesRegex(ValueError, 'unrecognized table columns'):
+                    self.copy()
+                self.assertFalse(self.destination.exists())
+                self.assertFalse(list(self.root.glob('millivolt-docs-backup-*')))
+                connection.close()
+                self.source.unlink()
+
+    def test_migration_ancestor_sources_derive_the_zero_backfill(self):
+        # An operator's local history can predate the latest migration
+        # columns: store.go appends each with INTEGER NOT NULL DEFAULT 0, so
+        # the derive accepts the ancestor and projects the migration's own
+        # backfill - identical to migrating the source first and deriving
+        # afterwards. The destination always carries the complete schema.
+        full, intermediate, single = (subject.MIGRATION_ZERO_COLUMNS,
+                                      subject.MIGRATION_ZERO_COLUMNS[:2],
+                                      subject.MIGRATION_ZERO_COLUMNS[-1:])
+        for drop in (full, intermediate, single):
+            with self.subTest(drop=drop):
+                connection, columns = self.ancestor_source_db(drop)
+                record = self.record()
+                connection.execute('INSERT INTO requests VALUES (' + ','.join('?' for _ in columns) + ')',
+                                   [record[name] for name in columns])
+                connection.commit()
+                self.assertEqual(self.copy()['records'], 1)
+                with closing(sqlite3.connect(self.destination)) as served:
+                    served_columns = [row[1] for row in served.execute('PRAGMA table_xinfo(requests)')]
+                    self.assertEqual(set(served_columns), set(subject.FIELD_TYPES))
+                    for name in drop:
+                        self.assertEqual(
+                            served.execute('SELECT "' + name + '" FROM requests').fetchone()[0], 0,
+                            name + ' must be the migration backfill, never the dropped source value')
+                connection.close()
+                self.source.unlink()
+                self.destination.unlink()
+
+    def test_non_migration_column_loss_still_fails_closed(self):
+        # Only the zero-backfilled migration columns may be absent. Losing
+        # any other column - alone or beside a migration column - is an
+        # unrecognized schema and the derive refuses.
+        for drop in (('cost',), ('cost',) + subject.MIGRATION_ZERO_COLUMNS[:1]):
+            with self.subTest(drop=drop):
+                connection, _ = self.ancestor_source_db(drop)
                 with self.assertRaisesRegex(ValueError, 'unrecognized table columns'):
                     self.copy()
                 self.assertFalse(self.destination.exists())

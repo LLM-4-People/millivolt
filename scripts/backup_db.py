@@ -59,6 +59,17 @@ FIELD_TYPES = {**dict.fromkeys(INTEGER_FIELDS, 'INTEGER'),
                **dict.fromkeys(EMPTY_FIELDS, 'TEXT'),
                **dict.fromkeys(('id', 'key_hash', 'attempts', 'tool_names'), 'TEXT'),
                'debug': 'INTEGER'}
+# The migration columns internal/storage appends with INTEGER NOT NULL
+# DEFAULT 0, in the migration's own order (store.go's needed map). A docs
+# source may predate them: an operator's local history database is a
+# migration ancestor, and the derive accepts it by projecting each missing
+# column as exactly the migration's zero backfill - identical to migrating
+# the source first and deriving afterwards. Every other column set stays
+# unrecognized. A future migration column joins this list only together
+# with its zero default.
+MIGRATION_ZERO_COLUMNS = ('chunks', 'first_reasoning_at', 'request_bytes', 'response_bytes',
+                          'upstream_gzip', 'upstream_connect_ms', 'upstream_tls_ms',
+                          'upstream_ttfb_ms', 'upstream_conn_reused')
 # These code-owned retry classes suppress non-upstream error cards. Replacing
 # them would change aggregate.errorEntries semantics for statuses below 500.
 ERROR_CLASSES = frozenset(('transport', 'rate_limit'))
@@ -122,12 +133,17 @@ def _readonly(path):
     return connection
 
 
-def _table_columns(connection, table, types, primary_key):
+def _table_columns(connection, table, types, primary_key, lineage=frozenset()):
     # table is an internal policy name, never source-provided SQL. xinfo also
     # includes generated/hidden columns, which table_info would silently omit.
+    # lineage names the migration columns (with zero defaults) a SOURCE table
+    # may legitimately lack; the derive backfills them itself, so the source
+    # may have fewer columns than the current schema. Destinations always
+    # carry the full set and verify with an empty lineage.
     info = connection.execute('PRAGMA table_xinfo(' + table + ')').fetchall()
     columns = [row[1] for row in info]
-    require(len(columns) == len(types) and set(columns) == set(types), 'unrecognized table columns')
+    missing = set(types) - set(columns)
+    require(set(columns) <= set(types) and missing <= lineage, 'unrecognized table columns')
     require(all(row[2].upper() == types[row[1]] and row[6] == 0 for row in info),
             'unrecognized column types or generated data')
     require([row[1] for row in info if row[5]] == [primary_key], 'unexpected table primary key')
@@ -135,9 +151,21 @@ def _table_columns(connection, table, types, primary_key):
 
 
 def _columns(connection):
+    # The strict reader: destinations and served copies must carry the
+    # complete current schema. Only _source_columns, below, tolerates a
+    # migration ancestor.
+    return _table_columns(connection, 'requests', FIELD_TYPES, 'id')
+
+
+def _source_columns(connection):
+    # The derive's source reader: an operator's local history may predate the
+    # latest migration columns, so a recognized ancestor (the current schema
+    # minus any subset of MIGRATION_ZERO_COLUMNS) is accepted here. Every
+    # other reader stays strict.
     require(connection.execute("SELECT type FROM sqlite_schema WHERE name='requests'").fetchone() == ('table',),
             'request data must be a table')
-    return _table_columns(connection, 'requests', FIELD_TYPES, 'id')
+    return _table_columns(connection, 'requests', FIELD_TYPES, 'id',
+                          lineage=frozenset(MIGRATION_ZERO_COLUMNS))
 
 
 def _json(value):
@@ -300,13 +328,21 @@ class _Manifest:
 
 def _derive(snapshot, destination):
     with closing(_readonly(snapshot)) as src:
-        columns = _columns(src)
+        source_columns = _source_columns(src)
+        # A migration-ancestor source lacks some MIGRATION_ZERO_COLUMNS; the
+        # destination always carries the complete current schema, with each
+        # absent column projected as the migration's zero backfill in SQL.
+        # Any other column name was refused above.
+        columns = list(source_columns) + [name for name in MIGRATION_ZERO_COLUMNS
+                                          if name not in source_columns]
         # Discard content in SQL, before SQLite/Python can decode or allocate
         # it. Source labels may contain arbitrary bytes: surrogateescape keeps
         # their identity reversible until replaced with safe aliases. No such
         # source string is ever inserted into the destination.
-        projection = ','.join("CAST('' AS TEXT)" if name in EMPTY_FIELDS else '0' if name == 'debug'
-                              else '"' + name + '"' for name in columns)
+        projection = ','.join(
+            '0' if name not in source_columns else
+            "CAST('' AS TEXT)" if name in EMPTY_FIELDS else '0' if name == 'debug'
+            else '"' + name + '"' for name in columns)
         src.text_factory = lambda data: data.decode('utf-8', errors='surrogateescape')
         aliases, manifest = _Aliases(), _Manifest(columns)
         _new_file(destination)
