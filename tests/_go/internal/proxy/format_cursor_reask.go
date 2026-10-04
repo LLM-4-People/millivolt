@@ -289,3 +289,104 @@ func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 		t.Fatalf("LastTokenAt %v before FirstTokenAt %v", rec.LastTokenAt, rec.FirstTokenAt)
 	}
 }
+
+// TestCursorVoidReaskFailureKeepsVoidTimeline pins the failed-re-ask contract:
+// when the void turn emitted a tokenless text delta and the re-ask then fails,
+// the surfaced response is still the VOID's, so the record must keep
+// describing the voided attempt. The re-ask's admission stamps FinalAttemptAt
+// (Retries > 0 after the absorb) and its >= 400 response adopts transport
+// timing inside openCursorHTTP; left in place, TTFT computes
+// FirstTokenAt - FinalAttemptAt < 0 and the timing describes an attempt whose
+// response the client never received. Both must roll back to the void's.
+func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
+	// voidGap separates the void's tokenless delta from the turn end, so a
+	// re-ask-anchored TTFT is negative by a wide, unambiguous margin.
+	// reaskDelay delays the failed re-ask's 500 headers, so its adopted
+	// ttfb sits structurally far above the void run's own fast send.
+	const voidGap = 200 * time.Millisecond
+	const reaskDelay = 300 * time.Millisecond
+	var voidDeltaAt time.Time
+	var calls atomic.Int32
+	h2s := &http2.Server{}
+	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := r.Body
+		if calls.Add(1) == 1 {
+			// The void: one tokenless text delta (the FirstTokenAt
+			// footprint), a fixed gap, then turn end with zero tokens.
+			w.Header().Set("Content-Type", "application/connect+proto")
+			w.Header().Set("X-Request-Id", "req-void")
+			fl := w.(http.Flusher)
+			w.WriteHeader(200)
+			readFrame(t, body)
+			cursorConnectHandshake(t, w, body, fl)
+			voidDeltaAt = time.Now()
+			w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "tokenless fragment")))))
+			fl.Flush()
+			time.Sleep(voidGap)
+			w.Write(cframe(cmsg(1, cmsg(14, nil))))
+			w.Write(cend("{}"))
+			fl.Flush()
+			return
+		}
+		// The re-ask fails: a 500 whose headers sit reaskDelay out, so the
+		// timing it would adopt is distinguishable from the void run's.
+		time.Sleep(reaskDelay)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		w.Write([]byte(`{"error":{"message":"upstream exploded"}}`))
+	}), h2s))
+	upstream.EnableHTTP2 = true
+	upstream.Start()
+	defer upstream.Close()
+
+	// StormMaxRetries 0 keeps the re-ask's 500 a single deterministic send:
+	// no storm-budget retry ladder runs before the failure surfaces.
+	cfg := config.Default()
+	cfg.StormMaxRetries = 0
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	resp, err := http.DefaultClient.Do(cursorVoidRequest(srv, upstream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	got := string(b)
+	if !strings.Contains(got, `"code":"empty_turn"`) {
+		t.Fatalf("a failed re-ask must surface the void in-band: %s", got)
+	}
+	if n := calls.Load(); n != 2 {
+		t.Fatalf("upstream Run calls = %d, want 2 (void + one failed re-ask)", n)
+	}
+
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() || rec.ErrorCode != cursorEmptyTurn {
+		t.Fatalf("record must flag the surfaced void: type=%q code=%q", rec.ErrorType, rec.ErrorCode)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorType != cursorEmptyTurn {
+		t.Fatalf("the absorbed void attempt must stay logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+	if rec.FirstTokenAt.IsZero() {
+		t.Fatal("the void's tokenless text delta must have stamped FirstTokenAt, or the TTFT pin below is vacuous")
+	}
+	if rec.TTFTMs < 0 {
+		t.Fatalf("TTFTMs = %d, want >= 0 (the surfaced void's own token timeline; a FinalAttemptAt kept from the failed re-ask's admission lands after the void's token and turns TTFT negative)", rec.TTFTMs)
+	}
+	// FinalAttemptAt must describe the surfaced void's own send, which began
+	// before the void's delta landed. The failed re-ask's admission stamp
+	// sits a full voidGap after the delta and fails this.
+	if !rec.FinalAttemptAt.Before(voidDeltaAt) {
+		t.Fatalf("FinalAttemptAt = %v, want the surfaced void's own attempt (before the void's delta at %v), never the failed re-ask's admission", rec.FinalAttemptAt, voidDeltaAt)
+	}
+	// The failed re-ask's 500 response adopted its transport timing inside
+	// openCursorHTTP before the opener discarded it; the surfaced record must
+	// keep the void run's fast send instead (the ~%dms header wait is the
+	// failed re-ask's, never the client's response).
+	if rec.UpstreamTTFBMs >= reaskDelay.Milliseconds()/2 {
+		t.Fatalf("UpstreamTTFBMs = %d, want the void run's own fast send (< %d), not the failed re-ask's ~%dms header wait",
+			rec.UpstreamTTFBMs, reaskDelay.Milliseconds()/2, reaskDelay.Milliseconds())
+	}
+}

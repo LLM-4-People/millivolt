@@ -1004,7 +1004,7 @@ func TestNewHTTPServerContract(t *testing.T) {
 	cfg.IdleTimeout = 4 * time.Minute
 	srvCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	srv := newHTTPServer(http.NotFoundHandler(), cfg, srvCtx)
+	srv := newHTTPServer(http.NotFoundHandler(), cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
 	if srv.ReadHeaderTimeout != cfg.ReadHeaderTimeout || srv.IdleTimeout != cfg.IdleTimeout {
 		t.Fatalf("timeouts = (%v, %v), want the boot config's (%v, %v)",
 			srv.ReadHeaderTimeout, srv.IdleTimeout, cfg.ReadHeaderTimeout, cfg.IdleTimeout)

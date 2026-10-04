@@ -517,11 +517,14 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 		resp.Body.Close()
 		return nil, fmt.Errorf("%s", detail)
 	}
-	// The re-ask's response is the one the client receives: the record-level
-	// upstream metadata (request id, server, processing time, rate-limit
-	// state, response headers, the transport's gzip fact) must describe it,
-	// not the voided run whose capture is still on the record. Without this
-	// re-capture a recovered void kept the VOID run's response metadata.
+	// The re-ask's response is the one the client receives, so its capture
+	// replaces the voided run's on the record: request id, server, response
+	// headers and the transport's gzip fact unconditionally, while the
+	// echoed model, processing time and rate-limit state follow
+	// captureUpstreamHeaders' fill-if-present rule (the same semantics as
+	// every generic call site) - a value the response does not carry leaves
+	// the previous attempt's in place. Without this re-capture a recovered
+	// void kept the VOID run's response metadata.
 	captureUpstreamHeaders(resp, rec, t.authHeader)
 	return s.startCursorRun(pw, resp.Body, blobs, upstreamCancel), nil
 }
@@ -667,13 +670,24 @@ func openCursorStream(w http.ResponseWriter, rec *metrics.Record, id, model stri
 // reaskAfterVoid tears down a voided resume-action run and re-opens a fresh
 // one, absorbing the void into the record. It returns the new run with the
 // per-turn metrics already reset for its turn, or nil when the re-ask opener
-// failed; the caller owns its surface's divergent re-drive tail.
+// failed; the caller owns its surface's divergent re-drive tail. On failure
+// the record must keep describing the voided attempt - the void, not the
+// failed re-ask, is the response the caller surfaces - so the re-ask's
+// FinalAttemptAt admission stamp and the transport timing openCursorHTTP
+// adopted from its returned response roll back to their pre-re-ask values;
+// a successful re-ask re-stamps both with its own, like the generic quality
+// loops' adopted attempt.
 func (s *Server) reaskAfterVoid(run *providerformat.CursorRun, rec *metrics.Record, reask func() (*providerformat.CursorRun, error)) *providerformat.CursorRun {
 	s.cursorRuns.drop(run)
 	run.Close()
 	s.absorbCursorVoid(rec)
+	prevAttemptAt := rec.FinalAttemptAt
+	prevConnect, prevTLS, prevTTFB, prevReused := rec.UpstreamConnectMs, rec.UpstreamTLSMs, rec.UpstreamTTFBMs, rec.UpstreamConnReused
 	next, err := reask()
 	if err != nil || next == nil {
+		rec.FinalAttemptAt = prevAttemptAt
+		rec.UpstreamConnectMs, rec.UpstreamTLSMs, rec.UpstreamTTFBMs = prevConnect, prevTLS, prevTTFB
+		rec.UpstreamConnReused = prevReused
 		return nil
 	}
 	resetTurnMetrics(rec)

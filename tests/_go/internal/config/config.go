@@ -823,6 +823,39 @@ func TestHeartbeatValidateWording(t *testing.T) {
 	}
 }
 
+// The mcp category's whole band is enforced at the config boundary with the
+// key named, so a Settings write or a YAML load can never arm the endpoint
+// with an unusable policy. internal/mcp's Limits.Validate is the
+// construction-time twin of the same band; this pins the config side.
+func TestMCPSettingsValidateRejections(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+		key    string
+	}{
+		{"page size below floor", func(c *Config) { c.MCPPageSize = 0 }, "mcp_page_size"},
+		{"query rows below floor", func(c *Config) { c.MCPQueryMaxRows = 0 }, "mcp_query_max_rows"},
+		{"query bytes below floor", func(c *Config) { c.MCPQueryMaxBytes = 0 }, "mcp_query_max_bytes"},
+		{"capture bytes below floor", func(c *Config) { c.MCPCaptureMaxBytes = 0 }, "mcp_capture_max_bytes"},
+		{"query timeout zero", func(c *Config) { c.MCPQueryTimeout = 0 }, "mcp_query_timeout"},
+		{"query timeout negative", func(c *Config) { c.MCPQueryTimeout = -time.Second }, "mcp_query_timeout"},
+		{"request timeout zero", func(c *Config) { c.MCPTimeout = 0 }, "mcp_timeout"},
+		{"request timeout negative", func(c *Config) { c.MCPTimeout = -time.Second }, "mcp_timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			tc.mutate(c)
+			err := c.Validate()
+			if err == nil {
+				t.Fatalf("Validate() = nil, want a rejection for %s", tc.name)
+			}
+			if name, _, ok := strings.Cut(err.Error(), ":"); !ok || name != tc.key {
+				t.Fatalf("Validate() = %q, want the rejection to name %q", err, tc.key)
+			}
+		})
+	}
+}
+
 // TestApplyProviderAliases pins the Settings-sheet path for provider_aliases:
 // the JSON map coerces into the Go field, a malformed pair fails the Apply,
 // and Map() round-trips the map so the editor cannot silently drop it.

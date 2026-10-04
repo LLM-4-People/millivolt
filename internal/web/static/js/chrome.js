@@ -853,7 +853,7 @@ function settingsPurgeRowHTML() {
     <div class="st-name">Delete everything</div>
     <div class="st-ctl">
       <div class="st-backup-actions"><button type="button" class="btn btn-danger-solid" id="btn-purge-all">Delete everything</button></div>
-      <span class="st-hint">permanently delete ALL metrics history: the live ring and the entire durable database; cannot be undone</span>
+      <span class="st-hint">permanently delete all metrics history: the live ring and the entire durable database; cannot be undone</span>
     </div>
   </div>`;
 }
@@ -4541,7 +4541,7 @@ async function clearFiltered() {
 // instead of the menu's count preview, which belongs to the menu surface.
 async function purgeAll() {
   if (_purgeBusy) return;
-  if (!confirm('Permanently delete ALL metrics history?\n\nThe entire database will be wiped. This cannot be undone.')) return;
+  if (!confirm('Permanently delete all metrics history?\n\nThe entire database will be wiped. This cannot be undone.')) return;
   settingsStatus('deleting');
   if (await purgeMetrics(null, settingsStatus)) settingsStatus('all metrics history deleted', 'ok');
 }

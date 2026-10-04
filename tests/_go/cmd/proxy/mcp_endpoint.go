@@ -214,6 +214,42 @@ func TestMCPHTTPEndpointRefusesRedirectsInProcess(t *testing.T) {
 	}
 }
 
+// TestMCPHTTPEndpointWrongMethodIs405Post pins the documented method gate on
+// the real endpoint handler: with a valid Bearer, GET and DELETE answer 405
+// with Allow: POST (there is no standalone SSE stream and no session to
+// delete), so a method regression on the transport is caught locally instead
+// of only in the docs.
+func TestMCPHTTPEndpointWrongMethodIs405Post(t *testing.T) {
+	gate := newOperatorGate(mcpEndpointToken)
+	// The dispatch never runs: both wrong methods are answered by the
+	// transport's method gate before any tool could execute.
+	endpoint := httptest.NewServer(newMCPHandler(gate, http.NotFoundHandler(), mcp.LimitsFromConfig(config.Default())))
+	t.Cleanup(endpoint.Close)
+
+	for _, method := range []string{http.MethodGet, http.MethodDelete} {
+		request, err := http.NewRequest(method, endpoint.URL+"/mcp", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+mcpEndpointToken)
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatalf("%s /mcp: %v", method, err)
+		}
+		body, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if response.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("%s /mcp status = %d, want 405 (body %q)", method, response.StatusCode, body)
+		}
+		if got := response.Header.Get("Allow"); got != http.MethodPost {
+			t.Fatalf("%s /mcp Allow = %q, want POST", method, got)
+		}
+	}
+}
+
 // connectMCPHTTP connects a real streamable HTTP MCP client that presents the
 // fixture credential as a Bearer header. The standalone SSE GET is disabled
 // because a stateless server answers it 405 by design.

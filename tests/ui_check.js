@@ -1750,7 +1750,7 @@ async function main() {
     check('the whole-database delete renders as a storage-category action row',
       !!row && row.dataset.cat === 'storage' && !row.hidden && row.classList.contains('st-block') &&
       !!row.querySelector('.st-backup-actions') &&
-      row.querySelector('.st-hint').textContent.includes('permanently delete ALL metrics history'));
+      row.querySelector('.st-hint').textContent.includes('permanently delete all metrics history'));
     check('delete everything is the solid-red variant',
       purgeBtn && purgeBtn.classList.contains('btn-danger-solid'));
     check('the purge row joins the rail badge count',

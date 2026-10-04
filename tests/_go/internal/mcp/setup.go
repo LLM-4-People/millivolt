@@ -89,7 +89,9 @@ func TestLimitsValidation(t *testing.T) {
 		want   string
 	}{
 		{"no query rows", func(l *Limits) { l.QueryMaxRows = 0 }, "query max rows"},
+		{"no query bytes", func(l *Limits) { l.QueryMaxBytes = 0 }, "query max bytes"},
 		{"no page size", func(l *Limits) { l.PageSize = 0 }, "page size"},
+		{"no capture bytes", func(l *Limits) { l.CaptureBytes = 0 }, "capture bytes"},
 		{"no query timeout", func(l *Limits) { l.QueryTimeout = 0 }, "query timeout"},
 		{"no timeout", func(l *Limits) { l.Timeout = 0 }, "request timeout"},
 	} {

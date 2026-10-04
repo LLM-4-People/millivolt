@@ -57,16 +57,18 @@ func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
 	return false
 }
 
-// newHTTPServer builds the proxy's http.Server: the boot config's request
-// timeouts, no WriteTimeout (it would cut off long-lived SSE streams), and
-// the shared base context cancelled on shutdown so in-flight SSE streams
-// abort immediately and Shutdown is never gated on their timeout. The main
-// server and the restart handoff's clone share this one constructor.
-func newHTTPServer(handler http.Handler, cfg *config.Config, srvCtx context.Context) *http.Server {
+// newHTTPServer builds the proxy's http.Server: the caller-supplied request
+// timeouts (the boot config's values, or the live config's read under liveMu
+// by the restart handoff's clone), no WriteTimeout (it would cut off
+// long-lived SSE streams), and the shared base context cancelled on shutdown
+// so in-flight SSE streams abort immediately and Shutdown is never gated on
+// their timeout. The main server and the restart handoff's clone share this
+// one constructor.
+func newHTTPServer(handler http.Handler, readHeaderTimeout, idleTimeout time.Duration, srvCtx context.Context) *http.Server {
 	return &http.Server{
 		Handler:           handler,
-		ReadHeaderTimeout: cfg.ReadHeaderTimeout,
-		IdleTimeout:       cfg.IdleTimeout,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
 		// No WriteTimeout: it would cut off long-lived SSE streams.
 		BaseContext: func(net.Listener) context.Context { return srvCtx },
 	}
@@ -416,7 +418,7 @@ func main() {
 	srvCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 
-	httpSrv := newHTTPServer(handler, cfg, srvCtx)
+	httpSrv := newHTTPServer(handler, cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
 	// Serve in a goroutine; main blocks on the shutdown signal so we can shut
 	// down gracefully and close storage only after in-flight requests finish.
 
@@ -427,7 +429,14 @@ func main() {
 		listener: ln,
 		server:   httpSrv,
 		cloneServer: func() *http.Server {
-			return newHTTPServer(handler, cfg, srvCtx)
+			// The clone is built on the failed-handoff resume path, which
+			// can overlap a SIGHUP or admin reload swapping the live config
+			// in place; the timeout reads share liveMu with reloadConfig
+			// (the drainTimeout precedent below).
+			liveMu.Lock()
+			readHeaderTimeout, idleTimeout := liveCfg.ReadHeaderTimeout, liveCfg.IdleTimeout
+			liveMu.Unlock()
+			return newHTTPServer(handler, readHeaderTimeout, idleTimeout, srvCtx)
 		},
 		closeFeeds: buf.CloseFeeds,
 		flushStore: func() error {

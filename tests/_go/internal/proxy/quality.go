@@ -50,10 +50,14 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 		// the attempt whose body the client received (captureUpstreamHeaders
 		// re-captures after every successful re-send).
 		if n == 1 {
-			// The void attempt is SLOW: its (empty) answer sits ~150ms out,
-			// so an upstream_ttfb_ms anchored anywhere but the re-send's own
-			// start would carry the delay and fail the assertion below.
-			time.Sleep(150 * time.Millisecond)
+			// The void attempt is SLOW: its (empty) answer sits ~400ms out.
+			// Sleeps are floors, so the void's own ttfb is structurally
+			// >= 400ms while the re-send's is >= 60ms - the two competing
+			// timelines are far apart, and the ttfb bound below sits at the
+			// midpoint (250ms). An upstream_ttfb_ms anchored anywhere but the
+			// re-send's own start would carry the void's delay and fail the
+			// bound by ~150ms even under scheduler noise.
+			time.Sleep(400 * time.Millisecond)
 			w.Header().Set("X-Request-Id", "req-first")
 			w.WriteHeader(200)
 			w.Write([]byte(voidBody))
@@ -123,15 +127,15 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	// The httptrace decomposition describes the RE-SEND (the adopted
 	// attempt), like every other record-level fact above: upstream_ttfb_ms
 	// measures from the re-send's own start, not from the request start, so
-	// the slow void attempt's ~150ms header delay is absent (FinalAttemptAt -
+	// the slow void attempt's ~400ms header delay is absent (FinalAttemptAt -
 	// Start proves that delay was really on the wire timeline). The void
 	// attempt's fresh dial also died with its context: the re-send rode the
 	// pooled connection, so connect is 0 and reused is set.
-	if rec.UpstreamTTFBMs <= 0 || rec.UpstreamTTFBMs >= 100 {
-		t.Errorf("UpstreamTTFBMs = %d, want 0 < ttfb < 100 (the re-send's own header wait, not the void's ~150ms)", rec.UpstreamTTFBMs)
+	if rec.UpstreamTTFBMs < 30 || rec.UpstreamTTFBMs >= 250 {
+		t.Errorf("UpstreamTTFBMs = %d, want 30 <= ttfb < 250 (the re-send's own ~60ms header wait; the void's ~400ms timeline and any wrong anchor sit far above the bound)", rec.UpstreamTTFBMs)
 	}
-	if rec.FinalAttemptAt.Sub(rec.Start) < 100*time.Millisecond {
-		t.Fatalf("FinalAttemptAt - Start = %v, want >= 100ms (the void's delay is on the request timeline, so the ttfb bound above discriminates)", rec.FinalAttemptAt.Sub(rec.Start))
+	if rec.FinalAttemptAt.Sub(rec.Start) < 350*time.Millisecond {
+		t.Fatalf("FinalAttemptAt - Start = %v, want >= 350ms (the void's ~400ms delay is on the request timeline, so the ttfb bound above discriminates)", rec.FinalAttemptAt.Sub(rec.Start))
 	}
 	// The anchor pin: FinalAttemptAt must be the re-send's SEND START
 	// (stamped at its admission inside doWithRetry), never its headers
@@ -589,15 +593,20 @@ func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 // fresh stream, the record stays a success, and the absorbed attempt is
 // logged like every other retry.
 func TestStreamTruncatedEmptyRetried(t *testing.T) {
-	// The re-send delays its headers ~60ms: that wait must land inside
-	// ttft_ms (measured from the re-send's send start, FinalAttemptAt) and
-	// inside upstream_ttfb_ms, never be excluded from ttft by a
-	// headers-arrival FinalAttemptAt stamp - the anchor pin below.
+	// Two competing timelines keep the ttfb bound below load-safe: the
+	// re-send delays its headers ~60ms (a floor, so its own ttfb is
+	// structurally >= 60ms), while the truncated first attempt sits ~400ms
+	// out before its headers - any window that wrongly includes the first
+	// attempt's timeline (a request-start anchor) lands >= 460ms. The bound
+	// at 250ms is the midpoint: the re-send's own header wait passes with
+	// ~190ms of scheduler slack, and a wrong anchor fails it by ~200ms.
+	const firstAttemptDelay = 400 * time.Millisecond
 	const reaskHeaderDelay = 60 * time.Millisecond
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
+			time.Sleep(firstAttemptDelay)
 			w.Header().Set("X-Request-Id", "req-first")
 			w.WriteHeader(200)
 			// Truncation before any generation content: role chunk, clean EOF.
@@ -662,8 +671,8 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 	if rec.TTFTMs < 30 {
 		t.Fatalf("TTFTMs = %d, want >= 30 (the fresh attempt's ~60ms header wait is part of its TTFT; a headers-arrival FinalAttemptAt stamp strips it)", rec.TTFTMs)
 	}
-	if rec.UpstreamTTFBMs < 30 || rec.UpstreamTTFBMs >= 100 {
-		t.Errorf("UpstreamTTFBMs = %d, want 30..100 (the re-send's own ~60ms header wait, the same anchor ttft_ms measures from)", rec.UpstreamTTFBMs)
+	if rec.UpstreamTTFBMs < 30 || rec.UpstreamTTFBMs >= 250 {
+		t.Errorf("UpstreamTTFBMs = %d, want 30 <= ttfb < 250 (the re-send's own ~60ms header wait, the same anchor ttft_ms measures from; the first attempt's ~400ms timeline and any request-start anchor sit far above the bound)", rec.UpstreamTTFBMs)
 	}
 }
 

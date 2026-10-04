@@ -20,9 +20,13 @@ type Service struct {
 	previewToken previewToken
 }
 
-// NewService validates the setup parameters and returns the tool service. It is
-// the single construction path: a caller cannot obtain a Service without a
+// NewService validates the setup parameters and returns the tool service with
+// the default HTTP transport: a caller cannot obtain a Service without a
 // validated origin, a validated credential and a validated limits policy.
+// NewServiceWithTransport is the production constructor (the streamable HTTP
+// endpoint hands every service an in-process transport); this transport-less
+// convenience is the entry point the tests and the live integration suite
+// build their services through.
 func NewService(proxyURL, operatorToken string, limits Limits) (*Service, error) {
 	return NewServiceWithTransport(proxyURL, operatorToken, limits, nil)
 }
