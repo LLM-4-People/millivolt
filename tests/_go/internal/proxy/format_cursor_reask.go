@@ -20,6 +20,8 @@ import (
 // call ends with an EMPTY turn (the void - no deltas, turn_ended immediately),
 // and subsequent calls answer with a text delta. matchAction, when non-nil,
 // runs on each run_request payload so a test can pin the action encoding.
+// Each run also carries its own X-Request-Id, so a recovered void's record
+// can prove WHICH response its upstream metadata describes.
 func cursorReaskUpstream(t *testing.T, matchAction func(payload []byte)) *httptest.Server {
 	t.Helper()
 	var calls atomic.Int32
@@ -28,6 +30,11 @@ func cursorReaskUpstream(t *testing.T, matchAction func(payload []byte)) *httpte
 		n := calls.Add(1)
 		body := r.Body
 		w.Header().Set("Content-Type", "application/connect+proto")
+		if n == 1 {
+			w.Header().Set("X-Request-Id", "req-void")
+		} else {
+			w.Header().Set("X-Request-Id", "req-reask")
+		}
 		fl := w.(http.Flusher)
 		w.WriteHeader(200)
 
@@ -115,6 +122,17 @@ func TestCursorVoidReaskFreshUser(t *testing.T) {
 	}
 	if rec.Usage.OutputTokens != 3 {
 		t.Fatalf("output tokens = %d, want the re-ask's 3", rec.Usage.OutputTokens)
+	}
+	// The upstream-response metadata follows the ADOPTED response, like the
+	// generic quality loops: the record must describe the re-ask's response,
+	// and the absorbed void attempt keeps the void run's facts - a distinct
+	// request id per run makes any mix-up visible (without the re-ask's
+	// re-capture at adoption, the record kept the void run's request id).
+	if rec.ProviderRequestID != "req-reask" {
+		t.Fatalf("record must carry the re-ask response's request id, got %q", rec.ProviderRequestID)
+	}
+	if len(rec.Attempts) != 1 || rec.Attempts[0].ProviderRequestID != "req-void" {
+		t.Fatalf("the absorbed void attempt must keep the void run's request id, got %+v", rec.Attempts)
 	}
 }
 

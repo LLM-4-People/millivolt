@@ -36,6 +36,12 @@ func newConfigWithQuality(n int) *config.Config {
 // client sees only the healthy second response (established behavior: a plain
 // 0-in/0-out non-streaming response can poison client sessions).
 func TestQualityRetryNonStreamingVoid(t *testing.T) {
+	// reaskWake is when the re-send's handler woke: FinalAttemptAt (the
+	// re-send's send start, stamped at admission in doWithRetry) must sit at
+	// or before it, while a headers-arrival stamp would sit one reaskDelay
+	// after it - that is the anchor pin below.
+	const reaskDelay = 60 * time.Millisecond
+	var reaskWake time.Time
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := calls.Add(1)
@@ -53,6 +59,11 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 			w.Write([]byte(voidBody))
 			return
 		}
+		reaskWake = time.Now()
+		// The re-send delays its headers (still under the ttfb bound below):
+		// the delay must land inside upstream_ttfb_ms, never inside
+		// FinalAttemptAt, or the anchor pin below fails.
+		time.Sleep(reaskDelay)
 		w.Header().Set("X-Request-Id", "req-second")
 		w.WriteHeader(200)
 		w.Write([]byte(realBody))
@@ -121,6 +132,15 @@ func TestQualityRetryNonStreamingVoid(t *testing.T) {
 	}
 	if rec.FinalAttemptAt.Sub(rec.Start) < 100*time.Millisecond {
 		t.Fatalf("FinalAttemptAt - Start = %v, want >= 100ms (the void's delay is on the request timeline, so the ttfb bound above discriminates)", rec.FinalAttemptAt.Sub(rec.Start))
+	}
+	// The anchor pin: FinalAttemptAt must be the re-send's SEND START
+	// (stamped at its admission inside doWithRetry), never its headers
+	// arrival. The re-send's handler woke at reaskWake and delayed its
+	// headers ~60ms after waking, so a headers-arrival stamp would sit
+	// ~60ms AFTER reaskWake while the send-start stamp sits at or before
+	// it - the re-send's own header wait belongs to upstream_ttfb_ms.
+	if late := rec.FinalAttemptAt.Sub(reaskWake); late > 30*time.Millisecond {
+		t.Fatalf("FinalAttemptAt sits %v after the re-send's handler woke, want <= 30ms (a headers-arrival stamp carries the ~60ms header wait and fails this)", late)
 	}
 	if rec.UpstreamConnectMs != 0 || !rec.UpstreamConnReused {
 		t.Errorf("UpstreamConnectMs/ConnReused = %d/%v, want 0/true (the re-send rode the void attempt's pooled connection; the fresh dial died with it)", rec.UpstreamConnectMs, rec.UpstreamConnReused)
@@ -569,6 +589,11 @@ func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 // fresh stream, the record stays a success, and the absorbed attempt is
 // logged like every other retry.
 func TestStreamTruncatedEmptyRetried(t *testing.T) {
+	// The re-send delays its headers ~60ms: that wait must land inside
+	// ttft_ms (measured from the re-send's send start, FinalAttemptAt) and
+	// inside upstream_ttfb_ms, never be excluded from ttft by a
+	// headers-arrival FinalAttemptAt stamp - the anchor pin below.
+	const reaskHeaderDelay = 60 * time.Millisecond
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -580,6 +605,7 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 			w.(http.Flusher).Flush()
 			return
 		}
+		time.Sleep(reaskHeaderDelay)
 		w.Header().Set("X-Request-Id", "req-second")
 		w.WriteHeader(200)
 		w.Write([]byte(
@@ -628,6 +654,16 @@ func TestStreamTruncatedEmptyRetried(t *testing.T) {
 	// received - not the adopted attempt's frames alone.
 	if rec.ResponseBytes != int64(len(got)) {
 		t.Errorf("ResponseBytes = %d, want %d (the full appended wire content across the rescue)", rec.ResponseBytes, len(got))
+	}
+	// The anchor pin: ttft_ms is measured from the re-send's SEND START
+	// (FinalAttemptAt, stamped at its admission inside doWithRetry), so the
+	// re-send's ~60ms header wait is INSIDE ttft. A headers-arrival stamp
+	// would exclude it and leave ttft at the token-only residue (~0ms).
+	if rec.TTFTMs < 30 {
+		t.Fatalf("TTFTMs = %d, want >= 30 (the fresh attempt's ~60ms header wait is part of its TTFT; a headers-arrival FinalAttemptAt stamp strips it)", rec.TTFTMs)
+	}
+	if rec.UpstreamTTFBMs < 30 || rec.UpstreamTTFBMs >= 100 {
+		t.Errorf("UpstreamTTFBMs = %d, want 30..100 (the re-send's own ~60ms header wait, the same anchor ttft_ms measures from)", rec.UpstreamTTFBMs)
 	}
 }
 

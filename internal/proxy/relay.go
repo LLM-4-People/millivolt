@@ -255,8 +255,10 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 // the request is finished; ok=true returns the adopted attempt's response
 // and its per-send cancel, which the caller defers (function-scoped LIFO
 // ordering), with the record adoption (the status, the >=400 error detail,
-// the upstream headers, the final attempt time) already run here - the
-// single owner of the tail both quality loops used to duplicate.
+// the upstream headers) already run here - the single owner of the tail both
+// quality loops used to duplicate. The adopted attempt's send start
+// (FinalAttemptAt) is stamped at the re-send's admission inside doWithRetry,
+// exactly like the first send's own absorbed retries.
 // ResponseBytes is deliberately NOT reset by this adoption: on this surface
 // the abandoned attempts wrote nothing (the spool precedes every write), so
 // the accumulated total already equals the adopted attempt's body alone -
@@ -287,7 +289,6 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 		captureErrorFromResponse(next, rec)
 	}
 	captureUpstreamHeaders(next, rec, t.authHeader)
-	rec.FinalAttemptAt = time.Now()
 	return next, nextCancel, true
 }
 
@@ -648,12 +649,13 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 		// across this adoption (unlike the non-streaming twin): the abandoned
 		// attempt's role/keepalive/reasoning frames genuinely reached the
 		// client and the fresh stream appends behind them, so the running
-		// total stays "the bytes the client received".
+		// total stays "the bytes the client received". FinalAttemptAt was
+		// stamped at the re-send's admission inside doWithRetry (the same
+		// anchor as the non-streaming twin).
 		resp = next
 		defer nextCancel()
 		defer next.Body.Close()
 		rec.StatusCode = resp.StatusCode
-		rec.FinalAttemptAt = time.Now()
 		captureUpstreamHeaders(resp, rec, t.authHeader)
 		if resp.StatusCode >= 400 {
 			// A non-200 retry cannot change the committed status line:
@@ -1166,6 +1168,18 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			end(false)
 			return nil, nil, err
 		}
+		// FinalAttemptAt anchors TTFT at the adopted attempt's send start.
+		// Stamp at admission whenever the record has already absorbed an
+		// attempt - this loop's own retries and the quality re-sends the
+		// callers adopt both arrive with Retries > 0 - and let every later
+		// attempt re-stamp its own start, so the surviving value describes
+		// the attempt whose response is adopted, headers-arrival never. A
+		// record with no absorbed attempt keeps the zero value (TTFT falls
+		// back to Start); the cursor driver stamps the same way in
+		// openCursorHTTP.
+		if rec.Retries > 0 {
+			rec.FinalAttemptAt = attemptStart
+		}
 		// Per-send deadline: X-Proxy-Timeout-Ms bounds this ONE send (the
 		// Do below and the returned body), anchored on the attemptStart the
 		// admission helper stamped - a fresh budget per attempt, never eaten
@@ -1237,13 +1251,11 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			durable, quotaTyp, quotaCode, errBody, peekLeftOpen = quota429Peek(resp)
 			if durable {
 				if !s.settleQuotaFailure(permit, t.format, hooks.Client, hooks.Provider, metrics.NonRetryableQuotaClass(quotaTyp, quotaCode), parseRetryAfter(resp)) {
-					if attempt > 0 {
-						rec.FinalAttemptAt = attemptStart
-					}
 					end(false)
 					// This response reaches the client: adopt this attempt's
 					// transport timing (the failed attempts before it never
-					// touched the record).
+					// touched the record; FinalAttemptAt was already stamped at
+					// this attempt's admission above).
 					timing.adopt(rec)
 					// Re-serve the captured bytes so the client still gets the
 					// full error body verbatim.
@@ -1280,14 +1292,12 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		}
 		if !retryable || ordinary >= maxRetries && !s.allowStormRetry(ctx, active) {
 			// This is the attempt whose response reaches the client: TTFT is
-			// measured from here, so a retried request shows the successful
+			// measured from its send start (FinalAttemptAt was stamped at its
+			// admission above), so a retried request shows the successful
 			// attempt's responsiveness, not the accumulated retry delay. The
 			// httptrace decomposition is adopted the same way: the record
 			// keeps this attempt's dial/handshake/header-wait facts, and the
 			// absorbed attempts' traces died with their contexts.
-			if attempt > 0 {
-				rec.FinalAttemptAt = attemptStart
-			}
 			timing.adopt(rec)
 			end(isRetryable(resp.StatusCode))
 			if errBody != nil {

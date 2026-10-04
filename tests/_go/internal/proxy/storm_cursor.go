@@ -100,7 +100,7 @@ func TestStormCursorFreshOpenersShareRetryBudgetAndCleanup(t *testing.T) {
 			target := &target{baseURL: "http://neutral.invalid", timeout: time.Second}
 			hooks := scheduler.WaiterHooks{Provider: rec.Provider}
 			if reask {
-				run, err := s.openCursorRun(ctx, nil, target, "", []byte(`{"model":"neutral-model","messages":[{"role":"user","content":"fixture"}]}`), true, "native-retry", hooks)
+				run, err := s.openCursorRun(ctx, nil, target, "", []byte(`{"model":"neutral-model","messages":[{"role":"user","content":"fixture"}]}`), true, rec, "native-retry", hooks)
 				if err != nil {
 					t.Fatal(err)
 				}

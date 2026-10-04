@@ -334,7 +334,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 			}
 			called = true
 			s.finishStormResponse(ctx, true)
-			return s.openCursorRun(ctx, r, t, key, body, true, groupKey, hooks)
+			return s.openCursorRun(ctx, r, t, key, body, true, rec, groupKey, hooks)
 		}
 	}
 	s.driveRun(ctx, w, run, stream, rec, rr, resumeRequest, reask)
@@ -485,8 +485,12 @@ func cursorSendFailed(resp *http.Response) bool {
 // openCursorRun opens a fresh agent.v1 Run stream for the given request body.
 // forceUser selects the re-ask translation (fresh user turn). Errors are
 // returned to the caller (never written to the client); the caller classifies
-// them - a failed re-ask falls back to surfacing the void.
-func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, key string, body []byte, forceUser bool, groupKey string, hooks scheduler.WaiterHooks) (*providerformat.CursorRun, error) {
+// them - a failed re-ask falls back to surfacing the void. When the response
+// is adopted (a live Run will be driven on it), captureUpstreamHeaders
+// re-captures the record's upstream header metadata from it - the cursor twin
+// of the generic quality loops, which re-capture at every adoption so the
+// record describes the attempt whose body the client actually received.
+func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, key string, body []byte, forceUser bool, rec *metrics.Record, groupKey string, hooks scheduler.WaiterHooks) (*providerformat.CursorRun, error) {
 	var (
 		clientMessage []byte
 		blobs         *providerformat.KVBlobStore
@@ -513,6 +517,12 @@ func (s *Server) openCursorRun(ctx context.Context, r *http.Request, t *target, 
 		resp.Body.Close()
 		return nil, fmt.Errorf("%s", detail)
 	}
+	// The re-ask's response is the one the client receives: the record-level
+	// upstream metadata (request id, server, processing time, rate-limit
+	// state, response headers, the transport's gzip fact) must describe it,
+	// not the voided run whose capture is still on the record. Without this
+	// re-capture a recovered void kept the VOID run's response metadata.
+	captureUpstreamHeaders(resp, rec, t.authHeader)
 	return s.startCursorRun(pw, resp.Body, blobs, upstreamCancel), nil
 }
 
@@ -787,9 +797,12 @@ func (s *Server) absorbCursorVoid(rec *metrics.Record) {
 	}
 	// The void IS the response whose metadata captureUpstreamHeaders recorded
 	// when its run opened, so the attempt carries the same upstream
-	// information as every other attempt; the re-ask's own capture replaces
-	// the record-level fields afterwards. Response headers are never mutated
-	// in place (captureHeaders builds a fresh map), so sharing is safe.
+	// information as every other attempt. The re-ask then re-captures the
+	// record-level fields from ITS response at adoption (openCursorRun, the
+	// twin of the generic loops' re-capture), so the finalized record
+	// describes the re-ask's response, never the void's. Response headers
+	// are never mutated in place (captureHeaders builds a fresh map), so the
+	// attempt's shared copy is safe.
 	at.ProviderRequestID = rec.ProviderRequestID
 	at.ProviderServer = rec.ProviderServer
 	at.ProviderModel = rec.ProviderModel

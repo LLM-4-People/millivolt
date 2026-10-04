@@ -206,6 +206,47 @@ func TestSnapshotWireKeysStrict(t *testing.T) {
 	}
 }
 
+// TestRecordTransportFlagsWireExplicitFalse pins the record wire contract for
+// the two boolean transport flags: a stored false must travel to the wire as
+// an explicit false - no omitempty, exactly like stream and
+// client_disconnected - so the dashboard's kvBool rows render a real "false"
+// (the jsdom stored-false pins in tests/ui_check.js pin that rendered state).
+// omitempty here would make a live record's false unreachable, leaving the
+// renderer's "reused connection" row absent for every fresh-dial response.
+func TestRecordTransportFlagsWireExplicitFalse(t *testing.T) {
+	raw, err := json.Marshal(&Record{ID: "f1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"upstream_gzip", "upstream_conn_reused"} {
+		v, ok := wire[key]
+		if !ok {
+			t.Errorf("wire record omits %q for a stored false: %s", key, raw)
+			continue
+		}
+		if b, isBool := v.(bool); !isBool || b {
+			t.Errorf("wire %q = %v, want an explicit false", key, v)
+		}
+	}
+	raw, err = json.Marshal(&Record{ID: "f2", UpstreamGzip: true, UpstreamConnReused: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire = nil
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"upstream_gzip", "upstream_conn_reused"} {
+		if v, ok := wire[key]; !ok || v != true {
+			t.Errorf("wire %q = %v (present %v), want an explicit true", key, v, ok)
+		}
+	}
+}
+
 func TestPercentile(t *testing.T) {
 	sorted := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	if p := Percentile(sorted, 50); p != 5 {

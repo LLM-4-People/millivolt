@@ -236,7 +236,9 @@ type Record struct {
 	// Content-Encoding and Content-Length from the header map on
 	// auto-decompress, so the captured response headers cannot show the
 	// wire compression - this flag is the only retained fact about it.
-	UpstreamGzip bool `json:"upstream_gzip,omitempty"`
+	// No omitempty, like stream and client_disconnected: a stored false
+	// travels to the wire so the dashboard renders an explicit false row.
+	UpstreamGzip bool `json:"upstream_gzip"`
 
 	// UpstreamConnectMs / UpstreamTLSMs / UpstreamTTFBMs decompose the
 	// transport time of the FINAL adopted upstream attempt via
@@ -257,10 +259,13 @@ type Record struct {
 	// never fired leaves 0, and a partially observed attempt (for example a
 	// dial that never completed) legitimately carries only the parts that
 	// did - partial states are observations, never errors.
-	UpstreamConnectMs  int64 `json:"upstream_connect_ms,omitempty"`
-	UpstreamTLSMs      int64 `json:"upstream_tls_ms,omitempty"`
-	UpstreamTTFBMs     int64 `json:"upstream_ttfb_ms,omitempty"`
-	UpstreamConnReused bool  `json:"upstream_conn_reused,omitempty"`
+	UpstreamConnectMs int64 `json:"upstream_connect_ms,omitempty"`
+	UpstreamTLSMs     int64 `json:"upstream_tls_ms,omitempty"`
+	UpstreamTTFBMs    int64 `json:"upstream_ttfb_ms,omitempty"`
+	// UpstreamConnReused has no omitempty for the same reason as
+	// UpstreamGzip: a stored false is a real observation (a fresh dial) and
+	// must reach the wire like every other record flag.
+	UpstreamConnReused bool `json:"upstream_conn_reused"`
 
 	// LLM request parameters parsed from the request body. These are the fields
 	// that define the request shape; they carry no message content.

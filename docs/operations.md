@@ -1084,14 +1084,18 @@ keep wide scans behind a `started_at` window or a `LIMIT`. Column meanings
 come from the MCP `describe` tool. `started_at` is Unix milliseconds: a
 relative window is `started_at >= strftime('%s','now')*1000 - 3600000`, and
 calendar math divides by 1000 and applies SQLite's `unixepoch` modifier,
-with `localtime` for the host's zone. None of the computations below is a
-dashboard aggregate: the chart, explorer and KPI surfaces never compute
-these shapes. The exception proving the rule is the shared decode window
-(`last_token_at - first_token_at`), which the chart's dec series samples
-too; recipe 1 merely decomposes latency around it. Several of the columns
-a recipe reads do overlap what the aggregate scans read; the columns
-unique to each recipe never enter an aggregate at all. Each recipe is a
-question, the SQL that answers it, and how to read the result.
+with `localtime` for the host's zone. The recipes below earn their keep in
+the derived shapes no dashboard surface computes: the outlier ratio, the
+write/read ratio, the latency decompositions. Their ingredient aggregates
+are conceded up front, the way the decode window already is: the explorer
+sums per-group counts and cache reads (its N and Cache fields) and a
+per-group blended $/Mtok (its cost_per_mtok KPI, the same cost-reporting
+in+out rule), and the chart's dec series samples the shared decode window
+(`last_token_at - first_token_at`) that recipe 1 decomposes latency
+around. Several of the columns a recipe reads do overlap what the
+aggregate scans read; the columns unique to each recipe never enter an
+aggregate at all. Each recipe is a question, the SQL that answers it, and
+how to read the result.
 
 **Where did the time go on a slow request?**
 

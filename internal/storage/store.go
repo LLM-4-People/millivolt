@@ -891,9 +891,9 @@ func (s *Store) TotalsDegraded() bool {
 func readTotals(ctx context.Context, db interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }) (Totals, error) {
-	rows, err := db.QueryContext(ctx, `SELECT started_at, status_code, error_type, attempts,
+	rows, err := db.QueryContext(ctx, `SELECT status_code, error_type, attempts,
 		input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
-		cost, ttft_ms, duration_ms, overall_tps, gen_tps
+		cost, ttft_ms, overall_tps, gen_tps
 		FROM requests`)
 	if err != nil {
 		return Totals{}, err
@@ -901,13 +901,13 @@ func readTotals(ctx context.Context, db interface {
 	defer rows.Close()
 	var t Totals
 	for rows.Next() {
-		var startedAt, status, ttft, dur int64
+		var status, ttft int64
 		var errorType string
 		var attemptsJSON []byte
 		var in, out, cacheR, reason int64
 		var cost, overall, gen float64
-		if err := rows.Scan(&startedAt, &status, &errorType, &attemptsJSON,
-			&in, &out, &cacheR, &reason, &cost, &ttft, &dur, &overall, &gen); err != nil {
+		if err := rows.Scan(&status, &errorType, &attemptsJSON,
+			&in, &out, &cacheR, &reason, &cost, &ttft, &overall, &gen); err != nil {
 			return Totals{}, err
 		}
 		atts, err := DecodeAttemptsColumn(attemptsJSON)

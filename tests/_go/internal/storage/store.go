@@ -621,13 +621,17 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 		}
 	}
 
+	// UpstreamGzip and UpstreamConnReused deliberately DIFFER (true/false):
+	// they are the only two boolean columns, so a fixture that stores the
+	// same value in both cannot notice a by-name write/read swap of the
+	// pair; distinct values make the swap fail loudly below.
 	rec := &metrics.Record{
 		ID: "m1", Provider: "p", Model: "m", KeyHash: "k", UserAgent: "ua",
 		StatusCode: 200, Start: time.Now(), End: time.Now(),
 		ToolCalls: 1, ErrorCode: "invalid_api_key", RateLimitRemaining: 42, Cost: 0.01,
 		Chunks: 7, FirstReasoningAt: 1_700_000_000_000,
 		RequestBytes: 1234, ResponseBytes: 5678, UpstreamGzip: true,
-		UpstreamConnectMs: 3, UpstreamTLSMs: 0, UpstreamTTFBMs: 44, UpstreamConnReused: true,
+		UpstreamConnectMs: 3, UpstreamTLSMs: 0, UpstreamTTFBMs: 44, UpstreamConnReused: false,
 	}
 	metrics.FinalizeRecord(rec)
 	s.Record(rec)
@@ -675,8 +679,8 @@ func TestMigrateAddsNewColumns(t *testing.T) {
 	if rows[0]["upstream_ttfb_ms"] != int64(44) {
 		t.Errorf("upstream_ttfb_ms = %v, want 44 (migrated column round-trips)", rows[0]["upstream_ttfb_ms"])
 	}
-	if rows[0]["upstream_conn_reused"] != int64(1) {
-		t.Errorf("upstream_conn_reused = %v, want 1 (migrated column round-trips)", rows[0]["upstream_conn_reused"])
+	if rows[0]["upstream_conn_reused"] != int64(0) {
+		t.Errorf("upstream_conn_reused = %v, want 0 (the false half of the distinct bool pair, coherent with the fresh dial: a by-name swap with upstream_gzip now fails here)", rows[0]["upstream_conn_reused"])
 	}
 }
 
