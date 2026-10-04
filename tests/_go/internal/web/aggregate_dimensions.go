@@ -73,6 +73,27 @@ func TestProjectionEmptyModelCanonicalization(t *testing.T) {
 	}
 }
 
+// TestProjectionToolNamesShareDictionaryBytes pins the tool-name repoint in
+// intern: the per-row decode copies must become garbage after interning, not
+// stay live for the history's lifetime. Pointer inspection is test-only, like
+// the stored-label pin above; production uses ordinary immutable Go strings.
+func TestProjectionToolNamesShareDictionaryBytes(t *testing.T) {
+	var d contribDimensions
+	row := contrib{status: 200, toolsL: []string{strings.Clone("web_search"), strings.Clone("bash_exec")}}
+	d.intern(&row)
+	for i, name := range row.toolsL {
+		canonical := d.dict[dimTool].names[row.toolIDs[i]]
+		if name != canonical || unsafe.StringData(name) != unsafe.StringData(canonical) {
+			t.Fatalf("tool name %q retained a per-row copy instead of dictionary bytes", name)
+		}
+	}
+	for _, id := range row.toolIDs {
+		if d.dict[dimTool].counts[id] != 1 {
+			t.Fatalf("tool membership drifted: %+v", d.dict[dimTool])
+		}
+	}
+}
+
 func TestProjectionParentIdentitySharesConversationDictionary(t *testing.T) {
 	var d contribDimensions
 	child := contrib{conv: "child", parentConv: strings.Repeat("parent", 30), status: 200}

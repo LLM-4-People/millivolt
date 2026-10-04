@@ -183,10 +183,13 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
 			s, d := footprintStore(b, n)
 			for b.Loop() {
-				base := footprintHeap()
-				alloc := footprintTotalAlloc()
+				// The api and its ring predate the baseline so the "built"
+				// delta carries projection state only, not the fixed ring/
+				// api allocation that would otherwise differ per size.
 				api := NewAggAPI(metrics.NewBuffer(d.HistorySize), s, d.StorageQueryTimeout)
 				api.ModelCanon = d.ModelCanon
+				base := footprintHeap()
+				alloc := footprintTotalAlloc()
 				if err := api.PreloadHistory(context.Background()); err != nil {
 					b.Fatal(err)
 				}
@@ -253,7 +256,10 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 // readiness" row: seed, preload, settle, then read this process's resident
 // pages. The benchmark binary carries the test framework and every linked
 // package, so absolute MiB is a stable relative measure, not the deployed
-// proxy's exact RSS; per-100k normalization keeps the two sizes comparable.
+// proxy's exact RSS. That fixed binary/runtime constant weighs once per
+// process, so the per-100k normalization is only comparable at one size
+// across revisions; across sizes, compare the MiB difference between the two
+// rows instead.
 func BenchmarkProjectionProcessRSS(b *testing.B) {
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {

@@ -32,13 +32,26 @@ type historyProjection struct {
 	data projectionData
 }
 
-// growRows appends with exact capacity instead of append's doubling. The
-// rows slice is the projection's largest retained block; amortized doubling
-// leaves up to 2x spare capacity live on it for the process lifetime. Exact
-// growth pays the same amortized copy count without retaining the slack.
+// rowsGrowChunk bounds the rows slice's spare capacity. Growth rounds the new
+// length up to a multiple of this chunk: small delta catch-ups amortize their
+// copies (one copy per ~chunk/batch refreshes) and retained spare capacity
+// stays below one chunk (~1.4 MB at the current row width) no matter how long
+// the history grows, instead of append doubling's up-to-2x live slack.
+// Internal implementation constant, not a tunable.
+const rowsGrowChunk = 4096
+
+// growRows appends with chunk-bounded spare capacity. Growth copies the whole
+// retained rows block, so it must stay amortized for the small per-refresh
+// deltas of the query path while never leaving large live slack: batches
+// larger than one chunk grow exactly, batches that fit share one rounded
+// chunk of headroom.
 func growRows(dst, add []contrib) []contrib {
 	if cap(dst)-len(dst) < len(add) {
-		grown := make([]contrib, len(dst)+len(add))
+		size := len(dst) + len(add)
+		if r := size % rowsGrowChunk; r != 0 && len(add) < rowsGrowChunk {
+			size += rowsGrowChunk - r
+		}
+		grown := make([]contrib, size)
 		dst = grown[:copy(grown, dst)]
 	}
 	return append(dst, add...)

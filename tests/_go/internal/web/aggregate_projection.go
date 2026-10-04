@@ -218,3 +218,37 @@ func TestProjectionConcurrentReadersAndAppends(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestGrowRowsBoundedSpareCapacity pins the rows growth policy: small delta
+// catch-ups amortize their copies (the 3*rowsGrowChunk singles below cause
+// only chunk-sized growths, where doubling would have passed two whole
+// blocks), batches of a chunk or more grow exactly, and the live spare
+// capacity on the projection's largest retained block never exceeds one
+// chunk.
+func TestGrowRowsBoundedSpareCapacity(t *testing.T) {
+	var rows []contrib
+	for range 3 * rowsGrowChunk {
+		rows = growRows(rows, []contrib{{status: 200}})
+	}
+	if len(rows) != 3*rowsGrowChunk || cap(rows) != 3*rowsGrowChunk {
+		t.Fatalf("singles grew to len=%d cap=%d, want len=cap=%d (amortized chunk growth)",
+			len(rows), cap(rows), 3*rowsGrowChunk)
+	}
+	rows = growRows(rows, make([]contrib, rowsGrowChunk))
+	if len(rows) != 4*rowsGrowChunk || cap(rows) != 4*rowsGrowChunk {
+		t.Fatalf("chunk batch grew to len=%d cap=%d, want exact %d",
+			len(rows), cap(rows), 4*rowsGrowChunk)
+	}
+	rows = growRows(rows, []contrib{{status: 201}})
+	if cap(rows) != 5*rowsGrowChunk {
+		t.Fatalf("rounded growth cap=%d, want one chunk of headroom (%d)", cap(rows), 5*rowsGrowChunk)
+	}
+	spare := cap(rows) - len(rows)
+	rows = growRows(rows, []contrib{{status: 202}})
+	if cap(rows) != 5*rowsGrowChunk || cap(rows)-len(rows) != spare-1 {
+		t.Fatal("an in-capacity batch reallocated instead of reusing headroom")
+	}
+	if spare > rowsGrowChunk {
+		t.Fatalf("live spare capacity = %d rows, want <= one chunk (%d)", spare, rowsGrowChunk)
+	}
+}
