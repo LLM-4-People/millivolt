@@ -3,7 +3,7 @@ module github.com/LLM-4-People/millivolt
 go 1.27.0
 
 require (
-	github.com/klauspost/compress v1.18.0
+	github.com/klauspost/compress v1.20.1
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	golang.org/x/net v0.59.0
 	gopkg.in/yaml.v3 v3.0.1
