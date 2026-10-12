@@ -375,14 +375,14 @@ for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'lo
 check('qualified provider favicon keeps the canonical host',
   w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
   w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
-check('client labels omit SDK versions consistently',
-  w.clientLabel('opencode/1.18.32') === 'opencode' &&
-  w.clientLabel('python 1.55') === 'python' &&
+check('client labels show the recorded identity verbatim',
+  w.clientLabel('opencode/1.18.32') === 'opencode/1.18.32' &&
+  w.clientLabel('opencode/latest/2.0.26/cli') === 'opencode/latest/2.0.26/cli' &&
+  w.clientLabel('python 1.55') === 'python 1.55' &&
   w.clientLabel('team/2fa') === 'team/2fa' &&
-  w.clientLabel('python 2fa') === 'python 2fa' &&
-  w.dimLabel('client', 'opencode/1.18.32') === 'opencode' &&
-  w.entityBadge('client', 'opencode/1.18.32').includes('>opencode</span>') &&
-  w.clientTipHTML('opencode/1.18.32').includes('>opencode</span>'));
+  w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
+  w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
+  w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Poll the page's own observable state instead of sleeping a fixed time: a
 // loaded runner can stretch a fetch/render round trip past any hard-coded
@@ -1326,8 +1326,8 @@ async function main() {
     lastData = saved;
     return html;
   })()`);
-  check('client filter labels omit versions while preserving exact values',
-    clientSelHTML.includes('<option value="opencode/1.18.32">opencode</option>') &&
+  check('client filter labels show the recorded identity while preserving exact values',
+    clientSelHTML.includes('<option value="opencode/1.18.32">opencode/1.18.32</option>') &&
     clientSelHTML.includes('<option value="team/2fa">team/2fa</option>'));
   const clientDrawerTitle = w.eval(`(() => {
     const saved = lastData, savedDrawer = drawerId;
@@ -1341,7 +1341,7 @@ async function main() {
     return title;
   })()`);
   check('drawer title uses the shared client label',
-    clientDrawerTitle.startsWith('opencode · provider.example · space-bunny-free'));
+    clientDrawerTitle.startsWith('opencode/1.18.32 · provider.example · space-bunny-free'));
   // refreshes the server aggregates; an unchanged payload does neither.
   {
     const rev0 = w.eval('lastData._rev');

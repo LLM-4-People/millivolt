@@ -181,9 +181,12 @@ function providerLabel(name) {
   if (!name) return '?';
   return name.includes('.') && !/^\d/.test(name) ? name.split('.')[0] : name;
 }
+// clientLabel renders a recorded client identity for display. The stored
+// value IS the identity (the X-Proxy-Client label or the inferred user-agent
+// identity), and no surface collapses or rewrites it: the request table
+// shows exactly what the client reported.
 function clientLabel(name) {
-  const value = String(name || '').trim();
-  return value.replace(/^([^/\s]+)\/[vV]?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?(?=\s|$)/, '$1').replace(/^(\S+)\s+[vV]?\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?(?=\s|$)/, '$1');
+  return String(name || '').trim();
 }
 const _faviconBroken = new Set();
 function faviconErr(img, origin) {

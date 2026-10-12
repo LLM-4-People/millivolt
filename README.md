@@ -124,7 +124,7 @@ port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
 | API base URL | `http://127.0.0.1:8080/v1` |
 | API key | Your actual upstream key, forwarded through `Authorization`; it does not authenticate dashboard access. |
 | Custom header `X-Proxy-Base-URL` | Your upstream API base URL, including its path, such as `/v1`. |
-| Optional header `X-Proxy-Client` | A label for this client in the dashboard. |
+| Optional header `X-Proxy-Client` | A label for this client in the dashboard; one that only repeats the user agent's product name keeps the fuller user-agent identity. |
 
 The client must support custom headers, or middleware that adds them. Select a
 model supported by your upstream; millivolt does not register providers or keys.

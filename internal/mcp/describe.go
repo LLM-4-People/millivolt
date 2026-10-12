@@ -370,7 +370,7 @@ var tableDocs = []TableDoc{
 			{Name: "provider", Type: "TEXT", Meaning: "upstream provider label"},
 			{Name: "model", Type: "TEXT", Meaning: "requested model, raw spelling (never canonicalized)"},
 			{Name: "provider_model", Type: "TEXT", Meaning: "model the upstream echoed back, when it differs"},
-			{Name: "client", Type: "TEXT", Meaning: "friendly client classification (for example desktop-client)"},
+			{Name: "client", Type: "TEXT", Meaning: "recorded client identity: the X-Proxy-Client label or the inferred user-agent identity (for example desktop-client)"},
 			{Name: "key_hash", Type: "TEXT", Meaning: "SHA-256 of the upstream key; never the key"},
 			{Name: "user_agent", Type: "TEXT", Meaning: "raw client user agent"},
 			{Name: "client_ip", Type: "TEXT", Meaning: "client address as observed; may be a proxy address, so treat it as a hint, not an identity"},

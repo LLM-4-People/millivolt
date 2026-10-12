@@ -372,3 +372,51 @@ func TestMaxCompletionTokensPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// TestClassifyClientLabelPrecedence pins the recorded client identity. An
+// explicit X-Proxy-Client label wins outright, except when it merely repeats
+// the user agent's product name while the agent reports more detail - the
+// fuller user-agent identity is then the true one, so one app through several
+// provider blocks records one identity. Everything else keeps the
+// established precedence: the label, then x-stainless-lang, then the user
+// agent's product token.
+func TestClassifyClientLabelPrecedence(t *testing.T) {
+	cases := []struct {
+		name                 string
+		label, ua, lang, pkg string
+		want                 string
+	}{
+		{name: "coarse label keeps the fuller user-agent identity", label: "opencode", ua: "opencode/latest/2.0.26/cli ai-sdk/4.0.23", want: "opencode/latest/2.0.26/cli"},
+		{name: "coarse label keeps a plain versioned identity", label: "opencode", ua: "opencode/1.18.25", want: "opencode/1.18.25"},
+		{name: "a distinct label is an explicit override", label: "my-team", ua: "opencode/1.18.25", want: "my-team"},
+		{name: "a richer label is an explicit override", label: "opencode/zen", ua: "opencode/1.18.25", want: "opencode/zen"},
+		{name: "a label beside an unrelated user agent wins", label: "opencode", ua: "curl/8.14.1", want: "opencode"},
+		{name: "a label without a user agent wins", label: "opencode", want: "opencode"},
+		{name: "a label equal to the product token stays", label: "opencode/1.18.25", ua: "opencode/1.18.25", want: "opencode/1.18.25"},
+		{name: "the user agent's product token fills in without a label", ua: "opencode/latest/2.0.26/cli ai-sdk/4.0.23", want: "opencode/latest/2.0.26/cli"},
+		{name: "x-stainless-lang beats user-agent inference", ua: "openai-python/1.55.0", lang: "python", pkg: "1.55", want: "python 1.55"},
+		{name: "x-stainless-lang without a package version stands alone", lang: "go", want: "go"},
+		{name: "a label beats x-stainless-lang", label: "my-team", lang: "python", want: "my-team"},
+		{name: "nothing classifies", want: "unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			if tc.label != "" {
+				req.Header.Set(hdrClient, tc.label)
+			}
+			if tc.ua != "" {
+				req.Header.Set("User-Agent", tc.ua)
+			}
+			if tc.lang != "" {
+				req.Header.Set("X-Stainless-Lang", tc.lang)
+			}
+			if tc.pkg != "" {
+				req.Header.Set("X-Stainless-Package-Version", tc.pkg)
+			}
+			if got := classifyClient(req); got != tc.want {
+				t.Fatalf("classifyClient(label=%q ua=%q) = %q, want %q", tc.label, tc.ua, got, tc.want)
+			}
+		})
+	}
+}

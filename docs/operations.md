@@ -155,8 +155,10 @@ in the same rule.
 
 Scope matching is exact leaf. A rule applies when every non-empty scope field
 equals the request's value exactly: `client` against the classified client
-label (`X-Proxy-Client` when sent, otherwise inferred from SDK/user-agent
-metadata), `provider` against the canonical label after `provider_aliases`,
+label (`X-Proxy-Client` when sent, except a label that only repeats the user
+agent's product name, which records the fuller user-agent identity; otherwise
+inferred from SDK/user-agent metadata), `provider` against the canonical
+label after `provider_aliases`,
 and `model` against the recorded model id (for Cursor requests the base id the
 dashboard records, not the fused spelling). An empty scope field matches
 anything. There is no model-rule canonicalization, regex or wildcard broadening.

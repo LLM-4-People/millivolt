@@ -700,9 +700,12 @@ func isValidAuthHeader(h string) bool {
 	return true
 }
 
-// classifyClient derives a friendly client/app name from the request headers.
-// It prefers an explicit X-Proxy-Client header, then x-stainless-lang (OpenAI
-// SDKs), then the User-Agent.
+// classifyClient derives the recorded client identity from the request
+// headers. An explicit X-Proxy-Client label wins, except when it merely
+// repeats the user agent's product name while the agent reports more detail
+// ("opencode" beside "opencode/latest/2.0.26/cli"): the fuller user-agent
+// identity is then the true one. Without a label the order is x-stainless-lang
+// (OpenAI SDKs), then the user agent's product token, else "unknown".
 
 // remoteIP returns the client's IP (host part of RemoteAddr), honoring
 // X-Forwarded-For when the proxy sits behind another proxy.
@@ -743,8 +746,21 @@ func clientLang(r *http.Request) string {
 }
 
 func classifyClient(r *http.Request) string {
+	ua := strings.TrimSpace(r.UserAgent())
+	if i := strings.Index(ua, " "); i > 0 {
+		ua = ua[:i]
+	}
 	// Explicit override from the app.
 	if v := strings.TrimSpace(r.Header.Get(hdrClient)); v != "" {
+		if ua != "" && ua != v {
+			name := ua
+			if i := strings.Index(name, "/"); i > 0 {
+				name = name[:i]
+			}
+			if v == name {
+				return ua
+			}
+		}
 		return v
 	}
 	// OpenAI-compatible SDKs set x-stainless-lang (e.g. "python", "js", "go").
@@ -754,13 +770,8 @@ func classifyClient(r *http.Request) string {
 		}
 		return v
 	}
-	// Otherwise use the user-agent, normalized to its leading product token.
-	ua := r.UserAgent()
 	if ua == "" {
 		return "unknown"
-	}
-	if i := strings.Index(ua, " "); i > 0 {
-		ua = ua[:i]
 	}
 	return ua
 }
