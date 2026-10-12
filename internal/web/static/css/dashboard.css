@@ -133,7 +133,11 @@
     -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
     mask-image: linear-gradient(to bottom, rgba(0,0,0,.7), transparent);
   }
-  .brand { display: flex; align-items: center; gap: 11px; }
+  /* The brand lockup links to the project source; it keeps the header's
+     text colors and only marks hover/focus on the wordmark. */
+  .brand { display: flex; align-items: center; gap: 11px; color: inherit; text-decoration: none; }
+  .brand:hover h1, .brand:focus-visible h1 { color: var(--accent); }
+  .brand:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
   /* The mark: a probe trace crossing a graduated scale - the millivolt
      instrument reading the stream. A soft glowing well, no hard gem tile. */
   .brand-logo {
