@@ -74,6 +74,14 @@ func TestParseUsage(t *testing.T) {
 			`{"input_tokens":50,"output_tokens":20,"cache_read_input_tokens":10,"cache_creation_input_tokens":5}`,
 			nil,
 			Usage{InputTokens: 50, OutputTokens: 20, CacheReadTokens: 10, CacheWrite: 5}},
+		// Cache writes under prompt_tokens_details.created_cache_tokens.
+		// Real shape observed live on primalabs-ai/MiMo-V2.6-Pro (LiteLLM
+		// gateway): its terminal usage chunk reported created_cache_tokens
+		// beside cached_tokens and both were otherwise lost.
+		{"openai created_cache_tokens",
+			`{"prompt_tokens":87944,"completion_tokens":2970,"total_tokens":90914,"prompt_tokens_details":{"cached_tokens":70720,"created_cache_tokens":17216},"completion_tokens_details":{"reasoning_tokens":50}}`,
+			nil,
+			Usage{InputTokens: 87944, OutputTokens: 2970, TotalTokens: 90914, CacheReadTokens: 70720, CacheWrite: 17216, ReasoningTokens: 50}},
 		{"per-provider override key path",
 			`{"custom_in":7,"prompt_tokens":99}`,
 			map[string]string{"input_tokens": "custom_in"},
