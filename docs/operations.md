@@ -799,7 +799,7 @@ provider's parked work; both accept explicit `0` = unlimited. Independent
 per-key/header concurrency remains unlimited by default. The scheduler retains
 at most 100000 distinct provider+key groups and 4096 header-created provider
 limits, refusing new ones past those bounds rather than growing process memory
-without limit. A new request body has a ten-minute read-progress bound, SSE
+without limit. A new request body has a ten-minute total read budget, SSE
 writes have a one-minute per-event progress bound, and an upstream body that
 stops sending for ten minutes is canceled.
 
