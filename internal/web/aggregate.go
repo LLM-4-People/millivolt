@@ -12,6 +12,7 @@ package web
 // are SERVER-local time.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -24,6 +25,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -1656,16 +1658,41 @@ func dimValue(dim string, c *contrib) (string, bool) {
 	return "", false
 }
 
+// jsonBufferPool reuses the encoder's scratch buffer: chart bundles and the
+// bootstrap payload run to hundreds of kilobytes, and a fresh right-sized
+// slice per poll is pure garbage. Oversized buffers are dropped instead of
+// pinned in the pool.
+var jsonBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+const jsonBufferRetain = 1 << 20
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	data, err := json.Marshal(v)
+	buf := jsonBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	enc := json.NewEncoder(buf)
+	// application/json is never parsed as HTML by a browser: escaping <, > and
+	// & only inflates URLs, query strings and previews with \u003c sequences.
+	enc.SetEscapeHTML(false)
+	err := enc.Encode(v)
 	if err != nil {
+		buf.Reset()
+		jsonBufferPool.Put(buf)
 		log.Printf("agg encode: %v", err)
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write(adminjson.ErrorBody("aggregate cannot be represented"))
 		return
 	}
-	w.Write(append(data, '\n'))
+	data := buf.Bytes()
+	if _, err := w.Write(data); err != nil {
+		// The response is already streaming; nothing to repair.
+		_ = err
+	}
+	if buf.Cap() > jsonBufferRetain {
+		return
+	}
+	buf.Reset()
+	jsonBufferPool.Put(buf)
 }
 
 // Live-log page: GET /metrics/agg/log?before_ms=&limit=&s=&f=…
