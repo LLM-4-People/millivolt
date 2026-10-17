@@ -319,7 +319,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	s.initPause()
 	s.cfgSnap.Store(cfg)
 	s.client.Store(newUpstreamClient(cfg))
-	s.inflight.set(cfg.MaxInflightRequests)
+	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))
 	return s
 }
 
@@ -400,7 +400,7 @@ func (s *Server) Reload(cfg *config.Config) {
 		}
 	}
 	// Re-apply the live-tunable scheduler + conversation settings.
-	s.inflight.set(cfg.MaxInflightRequests)
+	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))
 	s.scheduler.UpdateOptions(schedulerOptions(cfg))
 	s.convos.UpdateLimits(cfg.ConversationIdleGap, cfg.ConversationMaxOpen)
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)
@@ -449,7 +449,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// terminal 429/502, validation 4xx, storm queue 429s) carries it through
 	// one owner instead of per-sink calls.
 	w = &clientRetryDirective{ResponseWriter: w, srv: s}
-	if !s.inflight.acquire() {
+	// Reserve the declared upload now. A chunked body has no length yet, so it
+	// reserves the configured request cap; admission therefore bounds both the
+	// handler set and the heap those bodies can occupy before routing.
+	reserve := int64(0)
+	if r.Body != nil && r.Body != http.NoBody {
+		reserve = r.ContentLength
+		if reserve <= 0 {
+			reserve = int64(s.cfg().MaxRequestBytes)
+		}
+		if maxBody := int64(s.cfg().MaxRequestBytes); reserve > maxBody {
+			reserve = maxBody
+		}
+	}
+	if !s.inflight.acquire(reserve) {
 		// Refuse before buffering a body: over the process-wide bound, heap is
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
@@ -457,7 +470,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errJSON(typeAPIError, "proxy is at its in-flight request limit"), http.StatusServiceUnavailable)
 		return
 	}
-	defer s.inflight.release()
+	defer s.inflight.release(reserve)
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)

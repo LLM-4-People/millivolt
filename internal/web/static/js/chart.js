@@ -927,6 +927,17 @@ function chartChromeSync() {
   updateSection('chart-context', context);
 }
 
+// resizeChart re-measures an existing plot and forwards only the pixel change.
+// The data, legend and totals did not change, so resize never re-derives them.
+function resizeChart() {
+  const box = $('chart-traffic');
+  if (!box || !_up) return;
+  const w = Math.round(box.clientWidth);
+  const h = Math.round(box.clientHeight);
+  if (w < CHART_MIN_W || h < CHART_MIN_H) return;
+  if (_up.width !== w || _up.height !== h) _up.setSize({ width: w, height: h });
+}
+
 function renderChart() {
   const box = $('chart-traffic'); // the .chart-wrap div - uPlot mounts INTO it
   if (!box) return;

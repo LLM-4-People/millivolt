@@ -80,6 +80,9 @@ type Options struct {
 	// the written set is the exact dedupe boundary. Sized 2x the ring
 	// (history_size) so it always covers every record the ring can hold.
 	WriteTrackCap int
+	// DebugMaxBytes caps the durable debug-capture sidecar; new captures are
+	// refused once the next write would exceed it. Zero disables the cap.
+	DebugMaxBytes int64
 	// BusyTimeout shortens the sqliteBusyTimeout guardrail for tests that
 	// assert the contention window quickly (a 5s window costs 5s of wall
 	// time per phase). Zero keeps the production constant; config has no
@@ -443,6 +446,13 @@ type Store struct {
 	purgeWake    chan struct{}
 
 	drops atomic.Uint64
+	// debug sidecar accounting: the writer connection serializes physical
+	// writes, debugMu makes the byte counter and the SQL that changes it one
+	// atomic pair across request-goroutine saves and the writer's expiry.
+	debugMu       sync.Mutex
+	debugBytes    int64
+	debugSeeded   bool
+	debugMaxBytes int64
 
 	// aggMu guards the written-id set and the totals snapshot. The writer
 	// updates both under this lock AFTER a batch commits, and dashboard
@@ -570,17 +580,26 @@ func Open(path string, opts Options) (*Store, error) {
 	rdb.SetMaxIdleConns(sqliteReadConns)
 
 	s := &Store{
-		path:       path,
-		db:         db,
-		rdb:        rdb,
-		ch:         make(chan queuedRecord, opts.WriteChanCap),
-		opts:       opts,
-		done:       make(chan struct{}),
-		writerDone: make(chan struct{}),
-		written:    make(map[string]struct{}),
-		writtenCap: opts.WriteTrackCap,
-		flushCh:    make(chan chan error, 1),
-		purgeWake:  make(chan struct{}, 1),
+		path:          path,
+		db:            db,
+		rdb:           rdb,
+		ch:            make(chan queuedRecord, opts.WriteChanCap),
+		opts:          opts,
+		done:          make(chan struct{}),
+		writerDone:    make(chan struct{}),
+		written:       make(map[string]struct{}),
+		writtenCap:    opts.WriteTrackCap,
+		flushCh:       make(chan chan error, 1),
+		purgeWake:     make(chan struct{}, 1),
+		debugMaxBytes: int64(opts.DebugMaxBytes),
+	}
+	if s.debugMaxBytes > 0 {
+		// Seed the sidecar byte counter once; the cap must reflect captures
+		// written by earlier processes. A read failure leaves the counter
+		// unseeded and SaveDebugCapture retries the seed before enforcing.
+		if err := s.seedDebugBytes(context.Background()); err != nil {
+			log.Printf("storage: seed debug byte counter: %v", err)
+		}
 	}
 	// Since-inception totals are a durable meta row maintained in the same
 	// transaction as every mutation. A current document is O(1) at boot; an
@@ -647,6 +666,35 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 		// the ring buffer already holds the most recent records in memory.
 		s.incrDrops()
 	}
+}
+
+// seedDebugBytes initializes the sidecar byte counter from durable rows. The
+// writer connection is free at Open; a failure leaves it unseeded so
+// SaveDebugCapture retries before enforcing the cap.
+func (s *Store) seedDebugBytes(ctx context.Context) error {
+	var n int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
+		return err
+	}
+	s.debugMu.Lock()
+	s.debugBytes, s.debugSeeded = n, true
+	s.debugMu.Unlock()
+	return nil
+}
+
+// resetDebugBytes recomputes the counter after a bulk mutation (purge/merge)
+// on the caller's transaction/connection.
+func (s *Store) resetDebugBytes(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) error {
+	var n int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
+		return err
+	}
+	s.debugMu.Lock()
+	s.debugBytes, s.debugSeeded = n, true
+	s.debugMu.Unlock()
+	return nil
 }
 
 func (s *Store) incrDrops() {
@@ -1054,7 +1102,12 @@ func loadTotals(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }) (t Totals, found bool, err error) {
 	var raw string
-	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, totalsMetaKey).Scan(&raw)
+	var epoch int64
+	// One statement reads the document and its mutation witness from the same
+	// SQLite snapshot, so a concurrent commit cannot land between them.
+	err = db.QueryRowContext(ctx, `SELECT m.value, s.epoch
+		FROM meta AS m CROSS JOIN request_projection_state AS s
+		WHERE m.key = ? AND s.singleton = 1`, totalsMetaKey).Scan(&raw, &epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Totals{}, false, nil
 	}
@@ -1068,10 +1121,6 @@ func loadTotals(ctx context.Context, db interface {
 	}
 	if d.V != totalsMetaVersion || d.Invalid {
 		return Totals{}, false, nil
-	}
-	var epoch int64
-	if err := db.QueryRowContext(ctx, `SELECT epoch FROM request_projection_state WHERE singleton = 1`).Scan(&epoch); err != nil {
-		return Totals{}, false, err
 	}
 	if epoch != d.Epoch {
 		// Authoritative rows changed outside this store's transaction (the
@@ -1451,18 +1500,80 @@ type LogCursor struct {
 
 // QueryBefore returns a newest-first page below the exclusive cursor. A nil
 // cursor starts at durable newest, independently of the arrival-ordered ring.
-func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, limit int) ([]*metrics.Record, error) {
+// LogField is the closed set of exact durable columns a log page may push
+// into SQL. The enum is the trust boundary: callers never supply identifiers.
+type LogField int
+
+const (
+	LogProvider LogField = iota
+	LogClient
+	LogKeyHash
+	LogConversation
+	LogModel
+	LogStatus
+)
+
+// LogPredicate is one exact equality (ANDed with every other predicate). The
+// Go scope matcher remains authoritative; pushdown only reduces decode work.
+type LogPredicate struct {
+	Field LogField
+	Value string
+}
+
+// LogFilter carries SQL-safe exact predicates plus an optional exact status.
+// Zero value selects everything.
+type LogFilter struct {
+	All []LogPredicate
+}
+
+func (f *LogFilter) where() (string, []any) {
+	if f == nil {
+		return "", nil
+	}
+	var clause string
+	args := make([]any, 0, len(f.All))
+	for _, p := range f.All {
+		var column string
+		switch p.Field {
+		case LogProvider:
+			column = "provider"
+		case LogClient:
+			column = "client"
+		case LogKeyHash:
+			column = "key_hash"
+		case LogConversation:
+			column = "conversation_id"
+		case LogModel:
+			column = "model"
+		case LogStatus:
+			column = "status_code"
+		default:
+			continue
+		}
+		clause += " AND " + column + " = ?"
+		args = append(args, p.Value)
+	}
+	return clause, args
+}
+
+// QueryBefore pages durable records newest-first below an exact (time,id)
+// cursor. filter predicates are applied by SQLite before decoding; callers
+// that need canonical-model or class semantics still match in Go.
+func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogFilter, limit int) ([]*metrics.Record, error) {
 	if limit <= 0 {
 		return nil, nil
 	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
-	q := `SELECT ` + recordColumns + ` FROM requests`
+	q := `SELECT ` + recordColumns + ` FROM requests WHERE 1=1`
 	var args []any
 	if before != nil {
-		q += ` WHERE (started_at, id) < (?, ?)`
+		q += ` AND (started_at, id) < (?, ?)`
 		args = append(args, before.StartMs, before.ID)
 	}
+	push, pushArgs := filter.where()
+	q += push
+	args = append(args, pushArgs...)
 	q += ` ORDER BY started_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := s.rdb.QueryContext(ctx, q, args...)

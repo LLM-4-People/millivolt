@@ -158,17 +158,36 @@ share its builder. SQLite transactions capture rowid high-water/destructive
 epoch/schema authority; destructive changes rebuild. Failed or canceled reads
 never publish stale rows or advance authority.
 
+Materialization runs off the projection lock with one single-flight builder;
+concurrent readers keep serving the previous complete snapshot and wait for
+that builder instead of repeating its scan. A destructive change builds a
+complete replacement off-lock and swaps it under a short write lock. The
+durable since-inception totals are one meta row written in the same
+transaction as every insert and purge and on the held writer connection during
+a merge; its recorded projection epoch is the mutation witness. A merge whose
+document write fails leaves the epoch advanced, so the next boot rebuilds
+rather than trusting the pair. A boot with a changed epoch rebuilds once from the rows
+instead of trusting a stale cache, and a full purge has no surviving rows to
+scan. Restart readiness therefore no longer scales with the sum of a totals
+scan plus a separate preload scan.
+
 Chart and explorer each retain one immutable last-result slot. Keys include
 validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
 SQLite data_version is read on one retained connection; unsupported external
-writers are not made safe merely by cache invalidation.
+writers are not made safe merely by cache invalidation. Log pages push exact
+provider/client/key/conversation/model/status equalities into SQLite before
+decoding, while the Go scope matcher remains authoritative for canonical
+models, status classes, errors, tools, time buckets and live-only classes.
 
 Explorer uses dictionary IDs, scoped predicates and bitsets. Projected metric
-samples stay in shared sorted orders: per-row membership spans preserve
-multi-valued occurrences, selected groups use the same exact rank reader as
-chart buckets, and only top cards derive percentile payloads. Pending
-dedupe retains only relevant pending IDs, not another history-sized seen set.
+samples stay in shared sorted orders: single-valued dimensions retain one group
+id per row, while tool/error membership spans preserve multi-valued
+occurrences. Selected groups use the same exact rank reader as chart buckets,
+and only top cards derive percentile payloads. Pending dedupe retains only
+relevant pending IDs, not another history-sized seen set. Chart's rank reader
+also produces the occurrence-weighted avg/min/max in the same traversal, so a
+metric order is no longer walked separately for stats.
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.

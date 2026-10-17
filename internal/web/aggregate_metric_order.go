@@ -140,48 +140,6 @@ func observeMetricRank(sets []metricRankSet, bucket uint8, value float64) {
 	sets[0].observe(value) // one exact period-wide order, not bucket averages
 }
 
-// metricStats returns [avg, min, max] over the exact occurrence-weighted
-// population rankPercentiles ranks for the period: durable order samples
-// whose row maps to a bucket (zero excludes), plus valid in-range ring
-// extras. A tile can therefore quote an average over the same samples the
-// percentiles rank. nil means no captured sample in the window.
-func metricStats[T ~int64 | ~float64](order []metricSample[T], membership []uint8, extraValues []T, extraBuckets []uint8, bucketCount int) []*float64 {
-	var sum float64
-	var n int
-	var lo, hi float64
-	observe := func(v float64) {
-		if n == 0 {
-			lo, hi = v, v
-		} else {
-			if v < lo {
-				lo = v
-			}
-			if v > hi {
-				hi = v
-			}
-		}
-		sum += v
-		n++
-	}
-	for _, s := range order {
-		if uint64(s.row) < uint64(len(membership)) && membership[s.row] != 0 && int(membership[s.row]) <= bucketCount {
-			observe(float64(s.value))
-		}
-	}
-	if len(extraValues) == len(extraBuckets) {
-		for i, v := range extraValues {
-			if b := extraBuckets[i]; b != 0 && int(b) <= bucketCount && validMetricSample(v) {
-				observe(float64(v))
-			}
-		}
-	}
-	if n == 0 {
-		return nil
-	}
-	avg := sum / float64(n)
-	return []*float64{&avg, &lo, &hi}
-}
-
 // rankPercentiles adapts a chart's one-byte row membership to the shared
 // multi-membership reader. Zero excludes a row; other values are bucket+1.
 func rankPercentiles[T ~int64 | ~float64](order []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64) {
@@ -201,6 +159,53 @@ func rankPercentiles[T ~int64 | ~float64](order []metricSample[T], membership []
 // Unsorted ring extras use the same group encoding and are copied locally;
 // all inputs remain immutable. Work is O(history + memberships + extras log extras).
 func rankPercentilesVisit[T ~int64 | ~float64](order []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8))) ([][]*float64, []*float64) {
+	buckets, period, _ := rankPercentilesCore(order, counts, extraValues, extraBuckets, visit, false)
+	return buckets, period
+}
+
+// rankPercentilesStats is the chart's combined owner: one traversal yields the
+// exact bucket/period ranks AND the period-wide occurrence-weighted
+// avg/min/max. The separate metricStats pass walked the same immutable order a
+// second time per metric for no new information.
+func rankPercentilesStats[T ~int64 | ~float64](order []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64, []*float64) {
+	return rankPercentilesCore(order, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
+		if uint64(row) < uint64(len(membership)) {
+			emit(membership[row])
+		}
+	}, true)
+}
+
+type metricAccumulator struct {
+	sum float64
+	n   int
+	lo  float64
+	hi  float64
+}
+
+func (a *metricAccumulator) add(v float64) {
+	if a.n == 0 {
+		a.lo, a.hi = v, v
+	} else {
+		if v < a.lo {
+			a.lo = v
+		}
+		if v > a.hi {
+			a.hi = v
+		}
+	}
+	a.sum += v
+	a.n++
+}
+
+func (a *metricAccumulator) result() []*float64 {
+	if a.n == 0 {
+		return nil
+	}
+	avg := a.sum / float64(a.n)
+	return []*float64{&avg, &a.lo, &a.hi}
+}
+
+func rankPercentilesCore[T ~int64 | ~float64](order []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8)), wantStats bool) ([][]*float64, []*float64, []*float64) {
 	sets := make([]metricRankSet, len(counts)+1)
 	buckets := make([][]*float64, len(counts))
 	out := make([]*float64, 3*len(sets))
@@ -213,8 +218,16 @@ func rankPercentilesVisit[T ~int64 | ~float64](order []metricSample[T], counts [
 	}
 	sets[0].init(total)
 	period := out[:3]
-	if total < pctMinSamples || len(extraValues) != len(extraBuckets) {
-		return buckets, period
+	if len(extraValues) != len(extraBuckets) {
+		return buckets, period, nil
+	}
+	if total < pctMinSamples {
+		// Ranks need the minimum sample count, but the avg/min/max tile is
+		// valid for any positive count. Traverse for stats only when asked;
+		// the rank sets are already disabled by init.
+		if !wantStats || total == 0 {
+			return buckets, period, nil
+		}
 	}
 	extras := make([]metricSample[T], 0, len(extraValues))
 	for i, value := range extraValues {
@@ -226,24 +239,45 @@ func rankPercentilesVisit[T ~int64 | ~float64](order []metricSample[T], counts [
 	slices.SortFunc(extras, func(a, b metricSample[T]) int { return cmp.Compare(a.value, b.value) })
 	// One callback for this traversal, never a closure allocation per row.
 	var currentValue float64
-	emit := func(bucket uint8) { observeMetricRank(sets, bucket, currentValue) }
+	var stats metricAccumulator
+	emit := func(bucket uint8) {
+		observeMetricRank(sets, bucket, currentValue)
+		if wantStats && bucket != 0 && int(bucket) < len(sets) {
+			stats.add(currentValue)
+		}
+	}
+	useEmit := emit
+	if visit == nil {
+		useEmit = func(bucket uint8) {
+			observeMetricRank(sets, bucket, currentValue)
+		}
+	}
 	extra := 0
 	for _, sample := range order {
 		for extra < len(extras) && extras[extra].value <= sample.value {
 			v := extras[extra]
 			observeMetricRank(sets, uint8(v.row), float64(v.value))
+			if wantStats && v.row != 0 {
+				stats.add(float64(v.value))
+			}
 			extra++
 		}
 		if visit != nil {
 			currentValue = float64(sample.value)
-			visit(sample.row, emit)
+			visit(sample.row, useEmit)
 		}
 	}
 	for _, v := range extras[extra:] {
 		observeMetricRank(sets, uint8(v.row), float64(v.value))
+		if wantStats && v.row != 0 {
+			stats.add(float64(v.value))
+		}
 	}
 	for i := range sets {
 		sets[i].result(out[3*i:3*(i+1)], values[3*i:3*(i+1)])
 	}
-	return buckets, period
+	if !wantStats {
+		return buckets, period, nil
+	}
+	return buckets, period, stats.result()
 }

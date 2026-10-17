@@ -55,9 +55,10 @@ type Config struct {
 
 	// MemoryLimit is a soft cap on the Go runtime's total managed memory
 	// (heap, stacks, runtime structures), applied once at startup through
-	// the runtime's memory-limit mechanism. Zero leaves the runtime
-	// unbounded and keeps operator GOMEMLIMIT/GOGC environment control; a
-	// set value overrides the environment for the process lifetime. The
+	// the runtime's memory-limit mechanism. Zero auto-detects a finite cgroup
+	// memory ceiling (80% of it) when GOMEMLIMIT is unset, otherwise leaves
+	// the runtime unbounded; a set value overrides the environment for the
+	// process lifetime. The
 	// limit is soft: exceeding it makes the collector more aggressive
 	// (capped near 50% of CPU time) instead of failing requests. It bounds
 	// Go-managed memory only, never SQLite's page cache or OS overhead.
@@ -107,6 +108,10 @@ type Config struct {
 	// DebugCaptureMaxBytes caps one debug capture (request body + client-facing
 	// response bytes). Past the cap the rest is dropped and truncated=true.
 	DebugCaptureMaxBytes ByteSize `yaml:"debug_capture_max_bytes" json:"debug_capture_max_bytes"`
+	// DebugStoreMaxBytes caps the total durable debug-capture sidecar. New
+	// captures are skipped once the sidecar would exceed it; TTL expiry frees
+	// room. 0 = unlimited. Restart required (the counter is seeded at boot).
+	DebugStoreMaxBytes ByteSize `yaml:"debug_store_max_bytes" json:"debug_store_max_bytes"`
 
 	// AutoTokenRefresh enables stateless expired-token refresh: when a client
 	// presents a JWT access token whose exp has passed (within a small
@@ -146,6 +151,11 @@ type Config struct {
 	// concurrency lets clients control heap directly. Requests above the bound
 	// are answered 503 with Retry-After instead of buffering. 0 = unlimited.
 	MaxInflightRequests int `yaml:"max_inflight_requests" json:"max_inflight_requests"`
+	// MaxInflightBodyBytes is the process-wide budget for buffered inbound
+	// bodies. Admission reserves the declared Content-Length (or the configured
+	// request cap for chunked bodies) and refuses a request that would exceed
+	// this budget, before reading it. 0 = unlimited.
+	MaxInflightBodyBytes ByteSize `yaml:"max_inflight_body_bytes" json:"max_inflight_body_bytes"`
 	// QueueRetryAfter is the Retry-After hint sent to clients when the proxy's
 	// own queue is full or the wait is exceeded. HTTP Retry-After is integer
 	// seconds; RetryAfterSeconds is the single conversion for that header.
@@ -844,7 +854,7 @@ func Default() *Config {
 		HistorySize:         10000,
 		ShutdownTimeout:     5 * time.Second,
 		RestartDrainTimeout: 10 * time.Minute,
-		MemoryLimit:         0, // 0 = unbounded; operator GOMEMLIMIT/GOGC env control
+		MemoryLimit:         0, // 0 = auto cgroup ceiling, else unbounded; GOMEMLIMIT wins
 
 		MaxRequestBytes:         32 << 20, // 32 MiB
 		UpstreamTimeout:         5 * time.Minute,
@@ -857,13 +867,14 @@ func Default() *Config {
 		MaxIdleConnsPerHost: 512,
 		IdleConnTimeout:     90 * time.Second,
 
-		MaxRetries:          5,
-		MaxQueueSize:        1024,
-		MaxQueueWait:        10 * time.Minute,
-		MaxInflightRequests: 10000,
-		QueueRetryAfter:     2 * time.Second,
-		BaseBackoff:         1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
-		MaxBackoff:          2 * time.Minute,
+		MaxRetries:           5,
+		MaxQueueSize:         1024,
+		MaxQueueWait:         10 * time.Minute,
+		MaxInflightRequests:  10000,
+		MaxInflightBodyBytes: 256 << 20,
+		QueueRetryAfter:      2 * time.Second,
+		BaseBackoff:          1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
+		MaxBackoff:           2 * time.Minute,
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
@@ -900,7 +911,8 @@ func Default() *Config {
 		ModelRules: DefaultModelRules(),
 
 		DebugCaptureTTL:      24 * time.Hour,
-		DebugCaptureMaxBytes: 1 << 20, // 1 MiB
+		DebugCaptureMaxBytes: 1 << 20,   // 1 MiB
+		DebugStoreMaxBytes:   512 << 20, // 512 MiB total sidecar
 
 		ConversationIdleGap: 30 * time.Minute,
 		ConversationMaxOpen: 64,
@@ -1121,6 +1133,11 @@ func (c *Config) Validate() error {
 	if c.DebugCaptureTTL < DebugCaptureTTLMin || c.DebugCaptureTTL > DebugCaptureTTLMax {
 		return errRange("debug_capture_ttl", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))
 	}
+	if c.DebugStoreMaxBytes != 0 {
+		if err := checkByteSize("debug_store_max_bytes", c.DebugStoreMaxBytes, 16<<20, 8<<30); err != nil {
+			return err
+		}
+	}
 	if err := checkByteSize("debug_capture_max_bytes", c.DebugCaptureMaxBytes, DebugCaptureMaxBytesMin, DebugCaptureMaxBytesMax); err != nil {
 		return err
 	}
@@ -1140,6 +1157,11 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxInflightRequests < 0 || c.MaxInflightRequests > 1_000_000 {
 		return fmt.Errorf("max_inflight_requests: must be 0..1000000, got %d", c.MaxInflightRequests)
+	}
+	if c.MaxInflightBodyBytes != 0 {
+		if err := checkByteSize("max_inflight_body_bytes", c.MaxInflightBodyBytes, 1<<20, 64<<30); err != nil {
+			return err
+		}
 	}
 	if c.QualityRetries < 0 || c.QualityRetries > QualityRetriesMax {
 		return fmt.Errorf("quality_retries: must be 0..%d, got %d", QualityRetriesMax, c.QualityRetries)

@@ -79,8 +79,8 @@ func TestRestartBudgetMirrorsPinned(t *testing.T) {
 	if restartBuildTimeout != 5*time.Minute {
 		t.Errorf("restartBuildTimeout = %v, want 5 minutes (dashboard RESTART_BUILD_BUDGET_MS 300000)", restartBuildTimeout)
 	}
-	if restartReadyTimeout != 30*time.Second {
-		t.Errorf("restartReadyTimeout = %v, want 30 seconds (dashboard RESTART_READY_BUDGET_MS 30000)", restartReadyTimeout)
+	if restartReadyTimeout != 5*time.Minute {
+		t.Errorf("restartReadyTimeout = %v, want 5 minutes (dashboard RESTART_READY_BUDGET_MS 300000)", restartReadyTimeout)
 	}
 	if got := config.Default().RestartDrainTimeout; got != 10*time.Minute {
 		t.Errorf("Default RestartDrainTimeout = %v, want 10 minutes (dashboard RESTART_DRAIN_FALLBACK_MS 600000)", got)

@@ -35,16 +35,9 @@ func TestLogPageRetainsTimestampTies(t *testing.T) {
 	}
 }
 
-func TestLogPageScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
-	// This tests a row-work budget, not a wall-clock performance requirement.
-	// The query deadline must stay a generous real one: a synthetic deadline
-	// inside a synctest bubble sprints past while the single query goroutine
-	// blocks on real SQLite file I/O on a loaded CI runner, fail-closing the
-	// page with 500. The hour must ride BOTH the aggregate context below and
-	// the store's own QueryTimeout: storage.withQueryTimeout wraps the handler
-	// context unconditionally, so the shared fixture's one-second cap silently
-	// overrode this one-hour budget and a loaded runner failed it as
-	// "agg log page: context deadline exceeded".
+func TestLogPagePushdownReturnsScopedMatchesDirectly(t *testing.T) {
+	// Exact provider equality is pushed into SQL, so a page returns the
+	// matching rows without decoding the newer unrelated history first.
 	s := testStoreWithQueryTimeout(t, time.Hour)
 	start := time.UnixMilli(1_800_000_000_000)
 	for i := range logScanMax + 7 {
@@ -64,12 +57,9 @@ func TestLogPageScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
 	}
 	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
 	first := get(t, h, "/metrics/agg/log?limit=10&f=provider:target")
-	if len(first["records"].([]any)) != 0 || first["more"] != true || first["cursor_id"] != "row-0007" {
-		t.Fatalf("scope-budget cursor=%v", first)
-	}
-	second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&f=provider:target&before_ms=%.0f&before_id=%s", first["cursor_ms"], url.QueryEscape(first["cursor_id"].(string))))
-	if len(second["records"].([]any)) != 7 || second["more"] != false {
-		t.Fatalf("scope-budget continuation lost rows=%v", second)
+	records, _ := first["records"].([]any)
+	if len(records) != 7 || first["more"] != false {
+		t.Fatalf("pushdown page = %d records, more=%v; want 7, false", len(records), first["more"])
 	}
 	for _, target := range []string{
 		"?limit=10&before_ms=1", "?limit=10&before_id=x", "?limit=10&before_ms=nope&before_id=x",
@@ -81,6 +71,43 @@ func TestLogPageScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
 		if w.Code != http.StatusBadRequest {
 			t.Fatalf("malformed cursor accepted: %s status=%d", target, w.Code)
 		}
+	}
+}
+
+func TestLogPageUnpushableScopeBudgetAdvancesAcrossTimestampTies(t *testing.T) {
+	// This tests a row-work budget, not a wall-clock performance requirement.
+	// Tool membership cannot be pushed into SQL, so a page that scans its
+	// full budget without a match must still return a progress cursor instead
+	// of rescanning the same newest rows forever.
+	// The query deadline must stay a generous real one: a synthetic deadline
+	// inside a synctest bubble sprints past while the single query goroutine
+	// blocks on real SQLite file I/O on a loaded CI runner, fail-closing the
+	// page with 500. The hour must ride BOTH the aggregate context below and
+	// the store's own QueryTimeout: storage.withQueryTimeout wraps the handler
+	// context unconditionally, so the shared fixture's one-second cap silently
+	// overrode this one-hour budget and a loaded runner failed it as
+	// "agg log page: context deadline exceeded".
+	s := testStoreWithQueryTimeout(t, time.Hour)
+	start := time.UnixMilli(1_800_000_000_000)
+	for i := range logScanMax + 7 {
+		s.Record(&metrics.Record{ID: fmt.Sprintf("row-%04d", i), Provider: "target", Start: start, StatusCode: 200})
+		if i%logScanBatch == 0 {
+			if err := s.Flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
+	first := get(t, h, "/metrics/agg/log?limit=10&f=tool:missing")
+	if len(first["records"].([]any)) != 0 || first["more"] != true || first["cursor_id"] != "row-0007" {
+		t.Fatalf("scope-budget cursor=%v", first)
+	}
+	second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&f=tool:missing&before_ms=%.0f&before_id=%s", first["cursor_ms"], url.QueryEscape(first["cursor_id"].(string))))
+	if len(second["records"].([]any)) != 0 || second["more"] != false {
+		t.Fatalf("scope-budget continuation=%v", second)
 	}
 }
 

@@ -104,7 +104,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Keep-alive idle connections. No write timeout (it would kill SSE). Restart required.",
 			Kind: KindDuration, HotReload: false, Min: num(0), ZeroMeans: "no timeout"},
 		{Key: "go_memory_limit", Category: "server", Label: "Go memory limit",
-			Help: "Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup. 0 leaves it unbounded and keeps GOMEMLIMIT/GOGC env control; a set value overrides the env. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails requests. Does not bound SQLite's page cache or OS overhead. Restart required.",
+			Help: "Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup. 0 auto-detects a finite cgroup memory ceiling at 80% and otherwise leaves the runtime unbounded; GOMEMLIMIT/GOGC environment control wins when set, and a set value overrides the environment. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails requests. Does not bound SQLite's page cache or OS overhead. Restart required.",
 			Kind: KindBytes, HotReload: false, Min: num(float64(MemoryLimitMin)), Max: num(float64(MemoryLimitMax)), ZeroMeans: "unbounded"},
 
 		// ---- request ----
@@ -123,6 +123,9 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "debug_capture_max_bytes", Category: "request", Label: "Debug capture max bytes",
 			Help: "Cap on one debug capture (request body plus client-facing response bytes). Past the cap the rest is dropped and the capture is marked truncated.",
 			Kind: KindBytes, HotReload: true, Min: num(float64(DebugCaptureMaxBytesMin)), Max: num(float64(DebugCaptureMaxBytesMax))},
+		{Key: "debug_store_max_bytes", Category: "request", Label: "Debug store max bytes",
+			Help: "Total durable debug-capture sidecar cap. New captures are skipped once the next write would exceed it; TTL expiry frees capacity. Bytes, not characters. 0 = unlimited. Restart required.",
+			Kind: KindBytes, Min: num(0), Max: num(8 << 30)},
 		{Key: "auto_token_refresh", Category: "request", Label: "Auto token refresh",
 			Help: "Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All supported providers use inference handback: HTTP 401 with token_expired and access_token in the error body, plus refresh_token only when the exchange returns a different replacement. No inference is sent; adopt the returned credentials and retry, retaining the old refresh token if no replacement is returned. Model discovery refreshes transparently without returning tokens. Stateless: no reusable credentials are retained.",
 			Kind: KindBool, HotReload: true},
@@ -166,6 +169,8 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		{Key: "max_inflight_requests", Category: "queue", Label: "Max in-flight requests",
 			Help: "Process-wide inference admission bound. Requests above it are refused with 503 and Retry-After instead of buffering their bodies. 0 = unlimited. Hot-reloads.",
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(1_000_000)},
+		{Key: "max_inflight_body_bytes", Category: "queue", Label: "Max in-flight body bytes",
+			Help: "Process-wide budget for buffered inbound request bodies. Admission reserves the declared Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(0), Max: num(64 << 30)},
 		{Key: "max_queue_wait", Category: "queue", Label: "Max queue wait",
 			Help: "How long a request may sit in the queue before 429. " + FormatDuration(0) + " is unlimited. Operator-hold time is excluded.",
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},

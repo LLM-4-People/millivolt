@@ -74,9 +74,11 @@ read_header_timeout: 10s
 idle_timeout: 2m
 
 # Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup.
-# 0 leaves it unbounded and keeps GOMEMLIMIT/GOGC env control; a set value overrides the
-# env. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails
-# requests. Does not bound SQLite's page cache or OS overhead. Restart required.
+# 0 auto-detects a finite cgroup memory ceiling at 80% and otherwise leaves the runtime
+# unbounded; GOMEMLIMIT/GOGC environment control wins when set, and a set value overrides
+# the environment. Exceeding it turns the collector more aggressive (capped near 50% CPU),
+# never fails requests. Does not bound SQLite's page cache or OS overhead. Restart
+# required.
 # Hot-reload: NO (restart required).
 #   type: bytes · range 32MiB..1024GiB (0B = unbounded) · default 0B
 go_memory_limit: 0B
@@ -113,6 +115,13 @@ debug_capture_ttl: 24h
 # Hot-reload: yes.
 #   type: bytes · range 4KiB..16MiB · default 1MiB
 debug_capture_max_bytes: 1MiB
+
+# Total durable debug-capture sidecar cap. New captures are skipped once the next write
+# would exceed it; TTL expiry frees capacity. Bytes, not characters. 0 = unlimited.
+# Restart required.
+# Hot-reload: NO (restart required).
+#   type: bytes · range 0B..8GiB · default 512MiB
+debug_store_max_bytes: 512MiB
 
 # Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All
 # supported providers use inference handback: HTTP 401 with token_expired and access_token
@@ -196,6 +205,13 @@ max_queue_size: 1024
 # Hot-reload: yes.
 #   type: int · range 0..1000000 · default 10000
 max_inflight_requests: 10000
+
+# Process-wide budget for buffered inbound request bodies. Admission reserves the declared
+# Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before
+# reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.
+# Hot-reload: yes.
+#   type: bytes · range 0B..64GiB · default 256MiB
+max_inflight_body_bytes: 256MiB
 
 # How long a request may sit in the queue before 429. 0s is unlimited. Operator-hold time
 # is excluded.

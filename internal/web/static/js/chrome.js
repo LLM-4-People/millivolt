@@ -448,8 +448,14 @@ async function mutateOperator(kind, body, after) {
   }
 }
 
+let _pauseStateSig = '';
+let _throttleStateSig = '';
+let _debugStateSig = '';
 function applyPauseState(st, revision = operatorState.pause.revision) {
   if (!acceptOperator('pause', st, revision)) return;
+  const sig = JSON.stringify(st);
+  if (sig === _pauseStateSig) return;
+  _pauseStateSig = sig;
   pauseState = {
     paused: !!st.paused,
     clients: Array.isArray(st.clients) ? st.clients : [],
@@ -467,6 +473,9 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
 
 function applyThrottleState(st, revision = operatorState.throttle.revision) {
   if (!acceptOperator('throttle', st, revision)) return;
+  const sig = JSON.stringify(st);
+  if (sig === _throttleStateSig) return;
+  _throttleStateSig = sig;
   throttleState = {
     throttles: Array.isArray(st.throttles) ? st.throttles : [],
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
@@ -672,11 +681,11 @@ function settingsIsDirty() {
   return !!(settingsDoc && settingsDoc.writable && settingsSnap && settingsFingerprint() !== settingsSnap);
 }
 
-function settingsDirtyCount() {
+function settingsDirtyCount(values) {
   if (!settingsSnap) return 0;
   try {
     const a = JSON.parse(settingsSnap);
-    const b = collectSettingsValues();
+    const b = values || collectSettingsValues();
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
     let n = 0;
     keys.forEach(k => {
@@ -709,9 +718,16 @@ function closeSettings(force) {
   const s = $('settings-sheet');
   const v = $('settings-veil');
   const b = $('btn-settings');
+  const wasOpen = settingsIsOpen();
   if (s) { s.classList.remove('open'); closeModal(s); }
   if (v) v.classList.remove('open');
   if (b) b.setAttribute('aria-pressed', 'false');
+  if (wasOpen && !force) {
+    // The Settings opener lives inside the Actions flyout, which closed
+    // before the modal opened; closeModal's stored element is now hidden and
+    // cannot receive focus. Return to the visible header control instead.
+    visibleHeaderControl()?.focus();
+  }
 }
 
 function toggleSettings(e) {
@@ -3384,15 +3400,23 @@ function settingsFingerprint() {
 
 function markSettingsDirty() {
   if (settingsDoc && settingsDoc.writable) {
-    const n = settingsDirtyCount();
+    // One collection feeds both the per-key count and the dirty gate. The
+    // previous path collected and stringified the whole form twice per
+    // keystroke on the settings surface.
+    const values = collectSettingsValues();
+    const n = settingsDirtyCount(values);
     if (n) settingsStatus(n === 1 ? '1 unsaved' : n + ' unsaved');
     else settingsStatus(settingsRestartNotice(settingsDoc));
+    updateSettingsActions(n > 0);
+    return;
   }
   updateSettingsActions();
 }
 
-function updateSettingsActions() {
-  const dirty = !!(settingsSnap && settingsFingerprint() !== settingsSnap);
+function updateSettingsActions(dirtyOverride) {
+  const dirty = dirtyOverride !== undefined
+    ? !!dirtyOverride
+    : !!(settingsSnap && settingsFingerprint() !== settingsSnap);
   const apply = $('btn-settings-apply');
   const revert = $('btn-settings-revert');
   const busy = !!(apply?.dataset.busy || revert?.dataset.busy);
@@ -3585,6 +3609,9 @@ document.getElementById('settings-rail')?.addEventListener('click', e => {
 
 function applyDebugState(st, revision = operatorState.debug.revision) {
   if (!acceptOperator('debug', st, revision) || !applyModelCanon(st.model_canon)) return;
+  const sig = JSON.stringify(st);
+  if (sig === _debugStateSig) return;
+  _debugStateSig = sig;
   debugState = {
     enabled: !!st.enabled,
     sessions: Array.isArray(st.sessions) ? st.sessions : [],
@@ -4802,7 +4829,7 @@ const RESTART_STEPS = [
 // (internal/config Default: RestartDrainTimeout, 10 minutes) for documents
 // that omit the bound or report an unbounded drain.
 const RESTART_BUILD_BUDGET_MS = 300000;
-const RESTART_READY_BUDGET_MS = 30000;
+const RESTART_READY_BUDGET_MS = 300000;
 const RESTART_DRAIN_FALLBACK_MS = 600000;
 // Poll cadence while the choreography runs; each poll is raced against the
 // hang bound because drain-phase polls sit unanswered in the inherited

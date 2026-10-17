@@ -790,6 +790,19 @@ available budget and in-flight/queued state. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
+Admission is bounded end to end. `max_inflight_requests` is the process-wide
+inference ceiling (default 10000) and `max_inflight_body_bytes` its buffered
+body budget (default 256 MiB); requests above either bound are refused with
+`503` and `Retry-After` before their bodies are buffered. `max_queue_size` (default 1024
+per group) and `max_queue_wait` (default 10m) bound a held or saturated
+provider's parked work; both accept explicit `0` = unlimited. Independent
+per-key/header concurrency remains unlimited by default. The scheduler retains
+at most 100000 distinct provider+key groups and 4096 header-created provider
+limits, refusing new ones past those bounds rather than growing process memory
+without limit. A new request body has a ten-minute read-progress bound, SSE
+writes have a one-minute per-event progress bound, and an upstream body that
+stops sending for ten minutes is canceled.
+
 Request and token budgets start full when enabled and refill continuously at
 the configured count/window rate. Request budget is charged once per proxy
 admission, not again for each absorbed upstream retry. Token admission reserves
@@ -902,7 +915,10 @@ Do not assume that every model spelling is an independent exact scope.
 The session timer selects future captures. `debug_capture_ttl` separately
 controls retained capture lifetime after completion, and
 `debug_capture_max_bytes` bounds captured request plus client-facing response
-bytes. Oversized captures are marked truncated. The request drawer loads an
+bytes. Oversized captures are marked truncated. `debug_store_max_bytes`
+(default 512 MiB) caps the whole capture sidecar; once the next write would
+exceed it, new captures are skipped and TTL expiry frees capacity again.
+Capture writes are counted in bytes, not characters. The request drawer loads an
 available sidecar only for a captured request; expired/absent captures are not
 recreated from ordinary metrics.
 
@@ -1350,7 +1366,11 @@ record over a seeded scratch database) and `BenchmarkProjectionProcessRSS`
 `go_memory_limit` is the operator's steady-state RSS lever: a soft cap on Go
 runtime managed memory (heap, stacks, runtime structures) applied once at
 startup. The default `0` leaves the runtime unbounded and keeps
-`GOMEMLIMIT`/`GOGC` environment control; a set value overrides the environment
+`GOMEMLIMIT`/`GOGC` environment control; when the setting is 0 and no
+`GOMEMLIMIT` is present, a finite cgroup memory ceiling (v2 `memory.max` or v1
+`memory.limit_in_bytes`) becomes a soft limit at 80% of that ceiling so a
+container's own bound actually reaches the Go runtime. A set value overrides
+the environment
 for the process lifetime. The limit is soft - exceeding it makes the collector
 more aggressive (capped near 50% of CPU time) instead of failing requests - and
 bounds Go-managed memory only, never SQLite's page cache or OS overhead.

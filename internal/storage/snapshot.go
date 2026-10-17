@@ -219,6 +219,8 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	var debugErr error
 	if _, err := mergeAttachedTable(ctx, conn, "request_debug"); err != nil {
 		debugErr = err
+	} else if err := s.resetDebugBytes(ctx, conn); err != nil {
+		debugErr = err
 	}
 	if inserted == 0 {
 		if debugErr != nil {

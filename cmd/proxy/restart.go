@@ -50,8 +50,12 @@ import (
 // Internal guardrails bounding the mechanical steps. Not user-tunable - the
 // user-facing drain bound is restart_drain_timeout in internal/config.
 const (
-	restartBuildTimeout = 5 * time.Minute  // cold builds (empty cache) can be slow
-	restartReadyTimeout = 30 * time.Second // child boot: migrate + totals scan + backfill
+	restartBuildTimeout = 5 * time.Minute // cold builds (empty cache) can be slow
+	// Child boot includes migration, the durable-totals load/rebuild and the
+	// one initial projection decode. Large histories legitimately exceed 30s;
+	// a crashed child closes the pipe immediately, so this deadline only
+	// bounds a hung boot, not a slow-but-healthy one.
+	restartReadyTimeout = 5 * time.Minute
 )
 
 // FD-handoff env keys. ExtraFiles start at fd 3: fd 3 is the listening

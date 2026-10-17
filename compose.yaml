@@ -22,6 +22,13 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    # Bound the container's own json-file logs; the default driver grows them
+    # without limit for the life of the deployment.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # SIGTERM cancels streams. Allow time beyond shutdown_timeout for SQLite
     # draining; this grace is configurable, not a lossless shutdown guarantee.
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}

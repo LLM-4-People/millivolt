@@ -207,7 +207,8 @@ func TestExplorerFoldPendingDedupeIsBounded(t *testing.T) {
 
 // Metric sample counting follows the projected memberships exactly (the
 // error dim counts affected requests; tool occurrences count duplicates),
-// and the CSR membership list retains one entry per projected membership.
+// and the per-dimension membership owner retains one entry per projected
+// membership (single id per row for single-valued dims, CSR for multi).
 func TestExplorerFoldMetricCountsFollowProjectedMemberships(t *testing.T) {
 	rows := explorerFoldFixtures()
 	p := explorerProjection(rows)
@@ -234,8 +235,21 @@ func TestExplorerFoldMetricCountsFollowProjectedMemberships(t *testing.T) {
 					dim, g.name, g.ttftN, g.tpsN, len(g.ttftS), len(g.tpsS), want)
 			}
 		}
-		if len(f.members) != memberships {
-			t.Fatalf("%s retained %d CSR occurrences, want %d", dim, len(f.members), memberships)
+		if f.multiMember {
+			if len(f.members) != memberships {
+				t.Fatalf("%s retained %d CSR occurrences, want %d", dim, len(f.members), memberships)
+			}
+		} else {
+			// Single-valued dimensions own one group id per projected row.
+			kept := 0
+			for _, id := range f.singleMember {
+				if id != 0 {
+					kept++
+				}
+			}
+			if kept != memberships {
+				t.Fatalf("%s retained %d row memberships, want %d", dim, kept, memberships)
+			}
 		}
 	}
 }

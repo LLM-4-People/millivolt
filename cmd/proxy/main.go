@@ -210,8 +210,12 @@ func main() {
 	// active before the startup projection preload allocates its burst, and
 	// an unset value never calls the API so operator GOMEMLIMIT/GOGC
 	// environment variables keep control (config.go owns the semantics).
-	if cfg.MemoryLimit > 0 {
-		debug.SetMemoryLimit(int64(cfg.MemoryLimit))
+	cgroupLimit, hasCgroup := cgroupMemoryMax()
+	if limit := effectiveMemoryLimit(int64(cfg.MemoryLimit), os.Getenv("GOMEMLIMIT"), cgroupLimit, hasCgroup); limit > 0 {
+		debug.SetMemoryLimit(limit)
+		if cfg.MemoryLimit == 0 {
+			log.Printf("runtime: soft memory limit %d MiB from cgroup v2 ceiling %d MiB", limit>>20, cgroupLimit>>20)
+		}
 	}
 
 	buf := metrics.NewBuffer(cfg.HistorySize)
@@ -231,6 +235,7 @@ func main() {
 			// config knob: the written-id set must cover every record the
 			// ring can hold so the aggregate merge dedupes exactly.
 			WriteTrackCap: cfg.HistorySize * 2,
+			DebugMaxBytes: int64(cfg.DebugStoreMaxBytes),
 		})
 		if err != nil {
 			log.Fatalf("storage: %v", err)

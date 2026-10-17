@@ -97,6 +97,13 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	// before the matching ring removal and aggregate publication finish. The
 	// writer owns the buffered result channel, so returning on cancellation can
 	// never block it.
+	// Prefer a completed outcome when both the result and cancellation are
+	// ready: the transaction may have committed just before the deadline.
+	select {
+	case out := <-cmd.result:
+		return out.result, out.err
+	default:
+	}
 	select {
 	case out := <-cmd.result:
 		return out.result, out.err
@@ -136,6 +143,9 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 			return PurgeResult{}, err
 		}
 	} else if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
+		return PurgeResult{}, err
+	}
+	if err := s.resetDebugBytes(cmd.ctx, tx); err != nil {
 		return PurgeResult{}, err
 	}
 	res, err := tx.ExecContext(cmd.ctx, "DELETE FROM requests"+where, args...)

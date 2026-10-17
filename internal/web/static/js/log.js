@@ -11,12 +11,11 @@
 // HTML is deliberately not retained: it is only read by the full rebuild that
 // created it, so keeping it duplicated every loaded row's markup in memory.
 const logHTML = new Map();
-function removeRowGroup(id) {
-  const c = $('tbl-requests');
-  if (!c) return;
-  c.querySelectorAll(`tr[data-id="${CSS.escape(id)}"], tr[data-sep-of="${CSS.escape(id)}"]`).forEach(tr => tr.remove());
-  logHTML.delete(id);
-}
+// Durable pages loaded below the ring are a convenience window, not a second
+// unlimited history. Twenty thousand records bounds this page's retained JSON
+// at a few megabytes while still covering deep operator scroll sessions; the
+// server keyset cursor remains valid, so fetching continues below the trim.
+const LOG_ARCHIVE_MAX = 20000;
 function logPageSize() { return dashCfg.log_rows; }
 function logCap() { return logLimit > 0 ? logLimit : logPageSize(); }
 function resetLogWindow() {
@@ -186,9 +185,17 @@ function renderRequestsIncremental(recs) {
   }
   if (!sameSet) {
     const want = new Set(recent.map(r => r.id));
-    container.querySelectorAll('tr.exp-row[data-id]').forEach(tr => {
-      if (!want.has(tr.dataset.id)) removeRowGroup(tr.dataset.id);
+    const dropped = new Set();
+    // One traversal and one direct removal per stale node. The previous
+    // per-id removeRowGroup rescanned the whole table for every stale row,
+    // making a scope change quadratic in the loaded window.
+    container.querySelectorAll('tr[data-id], tr[data-sep-of], tr.retry-sub[data-retry-of]').forEach(tr => {
+      const id = tr.dataset.id || tr.dataset.sepOf || tr.dataset.retryOf;
+      if (want.has(id)) return;
+      dropped.add(id);
+      tr.remove();
     });
+    for (const id of dropped) logHTML.delete(id);
   }
 
   // Process oldest→newest, collecting each new or changed group; insertions
@@ -348,6 +355,7 @@ function fetchOlderLog() {
     }
     if (added.length) {
       logArchive = added.reverse().concat(logArchive);
+      if (logArchive.length > LOG_ARCHIVE_MAX) logArchive.length = LOG_ARCHIVE_MAX;
       const merged = mergeLogArchive(ringScoped);
       logLimit = Math.min(merged.length, Math.max(logCap() + added.length, logPageSize()));
       appendOlderLogRows(merged);
@@ -956,6 +964,12 @@ function closeDrawer() {
   drawerAttempt = null;
   if ($('drawer')) { $('drawer').classList.remove('open'); closeModal($('drawer')); }
   $('drawer-veil')?.classList.remove('open');
+  // Release the previous request's rendered detail and debug capture: the
+  // hidden drawer otherwise retained request/response bodies for the life of
+  // the tab. The next open re-renders from its record.
+  if ($('drawer-body')) $('drawer-body').innerHTML = '';
+  if ($('drawer-title')) $('drawer-title').textContent = '';
+  if ($('drawer-debug')) $('drawer-debug').innerHTML = '';
   highlightRow();
 }
 function drawerNav(dir) {

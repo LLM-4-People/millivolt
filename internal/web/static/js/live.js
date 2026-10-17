@@ -182,6 +182,10 @@ let lastSeq = 0;
 // writes) and every scope change swaps the filter-set identity, so a cached
 // derivation can never go stale. All render paths share this one derivation.
 let _der = null, _derData = null, _derRev = -1, _derFS = null;
+let _kpiHtml = '';
+let _kpiHtmlKey = '';
+let _statusHtml = '';
+let _statusHtmlKey = '';
 function derive(data) {
   const fs = explorerFilters(); // memoized on (hash, status) - identity is the scope key
   const rev = data._rev || 0;
@@ -194,6 +198,10 @@ function derive(data) {
   const liveSeen = new Set();
   const codeSeen = new Set();
   const scopedRecs = [];
+  // The unfiltered case is the common one: assign the ring directly instead
+  // of running the status/label matcher per record. Live/code inventories
+  // still walk once because the status dropdown derives from them.
+  const matchAll = !filters.status && fs.length === 0;
   for (const r of recs) {
     if (!r) continue;
     if (r.live) {
@@ -202,7 +210,7 @@ function derive(data) {
       liveSeen.add(k);
     }
     if (Number(r.status_code) > 0) codeSeen.add(r.status_code);
-    if (recordMatchesStatusFilter(r, filters.status) && fs.every(f => recordMatchesDim(r, f.dim, f.id))) {
+    if (matchAll || (recordMatchesStatusFilter(r, filters.status) && fs.every(f => recordMatchesDim(r, f.dim, f.id)))) {
       scopedRecs.push(r);
     }
   }
@@ -228,7 +236,12 @@ function derive(data) {
   const costPerReq = Number.isFinite(a.cost_per_req) ? a.cost_per_req : null;
   const costPerMtok = Number.isFinite(a.cost_per_mtok) ? a.cost_per_mtok : null;
 
-  const kpiHtml = `
+  const kpiKey = [a.requests, a.errors, a.cost, a.input_tokens, a.output_tokens,
+    a.cache_read_tokens, a.reasoning_tokens, a.avg_ttft_ms, a.avg_tps,
+    a.cost_per_req, a.cost_per_mtok, inFlight, flightSub].join('|');
+  let kpiHtml = _kpiHtml;
+  if (_kpiHtmlKey !== kpiKey) {
+    kpiHtml = `
     <div class="kpi"><h2>Requests</h2><div class="val">${vt(fmt(a.requests))}</div><div class="sub2">all tracked</div></div>
     <div class="kpi ${inFlight ? 'k-err' : ''}"><h2>In-flight</h2><div class="val">${vt(fmt(inFlight))}</div><div class="sub2">${flightSub}</div></div>
     <div class="kpi k-cost"><h2>Total cost</h2><div class="val">${vt(fmtMoney(totalCost), 'est USD · ' + fmtMoney(totalCost))}</div><div class="sub2">${costPerReq != null ? vt('~' + fmtMoney(costPerReq) + '/req') : '-'}</div></div>
@@ -239,6 +252,9 @@ function derive(data) {
     <div class="kpi"><h2>Avg TPS</h2><div class="val">${a.avg_tps != null ? a.avg_tps.toFixed(1) + '<span class="unit">tok/s</span>' : '-'}</div><div class="sub2">throughput</div></div>
     <div class="kpi ${a.errors ? 'k-err' : ''}"><h2>Error rate</h2><div class="val">${vt(errRate)}</div><div class="sub2">${vt(fmt(a.errors || 0) + ' of ' + fmt(a.requests))}</div></div>
   `;
+    _kpiHtml = kpiHtml;
+    _kpiHtmlKey = kpiKey;
+  }
 
   // Status filter options. Live pills (streaming / paused) are always listed
   // - they are in-flight states, not HTTP codes, so they never appear in the
@@ -256,7 +272,13 @@ function derive(data) {
   const codes = [...codeSeen].sort((x, y) => x - y);
   const statuses = liveOpts.concat(codes);
   if (filters.status && !statuses.some(s => String(s) === String(filters.status))) statuses.push(filters.status);
-  const statusHtml = `<option value="">all status</option>` + statuses.map(s => `<option value="${s}" ${String(s)===filters.status?'selected':''}>${s}</option>`).join('');
+  const statusKey = statuses.join('|') + '|' + filters.status;
+  let statusHtml = _statusHtml;
+  if (_statusHtmlKey !== statusKey) {
+    statusHtml = `<option value="">all status</option>` + statuses.map(s => `<option value="${s}" ${String(s)===filters.status?'selected':''}>${s}</option>`).join('');
+    _statusHtml = statusHtml;
+    _statusHtmlKey = statusKey;
+  }
 
   _der = { recs, scopedRecs, kpiHtml, statusHtml };
   _derData = data; _derRev = rev; _derFS = fs;
@@ -333,7 +355,9 @@ function renderLive() {
   if ($('f-status').value !== filters.status) $('f-status').value = filters.status;
   renderRequestsIncremental(d.scopedRecs);
   updateLogStats(d);
-  scheduleExplorerRender();
+  // The explorer gallery renders server aggregates (refreshed on its own
+  // cadence and rendered on arrival). Re-rendering it per live event only
+  // rebuilt identical DOM.
   refreshFooterState();
   updateScopeLine();
 }
@@ -526,16 +550,6 @@ function upsertPendingRec(rec, pendingRevision) {
   return recs;
 }
 
-// Explorer rebuild debounce during live-event bursts: the gallery cards must
-// not jitter on every single request. Navigation/full renders still rebuild
-// immediately.
-const EXPLORER_RENDER_DEBOUNCE_MS = 600;
-let _explorerTimer = null;
-function scheduleExplorerRender() {
-  if (_explorerTimer) return;
-  _explorerTimer = setTimeout(() => { _explorerTimer = null; renderExplorer(); }, EXPLORER_RENDER_DEBOUNCE_MS);
-}
-
 // startStream opens the SSE feed. since/feed seed the initial snapshot's
 // cursor (a page that just bootstrapped replays only the delta); a
 // reconnect ignores them - the browser echoes Last-Event-ID, and a feed
@@ -633,7 +647,15 @@ function startStream(since, feed) {
 // the capture listener sees scrolls of every nested region.
 window.addEventListener('resize', () => {
   if (_resizeRaf) return;
-  _resizeRaf = requestAnimationFrame(() => { _resizeRaf = 0; syncMetricsMenuEdge(); if (lastData) renderChart(); });
+  _resizeRaf = requestAnimationFrame(() => {
+    _resizeRaf = 0;
+    syncMetricsMenuEdge();
+    if (!lastData) return;
+    // An existing plot needs only new pixel dimensions; recomputing the
+    // payload, totals and legend on every resize frame was pure waste. Fall
+    // back to the full path when no plot exists yet (first viable layout).
+    if (_up) resizeChart(); else renderChart();
+  });
 });
 let _resizeRaf = 0;
 window.addEventListener('scroll', () => syncMetricsMenuEdge(), true);

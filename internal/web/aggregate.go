@@ -780,11 +780,9 @@ func (f *chartFold) payload(now int64) chartPayload {
 	for i, b := range f.buckets {
 		ttftCounts[i], tpsCounts[i], decCounts[i] = b.ttftN, b.tpsN, b.decN
 	}
-	ttft, periodTTFT := rankPercentiles(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
-	tps, periodTPS := rankPercentiles(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
+	ttft, periodTTFT, ttftStat := rankPercentilesStats(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
+	tps, periodTPS, tpsStat := rankPercentilesStats(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
 	dec, periodDec := rankPercentiles(f.order.dec, f.membership, decCounts, f.extraDec, f.decBucket)
-	ttftStat := metricStats(f.order.ttft, f.membership, f.extraTTFT, f.ttftBucket, f.count)
-	tpsStat := metricStats(f.order.tps, f.membership, f.extraTPS, f.tpsBucket, f.count)
 	for i, b := range f.buckets {
 		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
@@ -1266,13 +1264,18 @@ type explorerFold struct {
 	groups        map[uint32]*entAcc
 	maxGroupID    uint32
 	order         projectionMetrics
-	memberSpans   []explorerMemberSpan
-	members       []uint32
-	pendingIDs    map[string]struct{}
-	seen          map[string]struct{}
-	total         int64
-	errTot        int64
-	scope         scopePayload
+	rowCount      int
+	// Single-valued dimensions store one group id per projected row (4 bytes).
+	// Only tool/error need the flat multi-membership list + spans.
+	singleMember []uint32
+	multiMember  bool
+	memberSpans  []explorerMemberSpan
+	members      []uint32
+	pendingIDs   map[string]struct{}
+	seen         map[string]struct{}
+	total        int64
+	errTot       int64
+	scope        scopePayload
 }
 
 func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold {
@@ -1316,8 +1319,8 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 				}
 			}
 		}
-		e.memberSpans = make([]explorerMemberSpan, len(p.rows))
-		e.members = make([]uint32, 0, len(p.rows))
+		e.rowCount = len(p.rows)
+		e.multiMember = e.dimIndex == dimTool || e.dimIndex == dimError
 		// Only pending candidates can be replayed by the captured live snapshot.
 		// Never allocate a second full-history request-ID set for this query.
 		for id := range e.pendingIDs {
@@ -1485,12 +1488,26 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 		}
 	}
 	if c.rowIndex > 0 {
-		span := &e.memberSpans[c.rowIndex-1]
-		if span.count == 0 {
-			span.start = uint32(len(e.members))
+		if !e.multiMember {
+			// One group per row for every single-valued dimension (client,
+			// provider, model, key, status, time, conversation). Previously
+			// every explorer request allocated a span and a membership slot
+			// per projected row even for these.
+			if e.singleMember == nil {
+				e.singleMember = make([]uint32, e.rowCount)
+			}
+			e.singleMember[c.rowIndex-1] = dimKey
+		} else {
+			if e.memberSpans == nil {
+				e.memberSpans = make([]explorerMemberSpan, e.rowCount)
+			}
+			span := &e.memberSpans[c.rowIndex-1]
+			if span.count == 0 {
+				span.start = uint32(len(e.members))
+			}
+			span.count++
+			e.members = append(e.members, dimKey)
 		}
-		span.count++
-		e.members = append(e.members, dimKey)
 	}
 	// Durable samples stay in immutable metric order. Only raw ring/pending
 	// extras need per-group values; counts preserve occurrence multiplicity.
@@ -1557,18 +1574,29 @@ func (e *explorerFold) payload() explorerPayload {
 			tpsBuckets = append(tpsBuckets, bucket)
 		}
 	}
-	membership := make([]uint8, len(e.members))
-	for i, id := range e.members {
-		membership[i] = selected[id]
-	}
-	visit := func(row uint32, emit func(uint8)) {
-		if uint64(row) >= uint64(len(e.memberSpans)) {
-			return
+	var visit func(row uint32, emit func(uint8))
+	if e.multiMember {
+		membership := make([]uint8, len(e.members))
+		for i, id := range e.members {
+			membership[i] = selected[id]
 		}
-		span := e.memberSpans[row]
-		for _, bucket := range membership[span.start : span.start+span.count] {
-			if bucket != 0 {
-				emit(bucket)
+		visit = func(row uint32, emit func(uint8)) {
+			if uint64(row) >= uint64(len(e.memberSpans)) {
+				return
+			}
+			span := e.memberSpans[row]
+			for _, bucket := range membership[span.start : span.start+span.count] {
+				if bucket != 0 {
+					emit(bucket)
+				}
+			}
+		}
+	} else {
+		visit = func(row uint32, emit func(uint8)) {
+			if uint64(row) < uint64(len(e.singleMember)) {
+				if bucket := selected[e.singleMember[row]]; bucket != 0 {
+					emit(bucket)
+				}
 			}
 		}
 	}
@@ -1668,6 +1696,9 @@ const jsonBufferRetain = 1 << 20
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// Every aggregate carries live request metadata; never let a browser or
+	// intermediary retain a stale copy of request previews or filter results.
+	w.Header().Set("Cache-Control", "no-store")
 	buf := jsonBufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	enc := json.NewEncoder(buf)
@@ -1756,6 +1787,44 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := a.queryCtx(r)
 	defer cancel()
 
+	// A live-only status class can never match durable history (those classes
+	// describe the in-memory pending set). Return the empty page without
+	// decoding up to logScanMax rows that the Go matcher would reject.
+	if liveStatusFilter(statusCode) {
+		writeJSON(w, map[string]any{
+			"records":     []metrics.ObservedRecord{},
+			"model_canon": a.ObserveModels(false, nil),
+			"more":        false,
+			"cursor_ms":   int64(0),
+			"cursor_id":   "",
+		})
+		return
+	}
+	// Push exact, SQL-safe dimensions into the page query. Canonical model
+	// equality is pushable only when no rules rewrite names; class filters,
+	// errors, tools and time buckets stay in the authoritative Go matcher.
+	var logFilter storage.LogFilter
+	for _, f := range fs {
+		switch f.dim {
+		case "client":
+			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
+		case "provider":
+			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
+		case "key":
+			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
+		case "conversation":
+			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
+		case "model":
+			if len(mcz.exec) == 0 {
+				logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
+			}
+		}
+	}
+	if statusCode != "" {
+		if n, err := strconv.Atoi(statusCode); err == nil {
+			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogStatus, Value: strconv.Itoa(n)})
+		}
+	}
 	out := make([]*metrics.Record, 0, limit)
 	scanned := 0
 	hitEnd := a.store == nil
@@ -1768,7 +1837,7 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			if batch <= 0 {
 				break
 			}
-			rows, err := a.store.QueryBefore(ctx, cursor, batch)
+			rows, err := a.store.QueryBefore(ctx, cursor, &logFilter, batch)
 			if err != nil {
 				log.Printf("agg log page: %v", err)
 				adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")

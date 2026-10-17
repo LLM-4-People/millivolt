@@ -7375,7 +7375,7 @@ async function main() {
       // default RestartDrainTimeout - each pinned Go-side) and RESTART_STEPS
       // follows the server's phaseRank order.
       check('the restart poll budgets mirror the Go choreography bounds',
-        sw.eval('[RESTART_BUILD_BUDGET_MS, RESTART_READY_BUDGET_MS, RESTART_DRAIN_FALLBACK_MS].join()') === '300000,30000,600000');
+        sw.eval('[RESTART_BUILD_BUDGET_MS, RESTART_READY_BUDGET_MS, RESTART_DRAIN_FALLBACK_MS].join()') === '300000,300000,600000');
       check('RESTART_STEPS ranks follow the server phaseRank order',
         sw.eval('RESTART_STEPS.map(s => s.rank).join()') === '0,1,2,3');
 
