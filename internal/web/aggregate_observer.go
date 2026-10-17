@@ -3,6 +3,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"sync"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -18,15 +19,26 @@ type modelRuleCache struct {
 
 type compiledModelRules struct {
 	identity, revision string
+	rules              []config.ModelRule
 	exec               []config.ModelRuleExec
 }
 
-func (c *modelRuleCache) get(identity string, rules config.ModelCanon) *compiledModelRules {
+// get returns the compiled rules for the current snapshot. The rules content
+// is compared directly, so the identity marshal and hash run only when the
+// operator actually changes them; the former per-event path serialized the
+// whole rule set and hashed it again for every SSE event.
+func (c *modelRuleCache) get(rules config.ModelCanon) *compiledModelRules {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.current == nil || c.current.identity != identity {
+	if c.current == nil || !slices.Equal(c.current.rules, rules.Rules) {
+		identity := modelCanonIdentity(rules)
 		hash := sha256.Sum256([]byte(identity))
-		c.current = &compiledModelRules{identity: identity, revision: hex.EncodeToString(hash[:]), exec: config.CompileModelRules(rules.Rules)}
+		c.current = &compiledModelRules{
+			identity: identity,
+			revision: hex.EncodeToString(hash[:]),
+			rules:    slices.Clone(rules.Rules),
+			exec:     config.CompileModelRules(rules.Rules),
+		}
 	}
 	return c.current
 }
@@ -46,8 +58,7 @@ func (a *AggAPI) ObserveModelNames(names []string) any {
 
 func (a *AggAPI) observeModelNames(full bool, names []string) any {
 	rules := a.modelCanon()
-	identity := modelCanonIdentity(rules)
-	compiled := a.modelRules.get(identity, rules)
+	compiled := a.modelRules.get(rules)
 	out := modelObserverState{Revision: compiled.revision, Names: make(map[string]string)}
 	if full {
 		if rules.Rules == nil {
@@ -66,6 +77,15 @@ func (a *AggAPI) observeModelNames(full bool, names []string) any {
 // ObserveModels is the one provider wired to bootstrap and SSE. No record is
 // changed, no history is queried, and regex work happens only on observers.
 func (a *AggAPI) ObserveModels(full bool, groups ...[]*metrics.Record) any {
+	// The SSE record/end path passes one record: skip the dedupe map and the
+	// names slice it would build.
+	if len(groups) == 1 && len(groups[0]) == 1 {
+		if r := groups[0][0]; r != nil {
+			names := [1]string{r.Model}
+			return a.observeModelNames(full, names[:])
+		}
+		return a.observeModelNames(full, nil)
+	}
 	seen := make(map[string]struct{})
 	var names []string
 	for _, records := range groups {

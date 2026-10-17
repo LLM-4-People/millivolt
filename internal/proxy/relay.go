@@ -324,7 +324,11 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			copyResponseHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			if isEventStream(resp.Header.Get("Content-Type")) {
-				if _, cerr := io.Copy(disconnectWriter{w, rec}, resp.Body); cerr != nil {
+				// Flush each read: an upstream error event that stays open
+				// must reach the client immediately, not sit in the server's
+				// response buffer until the body ends.
+				flusher, _ := w.(http.Flusher)
+				if cerr := copyFlushing(disconnectWriter{w, rec}, resp.Body, flusher); cerr != nil {
 					markStreamErr(ctx, rec, cerr)
 				}
 				// The relaying copy above may abort early on a client
@@ -832,6 +836,30 @@ func captureUpstreamHeaders(resp *http.Response, rec *metrics.Record, authHeader
 	}
 	if m.hasLimit {
 		rec.RateLimitLimit = m.RateLimitLimit
+	}
+}
+
+// copyFlushing relays a body with one Flush after each successful write, so a
+// long-lived event-stream error body reaches the client as it arrives. The
+// stack read buffer avoids io.Copy's per-call allocation.
+func copyFlushing(w io.Writer, body io.Reader, flusher http.Flusher) error {
+	var buf [32 * 1024]byte
+	for {
+		n, rerr := body.Read(buf[:])
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return nil
+			}
+			return rerr
+		}
 	}
 }
 
@@ -1525,20 +1553,49 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, sseScannerBufInit), sseScannerBufMax)
 	a := s.analyzerFor(rec)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		// One Write per frame so a keepalive comment cannot splice onto a
-		// data line between the payload and its trailing newline.
-		frame := make([]byte, len(line)+1)
-		copy(frame, line)
-		frame[len(line)] = '\n'
+	// Frames are accumulated until their blank-line terminator, then written
+	// and flushed once: the transformer always emits "data: ...\n\n", so this
+	// is one Write and one Flush per event instead of two of each, and the
+	// buffer is reused across events with no per-line allocation.
+	var frame []byte
+	writeFrame := func() bool {
+		if len(frame) == 0 {
+			return true
+		}
 		if _, err := w.Write(frame); err != nil {
 			markClientGone(rec)
-			return
+			return false
 		}
 		rec.ResponseBytes += int64(len(frame))
-		a.Feed(line, time.Now())
+		// Feed the analyzer from the bytes actually delivered, in line order.
+		rest := frame
+		for len(rest) > 0 {
+			line := rest
+			if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+				line, rest = rest[:i], rest[i+1:]
+			} else {
+				rest = nil
+			}
+			a.Feed(line, time.Now())
+		}
+		frame = frame[:0]
 		flusher.Flush()
+		return true
+	}
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			frame = append(frame, '\n')
+			if !writeFrame() {
+				return
+			}
+			continue
+		}
+		frame = append(frame, line...)
+		frame = append(frame, '\n')
+	}
+	if !writeFrame() {
+		return
 	}
 	// A scanner error is the transformer's failure arriving through the pipe
 	// (CloseWithError): classify it here, in the handler, so the classification

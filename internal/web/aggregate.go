@@ -139,8 +139,8 @@ func (m *modelCanonizer) model(name string) string {
 // called a bounded number of times per request (one per fold helper entry).
 func (a *AggAPI) canonizer() *modelCanonizer {
 	rules := a.modelCanon()
-	identity := modelCanonIdentity(rules)
-	return &modelCanonizer{exec: a.modelRules.get(identity, rules).exec, memo: map[string]string{}, identity: identity}
+	compiled := a.modelRules.get(rules)
+	return &modelCanonizer{exec: compiled.exec, memo: map[string]string{}, identity: compiled.identity}
 }
 
 func (a *AggAPI) modelCanon() config.ModelCanon {

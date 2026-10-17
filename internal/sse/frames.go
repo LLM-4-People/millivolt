@@ -37,7 +37,18 @@ func EmitFrame(w io.Writer, flusher http.Flusher, obj any) error {
 	if err != nil {
 		return err
 	}
-	if _, err := w.Write(DataFrame(b)); err != nil {
+	// Render into a stack buffer for the ordinary small chunk; DataFrame's
+	// second allocation is only needed when the frame outgrows it.
+	var stack [512]byte
+	frame := stack[:0]
+	if len("data: ")+len(b)+2 <= len(stack) {
+		frame = append(frame, "data: "...)
+		frame = append(frame, b...)
+		frame = append(frame, '\n', '\n')
+	} else {
+		frame = DataFrame(b)
+	}
+	if _, err := w.Write(frame); err != nil {
 		return err
 	}
 	if flusher != nil {

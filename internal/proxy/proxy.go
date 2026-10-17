@@ -62,9 +62,11 @@ const (
 	// still relayed to the client in full. Safety guardrail, not user-tunable.
 	maxErrBodyBytes = 64 * 1024
 	// sseScannerBufInit / sseScannerBufMax bound one SSE event line when
-	// scanning a pre-translated stream (initial buffer / hard cap). Safety
-	// guardrail, not user-tunable.
-	sseScannerBufInit = 64 * 1024
+	// scanning a pre-translated stream (initial buffer / hard cap). The small
+	// initial buffer fits the ordinary chunk and grows on demand, so a stream
+	// that never exceeds it retains 4 KiB instead of 64. Safety guardrail, not
+	// user-tunable.
+	sseScannerBufInit = 4 * 1024
 	sseScannerBufMax  = 1024 * 1024
 	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
 	// kept for usage/cost parsing. Documents exceeding this capture can have

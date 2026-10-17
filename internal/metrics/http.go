@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -82,6 +83,44 @@ func (b *Buffer) SnapshotRequest(q url.Values, header http.Header) Snapshot {
 	return snap
 }
 
+// writeSSEFrame streams one event as its parts: the JSON payload is already
+// allocated, so concatenating prefix+payload+suffix and converting the result
+// to a byte slice only adds two full-size copies (multi-megabyte for a full
+// snapshot). net/http's response buffer coalesces the writes.
+func writeSSEFrame(w io.Writer, event string, id int64, hasID bool, data []byte) error {
+	if hasID {
+		var idbuf [20]byte
+		if _, err := io.WriteString(w, "id: "); err != nil {
+			return err
+		}
+		if _, err := w.Write(strconv.AppendInt(idbuf[:0], id, 10)); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+	if event != "" {
+		if _, err := io.WriteString(w, "event: "); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, event); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+	}
+	if _, err := io.WriteString(w, "data: "); err != nil {
+		return err
+	}
+	if _, err := w.Write(data); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, "\n\n")
+	return err
+}
+
 // HandleStream serves live updates over SSE at /metrics/live/stream. It pushes
 // each new record as it arrives, plus a heartbeat every 30s - the dashboard's
 // instant-refresh channel (event-driven) beside the tick-resumed bootstrap.
@@ -145,7 +184,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusInternalServerError, "serialize")
 		return
 	}
-	if _, err := w.Write([]byte("event: snapshot\ndata: " + string(snap) + "\n\n")); err != nil {
+	if err := writeSSEFrame(w, "snapshot", 0, false, snap); err != nil {
 		return
 	}
 	flusher.Flush()
@@ -186,7 +225,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			if _, err := w.Write([]byte("id: " + strconv.FormatInt(ev.Seq, 10) + "\nevent: record\ndata: " + string(data) + "\n\n")); err != nil {
+			if err := writeSSEFrame(w, "record", ev.Seq, true, data); err != nil {
 				return
 			}
 			flusher.Flush()
@@ -202,7 +241,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue
 			}
-			if _, err := w.Write([]byte("event: " + liveEv.Phase + "\ndata: " + string(data) + "\n\n")); err != nil {
+			if err := writeSSEFrame(w, liveEv.Phase, 0, false, data); err != nil {
 				return
 			}
 			flusher.Flush()

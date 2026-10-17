@@ -5,6 +5,7 @@ package format
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +18,11 @@ import (
 
 const (
 	// sseLineBufInit / sseLineBufMax bound a single SSE event line while
-	// scanning an upstream Anthropic stream (initial buffer / hard cap).
-	// Safety guardrail against pathological lines, not user-tunable.
-	sseLineBufInit = 64 * 1024
+	// scanning an upstream Anthropic stream (initial buffer / hard cap). The
+	// small initial buffer fits the ordinary event and grows on demand, so a
+	// stream that never exceeds it retains 4 KiB instead of 64. Safety
+	// guardrail against pathological lines, not user-tunable.
+	sseLineBufInit = 4 * 1024
 	sseLineBufMax  = 1024 * 1024
 )
 
@@ -461,15 +464,18 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 
 	var event string
 	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event:") {
-			event = strings.TrimPrefix(strings.TrimPrefix(line, "event:"), " ")
+		// Keep the scanner's bytes: Text() copies the line and DataPayload's
+		// []byte conversion copied it again. Only the rare event: line needs a
+		// string.
+		line := scanner.Bytes()
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event = strings.TrimPrefix(strings.TrimPrefix(string(line), "event:"), " ")
 			continue
 		}
 		// Payload extraction is the frames owner's DataPayload: the full
 		// "data:" prefix is required, one optional leading space is consumed,
 		// ordinary payload bytes stay verbatim.
-		payload, ok := sse.DataPayload([]byte(line))
+		payload, ok := sse.DataPayload(line)
 		if !ok {
 			continue
 		}

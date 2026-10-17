@@ -206,9 +206,17 @@ func (b *Buffer) Record(r *Record) {
 	var ended *LiveEvent
 	if _, pending := b.pending[r.ID]; pending {
 		delete(b.pending, r.ID)
+		if len(b.pending) == 0 {
+			// Go maps keep their bucket array after deletes; releasing the map
+			// lets a burst's high-water memory be collected once the last
+			// request retires (a nil map is valid for every reader here).
+			b.pending = nil
+		}
 		b.pendingRevision++
 		b.inFlight.Store(int64(len(b.pending)))
-		ended = &LiveEvent{Phase: "end", Record: r, InFlight: b.inFlight.Load(), PendingRevision: b.pendingRevision, feedID: feed}
+		if len(b.liveSubs) > 0 {
+			ended = &LiveEvent{Phase: "end", Record: r, InFlight: b.inFlight.Load(), PendingRevision: b.pendingRevision, feedID: feed}
+		}
 	}
 	b.mu.Unlock()
 
@@ -342,10 +350,17 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 	// The registry owns the gauge: snapshot, revision and count are one
 	// transition under mu, including the first begin. No separate Begin/End API.
 	b.inFlight.Store(int64(len(b.pending)))
-	ev := &LiveEvent{Phase: phase, Record: &snap, InFlight: b.inFlight.Load(), PendingRevision: b.pendingRevision, feedID: b.feedID}
+	revision := b.pendingRevision
+	gauge := b.inFlight.Load()
+	feed := b.feedID
 	b.mu.Unlock()
 	b.subsMu.Lock()
-	fanout(b.liveSubs, ev)
+	// Allocate and fan out only when a dashboard is attached; a fresh
+	// subscriber always receives the pending registry in its snapshot, so the
+	// skipped event cannot be missed.
+	if len(b.liveSubs) > 0 {
+		fanout(b.liveSubs, &LiveEvent{Phase: phase, Record: &snap, InFlight: gauge, PendingRevision: revision, feedID: feed})
+	}
 	b.subsMu.Unlock()
 }
 

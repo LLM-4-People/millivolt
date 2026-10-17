@@ -117,6 +117,12 @@ type Analyzer struct {
 	// past eventDataMax - beyond that only per-line lexical scans continue.
 	// General multi-line token/usage accounting is not yet supported.
 	eventData []byte
+	// eventDataSeen records that the current event already produced a data
+	// line, so a skipped-accumulation first line is not mistaken for the first
+	// one on a later line. eventSkipAccum is set when that first payload is a
+	// complete JSON object and therefore needs no reassembly.
+	eventDataSeen  bool
+	eventSkipAccum bool
 
 	usage json.RawMessage
 
@@ -187,8 +193,19 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// event (data split across lines per the SSE spec) can be parsed whole at
 	// the boundary. Joined with "\n" per spec; bounded by eventDataMax - past
 	// the cap only per-line lexical scans remain available for accounting.
-	firstDataFrame := len(a.eventData) == 0
-	if len(a.eventData)+len(payload)+1 <= eventDataMax {
+	//
+	// A first data line that is already a complete JSON object needs no
+	// reassembly: the per-line gate below scans exactly those bytes for an
+	// in-band error, and a complete object cannot continue into a later data
+	// line as valid JSON. Skipping the copy keeps the buffer empty for the
+	// ordinary one-object-per-event stream, saving a frame-sized copy and a
+	// second scan per frame plus the largest-frame retention.
+	firstDataFrame := !a.eventDataSeen
+	if firstDataFrame {
+		a.eventDataSeen = true
+		a.eventSkipAccum = completeJSONObject(payload)
+	}
+	if !a.eventSkipAccum && len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
 			a.eventData = append(a.eventData, '\n')
 		}
@@ -363,6 +380,23 @@ func (a *Analyzer) flushEvent() {
 		a.captureStreamError(a.eventData)
 	}
 	a.eventData = a.eventData[:0]
+	a.eventDataSeen = false
+	a.eventSkipAccum = false
+}
+
+// completeJSONObject reports whether payload is one whole JSON object: an
+// opening brace to a closing brace with nothing but space outside. Only whole
+// objects skip event reassembly; anything ambiguous keeps accumulating.
+func completeJSONObject(payload []byte) bool {
+	i := metrics.SkipSpace(payload, 0)
+	if i >= len(payload) || payload[i] != '{' {
+		return false
+	}
+	end := len(payload)
+	for end > i+1 && (payload[end-1] == ' ' || payload[end-1] == '\t' || payload[end-1] == '\r' || payload[end-1] == '\n') {
+		end--
+	}
+	return payload[end-1] == '}'
 }
 
 // isBlankLine reports whether the line is empty or only whitespace/CR - the
