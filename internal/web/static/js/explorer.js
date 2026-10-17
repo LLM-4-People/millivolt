@@ -99,12 +99,14 @@ function onNavigate(cb) {
 // recordHasError reports whether a record's final error or any absorbed attempt
 // matches the given error key (type|code|msg).
 function recordHasError(r, key) {
-  // Shares the single error-identity derivation (recordErrorEntries) with the
-  // gallery grouping, so filtering and counting never disagree.
-  for (const e of recordErrorEntries(r)) {
-    if (errorKey(e.type, e.code, e.msg) === key) return true;
-  }
-  return false;
+  // Shares the single error-identity derivation (forEachErrorEntry) with the
+  // gallery grouping, so filtering and counting never disagree; the visitor
+  // form avoids allocating an entry object per occurrence.
+  let hit = false;
+  forEachErrorEntry(r, (type, code, msg) => {
+    if (!hit && errorKeyMatches(key, type, code, msg)) hit = true;
+  });
+  return hit;
 }
 
 // shortId shortens an entity id for chip/gallery display: conversation ids

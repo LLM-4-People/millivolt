@@ -5619,20 +5619,24 @@ async function main() {
 
   // ---- test 12f: row-identity cache - reqRow is skipped for unchanged records ----
   {
-    // Insert two records, then replay one - the replayed row should NOT rebuild HTML
-    const origHTML = w.eval("logHTML.get('idx1')?.html?.length || 0");
+    // Insert two records, then replay one - the replayed row must not rebuild
+    // HTML. The cache stores record identity, not markup, so count reqRow calls.
+    w.eval("window.__reqRowOrig = window.reqRow; window.__reqRowCalls = 0; window.reqRow = (...a) => { window.__reqRowCalls++; return window.__reqRowOrig(...a); };");
     fire('record', { ...mkRec('idx1', 200, 1700000400000) }); // replay
     await sleep(20);
-    const newHTML = w.eval("logHTML.get('idx1')?.html?.length || 0");
-    check('row-identity cache preserves HTML for unchanged record', origHTML === newHTML && origHTML > 0);
+    const replayCalls = w.eval('window.__reqRowCalls');
+    check('row-identity cache skips reqRow for an unchanged record', replayCalls === 0);
     // A real update (pending → finalized) MUST rebuild
+    w.eval('window.__reqRowCalls = 0');
     fire('begin', { record: { ...mkRec('idx4', 0, 1700000403000), attempts: [] }, in_flight: 1 });
     await sleep(20);
     const liveBefore = w.eval("logHTML.get('idx4')?.rec?.live");
     fire('end', { record: { ...mkRec('idx4', 200, 1700000403000), attempts: [] }, in_flight: 0 });
     await sleep(20);
     const liveAfter = w.eval("logHTML.get('idx4')?.rec?.live");
-    check('row-identity cache rebuilds on pending→finalized transition', liveBefore === true && liveAfter === false);
+    check('row-identity cache rebuilds on pending→finalized transition',
+      liveBefore === true && liveAfter === false && w.eval('window.__reqRowCalls') > 0);
+    w.eval('window.reqRow = window.__reqRowOrig; delete window.__reqRowOrig; delete window.__reqRowCalls;');
   }
 
   // ---- test 12g: requestGate helper - issue-order supersede + dedupe ----

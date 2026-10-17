@@ -347,8 +347,12 @@ function setupCanvas(box) {
   cv.style.height = '100%';
   const w = cv.offsetWidth;
   const h = cv.offsetHeight;
-  cv.width = Math.max(1, Math.round(w * dpr));
-  cv.height = Math.max(1, Math.round(h * dpr));
+  // Assigning width/height reallocates and clears the backing store even when
+  // the pixel size is unchanged; the empty chart re-renders on every refresh.
+  const pw = Math.max(1, Math.round(w * dpr));
+  const ph = Math.max(1, Math.round(h * dpr));
+  if (cv.width !== pw) cv.width = pw;
+  if (cv.height !== ph) cv.height = ph;
   const ctx = cv.getContext('2d');
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   return { ctx, w, h };

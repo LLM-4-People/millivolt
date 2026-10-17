@@ -242,6 +242,22 @@ function errorKey(type, code, msg) {
   return [type || '', code || '', msg || ''].join('|');
 }
 
+// errorKeyMatches compares the joined error identity without building it: the
+// filter path evaluates every error entry of every row.
+function errorKeyMatches(key, type, code, msg) {
+  const t = type || '', c = code || '', m = msg || '';
+  let p = 0;
+  if (!key.startsWith(t)) return false;
+  p = t.length;
+  if (key.charCodeAt(p) !== 124) return false;
+  p++;
+  if (!key.startsWith(c, p)) return false;
+  p += c.length;
+  if (key.charCodeAt(p) !== 124) return false;
+  p++;
+  return key.length === p + m.length && key.startsWith(m, p);
+}
+
 // statusClass buckets a record's HTTP status into a coarse class. Keep in
 // lockstep with contribStatusClass in aggregate.go. Live in-flight rows
 // (the live flag - status_code may already be set after upstream headers)
@@ -272,16 +288,19 @@ function statusClass(r) {
 function timeBucket(r) { return r.time_bucket || null; }
 
 // recordTools returns the distinct tool names a record called (multi-valued).
+// The server payload never carries empty names, so the common case returns the
+// existing array instead of allocating a filtered copy for every derivation.
 function recordTools(r) {
-  return Array.isArray(r.tool_names) ? r.tool_names.filter(Boolean) : [];
+  if (!Array.isArray(r.tool_names)) return [];
+  for (const name of r.tool_names) if (!name) return r.tool_names.filter(Boolean);
+  return r.tool_names;
 }
 
 // recordErrorEntries is the single canonical enumerator of a record's error
-// entries: the final (client-visible) failure plus each absorbed retry attempt,
-// each as { type, code, msg, provider, absorbed, at }. The log matchers
-// consume it so what a card counts and what clicking it filters to cannot drift.
-function recordErrorEntries(r) {
-  const out = [];
+// entries: the final (client-visible) failure plus each absorbed retry attempt.
+// forEachErrorEntry is its visitor form so a match can walk the same entries
+// without allocating one object per entry; both share this predicate owner.
+function forEachErrorEntry(r, visit) {
   // Final (client-visible) failure - 429 (rate limit) and a plain 499 (local
   // client closed the connection) are flow events, not errors, so they
   // produce no error-group entry. A 499 carrying a structured error_type
@@ -291,7 +310,7 @@ function recordErrorEntries(r) {
   const finStatus = r.status_code || 0;
   if (finStatus !== 429 && !(finStatus === 499 && !r.error_type) && (r.error_type || finStatus >= 400)) {
     const code = r.error_code || (finStatus ? String(finStatus) : '');
-    out.push({ type: r.error_type || 'http_' + finStatus, code, msg: r.error_msg, provider: r.provider, absorbed: false, at: r.start });
+    visit(r.error_type || 'http_' + finStatus, code, r.error_msg, false, r.start);
   }
   // Absorbed retry attempts: only genuine failures (a 5xx, or a structured
   // error that isn't a rate limit). A 429 attempt is flow control, excluded.
@@ -302,8 +321,15 @@ function recordErrorEntries(r) {
     if (as < 500 && (t === 'transport' || t === 'rate_limit')) continue; // not a server failure
     if (as < 400 && !a.error_type) continue; // no failure at all
     const code = a.error_code || (as ? String(as) : '');
-    out.push({ type: t, code, msg: a.error_msg, provider: r.provider, absorbed: true, at: a.at || r.start });
+    visit(t, code, a.error_msg, true, a.at || r.start);
   }
+}
+
+function recordErrorEntries(r) {
+  const out = [];
+  forEachErrorEntry(r, (type, code, msg, absorbed, at) => {
+    out.push({ type, code, msg, provider: r.provider, absorbed, at });
+  });
   return out;
 }
 

@@ -9,15 +9,13 @@ const CACHE = CACHE_PREFIX + '__DASHBOARD_VERSION__';
 // One list of the exact shell assets: the install-time precache array and
 // shellPath's exact-name check both derive from it, so the two cannot drift.
 // The prefix rules stay separate (shellPath accepts /dash/ paths and any
-// /icon- size the precache does not enumerate).
+// /icon- size the precache does not enumerate). Only bytes the offline shell
+// needs are precached; the maskable/app icons are a quarter megabyte that the
+// service worker never serves for rendering (the OS fetches manifest icons at
+// install time, and shellPath caches any icon on demand).
 const SHELL_ASSETS = [
   '/favicon.ico',
   '/favicon.svg',
-  '/apple-touch-icon.png',
-  '/icon-192.png',
-  '/icon-512.png',
-  '/icon-192-maskable.png',
-  '/icon-512-maskable.png',
   '/manifest.webmanifest',
 ];
 

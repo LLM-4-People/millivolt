@@ -580,10 +580,10 @@ function applyDashValues(v) {
   // core.js seeds are first-paint only (TestDashCfgSeedsMatchDefault).
   const cadence = () => `${dashCfg.poll_ms}|${dashCfg.chart_ms}|${dashCfg.explorer_stale_ms}`;
   const before = cadence();
+  const logRowsBefore = dashCfg.log_rows;
   const wasBackgroundRefresh = dashCfg.background_refresh;
   if (v.history_size != null) dashCfg.history_size = +v.history_size;
-  if (v.dash_log_rows != null) dashCfg.log_rows = +v.dash_log_rows;
-  if (v.dash_background_refresh != null) dashCfg.background_refresh = !!v.dash_background_refresh;
+  if (v.dash_log_rows != null) dashCfg.log_rows = +v.dash_log_rows;  if (v.dash_background_refresh != null) dashCfg.background_refresh = !!v.dash_background_refresh;
   // parseGoDuration returns 0 for garbage; a 0ms interval would tight-loop.
   // Fail closed (keep the first-paint seed). Validate already rejects 0.
   if (v.dash_poll_interval != null) {
@@ -598,6 +598,9 @@ function applyDashValues(v) {
     const stale = parseGoDuration(v.dash_explorer_stale);
     if (stale > 0) dashCfg.explorer_stale_ms = stale;
   }
+  // A page-size change reshapes the log window; repaint it explicitly instead
+  // of relying on an unrelated KPI revision bump to invalidate the derivation.
+  if (dashCfg.log_rows !== logRowsBefore && typeof scheduleRenderLive === 'function') scheduleRenderLive();
   // Re-arm only on an actual cadence change - the 5s tick calls this with an
   // unchanged config, and clearing/setting the interval every tick would
   // starve it (a tick younger than the interval never fires). Payloads can
@@ -3842,9 +3845,13 @@ function editHoldForRecord(r) {
 }
 
 function recordById(id) {
-  const hit = (lastData?.records || []).find(r => r && r.id === id);
-  if (hit) return hit;
-  return logArchive.find(r => r && r.id === id);
+  if (!id) return undefined;
+  const recs = lastData?.records || [];
+  const i = _recIdx.get(id);
+  if (i !== undefined && recs[i]?.id === id) return recs[i];
+  // A full replacement renders the drawer before _rebuildRecIdx runs; fall
+  // back to a scan rather than drop the open drawer for one frame.
+  return recs.find(r => r && r.id === id) || logArchive.find(r => r && r.id === id);
 }
 
 function editPauseHold(id) {

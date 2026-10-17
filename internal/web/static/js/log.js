@@ -4,10 +4,12 @@
 // when that one record actually changed (in-flight → finalized), and when the
 // user has scrolled into the list, scrollTop is compensated for rows inserted
 // above the viewport so the content under the cursor stays put.
-// logHTML maps id → {rec, html, sep}: the record object reference enables O(1)
+// logHTML maps id → {rec, sep}: the record object reference enables O(1)
 // change detection (replaced objects are always new from JSON.parse) so
 // reqRow() is skipped entirely for rows whose record hasn't changed; sep is
-// the row's day-divider label (its movement is part of the diff key).
+// the row's day-divider label (its movement is part of the diff key). The row
+// HTML is deliberately not retained: it is only read by the full rebuild that
+// created it, so keeping it duplicated every loaded row's markup in memory.
 const logHTML = new Map();
 function removeRowGroup(id) {
   const c = $('tbl-requests');
@@ -68,12 +70,21 @@ function recStartMs(r) {
 // nothing ever re-renders wholesale for a boundary.
 
 // dayKey buckets a record's start into its local calendar day. One owner for
-// both the boundary flags and (indirectly) the label.
+// both the boundary flags and (indirectly) the label. The key is cached per
+// record object: a live paint re-walks the whole visible window, and rebuilding
+// a Date plus a key string per row was the incremental pass's dominant cost
+// after the user scrolled deep. Records are replaced wholesale on change, so
+// the cache never goes stale.
+const dayKeyCache = new WeakMap();
 function dayKey(r) {
+  let k = dayKeyCache.get(r);
+  if (k !== undefined) return k;
   const t = recStartMs(r);
-  if (!t) return '';
+  if (!t) { dayKeyCache.set(r, ''); return ''; }
   const d = new Date(t);
-  return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+  k = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+  dayKeyCache.set(r, k);
+  return k;
 }
 
 // dayDividerLabel renders the day's stamp: today / yesterday for the fresh
@@ -165,25 +176,28 @@ function renderRequestsIncremental(recs) {
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; } // empty-state placeholder in DOM: rebuild properly
 
-  // Drop rows that left the window (scope change or dashCfg.log_rows cap overflow).
-  const want = new Set(recent.map(r => r.id));
-  container.querySelectorAll('tr.exp-row[data-id]').forEach(tr => {
-    if (!want.has(tr.dataset.id)) removeRowGroup(tr.dataset.id);
-  });
+  // Drop rows that left the window (scope change or dashCfg.log_rows cap
+  // overflow). When logHTML's id set is exactly the visible window - the
+  // steady-state case - no DOM traversal is needed; the check is O(rows) map
+  // probes rather than a querySelectorAll plus Set build.
+  let sameSet = logHTML.size === recent.length;
+  if (sameSet) {
+    for (const r of recent) { if (!logHTML.has(r.id)) { sameSet = false; break; } }
+  }
+  if (!sameSet) {
+    const want = new Set(recent.map(r => r.id));
+    container.querySelectorAll('tr.exp-row[data-id]').forEach(tr => {
+      if (!want.has(tr.dataset.id)) removeRowGroup(tr.dataset.id);
+    });
+  }
 
-  // Process oldest→newest, inserting each new group at the top so the final
-  // order is newest-first (later inserts land above earlier ones). Day-divider
-  // ownership is part of the diff key: a boundary that appears or moves
-  // between passes rebuilds exactly the two rows it touches.
+  // Process oldest→newest, collecting each new or changed group; insertions
+  // land at the top so the final order is newest-first. Day-divider ownership
+  // is part of the diff key: a boundary that appears or moves between passes
+  // rebuilds exactly the two rows it touches.
   const seps = dayStartLabels(recent);
-  // Scroll anchor: the content under the cursor must not move. Every DOM
-  // change above the first pre-existing row contributes to its displacement -
-  // inserts add their height, in-place group swaps add their net height (a
-  // divider moving off a row cancels against the new divider above it). The
-  // offset is applied once after the pass, from the scrollTop captured before
-  // any mutation. Evictions only remove below the anchor, so they never count.
   const scrollAtTop = container.scrollTop;
-  let anchorDelta = 0;
+  const ops = [];
   for (let i = recent.length - 1; i >= 0; i--) {
     const r = recent[i];
     const sep = seps[i];
@@ -193,25 +207,46 @@ function renderRequestsIncremental(recs) {
     // creates a fresh object, so a replay that discards its duplicate never
     // reaches here (upsertRec returns false, the row is unchanged).
     if (!prev) {
-      const html = reqRow(r, sep);
-      tbody.insertBefore(trGroupNodesHTML(html), tbody.firstChild);
-      if (scrollAtTop > 0) anchorDelta += rowGroupHeight(container, r.id);
-      logHTML.set(r.id, { rec: r, html, sep });
+      ops.push({ kind: 'insert', id: r.id, rec: r, sep, html: reqRow(r, sep) });
     } else if (prev.rec !== r || prev.sep !== sep) {
-      // The record itself changed (in-flight row finalized, retry badge
-      // grew), or its day-divider position moved: replace only this row's
-      // group, in place - everything else (including any text the user is
-      // selecting) is untouched. Old nodes are captured before the insert and
-      // removed by reference (replaceRowGroupDOM).
-      const html = reqRow(r, sep);
-      const before = rowGroupHeight(container, r.id);
-      replaceRowGroupDOM(container, r.id, html);
-      if (scrollAtTop > 0) anchorDelta += rowGroupHeight(container, r.id) - before;
-      logHTML.set(r.id, { rec: r, html, sep });
+      // The record itself changed (in-flight row finalized, retry badge grew),
+      // or its day-divider position moved: replace only this row's group, in
+      // place. Everything else, including any text the user is selecting, is
+      // untouched.
+      ops.push({ kind: 'replace', id: r.id, rec: r, sep, html: reqRow(r, sep) });
     }
     // else: prev.rec === r && prev.sep === sep → unchanged, skip entirely.
   }
-  if (scrollAtTop > 0 && anchorDelta !== 0) container.scrollTop = scrollAtTop + anchorDelta;
+  if (!ops.length) return;
+
+  // Scroll anchor: the content under the cursor must not move. Every DOM
+  // change above the first pre-existing row contributes to its displacement.
+  // Measure all replaced rows in one read pass BEFORE any mutation, apply all
+  // writes, then measure the results in one read pass: one or two layouts for
+  // the whole frame instead of one forced layout per changed row.
+  let before = null;
+  if (scrollAtTop > 0) {
+    before = new Map();
+    for (const op of ops) {
+      if (op.kind === 'replace') before.set(op.id, rowGroupHeight(container, op.id));
+    }
+  }
+  for (const op of ops) {
+    if (op.kind === 'insert') {
+      tbody.insertBefore(trGroupNodesHTML(op.html), tbody.firstChild);
+    } else {
+      replaceRowGroupDOM(container, op.id, op.html);
+    }
+    logHTML.set(op.id, { rec: op.rec, sep: op.sep });
+  }
+  if (scrollAtTop > 0) {
+    let delta = 0;
+    for (const op of ops) {
+      const h = rowGroupHeight(container, op.id);
+      delta += op.kind === 'insert' ? h : h - before.get(op.id);
+    }
+    if (delta !== 0) container.scrollTop = scrollAtTop + delta;
+  }
 }
 
 // rowGroupHeight sums the rendered heights of one record's whole group
@@ -237,14 +272,14 @@ function appendOlderLogRows(recs) {
     const prev = logHTML.get(r.id);
     if (!prev) {
       const html = reqRow(r, sep);
-      logHTML.set(r.id, { rec: r, html, sep });
+      logHTML.set(r.id, { rec: r, sep });
       tbody.appendChild(trGroupNodesHTML(html));
     } else if (prev.sep !== sep) {
       // An older page can re-shape the day boundary of the previously-last
       // row; rebuild just that group in place.
       const html = reqRow(r, sep);
       replaceRowGroupDOM(container, r.id, html);
-      logHTML.set(r.id, { rec: r, html, sep });
+      logHTML.set(r.id, { rec: r, sep });
     }
   }
 }
@@ -542,11 +577,13 @@ function renderRequests(recs) {
     return;
   }
   const seps = dayStartLabels(recent);
+  const rows = new Array(recent.length);
   for (let i = 0; i < recent.length; i++) {
     const r = recent[i];
-    logHTML.set(r.id, { rec: r, html: reqRow(r, seps[i]), sep: seps[i] });
+    rows[i] = reqRow(r, seps[i]);
+    logHTML.set(r.id, { rec: r, sep: seps[i] });
   }
-  updateSection('tbl-requests', `<table>${REQ_THEAD}<tbody>${Array.from(logHTML.values()).map(e => e.html).join('')}</tbody></table>`);
+  updateSection('tbl-requests', `<table>${REQ_THEAD}<tbody>${rows.join('')}</tbody></table>`);
   scheduleLogFill();
 }
 

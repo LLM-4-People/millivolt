@@ -100,6 +100,10 @@ function explorerReq() {
 function fetchExplorer(mode = 'reuse') {
   const q = explorerReq();
   const scope = scopeQS();
+  // Capture the feed/canonicalization state this payload will reflect. A live
+  // tick can then skip the refetch when nothing changed, instead of folding
+  // all history on a timer.
+  const srcSeq = lastSeq, srcFeed = feedId, srcRev = modelRevision;
   // The breakdown shows the active dim's distribution over records matching
   // all other dims' filters - computed server-side over all history since
   // inception (the filter set is a scoping signal, never a client record set).
@@ -112,15 +116,22 @@ function fetchExplorer(mode = 'reuse') {
     explorerAgg = p;
     explorerAgg.fetchedAt = Date.now();
     explorerAgg.scopeKey = scope;
+    explorerAgg.srcSeq = srcSeq;
+    explorerAgg.srcFeed = srcFeed;
+    explorerAgg.srcRev = srcRev;
     renderExplorer();
     updateScopeLine();
   }, mode);
 }
-// refreshExplorerIfStale re-derives the breakdown from the server when the
-// cached payload aged out; filter/dim changes refetch immediately (onNavigate).
+// refreshExplorerIfStale re-derives the breakdown from the server only when
+// the cached payload aged out AND something it depends on changed: records,
+// the feed epoch, or the canonicalization rules. An idle instance therefore
+// stops folding all history four times a minute per tab.
 function refreshExplorerIfStale() {
-  if (!explorerAgg) fetchExplorer();
-  else if (Date.now() - explorerAgg.fetchedAt > dashCfg.explorer_stale_ms) fetchExplorer('refresh');
+  if (!explorerAgg) { fetchExplorer(); return; }
+  if (Date.now() - explorerAgg.fetchedAt <= dashCfg.explorer_stale_ms) return;
+  if (explorerAgg.srcSeq === lastSeq && explorerAgg.srcFeed === feedId && explorerAgg.srcRev === modelRevision) return;
+  fetchExplorer('refresh');
 }
 function explorerWantsLiveStatus() {
   if (LIVE_STATUS_FILTERS[filters.status]) return true;
@@ -128,13 +139,14 @@ function explorerWantsLiveStatus() {
   if (st.activeDim === 'status') return true;
   return st.filters.some(f => f.dim === 'status' && LIVE_STATUS_FILTERS[f.id]);
 }
-// Live-status explorer refresh cadence: coalesce a burst of lifecycle
-// events into one server refetch instead of one per event.
+// Live-status explorer refresh cadence: coalesce a burst of lifecycle events
+// into one server refetch. Throttled, not debounced: a sustained event stream
+// must still refresh at the cadence instead of resetting the timer forever.
 const EXPLORER_LIVE_REFRESH_MS = 250;
 let _xpLiveTimer = null;
 function scheduleExplorerLiveRefresh() {
   if (!explorerWantsLiveStatus()) return;
-  if (_xpLiveTimer) clearTimeout(_xpLiveTimer);
+  if (_xpLiveTimer) return;
   _xpLiveTimer = setTimeout(() => {
     _xpLiveTimer = null;
     fetchExplorer('refresh');
@@ -883,11 +895,18 @@ function applyBootstrapState(p, revisions = captureOperatorRevisions()) {
   applyDashValues(p.dash);
   applyModelCanon(p.model_canon, true);
   if (p.kpi) {
-    kpiAgg = p.kpi;
-    // kpiHtml lives inside the memoized derivation - a kpiAgg swap alone
-    // (mode 'none': the SSE snapshot already delivered the records) must
-    // invalidate it or renderBand would repaint the old aggregate.
-    bumpData();
+    // The 5s poll usually returns the same aggregate; swapping it and
+    // bumping the revision would re-run the whole derivation (and every
+    // scoped log scan) for nothing. The KPI document is small.
+    const next = JSON.stringify(p.kpi);
+    const prev = kpiAgg === null || kpiAgg === undefined ? '' : JSON.stringify(kpiAgg);
+    if (next !== prev) {
+      kpiAgg = p.kpi;
+      // kpiHtml lives inside the memoized derivation - a kpiAgg swap alone
+      // (mode 'none': the SSE snapshot already delivered the records) must
+      // invalidate it or renderBand would repaint the old aggregate.
+      bumpData();
+    }
   }
   if (p.pause) applyPauseState(p.pause, revisions.pause);
   if (p.throttle) applyThrottleState(p.throttle, revisions.throttle);
