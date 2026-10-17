@@ -37,6 +37,7 @@ import (
 // the -config flag value.
 var (
 	liveMu             sync.Mutex
+	reloadMu           sync.Mutex // serializes reload transactions; never held by readers
 	liveCfg            *config.Config
 	bootCfg            *config.Config // immutable process-bound settings
 	liveProxy          *proxy.Server
@@ -700,8 +701,15 @@ func applyCLIOverrides(cfg *config.Config) {
 // repointed to a fresh clone so a second reload diffs against the latest
 // snapshot.
 func reloadConfig() ([]string, error) {
+	// One reload at a time, but never hold the reader lock across file I/O or
+	// the history-wide provider-alias rewrite: dashboard bootstrap, backup
+	// status, the restart watch and shutdown read liveMu and must not stall
+	// behind an operator reload.
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
 	liveMu.Lock()
-	defer liveMu.Unlock()
+	current, store, srv, buf := liveCfg, liveStore, liveProxy, liveBuf
+	liveMu.Unlock()
 	fresh, dropped, err := config.LoadFileRepair(liveConfigPath)
 	if err != nil {
 		// last_reload is a mutable single slot; the process log is the
@@ -724,23 +732,28 @@ func reloadConfig() ([]string, error) {
 	// running config. Records already in the in-memory ring keep their old
 	// label until they age out or the process restarts; new requests
 	// re-key immediately.
-	if liveStore != nil && !maps.Equal(liveCfg.ProviderAliases, fresh.ProviderAliases) {
-		if _, err := liveStore.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
+	if store != nil && !maps.Equal(current.ProviderAliases, fresh.ProviderAliases) {
+		if _, err := store.RenameProviders(context.Background(), fresh.ProviderAliases); err != nil {
 			err = fmt.Errorf("provider_aliases: %w", err)
 			log.Printf("config reload failed (keeping current): %v", err)
 			recordReloadStatus(false, err.Error(), dropped, nil)
 			return nil, err
 		}
 	}
-	// Hot-apply the reloadable subset. The proxy swaps its config snapshot and
-	// upstream transport atomically; in-flight requests are unaffected.
-	liveProxy.Reload(fresh.Clone())
+	// Hot-apply the reloadable subset under the reader lock. The proxy swaps
+	// its config snapshot and upstream transport atomically; in-flight requests
+	// are unaffected, and the effective-config/model-canon readers never observe
+	// a half-applied transaction. Everything held here is in-memory.
+	liveMu.Lock()
+	srv.Reload(fresh.Clone())
 	// The full-snapshot cap derives from dash_log_rows (hot-reloadable) -
 	// re-apply it so the boot-time bound can't drift from the live value.
 	// The helper gates on durable storage exactly like boot: an
 	// in-memory-only instance must stay unlimited (the ring is all
 	// history; the paging fallback is dead without a store).
-	applySnapshotLimit(liveBuf, liveStore, fresh.DashLogRows)
+	applySnapshotLimit(buf, store, fresh.DashLogRows)
+	liveCfg = fresh.Clone()
+	liveMu.Unlock()
 	// Keep the shared cfg in sync so the next reload diffs against the
 	// latest. Publish a NEW object, never a whole-struct write through the
 	// boot pointer: the object proxy.New captured is the immutable boot
@@ -751,7 +764,6 @@ func reloadConfig() ([]string, error) {
 	// config never alias each other's mutable future; with the swap the
 	// boot object is never written again, as immutable as every later
 	// snapshot.
-	liveCfg = fresh.Clone()
 	recordReloadStatus(true, "", dropped, skipped)
 	return skipped, nil
 }

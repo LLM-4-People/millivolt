@@ -1591,7 +1591,7 @@ func TestBootstrapSnapshotAndState(t *testing.T) {
 	p := get(t, http.HandlerFunc(agg.HandleBootstrap), "/metrics/bootstrap")
 	index := httptest.NewRecorder()
 	Handler(agg).ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/", nil))
-	if p["dashboard_version"] != dashboardVersion || !strings.Contains(index.Body.String(), `<meta name="dashboard-version" content="`+dashboardVersion+`">`) {
+	if p["dashboard_version"] != dashboardContentVersion() || !strings.Contains(index.Body.String(), `<meta name="dashboard-version" content="`+dashboardContentVersion()+`">`) {
 		t.Fatalf("full bootstrap asset version=%v does not match served HTML", p["dashboard_version"])
 	}
 	snap, ok := p["records"].([]any)

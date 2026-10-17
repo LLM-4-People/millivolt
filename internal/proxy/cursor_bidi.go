@@ -216,7 +216,13 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	if rec.Debug {
 		s.logCursorRequestShape(r, body)
 	}
-	rr := cursorTurnRender{est: estimateInputTokens(body), includeUsage: requestIncludesUsage(body), model: rec.Model, scope: s.cursorScopeFor(t, key, rawModel, rec.Client)}
+	requestBody := body
+	rr := cursorTurnRender{
+		estimate:     func() int64 { return estimateInputTokens(requestBody) },
+		includeUsage: requestIncludesUsage(body),
+		model:        rec.Model,
+		scope:        s.cursorScopeFor(t, key, rawModel, rec.Client),
+	}
 	// Does this request carry tool results that match a parked run? If so,
 	// resume that stream instead of opening a new one.
 	toolResults := extractToolResults(body)
@@ -745,10 +751,23 @@ func (s *Server) serveResumeStream(ctx context.Context, w http.ResponseWriter, r
 // turn drivers: the input-token estimate fallback, whether the client requested
 // OpenAI usage chunks, and the model id to stamp on chunks.
 type cursorTurnRender struct {
-	scope        cursorScope
-	est          int64
+	scope cursorScope
+	// estimate lazily derives the input-token fallback from the request
+	// payload. It is only consulted when the turn ends without Cursor's exact
+	// prompt count (park or error), so decoding the whole history eagerly on
+	// every turn was wasted work.
+	estimate     func() int64
 	includeUsage bool
 	model        string
+}
+
+// estimatedInput returns the lazy fallback, or zero when a caller built the
+// render without one (the usage policy then keeps the upstream count).
+func (rr cursorTurnRender) estimatedInput() int64 {
+	if rr.estimate == nil {
+		return 0
+	}
+	return rr.estimate()
 }
 
 // requestIncludesUsage reports whether the request asked for usage via
@@ -854,7 +873,7 @@ func markPostCommitGone(rec *metrics.Record, err error) {
 // outcome is surfaced as an error to both the client and the dashboard instead
 // of a silently empty success.
 func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.CursorRun, result providerformat.TurnResult, emit func(map[string]any, any) error, rec *metrics.Record, id string, rr cursorTurnRender, resumeRequest bool) {
-	applyCursorUsage(rec, &result, rr.est)
+	applyCursorUsage(rec, &result, rr.estimatedInput())
 	// A failed post-commit write here means the LOCAL client disconnected
 	// mid-turn. Cursor's documented exception: the committed upstream 200
 	// stays the record's status - mark the disconnect flag only, never
@@ -1013,7 +1032,7 @@ func emitHTTPError(w http.ResponseWriter, body string, code int) error {
 
 // writeRunJSON renders a non-streaming chat.completion from a turn result.
 func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorRun, result providerformat.TurnResult, content string, toolCalls []map[string]any, rec *metrics.Record, id string, rr cursorTurnRender, resumeRequest bool) {
-	applyCursorUsage(rec, &result, rr.est)
+	applyCursorUsage(rec, &result, rr.estimatedInput())
 	// A failed post-commit write here means the LOCAL client disconnected
 	// before the completion - or the error body below - was delivered.
 	// Cursor's documented exception (the same contract as finishRunTurn and

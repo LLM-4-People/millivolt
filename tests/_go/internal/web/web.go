@@ -702,15 +702,15 @@ func TestStaticFreshnessContract(t *testing.T) {
 	}
 	// The stamped cache identity must equal the process's dashboard version
 	// (the single source of truth loadStatic computes from every asset).
-	if version != dashboardVersion {
-		t.Fatalf("sw.js cache identity %q != dashboardVersion %q", version, dashboardVersion)
+	if version != dashboardContentVersion() {
+		t.Fatalf("sw.js cache identity %q != dashboardContentVersion() %q", version, dashboardContentVersion())
 	}
 }
 
 func TestServeDashRepresentations(t *testing.T) {
 	for _, rel := range []string{"css/dashboard.css", "vendor/uplot.js"} {
 		t.Run(rel, func(t *testing.T) {
-			asset := staticCache["static/"+rel]
+			asset := staticForTest("static/" + rel)
 			for _, tc := range []struct {
 				name, method, accept string
 				conditional, gzip    bool
@@ -726,7 +726,7 @@ func TestServeDashRepresentations(t *testing.T) {
 				{name: "infinite qvalue", method: http.MethodGet, accept: "gzip;q=+Inf"},
 				{name: "excessive qvalue", method: http.MethodGet, accept: "gzip;q=2"},
 				{name: "negative qvalue", method: http.MethodGet, accept: "gzip;q=-0.5"},
-				{name: "head gzip", method: http.MethodHead, accept: "gzip"},
+				{name: "head gzip", method: http.MethodHead, accept: "gzip", gzip: true},
 				{name: "head identity", method: http.MethodHead},
 				{name: "304 gzip", method: http.MethodGet, accept: "gzip", conditional: true},
 				{name: "304 identity", method: http.MethodGet, conditional: true},
@@ -760,8 +760,12 @@ func TestServeDashRepresentations(t *testing.T) {
 						t.Fatalf("status=%d", res.Code)
 					}
 					if tc.method == http.MethodHead {
-						if res.Body.Len() != 0 || res.Header().Get("Content-Length") != strconv.Itoa(len(asset.body)) {
-							t.Fatal("HEAD must preserve identity length without a body")
+						wantLen := len(asset.body)
+						if tc.gzip && len(asset.gzip) > 0 {
+							wantLen = len(asset.gzip)
+						}
+						if res.Body.Len() != 0 || res.Header().Get("Content-Length") != strconv.Itoa(wantLen) {
+							t.Fatal("HEAD must describe the selected representation without a body")
 						}
 						return
 					}
@@ -793,7 +797,7 @@ func TestServeDashRepresentations(t *testing.T) {
 
 func TestStaticCompressionKeepsSourceIdentity(t *testing.T) {
 	for _, body := range [][]byte{[]byte("x"), []byte(strings.Repeat("compressible dashboard source", 100))} {
-		asset := newStaticAsset(body)
+		asset := newStaticAsset(body, true)
 		if asset.etag != `W/"`+etagHex(body)+`"` || !slices.Equal(asset.body, body) {
 			t.Fatal("compressed representation changed source identity")
 		}
@@ -837,7 +841,7 @@ func BenchmarkServeDash(b *testing.B) {
 			req := httptest.NewRequest(tc.method, DashPrefix+"vendor/uplot.js", nil)
 			req.Header.Set("Accept-Encoding", tc.accept)
 			if tc.conditional {
-				req.Header.Set("If-None-Match", staticCache["static/vendor/uplot.js"].etag)
+				req.Header.Set("If-None-Match", staticForTest("static/vendor/uplot.js").etag)
 			}
 			writer := staticBenchmarkWriter{header: make(http.Header)}
 			handler := http.HandlerFunc(ServeDash)
@@ -908,7 +912,7 @@ func TestDashboardBootstrapMatchesEndpoint(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		// Browsers may still hold the old, static shell's validator. It must
 		// never turn a state-bearing response into a stale or empty 304.
-		req.Header.Set("If-None-Match", staticCache[dashboardIndexPath].etag)
+		req.Header.Set("If-None-Match", staticForTest(dashboardIndexPath).etag)
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
 		if res.Header().Get("Content-Security-Policy") != "frame-ancestors 'none'" {
@@ -1276,5 +1280,28 @@ func BenchmarkDynamicDashboardGzip(b *testing.B) {
 			b.ReportMetric(float64(encoded.Len()), "compressed-bytes/op")
 			b.ReportMetric(float64(len(body)), "raw-bytes/op")
 		})
+	}
+}
+
+// staticForTest resolves one precomputed asset through the lazy owner.
+func staticForTest(key string) *staticAsset {
+	cache, _ := staticAssets()
+	return cache[key]
+}
+
+// TestStaticPregzipSkipsAlreadyCompressedFormats pins the precompression
+// policy: text assets keep a gzip representation, raster icons never retain a
+// second full-size copy that saves only a few percent on the wire.
+func TestStaticPregzipSkipsAlreadyCompressedFormats(t *testing.T) {
+	cache, _ := staticAssets()
+	for _, p := range []string{"static/icon-512.png", "static/icon-192.png", "static/favicon.ico"} {
+		if a := cache[p]; a == nil || len(a.gzip) != 0 {
+			t.Fatalf("%s must not retain a gzip representation", p)
+		}
+	}
+	for _, p := range []string{"static/js/core.js", "static/css/dashboard.css", "static/manifest.webmanifest"} {
+		if a := cache[p]; a == nil || len(a.gzip) == 0 {
+			t.Fatalf("%s must retain a gzip representation", p)
+		}
 	}
 }

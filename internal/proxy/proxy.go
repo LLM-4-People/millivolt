@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -80,6 +82,11 @@ const (
 	// maxResponseHeaderBytes is the abusive-upstream header cap on the
 	// outbound client. Safety guardrail, not user-tunable.
 	maxResponseHeaderBytes = 1 << 20 // 1 MiB
+	// Upstream dial and TLS-handshake bounds. Internal guardrails matching
+	// net/http's DefaultTransport; without them both are unbounded.
+	upstreamDialTimeout         = 30 * time.Second
+	upstreamDialKeepAlive       = 30 * time.Second
+	upstreamTLSHandshakeTimeout = 10 * time.Second
 	// qualitySpoolMax bounds the pre-write spool of a non-streaming 200 kept
 	// for degenerate-outcome verification. Degenerate bodies are tiny (empty
 	// JSON shells); a body past this cap is clearly not degenerate and is
@@ -322,10 +329,22 @@ func newUpstreamClient(cfg *config.Config) *http.Client {
 		IdleConnTimeout:        cfg.IdleConnTimeout,
 		ResponseHeaderTimeout:  cfg.UpstreamTimeout, // 0 = no header-arrival cap
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
+		// A zero dial/TLS-handshake timeout means no timeout at all: a
+		// blackholed connect or a peer that accepts TCP but never handshakes
+		// would pin a request goroutine and socket indefinitely. These match
+		// net/http's DefaultTransport values.
+		DialContext: (&net.Dialer{
+			Timeout:   upstreamDialTimeout,
+			KeepAlive: upstreamDialKeepAlive,
+		}).DialContext,
+		TLSHandshakeTimeout: upstreamTLSHandshakeTimeout,
+		// Without a cache every new HTTPS connection (idle expiry, reload)
+		// pays a full handshake. Capacity follows the live per-host pool.
+		TLSClientConfig: &tls.Config{ClientSessionCache: tls.NewLRUClientSessionCache(cfg.MaxConnsPerHost)},
 		// Advertise both HTTP/1.1 and HTTP/2. Declaring the set explicitly (not
-		// relying on the implicit default) keeps h2 available even if a custom
-		// DialContext/TLSClientConfig is ever added - the conservative-disable
-		// heuristic (ForceAttemptHTTP2) only governs the nil-Protocols path.
+		// relying on the implicit default) keeps h2 available even with the
+		// custom dialer/TLS config above - the conservative-disable heuristic
+		// (ForceAttemptHTTP2) only governs the nil-Protocols path.
 		// HTTPS upstreams that speak h2 (e.g. Cursor's Connect-RPC agent.v1,
 		// which REQUIRES h2 for server-streaming) negotiate it via ALPN;
 		// everything else keeps HTTP/1.1 keep-alive, the reliable SSE path.
@@ -672,8 +691,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		maxConc = n
 	}
-	pacer := newSSEPacer(w, s.cfg().SSEKeepaliveInterval)
+	var pacer *ssePacer
 	if stream {
+		pacer = newSSEPacer(w, s.cfg().SSEKeepaliveInterval)
 		w = pacer
 		pacer.Arm()
 	}
@@ -812,6 +832,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// frames (queue / hold / TTFB); WriteHeader is then a no-op.
 		// A 4xx/5xx body after that commit cannot change the status - emit
 		// it in-band so the SDK sees a retryable error, not raw JSON on 200.
+		// A non-streaming request can still receive an event-stream response;
+		// its pacer is created here, unarmed, only to own the status commit.
+		if pacer == nil {
+			pacer = newSSEPacer(w, s.cfg().SSEKeepaliveInterval)
+		}
 		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode >= 400 {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)
 			if err := emitErrorSSE(w, rec.ID, typ, msg); err != nil {

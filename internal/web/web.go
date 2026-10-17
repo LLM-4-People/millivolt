@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 //go:embed static
@@ -82,12 +83,44 @@ type staticAsset struct {
 	gzip []byte // retained only when smaller than the original source
 }
 
-// staticCache and dashboardVersion describe the same immutable embedded
-// assets. Identical rebuilds retain the version; any asset change updates it.
-var staticCache, dashboardVersion = loadStatic(staticFS)
+// staticAssets lazily describes the immutable embedded assets. Identical
+// rebuilds retain the version; any asset change updates it. The walk, hashing
+// and precompression run on the first dashboard/brand request, not in every
+// short-lived CLI mode: the container healthcheck executes this binary every
+// 30 seconds and serves nothing.
+var (
+	staticOnce       sync.Once
+	staticCache      map[string]*staticAsset
+	dashboardVersion string
+)
 
-func newStaticAsset(body []byte) *staticAsset {
+func staticAssets() (map[string]*staticAsset, string) {
+	staticOnce.Do(func() { staticCache, dashboardVersion = loadStatic(staticFS) })
+	return staticCache, dashboardVersion
+}
+
+// dashboardContentVersion is the bootstrap payload's asset identity.
+func dashboardContentVersion() string {
+	_, version := staticAssets()
+	return version
+}
+
+// compressibleAsset is false for formats whose bytes are already compressed:
+// gzip on a PNG saves about 5% while retaining a second full-size copy and
+// making clients decompress it again.
+func compressibleAsset(p string) bool {
+	switch path.Ext(p) {
+	case ".png", ".ico":
+		return false
+	}
+	return true
+}
+
+func newStaticAsset(body []byte, compress bool) *staticAsset {
 	a := &staticAsset{etag: `W/"` + etagHex(body) + `"`, body: body}
+	if !compress {
+		return a
+	}
 	var encoded bytes.Buffer
 	writer := newPrecomputedGzipWriter(&encoded)
 	if _, err := writer.Write(body); err != nil {
@@ -118,7 +151,7 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 		if err != nil {
 			return err
 		}
-		asset := newStaticAsset(body)
+		asset := newStaticAsset(body, compressibleAsset(p))
 		cache[p] = asset
 		fmt.Fprintf(&identity, "%s\x00%s\x00", p, asset.etag)
 		return nil
@@ -148,8 +181,8 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 		panic("load dashboard assets: service worker must contain exactly one dashboard version marker")
 	}
 	version := etagHex([]byte(identity.String()))
-	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.Replace(index, dashboardVersionMarker, version, 1)))
-	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)))
+	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.Replace(index, dashboardVersionMarker, version, 1)), true)
+	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)), true)
 	return cache, version
 }
 
@@ -175,16 +208,18 @@ func writeStaticCached(w http.ResponseWriter, r *http.Request, contentType, cach
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if r.Method == http.MethodHead {
-		w.Header().Set("Content-Length", strconv.Itoa(len(a.body)))
-		return
-	}
 	body := a.body
 	if len(a.gzip) > 0 && acceptsGzip(r) {
 		w.Header().Set("Content-Encoding", "gzip")
 		body = a.gzip
 	}
+	// HEAD describes the representation GET would select, including the gzip
+	// body's length; advertising the identity length for a gzip response makes
+	// caches and CDNs size the wrong representation.
 	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	if r.Method == http.MethodHead {
+		return
+	}
 	w.Write(body)
 }
 
@@ -223,7 +258,8 @@ func Handler(agg *AggAPI) http.Handler {
 	if agg == nil {
 		panic("dashboard requires bootstrap state")
 	}
-	prefix, suffix, _ := bytes.Cut(staticCache[dashboardIndexPath].body, []byte(dashboardBootstrapMarker))
+	cache, _ := staticAssets()
+	prefix, suffix, _ := bytes.Cut(cache[dashboardIndexPath].body, []byte(dashboardBootstrapMarker))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnlessGetHead(w, r) {
 			return
@@ -273,7 +309,8 @@ func Brand(urlPath string) http.Handler {
 		if urlPath == "/sw.js" {
 			w.Header().Set("Service-Worker-Allowed", "/")
 		}
-		writeStaticCached(w, r, spec.ctype, "no-cache", staticCache[spec.file])
+		cache, _ := staticAssets()
+		writeStaticCached(w, r, spec.ctype, "no-cache", cache[spec.file])
 	})
 }
 
@@ -291,7 +328,8 @@ func ServeDash(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a := staticCache["static/"+rel]
+	cache, _ := staticAssets()
+	a := cache["static/"+rel]
 	if a == nil {
 		http.NotFound(w, r)
 		return

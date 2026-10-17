@@ -286,7 +286,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 		// ---- storage ----
 		{Key: "storage_write_chan_cap", Category: "storage", Label: "Write channel cap",
 			Help: "Buffered records before overflow drops. Restart required.",
-			Kind: KindInt, HotReload: false, Min: num(1)},
+			Kind: KindInt, HotReload: false, Min: num(1), Max: num(1_000_000)},
 		{Key: "storage_batch_cap", Category: "storage", Label: "Batch cap",
 			Help: "Max records per SQLite transaction. Cannot exceed the write channel cap. Restart required.",
 			Kind: KindInt, HotReload: false, Min: num(1)},

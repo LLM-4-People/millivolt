@@ -676,7 +676,16 @@ func (rs *restarter) serveWatch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return false
 		}
-		if _, err := rw.WriteString(string(b) + "\n"); err != nil {
+		// The connection is hijacked: http.Server's write deadline no longer
+		// applies. A peer that stops reading would otherwise pin this
+		// goroutine, its watcher channel and the registry entry forever.
+		if err := conn.SetWriteDeadline(time.Now().Add(watchIdleTimeout)); err != nil {
+			return false
+		}
+		if _, err := rw.Write(b); err != nil {
+			return false
+		}
+		if err := rw.WriteByte('\n'); err != nil {
 			return false
 		}
 		return rw.Flush() == nil
@@ -692,6 +701,8 @@ func (rs *restarter) serveWatch(w http.ResponseWriter, r *http.Request) {
 	if !writeEvent(rs.status()) { // initial snapshot so the UI can seed the stepper
 		return
 	}
+	idle := time.NewTimer(watchIdleTimeout)
+	defer idle.Stop()
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -703,7 +714,7 @@ func (rs *restarter) serveWatch(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-r.Context().Done():
 			return
-		case <-time.After(watchIdleTimeout):
+		case <-idle.C:
 			// A watch opened before POST should not linger if the POST never
 			// comes. Once a run is in progress, a quiet stretch is a long
 			// build (no events until drain) - heartbeat the current status
@@ -713,6 +724,7 @@ func (rs *restarter) serveWatch(w http.ResponseWriter, r *http.Request) {
 				if !writeEvent(st) {
 					return
 				}
+				idle.Reset(watchIdleTimeout)
 				continue
 			}
 			return

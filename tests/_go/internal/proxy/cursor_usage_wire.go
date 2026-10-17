@@ -24,7 +24,7 @@ func TestCursorNonStreamingUsageCarriesReasoningDetail(t *testing.T) {
 	res := providerformat.TurnResult{Outcome: providerformat.TurnFinished, Prompt: 10, Output: 20, Reasoning: 5}
 	rec := &metrics.Record{ID: "req-1", StatusCode: 200}
 	w := httptest.NewRecorder()
-	s.writeRunJSON(w, run, res, "hi", nil, rec, "req-1", cursorTurnRender{model: "m", est: 7}, false)
+	s.writeRunJSON(w, run, res, "hi", nil, rec, "req-1", cursorTurnRender{model: "m", estimate: func() int64 { return 7 }}, false)
 
 	if w.Code != 200 || w.Header().Get("Content-Type") != "application/json" {
 		t.Fatalf("completion response: %d %s", w.Code, w.Body.String())
@@ -58,7 +58,7 @@ func TestCursorNonStreamingUsageCarriesReasoningDetail(t *testing.T) {
 	rec2 := &metrics.Record{ID: "req-2", StatusCode: 200}
 	res2 := providerformat.TurnResult{Outcome: providerformat.TurnFinished, Prompt: 3, Output: 4}
 	w2 := httptest.NewRecorder()
-	s.writeRunJSON(w2, run, res2, "hi", nil, rec2, "req-2", cursorTurnRender{model: "m", est: 7}, false)
+	s.writeRunJSON(w2, run, res2, "hi", nil, rec2, "req-2", cursorTurnRender{model: "m", estimate: func() int64 { return 7 }}, false)
 	if json.Unmarshal(w2.Body.Bytes(), &struct{}{}) != nil {
 		t.Fatalf("second completion body is not valid JSON: %s", w2.Body.String())
 	}

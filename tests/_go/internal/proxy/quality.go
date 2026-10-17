@@ -1715,7 +1715,7 @@ func TestEmitErrorSSEWriteFailureMarksCursorDisconnect(t *testing.T) {
 		Err:     fmt.Errorf("upstream died mid-turn"),
 		Output:  3,
 	}
-	s.finishRunTurn(failingSSEWriter{}, run, res, func(map[string]any, any) error { return nil }, rec, "id-1", cursorTurnRender{est: 10}, false)
+	s.finishRunTurn(failingSSEWriter{}, run, res, func(map[string]any, any) error { return nil }, rec, "id-1", cursorTurnRender{estimate: func() int64 { return 10 }}, false)
 
 	if !rec.ClientDisconnected {
 		t.Error("ClientDisconnected = false, want true (the in-band error hit a dead socket)")
@@ -1752,7 +1752,7 @@ func TestWriteRunJSONErrorWriteFailureMarksCursorDisconnect(t *testing.T) {
 		Err:     fmt.Errorf("transform boom"),
 		Output:  3,
 	}
-	s.writeRunJSON(failingSSEWriter{}, newRun(), res, "", nil, rec, "id-1", cursorTurnRender{est: 10}, false)
+	s.writeRunJSON(failingSSEWriter{}, newRun(), res, "", nil, rec, "id-1", cursorTurnRender{estimate: func() int64 { return 10 }}, false)
 	if !rec.ClientDisconnected {
 		t.Error("ClientDisconnected = false, want true (the 502 error body hit a dead socket)")
 	}
@@ -1766,7 +1766,7 @@ func TestWriteRunJSONErrorWriteFailureMarksCursorDisconnect(t *testing.T) {
 	// Void branch (an empty resume-action continuation surfaces a 502).
 	rec2 := &metrics.Record{StatusCode: 200}
 	res2 := providerformat.TurnResult{Outcome: providerformat.TurnFinished}
-	s.writeRunJSON(failingSSEWriter{}, newRun(), res2, "", nil, rec2, "id-2", cursorTurnRender{est: 10}, true)
+	s.writeRunJSON(failingSSEWriter{}, newRun(), res2, "", nil, rec2, "id-2", cursorTurnRender{estimate: func() int64 { return 10 }}, true)
 	if !rec2.ClientDisconnected {
 		t.Error("ClientDisconnected = false, want true (the void 502 body hit a dead socket)")
 	}
@@ -1793,7 +1793,7 @@ func TestWriteRunJSONVoidBodyBytes(t *testing.T) {
 	rec := &metrics.Record{StatusCode: 200}
 	res := providerformat.TurnResult{Outcome: providerformat.TurnFinished}
 	w := httptest.NewRecorder()
-	s.writeRunJSON(w, run, res, "", nil, rec, "id-1", cursorTurnRender{est: 10}, true)
+	s.writeRunJSON(w, run, res, "", nil, rec, "id-1", cursorTurnRender{estimate: func() int64 { return 10 }}, true)
 	if w.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (the void must surface a real failure)", w.Code)
 	}

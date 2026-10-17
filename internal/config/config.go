@@ -548,6 +548,11 @@ type OverrideBody struct {
 // in its row count and add gate.
 const RequestOverridesMax = 64
 
+// storageWriteChanCapMax bounds the buffered-record channel (16 bytes per slot
+// at deployment time): a typo must not reserve gigabytes at boot. Internal
+// guardrail, not a tunable.
+const storageWriteChanCapMax = 1_000_000
+
 // SubConversation is one classified client's tracked sub-conversation
 // identity: the client whose requests are tracked, the ordered top-level
 // request body field names whose value supplies the identity (the first
@@ -1167,7 +1172,10 @@ func (c *Config) Validate() error {
 	if c.DashExplorerStale <= 0 {
 		return fmt.Errorf("dash_explorer_stale: must be > %s", FormatDuration(0))
 	}
-	if c.StorageWriteChanCap < 1 || c.StorageBatchCap < 1 || c.StorageBatchCap > c.StorageWriteChanCap {
+	if c.StorageWriteChanCap < 1 || c.StorageWriteChanCap > storageWriteChanCapMax {
+		return fmt.Errorf("storage_write_chan_cap: must be 1..%d, got %d", storageWriteChanCapMax, c.StorageWriteChanCap)
+	}
+	if c.StorageBatchCap < 1 || c.StorageBatchCap > c.StorageWriteChanCap {
 		return fmt.Errorf("storage_batch_cap (%d) must be 1..storage_write_chan_cap (%d)", c.StorageBatchCap, c.StorageWriteChanCap)
 	}
 	if err := validateModelsDiscovery(c); err != nil {

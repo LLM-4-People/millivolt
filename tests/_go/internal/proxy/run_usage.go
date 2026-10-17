@@ -35,7 +35,7 @@ func TestCompletedReaderRetainsFreshTurnUsage(t *testing.T) {
 			p := New(config.Default(), metrics.Noop{})
 			rec := &metrics.Record{ID: "fixture", StatusCode: 200, Start: time.Now()}
 			w := httptest.NewRecorder()
-			p.driveRun(t.Context(), w, run, stream, rec, cursorTurnRender{model: "m", est: 3, includeUsage: true}, false, nil)
+			p.driveRun(t.Context(), w, run, stream, rec, cursorTurnRender{model: "m", estimate: func() int64 { return 3 }, includeUsage: true}, false, nil)
 			if rec.Usage.InputTokens != 42 || rec.Usage.OutputTokens != 17 || !strings.Contains(w.Body.String(), `"content":"answer"`) {
 				t.Fatalf("fresh driver lost decoded data: usage=%+v body=%s", rec.Usage, w.Body.String())
 			}

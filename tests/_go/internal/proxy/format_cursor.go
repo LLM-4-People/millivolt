@@ -122,7 +122,7 @@ func TestCursorClientAbortIsDisconnectNotError(t *testing.T) {
 		Output:      3,
 	}
 	w := httptest.NewRecorder()
-	s.finishRunTurn(w, run, res, func(map[string]any, any) error { return nil }, rec, "id-1", cursorTurnRender{est: 10}, false)
+	s.finishRunTurn(w, run, res, func(map[string]any, any) error { return nil }, rec, "id-1", cursorTurnRender{estimate: func() int64 { return 10 }}, false)
 
 	if !rec.ClientDisconnected {
 		t.Errorf("ClientDisconnected = false, want true")

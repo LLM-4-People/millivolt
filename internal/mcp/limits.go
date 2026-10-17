@@ -160,7 +160,7 @@ func clamp[T any](items []T, limit int, marker, advice string) ([]T, Truncation)
 // produced before that cap, so when BOTH limits fire the reported total is the
 // proxy's, not the smaller intermediate. Understating it would tell a model a
 // result was complete when it was not.
-func clampRowsToBytes(rows []map[string]any, total, budget int, advice string) ([]map[string]any, Truncation) {
+func clampRowsToBytes(rows []map[string]any, total, budget int, advice string) ([]map[string]any, int, Truncation) {
 	kept := make([]map[string]any, 0, len(rows))
 	used := 0
 	for _, row := range rows {
@@ -178,9 +178,9 @@ func clampRowsToBytes(rows []map[string]any, total, budget int, advice string) (
 		kept = append(kept, row)
 	}
 	if len(kept) == len(rows) {
-		return list(rows), Truncation{Shown: len(kept), Total: total}
+		return list(rows), used, Truncation{Shown: len(kept), Total: total}
 	}
-	return kept, Truncation{
+	return kept, used, Truncation{
 		Shown:     len(kept),
 		Total:     total,
 		Truncated: true,

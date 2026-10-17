@@ -480,7 +480,7 @@ cursor_heartbeat_interval: 5s
 # Durable SQLite write pipeline. Restart to apply.
 # Buffered records before overflow drops. Restart required.
 # Hot-reload: NO (restart required).
-#   type: int · range >= 1 · default 8192
+#   type: int · range 1..1000000 · default 8192
 storage_write_chan_cap: 8192
 
 # Max records per SQLite transaction. Cannot exceed the write channel cap. Restart

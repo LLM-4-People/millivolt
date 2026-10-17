@@ -976,7 +976,7 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 // buffer's existing feed/cursor trust boundary. No durable history scan.
 func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	observed := metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords))
-	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardVersion}
+	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardContentVersion()}
 	if a.store != nil {
 		payload.Storage = storageSignal{Enabled: true, Dropped: a.store.Dropped(), TotalsDegraded: a.store.TotalsDegraded()}
 	}

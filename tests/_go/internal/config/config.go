@@ -626,6 +626,7 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"dash_log_rows too small", "dash_log_rows: 1"},
 		{"dash_poll zero", "dash_poll_interval: 0s"},
 		{"batch cap exceeds chan cap", "storage_write_chan_cap: 100\nstorage_batch_cap: 200"},
+		{"write channel cap too high", "storage_write_chan_cap: 1000001"},
 		{"negative duration", "idle_conn_timeout: -5s"},
 		{"negative upstream_timeout", "upstream_timeout: -5s"},
 		{"negative backoff", "base_backoff: -1s"},

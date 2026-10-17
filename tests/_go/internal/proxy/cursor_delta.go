@@ -82,7 +82,7 @@ func TestOpenCursorStreamOpeningDeltaDisconnect(t *testing.T) {
 	run := providerformat.NewCursorRun(pw, pr, nil, func() {}, 5*time.Second)
 	s.finishRunTurn(failingSSEWriter{}, run,
 		providerformat.TurnResult{Outcome: providerformat.TurnFinished},
-		emit, rec, "cursor-1", cursorTurnRender{est: 10}, false)
+		emit, rec, "cursor-1", cursorTurnRender{estimate: func() int64 { return 10 }}, false)
 
 	if !rec.ClientDisconnected {
 		t.Error("the zero-delta turn finish must keep the disconnect flag set at stream open")

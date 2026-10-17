@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -29,18 +28,6 @@ type QueryOutput struct {
 const queryAdvice = "narrow the SELECT (fewer columns, a WHERE range, or a GROUP BY aggregate) and re-run; " +
 	"this tool has no cursor, so paging is done in SQL with keyset pagination"
 
-// queryBytes is the approximate encoded size of the returned rows, reported so
-// a model can size its next request without guessing from the row count.
-func queryBytes(rows []map[string]any) int {
-	total := 0
-	for _, row := range rows {
-		if encoded, err := json.Marshal(row); err == nil {
-			total += len(encoded)
-		}
-	}
-	return total
-}
-
 // Query runs one bounded SELECT and truncates client-side with an explicit
 // marker. The proxy's own row and byte limits still apply (413); this cap is
 // the volume a model can read.
@@ -61,11 +48,11 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 	// long narrow one, so the encoded-size clamp runs after it and is reported
 	// whenever it withheld something. Its total stays the proxy's own row count,
 	// so a result cut by both limits cannot read as complete.
-	bySize, sizeTruncation := clampRowsToBytes(kept, len(result), s.limits.QueryMaxBytes, queryAdvice)
+	bySize, bySizeBytes, sizeTruncation := clampRowsToBytes(kept, len(result), s.limits.QueryMaxBytes, queryAdvice)
 	if sizeTruncation.Truncated {
-		return &QueryOutput{Rows: bySize, RowCount: len(bySize), Bytes: queryBytes(bySize), Truncation: sizeTruncation}, nil
+		return &QueryOutput{Rows: bySize, RowCount: len(bySize), Bytes: bySizeBytes, Truncation: sizeTruncation}, nil
 	}
-	return &QueryOutput{Rows: kept, RowCount: len(kept), Bytes: queryBytes(kept), Truncation: truncation}, nil
+	return &QueryOutput{Rows: kept, RowCount: len(kept), Bytes: bySizeBytes, Truncation: truncation}, nil
 }
 
 // maxQueryRowsCeiling is an internal sanity bound so a typo cannot ask for a
