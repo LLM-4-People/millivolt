@@ -163,10 +163,12 @@ func NewAggAPI(buf *metrics.Buffer, store *storage.Store, queryTimeout time.Dura
 }
 
 // BootRingCapMul sizes the full-snapshot record cap (SetSnapshotLimit) as a
-// multiple of dash_log_rows - the first log page plus scroll-through
-// headroom before the log pages older history from the durable store.
-// Internal derivation, not a tunable (same shape as storage's WriteTrackCap).
-const BootRingCapMul = 8
+// multiple of dash_log_rows - the first log page plus one headroom page before
+// the log pages older history from the durable store. Internal derivation, not
+// a tunable (same shape as storage's WriteTrackCap). Kept small: every record
+// carries its response headers, so an 8x window multiplied the bootstrap and
+// reconnect payload for rows the first paint never renders.
+const BootRingCapMul = 2
 
 // queryCtx is the single choke point that bounds a dashboard aggregate
 // SELECT by StorageQueryTimeout. Validate requires > 0; a 0 fail-closes
@@ -481,14 +483,8 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 			prepare(p)
 		}
 		if p != nil {
-			for i := range p.rows {
-				c := &p.rows[i]
-				if since > 0 && c.start < since {
-					continue
-				}
-				if err := fn(c); err != nil {
-					return err
-				}
+			if err := p.visitSince(since, fn); err != nil {
+				return err
 			}
 		}
 		for _, r := range ring {
@@ -1127,12 +1123,42 @@ func scopedMatch(c *contrib, statusCode string, fs []scopeFilter) bool {
 			if contribStatusClass(c) != statusCode {
 				return false
 			}
-		} else if strconv.Itoa(c.status) != statusCode {
+		} else if !statusCodeEquals(c.status, statusCode) {
 			return false
 		}
 	}
 	for _, f := range fs {
 		if !f.matches(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// statusCodeEquals compares a contribution's numeric status with the validated
+// exact-code scope without formatting the number into a new string per row
+// (strconv.Itoa allocated once per match attempt on every fold).
+func statusCodeEquals(code int, text string) bool {
+	if code < 0 {
+		return false
+	}
+	var buf [20]byte
+	i := len(buf)
+	n := code
+	for {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+		if n == 0 {
+			break
+		}
+	}
+	digits := buf[i:]
+	if len(digits) != len(text) {
+		return false
+	}
+	for j := range digits {
+		if digits[j] != text[j] {
 			return false
 		}
 	}
@@ -1317,8 +1343,13 @@ func (e *explorerFold) markRail(dim int, id uint32) {
 }
 
 func (e *explorerFold) fold(c *contrib) error {
-	if _, pending := e.pendingIDs[c.id]; pending {
-		e.seen[c.id] = struct{}{}
+	// Only ring-only rows can be pending here: prepare already marked every
+	// pending ID the projection contains, so hashing the ID for projected rows
+	// is a redundant map probe per row.
+	if c.rowIndex == 0 {
+		if _, pending := e.pendingIDs[c.id]; pending {
+			e.seen[c.id] = struct{}{}
+		}
 	}
 	inRail := scopedMatch(c, e.statusCode, e.allFS)
 	if inRail {

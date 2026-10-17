@@ -252,3 +252,59 @@ func TestGrowRowsBoundedSpareCapacity(t *testing.T) {
 		t.Fatalf("live spare capacity = %d rows, want <= one chunk (%d)", spare, rowsGrowChunk)
 	}
 }
+
+// TestProjectionVisitSinceChunks pins the chunk-max window skip: blocks whose
+// newest row is older than the window are never visited, while a late
+// completion that lands in an old block is still visited because it raises that
+// block's maximum.
+func TestProjectionVisitSinceChunks(t *testing.T) {
+	var p projectionData
+	for i := range 3 * rowsGrowChunk {
+		start := int64(100000 - i)
+		p.rows = append(p.rows, contrib{start: start})
+		p.noteChunkStart(uint32(i+1), start)
+	}
+	// Late completion appended into a new block with a much newer start: the
+	// block's maximum must include it even though every earlier block is old.
+	lateStart := int64(999999)
+	p.rows = append(p.rows, contrib{start: lateStart})
+	p.noteChunkStart(uint32(len(p.rows)), lateStart)
+
+	visited := 0
+	if err := p.visitSince(95000, func(c *contrib) error {
+		if c.start < 95000 {
+			t.Fatalf("visited out-of-window start %d", c.start)
+		}
+		visited++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := 0
+	for i := range p.rows {
+		if p.rows[i].start >= 95000 {
+			want++
+		}
+	}
+	if visited != want {
+		t.Fatalf("visited %d rows, want %d", visited, want)
+	}
+
+	// Unbounded (since <= 0) still visits every row.
+	visited = 0
+	if err := p.visitSince(0, func(*contrib) error { visited++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if visited != len(p.rows) {
+		t.Fatalf("unbounded visited %d rows, want %d", visited, len(p.rows))
+	}
+
+	// A window ahead of every row visits nothing.
+	visited = 0
+	if err := p.visitSince(lateStart+1, func(*contrib) error { visited++; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if visited != 0 {
+		t.Fatalf("empty window visited %d rows", visited)
+	}
+}

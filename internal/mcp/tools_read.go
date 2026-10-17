@@ -356,7 +356,7 @@ type SnapshotOutput struct {
 }
 
 // Snapshot returns the live bootstrap snapshot. The full payload is capped at
-// 8 * dash_log_rows records when durable storage backs the ring, so older
+// 2 * dash_log_rows records when durable storage backs the ring, so older
 // history needs the durable log page.
 func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutput, error) {
 	limit := in.MaxRecords

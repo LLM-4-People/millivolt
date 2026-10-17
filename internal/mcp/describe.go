@@ -154,7 +154,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			"There is NO unixnow() function in this SQLite build. For a relative window use strftime('%s','now')*1000, " +
 				"for example WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour.",
 			"Use keyset pagination (WHERE (started_at, id) < (?, ?)) rather than OFFSET for deep history; OFFSET degrades on every page.",
-			"For history older than the snapshot window, use the records tool with its paired before_ms/before_id cursor. The snapshot is capped at 8 * dash_log_rows records.",
+			"For history older than the snapshot window, use the records tool with its paired before_ms/before_id cursor. The snapshot is capped at 2 * dash_log_rows records.",
 			"dashboard_version is a frontend asset fingerprint, not an API version. There is no API versioning and no published stability contract.",
 			"Filters in the export and purge grammars match raw stored values, never canonicalized model names. " +
 				"The explore, chart and records scope filters are the opposite: they match the CANONICAL model spelling the proxy derives " +

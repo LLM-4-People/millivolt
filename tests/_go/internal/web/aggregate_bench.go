@@ -46,6 +46,7 @@ func BenchmarkAggregateFold(b *testing.B) {
 	for i := range rows {
 		rows[i].rowIndex = uint32(i + 1)
 		p.dimensions.intern(&rows[i])
+		p.noteChunkStart(rows[i].rowIndex, rows[i].start)
 	}
 	p.metrics.append(rows, 0)
 	now := time.Now().UnixMilli()
@@ -76,6 +77,21 @@ func BenchmarkAggregateFold(b *testing.B) {
 				_ = f.fold(&rows[i])
 			}
 			_ = f.payload()
+		}
+	})
+	// A bounded chart window must touch only the blocks whose newest row is
+	// inside the window; the visitor owns that skip.
+	b.Run("chart_window", func(b *testing.B) {
+		since := now - 15*60*1000
+		fFrom, fStep, fCount := chartWindowEdges(now, since)
+		b.ReportAllocs()
+		for b.Loop() {
+			f := newChartFold(fFrom, fStep, fCount, "", nil)
+			f.prepare(p, nil)
+			if err := p.visitSince(since, func(c *contrib) error { return f.fold(c) }); err != nil {
+				b.Fatal(err)
+			}
+			_ = f.payload(now)
 		}
 	})
 }

@@ -1,7 +1,5 @@
 package web
 
-import "strings"
-
 // Dimension positions are internal dictionary slots, never wire values.
 // The names own the API dimension allowlist as well as index iteration.
 const (
@@ -44,7 +42,28 @@ func (d *dimensionDictionary) intern(name string) uint32 {
 	return id
 }
 
-type contribDimensions struct{ dict [dimCount]dimensionDictionary }
+type contribDimensions struct {
+	dict [dimCount]dimensionDictionary
+	// errorText dedupes repeated error type/code/message bytes across rows.
+	// The joined filter key remains the error dictionary's name; this map only
+	// shares the individual fields the cards and lineage expose.
+	errorText map[string]string
+}
+
+// internErrorText returns the shared copy of one error field.
+func (d *contribDimensions) internErrorText(s string) string {
+	if s == "" {
+		return ""
+	}
+	if shared, ok := d.errorText[s]; ok {
+		return shared
+	}
+	if d.errorText == nil {
+		d.errorText = make(map[string]string)
+	}
+	d.errorText[s] = s
+	return s
+}
 
 // dimField owns the stored single-valued dimension mapping. Both the value
 // reader and projection interning use it, so rows can share dictionary-owned
@@ -99,13 +118,17 @@ func (d *contribDimensions) intern(c *contrib) {
 		d.dict[dimTool].counts[id]++
 	}
 	c.errorIDs = make([]uint32, len(c.ent))
-	for i, ent := range c.ent {
-		c.errorIDs[i] = d.dict[dimError].intern(errorKey(ent))
+	for i := range c.ent {
+		e := &c.ent[i]
+		e.typ = d.internErrorText(e.typ)
+		e.code = d.internErrorText(e.code)
+		e.msg = d.internErrorText(e.msg)
+		c.errorIDs[i] = d.dict[dimError].intern(errorKey(*e))
 		d.dict[dimError].counts[c.errorIDs[i]]++
 	}
 }
 
-func errorKey(e errEnt) string { return strings.Join([]string{e.typ, e.code, e.msg}, "|") }
+func errorKey(e errEnt) string { return e.typ + "|" + e.code + "|" + e.msg }
 
 // Bind model filters to the raw dictionary once, keeping projection rows
 // immutable so readers can fold pointers without copying every contribution.

@@ -25,6 +25,11 @@ type projectionData struct {
 	hasStart   bool
 	cursor     storage.ProjectionCursor
 	version    int64
+	// chunkMaxStart holds the maximum contribution start per rowsGrowChunk
+	// block, so a bounded window can skip whole blocks whose newest row is
+	// older than the window. Late completions only raise their own block's
+	// maximum, which never makes the skip unsound.
+	chunkMaxStart []int64
 }
 
 type historyProjection struct {
@@ -98,6 +103,48 @@ func (a *AggAPI) withProjection(ctx context.Context, fn func(*projectionData) er
 	return fn(&a.projection.data)
 }
 
+// noteChunkStart records a contribution's start in its block's maximum.
+// rowIndex is 1-based, matching contrib.rowIndex.
+func (d *projectionData) noteChunkStart(rowIndex uint32, start int64) {
+	chunk := int(rowIndex-1) / rowsGrowChunk
+	for len(d.chunkMaxStart) <= chunk {
+		d.chunkMaxStart = append(d.chunkMaxStart, start)
+	}
+	if start > d.chunkMaxStart[chunk] {
+		d.chunkMaxStart[chunk] = start
+	}
+}
+
+// visitSince calls fn for every contribution whose start is at or after since
+// (since <= 0 means all). Whole blocks older than the window are skipped, so a
+// bounded chart window never touches stale history row by row.
+func (d *projectionData) visitSince(since int64, fn func(*contrib) error) error {
+	if since <= 0 || len(d.chunkMaxStart) == 0 {
+		for i := range d.rows {
+			if err := fn(&d.rows[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for chunk, maxStart := range d.chunkMaxStart {
+		if maxStart < since {
+			continue
+		}
+		start := chunk * rowsGrowChunk
+		end := min(start+rowsGrowChunk, len(d.rows))
+		for i := start; i < end; i++ {
+			if d.rows[i].start < since {
+				continue
+			}
+			if err := fn(&d.rows[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) error {
 	version, err := store.DataVersion(ctx)
 	if err != nil {
@@ -160,6 +207,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) e
 		if !data.hasStart || c.start < data.minStart {
 			data.minStart, data.hasStart = c.start, true
 		}
+		data.noteChunkStart(c.rowIndex, c.start)
 		if c.id != "" {
 			data.ids[c.id] = struct{}{}
 		}
