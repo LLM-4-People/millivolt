@@ -37,7 +37,7 @@ const sqliteWriterConns = 1
 // page cache, so an unbounded pool multiplies memory under dashboard/MCP
 // concurrency; reads beyond this bound queue behind the query timeout.
 // Internal guardrail, not user-tunable.
-const sqliteReadConns = 8
+const sqliteReadConns = 9
 
 // Ad-hoc SELECTs cannot materialize thousands of independent large columns
 // before the result-byte check. Internal safety guardrail, not user-tunable;
