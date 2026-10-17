@@ -33,6 +33,12 @@ import (
 // guardrail (avoids SQLITE_BUSY), not user-tunable.
 const sqliteWriterConns = 1
 
+// sqliteReadConns bounds the read-only pool. Each connection owns a SQLite
+// page cache, so an unbounded pool multiplies memory under dashboard/MCP
+// concurrency; reads beyond this bound queue behind the query timeout.
+// Internal guardrail, not user-tunable.
+const sqliteReadConns = 8
+
 // Ad-hoc SELECTs cannot materialize thousands of independent large columns
 // before the result-byte check. Internal safety guardrail, not user-tunable;
 // the canonical requests schema (including SELECT *) fits below this ceiling.
@@ -460,6 +466,9 @@ type Store struct {
 	// the caller knows every accepted record is durable - without sealing
 	// the pipeline the way Close does.
 	flushCh chan chan error
+	// lastDebugExpire is writer-goroutine state for the opportunistic expired
+	// sidecar sweep.
+	lastDebugExpire time.Time
 }
 
 // cantOpenContext explains SQLITE_CANTOPEN startup failures. The bare SQLite
@@ -513,7 +522,16 @@ func Open(path string, opts Options) (*Store, error) {
 		busyTimeout = sqliteBusyTimeout
 	}
 	busy := fmt.Sprintf("_pragma=busy_timeout(%d)", busyTimeout.Milliseconds())
-	db, err := sql.Open("sqlite", path+"?"+busy+"&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+	// journal_size_limit bounds the WAL file after checkpoints (the default
+	// keeps the high-water mark for the process lifetime). wal_autocheckpoint
+	// stays at SQLite's 1000-page default: the batch writer commits every
+	// flush interval, and a larger threshold trades WAL bytes for fewer
+	// checkpoint passes; it is measured by BenchmarkStorageWriter.
+	dsn := path + "?" + busy +
+		"&_pragma=journal_mode(WAL)" +
+		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=journal_size_limit(67108864)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -543,6 +561,14 @@ func Open(path string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("open read pool: %w", err)
 	}
+	// Bound the pool: database/sql defaults to unlimited connections, and each
+	// SQLite connection carries its own page cache (about 2 MiB by default) in
+	// anonymous mmap outside the Go heap limit. The bound queues excess
+	// dashboard/MCP reads behind StorageQueryTimeout instead of multiplying
+	// caches without limit; the writer and the retained data_version
+	// connection are separate pools.
+	rdb.SetMaxOpenConns(sqliteReadConns)
+	rdb.SetMaxIdleConns(sqliteReadConns)
 
 	s := &Store{
 		path:       path,
@@ -754,6 +780,7 @@ func (s *Store) writer() {
 			ret <- firstErr
 		case <-ticker.C:
 			flush()
+			s.expireDebugCapturesIfDue()
 		case <-s.done:
 			// Shutdown: Close closes s.ch right after s.done, so range drains
 			// every buffered record - including any a producer raced in after
@@ -765,6 +792,22 @@ func (s *Store) writer() {
 			flush()
 			return
 		}
+	}
+}
+
+// expireDebugCapturesIfDue runs the expired-sidecar sweep from the writer
+// goroutine at a bounded cadence. Expired rows are already invisible to reads;
+// without the sweep their bytes stay on disk until the next restart.
+func (s *Store) expireDebugCapturesIfDue() {
+	now := time.Now()
+	if !s.lastDebugExpire.IsZero() && now.Sub(s.lastDebugExpire) < debugExpireInterval {
+		return
+	}
+	s.lastDebugExpire = now
+	ctx, cancel := s.withQueryTimeout(context.Background())
+	defer cancel()
+	if _, err := s.ExpireDebugCaptures(ctx, now.UnixMilli()); err != nil && ctx.Err() == nil {
+		log.Printf("storage: expire debug captures: %v", err)
 	}
 }
 

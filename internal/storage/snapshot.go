@@ -57,7 +57,11 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 	}
 	defer os.RemoveAll(dir)
 	dest := filepath.Join(dir, "snapshot.db")
-	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
+	// VACUUM INTO is a read-only operation on the source (SQLite opens the
+	// destination separately), so run it on the read pool: the single writer
+	// connection stays free for request accounting during the copy. Flush above
+	// already committed every accepted record.
+	if _, err := s.rdb.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
 		return nil, fmt.Errorf("vacuum snapshot: %w", err)
 	}
 	// Integrity-check the VACUUM dest in place. CheckDatabase would

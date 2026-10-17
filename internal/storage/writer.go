@@ -133,55 +133,46 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 	insert := batchInsert{tx: tx}
 	defer insert.close()
 
+	// One values slice is reused for every row: a fresh 98-element []any per
+	// record was the batch's largest avoidable allocation.
+	values := make([]any, 0, 100)
 	for _, r := range records {
-		hdrJSON, herr := json.Marshal(r.ResponseHeaders)
-		if herr != nil {
-			log.Printf("storage: marshal response headers for %s: %v", r.ID, herr)
-			hdrJSON = nil
+		// Absent optional documents keep the exact stored JSON ("null", or
+		// "{}" for a non-nil empty header map) without running the marshaler
+		// and allocating a new byte slice per row.
+		hdrJSON := jsonNull
+		if r.ResponseHeaders != nil {
+			if len(r.ResponseHeaders) == 0 {
+				hdrJSON = jsonEmptyObject
+			} else if b, err := json.Marshal(r.ResponseHeaders); err == nil {
+				hdrJSON = b
+			} else {
+				log.Printf("storage: marshal response headers for %s: %v", r.ID, err)
+				hdrJSON = nil
+			}
 		}
-		toolNamesJSON, terr := json.Marshal(r.ToolNames)
-		if terr != nil {
-			log.Printf("storage: marshal tool names for %s: %v", r.ID, terr)
-			toolNamesJSON = nil
+		toolNamesJSON := jsonNull
+		if len(r.ToolNames) > 0 {
+			if b, err := json.Marshal(r.ToolNames); err == nil {
+				toolNamesJSON = b
+			} else {
+				log.Printf("storage: marshal tool names for %s: %v", r.ID, err)
+				toolNamesJSON = nil
+			}
 		}
-		attemptsJSON, aerr := json.Marshal(r.Attempts)
-		if aerr != nil {
-			log.Printf("storage: marshal attempts for %s: %v", r.ID, aerr)
-			// 'null', never '': the attempts column must hold valid JSON -
-			// migrate repairs pre-attempts '' rows for exactly this reason.
-			attemptsJSON = []byte("null")
+		attemptsJSON := jsonNull
+		if len(r.Attempts) > 0 {
+			if b, err := json.Marshal(r.Attempts); err == nil {
+				attemptsJSON = b
+			} else {
+				log.Printf("storage: marshal attempts for %s: %v", r.ID, err)
+				// 'null', never '': the attempts column must hold valid JSON -
+				// migrate repairs pre-attempts '' rows for exactly this reason.
+				attemptsJSON = jsonNull
+			}
 		}
-		if err := insert.exec([]any{
-			r.ID, r.Provider, r.Model, r.KeyHash, r.UserAgent, r.Client, r.ClientIP,
-			r.ClientLang, boolToInt(r.Stream),
-			r.StatusCode, r.Start.UnixMilli(), r.DurationMs,
-			r.TTFTMs, timeToMilli(r.FirstTokenAt), timeToMilli(r.LastTokenAt), r.Chunks,
-			r.RequestBytes, r.ResponseBytes, boolToInt(r.UpstreamGzip),
-			r.UpstreamConnectMs, r.UpstreamTLSMs, r.UpstreamTTFBMs, boolToInt(r.UpstreamConnReused),
-			r.FinishReason, r.ErrorType, r.ErrorMsg, r.ErrorCode, r.ToolCalls,
-			r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.TotalTokens,
-			r.Usage.CacheReadTokens, r.Usage.CacheWrite, r.Usage.ReasoningTokens,
-			boolToInt(r.ClientDisconnected),
-			r.RateLimitRemaining, r.RateLimitLimit, r.Cost,
-			r.TurnsUser, r.TurnsAssistant, r.TurnsTool, string(hdrJSON),
-			r.AnswerTokens, timeToMilli(r.FirstAnswerAt), r.FirstReasoningAt, r.GenTokens, boolToInt(r.HadAnswerContent), r.DecodeTPS, r.OverallTPS,
-			r.Method, r.Path, r.ProcessingMs, r.PromptPreview, r.ResponsePreview,
-			r.ProviderModel, r.ProviderRequestID, r.ProviderServer,
-			r.QueueWaitMs, boolToInt(r.RateLimited), r.Retries, r.RetryAfterMs,
-			string(toolNamesJSON),
-			intPtrVal(r.ReqMaxTokens), floatPtrVal(r.ReqTemperature), floatPtrVal(r.ReqTopP),
-			r.ReqToolsCount, r.ReqToolChoice,
-			intPtrVal(r.ReqN), r.ReqStop, boolToInt(r.ReqLogprobs),
-			floatPtrVal(r.ReqPresencePen), floatPtrVal(r.ReqFrequencyPen),
-			r.ReqResponseFormat, int64PtrVal(r.ReqSeed), boolPtrVal(r.ReqParallelTools),
-			r.ReqLogitBias, intPtrVal(r.ReqTopLogprobs), r.ReqServiceTier,
-			boolToInt(r.ReqThinking), r.ReqMetadataKeys, boolToInt(r.ReqStreamOpts),
-			string(attemptsJSON), timeToMilli(r.FinalAttemptAt), r.ConversationID, r.ParentConversationID,
-			r.CharsSystem, r.CharsUser, r.CharsAssistant, r.CharsTool,
-			r.Images, r.Attachments, r.LastTurnRole,
-			marshalClientMeta(r.ClientMeta), r.ReqReasoningEffort, r.ReqVerbosity,
-			boolToInt(r.Debug), r.DebugSessionID, requestParamPresence(r),
-		}); err != nil {
+		values = appendRecordValues(values[:0], r, hdrJSON, toolNamesJSON, attemptsJSON)
+		if err := insert.exec(values); err != nil {
 			return err
 		}
 	}
@@ -190,4 +181,45 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 	}
 	s.account(records)
 	return nil
+}
+
+var (
+	jsonNull        = []byte("null")
+	jsonEmptyObject = []byte("{}")
+)
+
+// appendRecordValues appends one record's column values in insertColumns
+// order to dst. The caller reuses dst across rows.
+func appendRecordValues(dst []any, r *metrics.Record, hdrJSON, toolNamesJSON, attemptsJSON []byte) []any {
+	return append(dst,
+		r.ID, r.Provider, r.Model, r.KeyHash, r.UserAgent, r.Client, r.ClientIP,
+		r.ClientLang, boolToInt(r.Stream),
+		r.StatusCode, r.Start.UnixMilli(), r.DurationMs,
+		r.TTFTMs, timeToMilli(r.FirstTokenAt), timeToMilli(r.LastTokenAt), r.Chunks,
+		r.RequestBytes, r.ResponseBytes, boolToInt(r.UpstreamGzip),
+		r.UpstreamConnectMs, r.UpstreamTLSMs, r.UpstreamTTFBMs, boolToInt(r.UpstreamConnReused),
+		r.FinishReason, r.ErrorType, r.ErrorMsg, r.ErrorCode, r.ToolCalls,
+		r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.TotalTokens,
+		r.Usage.CacheReadTokens, r.Usage.CacheWrite, r.Usage.ReasoningTokens,
+		boolToInt(r.ClientDisconnected),
+		r.RateLimitRemaining, r.RateLimitLimit, r.Cost,
+		r.TurnsUser, r.TurnsAssistant, r.TurnsTool, string(hdrJSON),
+		r.AnswerTokens, timeToMilli(r.FirstAnswerAt), r.FirstReasoningAt, r.GenTokens, boolToInt(r.HadAnswerContent), r.DecodeTPS, r.OverallTPS,
+		r.Method, r.Path, r.ProcessingMs, r.PromptPreview, r.ResponsePreview,
+		r.ProviderModel, r.ProviderRequestID, r.ProviderServer,
+		r.QueueWaitMs, boolToInt(r.RateLimited), r.Retries, r.RetryAfterMs,
+		string(toolNamesJSON),
+		intPtrVal(r.ReqMaxTokens), floatPtrVal(r.ReqTemperature), floatPtrVal(r.ReqTopP),
+		r.ReqToolsCount, r.ReqToolChoice,
+		intPtrVal(r.ReqN), r.ReqStop, boolToInt(r.ReqLogprobs),
+		floatPtrVal(r.ReqPresencePen), floatPtrVal(r.ReqFrequencyPen),
+		r.ReqResponseFormat, int64PtrVal(r.ReqSeed), boolPtrVal(r.ReqParallelTools),
+		r.ReqLogitBias, intPtrVal(r.ReqTopLogprobs), r.ReqServiceTier,
+		boolToInt(r.ReqThinking), r.ReqMetadataKeys, boolToInt(r.ReqStreamOpts),
+		string(attemptsJSON), timeToMilli(r.FinalAttemptAt), r.ConversationID, r.ParentConversationID,
+		r.CharsSystem, r.CharsUser, r.CharsAssistant, r.CharsTool,
+		r.Images, r.Attachments, r.LastTurnRole,
+		marshalClientMeta(r.ClientMeta), r.ReqReasoningEffort, r.ReqVerbosity,
+		boolToInt(r.Debug), r.DebugSessionID, requestParamPresence(r),
+	)
 }
