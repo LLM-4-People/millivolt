@@ -13,14 +13,83 @@ type metricSample[T ~int64 | ~float64] struct {
 	value T
 }
 
-type projectionMetrics struct {
+// recentMetricRows bounds the duplicate tail order used by bounded chart
+// windows. A window whose earliest durable row is inside this tail reads the
+// tail order instead of walking all history; 65536 rows covers a 15-minute
+// window at a high sustained rate while adding only a few MiB per process.
+// Internal implementation constants, not tunables.
+const (
+	recentMetricRows        = 65536
+	recentMetricRebuildRows = 16384
+)
+
+// metricOrders is one immutable set of value-sorted samples. Rows are
+// projection row indices (0-based); every slice is sorted ascending by value.
+type metricOrders struct {
 	ttft []metricSample[int64]
 	tps  []metricSample[float64]
 	dec  []metricSample[int64]
 }
 
+func (o metricOrders) empty() bool {
+	return len(o.ttft) == 0 && len(o.tps) == 0 && len(o.dec) == 0
+}
+
+// merge folds new samples into fresh immutable slices. The input slices are
+// never mutated after publication.
+func (o *metricOrders) merge(added metricOrders) {
+	o.ttft = mergeMetricOrder(o.ttft, added.ttft)
+	o.tps = mergeMetricOrder(o.tps, added.tps)
+	o.dec = mergeMetricOrder(o.dec, added.dec)
+}
+
+func (o *metricOrders) sort() {
+	slices.SortFunc(o.ttft, func(a, b metricSample[int64]) int { return cmp.Compare(a.value, b.value) })
+	slices.SortFunc(o.tps, func(a, b metricSample[float64]) int { return cmp.Compare(a.value, b.value) })
+	slices.SortFunc(o.dec, func(a, b metricSample[int64]) int { return cmp.Compare(a.value, b.value) })
+}
+
+type projectionMetrics struct {
+	all metricOrders
+	// recent is a value-sorted order over the last recentMetricRows rows. It
+	// may retain already-out-of-tail samples between rebuilds; consumers only
+	// use it when their earliest required row is >= recentFrom.
+	recent        metricOrders
+	recentFrom    int
+	recentBuiltAt int
+}
+
 func validMetricSample[T ~int64 | ~float64](value T) bool {
 	return value > 0 && !math.IsInf(float64(value), 0)
+}
+
+// collectMetricOrders selects valid samples in rows[from:].
+func collectMetricOrders(rows []contrib, from int) metricOrders {
+	if from < 0 {
+		from = 0
+	}
+	if from >= len(rows) {
+		return metricOrders{}
+	}
+	n := len(rows) - from
+	out := metricOrders{
+		ttft: make([]metricSample[int64], 0, n),
+		tps:  make([]metricSample[float64], 0, n),
+		dec:  make([]metricSample[int64], 0, n),
+	}
+	for i := from; i < len(rows); i++ {
+		c := &rows[i]
+		if validMetricSample(c.ttft) {
+			out.ttft = append(out.ttft, metricSample[int64]{row: uint32(i), value: c.ttft})
+		}
+		if validMetricSample(c.tps) {
+			out.tps = append(out.tps, metricSample[float64]{row: uint32(i), value: c.tps})
+		}
+		if validMetricSample(c.dec) {
+			out.dec = append(out.dec, metricSample[int64]{row: uint32(i), value: c.dec})
+		}
+	}
+	return out
 }
 
 // append sorts only new rows and merges into fresh immutable metric orders.
@@ -30,24 +99,47 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	if from >= len(rows) {
 		return
 	}
-	wait := make([]metricSample[int64], 0, len(rows)-from)
-	speed := make([]metricSample[float64], 0, len(rows)-from)
-	decode := make([]metricSample[int64], 0, len(rows)-from)
-	for i := from; i < len(rows); i++ {
-		c := &rows[i]
-		if validMetricSample(c.ttft) {
-			wait = append(wait, metricSample[int64]{row: uint32(i), value: c.ttft})
-		}
-		if validMetricSample(c.tps) {
-			speed = append(speed, metricSample[float64]{row: uint32(i), value: c.tps})
-		}
-		if validMetricSample(c.dec) {
-			decode = append(decode, metricSample[int64]{row: uint32(i), value: c.dec})
-		}
+	added := collectMetricOrders(rows, from)
+	m.all.merge(added)
+	if len(rows) <= recentMetricRows {
+		// Small histories need no duplicate tail: share the all-history
+		// slices. Every later merge replaces the headers, so the alias stays
+		// consistent only because this branch re-aliases on every append.
+		m.recent = m.all
+		m.recentFrom = 0
+		m.recentBuiltAt = len(rows)
+		return
 	}
-	m.ttft = mergeMetricOrder(m.ttft, wait)
-	m.tps = mergeMetricOrder(m.tps, speed)
-	m.dec = mergeMetricOrder(m.dec, decode)
+	if m.recentFrom == 0 {
+		m.rebuildRecent(rows)
+		return
+	}
+	if from < m.recentFrom {
+		// The batch crossed the old tail boundary; only rows still in the new
+		// tail belong in the recent order.
+		added = collectMetricOrders(rows, m.recentFrom)
+	}
+	m.recent.merge(added)
+	if next := len(rows) - recentMetricRows; next > m.recentFrom {
+		m.recentFrom = next
+	}
+	// Advance the tail lazily: out-of-tail samples retained between rebuilds
+	// are harmless (their membership byte is zero) and bounded by the rebuild
+	// cadence.
+	if len(rows)-m.recentBuiltAt >= recentMetricRebuildRows {
+		m.rebuildRecent(rows)
+	}
+}
+
+// rebuildRecent recreates the tail order from the newest recentMetricRows
+// rows and releases samples that have fallen out of the tail.
+func (m *projectionMetrics) rebuildRecent(rows []contrib) {
+	from := max(0, len(rows)-recentMetricRows)
+	orders := collectMetricOrders(rows, from)
+	orders.sort()
+	m.recent = orders
+	m.recentFrom = from
+	m.recentBuiltAt = len(rows)
 }
 
 func mergeMetricOrder[T ~int64 | ~float64](old, added []metricSample[T]) []metricSample[T] {

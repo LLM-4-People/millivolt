@@ -105,13 +105,13 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 	var m projectionMetrics
 	m.append(rows[:4], 0)
 	first := m
-	beforeWait, beforeSpeed, beforeDec := slices.Clone(m.ttft), slices.Clone(m.tps), slices.Clone(m.dec)
+	beforeWait, beforeSpeed, beforeDec := slices.Clone(m.all.ttft), slices.Clone(m.all.tps), slices.Clone(m.all.dec)
 	m.append(rows, 4)
-	if !slices.Equal(first.ttft, beforeWait) || !slices.Equal(first.tps, beforeSpeed) || !slices.Equal(first.dec, beforeDec) {
+	if !slices.Equal(first.all.ttft, beforeWait) || !slices.Equal(first.all.tps, beforeSpeed) || !slices.Equal(first.all.dec, beforeDec) {
 		t.Fatal("append mutated a previously published order")
 	}
-	if len(m.ttft) != 5 || len(m.tps) != 4 || len(m.dec) != 5 {
-		t.Fatalf("invalid sample accepted: ttft=%v tps=%v dec=%v", m.ttft, m.tps, m.dec)
+	if len(m.all.ttft) != 5 || len(m.all.tps) != 4 || len(m.all.dec) != 5 {
+		t.Fatalf("invalid sample accepted: ttft=%v tps=%v dec=%v", m.all.ttft, m.all.tps, m.all.dec)
 	}
 	check := func(n int, row uint32, value float64, expected float64) {
 		t.Helper()
@@ -119,31 +119,31 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 			t.Fatalf("sample %d lost row/value association: row=%d value=%v want=%v", n, row, value, expected)
 		}
 	}
-	for i, sample := range m.ttft {
+	for i, sample := range m.all.ttft {
 		check(i, sample.row, float64(sample.value), float64(rows[sample.row].ttft))
-		if i > 0 && m.ttft[i-1].value > sample.value {
+		if i > 0 && m.all.ttft[i-1].value > sample.value {
 			t.Fatal("TTFT merge is not sorted")
 		}
 	}
-	for i, sample := range m.tps {
+	for i, sample := range m.all.tps {
 		check(i, sample.row, sample.value, rows[sample.row].tps)
-		if i > 0 && m.tps[i-1].value > sample.value {
+		if i > 0 && m.all.tps[i-1].value > sample.value {
 			t.Fatal("TPS merge is not sorted")
 		}
 	}
-	for i, sample := range m.dec {
+	for i, sample := range m.all.dec {
 		check(i, sample.row, float64(sample.value), float64(rows[sample.row].dec))
-		if i > 0 && m.dec[i-1].value > sample.value {
+		if i > 0 && m.all.dec[i-1].value > sample.value {
 			t.Fatal("decode merge is not sorted")
 		}
 	}
 	previous := m
 	m.append(rows, len(rows))
-	if &m.ttft[0] != &previous.ttft[0] || &m.tps[0] != &previous.tps[0] || &m.dec[0] != &previous.dec[0] {
+	if &m.all.ttft[0] != &previous.all.ttft[0] || &m.all.tps[0] != &previous.all.tps[0] || &m.all.dec[0] != &previous.all.dec[0] {
 		t.Fatal("empty catch-up needlessly copied orders")
 	}
 	mask, counts := []uint8{1, 1, 0, 0, 1, 1, 1, 0}, []int{5}
-	buckets, period := rankPercentiles(m.ttft, mask, counts, nil, nil)
+	buckets, period := rankPercentiles(m.all.ttft, mask, counts, nil, nil)
 	want := sortedSampleOracle([]int64{10, 10, 20, 30, 40}, 50, 95, 99)
 	if !reflect.DeepEqual(period, want) || !reflect.DeepEqual(buckets[0], want) {
 		t.Fatal("merged order produced incorrect exact percentiles")
@@ -151,7 +151,7 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 	// The decode order ranks its own sample population: rows 0,1,5,6 pass
 	// both the validity gate and the mask (row 4's zero window is invalid,
 	// row 7's 1000ms window is masked out), so counts differ from ttft's.
-	decBuckets, decPeriod := rankPercentiles(m.dec, mask, []int{4}, nil, nil)
+	decBuckets, decPeriod := rankPercentiles(m.all.dec, mask, []int{4}, nil, nil)
 	decWant := sortedSampleOracle([]int64{10, 100, 200, 400}, 50, 95, 99)
 	if !reflect.DeepEqual(decPeriod, decWant) || !reflect.DeepEqual(decBuckets[0], decWant) {
 		t.Fatalf("decode order ranks = %v / %v, want %v", decPeriod, decBuckets[0], decWant)
@@ -316,4 +316,57 @@ func BenchmarkRankPercentilesVisit100K(b *testing.B) {
 	for b.Loop() {
 		benchmarkRankBuckets, benchmarkPercentileResult = rankPercentilesVisit(order, counts, nil, nil, visit)
 	}
+}
+
+// TestProjectionRecentOrderMatchesAllForTailWindows pins the bounded-chart
+// fast path: when every in-window row is inside the retained tail, ranks and
+// occurrence-weighted stats from the short order are exactly the all-history
+// answers. A delta crossing the rebuild cadence must advance and rebuild the
+// tail without losing the newest samples.
+func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
+	n := recentMetricRows + 5000
+	rows := make([]contrib, n)
+	for i := range rows {
+		rows[i] = contrib{ttft: int64(i + 1), tps: float64(i + 1), dec: int64(i + 1)}
+	}
+	var m projectionMetrics
+	m.append(rows, 0)
+	if m.recentFrom != n-recentMetricRows {
+		t.Fatalf("recentFrom = %d, want %d", m.recentFrom, n-recentMetricRows)
+	}
+	check := func(from int) {
+		t.Helper()
+		mask := make([]uint8, n)
+		for i := from; i < n; i++ {
+			mask[i] = 1
+		}
+		counts := []int{n - from}
+		allTTFT, allPeriodTTFT, allStatTTFT := rankPercentilesStats(m.all.ttft, mask, counts, nil, nil)
+		recentTTFT, recentPeriodTTFT, recentStatTTFT := rankPercentilesStats(m.recent.ttft, mask, counts, nil, nil)
+		if !reflect.DeepEqual(allTTFT, recentTTFT) || !reflect.DeepEqual(allPeriodTTFT, recentPeriodTTFT) ||
+			!reflect.DeepEqual(allStatTTFT, recentStatTTFT) {
+			t.Fatalf("TTFT tail ranks differ from all-history ranks (from=%d)", from)
+		}
+		allDec, allPeriodDec := rankPercentiles(m.all.dec, mask, counts, nil, nil)
+		recentDec, recentPeriodDec := rankPercentiles(m.recent.dec, mask, counts, nil, nil)
+		if !reflect.DeepEqual(allDec, recentDec) || !reflect.DeepEqual(allPeriodDec, recentPeriodDec) {
+			t.Fatalf("decode tail ranks differ from all-history ranks (from=%d)", from)
+		}
+	}
+	check(m.recentFrom)
+
+	delta := make([]contrib, 20000)
+	for i := range delta {
+		delta[i] = contrib{ttft: int64(n + i + 1), tps: float64(n + i + 1), dec: int64(n + i + 1)}
+	}
+	rows = append(rows, delta...)
+	m.append(rows, n)
+	n = len(rows)
+	if m.recentFrom != n-recentMetricRows {
+		t.Fatalf("advanced recentFrom = %d, want %d", m.recentFrom, n-recentMetricRows)
+	}
+	if m.recentBuiltAt != n {
+		t.Fatalf("recentBuiltAt = %d, want a rebuild at %d", m.recentBuiltAt, n)
+	}
+	check(m.recentFrom)
 }

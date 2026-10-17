@@ -676,9 +676,16 @@ type chartFold struct {
 	tpsBucket  []uint8
 	decBucket  []uint8
 	membership []uint8
-	order      projectionMetrics
-	statusCode string
-	fs         []scopeFilter
+	order      metricOrders
+	// recent is the tail order for bounded windows; recentFrom is its first
+	// covered projection row (0-based). minMemberRow is the earliest in-window
+	// durable row, so the tail is safe only when it covers that row.
+	recent       metricOrders
+	recentFrom   int
+	minMemberRow uint32
+	hasMember    bool
+	statusCode   string
+	fs           []scopeFilter
 }
 
 func newChartFold(from, step int64, count int, statusCode string, fs []scopeFilter) *chartFold {
@@ -699,7 +706,9 @@ func (f *chartFold) prepare(p *projectionData, mcz *modelCanonizer) {
 		return
 	}
 	f.membership = make([]uint8, len(p.rows))
-	f.order = p.metrics
+	f.order = p.metrics.all
+	f.recent = p.metrics.recent
+	f.recentFrom = p.metrics.recentFrom
 }
 
 func (f *chartFold) fold(c *contrib) error {
@@ -749,6 +758,9 @@ func (f *chartFold) fold(c *contrib) error {
 	}
 	if c.rowIndex > 0 {
 		f.membership[c.rowIndex-1] = uint8(idx + 1)
+		if !f.hasMember || c.rowIndex < f.minMemberRow {
+			f.minMemberRow, f.hasMember = c.rowIndex, true
+		}
 	}
 	if validMetricSample(c.ttft) {
 		b.ttftN++
@@ -780,9 +792,16 @@ func (f *chartFold) payload(now int64) chartPayload {
 	for i, b := range f.buckets {
 		ttftCounts[i], tpsCounts[i], decCounts[i] = b.ttftN, b.tpsN, b.decN
 	}
-	ttft, periodTTFT, ttftStat := rankPercentilesStats(f.order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
-	tps, periodTPS, tpsStat := rankPercentilesStats(f.order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
-	dec, periodDec := rankPercentiles(f.order.dec, f.membership, decCounts, f.extraDec, f.decBucket)
+	order := f.order
+	// Every durable row in this window is inside the retained tail, so the
+	// exact ranks can read the short sorted order instead of all history.
+	// Row indices are 1-based; recentFrom is a 0-based slice start.
+	if f.hasMember && f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom {
+		order = f.recent
+	}
+	ttft, periodTTFT, ttftStat := rankPercentilesStats(order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
+	tps, periodTPS, tpsStat := rankPercentilesStats(order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
+	dec, periodDec := rankPercentiles(order.dec, f.membership, decCounts, f.extraDec, f.decBucket)
 	for i, b := range f.buckets {
 		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
@@ -1263,7 +1282,7 @@ type explorerFold struct {
 	railCount     [dimCount]int
 	groups        map[uint32]*entAcc
 	maxGroupID    uint32
-	order         projectionMetrics
+	order         metricOrders
 	rowCount      int
 	// Single-valued dimensions store one group id per projected row (4 bytes).
 	// Only tool/error need the flat multi-membership list + spans.
@@ -1305,7 +1324,7 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	e.allFS = bindScope(e.allFS, p, mcz)
 	e.grpFS = bindScope(e.grpFS, p, mcz)
 	if p != nil {
-		e.order = p.metrics
+		e.order = p.metrics.all
 		// The unfiltered rail is exactly the shared dictionary's occupied
 		// memberships. Only unprojected ring/pending names can add anything;
 		// scoped rails continue to follow the canonical per-row predicate.
