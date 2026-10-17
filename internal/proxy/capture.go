@@ -114,16 +114,51 @@ func redactHeaderName(name, authHeader string) bool {
 
 // captureHeaders is the record-retention boundary, separate from transparent
 // forwarding. Neither ordinary metrics nor debug captures retain credentials.
+// Values are capped at a generous header-sized bound: the inbound server cap
+// (1 MiB) lets a hostile peer put a megabyte into one header that would then be
+// retained by the ring, every absorbed attempt and the database row.
 func captureHeaders(h http.Header, authHeader string) http.Header {
 	out := make(http.Header, len(h))
 	for name, values := range h {
 		if redactHeaderName(name, authHeader) {
 			out[name] = []string{"[REDACTED]"}
-		} else {
-			out[name] = append([]string(nil), values...)
+			continue
 		}
+		capped := make([]string, 0, min(len(values), retainedHeaderValuesMax))
+		for _, v := range values {
+			if len(capped) == retainedHeaderValuesMax {
+				break
+			}
+			capped = append(capped, retainedText(v, retainedHeaderValueMax))
+		}
+		out[name] = capped
 	}
 	return out
+}
+
+// Retained-text bounds for the record boundary. Internal guardrails, not
+// user-tunable: they protect the ring, retry attempts and durable rows from
+// client-controlled megabytes while leaving every real identifier intact.
+const (
+	retainedLabelMax         = 512  // model id
+	retainedClientMax        = 256  // classified client label
+	retainedUserAgentMax     = 1024 // user agent
+	retainedClientIPMax      = 128  // forwarded address list
+	retainedHeaderValueMax   = 4096 // one retained response-header value
+	retainedHeaderValuesMax  = 16   // values retained per header name
+	retainedTruncationSuffix = "…"
+)
+
+// retainedText truncates at a UTF-8 boundary and marks the cut.
+func retainedText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max - len(retainedTruncationSuffix)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + retainedTruncationSuffix
 }
 
 func headersToHAR(h http.Header, authHeader string) []harNV {

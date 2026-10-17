@@ -228,6 +228,7 @@ func TestQueueCompactionPreservesWaitersAndClearsTail(t *testing.T) {
 	}
 	ws[1].client, ws[4].client, ws[2].ctx = "held", "held", ctx
 	g.queue = append([]*waiter(nil), ws...)
+	g.queued = len(ws)
 	backing := g.queue[:cap(g.queue)]
 	g.drain()
 	if !slices.Equal(g.queue, []*waiter{ws[1], ws[2], ws[4], ws[5], ws[6], ws[7]}) || g.inFlight != 2 {

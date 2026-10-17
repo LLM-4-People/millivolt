@@ -1398,11 +1398,11 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 			// precedence as the clean merge below (a cap pair that still does
 			// not decode leaves the record's cap untouched).
 			applyTokenCaps(body, rec)
-			rec.Model, rec.Stream = req.Model, req.Stream
+			rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
 			return
 		}
 	}
-	rec.Model, rec.Stream = req.Model, req.Stream
+	rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
 	// Prefer max_completion_tokens, matching the Anthropic translator's
 	// pick: the translated body re-decodes through this same
 	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP

@@ -14,7 +14,6 @@ package scheduler
 import (
 	"context"
 	"math/rand"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -108,7 +107,9 @@ type group struct {
 	probing        bool          // the retrying request holds the send token
 	sendKick       chan struct{} // closed and replaced when the send gate changes
 	pacer          wakeTimer     // one shared pacing wakeup, not one per waiter
-	queue          []*waiter
+	queue          []*waiter     // live waiters; cancelled entries are nil tombstones
+	queued         int           // live waiter count (excludes tombstones)
+	tombstones     int           // nil entries awaiting drain's compaction pass
 	mu             sync.Mutex
 }
 
@@ -205,7 +206,7 @@ func (s *Scheduler) Stats() Stats {
 	for _, g := range s.groups {
 		g.mu.Lock()
 		st.InFlight += g.inFlight
-		st.Queued += len(g.queue)
+		st.Queued += g.queued
 		g.mu.Unlock()
 	}
 	return st
@@ -515,7 +516,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	// Fast path: queue empty, capacity available, past pacing window, not held,
 	// provider throttle admits. tryAdmit consumes RPM/TPM/concurrency - only
 	// call it when every other predicate already passed.
-	if len(g.queue) == 0 &&
+	if g.queued == 0 &&
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!time.Now().Before(g.nextAllowedAt) &&
 		g.sched.matchingHold(hooks.Client, hooks.Provider) == nil {
@@ -529,7 +530,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 			g.sched.armThrottleDrain(hooks.Provider, wait)
 		}
 	}
-	if opts.MaxQueueSize > 0 && len(g.queue) >= opts.MaxQueueSize {
+	if opts.MaxQueueSize > 0 && g.queued >= opts.MaxQueueSize {
 		g.mu.Unlock()
 		return nil, ErrQueueFull
 	}
@@ -548,6 +549,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		}
 	}
 	g.queue = append(g.queue, w)
+	g.queued++
 	if w.holdID != "" && opts.MaxWait > 0 {
 		// Stamp hold start here so a waiter that hasn't entered the wait
 		// loop yet still excludes pause time from MaxWait.
@@ -716,6 +718,12 @@ func (g *group) drain() {
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) {
 		w := g.queue[read]
+		if w == nil {
+			// removeWaiter tombstoned a cancelled waiter; drop it in the one
+			// compaction pass instead of shifting the suffix per cancel.
+			read++
+			continue
+		}
 		// Leave cancelled waiters queued so removeWaiter still finds them.
 		// Dropping here made removeWaiter treat them as a grant and
 		// decrement a live in-flight slot.
@@ -740,6 +748,7 @@ func (g *group) drain() {
 		}
 		w.admission = lease
 		read++
+		g.queued--
 		g.inFlight++
 		// Non-blocking send: w.ch is buffered (cap 1) so this always succeeds
 		// for a popped waiter. A waiter that was cancelled before reading the
@@ -754,15 +763,41 @@ func (g *group) drain() {
 	kept += copy(g.queue[kept:], g.queue[read:])
 	clear(g.queue[kept:])
 	g.queue = g.queue[:kept]
+	if g.tombstones > 0 {
+		// The grant loop stops at the first blocked waiter, so tombstones below
+		// it survive the one-pass compaction above.
+		g.compactLocked()
+	}
+}
+
+// compactLocked drops tombstoned waiters in one sweep. removeWaiter tombstones
+// instead of shifting the suffix per cancel, so a mass cancel costs O(Q) in
+// total rather than O(Q²).
+func (g *group) compactLocked() {
+	live := g.queue[:0]
+	for _, w := range g.queue {
+		if w != nil {
+			live = append(live, w)
+		}
+	}
+	clear(g.queue[len(live):])
+	g.queue = live
+	g.tombstones = 0
 }
 
 func (g *group) removeWaiter(w *waiter) {
 	g.mu.Lock()
-	found := false
+	found, headRemoved := false, false
 	for i, q := range g.queue {
 		if q == w {
-			g.queue = slices.Delete(g.queue, i, i+1)
+			// Tombstone instead of slices.Delete: a mass cancel must not shift
+			// the queue suffix once per waiter (O(Q²)); drain's single
+			// compaction pass drops the nil slots immediately below.
+			g.queue[i] = nil
+			g.queued--
+			g.tombstones++
 			found = true
+			headRemoved = i == 0
 			break
 		}
 	}
@@ -779,8 +814,18 @@ func (g *group) removeWaiter(w *waiter) {
 		w.admission.finish(0)
 	}
 	// Removing a throttled head can expose a smaller reservation that fits now.
-	// Re-evaluate synchronously; no detached goroutine is needed for a cancel.
-	g.drain()
+	// A non-head removal cannot change which waiter drain reaches first, and its
+	// tombstone is compacted on the next drain; skipping the synchronous pass
+	// keeps a mass cancel from re-walking the queue per waiter.
+	if headRemoved || !found {
+		g.drain()
+	} else if g.tombstones >= max(1, len(g.queue)/8) {
+		// Bound tombstone retention without paying a full shift per cancel:
+		// compact once per eighth of the queue, then let drain own the rest.
+		g.mu.Lock()
+		g.compactLocked()
+		g.mu.Unlock()
+	}
 }
 
 // MaxRetryHint is the ceiling on a provider-supplied Retry-After /
