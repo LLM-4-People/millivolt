@@ -35,6 +35,10 @@ type projectionData struct {
 type historyProjection struct {
 	mu   sync.RWMutex
 	data projectionData
+	// building is non-nil while exactly one builder materializes rows off the
+	// lock. Concurrent readers wait on it instead of repeating the same scan;
+	// readers holding the previous published snapshot keep serving.
+	building chan struct{}
 }
 
 // rowsGrowChunk bounds the rows slice's spare capacity. Growth rounds the new
@@ -146,79 +150,190 @@ func (d *projectionData) visitSince(since int64, fn func(*contrib) error) error 
 }
 
 func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) error {
-	version, err := store.DataVersion(ctx)
-	if err != nil {
-		return err // never serve an old projection when freshness is unknowable
-	}
-	p.mu.RLock()
-	current := p.data.cursor.Ready && p.data.version == version
-	p.mu.RUnlock()
-	if current {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	// Another reader may have caught up while this caller waited. Re-read the
-	// version after acquiring the build lock; an older caller cannot roll the
-	// projection's version back after a newer caller already published it.
-	version, err = store.DataVersion(ctx)
-	if err != nil {
-		return err
-	}
-	if p.data.cursor.Ready && p.data.version == version {
-		return nil
-	}
-	var incoming []contrib
-	next, full, err := store.StreamProjection(ctx, rowColumns, p.data.cursor, func(rows *sql.Rows) error {
-		c, err := scanContrib(rows, nil) // raw spelling; query rules apply later
-		if err == nil {
-			incoming = append(incoming, c)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		return err
-	})
-	if err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	data := p.data
-	if full {
-		data = projectionData{ids: make(map[string]struct{}, len(incoming))}
-	} else {
+		version, err := store.DataVersion(ctx)
+		if err != nil {
+			return err // never serve an old projection when freshness is unknowable
+		}
+		p.mu.RLock()
+		current := p.data.cursor.Ready && p.data.version == version
+		wait := p.building
+		p.mu.RUnlock()
+		if current {
+			return nil
+		}
+		if wait != nil {
+			// Single-flight: one builder owns the scan. Waiting readers keep
+			// their own cancellation and re-check the version after it ends.
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+
+		p.mu.Lock()
+		if p.building != nil {
+			wait := p.building
+			p.mu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		// Re-read the version after acquiring the build token: an older caller
+		// cannot roll the projection's version back, and a commit that landed
+		// while we waited is included in this scan.
+		version, err = store.DataVersion(ctx)
+		if err != nil {
+			p.mu.Unlock()
+			return err
+		}
+		if p.data.cursor.Ready && p.data.version == version {
+			p.mu.Unlock()
+			return nil
+		}
+		base := p.data // snapshot metadata; underlying rows stay immutable until apply
+		done := make(chan struct{})
+		p.building = done
+		p.mu.Unlock()
+
+		// Materialize off the lock. The version was read before the scan: a
+		// commit landing during it leaves the projection stamped older, so the
+		// next read catches up instead of falsely declaring the rows fresh.
+		var incoming []contrib
+		scanned := 0
+		next, full, err := store.StreamProjection(ctx, rowColumns, base.cursor, func(rows *sql.Rows) error {
+			c, err := scanContrib(rows, nil) // raw spelling; query rules apply later
+			if err != nil {
+				return err
+			}
+			incoming = append(incoming, c)
+			scanned++
+			// Check cancellation periodically so an abandoned dashboard request
+			// cannot keep a full-history decode running to completion.
+			if scanned%4096 == 0 {
+				return ctx.Err()
+			}
+			return nil
+		})
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			p.finishBuild(done)
+			return err
+		}
+
+		p.mu.Lock()
+		if p.data.version != base.version || p.data.cursor != base.cursor {
+			// Defensive: the build token makes this unreachable today. Never
+			// apply a delta onto a different base; release and retry instead.
+			p.finishBuildLocked(done)
+			p.mu.Unlock()
+			continue
+		}
+		if full {
+			data, err := buildProjection(incoming, next, version)
+			if err != nil {
+				p.finishBuildLocked(done)
+				p.mu.Unlock()
+				return err
+			}
+			p.data = data
+			p.finishBuildLocked(done)
+			p.mu.Unlock()
+			return nil
+		}
+		data := p.data
+		// Compact metric-order indices are uint32; reject before narrowing or
+		// mutating a published dictionary (an arithmetic guard, not a history cap).
+		if uint64(len(data.rows))+uint64(len(incoming)) > math.MaxUint32 {
+			p.finishBuildLocked(done)
+			p.mu.Unlock()
+			return errors.New("analytical row index capacity exceeded")
+		}
 		for _, c := range incoming {
 			if c.id != "" {
 				if _, exists := data.ids[c.id]; exists {
+					p.finishBuildLocked(done)
+					p.mu.Unlock()
 					return errors.New("analytical append unexpectedly replaced an existing request")
 				}
 			}
 		}
+		previousRows := len(data.rows)
+		for i := range incoming {
+			c := &incoming[i]
+			c.rowIndex = uint32(previousRows + i + 1)
+			data.dimensions.intern(c)
+			if !data.hasStart || c.start < data.minStart {
+				data.minStart, data.hasStart = c.start, true
+			}
+			data.noteChunkStart(c.rowIndex, c.start)
+			if c.id != "" {
+				data.ids[c.id] = struct{}{}
+			}
+		}
+		// growRows covers the delta append with one owner; spare capacity never
+		// exceeds the incoming batch.
+		data.rows = growRows(data.rows, incoming)
+		data.metrics.append(data.rows, previousRows)
+		data.cursor, data.version = next, version
+		p.data = data
+		p.finishBuildLocked(done)
+		p.mu.Unlock()
+		return nil
 	}
-	// Compact metric-order indices are uint32; reject before narrowing or
-	// mutating a published dictionary (an arithmetic guard, not a history cap).
-	if uint64(len(data.rows))+uint64(len(incoming)) > math.MaxUint32 {
-		return errors.New("analytical row index capacity exceeded")
+}
+
+// buildProjection constructs a complete replacement off the lock (destructive
+// invalidation, purge or external rewrite). The caller swaps it under the
+// write lock, so readers never observe a partially built table.
+func buildProjection(incoming []contrib, next storage.ProjectionCursor, version int64) (projectionData, error) {
+	// Compact metric-order indices are uint32; reject before narrowing.
+	if uint64(len(incoming)) > math.MaxUint32 {
+		return projectionData{}, errors.New("analytical row index capacity exceeded")
 	}
-	previousRows := len(data.rows)
+	data := projectionData{
+		ids:      make(map[string]struct{}, len(incoming)),
+		cursor:   next,
+		version:  version,
+		rows:     make([]contrib, len(incoming)),
+		hasStart: len(incoming) > 0,
+	}
 	for i := range incoming {
-		c := &incoming[i]
-		c.rowIndex = uint32(previousRows + i + 1)
-		data.dimensions.intern(c)
-		if !data.hasStart || c.start < data.minStart {
-			data.minStart, data.hasStart = c.start, true
+		c := incoming[i]
+		c.rowIndex = uint32(i + 1)
+		data.dimensions.intern(&c)
+		if i == 0 || c.start < data.minStart {
+			data.minStart = c.start
 		}
 		data.noteChunkStart(c.rowIndex, c.start)
 		if c.id != "" {
 			data.ids[c.id] = struct{}{}
 		}
+		data.rows[i] = c
 	}
-	// growRows covers the full rebuild (dst empty) and the delta append with
-	// one owner; spare capacity never exceeds the incoming batch.
-	data.rows = growRows(data.rows, incoming)
-	data.metrics.append(data.rows, previousRows)
-	data.cursor, data.version = next, version
-	// Keep the PRE-scan version. If a commit landed during materialization,
-	// the next read catches it up instead of falsely stamping old rows fresh.
-	p.data = data
-	return nil
+	data.metrics.append(data.rows, 0)
+	return data, nil
+}
+
+func (p *historyProjection) finishBuild(done chan struct{}) {
+	p.mu.Lock()
+	p.finishBuildLocked(done)
+	p.mu.Unlock()
+}
+
+func (p *historyProjection) finishBuildLocked(done chan struct{}) {
+	if p.building == done {
+		p.building = nil
+		close(done)
+	}
 }
