@@ -808,6 +808,9 @@ func (g *group) removeWaiter(w *waiter) {
 			g.inFlight--
 		}
 	}
+	// Bound tombstone retention without paying a full shift per cancel. Decide
+	// under the lock: the threshold reads queue state that drain mutates.
+	needCompact := found && !headRemoved && g.tombstones >= max(1, len(g.queue)/8)
 	g.mu.Unlock()
 	w.dropHold(g.sched)
 	if !found {
@@ -819,9 +822,9 @@ func (g *group) removeWaiter(w *waiter) {
 	// keeps a mass cancel from re-walking the queue per waiter.
 	if headRemoved || !found {
 		g.drain()
-	} else if g.tombstones >= max(1, len(g.queue)/8) {
-		// Bound tombstone retention without paying a full shift per cancel:
-		// compact once per eighth of the queue, then let drain own the rest.
+	} else if needCompact {
+		// compactLocked is idempotent; a concurrent drain may have already done
+		// the sweep between the unlock and this relock.
 		g.mu.Lock()
 		g.compactLocked()
 		g.mu.Unlock()
