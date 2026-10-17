@@ -128,18 +128,13 @@ func TestDefaultHasNoZeroTunables(t *testing.T) {
 			t.Errorf("Default().%s is zero/empty - every tunable must have a default", k)
 		}
 	}
-	// The queue caps are intentionally zero (0 = unlimited); pin that so an
-	// accidental default-zero on a real tunable isn't masked, and the trio's
-	// documented zero semantics are asserted somewhere.
-	zeroByDesign := map[string]bool{
-		"max_concurrent": c.MaxConcurrent == 0,
-		"max_queue_size": c.MaxQueueSize == 0,
-		"max_queue_wait": c.MaxQueueWait == 0,
+	// Concurrency stays unlimited by default (throughput), while the queue is
+	// bounded so a held provider cannot accumulate unbounded buffered bodies.
+	if c.MaxConcurrent != 0 {
+		t.Errorf("Default().max_concurrent = %d, want 0 (unlimited)", c.MaxConcurrent)
 	}
-	for k, ok := range zeroByDesign {
-		if !ok {
-			t.Errorf("Default().%s should stay 0 (0 = unlimited by design)", k)
-		}
+	if c.MaxQueueSize <= 0 || c.MaxQueueWait <= 0 || c.MaxInflightRequests <= 0 {
+		t.Errorf("queue bounds = (%d, %v, %d), want finite defaults", c.MaxQueueSize, c.MaxQueueWait, c.MaxInflightRequests)
 	}
 }
 

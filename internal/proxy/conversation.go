@@ -355,10 +355,16 @@ type convoPartition struct {
 
 // ConversationTracker assigns a stable conversation id to each request. It is
 // safe for concurrent use and bounds memory by expiring idle sessions lazily.
+// conversationPartitionsMax bounds distinct client+key partitions retained in
+// memory. A hostile client rotating keys/labels can otherwise grow the map for
+// the process lifetime; at the cap the oldest-created partition is evicted.
+const conversationPartitionsMax = 65_536
+
 type ConversationTracker struct {
 	mu        sync.Mutex
 	parts     map[string]*convoPartition
-	sequence  uint64 // process-lifetime sequence; no expired partition keys retained
+	order     []string // creation order for O(1) eviction at the cap
+	sequence  uint64   // process-lifetime sequence; no expired partition keys retained
 	idleGap   time.Duration
 	maxOpen   int       // per-partition cap on concurrently-open conversations
 	lastSweep time.Time // last global idle-partition sweep (throttled to idleGap)
@@ -422,26 +428,25 @@ func (t *ConversationTracker) Assign(client, keyHash, explicitID, trackedID stri
 	// sequence lives in t.sequence and survives the drop, so a recreated
 	// partition never reuses an id.
 	if now.Sub(t.lastSweep) >= t.idleGap {
-		t.lastSweep = now
-		for k, part := range t.parts {
-			alive := false
-			for _, s := range part.sessions {
-				if now.Sub(s.lastAt) <= t.idleGap {
-					alive = true
-					break
-				}
-			}
-			if !alive {
-				delete(t.parts, k)
-			}
-		}
+		t.sweepLocked(now)
 	}
 
 	pk := convoKey(client, keyHash)
 	p := t.parts[pk]
 	if p == nil {
+		if len(t.parts) >= conversationPartitionsMax {
+			t.sweepLocked(now)
+		}
+		for len(t.parts) >= conversationPartitionsMax && len(t.order) > 0 {
+			oldest := t.order[0]
+			t.order = t.order[1:]
+			if _, live := t.parts[oldest]; live {
+				delete(t.parts, oldest)
+			}
+		}
 		p = &convoPartition{}
 		t.parts[pk] = p
+		t.order = append(t.order, pk)
 	}
 
 	// Find the open conversation this request continues: the one with the
@@ -464,6 +469,28 @@ func (t *ConversationTracker) Assign(client, keyHash, explicitID, trackedID stri
 	best.lastTurn = max(best.lastTurn, totalTurns)
 	best.lastAt = now
 	return best.id
+}
+
+// sweepLocked drops partitions whose sessions all idle-expired and rebuilds
+// the creation-order index from the survivors. Callers hold mu.
+func (t *ConversationTracker) sweepLocked(now time.Time) {
+	t.lastSweep = now
+	for k, part := range t.parts {
+		alive := false
+		for _, s := range part.sessions {
+			if now.Sub(s.lastAt) <= t.idleGap {
+				alive = true
+				break
+			}
+		}
+		if !alive {
+			delete(t.parts, k)
+		}
+	}
+	t.order = t.order[:0]
+	for k := range t.parts {
+		t.order = append(t.order, k)
+	}
 }
 
 // newSession creates a conversation under the partition, evicting the oldest

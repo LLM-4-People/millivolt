@@ -47,4 +47,15 @@ func TestCaptureHeadersBoundsHostileValues(t *testing.T) {
 	if got := out["Authorization"]; len(got) != 1 || got[0] != "[REDACTED]" {
 		t.Fatalf("credential redaction lost: %v", got)
 	}
+	// The whole retained map stays under one total budget, so many oversized
+	// names cannot multiply the per-value cap.
+	total := 0
+	for name, values := range out {
+		for _, v := range values {
+			total += len(name) + len(v)
+		}
+	}
+	if total > retainedHeadersMaxBytes {
+		t.Fatalf("retained header bytes = %d, want <= %d", total, retainedHeadersMaxBytes)
+	}
 }

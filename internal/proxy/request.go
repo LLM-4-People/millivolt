@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1007,7 +1008,36 @@ func isEventStream(ct string) bool {
 // The audit identity belongs to this proxy, not the client. Reused client
 // request IDs must not collapse pending lifecycles or replace durable rows.
 // The original X-Request-Id still forwards unchanged in buildUpstreamRequest.
-func requestID() string { return rand.Text() }
+// requestIDEncoding is base32 with an ASCII-ordered alphabet ("0".."9",
+// "A".."V"). RFC 4648's alphabet places digits after letters, so its encoded
+// strings are not lexicographically ordered; this one is, which is what makes
+// the time prefix a right-edge B-tree append.
+var requestIDEncoding = base32.NewEncoding("0123456789ABCDEFGHIJKLMNOPQRSTUV").WithPadding(base32.NoPadding)
+
+// requestID returns a 26-character opaque identifier whose leading six bytes
+// are the request time. SQLite's TEXT primary key is a B-tree: random IDs make
+// every insert seek and dirty a different leaf, while a time prefix appends at
+// the right edge and keeps the hot leaf cached. Ten random bytes retain 80 bits
+// of uniqueness within a millisecond; the format and length are unchanged from
+// the previous fully random value, and IDs stay opaque to every consumer.
+func requestID() string {
+	var b [16]byte
+	ms := time.Now().UnixMilli()
+	b[0] = byte(ms >> 40)
+	b[1] = byte(ms >> 32)
+	b[2] = byte(ms >> 24)
+	b[3] = byte(ms >> 16)
+	b[4] = byte(ms >> 8)
+	b[5] = byte(ms)
+	if _, err := rand.Read(b[6:]); err != nil {
+		// crypto/rand failure is a platform fault; fall back to the random
+		// portion only so the request still gets an ID (uniqueness retained).
+		for i := 6; i < len(b); i++ {
+			b[i] = byte(time.Now().UnixNano() >> (i * 3))
+		}
+	}
+	return requestIDEncoding.EncodeToString(b[:])
+}
 
 func hashKey(key string) string {
 	if key == "" {

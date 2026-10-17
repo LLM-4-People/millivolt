@@ -9,6 +9,10 @@ import (
 
 const sseKeepaliveComment = ": keepalive\n\n"
 
+// sseWriteProgressDeadline bounds one client-facing stream write; a stalled
+// reader fails the write and releases the pacer instead of pinning shutdown.
+const sseWriteProgressDeadline = time.Minute
+
 // sseKeepaliveInterval is how often a quiet SSE socket gets a comment.
 // Chat Completions is data-only SSE: spec-compliant clients (including the
 // OpenAI SDKs) ignore comment lines. The Responses API also emits typed
@@ -85,6 +89,9 @@ func (p *ssePacer) Write(b []byte) (int, error) {
 		p.commitSSELocked()
 	}
 	p.lastWrite = time.Now()
+	// Bound one SSE write: a client that stops reading must not pin the
+	// handler (and Stop) inside the network write forever. Re-armed per write.
+	_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(sseWriteProgressDeadline))
 	return p.w.Write(b)
 }
 

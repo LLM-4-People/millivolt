@@ -67,3 +67,23 @@ func TestPacerWriteHeaderIsNotSSEComment(t *testing.T) {
 		t.Fatalf("keepalive comment on JSON 429: %q", rec.Body.String())
 	}
 }
+
+// deadlineRecorder is an httptest.ResponseRecorder with ResponseController's
+// deadline hooks, so the pacer's stream write bound is observable.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	write time.Time
+}
+
+func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error { r.write = t; return nil }
+
+func TestPacerArmsPerWriteDeadline(t *testing.T) {
+	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	p := newSSEPacer(rec, time.Hour)
+	if _, err := p.Write([]byte("data: x\n\n")); err != nil {
+		t.Fatal(err)
+	}
+	if rec.write.IsZero() || time.Until(rec.write) <= 0 || time.Until(rec.write) > sseWriteProgressDeadline+time.Second {
+		t.Fatalf("pacer write deadline = %v, want a near-future progress bound", rec.write)
+	}
+}

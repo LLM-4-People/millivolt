@@ -526,6 +526,7 @@ func TestHandlePauseDefaultMaxQueued(t *testing.T) {
 	// must not feed the hold's default queue capacity.
 	d2 := config.Default()
 	d2.MaxConcurrent = 7
+	d2.MaxQueueSize = 0 // unlimited by explicit config, not by MaxConcurrent
 	p2 := New(d2, metrics.Noop{})
 	rr2 := httptest.NewRecorder()
 	p2.HandlePause(rr2, httptest.NewRequest(http.MethodPost, "/admin/pause",

@@ -174,6 +174,12 @@ type nameSet struct {
 	names map[string]struct{}
 }
 
+// nameSetMax bounds one operator-known vocabulary. These lists exist for
+// operator convenience; model names are client-controlled, so an unbounded set
+// is a process-lifetime memory leak. New names beyond the cap are not retained
+// (early names win; the operator can still use exact live values).
+const nameSetMax = 4096
+
 // add records one observed name.
 func (n *nameSet) add(name string) {
 	if name == "" {
@@ -182,6 +188,10 @@ func (n *nameSet) add(name string) {
 	n.mu.Lock()
 	if n.names == nil {
 		n.names = make(map[string]struct{})
+	}
+	if _, exists := n.names[name]; !exists && len(n.names) >= nameSetMax {
+		n.mu.Unlock()
+		return
 	}
 	n.names[name] = struct{}{}
 	n.mu.Unlock()
@@ -196,9 +206,13 @@ func (n *nameSet) seed(names []string) {
 		n.names = make(map[string]struct{})
 	}
 	for _, name := range names {
-		if name != "" {
-			n.names[name] = struct{}{}
+		if name == "" {
+			continue
 		}
+		if _, exists := n.names[name]; !exists && len(n.names) >= nameSetMax {
+			continue
+		}
+		n.names[name] = struct{}{}
 	}
 }
 

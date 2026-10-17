@@ -16,6 +16,15 @@ import (
 // silent connections. Internal cadence, not user-tunable.
 const sseHeartbeat = 30 * time.Second
 
+// sseWriteProgressDeadline bounds one dashboard SSE write. A tab that stops
+// reading must fail its write and release the handler instead of pinning it
+// until process shutdown; every event re-arms the bound.
+const sseWriteProgressDeadline = time.Minute
+
+func armSSEWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(sseWriteProgressDeadline))
+}
+
 // metricsAllow is RFC 9110 Allow for ring-buffer JSON/SSE/Prometheus.
 const metricsAllow = "GET"
 
@@ -88,6 +97,9 @@ func (b *Buffer) SnapshotRequest(q url.Values, header http.Header) Snapshot {
 // to a byte slice only adds two full-size copies (multi-megabyte for a full
 // snapshot). net/http's response buffer coalesces the writes.
 func writeSSEFrame(w io.Writer, event string, id int64, hasID bool, data []byte) error {
+	if rw, ok := w.(http.ResponseWriter); ok {
+		armSSEWriteDeadline(rw)
+	}
 	if hasID {
 		var idbuf [20]byte
 		if _, err := io.WriteString(w, "id: "); err != nil {
@@ -246,6 +258,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		case <-ticker.C:
+			armSSEWriteDeadline(w)
 			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
 				return
 			}

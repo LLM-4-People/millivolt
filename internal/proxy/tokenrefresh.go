@@ -2,13 +2,16 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -64,6 +67,60 @@ var tokenHTTPClient = &http.Client{Timeout: tokenHTTPTimeout, CheckRedirect: pre
 // xaiTokenEndpoint is xAI's OAuth token endpoint - refresh lives on the auth
 // host, not under the API base URL. Test hook for mock endpoints.
 var xaiTokenEndpoint = "https://auth.x.ai/oauth2/token"
+
+// tokenRefreshFlight is one in-flight exchange. Waiters join it; the map entry
+// is deleted before done closes, so a later caller starts a fresh exchange
+// instead of reusing a completed result (the proxy still holds no credentials).
+type tokenRefreshFlight struct {
+	done    chan struct{}
+	access  string
+	refresh string
+	err     error
+}
+
+type tokenRefreshCoalescer struct {
+	mu sync.Mutex
+	m  map[string]*tokenRefreshFlight
+}
+
+// do coalesces concurrent refreshes for the same provider + refresh token.
+// The key is a hash; the token itself is never retained. The exchange runs on
+// a detached, bounded context so one client's cancellation cannot fail the
+// others, and every waiter still observes its own context while waiting.
+func (c *tokenRefreshCoalescer) do(ctx context.Context, key string, fn func(context.Context) (string, string, error)) (string, string, error) {
+	c.mu.Lock()
+	if f, ok := c.m[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-f.done:
+			return f.access, f.refresh, f.err
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		}
+	}
+	f := &tokenRefreshFlight{done: make(chan struct{})}
+	if c.m == nil {
+		c.m = make(map[string]*tokenRefreshFlight)
+	}
+	c.m[key] = f
+	c.mu.Unlock()
+
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tokenHTTPTimeout)
+	f.access, f.refresh, f.err = fn(actx)
+	cancel()
+
+	c.mu.Lock()
+	delete(c.m, key)
+	c.mu.Unlock()
+	close(f.done)
+	return f.access, f.refresh, f.err
+}
+
+// tokenRefreshKey identifies a coalescing group without retaining the secret.
+func tokenRefreshKey(t *target, refreshToken string) string {
+	sum := sha256.Sum256([]byte(t.format + "\x00" + t.baseURL + "\x00" + refreshToken))
+	return hex.EncodeToString(sum[:])
+}
 
 // refreshedTokens is the outcome of a successful refresh exchange. refresh is
 // empty when the provider omitted a refresh token or returned the same value
@@ -230,14 +287,17 @@ func (s *Server) refreshKeyIfExpired(r *http.Request, t *target, key string) (st
 		ctx, cancel = context.WithTimeout(ctx, d)
 		defer cancel()
 	}
-	fresh, err := refreshAccessToken(ctx, t, refreshToken)
-	if err != nil || fresh.access == "" {
+	access, refresh, err := s.tokenRefresh.do(ctx, tokenRefreshKey(t, refreshToken), func(exchangeCtx context.Context) (string, string, error) {
+		pair, err := refreshAccessToken(exchangeCtx, t, refreshToken)
+		return pair.access, pair.refresh, err
+	})
+	if err != nil || access == "" {
 		return key, refreshedTokens{}, false
 	}
-	if strings.TrimSpace(fresh.refresh) == refreshToken {
-		fresh.refresh = ""
+	if strings.TrimSpace(refresh) == refreshToken {
+		refresh = ""
 	}
-	return fresh.access, fresh, true
+	return access, refreshedTokens{access: access, refresh: refresh}, true
 }
 
 // resolveKey is the single inference-refresh policy owner. Any successful

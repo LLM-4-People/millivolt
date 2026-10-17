@@ -270,6 +270,12 @@ type Server struct {
 	// ModelObserver is wired before serving. Debug state uses the same Go
 	// canonical-name metadata provider as all other dashboard observers.
 	ModelObserver func([]string) any
+	// inflight bounds buffered inference requests process-wide (see
+	// MaxInflightRequests). Lock-free so reload can change the bound live.
+	inflight inflightLimiter
+	// tokenRefresh coalesces concurrent expired-token exchanges for the same
+	// provider + refresh token, holding no credentials after completion.
+	tokenRefresh tokenRefreshCoalescer
 }
 
 // cfg returns the current config snapshot. Cheap (atomic load); safe to call
@@ -313,6 +319,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	s.initPause()
 	s.cfgSnap.Store(cfg)
 	s.client.Store(newUpstreamClient(cfg))
+	s.inflight.set(cfg.MaxInflightRequests)
 	return s
 }
 
@@ -393,6 +400,7 @@ func (s *Server) Reload(cfg *config.Config) {
 		}
 	}
 	// Re-apply the live-tunable scheduler + conversation settings.
+	s.inflight.set(cfg.MaxInflightRequests)
 	s.scheduler.UpdateOptions(schedulerOptions(cfg))
 	s.convos.UpdateLimits(cfg.ConversationIdleGap, cfg.ConversationMaxOpen)
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)
@@ -441,6 +449,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// terminal 429/502, validation 4xx, storm queue 429s) carries it through
 	// one owner instead of per-sink calls.
 	w = &clientRetryDirective{ResponseWriter: w, srv: s}
+	if !s.inflight.acquire() {
+		// Refuse before buffering a body: over the process-wide bound, heap is
+		// what a client would otherwise control. The directive writer above
+		// carries the no-retry header like every other error sink.
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, errJSON(typeAPIError, "proxy is at its in-flight request limit"), http.StatusServiceUnavailable)
+		return
+	}
+	defer s.inflight.release()
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
 		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)

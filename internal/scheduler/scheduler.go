@@ -41,6 +41,11 @@ type Options struct {
 	Storm      StormOptions
 }
 
+// maxSchedulerGroups bounds distinct per-provider+key groups retained for the
+// process lifetime. A hostile client rotating keys can otherwise grow the map
+// without limit; the bound is generous for real deployments (100k keys).
+const maxSchedulerGroups = 100_000
+
 // Scheduler manages ordered queues per group key.
 type Scheduler struct {
 	mu     sync.Mutex // guards opts and groups
@@ -62,6 +67,11 @@ type Scheduler struct {
 	// client setting a header applies across every key of that provider.
 	throttleMu sync.Mutex
 	gates      map[string]*providerGate
+	// gateSnap is the lock-free read view of gates. gate() must never take
+	// throttleMu: admission calls it while holding a group's mutex, and the
+	// throttle writers take throttleMu -> gate/group mutexes. Reading through
+	// an immutable replacement removes that inversion entirely.
+	gateSnap atomic.Pointer[map[string]*providerGate]
 }
 
 // New builds a Scheduler. All Options are taken as-is - defaults are owned by
@@ -70,6 +80,7 @@ type Scheduler struct {
 func New(opts Options) *Scheduler {
 	s := &Scheduler{opts: opts, groups: make(map[string]*group), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
 	s.policy.Store(&policySnap{})
+	s.publishGatesLocked()
 	s.storms.configure(opts.Storm)
 	return s
 }
@@ -185,6 +196,13 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 // exceeds MaxWait.
 func (s *Scheduler) AcquireWith(ctx context.Context, key string, maxConcurrent int, hooks WaiterHooks) (Release, error) {
 	s.mu.Lock()
+	if _, exists := s.groups[key]; !exists && len(s.groups) >= maxSchedulerGroups {
+		// A client that rotates keys forever must not grow the group map for
+		// the process lifetime. Existing keys keep working; a brand-new key is
+		// refused with the queue-full class (429 at the proxy boundary).
+		s.mu.Unlock()
+		return nil, ErrGroupLimit
+	}
 	g := s.groupForLocked(key, maxConcurrent, true)
 	opts := s.opts
 	s.mu.Unlock()
@@ -889,6 +907,9 @@ var (
 	// ErrQueueFull is returned when the group queue or a pause's MaxQueued
 	// cap is exhausted. The proxy maps this to HTTP 429.
 	ErrQueueFull = errorString("queue full")
+	// ErrGroupLimit is returned when a brand-new group would exceed the
+	// process-wide group bound. Existing keys are unaffected.
+	ErrGroupLimit = errorString("scheduler group limit reached")
 	// ErrOverlap is returned when AddHold / ReplaceHold would
 	// park a target already covered by another pause.
 	ErrOverlap = errorString("pause overlaps existing hold")

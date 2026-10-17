@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -369,5 +370,53 @@ func BenchmarkQueueDrain(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// TestGateLookupNeverWaitsForThrottleWriters pins the lock-order fix: gate()
+// is called from admission while a group mutex is held, and throttle writers
+// hold throttleMu while taking that same group mutex. A gate lookup must read
+// an immutable snapshot, never acquire throttleMu, or the two orders deadlock.
+func TestGateLookupNeverWaitsForThrottleWriters(t *testing.T) {
+	s := New(Options{})
+	provider := "provider.example"
+	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 2}})
+	g := s.gate(provider)
+	if g == nil {
+		t.Fatal("gate not installed")
+	}
+	g.mu.Lock() // simulate admission holding the group mutex
+	updated := make(chan struct{})
+	go func() {
+		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 3}})
+		close(updated)
+	}()
+	// Wait until the writer holds throttleMu and is blocked on g.mu.
+	deadline := time.Now().Add(2 * time.Second)
+	for s.throttleMu.TryLock() {
+		s.throttleMu.Unlock()
+		if time.Now().After(deadline) {
+			g.mu.Unlock()
+			t.Fatal("throttle writer did not take throttleMu")
+		}
+		runtime.Gosched()
+	}
+	lookup := make(chan *providerGate, 1)
+	go func() { lookup <- s.gate(provider) }()
+	select {
+	case got := <-lookup:
+		if got != g {
+			g.mu.Unlock()
+			t.Fatal("gate lookup returned a different gate")
+		}
+	case <-time.After(2 * time.Second):
+		g.mu.Unlock()
+		t.Fatal("gate lookup blocked behind the throttle writer: lock-order inversion")
+	}
+	g.mu.Unlock()
+	select {
+	case <-updated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("throttle writer did not finish after the group lock was released")
 	}
 }

@@ -322,6 +322,7 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		g.throttle = Throttle{}
 		g.mu.Unlock()
 		delete(s.gates, provider)
+		s.publishGatesLocked()
 		s.throttleMu.Unlock()
 		s.kickThrottles()
 		return true
@@ -330,12 +331,19 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 		t.UpdatedAt = time.Now()
 	}
 	if g == nil {
+		if len(s.gates) >= maxProviderGates {
+			// Header-driven limits are client-controlled. Beyond the cap a new
+			// provider name is ignored instead of growing the gate map forever.
+			s.throttleMu.Unlock()
+			return false
+		}
 		g = s.newProviderGate(provider)
 		g.mu.Lock()
 		if s.gates == nil {
 			s.gates = make(map[string]*providerGate)
 		}
 		s.gates[provider] = g
+		s.publishGatesLocked()
 	}
 	g.throttle = t
 	now := time.Now()
@@ -396,8 +404,13 @@ func (s *Scheduler) RestoreThrottles(ts []Throttle) {
 		g.resetBuckets(t.Limit, now)
 		s.gates[t.Provider] = g
 	}
+	s.publishGatesLocked()
 	s.throttleMu.Unlock()
 }
+
+// maxProviderGates bounds header-driven provider caps. Configured providers
+// are restored explicitly and are not subject to the header-creation path.
+const maxProviderGates = 4096
 
 func (s *Scheduler) newProviderGate(provider string) *providerGate {
 	g := &providerGate{}
@@ -409,10 +422,22 @@ func (s *Scheduler) gate(provider string) *providerGate {
 	if provider == "" {
 		return nil
 	}
-	s.throttleMu.Lock()
-	g := s.gates[provider]
-	s.throttleMu.Unlock()
-	return g
+	snap := s.gateSnap.Load()
+	if snap == nil {
+		return nil
+	}
+	return (*snap)[provider]
+}
+
+// publishGatesLocked replaces the immutable read view. Callers hold
+// throttleMu; readers only load the pointer, so a hot-path admission never
+// waits for a policy writer.
+func (s *Scheduler) publishGatesLocked() {
+	snap := make(map[string]*providerGate, len(s.gates))
+	for p, g := range s.gates {
+		snap[p] = g
+	}
+	s.gateSnap.Store(&snap)
 }
 
 func (s *Scheduler) tryAdmit(provider string, est int64) (ok bool, lease admission, wait time.Duration) {

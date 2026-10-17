@@ -1338,6 +1338,11 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 					resp.Body = io.NopCloser(bytes.NewReader(errBody))
 				}
 			}
+			// A provider can send headers and then go silent forever. The
+			// attempt context's cancel is the only thing that aborts a blocked
+			// transport body read; arm it when no bytes arrive for the idle
+			// bound. Close stops the timer and releases the context.
+			resp.Body = newIdleCancelBody(resp.Body, attemptCancel, upstreamStreamIdleTimeout)
 			return resp, attemptCancel, nil
 		}
 

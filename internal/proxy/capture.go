@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -119,9 +120,23 @@ func redactHeaderName(name, authHeader string) bool {
 // retained by the ring, every absorbed attempt and the database row.
 func captureHeaders(h http.Header, authHeader string) http.Header {
 	out := make(http.Header, len(h))
-	for name, values := range h {
+	// Deterministic total budget: names are visited in sorted order so which
+	// oversized headers survive does not depend on map iteration order. A
+	// response otherwise bounded only per value could retain 64 KiB per name
+	// across hundreds of names, multiplied by every absorbed attempt.
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	used := 0
+	for _, name := range names {
+		values := h[name]
 		if redactHeaderName(name, authHeader) {
 			out[name] = []string{"[REDACTED]"}
+			continue
+		}
+		if used >= retainedHeadersMaxBytes {
 			continue
 		}
 		capped := make([]string, 0, min(len(values), retainedHeaderValuesMax))
@@ -129,9 +144,17 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 			if len(capped) == retainedHeaderValuesMax {
 				break
 			}
-			capped = append(capped, retainedText(v, retainedHeaderValueMax))
+			v = retainedText(v, retainedHeaderValueMax)
+			cost := len(name) + len(v)
+			if used+cost > retainedHeadersMaxBytes {
+				break
+			}
+			used += cost
+			capped = append(capped, v)
 		}
-		out[name] = capped
+		if len(capped) > 0 {
+			out[name] = capped
+		}
 	}
 	return out
 }
@@ -140,12 +163,13 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 // user-tunable: they protect the ring, retry attempts and durable rows from
 // client-controlled megabytes while leaving every real identifier intact.
 const (
-	retainedLabelMax         = 512  // model id
-	retainedClientMax        = 256  // classified client label
-	retainedUserAgentMax     = 1024 // user agent
-	retainedClientIPMax      = 128  // forwarded address list
-	retainedHeaderValueMax   = 4096 // one retained response-header value
-	retainedHeaderValuesMax  = 16   // values retained per header name
+	retainedLabelMax         = 512   // model id
+	retainedClientMax        = 256   // classified client label
+	retainedUserAgentMax     = 1024  // user agent
+	retainedClientIPMax      = 128   // forwarded address list
+	retainedHeaderValueMax   = 4096  // one retained response-header value
+	retainedHeaderValuesMax  = 16    // values retained per header name
+	retainedHeadersMaxBytes  = 16384 // total retained bytes across one header map
 	retainedTruncationSuffix = "…"
 )
 

@@ -141,6 +141,11 @@ type Config struct {
 	MaxQueueSize  int           `yaml:"max_queue_size" json:"max_queue_size"` // per group; 0 = unlimited
 	MaxQueueWait  time.Duration `yaml:"max_queue_wait" json:"max_queue_wait"` // max queue wait before 429; 0 = unlimited
 	MaxRetries    int           `yaml:"max_retries" json:"max_retries"`       // max transient (429/5xx) retries
+	// MaxInflightRequests is the process-wide inference admission bound. Every
+	// accepted request buffers its body before routing, so unbounded handler
+	// concurrency lets clients control heap directly. Requests above the bound
+	// are answered 503 with Retry-After instead of buffering. 0 = unlimited.
+	MaxInflightRequests int `yaml:"max_inflight_requests" json:"max_inflight_requests"`
 	// QueueRetryAfter is the Retry-After hint sent to clients when the proxy's
 	// own queue is full or the wait is exceeded. HTTP Retry-After is integer
 	// seconds; RetryAfterSeconds is the single conversion for that header.
@@ -852,10 +857,13 @@ func Default() *Config {
 		MaxIdleConnsPerHost: 512,
 		IdleConnTimeout:     90 * time.Second,
 
-		MaxRetries:      5,
-		QueueRetryAfter: 2 * time.Second,
-		BaseBackoff:     1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
-		MaxBackoff:      2 * time.Minute,
+		MaxRetries:          5,
+		MaxQueueSize:        1024,
+		MaxQueueWait:        10 * time.Minute,
+		MaxInflightRequests: 10000,
+		QueueRetryAfter:     2 * time.Second,
+		BaseBackoff:         1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
+		MaxBackoff:          2 * time.Minute,
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
@@ -1129,6 +1137,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxConcurrent < 0 || c.MaxQueueSize < 0 || c.MaxRetries < 0 {
 		return fmt.Errorf("max_concurrent/max_queue_size/max_retries: must be >= 0")
+	}
+	if c.MaxInflightRequests < 0 || c.MaxInflightRequests > 1_000_000 {
+		return fmt.Errorf("max_inflight_requests: must be 0..1000000, got %d", c.MaxInflightRequests)
 	}
 	if c.QualityRetries < 0 || c.QualityRetries > QualityRetriesMax {
 		return fmt.Errorf("quality_retries: must be 0..%d, got %d", QualityRetriesMax, c.QualityRetries)

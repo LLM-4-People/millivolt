@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -564,5 +566,53 @@ func TestAutoRefreshClientIDMatchesLoginScript(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), xaiOAuthClientID) {
 		t.Errorf("scripts/grok-login.sh no longer carries the proxy's client id %s", xaiOAuthClientID)
+	}
+}
+
+// TestTokenRefreshCoalescesConcurrentExchanges pins the request-path
+// singleflight: many requests presenting the same expired token produce one
+// provider exchange, while failures still reach every waiter.
+func TestTokenRefreshCoalescesConcurrentExchanges(t *testing.T) {
+	var c tokenRefreshCoalescer
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fn := func(context.Context) (string, string, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		return "access-1", "refresh-1", nil
+	}
+	leader := make(chan struct{})
+	go func() {
+		defer close(leader)
+		if access, _, err := c.do(context.Background(), "same", fn); err != nil || access != "access-1" {
+			t.Errorf("leader = %q, %v", access, err)
+		}
+	}()
+	<-started
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Go(func() {
+			if access, refresh, err := c.do(context.Background(), "same", fn); err != nil || access != "access-1" || refresh != "refresh-1" {
+				t.Errorf("waiter = %q/%q, %v", access, refresh, err)
+			}
+		})
+	}
+	// Let every waiter reach the flight before the exchange completes.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	<-leader
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("provider exchanges = %d, want 1", got)
+	}
+	// A completed flight is not cached: the proxy still holds no credentials.
+	if access, _, err := c.do(context.Background(), "same", fn); err != nil || access != "access-1" {
+		t.Fatalf("post-completion exchange = %q, %v", access, err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("post-completion exchanges = %d, want 2", got)
 	}
 }
