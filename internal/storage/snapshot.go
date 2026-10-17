@@ -175,6 +175,10 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	if s == nil {
 		return 0, 0, ErrStorageDisabled
 	}
+	// Admin mutations serialize: purge holds the same mutex, so a merge can
+	// never queue behind (or race) a delete and starve the writer twice.
+	s.purgeMu.Lock()
+	defer s.purgeMu.Unlock()
 	info, err := backup.InspectDatabase(s.stageDir(), data)
 	if err != nil {
 		return 0, 0, err
@@ -216,14 +220,33 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	if _, err := mergeAttachedTable(ctx, conn, "request_debug"); err != nil {
 		debugErr = err
 	}
+	if inserted == 0 {
+		if debugErr != nil {
+			return inserted, skipped, debugErr
+		}
+		return inserted, skipped, nil
+	}
 	tctx, cancel := s.withQueryTimeout(context.Background())
 	defer cancel()
-	if err := s.computeTotals(tctx); err != nil {
+	// No other writer can commit while conn is held, so the scan is exact.
+	totals, err := readTotals(tctx, s.rdb)
+	if err != nil {
 		if debugErr != nil {
 			return inserted, skipped, fmt.Errorf("%w; totals after backup merge: %v", debugErr, err)
 		}
 		return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
 	}
+	epoch, err := projectionEpoch(tctx, conn)
+	if err != nil {
+		return inserted, skipped, fmt.Errorf("projection epoch after backup merge: %w", err)
+	}
+	if err := saveTotals(tctx, conn, totals, false, epoch); err != nil {
+		if debugErr != nil {
+			return inserted, skipped, fmt.Errorf("%w; persist totals after backup merge: %v", debugErr, err)
+		}
+		return inserted, skipped, fmt.Errorf("persist totals after backup merge: %w", err)
+	}
+	s.installTotals(totals)
 	if debugErr != nil {
 		return inserted, skipped, debugErr
 	}
@@ -261,7 +284,9 @@ func mergeAttachedTable(ctx context.Context, db mergeConn, table string) (int64,
 		return 0, fmt.Errorf("backup %s has no columns in common", table)
 	}
 	list := quoteIdents(cols)
-	q := "INSERT OR IGNORE INTO " + table + " (" + list + ") SELECT " + list + " FROM backup_merge." + table
+	q := "INSERT OR IGNORE INTO " + table + " (" + list + ") SELECT " + list +
+		" FROM backup_merge." + table + " AS incoming" +
+		" WHERE NOT EXISTS (SELECT 1 FROM main." + table + " AS live WHERE live.id = incoming.id)"
 	res, err := db.ExecContext(ctx, q)
 	if err != nil {
 		return 0, err

@@ -442,8 +442,7 @@ type Store struct {
 	pendingPurge atomic.Pointer[purgeCommand] // one command owner; publication under sendMu
 	purgeWake    chan struct{}
 
-	mu    sync.Mutex
-	drops uint64
+	drops atomic.Uint64
 
 	// aggMu guards the written-id set and the totals snapshot. The writer
 	// updates both under this lock AFTER a batch commits, and dashboard
@@ -583,15 +582,24 @@ func Open(path string, opts Options) (*Store, error) {
 		flushCh:    make(chan chan error, 1),
 		purgeWake:  make(chan struct{}, 1),
 	}
-	// Build the since-inception totals once at Open (bounded by the query
-	// timeout so a wedged read pool can't hang startup). A failure logs and
-	// leaves totals in degraded mode - never silently pretend they're right.
+	// Since-inception totals are a durable meta row maintained in the same
+	// transaction as every mutation. A current document is O(1) at boot; an
+	// absent/stale one rebuilds once from the rows (bounded by the query
+	// timeout). A failure logs and leaves totals degraded - never silently
+	// pretend they're right.
 	tctx, cancel := s.withQueryTimeout(context.Background())
-	if err := s.computeTotals(tctx); err != nil {
-		log.Printf("storage: initial totals scan failed (dashboard aggregates degraded): %v", err)
-		s.aggMu.Lock()
-		s.totalsDegraded = true
-		s.aggMu.Unlock()
+	if persisted, ok, err := loadTotals(tctx, s.rdb); err == nil && ok {
+		s.installTotals(persisted)
+	} else {
+		if err != nil {
+			log.Printf("storage: persisted totals unreadable (%v); rebuilding", err)
+		}
+		if err := s.computeTotals(tctx); err != nil {
+			log.Printf("storage: initial totals scan failed (dashboard aggregates degraded): %v", err)
+			s.aggMu.Lock()
+			s.totalsDegraded = true
+			s.aggMu.Unlock()
+		}
 	}
 	cancel()
 	s.wg.Add(1)
@@ -642,17 +650,13 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 }
 
 func (s *Store) incrDrops() {
-	s.mu.Lock()
-	s.drops++
-	s.mu.Unlock()
+	// Atomic: the overload path must not serialize producers on a mutex
+	// exactly when records are already being lost.
+	s.drops.Add(1)
 }
 
 // Dropped returns the number of records dropped due to a full write channel.
-func (s *Store) Dropped() uint64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.drops
-}
+func (s *Store) Dropped() uint64 { return s.drops.Load() }
 
 func (s *Store) writer() {
 	defer func() { close(s.writerDone); s.wg.Done() }()
@@ -823,23 +827,56 @@ func (s *Store) markWrittenLocked(id string) {
 	s.writtenOrder = append(s.writtenOrder, id)
 }
 
-// account folds a committed batch into the written-id set and totals. Called
-// by the single writer goroutine, so it never races another account().
-func (s *Store) account(records []*metrics.Record) {
+// account folds a committed batch into the written-id set and totals. When
+// next is non-nil it is the exact aggregate persisted in the batch's own
+// transaction; installing it (instead of re-adding) keeps memory and disk
+// identical. Called by the single writer goroutine, so it never races another
+// account().
+func (s *Store) account(records []*metrics.Record, next *Totals) {
 	s.aggMu.Lock()
 	defer s.aggMu.Unlock()
-	if !s.totalsBuilt {
-		// Degraded mode: the initial full-scan totals failed. Count new rows
-		// from zero so live aggregates at least track post-start traffic.
-		s.totals = Totals{}
+	if next != nil {
+		s.totals = *next
 		s.totalsBuilt = true
+		// The degraded flag describes a boot rebuild that never saw older
+		// rows; post-boot accounting cannot repair that, so it stays set
+		// (and keeps persisted documents marked invalid) until a later
+		// successful rebuild.
+	} else {
+		if !s.totalsBuilt {
+			// Degraded mode: the initial rebuild failed. Count new rows from
+			// zero so live aggregates at least track post-start traffic.
+			s.totals = Totals{}
+			s.totalsBuilt = true
+		}
+		for _, r := range records {
+			s.totals.Add(r)
+		}
 	}
 	for _, r := range records {
-		s.totals.Add(r)
 		if _, ok := s.written[r.ID]; !ok {
 			s.markWrittenLocked(r.ID)
 		}
 	}
+}
+
+// totalsForBatch computes the committed batch's aggregate from the current
+// in-memory value. The caller holds the sole writer connection (Begin has
+// returned), so no merge/purge can publish between this read and the commit;
+// merge holds that same connection from its first statement through install.
+func (s *Store) totalsForBatch(records []*metrics.Record) (Totals, bool) {
+	s.aggMu.Lock()
+	next := s.totals
+	built := s.totalsBuilt
+	degraded := s.totalsDegraded
+	s.aggMu.Unlock()
+	if !built {
+		next = Totals{}
+	}
+	for _, r := range records {
+		next.Add(r)
+	}
+	return next, degraded
 }
 
 // TotalsAndUnwritten captures totals and filters the caller-owned ring slice
@@ -904,11 +941,20 @@ func (s *Store) MarkWritten(ids []string) {
 }
 
 // computeTotals rebuilds the aggregate from the durable rows (startup +
-// post-purge). One full scan; runs synchronously at Open.
+// post-merge). One full scan; runs synchronously at Open or while the caller
+// holds the sole writer connection. The rebuilt document is persisted before
+// it is published.
 func (s *Store) computeTotals(ctx context.Context) error {
 	t, err := readTotals(ctx, s.rdb)
 	if err != nil {
 		return err
+	}
+	epoch, err := projectionEpoch(ctx, s.rdb)
+	if err != nil {
+		return err
+	}
+	if err := saveTotals(ctx, s.db, t, false, epoch); err != nil {
+		return fmt.Errorf("persist totals: %w", err)
 	}
 	s.installTotals(t)
 	return nil
@@ -929,6 +975,120 @@ func (s *Store) TotalsDegraded() bool {
 	s.aggMu.Lock()
 	defer s.aggMu.Unlock()
 	return s.totalsDegraded
+}
+
+// totalsMetaKey is the durable since-inception aggregate. It is written in the
+// same transaction as every insert, full purge, filtered purge and merge, so a
+// reboot loads one row instead of scanning all history. Version gates the
+// document: a semantics change bumps it and forces one rebuilding scan.
+const totalsMetaKey = "totals"
+
+const totalsMetaVersion = 1
+
+// totalsDoc is the persisted shape. Totals' JSON tags are the dashboard API
+// contract; this type owns the storage contract separately.
+type totalsDoc struct {
+	V int `json:"v"`
+	// Epoch is the projection mutation epoch observed after the same
+	// transaction's request triggers. Any later external INSERT/UPDATE/DELETE
+	// (or a crash-repaired row) advances it, so a stale document is detected
+	// at boot and rebuilt instead of trusted over authoritative SQLite rows.
+	Epoch     int64   `json:"epoch"`
+	Invalid   bool    `json:"invalid,omitempty"`
+	Requests  int64   `json:"requests"`
+	Errors    int64   `json:"errors"`
+	Cost      float64 `json:"cost"`
+	InputTok  int64   `json:"input_tokens"`
+	OutputTok int64   `json:"output_tokens"`
+	CacheRead int64   `json:"cache_read_tokens"`
+	Reasoning int64   `json:"reasoning_tokens"`
+	TTFTSum   int64   `json:"ttft_sum"`
+	TTFTN     int64   `json:"ttft_n"`
+	TPSSum    float64 `json:"tps_sum"`
+	TPSN      int64   `json:"tps_n"`
+	CostReqs  int64   `json:"cost_reqs"`
+	CostInOut float64 `json:"cost_in_out"`
+}
+
+func totalsDocument(t Totals, invalid bool, epoch int64) totalsDoc {
+	return totalsDoc{
+		V: totalsMetaVersion, Epoch: epoch, Invalid: invalid || t.err != nil,
+		Requests: t.Requests, Errors: t.Errors, Cost: t.Cost,
+		InputTok: t.InputTok, OutputTok: t.OutputTok,
+		CacheRead: t.CacheRead, Reasoning: t.Reasoning,
+		TTFTSum: t.TTFTSum, TTFTN: t.TTFTN,
+		TPSSum: t.TPSSum, TPSN: t.TPSN,
+		CostReqs: t.CostReqs, CostInOut: t.CostInOut,
+	}
+}
+
+func (d totalsDoc) totals() Totals {
+	return Totals{
+		Requests: d.Requests, Errors: d.Errors, Cost: d.Cost,
+		InputTok: d.InputTok, OutputTok: d.OutputTok,
+		CacheRead: d.CacheRead, Reasoning: d.Reasoning,
+		TTFTSum: d.TTFTSum, TTFTN: d.TTFTN,
+		TPSSum: d.TPSSum, TPSN: d.TPSN,
+		CostReqs: d.CostReqs, CostInOut: d.CostInOut,
+	}
+}
+
+// saveTotals writes the aggregate on the caller's transaction/connection. It
+// must share the mutation's transaction: a totals row ahead of or behind the
+// request rows would turn a crash into silently wrong since-inception KPIs.
+func saveTotals(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, t Totals, invalid bool, epoch int64) error {
+	b, err := json.Marshal(totalsDocument(t, invalid, epoch))
+	if err != nil {
+		return err
+	}
+	_, err = db.ExecContext(ctx, `INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)`, totalsMetaKey, string(b))
+	return err
+}
+
+// loadTotals returns the persisted aggregate. found is false for an absent,
+// malformed, invalid or older-version document, in which case the caller
+// rebuilds from the durable rows and rewrites the document.
+func loadTotals(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (t Totals, found bool, err error) {
+	var raw string
+	err = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, totalsMetaKey).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Totals{}, false, nil
+	}
+	if err != nil {
+		return Totals{}, false, err
+	}
+	var d totalsDoc
+	if err := json.Unmarshal([]byte(raw), &d); err != nil {
+		log.Printf("storage: persisted totals malformed (%v); rebuilding", err)
+		return Totals{}, false, nil
+	}
+	if d.V != totalsMetaVersion || d.Invalid {
+		return Totals{}, false, nil
+	}
+	var epoch int64
+	if err := db.QueryRowContext(ctx, `SELECT epoch FROM request_projection_state WHERE singleton = 1`).Scan(&epoch); err != nil {
+		return Totals{}, false, err
+	}
+	if epoch != d.Epoch {
+		// Authoritative rows changed outside this store's transaction (the
+		// projection trigger fired); the cached aggregate is no longer exact.
+		return Totals{}, false, nil
+	}
+	return d.totals(), true, nil
+}
+
+// projectionEpoch reads the current mutation witness on the caller's
+// transaction/connection. Triggers keep it current within the transaction.
+func projectionEpoch(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (int64, error) {
+	var epoch int64
+	err := db.QueryRowContext(ctx, `SELECT epoch FROM request_projection_state WHERE singleton = 1`).Scan(&epoch)
+	return epoch, err
 }
 
 func readTotals(ctx context.Context, db interface {

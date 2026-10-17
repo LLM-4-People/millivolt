@@ -184,7 +184,7 @@ func TestWrittenSetEvictsOldestAtCap(t *testing.T) {
 		{ID: "oldest", Start: time.Now(), StatusCode: 200},
 		{ID: "middle", Start: time.Now(), StatusCode: 200},
 		{ID: "newest", Start: time.Now(), StatusCode: 200},
-	})
+	}, nil)
 	written := func(id string) bool {
 		s.aggMu.Lock()
 		defer s.aggMu.Unlock()

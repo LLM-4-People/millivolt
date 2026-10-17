@@ -399,9 +399,33 @@ def verify_docs_copy(path):
                     and all(type(value) is int and 0 <= value < (1 << 63) for value in state[0]),
                     'unexpected projection state')
         metadata = dict(connection.execute('SELECT key, value FROM meta'))
-        require(set(metadata) <= {MARKER_KEY, 'attempts_repaired'} and MARKER_KEY in metadata,
+        require(set(metadata) <= {MARKER_KEY, 'attempts_repaired', 'totals'} and MARKER_KEY in metadata,
                 'missing provenance or unexpected operator metadata')
         require(metadata.get('attempts_repaired', '1') == '1', 'unexpected migration metadata')
+        if 'totals' in metadata:
+            # A live reader opened this publication and persisted its durable
+            # aggregate. It is derived from the already-published rows, but its
+            # shape and finite arithmetic are revalidated like every other fact.
+            totals = _json(metadata['totals'])
+            require(type(totals) is dict and totals.get('v') == 1
+                    and type(totals.get('epoch')) is int and totals['epoch'] >= 0
+                    and not totals.get('invalid', False),
+                    'unexpected persisted totals')
+            integer_keys = {'requests', 'errors', 'input_tokens', 'output_tokens',
+                            'cache_read_tokens', 'reasoning_tokens', 'ttft_sum', 'ttft_n',
+                            'tps_n', 'cost_reqs'}
+            float_keys = {'cost', 'tps_sum', 'cost_in_out'}
+            require(set(totals) <= {'v', 'epoch', 'invalid'} | integer_keys | float_keys,
+                    'unexpected persisted totals fields')
+            for name in integer_keys:
+                require(type(totals.get(name)) is int and totals[name] >= 0,
+                        'invalid persisted totals integer')
+            for name in float_keys:
+                value = totals.get(name)
+                require(type(value) in (int, float) and math.isfinite(value) and value >= 0,
+                        'invalid persisted totals number')
+            require(totals['requests'] == connection.execute('SELECT COUNT(*) FROM requests').fetchone()[0],
+                    'persisted totals count does not match the publication')
         marker = _json(metadata[MARKER_KEY])
         require(type(marker) is dict and set(marker) == {'policy', 'sha256', 'summary'}
                 and type(marker['policy']) is int and marker['policy'] == POLICY_VERSION,

@@ -1,8 +1,10 @@
 package storage
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 
@@ -132,6 +134,9 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 
 	insert := batchInsert{tx: tx}
 	defer insert.close()
+	// Read the base only after Begin: the sole writer connection serializes
+	// this batch against merge (which holds it through its own totals install).
+	next, degraded := s.totalsForBatch(records)
 
 	// One values slice is reused for every row: a fresh 98-element []any per
 	// record was the batch's largest avoidable allocation.
@@ -176,10 +181,17 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			return err
 		}
 	}
+	epoch, err := projectionEpoch(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("read projection epoch: %w", err)
+	}
+	if err := saveTotals(context.Background(), tx, next, degraded, epoch); err != nil {
+		return fmt.Errorf("persist totals: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.account(records)
+	s.account(records, &next)
 	return nil
 }
 

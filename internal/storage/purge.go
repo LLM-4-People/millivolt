@@ -94,9 +94,15 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	s.sendMu.Unlock()
 	// Once published, wait for the actual transaction outcome. Cancellation is
 	// passed into SQL; it must not turn a committed delete into a reported failure
-	// before the matching ring removal and aggregate publication finish.
-	out := <-cmd.result
-	return out.result, out.err
+	// before the matching ring removal and aggregate publication finish. The
+	// writer owns the buffered result channel, so returning on cancellation can
+	// never block it.
+	select {
+	case out := <-cmd.result:
+		return out.result, out.err
+	case <-ctx.Done():
+		return PurgeResult{}, ctx.Err()
+	}
 }
 
 func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
@@ -116,7 +122,20 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	}
 	// Captures for requests still finalizing have no durable row yet and must
 	// survive. Orphan/expired capture cleanup remains owned by the TTL path.
-	if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
+	// Scan the sidecar (usually small or empty) and probe requests per capture,
+	// instead of probing the sidecar once per request row. In-flight captures
+	// have no durable request row yet and survive by construction; a filtered
+	// clear keeps the correlated subquery so only captures of matched requests
+	// go. Clearing every capture is wrong: a capture can precede its request's
+	// durable row.
+	if cmd.filter == nil {
+		if _, err = tx.ExecContext(cmd.ctx,
+			`DELETE FROM request_debug WHERE id IN (
+				SELECT d.id FROM request_debug AS d
+				WHERE EXISTS (SELECT 1 FROM requests AS r WHERE r.id = d.id))`); err != nil {
+			return PurgeResult{}, err
+		}
+	} else if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
 		return PurgeResult{}, err
 	}
 	res, err := tx.ExecContext(cmd.ctx, "DELETE FROM requests"+where, args...)
@@ -127,15 +146,33 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	if err != nil {
 		return PurgeResult{}, err
 	}
-	totals, err := readTotals(cmd.ctx, tx)
-	if err != nil {
-		return PurgeResult{}, err
+	// A zero-row purge changed no aggregate. A full purge leaves no rows, so
+	// its aggregate is exactly zero without scanning; a filtered purge scans
+	// the survivors once. Both write the document in this transaction.
+	var totals Totals
+	hasTotals := n > 0
+	if hasTotals {
+		if cmd.filter != nil {
+			totals, err = readTotals(cmd.ctx, tx)
+			if err != nil {
+				return PurgeResult{}, err
+			}
+		}
+		epoch, err := projectionEpoch(cmd.ctx, tx)
+		if err != nil {
+			return PurgeResult{}, err
+		}
+		if err := saveTotals(cmd.ctx, tx, totals, false, epoch); err != nil {
+			return PurgeResult{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return PurgeResult{}, err
 	}
 	// Do not consult ctx after commit: these in-memory effects are mandatory.
-	s.installTotals(totals)
+	if hasTotals {
+		s.installTotals(totals)
+	}
 	result := PurgeResult{Deleted: n}
 	if cmd.buffer != nil {
 		var match func(*metrics.Record) bool
