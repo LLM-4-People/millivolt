@@ -361,10 +361,13 @@ type convoPartition struct {
 const conversationPartitionsMax = 65_536
 
 type ConversationTracker struct {
-	mu        sync.Mutex
-	parts     map[string]*convoPartition
-	order     []string // creation order for O(1) eviction at the cap
-	sequence  uint64   // process-lifetime sequence; no expired partition keys retained
+	mu    sync.Mutex
+	parts map[string]*convoPartition
+	// order tracks live partitions for O(1) eviction at the cap. An idle sweep
+	// rebuilds it from the survivors, so eviction order after a sweep is not
+	// creation order; the cap is a memory bound, not a fairness contract.
+	order     []string
+	sequence  uint64 // process-lifetime sequence; no expired partition keys retained
 	idleGap   time.Duration
 	maxOpen   int       // per-partition cap on concurrently-open conversations
 	lastSweep time.Time // last global idle-partition sweep (throttled to idleGap)

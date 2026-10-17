@@ -80,7 +80,7 @@ idle_timeout: 2m
 # never fails requests. Does not bound SQLite's page cache or OS overhead. Restart
 # required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range 32MiB..1024GiB (0B = unbounded) · default 0B
+#   type: bytes · range 32MiB..1024GiB (0B = auto cgroup, else unbounded) · default 0B
 go_memory_limit: 0B
 
 # ---- Request ----
