@@ -90,7 +90,9 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	// (e.g. "Connection: X-Secret" + "X-Secret: …"), so strip nominated tokens too.
 	nominated := connectionTokens(r.Header)
 	for k, vs := range r.Header {
-		if isProxyControlHeader(k) || isHopByHop(k) || nominated[strings.ToLower(k)] || strings.EqualFold(k, "Accept-Encoding") {
+		// Inbound names are already canonical, so the direct predicates avoid
+		// three lowercasing allocations per forwarded header.
+		if isProxyControlHeaderCanonical(k) || isHopByHopCanonical(k) || nominated[k] || strings.EqualFold(k, "Accept-Encoding") {
 			continue
 		}
 		req.Header[k] = append([]string(nil), vs...)
@@ -256,8 +258,10 @@ func resolveRequestOverrides(rules []config.RequestOverride, client, provider, m
 	}
 	var ov resolvedOverride
 	// removed tracks the names whose last action was a removal, so a later
-	// rule's set can win a name an earlier rule removed.
-	removed := make(map[string]bool)
+	// rule's set can win a name an earlier rule removed. Allocated only when a
+	// matching rule actually removes something; the configured-but-unmatched
+	// path stays allocation-free.
+	var removed map[string]bool
 	matched := false
 	for i := range rules {
 		r := &rules[i]
@@ -268,7 +272,9 @@ func resolveRequestOverrides(rules []config.RequestOverride, client, provider, m
 		}
 		matched = true
 		for name, value := range r.Headers {
-			delete(removed, name)
+			if removed != nil {
+				delete(removed, name)
+			}
 			if ov.headers == nil {
 				ov.headers = make(map[string]string, len(r.Headers))
 			}
@@ -276,6 +282,9 @@ func resolveRequestOverrides(rules []config.RequestOverride, client, provider, m
 		}
 		for _, name := range r.RemoveHeaders {
 			delete(ov.headers, name)
+			if removed == nil {
+				removed = make(map[string]bool)
+			}
 			removed[name] = true
 		}
 		if r.Body != nil {
@@ -361,16 +370,24 @@ func overrideHeaderAuthOwned(name, authHeader string) bool {
 // operator-actionable reason and the caller relays the ORIGINAL bytes
 // unchanged - when the body is not a JSON object or the rewritten result
 // would exceed the request byte budget.
-func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64) (out []byte, why string) {
+func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, ensureTools []string, maxBytes int64) (out []byte, changed bool, why string) {
+	// Narrow fast path: when ensured tools are the only configured action and
+	// the body already carries every name, one struct decode proves the
+	// document needs no rewrite. The general path would materialize every
+	// top-level value as json.RawMessage (a body-sized copy) and decode every
+	// tool entry again only to return the original bytes.
+	if ob == nil && len(strip) == 0 && len(ensureTools) > 0 && ensureToolsSatisfied(body, ensureTools) {
+		return body, false, ""
+	}
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Sprintf("the request body is not a JSON object: %v", err)
+		return nil, false, fmt.Sprintf("the request body is not a JSON object: %v", err)
 	}
 	if doc == nil {
 		// Valid JSON null: not an object, so no field can be set on it.
-		return nil, "the request body is not a JSON object"
+		return nil, false, "the request body is not a JSON object"
 	}
-	changed := false
+	changed = false
 	if ob != nil {
 		if ob.MaxTokens != nil {
 			doc["max_tokens"] = json.RawMessage(strconv.Itoa(*ob.MaxTokens))
@@ -389,22 +406,58 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 	}
 	if len(ensureTools) > 0 {
 		if ensureToolsChanged, whyTools := ensureToolsInBody(doc, ensureTools); whyTools != "" {
-			return nil, whyTools
+			return nil, false, whyTools
 		} else if ensureToolsChanged {
 			changed = true
 		}
 	}
 	if !changed {
-		return body, ""
+		return body, false, ""
 	}
 	out, err := json.Marshal(doc)
 	if err != nil {
-		return nil, fmt.Sprintf("re-encoding the rewritten body failed: %v", err)
+		return nil, false, fmt.Sprintf("re-encoding the rewritten body failed: %v", err)
 	}
 	if int64(len(out)) > maxBytes {
-		return nil, fmt.Sprintf("the rewritten body would exceed max_request_bytes (%d bytes)", maxBytes)
+		return nil, false, fmt.Sprintf("the rewritten body would exceed max_request_bytes (%d bytes)", maxBytes)
 	}
-	return out, ""
+	return out, true, ""
+}
+
+// ensureToolsSatisfied reports whether the ensured-tools actor would leave the
+// body unchanged: no top-level messages member (the actor skips non-chat
+// bodies) or every configured name already present in the tools array. One
+// struct decode replaces the general path's raw-value map plus per-entry
+// decode; any shape it cannot prove satisfied falls back to that path, so the
+// skip semantics stay exactly ensureToolsInBody's.
+func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
+	var doc struct {
+		Messages *json.RawMessage `json:"messages"`
+		Tools    []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(body, &doc) != nil {
+		return false
+	}
+	if doc.Messages == nil {
+		return true
+	}
+	for _, want := range ensureTools {
+		found := false
+		for i := range doc.Tools {
+			if doc.Tools[i].Function.Name == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureToolStub is the inert function stub injected for a configured name a
@@ -843,38 +896,58 @@ func headerPresent(r *http.Request, name string) bool {
 	return ok
 }
 
-// proxyControlHeaders is the authoritative strip set for the routing
+// proxyControlHeaderNames is the authoritative strip set for the routing
 // boundary: every client-consumed routing/control header name, built from
-// the named constants (lowercased for the case-insensitive predicate) plus
-// the documented defensive entries. isProxyControlHeader consults it so
-// none of these names can leak upstream - neither via header passthrough
-// nor via an X-Proxy-Headers injection map. A new routing header is one
-// named constant plus one line in this set; the routing-header drift test
-// fails when the two halves diverge.
-var proxyControlHeaders = func() map[string]bool {
-	names := []string{
-		hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
-		hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
-		hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
-		hdrParentSession, hdrClient,
-		hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
-		// authorization and cookie are defensive strips without routing
-		// constants: the upstream key rides only the provider's auth header,
-		// rebuilt from the extracted key in buildUpstreamRequest, so the
-		// client's raw Authorization (which may carry the operator-plane
-		// credential) must never pass through; a client's cookies are this
-		// proxy origin's browser state, never provider credentials.
-		"authorization", "cookie",
+// the named constants plus the documented defensive entries. Two derived
+// lookups share this one list: a canonical-name set for parsed inbound
+// headers (allocation-free on the hot path) and a case-folded set for
+// operator-supplied names. A new routing header is one named constant plus
+// one line here; the routing-header drift test fails when the two halves
+// diverge.
+var proxyControlHeaderNames = []string{
+	hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
+	hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
+	hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
+	hdrParentSession, hdrClient,
+	hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
+	// authorization and cookie are defensive strips without routing
+	// constants: the upstream key rides only the provider's auth header,
+	// rebuilt from the extracted key in buildUpstreamRequest, so the
+	// client's raw Authorization (which may carry the operator-plane
+	// credential) must never pass through; a client's cookies are this
+	// proxy origin's browser state, never provider credentials.
+	"authorization", "cookie",
+}
+
+var (
+	proxyControlHeaders       = canonicalHeaderSet(proxyControlHeaderNames)
+	proxyControlHeadersFolded = foldedHeaderSet(proxyControlHeaderNames)
+)
+
+func canonicalHeaderSet(names []string) map[string]bool {
+	m := make(map[string]bool, len(names))
+	for _, name := range names {
+		m[http.CanonicalHeaderKey(name)] = true
 	}
+	return m
+}
+
+func foldedHeaderSet(names []string) map[string]bool {
 	m := make(map[string]bool, len(names))
 	for _, name := range names {
 		m[strings.ToLower(name)] = true
 	}
 	return m
-}()
+}
 
 func isProxyControlHeader(h string) bool {
-	return proxyControlHeaders[strings.ToLower(h)]
+	return proxyControlHeadersFolded[strings.ToLower(h)]
+}
+
+// isProxyControlHeaderCanonical is the allocation-free lookup for header maps
+// net/http has already canonicalized.
+func isProxyControlHeaderCanonical(h string) bool {
+	return proxyControlHeaders[h]
 }
 
 func copyResponseHeaders(dst, src http.Header) {
@@ -885,7 +958,7 @@ func copyResponseHeaders(dst, src http.Header) {
 		// forwarding it would cause clients to double-decompress), and
 		// Set-Cookie (an upstream cookie must never enter the browser's
 		// millivolt-origin jar, where it could shadow operator-plane state).
-		if isHopByHop(k) || nominated[strings.ToLower(k)] || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Set-Cookie") {
+		if isHopByHopCanonical(k) || nominated[k] || strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding") || strings.EqualFold(k, "Set-Cookie") {
 			continue
 		}
 		dst[k] = append([]string(nil), vs...)
@@ -893,23 +966,34 @@ func copyResponseHeaders(dst, src http.Header) {
 }
 
 func isHopByHop(h string) bool {
-	switch strings.ToLower(h) {
-	case "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-		"te", "trailer", "transfer-encoding", "upgrade":
+	return isHopByHopCanonical(http.CanonicalHeaderKey(strings.ToLower(h)))
+}
+
+// isHopByHopCanonical is the allocation-free form for canonical header names.
+func isHopByHopCanonical(h string) bool {
+	switch h {
+	case "Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
+		"Te", "Trailer", "Transfer-Encoding", "Upgrade":
 		return true
 	}
 	return false
 }
 
-// connectionTokens returns the lowercased header names nominated by the
+// connectionTokens returns the canonical header names nominated by the
 // request's Connection header. Per RFC 7230 §6.1 those nominated headers are
-// themselves hop-by-hop and must not be forwarded upstream.
+// themselves hop-by-hop and must not be forwarded upstream. nil when the
+// header is absent, which is the common HTTP/1 no-nomination and every
+// HTTP/2 case; a nil map lookup is valid.
 func connectionTokens(h http.Header) map[string]bool {
-	out := map[string]bool{}
-	for _, v := range h["Connection"] {
+	values := h.Values("Connection")
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(values))
+	for _, v := range values {
 		for _, tok := range strings.Split(v, ",") {
 			if tok = strings.TrimSpace(tok); tok != "" {
-				out[strings.ToLower(tok)] = true
+				out[http.CanonicalHeaderKey(tok)] = true
 			}
 		}
 	}
@@ -1083,29 +1167,57 @@ func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, re
 	}
 	defer r.Body.Close()
 	reader := io.LimitReader(r.Body, maxBytes+1)
-	if hint := min(r.ContentLength, maxBytes+1, requestReadHintMax); hint > 0 {
-		body = make([]byte, int(hint))
-		n := 0
-		for n < len(body) {
-			var got int
-			got, err = reader.Read(body[n:])
-			n += got
-			if err != nil {
-				break
-			}
-		}
-		body = body[:n]
-		if err != nil && err != io.EOF {
+	hint := min(r.ContentLength, maxBytes+1, requestReadHintMax)
+	switch {
+	case r.ContentLength < 0:
+		// Unknown length (chunked): one growable buffer owns the bytes.
+		// io.ReadAll would build chunk slices and then copy them into a second
+		// right-sized slice, doubling the transient bytes for a large body.
+		var buf bytes.Buffer
+		if _, err = buf.ReadFrom(reader); err != nil {
 			return nil, nil, err
 		}
-		if err == nil {
-			var rest []byte
-			rest, err = io.ReadAll(reader)
-			body = append(body, rest...)
+		body = buf.Bytes()
+	case hint > 0:
+		body = make([]byte, int(hint))
+		if r.ContentLength <= requestReadHintMax {
+			// The declared length is inside the speculative guardrail: read it
+			// in place, with no growth or right-sizing copy. A short body is
+			// accepted exactly as before.
+			var n int
+			n, err = io.ReadFull(reader, body)
+			body = body[:n]
+			if err == io.ErrUnexpectedEOF || err == io.EOF {
+				err = nil
+			}
 		} else {
-			err = nil
+			// The declared length exceeds the speculative hint: read the
+			// capped prefix, then the rest below. Keeps attacker-controlled
+			// preallocation capped without a doubling growth copy.
+			n := 0
+			for n < len(body) {
+				var got int
+				got, err = reader.Read(body[n:])
+				n += got
+				if err != nil {
+					break
+				}
+			}
+			body = body[:n]
+			if err == io.EOF {
+				err = nil
+			}
 		}
-	} else {
+		if err != nil {
+			return nil, nil, err
+		}
+		// A body longer than a short/understated Content-Length still reads
+		// to the limit, as it always has; the tail helper costs nothing when
+		// the reader is already at EOF.
+		if body, err = readRequestBodyTail(reader, body); err != nil {
+			return nil, nil, err
+		}
+	default:
 		body, err = io.ReadAll(reader)
 	}
 	if err != nil {
@@ -1124,6 +1236,30 @@ func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, re
 	rec.Start = time.Now()
 	parseLLMRequest(body, rec, preview)
 	return body, rec, nil
+}
+
+// readRequestBodyTail appends any bytes past the already-read prefix. A single
+// stack-buffered probe answers the normal end-of-body case without the 512-byte
+// allocation io.ReadAll makes even for an empty remainder; only a genuinely
+// longer body pays the right-sized copy.
+func readRequestBodyTail(reader io.Reader, body []byte) ([]byte, error) {
+	var tail [512]byte
+	n, err := reader.Read(tail[:])
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	if n == 0 {
+		return body, nil
+	}
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+	grown := make([]byte, len(body)+n+len(rest))
+	copy(grown, body)
+	copy(grown[len(body):], tail[:n])
+	copy(grown[len(body)+n:], rest)
+	return grown, nil
 }
 
 // discardedJSON accepts every JSON shape like any without materializing

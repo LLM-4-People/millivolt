@@ -107,13 +107,10 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 	if entry == nil {
 		return nil, ""
 	}
-	// One backslash probe shared by every param's negative pre-gate: the
-	// param grammar forbids quote, backslash and control bytes in the name
-	// itself, so a key can only reach the wire spelled literally or through
-	// escape sequences.
-	anyEscape := bytes.ContainsRune(body, '\\')
+	// One backslash probe, computed only when a param's literal spelling is
+	// absent: the common satisfied case never pays the full-body escape scan.
 	for _, name := range entry.Params {
-		if v, present := subConversationParam(body, name, anyEscape); present {
+		if v, present := subConversationParam(body, name); present {
 			return entry, v
 		}
 	}
@@ -130,11 +127,13 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 // request - the value comes back empty with present true, never a
 // fall-through to a later param, so the configured order stays
 // presence-ordered, never value-quality-ordered.
-func subConversationParam(body []byte, name string, anyEscape bool) (value string, present bool) {
+func subConversationParam(body []byte, name string) (value string, present bool) {
 	// Keep param-free regions on the vectorized negative path (the
 	// HasErrorKey pre-gate class): a body without the literal quoted spelling
-	// and without any escape sequence cannot carry the key.
-	if !bytes.Contains(body, []byte(`"`+name+`"`)) && !anyEscape {
+	// and without any escape sequence cannot carry the key. The param grammar
+	// forbids quote, backslash and control bytes in the name itself, so a key
+	// can only reach the wire spelled literally or through escape sequences.
+	if !containsQuotedName(body, name) && !bytes.ContainsRune(body, '\\') {
 		return "", false
 	}
 	tail := topLevelJSONKey(body, name)
@@ -180,6 +179,20 @@ func subConversationParam(body []byte, name string, anyEscape bool) (value strin
 		return "", true
 	}
 	return s, true
+}
+
+// containsQuotedName reports whether body contains the literal quoted spelling
+// of a top-level key. The stack buffer avoids a per-param allocation for the
+// normal short parameter name.
+func containsQuotedName(body []byte, name string) bool {
+	var buf [64]byte
+	if len(name)+2 <= len(buf) {
+		quoted := append(buf[:0], '"')
+		quoted = append(quoted, name...)
+		quoted = append(quoted, '"')
+		return bytes.Contains(body, quoted)
+	}
+	return bytes.Contains(body, []byte(`"`+name+`"`))
 }
 
 // topLevelJSONKey locates the named key among the members of the body's
@@ -252,34 +265,18 @@ func topLevelJSONKey(data []byte, key string) []byte {
 func skipJSONValue(data []byte, i int) int {
 	switch data[i] {
 	case '"':
-		i++
-		for i < len(data) {
-			if data[i] == '\\' {
-				i += 2
-				continue
-			}
-			if data[i] == '"' {
-				return i + 1
-			}
-			i++
-		}
-		return -1
+		return skipJSONString(data, i)
 	case '{', '[':
 		depth := 1
 		i++
 		for i < len(data) && depth > 0 {
 			switch data[i] {
 			case '"':
-				i++
-				for i < len(data) && data[i] != '"' {
-					if data[i] == '\\' {
-						i++
-					}
-					i++
-				}
-				if i >= len(data) {
+				next := skipJSONString(data, i)
+				if next < 0 {
 					return -1
 				}
+				i = next - 1
 			case '{', '[':
 				depth++
 			case '}', ']':
@@ -299,6 +296,32 @@ func skipJSONValue(data []byte, i int) int {
 		}
 		return i
 	}
+}
+
+// skipJSONString returns the index just past the closing quote of the JSON
+// string opening at i, or -1 when the string is unterminated. The common
+// unescaped body is one SIMD IndexByte search; only a string that actually
+// contains a backslash falls back to the escape-aware byte loop.
+func skipJSONString(data []byte, i int) int {
+	if i >= len(data) || data[i] != '"' {
+		return -1
+	}
+	rest := data[i+1:]
+	if j := bytes.IndexByte(rest, '"'); j >= 0 && bytes.IndexByte(rest[:j], '\\') < 0 {
+		return i + 1 + j + 1
+	}
+	i++
+	for i < len(data) {
+		if data[i] == '\\' {
+			i += 2
+			continue
+		}
+		if data[i] == '"' {
+			return i + 1
+		}
+		i++
+	}
+	return -1
 }
 
 // conversation.go reconstructs LLM "conversations" (multi-request tasks) from

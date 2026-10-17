@@ -523,9 +523,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) || len(ensureTools) > 0 {
-		if rewritten, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
+		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
 			body = rewritten
-			restampReqMaxTokens(body, rec)
+			if changed {
+				restampReqMaxTokens(body, rec)
+			}
 		} else {
 			// Name the requesting feature(s) by what fired, so a
 			// strip-only or tools-only skip is never misattributed.
