@@ -216,9 +216,13 @@ type target struct {
 }
 
 // livePublisher is the narrow interface for emitting per-request lifecycle
-// events (begin/end) to live SSE subscribers. The metrics.Buffer implements it;
-// the durable store does NOT (it must persist exactly one finalized record per
-// request, so lifecycle events bypass it entirely).
+// events (begin/update/end) to live SSE subscribers. The metrics.Buffer
+// implements it; the durable store does NOT (it must persist exactly one
+// finalized record per request, so lifecycle events bypass it entirely).
+//
+// The record's owner must serialize PublishLive calls with mutation of r and
+// with the matching Record call: one request publishes one lifecycle
+// transition at a time. It is an event sink, not a concurrency boundary.
 type livePublisher interface {
 	PublishLive(phase string, r *metrics.Record)
 }

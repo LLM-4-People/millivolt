@@ -221,8 +221,9 @@ func (b *Buffer) pushLocked(r *Record) (int64, string) {
 
 // Record is the hot-path append. The existing subscriber lock orders sequence
 // assignment with publication; otherwise concurrent callers could publish N+1
-// before N and a reconnect at N+1 would silently skip N. Lock order is subsMu
-// then mu; lifecycle publishers release mu before acquiring subsMu.
+// before N and a reconnect at N+1 would silently skip N. Record and
+// PublishLive share one lock order - subsMu then mu, with subsMu held across
+// the fan-out - so a begin/update can never be delivered after its end.
 func (b *Buffer) Record(r *Record) {
 	if r == nil {
 		return // never store a nil record
@@ -349,19 +350,22 @@ func (b *Buffer) UnsubscribeLive(ch chan *LiveEvent) {
 // window (e.g. an absorbed retry attempt), so the in-flight count must not
 // change. Each event carries the authoritative current in-flight value. It never
 // touches the ring buffer or the durable store, and never blocks the hot path
-// (close-on-overflow, same policy as Record's fan-out). The record is
-// shallow-copied so a "begin"/"update" snapshot stays a stable pending view -
-// the live record keeps mutating as the request streams, and subscribers must
-// not see those in-place writes.
+// (close-on-overflow, same policy as Record's fan-out).
+//
+// The record's owner must serialize PublishLive with mutation of r and with the
+// matching Record call: one request publishes one lifecycle transition at a
+// time. The shallow and attempt copies below isolate subscribers from later
+// owner mutation; they are not a concurrency guarantee and do not permit
+// concurrent mutation of r.
 func (b *Buffer) PublishLive(phase string, r *Record) {
 	if r == nil || (phase != "begin" && phase != "update") {
 		return
 	}
 	snap := *r // shallow copy: scalars + slice/map headers (fine for a pending view)
-	// An "update" is published mid-flight while the proxy may be concurrently
-	// appending to rec.Attempts; a shared slice header could read a torn slice.
-	// Copy the attempts so subscribers get a consistent point-in-time view.
-	// (Cheap: attempts are few, and only on the update path.)
+	// Copy the attempts so subscribers get a stable point-in-time view: the
+	// owner may append after this publication returns, and a shared slice
+	// header would tie the pending view to that mutation. (Cheap: attempts are
+	// few, and only on the update path.)
 	if phase == "update" && r.Attempts != nil {
 		att := make([]RetryAttempt, len(r.Attempts))
 		copy(att, r.Attempts)
@@ -378,10 +382,15 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 	// exactly (begin adds, update refreshes, end removes) and never touches the
 	// ring or the durable store - each request still persists exactly one
 	// finalized record there.
+	// Same lock order as Record: subsMu then mu, with subsMu held through the
+	// fan-out. Record cannot retire the pending entry between this transition
+	// and its event, so subscribers can never see update after end.
+	b.subsMu.Lock()
 	b.mu.Lock()
 	_, exists := b.pending[snap.ID]
 	if (phase == "begin" && exists) || (phase == "update" && !exists) {
 		b.mu.Unlock()
+		b.subsMu.Unlock()
 		return // duplicate begins and updates after completion cannot reopen a request
 	}
 	if b.pending == nil {
@@ -396,7 +405,6 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 	gauge := b.inFlight.Load()
 	feed := b.feedID
 	b.mu.Unlock()
-	b.subsMu.Lock()
 	// Allocate and fan out only when a dashboard is attached; a fresh
 	// subscriber always receives the pending registry in its snapshot, so the
 	// skipped event cannot be missed. More than one subscriber shares one
