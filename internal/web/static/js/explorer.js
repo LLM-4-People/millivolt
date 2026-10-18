@@ -265,11 +265,16 @@ function renderScopeBar(st) {
 // Clicking sets the breakdown dimension (by/<dim>), not a filter. Active = the
 // dimension the gallery is grouping by.
 function explorerRailCount(dim, payload) {
-  if (dim !== 'conversation') return fmt(payload?.rail?.[dim] ?? 0);
-  const summary = payload?.conversation_summary;
-  if (!summary) return '-';
-  return fmt(summary.main) + ' main + ' + fmt(summary.sub) + ' sub' +
-    (summary.unresolved ? ' + ' + fmt(summary.unresolved) + ' unresolved' : '');
+  if (dim === 'conversation') {
+    const summary = payload?.conversation_summary;
+    if (!summary) return '-';
+    return fmt(summary.main) + ' main + ' + fmt(summary.sub) + ' sub' +
+      (summary.unresolved ? ' + ' + fmt(summary.unresolved) + ' unresolved' : '');
+  }
+  // A missing payload or count was never measured: render the shared unknown
+  // marker, never a fabricated 0. A measured zero stays a real 0.
+  const n = payload?.rail?.[dim];
+  return Number.isFinite(n) ? fmt(n) : '-';
 }
 // The shared dimension trigger sits outside the rail zone's updateSection
 // cache, so its presentation is keyed separately on the active dimension and
@@ -278,12 +283,13 @@ function explorerRailCount(dim, payload) {
 let _dimTriggerKey = null;
 function renderDimRail(st) {
   // The rail is rebuilt through updateSection, so a count-only repaint
-  // replaces the focused button. Remember the dimension that owned focus and
-  // restore it only when this render actually wrote the rail.
+  // replaces the focused button. The shared helper restores it only when the
+  // rewrite dropped focus to BODY.
   const rail = $('xp-rail');
-  const focused = rail && document.activeElement && rail.contains(document.activeElement)
-    ? document.activeElement.closest('.xp-rail-item[data-xp-dim]') : null;
-  const focusedDim = focused ? focused.dataset.xpDim : null;
+  const focus = captureFocus(rail, el => {
+    const dim = el.closest('.xp-rail-item[data-xp-dim]')?.dataset.xpDim;
+    return dim == null ? null : `.xp-rail-item[data-xp-dim="${CSS.escape(dim)}"]`;
+  });
   // distinct-value counts come from the server aggregate (since inception),
   // for every dimension in one payload - no client-side grouping.
   const html = XP_RAIL_DIMS.map(dim => {
@@ -293,10 +299,7 @@ function renderDimRail(st) {
     // scope's shape. Share-of-total lives on the node-cards, where it differs.)
     return `<button type="button" class="xp-rail-item${on ? ' active' : ''}" style="--ent:${entityType(dim).color}" data-xp-dim="${dim}" aria-pressed="${on}">${entityBadge(dim, '', entityType(dim).label)}<span class="rail-n">${explorerRailCount(dim, explorerAgg)}</span></button>`;
   }).join('');
-  if (updateSection('xp-rail', html) && focusedDim) {
-    const next = rail.querySelector(`.xp-rail-item[data-xp-dim="${CSS.escape(focusedDim)}"]`);
-    if (next) next.focus();
-  }
+  if (updateSection('xp-rail', html)) restoreFocus(focus);
   const trig = $('xp-dim-trigger');
   if (trig) {
     const dim = st.activeDim;
@@ -338,23 +341,31 @@ function renderGallery(st) {
   // another filter/status set (or another breakdown dimension) is unusable.
   // The matching payload carries groups pre-sorted and pre-capped by the
   // server; the client applies no cuts or math.
+  const gallery = $('xp-gallery');
+  const focus = captureFocus(gallery, el => {
+    const key = el.closest('.xp-node[data-xp-key]')?.dataset.xpKey;
+    return key == null ? null : `.xp-node[data-xp-key="${CSS.escape(key)}"]`;
+  });
   const scopeKey = scopeQS();
   const payload = explorerAgg && explorerAgg.dim === st.activeDim &&
     explorerAgg.scopeKey === scopeKey ? explorerAgg : null;
   if (!payload) {
     const failed = explorerFailure && explorerFailure.scopeKey === scopeKey &&
       explorerFailure.dim === st.activeDim;
-    updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`);
+    if (updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`)) restoreFocus(focus);
     return;
   }
   if (!payload.groups || !payload.groups.length) {
-    updateSection('xp-gallery', `<div class="empty">no ${entityType(st.activeDim).label.toLowerCase()} values yet</div>`);
+    if (updateSection('xp-gallery', `<div class="empty">no ${entityType(st.activeDim).label.toLowerCase()} values yet</div>`)) restoreFocus(focus);
     return;
   }
   const cards = payload.groups.map(e => xpNodeCard(st, e, payload)).join('');
   // Only a changed gallery needs the post-layout sizing pass; an identical
   // payload leaves both the DOM and the layout untouched.
-  if (updateSection('xp-gallery', cards)) sizeGallery();
+  if (updateSection('xp-gallery', cards)) {
+    restoreFocus(focus);
+    sizeGallery();
+  }
 }
 
 // sizeGallery sizes the gallery once per render. In the locked viewport layout

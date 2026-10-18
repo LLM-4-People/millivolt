@@ -96,18 +96,51 @@ function scopeQS() {
   return parts.join('&');
 }
 const chartRequest = requestGate(true);
-function fetchChart(mode = 'reuse') {
-  const win = chartView.window;
+// chartAgg carries the request identity (window + scope) that produced it;
+// chartFailure names the current identity whose last request failed. A key
+// change or an explicit invalidate drops the payload and paints the skeleton
+// before the new request, so a held or failed response can never leave the
+// previous window/scope totals on screen.
+let chartKey = null;
+let chartFailure = null;
+function chartReqKey() {
   const scope = scopeQS();
-  const q = 'window=' + win + (scope ? '&' + scope : '');
-  chartRequest(q, (accept, signal) => {
+  return 'window=' + chartView.window + (scope ? '&' + scope : '');
+}
+function markChartFailure(key) {
+  chartFailure = key;
+  // A failed same-key periodic refresh may retain the last good payload; only
+  // an identity change or invalidate leaves no payload to show.
+  if (!chartAgg || chartAgg.key !== key) {
+    chartAgg = null;
+    renderChart();
+  }
+}
+function fetchChart(mode = 'reuse') {
+  const q = chartReqKey();
+  if (mode === 'invalidate' || chartKey !== q) {
+    chartKey = q;
+    chartAgg = null;
+    chartFailure = null;
+    renderChart();
+  }
+  return chartRequest(q, (accept, signal) => {
     _lastChartFetch = Date.now();
     operatorJson('/metrics/agg/chart?' + q, {signal})
       .then(p => accept(p, true)).catch(() => accept(null, false));
   }, p => {
+    // Hash state can change before its navigation event dispatches. Never
+    // adopt a payload whose identity no longer matches the current view.
+    if (q !== chartReqKey()) { fetchChart(); return; }
+    if (!p || typeof p !== 'object') { markChartFailure(q); return; }
     chartAgg = p;
+    chartAgg.key = q;
+    chartFailure = null;
     renderChart();
-  }, mode);
+  }, mode, () => {
+    if (q !== chartReqKey()) { fetchChart(); return; }
+    markChartFailure(q);
+  });
 }
 const explorerRequest = requestGate(true);
 
@@ -123,10 +156,16 @@ function fetchExplorer(mode = 'reuse') {
   const q = explorerReq();
   const scope = scopeQS();
   const dim = explorerState().activeDim;
-  // A request for another scope invalidates the old payload before its own
-  // response lands. Repaint immediately so the gallery cannot keep showing
-  // cards that the new scope did not produce.
-  if (explorerAgg && explorerAgg.scopeKey !== scope) {
+  // Invalidation drops the cached payload even for the same scope before the
+  // request is issued, so a purge/restart resync paints loading instead of
+  // keeping aggregates that describe the deleted data. A different scope
+  // invalidates the old payload for the same reason.
+  if (mode === 'invalidate') {
+    explorerAgg = null;
+    explorerFailure = null;
+    renderExplorer();
+    updateScopeLine();
+  } else if (explorerAgg && explorerAgg.scopeKey !== scope) {
     explorerAgg = null;
     explorerFailure = null;
     renderExplorer();
@@ -142,7 +181,7 @@ function fetchExplorer(mode = 'reuse') {
   // The breakdown shows the active dim's distribution over records matching
   // all other dims' filters - computed server-side over all history since
   // inception (the filter set is a scoping signal, never a client record set).
-  explorerRequest(q, (accept, signal) => {
+  return explorerRequest(q, (accept, signal) => {
     operatorJson('/metrics/agg/explorer?' + q, {signal})
       .then(p => accept(p, true)).catch(() => accept(null, false));
   }, p => {
@@ -432,6 +471,11 @@ function renderLive() {
   // rebuilt identical DOM.
   refreshFooterState();
   updateScopeLine();
+  // An open drawer follows the same live lifecycle as its row: repaint only
+  // when the record object actually changed (a pending request finalized, a
+  // retry attempt arrived). Unrelated traffic leaves the drawer DOM and its
+  // scroll position untouched.
+  if (drawerId && recordById(drawerId) !== _drawerRecord) renderDrawer();
 }
 
 // Canonical scope and active breakdown of the last full render. Full paths
@@ -764,7 +808,10 @@ window.addEventListener('scroll', () => syncMetricsMenuEdge(), true);
 // locks as a freezing exemption, so the SSE feed survives Energy-Saver
 // freezing. Android and iOS still suspend at the OS level regardless.
 let _clockTimer = null;
-let _wasHidden = false;
+// Initialized from the page's actual visibility: a dashboard opened in a
+// background tab must not arm its 1s clock or 5s poll before the operator
+// returns. The visible transition below runs the same resume path.
+let _wasHidden = !!document.hidden;
 let _bgLockGen = 0;
 let _bgLockRelease = null;
 // Per-document lock name: the lock is a per-document freeze-exemption marker,
@@ -813,7 +860,7 @@ function _armClock() {
     if (pauseActive() || (pauseState.holds || []).length || debugActive() || (debugState.sessions || []).length) refreshFooterState();
   }, FOOTER_CLOCK_MS);
 }
-_armClock();
+if (_wasHidden) dashHoldBackgroundLock(); else _armClock();
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     _wasHidden = true;
@@ -886,7 +933,7 @@ function armDashboardTicks() {
     refreshExplorerIfStale();
   }, dashCfg.poll_ms);
 }
-armDashboardTicks();
+if (!_wasHidden) armDashboardTicks();
 
 // Explorer: the URL hash drives the log's scope and the breakdown dimension.
 // onNavigate fires on hash change and once immediately (deep-link restore).

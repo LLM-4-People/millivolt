@@ -57,6 +57,14 @@ function offlinePage() {
   );
 }
 
+// CacheStorage is an optional accelerator, never a dependency. An open,
+// match, or put rejection is a cache miss: the network path stays
+// authoritative, and a failed offline fallback preserves the original
+// network error for the caller.
+async function cacheBestEffort(operation) {
+  try { return await operation(); } catch { return undefined; }
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
@@ -92,35 +100,28 @@ self.addEventListener('fetch', (event) => {
   // Unversioned shell and brand paths remain network-first with cache fallback.
   if (exactVersionedDash(url)) {
     event.respondWith((async () => {
-      const cache = await caches.open(CACHE);
-      const hit = await cache.match(req);
+      const cache = await cacheBestEffort(() => caches.open(CACHE));
+      const hit = cache ? await cacheBestEffort(() => cache.match(req)) : undefined;
       if (hit) return hit;
       const fresh = await fetch(req);
-      if (fresh.ok) {
-        try {
-          await cache.put(req, fresh.clone());
-        } catch {
-          // A full or unavailable CacheStorage must not fail the response.
-        }
+      if (fresh.ok && cache) {
+        await cacheBestEffort(() => cache.put(req, fresh.clone()));
       }
       return fresh;
     })());
     return;
   }
   event.respondWith((async () => {
-    const cache = await caches.open(CACHE);
     try {
       const fresh = await fetch(req);
       if (fresh.ok && shellPath(url.pathname)) {
-        try {
-          await cache.put(req, fresh.clone());
-        } catch {
-          // A full or unavailable CacheStorage must not fail the response.
-        }
+        const cache = await cacheBestEffort(() => caches.open(CACHE));
+        if (cache) await cacheBestEffort(() => cache.put(req, fresh.clone()));
       }
       return fresh;
     } catch (err) {
-      const hit = await cache.match(req);
+      const cache = await cacheBestEffort(() => caches.open(CACHE));
+      const hit = cache ? await cacheBestEffort(() => cache.match(req)) : undefined;
       if (hit) return hit;
       throw err;
     }

@@ -87,8 +87,10 @@ const CHART_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', d
 const CHART_FULL_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 const CHART_DAY_MS = 86400000;
 
-// fmtPct keeps % axis ticks and legend values human (≤1 decimal, no float spew).
-const fmtPct = v => (Math.round(v * 10) / 10) + '%';
+// fmtPct keeps % axis ticks/legend values human (up to 1 decimal, no float
+// spew) through the shared percentage-value owner: a strictly-sub-100 value
+// is floored below 100 before rounding.
+const fmtPct = v => pctValue(v, 1, true);
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
 
 // hm is the single HH:MM local-time label (x ticks + hover chip).
@@ -756,7 +758,14 @@ function chartTotalsSkeleton() {
 // percentiles; the summary's timing tile: ttft_stat / tps_stat averages
 // with sample ranges), never an average of bucket percentiles.
 function chartTotals() {
-  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) return chartTotalsSkeleton();
+  if (!chartAgg || !chartAgg.buckets || !chartAgg.buckets.length) {
+    // The current identity failed and no last-good payload exists: the
+    // aria-live strip itself carries the failure, never old totals.
+    if (chartFailure === chartReqKey()) {
+      return `<span class="chart-total" style="color:var(--muted)">chart unavailable</span>`;
+    }
+    return chartTotalsSkeleton();
+  }
   let req = 0, err = 0, rl = 0, tin = 0, tout = 0, tcache = 0, treason = 0, cost = 0;
   chartAgg.buckets.forEach((b, i) => {
     req += b.req;
@@ -923,7 +932,9 @@ function chartChromeSync() {
   const omitted = _compacted
     ? (_plan?.preset.requireAll ? ' · unmeasured intervals omitted' : ' · empty intervals omitted')
     : '';
-  const context = chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted : 'Waiting for traffic';
+  const failed = !chartAgg && chartFailure === chartReqKey();
+  const context = failed ? 'chart unavailable - retrying'
+    : chartAgg ? fmtDur(chartAgg.bucket_ms) + ' buckets' + omitted : 'Waiting for traffic';
   updateSection('chart-context', context);
 }
 
@@ -1004,12 +1015,19 @@ function renderChart() {
 function chartLegendSync() {
   const l = $('traffic-legend');
   if (!l || !_plan) return;
+  // A toggle repaint replaces the focused series button. Capture its stable
+  // data-series identity first and restore only when the rewrite dropped
+  // focus to BODY.
+  const focus = captureFocus(l, el => {
+    const series = el.closest('.leg-item[data-series]')?.dataset.series;
+    return series == null ? null : `[data-series="${CSS.escape(series)}"]`;
+  });
   const html = _plan.meta.map(({ spec, bar, hidden }) => {
     const mark = bar ? 'bar' : spec.dash ? 'dashed' : 'line';
     const title = (hidden ? 'Show' : 'Hide') + ' ' + spec.label + (spec.title ? '. ' + spec.title : '');
     return `<button type="button" class="leg-item${hidden ? ' off' : ''}" data-series="${spec.id}" aria-pressed="${!hidden}" title="${escapeHtml(title)}" style="--sw:${COLORS[spec.color]}"><span class="swatch ${mark}" aria-hidden="true"></span>${spec.label}</button>`;
   }).join('');
-  updateSection('traffic-legend', html);
+  if (updateSection('traffic-legend', html)) restoreFocus(focus);
 }
 
 // toggleHiddenMember is the one flip contract for chart visibility: a

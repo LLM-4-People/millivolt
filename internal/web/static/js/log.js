@@ -169,6 +169,21 @@ function replaceRowGroupDOM(container, id, html) {
   return true;
 }
 
+// rowFocusKey maps a focused control inside one request row to its stable
+// selector: the record id plus the control's own identity. Used by the
+// render paths to keep keyboard focus on the equivalent control after a row
+// group is replaced.
+function rowFocusKey(el) {
+  const tr = el.closest('tr.exp-row[data-id]');
+  const id = tr && tr.dataset.id;
+  if (!id) return null;
+  const row = `tr.exp-row[data-id="${CSS.escape(id)}"] `;
+  if (el.hasAttribute('data-open-req')) return row + 'button[data-open-req]';
+  if (el.hasAttribute('data-retry-for')) return row + 'button[data-retry-for]';
+  if (el.matches('a.ent-link[href]')) return row + `a.ent-link[href="${CSS.escape(el.getAttribute('href'))}"]`;
+  return null;
+}
+
 function trGroupNodesHTML(html) {
   const t = document.createElement('template');
   t.innerHTML = html;
@@ -203,7 +218,9 @@ function renderRequestsIncremental(recs) {
   const recent = visibleLog(recs);
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; } // empty-state placeholder in DOM: rebuild properly
-
+  // A row replacement below removes whichever control owned keyboard focus.
+  // Capture its record/control identity before any DOM write.
+  const focus = captureFocus(container, rowFocusKey);
   // Drop rows that left the window (scope change or dashCfg.log_rows cap
   // overflow). When logHTML's id set is exactly the visible window - the
   // steady-state case - no DOM traversal is needed; the check is O(rows) map
@@ -283,6 +300,7 @@ function renderRequestsIncremental(recs) {
     }
     if (delta !== 0) container.scrollTop = scrollAtTop + delta;
   }
+  restoreFocus(focus);
 }
 
 // rowGroupHeight sums the rendered heights of one record's whole group
@@ -300,6 +318,7 @@ function appendOlderLogRows(recs) {
   const recent = visibleLog(recs);
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; }
+  const focus = captureFocus(container, rowFocusKey);
   const seps = dayStartLabels(recent);
   for (let i = 0; i < recent.length; i++) {
     const r = recent[i];
@@ -318,6 +337,7 @@ function appendOlderLogRows(recs) {
       logHTML.set(r.id, { rec: r, sep });
     }
   }
+  restoreFocus(focus);
 }
 
 function logNearBottom() {
@@ -398,7 +418,22 @@ function fetchOlderLog() {
       seen.add(r.id);
       added.push(r);
     }
-    if (added.length) {
+    // At the cap the retained window is the newest LOG_ARCHIVE_MAX rows. A
+    // page fetched below that window cannot be retained: prepending then
+    // trimming it would only grow logLimit for rows that never stay and
+    // re-arm the fill owner forever. Treat the cap as terminal here, at the
+    // one cursor/fill owner, so scroll and delayed fills stop too.
+    const oldestRetained = logArchive[0];
+    const outsideRetained = r => {
+      if (!oldestRetained) return false;
+      const rm = recStartMs(r), om = recStartMs(oldestRetained);
+      return rm < om || (rm === om && String(r.id) < String(oldestRetained.id));
+    };
+    const capTerminal = logArchive.length >= LOG_ARCHIVE_MAX &&
+      (added.length === 0 || added.every(outsideRetained));
+    if (capTerminal) {
+      logExhausted = true;
+    } else if (added.length) {
       logArchive = added.reverse().concat(logArchive);
       // Ascending oldest-to-newest: trim the oldest rows so the newest archive
       // window stays contiguous with the live ring at the top of the merge.
@@ -626,6 +661,8 @@ function reqRow(r, sepLabel) {
 function renderRequests(recs) {
   recs = mergeLogArchive(recs);
   const recent = visibleLog(recs);
+  const container = $('tbl-requests');
+  const focus = captureFocus(container, rowFocusKey);
   logHTML.clear();
   // Incremental/append mutate the tbody without going through updateSection,
   // so lastRender['tbl-requests'] is stale. A full rebuild must always paint
@@ -633,6 +670,7 @@ function renderRequests(recs) {
   delete lastRender['tbl-requests'];
   if (!recent.length) {
     updateSection('tbl-requests', '<div class="empty">no matching requests</div>');
+    restoreFocus(focus);
     // An empty scope (its records predate the ring - a provider not used in a
     // while) must still probe the store: nothing will ever scroll here, so the
     // fill probe below is the only path that can pull the scope's durable rows.
@@ -647,6 +685,7 @@ function renderRequests(recs) {
     logHTML.set(r.id, { rec: r, sep: seps[i] });
   }
   updateSection('tbl-requests', `<table>${REQ_THEAD}<tbody>${rows.join('')}</tbody></table>`);
+  restoreFocus(focus);
   scheduleLogFill();
 }
 
@@ -1014,9 +1053,18 @@ function drawerBackToRequest() {
   const first = modalFocusables($('drawer'))[0];
   if (first) first.focus();
 }
+// _drawerRecord is the record object the drawer was last painted from;
+// renderLive compares it to repaint only on a real live change. _drawerRenderKey
+// is the (id, attempt) identity: scroll is preserved across a record change
+// with the same identity and reset when the drawer navigates elsewhere.
+let _drawerRecord = null;
+let _drawerRenderKey = null;
+
 function closeDrawer() {
   drawerId = null;
   drawerAttempt = null;
+  _drawerRecord = null;
+  _drawerRenderKey = null;
   if ($('drawer')) { $('drawer').classList.remove('open'); closeModal($('drawer')); }
   $('drawer-veil')?.classList.remove('open');
   // Release the previous request's rendered detail and debug capture: the
@@ -1050,6 +1098,9 @@ function renderDrawer() {
   // the request view, never a throw.
   const a = drawerAttempt != null && Array.isArray(r.attempts) ? r.attempts[drawerAttempt] : null;
   if (drawerAttempt != null && !a) drawerAttempt = null;
+  const body = $('drawer-body');
+  const renderKey = String(drawerId) + '\u0000' + String(drawerAttempt);
+  const scroll = body && _drawerRenderKey === renderKey ? body.scrollTop : 0;
   const base = `${clientLabel(r.client) || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`;
   if (a) {
     // The title carries the attempt identity: index, real status (transport
@@ -1059,13 +1110,15 @@ function renderDrawer() {
     const ident = ` · attempt ${drawerAttempt + 1} of ${r.attempts.length} · ${status}`
       + (a.provider_request_id ? ` · ${a.provider_request_id}` : '');
     $('drawer-title').innerHTML = `<button type="button" class="btn" id="drawer-back" onclick="drawerBackToRequest()" title="back to request">‹ request</button> ${escapeHtml(base + ident)}`;
-    $('drawer-body').innerHTML = formatAttemptDetail(r, drawerAttempt);
+    body.innerHTML = formatAttemptDetail(r, drawerAttempt);
   } else {
     $('drawer-title').innerHTML = escapeHtml(base);
-    $('drawer-body').innerHTML = formatDetail(r);
+    body.innerHTML = formatDetail(r);
     if (r.debug) fillDrawerDebug(r.id);
   }
-  $('drawer-body').scrollTop = 0;
+  body.scrollTop = scroll;
+  _drawerRecord = r;
+  _drawerRenderKey = renderKey;
 }
 
 // debugKV is the one debug key-value row builder. An empty value renders

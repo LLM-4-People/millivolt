@@ -293,31 +293,47 @@ const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
 // fmtMoney owns every displayed cost. Values remain USD in data; magnitudes
 // below $1 display as cents (including fractional cents), with at most three
 // decimals in the displayed unit. Dollar amounts retain compact K/M/B units.
+// The cents form is rounded at the same precision before the unit is chosen:
+// a value whose displayed cents reach 100 promotes to the dollar form ($1),
+// never the impossible "100¢".
 const fmtMoney = x => {
   if (x == null || !isFinite(x)) return '-';
   const neg = x < 0 ? '-' : '';
   const a = Math.abs(Number(x));
-  const cents = a < 1;
   const trim = v => {
     let s = v.toFixed(3);
     if (s.includes('.')) s = s.replace(/\.?0+$/, '');
-    return cents ? neg + s + '¢' : neg + '$' + s;
+    return s;
   };
-  if (cents) return trim(a * 100);
-  if (a < 1000) return trim(a);
+  if (a < 1) {
+    const cents = Math.round(a * 100 * 1000) / 1000;
+    return cents >= 100 ? neg + '$' + trim(a) : neg + trim(a * 100) + '¢';
+  }
+  if (a < 1000) return neg + '$' + trim(a);
   const m = compactMagnitude(a);
-  return trim(m.value) + m.suffix;
+  return neg + '$' + trim(m.value) + m.suffix;
 };
-// Percentage formatting. toFixed rounds, so a strictly-sub-100 ratio like
-// 99.996% would print as "100.0%" / "100.00%" and falsely claim a perfect rate
-// (a provider at 99.xx% cache read displayed "100%"). Floor such ratios to the
-// largest sub-100 value at this precision; only a >= b may ever show "100%".
-// A zero denominator means the rate was never measured: render '-' like the
-// other shared formatters, never a fabricated 0%.
+// pctValue is the one percentage-value formatter. toFixed rounds, so a
+// strictly-sub-100 value like 99.99 would print 100.0 and falsely claim a
+// perfect rate. Floor any value below 100 to the largest sub-100 value at
+// this precision; only a value >= 100 may ever print 100. The `trim` flag
+// keeps the chart/storm compact style (100%, 75%) while the shared pct/pct2
+// ratio owner keeps its exact decimal width. A non-finite value was never
+// measured: render '-'.
+const pctValue = (v, d = 1, trim = false) => {
+  if (!Number.isFinite(v)) return '-';
+  let x = v;
+  if (x < 100) x = Math.min(x, 100 - Math.pow(10, -d));
+  let s = x.toFixed(d);
+  if (trim && s.includes('.')) s = s.replace(/\.?0+$/, '');
+  return s + '%';
+};
 const pctCap = (a, b, d) => {
   let v = (a / b) * 100;
+  // Use the counts, not the rounded ratio, so a strict a < b always floors
+  // even when floating division rounds the ratio to exactly 100.
   if (a < b) v = Math.min(v, 100 - Math.pow(10, -d));
-  return v.toFixed(d) + '%';
+  return pctValue(v, d);
 };
 const pct = (a, b) => b ? pctCap(a, b, 1) : '-';
 // pct2 is the 2-decimal variant for per-request cache hit, where precision matters.
@@ -327,6 +343,30 @@ const pct2 = (a, b) => b ? pctCap(a, b, 2) : '-';
 // fully recoverable on hover. Use for any value that can exceed its container.
 const vt = (display, full) => `<span class="vt" title="${escapeHtml(String(full ?? display))}">${display}</span>`;
 const $ = id => document.getElementById(id);
+
+// ---------- focus preservation across repaints ----------
+// Redraws that replace innerHTML (request rows, gallery cards, chart legend,
+// the explorer rail) remove the focused control and leave the browser on
+// BODY. captureFocus records the focused descendant and its stable selector;
+// restoreFocus puts focus back only when the repaint actually dropped it to
+// BODY. If the operator moved focus elsewhere, it is never stolen.
+function captureFocus(owner, keyOf) {
+  if (!owner) return null;
+  const active = document.activeElement;
+  if (!active || active === owner || active === document.body || !owner.contains(active)) return null;
+  const key = keyOf ? keyOf(active) : null;
+  return key ? {owner, key} : null;
+}
+function restoreFocus(token) {
+  if (!token || !token.owner.isConnected) return false;
+  const active = document.activeElement;
+  if (active && active !== document.body) return false;
+  let next = null;
+  try { next = token.owner.querySelector(token.key); } catch (e) { return false; }
+  if (!next || next === token.owner || next === active) return false;
+  next.focus();
+  return document.activeElement === next;
+}
 
 // requestGate creates a deduplication/supersede wrapper for fetch calls.
 // Returns a `run` function: run(key, fetchFn, applyFn, mode) where:
@@ -344,21 +384,39 @@ const $ = id => document.getElementById(id);
 // identical key can optionally dedupe (no duplicate in-flight fetches for the
 // same key); (3) a fetch failure unpins the dedupe so the next trigger works;
 // (4) superseded work is cancelled instead of delaying the new selection.
+// run returns a promise settling true when the current request applied its
+// payload, false on failure or supersede. A deduped call settles false
+// immediately: the in-flight owner already reports its own outcome.
 function requestGate(dedupe) {
-  let seq = 0, pinned = null, controller = null;
+  let seq = 0, pinned = null, controller = null, settlePending = null;
   return function run(key, fetchFn, applyFn, mode = 'reuse', failFn = null) {
-    if (dedupe && key === pinned && (mode === 'reuse' || (controller && mode !== 'invalidate'))) return;
+    if (dedupe && key === pinned && (mode === 'reuse' || (controller && mode !== 'invalidate'))) {
+      return Promise.resolve(false);
+    }
     pinned = key;
     const my = ++seq;
-    if (controller) controller.abort();
+    if (controller) {
+      controller.abort();
+      // An implementation may ignore the abort signal and never call accept.
+      // Settle the superseded awaiter here so a forced resync cannot hang on
+      // work this gate already replaced.
+      if (settlePending) settlePending(false);
+    }
     controller = new AbortController();
+    let settle = null;
+    const settled = new Promise(resolve => { settle = resolve; });
+    settlePending = settle;
+    let done = false;
+    const finish = ok => { if (!done) { done = true; settle(ok); } };
     fetchFn((payload, ok) => {
-      if (my !== seq) return false; // superseded by a newer request
+      if (my !== seq) { finish(false); return false; } // superseded by a newer request
       controller = null;
-      if (!ok) { pinned = null; if (failFn) failFn(); return false; } // failure unpins the dedupe
+      if (!ok) { pinned = null; finish(false); if (failFn) failFn(); return false; } // failure unpins the dedupe
       applyFn(payload);
+      finish(true);
       return true;
     }, controller.signal);
+    return settled;
   };
 }
 

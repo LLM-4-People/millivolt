@@ -3184,8 +3184,12 @@ async function purgeMetrics(filter) {
     lastSeq = 0;
     // No removal event exists: the forced full bootstrap is the post-purge
     // render, superseding any stale in-flight tick. No optimistic local wipe.
-    refreshAggregates();
-    fetchBootstrap('full');
+    // Await both the record snapshot and the forced aggregate resync so the
+    // reported completion describes the read side too; the invalidation has
+    // already painted loading and dropped the old aggregates.
+    const aggregates = refreshAggregates();
+    const bootstrap = fetchBootstrap('full');
+    await Promise.all([bootstrap, aggregates]);
     return true;
   } catch (err) {
     settingsStatus(String(err.message || fail));

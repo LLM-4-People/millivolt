@@ -467,6 +467,17 @@ async function main() {
   check('full render shows 30 rows', rows().length === 30);
   check('dimension picker trigger exists', !!d.getElementById('xp-dim-trigger'));
   check('dimension rail still has nine dims', d.querySelectorAll('#xp-rail .xp-rail-item').length === 9);
+  {
+    // Disclosure contract: the trigger expands the rail group it controls.
+    // It is not a listbox popup, so it must not advertise aria-haspopup.
+    const trigger = d.getElementById('xp-dim-trigger');
+    const rail = d.getElementById('xp-rail');
+    check('the dimension trigger is a disclosure for its rail group, not a listbox popup',
+      !trigger.hasAttribute('aria-haspopup') &&
+      trigger.getAttribute('aria-controls') === 'xp-rail' &&
+      trigger.getAttribute('aria-expanded') === 'false' &&
+      rail.getAttribute('role') === 'group');
+  }
   check('first paint fetches chart and explorer exactly once when model rules arrive',
     initialFetches.filter(u => u.includes('/metrics/agg/chart')).length === 1 &&
     initialFetches.filter(u => u.includes('/metrics/agg/explorer')).length === 1);
@@ -7129,8 +7140,8 @@ async function main() {
     reply(pending[2], 999);
     await sleep(20);
     check('latest forced refresh wins without a separate footer history scan', scopeFetches === 0 && d.getElementById('f-scope').textContent.startsWith('8 of '));
-    w.fetchExplorer('invalidate');
     const previousExplorer = w.eval('explorerAgg');
+    w.fetchExplorer('invalidate');
     d.getElementById('f-status').value = 'streaming';
     w.doFilter();
     check('status selections immediately supersede old scans without a debounce delay', pending.length === 6 && pending[4].signal.aborted);
@@ -9337,6 +9348,484 @@ async function main() {
       check('a failed settings load is not retried on the next open',
         failed.appended.length === 1);
     } finally { failed.dom.window.close(); }
+  }
+
+  // ---- round-2 frontend regressions ----
+  // These drive the production render/fetch owners and shipped events; no
+  // helper copies. Each block restores the shared page state it changes.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null; clearTimeout(_xpLiveTimer); _xpLiveTimer = null; clearTimeout(logRetryTimer); logRetryTimer = null;');
+    // An earlier reload-boundary check intentionally set dashboardReloading
+    // and jsdom cannot navigate; the production gate is reset so these checks
+    // can drive the real bootstrap path.
+    w.eval('dashboardReloading = false');
+    w.closeDrawer();
+    if (w.settingsIsOpen()) w.closeSettings();
+
+    const auditFeed = w.eval('feedId') || 'feedB';
+    const auditBase = 1700002000000;
+    fullPayload = { feed_id: auditFeed, seq: Math.max(500, w.eval('lastSeq') + 10), incremental: false,
+      records: Array.from({ length: 6 }, (_, i) => ({ ...mkRec('audit' + i, 200, auditBase + i * 1000), __seq: i + 1 })),
+      counters: { in_flight: 0, total_requests: 6, total_errors: 0 } };
+    w.eval("fetchBootstrap('full')");
+    await settleUntil(() => rows().length === 6);
+    w.navigateTo([]);
+    await sleep(50);
+    const chartWith = n => {
+      const p = JSON.parse(JSON.stringify(chartPayload));
+      p.now_ms = Date.now();
+      p.from_ms = p.now_ms - 3600000;
+      p.buckets.forEach(b => { b.req = 0; b.err = 0; });
+      if (p.buckets.length) p.buckets[p.buckets.length - 1].req = n;
+      return p;
+    };
+
+    // F7: one percentage-value formatter applies the pctCap floor to the
+    // chart and storm surfaces; only a real >= 100 prints 100.
+    const pctEval = expr => {
+      try { return w.eval(expr); } catch (e) { return undefined; }
+    };
+    check('the shared percentage formatter applies pctCap at the boundary',
+      pctEval('pctValue(99.949, 1)') === '99.9%' &&
+      pctEval('pctValue(99.95, 1)') === '99.9%' &&
+      pctEval('pctValue(99.999, 1)') === '99.9%' &&
+      pctEval('pctValue(100, 1)') === '100.0%' &&
+      pctEval('pctCap(1999, 2000, 1)') === '99.9%' &&
+      pctEval('fmtPct(99.95)') === '99.9%' &&
+      pctEval('fmtPct(100)') === '100%' &&
+      pctEval('typeof stormPercent') === 'undefined');
+    w.applyStormState({ enabled: true, banner_enabled: true, storms: [{
+      provider: 'neutral.example', model: '', scope: 'provider', state: 'open',
+      reason: 'http_503', quota: false, error_percent: 99.95, error_requests: 9,
+      failures: 15, samples: 20, window_ms: 60000, queued: 4, active_models: 3,
+      affected_models: 2, affected_model_percent: 99.95,
+      retry_at: '2026-09-05T12:00:00Z', recovery_successes: 0, recovery_required: 2,
+    }] });
+    check('storm surfaces use the shared sub-100 percentage floor',
+      d.getElementById('storm-banner').textContent.includes('99.9% failed attempts') &&
+      !d.getElementById('storm-banner').textContent.includes('100% failed attempts'));
+    w.applyStormState({ enabled: false, banner_enabled: false, storms: [] });
+
+    // F8: a rounded cents form that reaches 100 promotes to the dollar form.
+    check('a rounded sub-dollar value promotes to the dollar form, never 100 cents',
+      w.eval('fmtMoney(0.999999)') === '$1' &&
+      w.eval('fmtMoney(0.9999999)') === '$1' &&
+      w.eval('fmtMoney(1)') === '$1' &&
+      w.eval('fmtMoney(0.99999)') === '99.999¢' &&
+      w.eval('fmtMoney(999.9999)') === '$1000');
+
+    // F2: once the archive holds the cap, a fetched older page cannot be
+    // retained. The cursor/fill owner must end pagination after that one
+    // request instead of growing logLimit and fetching forever.
+    {
+      const saved = { fetch: w.fetch, fill: w.scheduleLogFill, page: logPage, data: w.eval('lastData') };
+      w.scheduleLogFill = () => {};
+      const capBase = 1600000000000;
+      w.__auditCapArchive = Array.from({ length: 20000 }, (_, i) =>
+        mkRec('cap' + String(i).padStart(5, '0'), 200, capBase + i * 1000));
+      w.eval('logArchive = window.__auditCapArchive; logLimit = 20001; ' +
+        'logCursor = {ms: ' + capBase + ', id: "cap00000"}; ' +
+        'logExhausted = false; logFetching = false; logFailures = 0; logFetchFailed = false; logFetchGen++; ' +
+        'logHTML.clear(); for (const r of logArchive) logHTML.set(r.id, {rec: r, sep: ""}); ' +
+        'for (const r of (lastData && lastData.records || [])) logHTML.set(r.id, {rec: r, sep: ""});');
+      const urls = [];
+      const canon = { rules: [], revision: w.eval('modelRevision'), names: {} };
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (!u.includes('/metrics/agg/log')) return saved.fetch(url, opts);
+        urls.push(u);
+        return Promise.resolve({ ok: true, json: async () => ({
+          records: [mkRec('cap-old', 200, capBase - 1000)], more: true,
+          cursor_ms: capBase - 1000, cursor_id: 'cap-old', model_canon: canon,
+        }) });
+      };
+      try {
+        w.fetchOlderLog();
+        await settleUntil(() => urls.length === 1 && !w.eval('logFetching'));
+        await sleep(120);
+        check('the archive cap is terminal: one older-page request, no retained rows',
+          urls.length === 1 && w.eval('logArchive.length') === 20000 &&
+          !w.eval('logArchive.some(r => r.id === "cap-old")') && w.eval('logExhausted') === true);
+        check('the terminal cap does not grow logLimit for discarded rows', w.eval('logLimit') === 20001);
+        w.fetchOlderLog();
+        await sleep(80);
+        check('scroll and delayed fills stop at the terminal archive cap', urls.length === 1);
+      } finally {
+        w.fetch = saved.fetch;
+        w.scheduleLogFill = saved.fill;
+        logPage = saved.page;
+        w.resetLogWindow();
+        w.renderAll(saved.data);
+        delete w.__auditCapArchive;
+      }
+    }
+
+    // F3: the chart payload carries its window/scope identity. A changed key
+    // clears the old payload and paints the skeleton before the response; a
+    // failed new key shows an honest failure with no old totals.
+    {
+      const savedFetch = w.fetch;
+      let mode = 'ok', value = 300;
+      const held = [];
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (!u.includes('/metrics/agg/chart')) return savedFetch(url, opts);
+        if (mode === 'hold') return new Promise((resolve, reject) => held.push({ resolve, reject }));
+        if (mode === 'fail') return Promise.resolve({ ok: false, status: 503, json: async () => ({ error: 'chart down' }) });
+        return Promise.resolve({ ok: true, json: async () => chartWith(value) });
+      };
+      try {
+        w.eval("chartView.preset = 'traffic'; chartView.hidden = {}; chartView.window = 'all'; chartView.pct = 95; fillChartControls();");
+        mode = 'ok'; value = 300;
+        w.fetchChart('invalidate');
+        await settleUntil(() => w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 300);
+        mode = 'hold';
+        const win = d.getElementById('chart-window');
+        win.value = '1440';
+        win.dispatchEvent(new w.Event('change', { bubbles: true }));
+        await settleUntil(() => held.length === 1);
+        check('a chart window change clears the old payload and paints the skeleton before the response',
+          w.eval('chartAgg === null') &&
+          !d.getElementById('chart-totals').textContent.includes('300') &&
+          d.getElementById('chart-context').textContent === 'Waiting for traffic');
+        held.shift().resolve({ ok: true, json: async () => chartWith(1) });
+        await settleUntil(() => w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 1);
+        check('only the matching window payload paints the new totals',
+          w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 1 &&
+          d.getElementById('chart-totals').textContent.includes('requests'));
+        mode = 'fail';
+        await w.fetchChart('refresh');
+        check('a same-key chart refresh failure retains the last good payload',
+          w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 1 &&
+          d.getElementById('chart-totals').textContent.includes('requests 1'));
+        w.navigateTo([{ dim: 'provider', id: 'chart-fail.example' }]);
+        await settleUntil(() => d.getElementById('chart-context').textContent.includes('chart unavailable'));
+        const failTotals = d.getElementById('chart-totals').textContent;
+        check('a failed new-scope chart request shows no old-scope totals and a visible failure',
+          w.eval('chartAgg === null') && failTotals.includes('chart unavailable') &&
+          !failTotals.includes('300') && !/requests\s*1\b/.test(failTotals) &&
+          d.getElementById('chart-context').textContent.includes('chart unavailable'));
+      } finally {
+        mode = 'ok'; value = 0;
+        w.eval("chartView.window = 'all'; fillChartControls();");
+        w.navigateTo([]);
+        await settleUntil(() => !!w.eval('chartAgg'), 3000);
+        w.eval("chartView.preset = 'traffic'; chartView.hidden = {}; renderChart();");
+        w.fetch = savedFetch;
+      }
+    }
+
+    // F5: absent explorer counts are unknown, not measured zeros.
+    {
+      const savedFetch = w.fetch;
+      let mode = 'hold';
+      const held = [];
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (!u.includes('/metrics/agg/explorer')) return savedFetch(url, opts);
+        if (mode === 'hold') return new Promise((resolve, reject) => held.push({ resolve, reject }));
+        if (mode === 'fail') return Promise.resolve({ ok: false, status: 503, json: async () => ({ error: 'down' }) });
+        return Promise.resolve({ ok: true, json: async () => ({
+          dim: 'provider', total: 0, error_total: 0, rail: { provider: 0 }, groups: [],
+          scope: { matches: 0, errors: 0 },
+        }) });
+      };
+      const railValues = () => [...d.querySelectorAll('#xp-rail .xp-rail-item')]
+        .map(b => b.querySelector('.rail-n').textContent);
+      const triggerValue = () => d.getElementById('xp-dim-trigger').querySelector('.rail-n')?.textContent;
+      try {
+        w.navigateTo([{ dim: 'provider', id: 'rail-unknown.example' }]);
+        await settleUntil(() => held.length > 0);
+        check('an unloaded explorer payload renders unknown rail and trigger counts, not fabricated zeros',
+          railValues().every(v => v === '-') && triggerValue() === '-' &&
+          /loading breakdown/.test(d.getElementById('xp-gallery').textContent));
+        mode = 'fail';
+        held.shift().resolve({ ok: false, status: 503, json: async () => ({ error: 'down' }) });
+        await settleUntil(() => /breakdown unavailable/.test(d.getElementById('xp-gallery').textContent));
+        check('a failed explorer payload keeps rail and trigger counts unknown',
+          railValues().every(v => v === '-') && triggerValue() === '-');
+        mode = 'ok';
+        w.fetchExplorer('invalidate');
+        await settleUntil(() => w.eval('explorerAgg && explorerAgg.scopeKey === scopeQS()'));
+        check('a measured explorer zero renders as a real zero',
+          d.querySelector('#xp-rail [data-xp-dim="provider"] .rail-n').textContent === '0' &&
+          triggerValue() === '0');
+      } finally {
+        w.fetch = savedFetch;
+        w.navigateTo([]);
+        await settleUntil(() => !!w.eval('explorerAgg'), 3000);
+      }
+    }
+
+    // F1: a purge invalidates same-scope aggregates at once, paints loading,
+    // and reports completion only after the forced bootstrap + aggregate
+    // resync settle. A failed chart resync keeps the deleted totals gone.
+    {
+      const savedFetch = w.fetch;
+      const savedFull = fullPayload;
+      const savedConfirm = w.confirm;
+      const hold = { chart: [], explorer: [] };
+      let phase = 'seed';
+      const ghost = { dim: 'provider', total: 40, error_total: 0, rail: { provider: 40 },
+        groups: [{ name: 'ghost.example', n: 40, cost: 0, in: 10, out: 5, cache: 2, tools: 0,
+          err_final: 0, rate_limit_requests: 0, cost_per_mtok: null,
+          ttft_p50: null, ttft_p95: null, tps_p50: null, tps_p95: null }],
+        scope: { matches: 40, errors: 0 } };
+      const empty = { dim: 'provider', total: 0, error_total: 0, rail: { provider: 0 },
+        groups: [], scope: { matches: 0, errors: 0 } };
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (u.includes('/admin/purge') && !u.includes('/count')) {
+          return Promise.resolve({ ok: true, json: async () => ({ ok: true }) });
+        }
+        if (u.includes('/metrics/agg/chart')) {
+          if (phase === 'hold') return new Promise((resolve, reject) => hold.chart.push({ resolve, reject }));
+          return Promise.resolve({ ok: true, json: async () => chartWith(phase === 'seed' ? 40 : 0) });
+        }
+        if (u.includes('/metrics/agg/explorer')) {
+          if (phase === 'hold') return new Promise((resolve, reject) => hold.explorer.push({ resolve, reject }));
+          return Promise.resolve({ ok: true, json: async () =>
+            JSON.parse(JSON.stringify(phase === 'seed' ? ghost : empty)) });
+        }
+        return savedFetch(url, opts);
+      };
+      try {
+        w.navigateTo([{ dim: 'provider', id: 'purge-scope.example' }]);
+        await settleUntil(() => !!d.querySelector('#xp-gallery [data-xp-key="ghost.example"]') &&
+          w.eval('chartAgg && chartAgg.buckets.reduce((a,b) => a + b.req, 0)') === 40);
+        const feed = w.eval('feedId');
+        fullPayload = { feed_id: feed, seq: Math.max(900, w.eval('lastSeq') + 10), incremental: false,
+          records: [], counters: { in_flight: 0, total_requests: 0, total_errors: 0 } };
+        phase = 'hold';
+        w.confirm = () => true;
+        let purgeSettled = false;
+        const purge = w.purgeAll().then(v => { purgeSettled = true; return v; });
+        await settleUntil(() => hold.chart.length === 1 && hold.explorer.length === 1 && rows().length === 0);
+        check('purge completion waits for the forced record and aggregate resync',
+          purgeSettled === false);
+        check('a purge drops same-scope aggregates and paints loading before the resync lands',
+          w.eval('explorerAgg === null') && w.eval('chartAgg === null') &&
+          /loading breakdown/.test(d.getElementById('xp-gallery').textContent) &&
+          [...d.querySelectorAll('#xp-rail .xp-rail-item')].every(b => b.querySelector('.rail-n').textContent === '-') &&
+          d.getElementById('xp-dim-trigger').querySelector('.rail-n').textContent === '-' &&
+          d.getElementById('f-scope').textContent.startsWith('… of') &&
+          !d.getElementById('f-scope').textContent.includes('40 of') &&
+          !d.getElementById('chart-totals').textContent.includes('40'));
+        hold.chart.shift().reject(new Error('chart down'));
+        hold.explorer.shift().resolve({ ok: true, json: async () => JSON.parse(JSON.stringify(empty)) });
+        await Promise.race([purge, sleep(2000)]);
+        await settleUntil(() => w.eval('explorerAgg !== null') && !w.eval('chartAgg'));
+        check('a failed post-purge chart cannot retain deleted totals; the failure is visible',
+          w.eval('chartAgg === null') &&
+          d.getElementById('chart-totals').textContent.includes('chart unavailable') &&
+          d.getElementById('chart-context').textContent.includes('chart unavailable') &&
+          !d.getElementById('chart-totals').textContent.includes('40'));
+        check('the released post-purge explorer paints the new empty scope',
+          w.eval('explorerAgg && explorerAgg.scope.matches === 0') &&
+          /no provider values yet/.test(d.getElementById('xp-gallery').textContent) &&
+          !d.getElementById('xp-gallery').textContent.includes('ghost') &&
+          d.getElementById('f-scope').textContent.startsWith('0 of '));
+        check('purge completion is reported only after the forced resync settles',
+          d.getElementById('settings-count').textContent === 'all metrics history deleted' &&
+          d.getElementById('settings-count').classList.contains('ok'));
+        phase = 'ok';
+        w.fetchChart('invalidate');
+        await settleUntil(() => w.eval('chartAgg && chartAgg.buckets.length > 0'));
+        check('the chart recovers after the failed resync with fresh aggregates',
+          d.getElementById('chart-totals').textContent.includes('requests 0'));
+      } finally {
+        phase = 'seed';
+        w.confirm = savedConfirm;
+        w.fetch = savedFetch;
+        savedFull.seq = Math.max(savedFull.seq || 0, w.eval('lastSeq') + 10);
+        fullPayload = savedFull;
+        w.navigateTo([]);
+        await w.fetchBootstrap('full');
+        await settleUntil(() => rows().length === 6, 3000);
+        await sleep(50);
+      }
+    }
+
+    // F4: an open drawer follows the live finalization of its record without
+    // rewriting on unrelated traffic, preserving scroll for the same identity.
+    {
+      const base = 1700003000000;
+      fire('begin', { record: { ...mkRec('audit-drawer', 0, base) }, in_flight: 1 });
+      await settleUntil(() => !!d.querySelector('#tbl-requests tr.exp-row[data-id="audit-drawer"]'));
+      w.openDrawer('audit-drawer');
+      const body = d.getElementById('drawer-body');
+      body.scrollTop = 120;
+      check('the drawer opens on the live request', /streaming/.test(body.textContent));
+      fire('end', { record: { ...mkRec('audit-drawer', 200, base), duration_ms: 900, ttft_ms: 250 }, in_flight: 0 });
+      await settleUntil(() => /900ms/.test(d.getElementById('drawer-body').textContent));
+      check('an open drawer follows the live finalization',
+        !/streaming/.test(d.getElementById('drawer-body').textContent) &&
+        /900ms/.test(d.getElementById('drawer-body').textContent));
+      check('the live drawer repaint preserves its scroll position', body.scrollTop === 120);
+      const html = body.innerHTML;
+      fire('record', { ...mkRec('audit-unrelated', 200, base + 2000) }, '900');
+      await sleep(40);
+      check('an unrelated live event does not rewrite the open drawer',
+        body.innerHTML === html && body.scrollTop === 120);
+      body.scrollTop = 120;
+      w.openDrawer('audit-unrelated');
+      check('a drawer identity change resets its scroll position', body.scrollTop === 0);
+      w.closeDrawer();
+    }
+
+    // F6: row replacement, gallery repaint and legend activation restore
+    // keyboard focus to the equivalent control through one shared helper.
+    {
+      const base = 1700004000000;
+      const rowBtn = () => d.querySelector('#tbl-requests tr.exp-row[data-id="audit-focus"] button[data-open-req]');
+      fire('begin', { record: { ...mkRec('audit-focus', 0, base) }, in_flight: 1 });
+      await settleUntil(() => !!rowBtn());
+      rowBtn().focus();
+      check('the row control owns focus before the live replacement', d.activeElement === rowBtn());
+      fire('end', { record: { ...mkRec('audit-focus', 200, base) }, in_flight: 0 });
+      await settleUntil(() => {
+        const next = rowBtn();
+        return !!next && !next.closest('tr').classList.contains('live-row') && d.activeElement === next;
+      });
+      check('a live row replacement restores focus to the equivalent open control',
+        d.activeElement === rowBtn() && !rowBtn().closest('tr').classList.contains('live-row'));
+    }
+    {
+      const savedFetch = w.fetch;
+      let version = 1;
+      const ent = n => ({ name: 'focus-card.example', n, cost: 0, in: 10, out: 5, cache: 2, tools: 0,
+        err_final: 0, rate_limit_requests: 0, cost_per_mtok: null,
+        ttft_p50: null, ttft_p95: null, tps_p50: null, tps_p95: null });
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (!u.includes('/metrics/agg/explorer')) return savedFetch(url, opts);
+        return Promise.resolve({ ok: true, json: async () => ({
+          dim: 'provider', total: 3, error_total: 0, rail: { provider: 1 },
+          groups: [ent(version)], scope: { matches: version, errors: 0 },
+        }) });
+      };
+      const card = () => d.querySelector('#xp-gallery [data-xp-key="focus-card.example"]');
+      try {
+        w.navigateTo([{ dim: 'provider', id: 'focus-gallery.example' }]);
+        await settleUntil(() => !!card() && /1req/.test(card().textContent));
+        card().focus();
+        version = 2;
+        w.fetchExplorer('refresh');
+        await settleUntil(() => !!card() && /2req/.test(card().textContent) && d.activeElement === card());
+        check('a gallery repaint restores focus to the equivalent card', d.activeElement === card());
+      } finally {
+        w.fetch = savedFetch;
+        w.navigateTo([]);
+        await settleUntil(() => !!w.eval('explorerAgg'), 3000);
+      }
+    }
+    {
+      w.eval("chartView.preset = 'traffic'; chartView.hidden = {}; chartView.pct = 95; chartView.window = 'all'; fillChartControls(); renderChart();");
+      const leg = () => d.querySelector('#traffic-legend .leg-item[data-series="err"]');
+      const before = leg();
+      before.focus();
+      before.click();
+      const after = leg();
+      check('a legend activation restores focus to the equivalent toggle',
+        before !== after && after.classList.contains('off') && d.activeElement === after);
+      after.click();
+      await sleep(0);
+    }
+    {
+      const legend = d.getElementById('traffic-legend');
+      const item = legend.querySelector('.leg-item');
+      item.focus();
+      const token = typeof w.captureFocus === 'function' ? w.captureFocus(legend, el => {
+        const series = el.closest('.leg-item[data-series]')?.dataset.series;
+        return series == null ? null : `[data-series="${w.CSS.escape(series)}"]`;
+      }) : null;
+      const other = d.getElementById('btn-nav');
+      other.focus();
+      const restored = typeof w.restoreFocus === 'function' ? w.restoreFocus(token) : false;
+      check('the shared focus restore never steals focus from a moved operator',
+        !!token && restored === false && d.activeElement === other);
+    }
+
+    // F9: a page opened in a hidden tab must not arm the clock or poll before
+    // its first visible transition; that transition runs the resume path.
+    {
+      let hidden = true;
+      let hiddenBoot = 0, hiddenChart = 0, hiddenExplorer = 0;
+      const hiddenDom = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), {
+        url: 'http://127.0.0.1:8081/',
+        runScripts: 'dangerously',
+        pretendToBeVisual: true,
+        beforeParse(window) {
+          Object.defineProperty(window.document, 'hidden', { configurable: true, get: () => hidden });
+          window.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+          window.matchMedia = () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} });
+          window.CSS = window.CSS || {};
+          if (!window.CSS.escape) window.CSS.escape = s => String(s).replace(/[\\"]/g, '\\$&');
+          Object.defineProperty(window.HTMLElement.prototype, 'offsetHeight', { get() { return 20; }, configurable: true });
+          window.Path2D = class { moveTo() {} lineTo() {} arcTo() {} arc() {} rect() {} closePath() {} bezierCurveTo() {} };
+          window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
+            get: (t, k) => (k === 'measureText' ? () => ({ width: 1 }) :
+              k === 'canvas' ? { width: 0, height: 0 } :
+              (typeof k === 'string' ? () => {} : undefined)),
+            set: () => true,
+          });
+          window.EventSource = function (url) {
+            return { url, readyState: 1, addEventListener() {}, close() { this.readyState = 2; } };
+          };
+          window.fetch = url => {
+            const u = String(url);
+            if (u.includes('/metrics/bootstrap')) {
+              hiddenBoot++;
+              return Promise.resolve({ ok: true, json: async () => ({
+                records: [], in_flight_records: [], counters: { in_flight: 0 },
+                pending_revision: 0, seq: 0, feed_id: 'hidden-feed', incremental: false,
+                kpi: { requests: 0, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null,
+                  input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
+                  avg_ttft_ms: null, avg_tps: null },
+                dashboard_version: TEST_DASHBOARD_VERSION,
+                model_canon: { rules: [], names: {} },
+                dash: {}, storage: { enabled: true, dropped: 0, totals_degraded: false },
+                pause: { ok: true, paused: false, clients: [], providers: [], holds: [], known_clients: [], known_providers: [], until: null, queued: 0, default_max_queued: 0 },
+                throttle: { ok: true, throttles: [], known_providers: [], active: false },
+                debug: { ok: true, enabled: false, sessions: [], known_clients: [], known_providers: [], known_models: [], until: null, ttl: '24h', max_bytes: '1MiB' },
+              }) });
+            }
+            if (u.includes('/metrics/agg/chart')) {
+              hiddenChart++;
+              return Promise.resolve({ ok: true, json: async () => ({
+                now_ms: Date.now(), from_ms: Date.now() - 3600000, bucket_ms: 60000,
+                ttft_p: [null, null, null], tps_p: [null, null, null], dec_p: [null, null, null],
+                buckets: [],
+              }) });
+            }
+            if (u.includes('/metrics/agg/explorer')) {
+              hiddenExplorer++;
+              return Promise.resolve({ ok: true, json: async () => ({
+                dim: 'provider', total: 0, error_total: 0, rail: { provider: 0 }, groups: [],
+                scope: { matches: 0, errors: 0 },
+              }) });
+            }
+            if (u.includes('/metrics/agg/log')) return Promise.resolve({ ok: true, json: async () => ({ records: [], more: false, cursor_ms: 0, cursor_id: '' }) });
+            return Promise.resolve({ ok: true, json: async () => ({}) });
+          };
+        },
+      });
+      const hw = hiddenDom.window;
+      const hd = hw.document;
+      await sleep(300);
+      check('a page loaded hidden keeps its clock and poll timers unarmed',
+        hw.eval('_wasHidden === true && _clockTimer === null && _dashTickTimer === null'));
+      check('a hidden-at-load page completes only its initial paint fetches',
+        hiddenBoot === 1 && hiddenChart === 1 && hiddenExplorer === 1);
+      const bootBefore = hiddenBoot;
+      hidden = false;
+      hd.dispatchEvent(new hw.Event('visibilitychange'));
+      await sleep(80);
+      check('the visible transition arms both timers and refreshes the page',
+        hw.eval('_wasHidden === false && _clockTimer !== null && _dashTickTimer !== null') &&
+        hiddenBoot > bootBefore);
+      hiddenDom.window.close();
+    }
   }
 
   reportFailures(false);

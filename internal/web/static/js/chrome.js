@@ -5,7 +5,6 @@ let stormSnapshot = {valid: false, enabled: false, storms: []};
 let stormDialogKey = '';
 let quotaResumeError = '';
 const stormIncidentKey = s => JSON.stringify([s.provider, s.scope, s.model]);
-const stormPercent = value => value.toLocaleString(undefined, {maximumFractionDigits: 1});
 function applyStormState(st) {
   const banner = $('storm-banner');
   if (!banner) return;
@@ -39,7 +38,7 @@ function applyStormState(st) {
     const scope = s.provider + ' · ' + (s.scope === 'provider' ? 'all models' : s.model || '(unspecified model)');
     const detail = s.quota
       ? `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>Quota pause</span><span>${fmt(s.queued)} queued</span><span>${fmt(s.recovery_successes)} / ${fmt(s.recovery_required)} recovery probes</span>`
-      : `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(stormPercent(s.error_percent))}% failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span>`;
+      : `<span class="storm-reason">${escapeHtml(s.reason)}</span><span>${escapeHtml(pctValue(s.error_percent, 1, true))} failed attempts</span><span>${fmt(s.error_requests)} requests affected</span><span>${fmt(s.queued)} queued</span>`;
     const html = `<span class="storm-heading"><strong>${escapeHtml(scope)}</strong><span class="storm-state">${s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'}</span><span class="storm-open-hint">View details ›</span></span><span class="storm-detail">${detail}</span>`;
     let row = existing.get(key);
     existing.delete(key);
@@ -138,13 +137,13 @@ function renderStormDetails() {
     ['Provider', s.provider], ['Model scope', s.scope === 'provider' ? 'All models' : s.model || '(unspecified model)'],
     ['State', s.state === 'half_open' ? 'Checking recovery' : 'Holding requests'], ['Error', s.reason],
     ['Requests affected', fmt(s.error_requests)], ['Failed upstream attempts', fmt(s.failures)],
-    ['Sampled upstream attempts', fmt(s.samples)], ['Upstream attempt failure rate', stormPercent(s.error_percent) + '%'],
+    ['Sampled upstream attempts', fmt(s.samples)], ['Upstream attempt failure rate', pctValue(s.error_percent, 1, true)],
     ['Detection window', fmtDur(s.window_ms)], ['Queued requests', fmt(s.queued)],
     ['Next retry', new Date(s.retry_at).toLocaleString()],
     ['Successful recovery probes', s.recovery_successes + ' / ' + s.recovery_required],
   ];
   if (!s.quota && s.scope === 'provider') entries.push(['Active models', fmt(s.active_models)],
-    ['Affected active models', fmt(s.affected_models) + ' / ' + fmt(s.active_models) + ' (' + stormPercent(s.affected_model_percent) + '%)']);
+    ['Affected active models', fmt(s.affected_models) + ' / ' + fmt(s.active_models) + ' (' + pctValue(s.affected_model_percent, 1, true) + ')']);
   const rows = entries.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
   const explanation = s.quota
     ? 'This provider is paused after a durable quota/billing error (for example insufficient credits). Every new request parks here and one recovery probe is admitted per cooldown - a provider Retry-After on the quota response paces it like any other 429. The first successful probe releases the queue; Resume now closes the gate immediately.'
@@ -2127,11 +2126,12 @@ async function updateFilterCount(prefix, elId, btnId, phrase, busy) {
   }
 }
 function recPhrase(n) { return fmt(n) + ' record' + (n === 1 ? '' : 's'); }
-// refreshAggregates pulls the since-inception numeric surfaces now so a
-// purge (or any wipe) is visible before the next tick. The KPI aggregate
-// rides the bootstrap payload; explorer includes the scoped footer counts.
+// refreshAggregates invalidates and re-pulls the since-inception numeric
+// surfaces now so a purge (or any wipe) is visible before the next tick. The
+// invalidation clears the cached payloads and paints loading before each
+// request; the returned promise settles when both forced requests finish.
 function refreshAggregates() {
-  fetchChart('invalidate'); fetchExplorer('invalidate');
+  return Promise.all([fetchChart('invalidate'), fetchExplorer('invalidate')]);
 }
 
 // refreshAfterRestart re-pulls every server-fed surface after the SSE

@@ -45,8 +45,10 @@ class FakeCache {
     this.added = [];
     this.puts = [];
     this.failPut = new Set();
+    this.failMatch = false;
   }
   match(req) {
+    if (this.failMatch) return Promise.reject(new Error('match failed'));
     return Promise.resolve(this.entries.has(req.url) ? this.entries.get(req.url).clone() : undefined);
   }
   put(req, res) {
@@ -61,7 +63,7 @@ class FakeCache {
   }
 }
 
-function loadWorker() {
+function loadWorker({ failOpen = false, failMatch = false } = {}) {
   const source = fs.readFileSync(SW_PATH, 'utf8');
   const markers = source.split(MARKER).length - 1;
   check('sw.js carries exactly one dashboard version marker', markers === 1, 'found ' + markers);
@@ -77,7 +79,10 @@ function loadWorker() {
   const caches = {
     open(name) {
       calls.opens.push(name);
-      return Promise.resolve(store(name));
+      if (failOpen) return Promise.reject(new Error('cache storage unavailable'));
+      const cache = store(name);
+      if (failMatch) cache.failMatch = true;
+      return Promise.resolve(cache);
     },
     keys() {
       return Promise.resolve([...stores.keys()]);
@@ -341,6 +346,56 @@ async function main() {
         cache.puts.includes(req.url),
       JSON.stringify({ body: res && res.body, fetches: worker.fetches(), puts: cache.puts }));
     cache.failPut.delete(req.url);
+  }
+
+  // CacheStorage failures are misses, never response failures: both shell
+  // paths still reach the network, and an offline fallback preserves the
+  // original fetch error when its own cache match also fails.
+  {
+    const cases = [
+      ['exact-version dash with a cache open failure', { failOpen: true },
+        '/dash/js/core.js?v=' + TEST_VERSION, 'fresh:1'],
+      ['network-first dash with a cache open failure', { failOpen: true },
+        '/dash/js/core.js', 'fresh:1'],
+      ['brand shell asset with a cache open failure', { failOpen: true },
+        '/favicon.svg', 'fresh:1'],
+      ['exact-version dash with a cache match failure', { failMatch: true },
+        '/dash/js/core.js?v=' + TEST_VERSION, 'fresh:1'],
+      ['network-first dash with a cache match failure', { failMatch: true },
+        '/dash/js/core.js', 'fresh:1'],
+    ];
+    for (const [label, options, pathname, body] of cases) {
+      const worker = loadWorker(options);
+      worker.resetFetches();
+      let res = null, err = null;
+      try { res = await worker.dispatch(worker.request(pathname)); } catch (e) { err = e; }
+      check(label + ' still serves the fresh network response',
+        !err && !!res && res.body === body && worker.fetches().length === 1,
+        JSON.stringify({ error: err && err.message, body: res && res.body, fetches: worker.fetches() }));
+    }
+
+    const exactStore = loadWorker({ failMatch: true });
+    const exactReq = exactStore.request('/dash/js/after-match-failure.js?v=' + TEST_VERSION);
+    exactStore.resetFetches();
+    let exactRes = null, exactErr = null;
+    try { exactRes = await exactStore.dispatch(exactReq); } catch (e) { exactErr = e; }
+    check('an exact-version match failure still stores the successful response',
+      !exactErr && !!exactRes && exactRes.body === 'fresh:1' && exactStore.fetches().length === 1 &&
+        exactStore.store(CACHE_NAME).entries.has(exactReq.url),
+      JSON.stringify({ error: exactErr && exactErr.message, body: exactRes && exactRes.body, fetches: exactStore.fetches() }));
+
+    const offline = loadWorker({ failMatch: true });
+    offline.onFetch(() => Promise.reject(new Error('offline')));
+    offline.resetFetches();
+    let offlineError = '';
+    try {
+      await offline.dispatch(offline.request('/favicon.svg'));
+    } catch (err) {
+      offlineError = err && err.message;
+    }
+    check('an offline network-first fallback with a failed cache match rejects with the original network error',
+      offlineError === 'offline' && offline.fetches().length === 1,
+      JSON.stringify({ error: offlineError, fetches: offline.fetches() }));
   }
 
   await new Promise(resolve => setImmediate(resolve));
