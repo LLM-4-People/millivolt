@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 )
 
 func checkRankPercentiles[T ~int64 | ~float64](t *testing.T, values []T, membership []uint8, bucketCount int, extras []T, extraBuckets []uint8) {
@@ -318,22 +319,49 @@ func BenchmarkRankPercentilesVisit100K(b *testing.B) {
 	}
 }
 
+func shuffledMetricRows(n int) []contrib {
+	rows := make([]contrib, n)
+	for i := range rows {
+		// A non-monotone value order keeps the fixture from passing when a
+		// merge forgets to sort.
+		v := int64((i*7919)%n + 1)
+		rows[i] = contrib{ttft: v, tps: float64(v), dec: v}
+	}
+	return rows
+}
+
 // TestProjectionRecentOrderMatchesAllForTailWindows pins the bounded-chart
 // fast path: when every in-window row is inside the retained tail, ranks and
 // occurrence-weighted stats from the short order are exactly the all-history
-// answers. A delta crossing the rebuild cadence must advance and rebuild the
-// tail without losing the newest samples.
+// answers. A sub-cadence delta must advance the tail without a rebuild; a
+// larger delta must rebuild it, and the tail's own bound and immutability are
+// asserted directly.
 func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 	n := recentMetricRows + 5000
-	rows := make([]contrib, n)
-	for i := range rows {
-		rows[i] = contrib{ttft: int64(i + 1), tps: float64(i + 1), dec: int64(i + 1)}
-	}
+	rows := shuffledMetricRows(n)
 	var m projectionMetrics
 	m.append(rows, 0)
 	if m.recentFrom != n-recentMetricRows {
 		t.Fatalf("recentFrom = %d, want %d", m.recentFrom, n-recentMetricRows)
 	}
+	checkBound := func() {
+		t.Helper()
+		if got := len(m.recent.ttft); got != recentMetricRows {
+			t.Fatalf("retained TTFT samples = %d, want %d", got, recentMetricRows)
+		}
+		if got := len(m.recent.tps); got != recentMetricRows {
+			t.Fatalf("retained TPS samples = %d, want %d", got, recentMetricRows)
+		}
+		if got := len(m.recent.dec); got != recentMetricRows {
+			t.Fatalf("retained decode samples = %d, want %d", got, recentMetricRows)
+		}
+		for _, s := range m.recent.ttft {
+			if int(s.row) < m.recentFrom {
+				t.Fatalf("recent TTFT sample row %d predates recentFrom %d", s.row, m.recentFrom)
+			}
+		}
+	}
+	checkBound()
 	check := func(from int) {
 		t.Helper()
 		mask := make([]uint8, n)
@@ -347,6 +375,12 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 			!reflect.DeepEqual(allStatTTFT, recentStatTTFT) {
 			t.Fatalf("TTFT tail ranks differ from all-history ranks (from=%d)", from)
 		}
+		allTPS, allPeriodTPS, allStatTPS := rankPercentilesStats(m.all.tps, mask, counts, nil, nil)
+		recentTPS, recentPeriodTPS, recentStatTPS := rankPercentilesStats(m.recent.tps, mask, counts, nil, nil)
+		if !reflect.DeepEqual(allTPS, recentTPS) || !reflect.DeepEqual(allPeriodTPS, recentPeriodTPS) ||
+			!reflect.DeepEqual(allStatTPS, recentStatTPS) {
+			t.Fatalf("TPS tail ranks differ from all-history ranks (from=%d)", from)
+		}
 		allDec, allPeriodDec := rankPercentiles(m.all.dec, mask, counts, nil, nil)
 		recentDec, recentPeriodDec := rankPercentiles(m.recent.dec, mask, counts, nil, nil)
 		if !reflect.DeepEqual(allDec, recentDec) || !reflect.DeepEqual(allPeriodDec, recentPeriodDec) {
@@ -355,9 +389,36 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 	}
 	check(m.recentFrom)
 
-	delta := make([]contrib, 20000)
+	// A delta below the rebuild cadence advances the window and merges only
+	// new samples; the previously published arrays must stay untouched.
+	oldBuiltAt := m.recentBuiltAt
+	publishedTTFT := m.recent.ttft
+	publishedTTFTCopy := slices.Clone(publishedTTFT)
+	delta := make([]contrib, 1000)
 	for i := range delta {
-		delta[i] = contrib{ttft: int64(n + i + 1), tps: float64(n + i + 1), dec: int64(n + i + 1)}
+		v := int64(n + i + 1)
+		delta[i] = contrib{ttft: v, tps: float64(v), dec: v}
+	}
+	rows = append(rows, delta...)
+	m.append(rows, n)
+	n = len(rows)
+	if m.recentBuiltAt != oldBuiltAt {
+		t.Fatalf("sub-cadence delta rebuilt at %d, want %d", m.recentBuiltAt, oldBuiltAt)
+	}
+	if m.recentFrom != n-recentMetricRows {
+		t.Fatalf("advanced recentFrom = %d, want %d", m.recentFrom, n-recentMetricRows)
+	}
+	if !slices.Equal(publishedTTFT, publishedTTFTCopy) {
+		t.Fatal("recent append mutated a previously published order")
+	}
+	check(m.recentFrom)
+
+	// A batch at the rebuild cadence replaces the tail, bounds it exactly,
+	// and still answers a window at the new boundary from the short order.
+	delta = make([]contrib, 20000)
+	for i := range delta {
+		v := int64(n + i + 1)
+		delta[i] = contrib{ttft: v, tps: float64(v), dec: v}
 	}
 	rows = append(rows, delta...)
 	m.append(rows, n)
@@ -368,5 +429,56 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 	if m.recentBuiltAt != n {
 		t.Fatalf("recentBuiltAt = %d, want a rebuild at %d", m.recentBuiltAt, n)
 	}
+	checkBound()
 	check(m.recentFrom)
+}
+
+// TestChartRecentTailMatchesAllHistory exercises the real chartFold selector:
+// the fast fold's all-history order is deliberately emptied after prepare, so
+// a wrong or missing tail selection cannot silently pass. The same window
+// folded with the all-history order must produce a byte-identical payload.
+func TestChartRecentTailMatchesAllHistory(t *testing.T) {
+	const n = recentMetricRows + 5000
+	now := time.Now().UnixMilli()
+	rows := make([]contrib, n)
+	for i := range rows {
+		start := now - int64(n-1-i)*1000
+		v := int64((i*7919)%n + 1)
+		rows[i] = contrib{start: start, rowIndex: uint32(i + 1), ttft: v, tps: float64(v)}
+	}
+	p := &projectionData{rows: rows}
+	p.metrics.append(rows, 0)
+	from, step, count := chartWindowEdges(now, now-15*60*1000)
+	first := n - 1 - int((now-from)/1000)
+	if first < 0 {
+		first = 0
+	}
+	fold := func(forceAll bool) chartPayload {
+		t.Helper()
+		f := newChartFold(from, step, count, "", nil)
+		f.prepare(p, nil)
+		if forceAll {
+			f.recentFrom = 0
+		} else {
+			// The fast path must select recent; if it falls back to order,
+			// the empty all-history order yields empty ranks.
+			f.order = metricOrders{}
+		}
+		for i := first; i < n; i++ {
+			if err := f.fold(&rows[i]); err != nil {
+				t.Fatal(err)
+			}
+			if !forceAll && f.recentFrom == 0 {
+				t.Fatalf("recentFrom reset at row index %d (rowIndex=%d)", i, rows[i].rowIndex)
+			}
+		}
+		if !forceAll && (!f.hasMember || f.recentFrom == 0 || int(f.minMemberRow) <= f.recentFrom) {
+			t.Fatalf("fast fold did not select the tail: hasMember=%v recentFrom=%d minMemberRow=%d", f.hasMember, f.recentFrom, f.minMemberRow)
+		}
+		return f.payload(now)
+	}
+	fast, slow := fold(false), fold(true)
+	if !reflect.DeepEqual(fast, slow) {
+		t.Fatal("tail-selected chart payload differs from all-history payload")
+	}
 }

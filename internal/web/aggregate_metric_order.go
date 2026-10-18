@@ -31,10 +31,6 @@ type metricOrders struct {
 	dec  []metricSample[int64]
 }
 
-func (o metricOrders) empty() bool {
-	return len(o.ttft) == 0 && len(o.tps) == 0 && len(o.dec) == 0
-}
-
 // merge folds new samples into fresh immutable slices. The input slices are
 // never mutated after publication.
 func (o *metricOrders) merge(added metricOrders) {
@@ -102,33 +98,28 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	added := collectMetricOrders(rows, from)
 	m.all.merge(added)
 	if len(rows) <= recentMetricRows {
-		// Small histories need no duplicate tail: share the all-history
-		// slices. Every later merge replaces the headers, so the alias stays
-		// consistent only because this branch re-aliases on every append.
-		m.recent = m.all
-		m.recentFrom = 0
-		m.recentBuiltAt = len(rows)
+		// No tail is read until the history exceeds recentMetricRows; leave
+		// the recent order empty instead of aliasing the all-history slices.
 		return
 	}
-	if m.recentFrom == 0 {
+	// Rebuild before merging a large catch-up: replaying a batch that is
+	// about to be discarded only doubles the transient copy.
+	if m.recentFrom == 0 || len(rows)-m.recentBuiltAt >= recentMetricRebuildRows {
 		m.rebuildRecent(rows)
 		return
 	}
-	if from < m.recentFrom {
-		// The batch crossed the old tail boundary; only rows still in the new
-		// tail belong in the recent order.
-		added = collectMetricOrders(rows, m.recentFrom)
+	// The recent order already covers every row >= recentFrom. A caller that
+	// passes an earlier from (not the incremental append contract) must not
+	// merge those rows again or its samples would be double-counted.
+	if from >= m.recentFrom {
+		m.recent.merge(added)
 	}
-	m.recent.merge(added)
 	if next := len(rows) - recentMetricRows; next > m.recentFrom {
 		m.recentFrom = next
 	}
 	// Advance the tail lazily: out-of-tail samples retained between rebuilds
 	// are harmless (their membership byte is zero) and bounded by the rebuild
 	// cadence.
-	if len(rows)-m.recentBuiltAt >= recentMetricRebuildRows {
-		m.rebuildRecent(rows)
-	}
 }
 
 // rebuildRecent recreates the tail order from the newest recentMetricRows

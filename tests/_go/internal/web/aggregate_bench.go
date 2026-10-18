@@ -35,7 +35,10 @@ func benchmarkContributions(b *testing.B) []contrib {
 	now := time.Now().UnixMilli()
 	rows := make([]contrib, 100000)
 	for i := range rows {
-		rows[i] = contrib{start: now - int64(i)*1000, status: 200, in: 100, out: 50, ttft: int64(1 + i%3000), tps: float64(1 + i%500), prov: "fixture.example", model: "model", client: "client"}
+		// Oldest first: row indexes and starts advance together, so a recent
+		// window has high row indexes and can use the retained metric tail.
+		start := now - int64(len(rows)-1-i)*1000
+		rows[i] = contrib{start: start, status: 200, in: 100, out: 50, ttft: int64(1 + i%3000), tps: float64(1 + i%500), prov: "fixture.example", model: "model", client: "client"}
 	}
 	return rows
 }
