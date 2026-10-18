@@ -386,7 +386,11 @@ draft or marks the sheet dirty.
 One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
 pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.
 Incremental log groups preserve scroll/selection; archive paging uses paired
-timestamp/ID cursors and stays outside the live arrival-ordered ring. The
+timestamp/ID cursors and stays outside the live arrival-ordered ring. One
+single-entry memo reuses the merged ring+archive window within a live revision,
+keyed by the live data and its revision plus the archive array identity/length
+and the scoped-ring (or prior merged) array identity; archive replacement or
+trim, reset, a live revision bump and a data replacement each rebuild it. The
 explorer memoizes its filter-set identity on the canonical, order-independent
 scope (filter set plus status, excluding the `by/<dim>` breakdown). A by-only
 hash change repaints the rail/gallery and fetches that one breakdown while the

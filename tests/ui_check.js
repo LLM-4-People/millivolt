@@ -2217,6 +2217,81 @@ async function main() {
         !rows().some(tr => tr.dataset.id.startsWith('sa-old')));
   }
 
+  // ---- test 10c-ter: one merged window per unchanged live revision ----
+  // renderRequestsIncremental and updateLogStats each merge the scoped ring
+  // with the durable archive on every live frame. The one-entry memo must
+  // return the same merged array while the live identity/revision, the
+  // archive identity/length and the scoped ring are unchanged, and rebuild on
+  // every real owner mutation.
+  {
+    const savedData = w.eval('lastData');
+    const savedArchive = w.eval('logArchive');
+    const ring = [
+      mkRec('memo-ring0', 200, 1700001000000),
+      mkRec('memo-ring1', 200, 1700001001000),
+    ];
+    const archive = [
+      mkRec('memo-old1', 200, 1700000900000),
+      mkRec('memo-old0', 200, 1700000800000),
+      { ...ring[0], status_code: 500 }, // a stale archive copy of a live id
+    ];
+    const data = { records: ring, counters: {}, _rev: 3 };
+    w.__memoRing = ring; w.__memoArchive = archive; w.__memoData = data;
+    w.eval('lastData = window.__memoData; logArchive = window.__memoArchive;');
+    const ids = list => list.map(r => r.id).join(',');
+    const first = w.mergeLogArchive(ring);
+    check('the merged window keeps durable order below the live ring and live wins duplicate ids',
+      ids(first) === 'memo-old1,memo-old0,memo-ring0,memo-ring1' &&
+      first[2] === ring[0] && first[3] === ring[1]);
+    check('an unchanged archive merge reuses the prior merged array',
+      w.mergeLogArchive(ring) === first);
+    check('a merged window passed back through the merge reuses itself',
+      w.mergeLogArchive(first) === first);
+    data._rev = 4;
+    const revved = w.mergeLogArchive(ring);
+    check('a live revision bump rebuilds the merged window',
+      revved !== first && ids(revved) === ids(first));
+    const nextData = { records: ring, counters: {}, _rev: 4 };
+    w.__memoData = nextData;
+    w.eval('lastData = window.__memoData');
+    const dataSwap = w.mergeLogArchive(ring);
+    check('a new live data object rebuilds the merged window',
+      dataSwap !== revved && ids(dataSwap) === ids(revved));
+    const nextArchive = archive.slice();
+    w.__memoArchive = nextArchive;
+    w.eval('logArchive = window.__memoArchive');
+    const archiveSwap = w.mergeLogArchive(ring);
+    check('a replaced archive array rebuilds the merged window',
+      archiveSwap !== dataSwap && ids(archiveSwap) === ids(dataSwap));
+    nextArchive.length = 1; // an in-place trim, as fetchOlderLog's cap applies
+    const trimmed = w.mergeLogArchive(ring);
+    check('an in-place archive trim rebuilds the merged window with the retained page',
+      trimmed !== archiveSwap && ids(trimmed) === 'memo-old1,memo-ring0,memo-ring1');
+    // One live frame merges for the rows and again for the stats. A build
+    // always allocates through concat, so equal result identity across both
+    // calls proves the second call reused the first build.
+    const calls = [];
+    const realMerge = w.mergeLogArchive;
+    w.mergeLogArchive = recs => { const out = realMerge(recs); calls.push(out); return out; };
+    try {
+      w.renderRequestsIncremental(ring);
+      w.updateLogStats({ scopedRecs: ring });
+    } finally {
+      w.mergeLogArchive = realMerge;
+    }
+    check('one live frame merges once for rows and stats',
+      calls.length === 2 && calls[0] === calls[1] &&
+      ids(calls[0]) === 'memo-old1,memo-ring0,memo-ring1');
+    w.__memoArchive = [];
+    w.eval('logArchive = window.__memoArchive');
+    check('an empty archive returns the scoped ring array itself',
+      w.mergeLogArchive(ring) === ring);
+    // Restore the suite's own data and repaint through the product owners.
+    w.__memoSavedData = savedData; w.__memoSavedArchive = savedArchive;
+    w.eval('lastData = window.__memoSavedData; logArchive = window.__memoSavedArchive; resetLogWindow(); renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+    for (const key of ['__memoRing', '__memoArchive', '__memoData', '__memoSavedData', '__memoSavedArchive']) delete w[key];
+  }
+
   // ---- test 10d: the request log nests by local calendar day - a divider
   // rides above each day's first row, moves with live inserts, and never
   // duplicates or orphans across full resyncs. Fixtures anchor to local

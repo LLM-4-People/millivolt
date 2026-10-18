@@ -22,6 +22,7 @@ function resetLogWindow() {
   logLimit = 0;
   const hadArchive = logArchive.length > 0;
   logArchive = [];
+  _logMergeMemo = null;
   if (hadArchive) pruneModelNames();
   logFetching = false;
   logExhausted = false;
@@ -32,8 +33,25 @@ function resetLogWindow() {
   // layout, so first paint must not measure the empty shell just to reset it.
   if (box && logHTML.size) box.scrollTop = 0; // newest-first on navigation/full resync
 }
+// One-entry memo for the merged window. renderRequestsIncremental and
+// updateLogStats both merge on every live frame, and a deep archive makes that
+// build O(ring+archive) twice. The live data identity and revision, the
+// archive array identity and length, and either the caller's scoped-ring array
+// or the cached merged result (a render fallback passes the merged window
+// back) fully identify a build. Archive replacement/prepend, in-place trim,
+// reset, a live revision bump, a data replacement or a different scoped-ring
+// array all miss. Only the latest result is retained.
+let _logMergeMemo = null;
 function mergeLogArchive(scopedRing) {
-  if (!logArchive.length) return scopedRing;
+  if (!logArchive.length) { _logMergeMemo = null; return scopedRing; }
+  const data = lastData;
+  const rev = data?._rev || 0;
+  const memo = _logMergeMemo;
+  if (memo && memo.data === data && memo.rev === rev &&
+      memo.archive === logArchive && memo.archiveLen === logArchive.length &&
+      (memo.ring === scopedRing || memo.merged === scopedRing)) {
+    return memo.merged;
+  }
   const seen = new Set();
   for (const r of scopedRing) { if (r && r.id) seen.add(r.id); }
   const extra = [];
@@ -43,7 +61,9 @@ function mergeLogArchive(scopedRing) {
   // Durable pages retain their server keyset order and append below the live
   // arrival-ordered ring. Do not sort live rows or derive an archive cutoff
   // from them: a late completion can have a much older start than its peers.
-  return extra.concat(scopedRing);
+  const merged = extra.concat(scopedRing);
+  _logMergeMemo = {data, rev, archive: logArchive, archiveLen: logArchive.length, ring: scopedRing, merged};
+  return merged;
 }
 function visibleLog(recs) {
   const n = Math.min(recs.length, logCap());
