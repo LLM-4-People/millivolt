@@ -354,7 +354,7 @@ func TestSettingsDocWireKeysStrict(t *testing.T) {
 	// The save response carries the STATE subset only (restart_required,
 	// values, revision, effective) plus saved, last_reload and error - the
 	// dashboard merges those into the doc its GET already fetched
-	// (chrome.js saveSettings). A re-added GET-only key reddens here.
+	// (settings.js saveSettings). A re-added GET-only key reddens here.
 	post := settingsPost(h, doc.Revision, `{"max_retries":2}`)
 	if post.Code != 200 {
 		t.Fatalf("POST status = %d body=%s", post.Code, post.Body.String())

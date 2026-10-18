@@ -1,13 +1,13 @@
 package config
 
 // Cross-language regex mirrors: the dashboard's PROV_PATH_RE and
-// PROV_HEADER_RE (chrome.js) must accept and reject exactly what the Go
-// owners (provPathRE, ValidHeaderName) do. The JS literals are extracted
-// from the real chrome.js source and compiled with Go's regexp engine, so
-// one shared table drives both sides of each pair: any verdict change on
-// either side reddens here. The extraction itself fails loudly if a future
-// pattern uses JS-only syntax or an unescaped slash, instead of silently
-// comparing nothing.
+// PROV_HEADER_RE (settings.js, the lazily loaded provider editor) must accept
+// and reject exactly what the Go owners (provPathRE, ValidHeaderName) do. The
+// JS literals are extracted from the real settings.js source and compiled with
+// Go's regexp engine, so one shared table drives both sides of each pair: any
+// verdict change on either side reddens here. The extraction itself fails
+// loudly if a future pattern uses JS-only syntax or an unescaped slash, instead
+// of silently comparing nothing.
 
 import (
 	"os"
@@ -18,28 +18,28 @@ import (
 	"testing"
 )
 
-// chromeJSSource locates the repository root from this file's compile-time
+// settingsJSSource locates the repository root from this file's compile-time
 // source path (the same self-location rule the web test suite applies;
 // test overlays keep the physical path, so the walk finds the root's
-// go.mod) and reads the dashboard's chrome.js from it.
-func chromeJSSource(t *testing.T) []byte {
+// go.mod) and reads the dashboard's settings.js from it.
+func settingsJSSource(t *testing.T) []byte {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Skip("cannot locate own source path (trimpath build) - chrome.js regex mirrors unchecked")
+		t.Skip("cannot locate own source path (trimpath build) - settings.js regex mirrors unchecked")
 	}
 	dir := filepath.Dir(file)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			b, err := os.ReadFile(filepath.Join(dir, "internal", "web", "static", "js", "chrome.js"))
+			b, err := os.ReadFile(filepath.Join(dir, "internal", "web", "static", "js", "settings.js"))
 			if err != nil {
-				t.Fatalf("read chrome.js: %v", err)
+				t.Fatalf("read settings.js: %v", err)
 			}
 			return b
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Skip("no go.mod above " + file + " - chrome.js regex mirrors unchecked")
+			t.Skip("no go.mod above " + file + " - settings.js regex mirrors unchecked")
 		}
 		dir = parent
 	}
@@ -53,15 +53,15 @@ func jsRegexLiteral(t *testing.T, src []byte, name string) string {
 	decl := "const " + name + " = /"
 	start := strings.Index(string(src), decl)
 	if start < 0 {
-		t.Fatalf("chrome.js missing const %s = /", name)
+		t.Fatalf("settings.js missing const %s = /", name)
 	}
 	rest := string(src[start+len(decl):])
 	end := strings.Index(rest, "/")
 	if end < 0 {
-		t.Fatalf("chrome.js %s pattern literal is not closed", name)
+		t.Fatalf("settings.js %s pattern literal is not closed", name)
 	}
 	if next := rest[end+1 : end+2]; next != ";" && next != "" && next != "\n" {
-		t.Fatalf("chrome.js %s carries regex flags; the mirror only handles flagless literals", name)
+		t.Fatalf("settings.js %s carries regex flags; the mirror only handles flagless literals", name)
 	}
 	return rest[:end]
 }
@@ -72,7 +72,7 @@ func jsRegexLiteral(t *testing.T, src []byte, name string) string {
 // verdict on every crafted path, so the Settings editor can never accept a
 // path the server would reject (or refuse one it accepts).
 func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
-	js := jsRegexLiteral(t, chromeJSSource(t), "PROV_PATH_RE")
+	js := jsRegexLiteral(t, settingsJSSource(t), "PROV_PATH_RE")
 	jsRE, err := regexp.Compile(js)
 	if err != nil {
 		t.Fatalf("the extracted PROV_PATH_RE %q is not a Go-compilable pattern: %v", js, err)
@@ -84,7 +84,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("provPathRE(%q) = false, want true", s)
 		}
 		if !jsRE.MatchString(s) {
-			t.Errorf("chrome.js PROV_PATH_RE(%q) = false, want true (Go accepts)", s)
+			t.Errorf("settings.js PROV_PATH_RE(%q) = false, want true (Go accepts)", s)
 		}
 	}
 	for _, s := range reject {
@@ -92,7 +92,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("provPathRE(%q) = true, want false", s)
 		}
 		if jsRE.MatchString(s) {
-			t.Errorf("chrome.js PROV_PATH_RE(%q) = true, want false (Go rejects)", s)
+			t.Errorf("settings.js PROV_PATH_RE(%q) = true, want false (Go rejects)", s)
 		}
 	}
 }
@@ -103,7 +103,7 @@ func TestProvPathGrammarAndJSRegexAgree(t *testing.T) {
 // must agree on every crafted name, so the Settings editor denies exactly
 // the names the server denies.
 func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
-	js := jsRegexLiteral(t, chromeJSSource(t), "PROV_HEADER_RE")
+	js := jsRegexLiteral(t, settingsJSSource(t), "PROV_HEADER_RE")
 	jsRE, err := regexp.Compile(js)
 	if err != nil {
 		t.Fatalf("the extracted PROV_HEADER_RE %q is not a Go-compilable pattern: %v", js, err)
@@ -115,7 +115,7 @@ func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("ValidHeaderName(%q) = false, want true", s)
 		}
 		if !jsRE.MatchString(s) {
-			t.Errorf("chrome.js PROV_HEADER_RE(%q) = false, want true (Go accepts)", s)
+			t.Errorf("settings.js PROV_HEADER_RE(%q) = false, want true (Go accepts)", s)
 		}
 	}
 	for _, s := range reject {
@@ -123,7 +123,7 @@ func TestValidHeaderNameGrammarAndJSRegexAgree(t *testing.T) {
 			t.Errorf("ValidHeaderName(%q) = true, want false", s)
 		}
 		if jsRE.MatchString(s) {
-			t.Errorf("chrome.js PROV_HEADER_RE(%q) = true, want false (Go rejects)", s)
+			t.Errorf("settings.js PROV_HEADER_RE(%q) = true, want false (Go rejects)", s)
 		}
 	}
 }

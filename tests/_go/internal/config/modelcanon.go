@@ -195,7 +195,7 @@ func TestModelRuleExactNoPadding(t *testing.T) {
 }
 
 // TestModelRulesMaxMirrorsDashboard pins the pipeline cap's literal value:
-// the dashboard's MODEL_RULES_MAX (chrome.js) mirrors it in the editor's
+// the dashboard's MODEL_RULES_MAX (settings.js) mirrors it in the editor's
 // count line and add gate, and the rejection text carries the number to the
 // operator. TestModelRulesCap exercises the boundary symbolically; this pin
 // holds the VALUE so a Go-side change cannot silently strand the JS mirror.
