@@ -1148,6 +1148,8 @@ do not apply counter-only `rate()`/`increase()` assumptions to them. Its TTFT
 quantiles use the ring's sample contract, which differs from dashboard R7 history
 percentiles. Metric names and units are exposed with HELP/TYPE metadata at
 `/metrics/prometheus`; [prometheus.go](../internal/metrics/prometheus.go) owns them.
+An unchanged finalized ring revision serves the exact last exposition without
+another ring copy, aggregate or TTFT sort; any ring content transition rebuilds.
 
 ### Operator recipes
 

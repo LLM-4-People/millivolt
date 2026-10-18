@@ -11,6 +11,18 @@ import (
 	"sync/atomic"
 )
 
+// prometheusCache holds the last rendered Prometheus exposition and the
+// finalized revision it was built from. mu serializes scrapes across the cold
+// render, so concurrent callers share one build; a cached hit only reads the
+// ring revision. Lock order is mu then the ring's mu: the ring lock is never
+// held while rendering or publishing, and no mutation path takes mu.
+type prometheusCache struct {
+	mu       sync.Mutex
+	revision uint64
+	body     string
+	valid    bool
+}
+
 // Buffer is an in-memory, lock-free-ish ring buffer of recent records. It
 // supports O(1) append and a snapshot query for the live dashboard. Skew is
 // tolerated for reads: readers see a consistent snapshot at the moment they
@@ -36,6 +48,12 @@ type Buffer struct {
 	// an increment. Readers can validate memoized finalized/pending aggregates.
 	finalRevision   uint64
 	pendingRevision uint64
+	// promCache is the one last-rendered Prometheus exposition, keyed by the
+	// finalized revision above. Every content transition (record, eviction,
+	// backfill, removal, reset/purge) already advances that revision, so a
+	// scrape at an unchanged revision reuses the body without another ring
+	// copy, record pass, or TTFT sort. One body bounds memory.
+	promCache prometheusCache
 
 	// feedID identifies the current replay epoch, guarded by mu. Restarts and
 	// removals mint a fresh pin: deltas cannot communicate deleted records.
@@ -416,6 +434,45 @@ func (b *Buffer) Revisions() (finalized, pending uint64) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.finalRevision, b.pendingRevision
+}
+
+// PrometheusExposition returns the exposition for the current finalized ring
+// revision, rendering it with render only when that revision has advanced.
+// A hit reads the revision and returns the retained body without copying the
+// ring, aggregating records, or sorting TTFT samples. A miss snapshots the
+// records and their revision under one ring lock, then renders and publishes
+// outside it; concurrent scrapes serialize on the cache lock and reuse the one
+// build. A failed render publishes nothing, so a later scrape retries it.
+func (b *Buffer) PrometheusExposition(render func([]*Record) (string, error)) (string, error) {
+	b.promCache.mu.Lock()
+	defer b.promCache.mu.Unlock()
+	if b.promCache.valid {
+		b.mu.RLock()
+		revision := b.finalRevision
+		b.mu.RUnlock()
+		if revision == b.promCache.revision {
+			return b.promCache.body, nil
+		}
+	}
+	records, revision := b.prometheusSnapshot()
+	body, err := render(records)
+	if err != nil {
+		return "", err // never publish a body the exposition could not build
+	}
+	b.promCache.revision = revision
+	b.promCache.body = body
+	b.promCache.valid = true
+	return body, nil
+}
+
+// prometheusSnapshot copies the finalized ring window together with the
+// revision it represents under one lock, so a concurrent mutation neither
+// tears the record slice nor leaves it tagged with a newer revision.
+// Callers must not hold the ring lock; the returned slice is a private copy.
+func (b *Buffer) prometheusSnapshot() ([]*Record, uint64) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return copyRingWindow(b.buf, b.ringIndex(0), b.size), b.finalRevision
 }
 
 // Backfill loads existing records into the ring buffer at startup to restore

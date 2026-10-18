@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -9,8 +10,10 @@ import (
 	"strings"
 )
 
-// HandlePrometheus renders the /metrics/prometheus exposition. It snapshots
-// the ring buffer and emits aggregates. Callers register this on the mux.
+// HandlePrometheus renders the /metrics/prometheus exposition. It reuses the
+// last body while the finalized ring revision is unchanged, so repeated
+// scrapes skip the snapshot, aggregate, and TTFT sort. Callers register this on
+// the mux.
 func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	if !RejectUnlessGet(w, r) {
 		return
@@ -18,12 +21,26 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	// Operator-plane JSON lives behind the credential: the response carries
 	// request totals and must never be cached by a shared intermediary.
 	w.Header().Set("Cache-Control", "no-store")
-	records := buf.Snapshot()
-	agg := Aggregate(records)
-	if agg.Err != nil {
-		log.Printf("metrics: aggregate: %v", agg.Err)
+	body, err := buf.PrometheusExposition(renderPrometheusExposition)
+	if err != nil {
+		log.Printf("metrics: aggregate: %v", err)
 		http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
 		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	// Best-effort write: the client may have already disconnected; nothing
+	// actionable remains at that point.
+	_, _ = io.WriteString(w, body)
+}
+
+// renderPrometheusExposition folds one immutable ring snapshot into the
+// exposition text. A failed aggregate returns no partial body, so the handler
+// can fail the whole scrape.
+func renderPrometheusExposition(records []*Record) (string, error) {
+	agg := Aggregate(records)
+	if agg.Err != nil {
+		return "", agg.Err
 	}
 
 	var b strings.Builder
@@ -73,10 +90,7 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_count %d\n", len(ttfts))
 	}
 
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	// Best-effort write: the client may have already disconnected; nothing
-	// actionable remains at that point.
-	w.Write([]byte(b.String()))
+	return b.String(), nil
 }
 
 func sortedKeys(m map[string]int) []string {
