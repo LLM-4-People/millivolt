@@ -502,7 +502,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, rec, err := readRequest(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview)
+	body, rec, err := readRequestHint(r, int64(s.cfg().MaxRequestBytes), s.cfg().CaptureBodyPreview, reserve)
 	if err != nil {
 		status := http.StatusBadRequest
 		var overflow *http.MaxBytesError

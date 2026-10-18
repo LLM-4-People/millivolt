@@ -254,6 +254,25 @@ func TestReadRequestBoundedLengthHintAndErrors(t *testing.T) {
 	}
 }
 
+// TestReadRequestHintAvoidsLargeBodyCopy pins the proxy caller's admitted-size
+// hint: a declared 2 MiB body must allocate about one body, not the 1 MiB
+// prefix plus a full right-sized copy.
+func TestReadRequestHintAvoidsLargeBodyCopy(t *testing.T) {
+	body := strings.Repeat("x", 2<<20)
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			rc := &requestTestBody{Reader: strings.NewReader(body)}
+			got, _, err := readRequestHint(&http.Request{Body: rc, ContentLength: int64(len(body))}, 32<<20, false, int64(len(body)))
+			if err != nil || len(got) != len(body) {
+				b.Fatalf("len=%d err=%v", len(got), err)
+			}
+		}
+	})
+	if alloc := res.AllocedBytesPerOp(); alloc > int64(len(body))*3/2 {
+		t.Fatalf("2 MiB hint allocated %d bytes/op, want about one body (prefix+copy regression)", alloc)
+	}
+}
+
 func TestProxyRequestBodyLimitHTTP(t *testing.T) {
 	for _, size := range []int{1023, 1024, 1025} {
 		for _, declared := range []int64{-1, 0, 1, 1 << 50} {

@@ -1187,17 +1187,25 @@ func translateResponse(format string, body []byte) ([]byte, error) {
 }
 
 // readRequest preserves the exact body for forwarding/retries and extracts
-// routing + observability metadata once. Content-Length is only a capped
-// allocation hint: short/long actual bodies still follow the same byte limit.
+// routing + observability metadata once. Direct callers use the 1 MiB
+// speculative guardrail; the proxy passes the admitted upload size so a
+// declared body can be read once in place instead of prefix + copy.
 func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, rec *metrics.Record, err error) {
+	return readRequestHint(r, maxBytes, preview, requestReadHintMax)
+}
+
+func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int64) (body []byte, rec *metrics.Record, err error) {
 	rec = new(metrics.Record)
 	if r.Body == nil {
 		rec.Start = time.Now()
 		return nil, rec, nil
 	}
 	defer r.Body.Close()
+	if hintMax <= 0 {
+		hintMax = requestReadHintMax
+	}
 	reader := io.LimitReader(r.Body, maxBytes+1)
-	hint := min(r.ContentLength, maxBytes+1, requestReadHintMax)
+	hint := min(r.ContentLength, maxBytes+1, hintMax)
 	switch {
 	case r.ContentLength < 0:
 		// Unknown length (chunked): one growable buffer owns the bytes.
@@ -1210,9 +1218,9 @@ func readRequest(r *http.Request, maxBytes int64, preview bool) (body []byte, re
 		body = buf.Bytes()
 	case hint > 0:
 		body = make([]byte, int(hint))
-		if r.ContentLength <= requestReadHintMax {
-			// The declared length is inside the speculative guardrail: read it
-			// in place, with no growth or right-sizing copy. A short body is
+		if r.ContentLength <= hintMax {
+			// The declared length fits the admitted allocation: read it in
+			// place, with no growth or right-sizing copy. A short body is
 			// accepted exactly as before.
 			var n int
 			n, err = io.ReadFull(reader, body)
