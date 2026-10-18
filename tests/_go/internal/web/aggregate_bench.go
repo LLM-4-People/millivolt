@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -161,6 +163,63 @@ func benchmarkProjectionCompaction(b *testing.B, history int) {
 		m.append(rows, len(rows)-1)
 		benchmarkProjectionMetrics = m
 	}
+}
+
+// BenchmarkAggregateFlightCoalesce measures N concurrent callers of one cold
+// chart key. The hooks hold the leader until every waiter has joined, so each
+// iteration measures the coalesced path: one fold, N-1 waits, then the shared
+// publication. Only the memo slots are reset, so no preload or fixture is
+// involved. Allocations are per coalesced batch of N requests.
+func BenchmarkAggregateFlightCoalesce(b *testing.B) {
+	const callers = 8
+	now := time.Now()
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("flight", now.Add(-time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	b.ReportAllocs()
+	for b.Loop() {
+		api.chartMemo.mu.Lock()
+		api.chartMemo.entry = nil
+		api.chartMemo.flight = nil
+		api.chartMemo.mu.Unlock()
+
+		var folds, waits atomic.Int64
+		allJoined := make(chan struct{})
+		api.testHooks = &aggregateTestHooks{
+			cold: func() {
+				if folds.Add(1) == 1 {
+					select {
+					case <-allJoined:
+					case <-time.After(5 * time.Second):
+					}
+				}
+			},
+			wait: func() {
+				if waits.Add(1) == callers-1 {
+					close(allJoined)
+				}
+			},
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(callers)
+		for range callers {
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := api.chart(b.Context(), 60, nil, "", now.UnixMilli()); err != nil {
+					b.Error(err)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if folds.Load() != 1 || waits.Load() != callers-1 {
+			b.Fatalf("folds = %d, waits = %d; want 1, %d", folds.Load(), waits.Load(), callers-1)
+		}
+	}
+	b.ReportMetric(1, "folds/op")
+	b.ReportMetric(callers-1, "waits/op")
 }
 
 // Unlike the fold kernel, this includes revision checks, query preparation,

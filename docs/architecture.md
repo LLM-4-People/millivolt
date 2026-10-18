@@ -177,6 +177,9 @@ scan plus a separate preload scan.
 Chart and explorer each retain one immutable last-result slot. Keys include
 validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
+One in-flight fold per memo is shared by concurrent same-key callers: a
+different key never waits, and a waiter that finds no published entry after the
+leader ends recomputes as the next leader instead of inheriting its error.
 The bootstrap KPI fold retains one exact totals slot keyed by the ring's
 finalized revision and the store's durable accounting revision; live counters
 are filled at serve time and the ring snapshot itself is never retained.

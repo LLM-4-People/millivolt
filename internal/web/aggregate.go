@@ -95,6 +95,9 @@ type AggAPI struct {
 	kpiMemo      kpiMemo
 	projection   historyProjection
 	modelRules   modelRuleCache
+	// testHooks is nil in production; package tests use it to sequence the
+	// in-flight coalescing cases without timing assumptions.
+	testHooks *aggregateTestHooks
 	// Optional state providers wired by main.go so HandleBootstrap can carry
 	// every first-paint surface in one payload. Nil = section omitted.
 	Dash     func() any // effective dashboard config (config.Map)

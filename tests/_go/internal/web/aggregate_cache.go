@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -307,4 +308,386 @@ func TestAggregateMemoCancellationBoundAndConcurrentReaders(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// flightProbe sequences the in-flight coalescing tests without timing
+// assumptions: the first cold fold blocks until release, and the first
+// same-key waiter announces itself through joined.
+type flightProbe struct {
+	cold    atomic.Int64
+	waits   atomic.Int64
+	started chan struct{}
+	release chan struct{}
+	joined  chan struct{}
+}
+
+func newFlightProbe() *flightProbe {
+	return &flightProbe{started: make(chan struct{}), release: make(chan struct{}), joined: make(chan struct{})}
+}
+
+func (p *flightProbe) hooks() *aggregateTestHooks {
+	var joinedOnce sync.Once
+	return &aggregateTestHooks{
+		cold: func() {
+			if p.cold.Add(1) == 1 {
+				close(p.started)
+				<-p.release
+			}
+		},
+		wait: func() {
+			p.waits.Add(1)
+			joinedOnce.Do(func() { close(p.joined) })
+		},
+	}
+}
+
+func awaitFlightSignal(t *testing.T, signal <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func awaitFlightJoin(t *testing.T, probe *flightProbe, release func()) {
+	t.Helper()
+	select {
+	case <-probe.joined:
+	case <-time.After(5 * time.Second):
+		release()
+		t.Fatalf("same-key caller did not join the in-flight fold (cold calls = %d)", probe.cold.Load())
+	}
+}
+
+func assertFlightComplete[T any](t *testing.T, m *aggregateMemo[T]) {
+	t.Helper()
+	m.mu.Lock()
+	published, inFlight := m.entry != nil, m.flight != nil
+	m.mu.Unlock()
+	if !published || inFlight {
+		t.Fatalf("memo published/flight = %v/%v, want true/false", published, inFlight)
+	}
+}
+
+func TestAggregateFlightCoalescesChart(t *testing.T) {
+	for _, winMin := range []int{0, 60} {
+		t.Run(fmt.Sprintf("window_%d", winMin), func(t *testing.T) {
+			now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+			buf := metrics.NewBuffer(8)
+			buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+			api := NewAggAPI(buf, nil, time.Second)
+			probe := newFlightProbe()
+			api.testHooks = probe.hooks()
+
+			var wg sync.WaitGroup
+			payloads := make([]chartPayload, 2)
+			errs := make([]error, 2)
+			wg.Go(func() { payloads[0], errs[0] = api.chart(t.Context(), winMin, nil, "", now.UnixMilli()) })
+			awaitFlightSignal(t, probe.started, "leader chart fold")
+			wg.Go(func() { payloads[1], errs[1] = api.chart(t.Context(), winMin, nil, "", now.UnixMilli()) })
+			awaitFlightJoin(t, probe, func() { close(probe.release); wg.Wait() })
+			close(probe.release)
+			wg.Wait()
+
+			for i, err := range errs {
+				if err != nil {
+					t.Fatalf("chart %d: %v", i, err)
+				}
+			}
+			if got := probe.cold.Load(); got != 1 {
+				t.Fatalf("cold folds = %d, want 1", got)
+			}
+			if !reflect.DeepEqual(payloads[0], payloads[1]) {
+				t.Fatalf("coalesced charts differ:\n%+v\n%+v", payloads[0], payloads[1])
+			}
+			if got := cacheChartRequests(payloads[1]); got != 1 {
+				t.Fatalf("chart requests = %d, want 1", got)
+			}
+			assertFlightComplete(t, &api.chartMemo)
+		})
+	}
+}
+
+func TestAggregateFlightCoalescesExplorer(t *testing.T) {
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	probe := newFlightProbe()
+	api.testHooks = probe.hooks()
+
+	var wg sync.WaitGroup
+	payloads := make([]explorerPayload, 2)
+	errs := make([]error, 2)
+	wg.Go(func() { payloads[0], errs[0] = api.explorer(t.Context(), "provider", nil, "") })
+	awaitFlightSignal(t, probe.started, "leader explorer fold")
+	wg.Go(func() { payloads[1], errs[1] = api.explorer(t.Context(), "provider", nil, "") })
+	awaitFlightJoin(t, probe, func() { close(probe.release); wg.Wait() })
+	close(probe.release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("explorer %d: %v", i, err)
+		}
+	}
+	if got := probe.cold.Load(); got != 1 {
+		t.Fatalf("cold folds = %d, want 1", got)
+	}
+	if payloads[0].Total != 1 || !reflect.DeepEqual(payloads[0], payloads[1]) {
+		t.Fatalf("coalesced explorers differ:\n%+v\n%+v", payloads[0], payloads[1])
+	}
+	assertFlightComplete(t, &api.explorerMemo)
+}
+
+func TestAggregateFlightDifferentKeyDoesNotWait(t *testing.T) {
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	probe := newFlightProbe()
+	api.testHooks = probe.hooks()
+
+	var wg sync.WaitGroup
+	leaderErr := make(chan error, 1)
+	wg.Go(func() {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		leaderErr <- err
+	})
+	awaitFlightSignal(t, probe.started, "leader chart fold")
+
+	// The one flight slot belongs to the 60-minute key. A different window
+	// must compute now, not wait behind it.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	p, err := api.chart(ctx, 30, nil, "", now.UnixMilli())
+	if err != nil {
+		t.Fatalf("different-key chart waited behind the flight: %v", err)
+	}
+	if got := probe.cold.Load(); got != 2 {
+		t.Fatalf("cold folds = %d, want 2", got)
+	}
+	from, step, count := chartWindowEdges(now.UnixMilli(), now.Add(-30*time.Minute).UnixMilli())
+	if p.FromMs != from || p.BucketMs != step || len(p.Buckets) != count {
+		t.Fatalf("different-key geometry = %d/%d/%d, want %d/%d/%d",
+			p.FromMs, p.BucketMs, len(p.Buckets), from, step, count)
+	}
+
+	close(probe.release)
+	wg.Wait()
+	if err := <-leaderErr; err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+}
+
+func TestAggregateFlightCanceledFollowerKeepsLeader(t *testing.T) {
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	probe := newFlightProbe()
+	api.testHooks = probe.hooks()
+
+	var wg sync.WaitGroup
+	leaderErr := make(chan error, 1)
+	wg.Go(func() {
+		_, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		leaderErr <- err
+	})
+	awaitFlightSignal(t, probe.started, "leader chart fold")
+
+	followerCtx, cancelFollower := context.WithCancel(t.Context())
+	followerDone := make(chan error, 1)
+	wg.Go(func() {
+		_, err := api.chart(followerCtx, 60, nil, "", now.UnixMilli())
+		followerDone <- err
+	})
+	awaitFlightJoin(t, probe, func() { close(probe.release); wg.Wait() })
+	cancelFollower()
+
+	select {
+	case err := <-followerDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled follower = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		close(probe.release)
+		wg.Wait()
+		t.Fatal("canceled follower did not return")
+	}
+
+	// The follower's cancellation must leave the leader and its slot intact.
+	api.chartMemo.mu.Lock()
+	flight, entry := api.chartMemo.flight, api.chartMemo.entry
+	api.chartMemo.mu.Unlock()
+	if flight == nil || entry != nil {
+		t.Fatalf("follower cancellation disturbed the leader: in-flight=%v published=%v", flight != nil, entry != nil)
+	}
+	if got := probe.cold.Load(); got != 1 {
+		t.Fatalf("cold folds = %d, want 1", got)
+	}
+
+	close(probe.release)
+	wg.Wait()
+	if err := <-leaderErr; err != nil {
+		t.Fatalf("leader: %v", err)
+	}
+	assertFlightComplete(t, &api.chartMemo)
+}
+
+func TestAggregateFlightLeaderCanceledThenFollowerLeads(t *testing.T) {
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	probe := newFlightProbe()
+	api.testHooks = probe.hooks()
+
+	var wg sync.WaitGroup
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	leaderErr := make(chan error, 1)
+	wg.Go(func() {
+		_, err := api.chart(leaderCtx, 60, nil, "", now.UnixMilli())
+		leaderErr <- err
+	})
+	awaitFlightSignal(t, probe.started, "leader chart fold")
+
+	followerPayload := make(chan chartPayload, 1)
+	followerErr := make(chan error, 1)
+	wg.Go(func() {
+		p, err := api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		followerPayload <- p
+		followerErr <- err
+	})
+	awaitFlightJoin(t, probe, func() { close(probe.release); wg.Wait() })
+
+	cancelLeader()
+	close(probe.release)
+	wg.Wait()
+
+	if err := <-leaderErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("leader = %v, want context.Canceled", err)
+	}
+	if err := <-followerErr; err != nil {
+		t.Fatalf("follower inherited the leader failure: %v", err)
+	}
+	p := <-followerPayload
+	if got := cacheChartRequests(p); got != 1 {
+		t.Fatalf("follower requests = %d, want 1", got)
+	}
+	if got := probe.cold.Load(); got != 2 {
+		t.Fatalf("cold folds = %d, want 2 (canceled leader then follower)", got)
+	}
+	assertFlightComplete(t, &api.chartMemo)
+}
+
+func TestAggregateFlightChartGeometryRecomputes(t *testing.T) {
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+	probe := newFlightProbe()
+	api.testHooks = probe.hooks()
+
+	var wg sync.WaitGroup
+	payloads := make([]chartPayload, 2)
+	errs := make([]error, 2)
+	wg.Go(func() { payloads[0], errs[0] = api.chart(t.Context(), 60, nil, "", now.UnixMilli()) })
+	awaitFlightSignal(t, probe.started, "leader chart fold")
+
+	// The same key carries no clock, so the follower joins the flight and then
+	// finds a published payload with the leader's geometry.
+	followerNow := now.Add(2 * time.Minute)
+	wg.Go(func() { payloads[1], errs[1] = api.chart(t.Context(), 60, nil, "", followerNow.UnixMilli()) })
+	awaitFlightJoin(t, probe, func() { close(probe.release); wg.Wait() })
+	close(probe.release)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("chart %d: %v", i, err)
+		}
+	}
+	if got := probe.cold.Load(); got != 2 {
+		t.Fatalf("cold folds = %d, want 2 (mismatched geometry recomputes)", got)
+	}
+	leaderFrom, leaderStep, leaderCount := chartWindowEdges(now.UnixMilli(), now.Add(-60*time.Minute).UnixMilli())
+	followerFrom, followerStep, followerCount := chartWindowEdges(followerNow.UnixMilli(), followerNow.Add(-60*time.Minute).UnixMilli())
+	if followerFrom == leaderFrom {
+		t.Fatal("test clock did not change the bucket geometry")
+	}
+	for i, want := range []struct {
+		from  int64
+		step  int64
+		count int
+	}{{leaderFrom, leaderStep, leaderCount}, {followerFrom, followerStep, followerCount}} {
+		p := payloads[i]
+		if p.FromMs != want.from || p.BucketMs != want.step || len(p.Buckets) != want.count {
+			t.Fatalf("chart %d geometry = %d/%d/%d, want %d/%d/%d",
+				i, p.FromMs, p.BucketMs, len(p.Buckets), want.from, want.step, want.count)
+		}
+		if cacheChartRequests(p) != 1 {
+			t.Fatalf("chart %d requests = %d, want 1", i, cacheChartRequests(p))
+		}
+	}
+	if api.chartMemo.entry.value.payload.FromMs != followerFrom {
+		t.Fatalf("published chart kept stale geometry: %d, want %d", api.chartMemo.entry.value.payload.FromMs, followerFrom)
+	}
+}
+
+func TestAggregateFlightConcurrentCold(t *testing.T) {
+	const callers = 8
+	now := time.Date(2030, 1, 2, 12, 0, 30, 0, time.UTC)
+	buf := metrics.NewBuffer(8)
+	buf.Record(cacheRecord("a", now.Add(-10*time.Minute)))
+	api := NewAggAPI(buf, nil, time.Second)
+
+	var cold, waits atomic.Int64
+	allJoined := make(chan struct{})
+	api.testHooks = &aggregateTestHooks{
+		cold: func() {
+			if cold.Add(1) == 1 {
+				select {
+				case <-allJoined:
+				case <-time.After(5 * time.Second):
+				}
+			}
+		},
+		wait: func() {
+			if waits.Add(1) == callers-1 {
+				close(allJoined)
+			}
+		},
+	}
+
+	start := make(chan struct{})
+	payloads := make([]chartPayload, callers)
+	errs := make([]error, callers)
+	var wg sync.WaitGroup
+	for i := range callers {
+		wg.Go(func() {
+			<-start
+			payloads[i], errs[i] = api.chart(t.Context(), 60, nil, "", now.UnixMilli())
+		})
+	}
+	close(start)
+	wg.Wait()
+
+	for i := range callers {
+		if errs[i] != nil {
+			t.Fatalf("chart %d: %v", i, errs[i])
+		}
+		if !reflect.DeepEqual(payloads[i], payloads[0]) {
+			t.Fatalf("concurrent chart %d differs:\n%+v\n%+v", i, payloads[i], payloads[0])
+		}
+	}
+	if got := cold.Load(); got != 1 {
+		t.Fatalf("cold folds = %d, want 1", got)
+	}
+	if got := waits.Load(); got != callers-1 {
+		t.Fatalf("waits = %d, want %d", got, callers-1)
+	}
+	t.Logf("callers=%d folds=%d waits=%d", callers, cold.Load(), waits.Load())
+	assertFlightComplete(t, &api.chartMemo)
 }
