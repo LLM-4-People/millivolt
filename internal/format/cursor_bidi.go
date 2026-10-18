@@ -17,6 +17,7 @@ package format
 // user-tunable.
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -108,6 +109,12 @@ const cursorBlobStoreBytesMax = 64 << 20 // 64 MiB
 // keeping the map bounded. Internal safety guardrail, not user-tunable.
 const cursorBlobStoreEntriesMax = 65_536
 
+// cursorBlobIDLen is the exact retained blob-key length: the raw sha256 digest
+// the Cursor schema documents for GetBlobArgs.blob_id (and history digests use
+// the same shape). A malformed id is rejected at put/get rather than retained
+// as an unbounded map key. Internal wire-contract constant.
+const cursorBlobIDLen = sha256.Size
+
 var (
 	// errCursorBlobBytes is the stable fail-closed reason for exceeding the
 	// per-run KV blob byte cap. Callers propagate it: a history set that cannot
@@ -118,10 +125,30 @@ var (
 	// per-run KV blob entry cap. A replacement of an existing id is always
 	// allowed; only a new id can hit this bound.
 	errCursorBlobEntries = errors.New("cursor: kv blob entry limit exceeded")
+	// errCursorBlobID is the stable fail-closed reason for a blob id that is
+	// not the documented 32-byte sha256 shape.
+	errCursorBlobID = errors.New("cursor: invalid kv blob id")
 )
+
+// cloneRetainedBytes detaches b from its backing array with cap == len, so a
+// sub-slice of a large upstream frame cannot pin the whole frame in retained
+// state. The store and pending map own the returned value; callers must not
+// rely on aliasing to the source.
+func cloneRetainedBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	out := make([]byte, len(b))
+	copy(out, b)
+	return out
+}
 
 // KVBlobStore holds the history blobs the server may pull mid-stream. Blobs
 // are keyed by their raw sha256 digest bytes (what GetBlobArgs.blob_id carries).
+// The store owns every retained value: callers hand over ownership and must not
+// mutate a stored blob afterwards. History blobs are freshly marshaled and are
+// handed over as-is; server-pushed sub-slices are cloned by the handler before
+// put, so a tiny push cannot retain a whole frame.
 type KVBlobStore struct {
 	mu    sync.Mutex
 	m     map[string][]byte
@@ -137,6 +164,9 @@ func newKVBlobStore() *KVBlobStore { return &KVBlobStore{m: map[string][]byte{}}
 // existing id is always admitted by the entry cap and subtracts the old value
 // before the byte check, so same-size replacement always fits.
 func (s *KVBlobStore) put(id, data []byte) error {
+	if len(id) != cursorBlobIDLen {
+		return fmt.Errorf("%w (id %d bytes, want %d)", errCursorBlobID, len(id), cursorBlobIDLen)
+	}
 	key := string(id)
 	size := int64(len(data))
 	s.mu.Lock()
@@ -159,6 +189,9 @@ func (s *KVBlobStore) put(id, data []byte) error {
 }
 
 func (s *KVBlobStore) get(id []byte) ([]byte, bool) {
+	if len(id) != cursorBlobIDLen {
+		return nil, false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.m[string(id)]
@@ -193,21 +226,44 @@ type streamWriter struct {
 }
 
 // writeFramed writes a complete envelope (flags byte + length + payload) in a
-// single critical section. Once a write fails, subsequent writes are no-ops
-// returning the stored error (the stream is dead).
+// single critical section. The frame header is written separately so a large
+// payload is never copied again into a header buffer; bytes on the wire are
+// identical to the previous header+payload concatenation. Once a write fails,
+// subsequent writes are no-ops returning the stored error (the stream is dead).
 func (s *streamWriter) writeFramed(payload []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
 	}
-	buf := make([]byte, connectFrameHeader+len(payload))
-	// buf[0] flags = 0 (uncompressed data frame).
-	binary.BigEndian.PutUint32(buf[1:], uint32(len(payload)))
-	copy(buf[connectFrameHeader:], payload)
-	if _, err := s.w.Write(buf); err != nil {
+	var hdr [connectFrameHeader]byte
+	// hdr[0] flags = 0 (uncompressed data frame).
+	binary.BigEndian.PutUint32(hdr[1:], uint32(len(payload)))
+	if err := writeAll(s.w, hdr[:]); err != nil {
 		s.err = err
 		return err
+	}
+	if len(payload) > 0 {
+		if err := writeAll(s.w, payload); err != nil {
+			s.err = err
+			return err
+		}
+	}
+	return nil
+}
+
+// writeAll writes p in full. A short nil-error write is an io.Writer contract
+// violation; treating it as success would put a truncated frame on the wire.
+func writeAll(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		p = p[n:]
 	}
 	return nil
 }
@@ -228,16 +284,24 @@ func encodeSteerUserMessage(text string) []byte {
 
 // encodeKvGetBlobResult builds
 // AgentClientMessage{ kv_client_message=3 KvClientMessage{ id, get_blob_result=2 GetBlobResult{ blob_data? } } }.
-// A nil/empty blobData omits the field, signaling not-found to the server.
+// A nil/empty blobData omits the field, signaling not-found to the server. The
+// output is sized exactly, so the blob is copied into the envelope once.
 func encodeKvGetBlobResult(id uint64, blobData []byte) []byte {
-	var res []byte
+	var resLen int
 	if len(blobData) > 0 {
-		res = appendBytes(res, fGetBlobResultBlobData, blobData)
+		resLen = bytesFieldLen(fGetBlobResultBlobData, len(blobData))
 	}
-	var kv []byte
-	kv = appendUint32(kv, fKvMessageID, uint32(id))
-	kv = appendMessage(kv, fKvClientGetBlobResult, res)
-	return appendMessage(nil, fAgentClientMessageKvClientMessage, kv)
+	kvLen := uint32FieldLen(fKvMessageID, uint32(id)) + bytesFieldLen(fKvClientGetBlobResult, resLen)
+	out := make([]byte, 0, bytesFieldLen(fAgentClientMessageKvClientMessage, kvLen))
+	out = appendTag(out, fAgentClientMessageKvClientMessage, wireBytes)
+	out = appendVarint(out, uint64(kvLen))
+	out = appendUint32(out, fKvMessageID, uint32(id))
+	out = appendTag(out, fKvClientGetBlobResult, wireBytes)
+	out = appendVarint(out, uint64(resLen))
+	if len(blobData) > 0 {
+		out = appendBytes(out, fGetBlobResultBlobData, blobData)
+	}
+	return out
 }
 
 // encodeKvSetBlobAck builds AgentClientMessage{ kv_client_message=3 { id, set_blob_result=3 {} } }.
@@ -248,17 +312,36 @@ func encodeKvSetBlobAck(id uint64) []byte {
 	return appendMessage(nil, fAgentClientMessageKvClientMessage, kv)
 }
 
-// wrapExecClient wraps one exec reply payload in
-// AgentClientMessage{ exec_client_message=2 ExecClientMessage{ id, exec_id?, field payload } }:
-// the correlation id echoes the request's; execID rides only when present.
-func wrapExecClient(id uint64, execID []byte, field int, payload []byte) []byte {
-	var ex []byte
-	ex = appendUint32(ex, fExecMessageID, uint32(id))
+// execClientBodyLen is the exact encoded size of the inner ExecClientMessage
+// (id, optional exec_id and the reply payload) shared by the size and append
+// owners, so the allocated capacity can never drift from the bytes written.
+func execClientBodyLen(id uint64, execID []byte, field, payloadLen int) int {
+	body := uint32FieldLen(fExecMessageID, uint32(id))
 	if len(execID) > 0 {
-		ex = appendBytes(ex, fExecMessageExecID, execID)
+		body += bytesFieldLen(fExecMessageExecID, len(execID))
 	}
-	ex = appendMessage(ex, field, payload)
-	return appendMessage(nil, fAgentClientMessageExecClientMessage, ex)
+	return body + bytesFieldLen(field, payloadLen)
+}
+
+// execClientEnvelopeLen returns the exact encoded size of one exec reply:
+// AgentClientMessage{ exec_client_message=2 ExecClientMessage{ id, exec_id?, field payload } }.
+func execClientEnvelopeLen(id uint64, execID []byte, field, payloadLen int) int {
+	return bytesFieldLen(fAgentClientMessageExecClientMessage, execClientBodyLen(id, execID, field, payloadLen))
+}
+
+// appendExecClientHeader appends the exact-size exec reply envelope headers up
+// to (not including) the payload bytes. Callers allocate execClientEnvelopeLen
+// bytes of capacity and append exactly payloadLen payload bytes afterwards, so
+// the reply is built once instead of being wrapped through several copies.
+func appendExecClientHeader(dst []byte, id uint64, execID []byte, field, payloadLen int) []byte {
+	dst = appendTag(dst, fAgentClientMessageExecClientMessage, wireBytes)
+	dst = appendVarint(dst, uint64(execClientBodyLen(id, execID, field, payloadLen)))
+	dst = appendUint32(dst, fExecMessageID, uint32(id))
+	if len(execID) > 0 {
+		dst = appendBytes(dst, fExecMessageExecID, execID)
+	}
+	dst = appendTag(dst, field, wireBytes)
+	return appendVarint(dst, uint64(payloadLen))
 }
 
 // encodeMcpResult builds the reply that delivers a real tool result into a
@@ -266,21 +349,32 @@ func wrapExecClient(id uint64, execID []byte, field int, payload []byte) []byte 
 // AgentClientMessage{ exec_client_message=2 { id, exec_id?, mcp_result=11 McpResult } }.
 // Success:  mcp_result{ success=1 { content=1 { text=1 { text=1 result } }, is_error=2 false } }
 // Error:    mcp_result{ error=2 { error=1 result } }
+// The nested envelope is sized exactly and the result is copied once.
 func encodeMcpResult(id uint64, execID []byte, result string, isError bool) []byte {
-	var mcpResult []byte
+	textLen := stringFieldLen(1, result)
+	var mcpResultLen, itemLen, successLen int
 	if isError {
-		var mcpErr []byte
-		mcpErr = appendString(mcpErr, 1, result)  // McpError.error = 1
-		mcpResult = appendMessage(nil, 2, mcpErr) // McpResult.error = 2
+		mcpResultLen = bytesFieldLen(2, textLen)
 	} else {
-		text := appendString(nil, 1, result) // McpTextContent.text = 1
-		item := appendMessage(nil, 1, text)  // McpToolResultContentItem.text = 1
-		var success []byte
-		success = appendMessage(success, 1, item) // McpSuccess.content = 1 (repeated)
-		// is_error = 2 stays false (omitted).
-		mcpResult = appendMessage(nil, 1, success) // McpResult.success = 1
+		itemLen = bytesFieldLen(1, textLen)
+		successLen = bytesFieldLen(1, itemLen)
+		mcpResultLen = bytesFieldLen(1, successLen)
 	}
-	return wrapExecClient(id, execID, fExecClientMcpResult, mcpResult)
+	out := make([]byte, 0, execClientEnvelopeLen(id, execID, fExecClientMcpResult, mcpResultLen))
+	out = appendExecClientHeader(out, id, execID, fExecClientMcpResult, mcpResultLen)
+	if isError {
+		out = appendTag(out, 2, wireBytes)
+		out = appendVarint(out, uint64(textLen))
+		out = appendString(out, 1, result)
+		return out
+	}
+	out = appendTag(out, 1, wireBytes)
+	out = appendVarint(out, uint64(successLen))
+	out = appendTag(out, 1, wireBytes)
+	out = appendVarint(out, uint64(itemLen))
+	out = appendTag(out, 1, wireBytes)
+	out = appendVarint(out, uint64(textLen))
+	return appendString(out, 1, result)
 }
 
 // encodeRequestContextResult builds
@@ -288,9 +382,14 @@ func encodeMcpResult(id uint64, execID []byte, result string, isError bool) []by
 // The RequestContext is empty (a text bridge has no workspace/rules/tools to
 // advertise); the proven-minimal reply is success{ request_context{} }.
 func encodeRequestContextResult(id uint64, execID []byte) []byte {
-	success := appendMessage(nil, fRequestContextSuccessInner, nil) // empty RequestContext{}
-	result := appendMessage(nil, fRequestContextResultSucc, success)
-	return wrapExecClient(id, execID, fExecClientRequestContext, result)
+	successLen := bytesFieldLen(fRequestContextSuccessInner, 0)
+	resultLen := bytesFieldLen(fRequestContextResultSucc, successLen)
+	out := make([]byte, 0, execClientEnvelopeLen(id, execID, fExecClientRequestContext, resultLen))
+	out = appendExecClientHeader(out, id, execID, fExecClientRequestContext, resultLen)
+	out = appendTag(out, fRequestContextResultSucc, wireBytes)
+	out = appendVarint(out, uint64(successLen))
+	out = appendTag(out, fRequestContextSuccessInner, wireBytes)
+	return appendVarint(out, 0)
 }
 
 // handleKvServerMessage answers a server's KV get/set request on the request stream.
@@ -326,7 +425,9 @@ func handleKvServerMessage(sw *streamWriter, kvField *protoField, blobs *KVBlobS
 		bid := firstField(args, fSetBlobArgsBlobID)
 		bdata := firstField(args, fSetBlobArgsBlobData)
 		if bid != nil && bdata != nil {
-			if err := blobs.put(bid.raw, bdata.raw); err != nil {
+			// The store retains the value past this frame; detach the sub-slice
+			// so a tiny push cannot pin the whole upstream frame.
+			if err := blobs.put(bid.raw, cloneRetainedBytes(bdata.raw)); err != nil {
 				return fmt.Errorf("cursor: cache SetBlobArgs blob: %w", err)
 			}
 		}
@@ -364,7 +465,9 @@ func handleExecServerMessage(sw *streamWriter, exField *protoField, outCall *Cur
 		if outCall != nil {
 			*outCall = parseMcpArgs(mcp)
 			outCall.execID = id
-			outCall.execIDStr = execID
+			// The pending map retains the id past this frame; detach it from
+			// the frame's backing array.
+			outCall.execIDStr = cloneRetainedBytes(execID)
 		}
 		// Deliberately not answered in-stream: the proxy ends the turn and hands
 		// the call to the OpenAI client, which executes the tool and re-sends

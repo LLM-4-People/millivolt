@@ -182,13 +182,18 @@ func (fn runResultWriter) Write(p []byte) (int, error) { return fn(p) }
 
 func TestResumeOwnsUsageResetBeforeWritingResults(t *testing.T) {
 	var r *CursorRun
+	triggered := false
 	out := runResultWriter(func(p []byte) (int, error) {
 		// A fast upstream continuation can publish usage immediately after the
-		// tool result write, before ResumeTurn reaches its event loop.
-		r.mu.Lock()
-		r.usagePrompt, r.usageDeltaSum = 222, r.usageDeltaSum+7
-		r.mu.Unlock()
-		r.events <- runEvent{kind: evDone}
+		// tool result write, before ResumeTurn reaches its event loop. writeFramed
+		// writes the header and payload segments, so react once per reply.
+		if !triggered {
+			triggered = true
+			r.mu.Lock()
+			r.usagePrompt, r.usageDeltaSum = 222, r.usageDeltaSum+7
+			r.mu.Unlock()
+			r.events <- runEvent{kind: evDone}
+		}
 		return len(p), nil
 	})
 	r = NewCursorRun(out, bytes.NewReader(nil), nil, nil, time.Hour)
@@ -321,10 +326,16 @@ func TestResumeClearsPreviousCompletionMarker(t *testing.T) {
 				frames = env(t, turnEndedField14(t))
 			}
 			var r *CursorRun
+			started := false
 			out := runResultWriter(func(p []byte) (int, error) {
 				// The current turn can reach EOF as soon as its tool result is
 				// written. Prior-turn state must already be retired here.
-				r.pump()
+				// writeFramed writes the header and payload segments, so start the
+				// pump once per reply.
+				if !started {
+					started = true
+					r.pump()
+				}
 				return len(p), nil
 			})
 			r = NewCursorRun(out, bytes.NewReader(frames), nil, nil, time.Hour)

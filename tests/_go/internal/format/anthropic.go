@@ -2,7 +2,10 @@ package format
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -447,5 +450,286 @@ func TestTranslateRequestPromptCacheKey(t *testing.T) {
 	}
 	if _, ok := got["prompt_cache_key"]; ok {
 		t.Errorf("untracked request gained a prompt_cache_key: %s", out)
+	}
+}
+
+// allocDelta measures bytes allocated by fn without timing it.
+func allocDelta(fn func()) uint64 {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestTranslateRequestSystemFragmentsExactOutput pins the exact system join:
+// the existing "\n\n" separator between lifted fragments, including empty
+// fragments, must survive the strings.Builder rewrite byte-for-byte.
+func TestTranslateRequestSystemFragmentsExactOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "leading system and mixed roles",
+			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":"a"},{"role":"developer","content":"b"},{"role":"user","content":"hi"}]}`,
+			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"s\n\na\n\nb"}`,
+		},
+		{
+			name: "top-level system",
+			body: `{"model":"m","system":"top","messages":[{"role":"system","content":"a"},{"role":"user","content":"hi"}]}`,
+			want: `{"max_tokens":64,"messages":[{"role":"user","content":"hi"}],"model":"m","stream":false,"system":"top\n\na"}`,
+		},
+		{
+			name: "empty fragment keeps separator",
+			body: `{"model":"m","messages":[{"role":"system","content":"s"},{"role":"system","content":""},{"role":"system","content":"b"}]}`,
+			want: `{"max_tokens":64,"messages":null,"model":"m","stream":false,"system":"s\n\n\n\nb"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := TranslateRequest([]byte(tc.body), 64, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(out) != tc.want {
+				t.Fatalf("translated request =\n%s\nwant\n%s", out, tc.want)
+			}
+		})
+	}
+}
+
+// TestTranslateRequestSystemAllocationLinear proves the system join allocates
+// linearly as the fragment count doubles; repeated += previously reallocated
+// and copied the accumulated prefix every iteration.
+func TestTranslateRequestSystemAllocationLinear(t *testing.T) {
+	mk := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString(`{"model":"m","messages":[`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"role":"system","content":"a"}`)
+		}
+		b.WriteString(`]}`)
+		return []byte(b.String())
+	}
+	wantFor := func(n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteByte('a')
+		}
+		return b.String()
+	}
+	var prev uint64
+	for _, n := range []int{4000, 8000, 16000} {
+		body := mk(n)
+		var out []byte
+		var err error
+		alloc := allocDelta(func() { out, err = TranslateRequest(body, 64, "") })
+		if err != nil {
+			t.Fatalf("%d system fragments: %v", n, err)
+		}
+		var got struct {
+			System string `json:"system"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.System != wantFor(n) {
+			t.Fatalf("%d system fragments produced a changed join", n)
+		}
+		if prev > 0 && alloc > prev*5/2 {
+			t.Fatalf("allocation growth %d -> %d bytes at %d fragments exceeds 2.5x", prev, alloc, n)
+		}
+		t.Logf("systems=%d input=%d alloc=%d", n, len(body), alloc)
+		prev = alloc
+	}
+}
+
+// TestTranslateResponseContentExactOutput pins the concatenated text content
+// and the full non-streaming envelope (created normalized to zero).
+func TestTranslateResponseContentExactOutput(t *testing.T) {
+	out, err := TranslateResponse([]byte(`{"id":"msg","model":"m","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	doc["created"] = float64(0)
+	normalized, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"choices":[{"finish_reason":"stop","index":0,"message":{"content":"ab","role":"assistant"}}],"created":0,"id":"msg","model":"m","object":"chat.completion","usage":{"completion_tokens":2,"prompt_tokens":1,"prompt_tokens_details":{"cache_write_tokens":0,"cached_tokens":0},"total_tokens":3}}`
+	if string(normalized) != want {
+		t.Fatalf("translated response =\n%s\nwant\n%s", normalized, want)
+	}
+}
+
+// TestTranslateResponseContentAllocationLinear mirrors the system join test for
+// non-streaming text blocks.
+func TestTranslateResponseContentAllocationLinear(t *testing.T) {
+	mk := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString(`{"id":"m","model":"m","content":[`)
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteString(`{"type":"text","text":"a"}`)
+		}
+		b.WriteString(`],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+		return []byte(b.String())
+	}
+	var prev uint64
+	for _, n := range []int{4000, 8000, 16000} {
+		body := mk(n)
+		var out []byte
+		var err error
+		alloc := allocDelta(func() { out, err = TranslateResponse(body) })
+		if err != nil {
+			t.Fatalf("%d content blocks: %v", n, err)
+		}
+		var got struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Choices) != 1 || got.Choices[0].Message.Content != strings.Repeat("a", n) {
+			t.Fatalf("%d content blocks produced changed content", n)
+		}
+		if prev > 0 && alloc > prev*5/2 {
+			t.Fatalf("allocation growth %d -> %d bytes at %d blocks exceeds 2.5x", prev, alloc, n)
+		}
+		t.Logf("blocks=%d input=%d alloc=%d", n, len(body), alloc)
+		prev = alloc
+	}
+}
+
+// TestNativeIdentityBound pins one 512-byte cap on provider identity fields on
+// both translation surfaces. An overlong value fails with the stable sentinel
+// before it can be echoed into output; values at the cap remain accepted.
+func TestNativeIdentityBound(t *testing.T) {
+	huge := strings.Repeat("i", 200<<10)
+	if nativeIdentityMaxBytes != 512 {
+		t.Fatalf("nativeIdentityMaxBytes = %d; the pinned record-consistent cap is 512", nativeIdentityMaxBytes)
+	}
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"nonstream id", fmt.Sprintf(`{"id":%q,"model":"m","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}`, huge)},
+		{"nonstream model", fmt.Sprintf(`{"id":"x","model":%q,"content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}`, huge)},
+		{"nonstream tool id", fmt.Sprintf(`{"id":"x","model":"m","content":[{"type":"tool_use","id":%q,"name":"n","input":{}}],"stop_reason":"tool_use"}`, huge)},
+		{"nonstream tool name", fmt.Sprintf(`{"id":"x","model":"m","content":[{"type":"tool_use","id":"t","name":%q,"input":{}}],"stop_reason":"tool_use"}`, huge)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := TranslateResponse([]byte(tc.body)); !errors.Is(err, errNativeIdentityTooLong) {
+				t.Fatalf("overlong identity error = %v, want %v", err, errNativeIdentityTooLong)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{"stream id", fmt.Sprintf(`{"type":"message_start","message":{"id":%q,"model":"m"}}`, huge)},
+		{"stream model", fmt.Sprintf(`{"type":"message_start","message":{"id":"x","model":%q}}`, huge)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			err := StreamToOpenAI(&out, strings.NewReader("data: "+tc.line+"\n\n"), nil, nil)
+			if !errors.Is(err, errNativeIdentityTooLong) {
+				t.Fatalf("overlong identity error = %v, want %v", err, errNativeIdentityTooLong)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("overlong identity emitted %d bytes before failing", out.Len())
+			}
+		})
+	}
+
+	t.Run("stream tool identity", func(t *testing.T) {
+		stream := "data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n" +
+			"data: " + fmt.Sprintf(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":%q,"name":"n"}}`, huge) + "\n\n"
+		var out strings.Builder
+		err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil)
+		if !errors.Is(err, errNativeIdentityTooLong) {
+			t.Fatalf("overlong tool identity error = %v, want %v", err, errNativeIdentityTooLong)
+		}
+		if out.Len() > 1<<10 {
+			t.Fatalf("overlong tool identity emitted %d bytes, want a bounded prefix", out.Len())
+		}
+	})
+
+	t.Run("at cap remains accepted", func(t *testing.T) {
+		atCap := strings.Repeat("i", nativeIdentityMaxBytes)
+		stream := "data: " + fmt.Sprintf(`{"type":"message_start","message":{"id":%q,"model":%q}}`, atCap, atCap) + "\n\n" +
+			"data: " + `{"type":"message_stop"}` + "\n\n"
+		var out strings.Builder
+		if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
+			t.Fatalf("identity at the cap was rejected: %v", err)
+		}
+		if n := strings.Count(out.String(), atCap); n < 2 {
+			t.Fatalf("identity at the cap was not echoed into the message_start frame: %d occurrences", n)
+		}
+	})
+}
+
+// TestNativeToolBlockCap pins the concurrent tool-block bound: unique starts
+// without stops fail closed, while a normal parallel stream still emits every
+// call and terminal events release the map.
+func TestNativeToolBlockCap(t *testing.T) {
+	if nativeToolBlocksMax != 1024 {
+		t.Fatalf("nativeToolBlocksMax = %d; the pinned bound is 1024", nativeToolBlocksMax)
+	}
+	var stream strings.Builder
+	stream.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
+	for i := 0; i <= nativeToolBlocksMax; i++ {
+		fmt.Fprintf(&stream, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
+	}
+	var out strings.Builder
+	err := StreamToOpenAI(&out, strings.NewReader(stream.String()), nil, nil)
+	if !errors.Is(err, errNativeToolBlocks) {
+		t.Fatalf("unterminated tool blocks error = %v, want %v", err, errNativeToolBlocks)
+	}
+	if out.Len() > 1<<20 {
+		t.Fatalf("tool-block overrun emitted %d bytes, want a bounded prefix", out.Len())
+	}
+
+	for _, terminal := range []struct{ name, event string }{
+		{"message_stop", `{"type":"message_stop"}`},
+		{"error", `{"type":"error","error":{"type":"overloaded_error","message":"x"}}`},
+	} {
+		t.Run("released by "+terminal.name, func(t *testing.T) {
+			var s strings.Builder
+			s.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
+			for i := 0; i < nativeToolBlocksMax; i++ {
+				fmt.Fprintf(&s, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
+			}
+			s.WriteString("data: " + terminal.event + "\n\n")
+			// Reusing index 0 is a duplicate unless the terminal released the map.
+			s.WriteString("data: " + `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"again","name":"n"}}` + "\n\n")
+			var o strings.Builder
+			if err := StreamToOpenAI(&o, strings.NewReader(s.String()), nil, nil); err != nil {
+				t.Fatalf("terminal did not release the tool-block map: %v", err)
+			}
+			if !strings.Contains(o.String(), `"id":"again"`) {
+				t.Fatal("post-terminal tool block was not emitted")
+			}
+		})
 	}
 }

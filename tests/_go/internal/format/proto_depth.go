@@ -1,7 +1,12 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -202,5 +207,70 @@ func TestParseMcpArgsSkipsHostileArgEntries(t *testing.T) {
 	}
 	if len(args) != 2 || args["file"] != "main.go" || args["dry_run"] != true {
 		t.Fatalf("args = %#v, want the two good entries only (hostile entry skipped)", args)
+	}
+}
+
+// TestProtoFieldCountBudget pins the per-buffer decoded-field budget. A minimal
+// field is 2 wire bytes but one protoField is 48 bytes, so a 4 MiB dense frame
+// previously produced 2,097,152 fields and a ~528 MB allocation; a 32 MiB
+// frame extrapolated to ~4 GiB. The budget must fail closed for both parser
+// paths, keep allocation bounded independently of frame size, and still admit
+// a large legitimate tool-argument map.
+func TestProtoFieldCountBudget(t *testing.T) {
+	// Compatibility fixture: a 16,384-entry mcp_args map is far below the
+	// budget and must decode completely.
+	var mcp []byte
+	mcp = appendString(mcp, fMcpArgsName, "bulk")
+	const argCount = 16 << 10
+	for i := 0; i < argCount; i++ {
+		key := "arg-" + strconv.Itoa(i)
+		mcp = appendMessage(mcp, fMcpArgsArgs, mcpArgsEntry(key, mcpArgValueString("v")))
+	}
+	call := parseMcpArgs(&protoField{wire: wireBytes, raw: mcp})
+	var args map[string]any
+	if err := json.Unmarshal([]byte(call.Args), &args); err != nil {
+		t.Fatalf("large legitimate mcp_args map did not decode: %v", err)
+	}
+	if len(args) != argCount {
+		t.Fatalf("large legitimate map decoded %d args, want %d", len(args), argCount)
+	}
+
+	// The budget is exact: a buffer at the cap parses, one more field fails.
+	exact := bytes.Repeat([]byte{0x08, 0x00}, protoFieldCountMax)
+	fields, err := parseProtoFields(exact)
+	if err != nil {
+		t.Fatalf("a buffer at the field budget was rejected: %v", err)
+	}
+	if len(fields) != protoFieldCountMax {
+		t.Fatalf("fields at the budget = %d, want %d", len(fields), protoFieldCountMax)
+	}
+	over := append(exact, 0x08, 0x00)
+	if _, err := parseProtoFields(over); !errors.Is(err, errProtoFieldCount) {
+		t.Fatalf("one field over budget error = %v, want %v", err, errProtoFieldCount)
+	}
+
+	// A 4 MiB dense frame must fail closed with bounded allocation (the old
+	// path materialized 2,097,152 fields and ~528 MB).
+	dense := bytes.Repeat([]byte{0x08, 0x00}, 2<<20)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fields, err = parseProtoFields(dense)
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, errProtoFieldCount) {
+		t.Fatalf("dense frame error = %v, want %v", err, errProtoFieldCount)
+	}
+	if fields != nil {
+		t.Fatalf("dense frame returned %d fields, want none", len(fields))
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(protoFieldCountMax)) {
+		t.Fatalf("dense frame error = %q, want the named limit", err)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 48<<20 {
+		t.Fatalf("dense frame allocated %d bytes, want a bounded <48 MiB", alloc)
+	}
+	// The lenient Value-shim parser shares the same bound.
+	if _, err := parseProtoFieldsLenient(dense); !errors.Is(err, errProtoFieldCount) {
+		t.Fatalf("lenient dense frame error = %v, want %v", err, errProtoFieldCount)
 	}
 }

@@ -13,12 +13,16 @@ import (
 	"time"
 )
 
+// testBlobID returns a valid raw 32-byte sha256 blob key for label, the only
+// shape KVBlobStore.put accepts.
+func testBlobID(label string) []byte { return sha256Digest([]byte(label)) }
+
 // fillKVBlobEntries fills the store with unique zero-length blobs to the exact
 // per-run entry cap.
 func fillKVBlobEntries(t *testing.T, s *KVBlobStore) {
 	t.Helper()
 	for i := 0; i < cursorBlobStoreEntriesMax; i++ {
-		if err := s.put([]byte("entry-"+strconv.Itoa(i)), nil); err != nil {
+		if err := s.put(testBlobID("entry-"+strconv.Itoa(i)), nil); err != nil {
 			t.Fatalf("entry %d of %d was rejected: %v", i+1, cursorBlobStoreEntriesMax, err)
 		}
 	}
@@ -55,18 +59,18 @@ func cursorKvSetBlobField(t *testing.T, msg []byte) *protoField {
 func TestKVBlobStorePerRunByteCap(t *testing.T) {
 	s := newKVBlobStore()
 	full := make([]byte, cursorBlobStoreBytesMax)
-	if err := s.put([]byte("fill"), full); err != nil {
+	if err := s.put(testBlobID("fill"), full); err != nil {
 		t.Fatalf("filling to the exact cap was rejected: %v", err)
 	}
 	if got := s.RetainedBytes(); got != cursorBlobStoreBytesMax {
 		t.Fatalf("retained bytes = %d, want exactly %d", got, cursorBlobStoreBytesMax)
 	}
-	got, ok := s.get([]byte("fill"))
+	got, ok := s.get(testBlobID("fill"))
 	if !ok || !bytes.Equal(got, full) {
 		t.Fatal("get did not return the stored bytes")
 	}
 
-	if err := s.put([]byte("overflow"), []byte("x")); !errors.Is(err, errCursorBlobBytes) {
+	if err := s.put(testBlobID("overflow"), []byte("x")); !errors.Is(err, errCursorBlobBytes) {
 		t.Fatalf("over-cap insert error = %v, want %v", err, errCursorBlobBytes)
 	}
 	if got := s.RetainedBytes(); got != cursorBlobStoreBytesMax {
@@ -75,7 +79,7 @@ func TestKVBlobStorePerRunByteCap(t *testing.T) {
 	if s.len() != 1 {
 		t.Fatalf("rejected insert changed the map: %d entries, want 1", s.len())
 	}
-	if _, ok := s.get([]byte("overflow")); ok {
+	if _, ok := s.get(testBlobID("overflow")); ok {
 		t.Fatal("rejected insert stored a partial value")
 	}
 }
@@ -94,7 +98,7 @@ func TestKVBlobStorePerRunEntryCap(t *testing.T) {
 		t.Fatalf("zero-length entries retained %d bytes, want 0", got)
 	}
 
-	if err := s.put([]byte("overflow"), nil); !errors.Is(err, errCursorBlobEntries) {
+	if err := s.put(testBlobID("overflow"), nil); !errors.Is(err, errCursorBlobEntries) {
 		t.Fatalf("over-cap insert error = %v, want %v", err, errCursorBlobEntries)
 	}
 	if got := s.RetainedEntries(); got != cursorBlobStoreEntriesMax {
@@ -103,12 +107,12 @@ func TestKVBlobStorePerRunEntryCap(t *testing.T) {
 	if got := s.RetainedBytes(); got != 0 {
 		t.Fatalf("rejected insert changed bytes: got %d, want 0", got)
 	}
-	if _, ok := s.get([]byte("overflow")); ok {
+	if _, ok := s.get(testBlobID("overflow")); ok {
 		t.Fatal("rejected insert stored an entry")
 	}
 
 	payload := []byte("replacement")
-	if err := s.put([]byte("entry-0"), payload); err != nil {
+	if err := s.put(testBlobID("entry-0"), payload); err != nil {
 		t.Fatalf("replacement of an existing id at the entry cap was rejected: %v", err)
 	}
 	if got := s.RetainedEntries(); got != cursorBlobStoreEntriesMax {
@@ -117,13 +121,13 @@ func TestKVBlobStorePerRunEntryCap(t *testing.T) {
 	if got, want := s.RetainedBytes(), int64(len(payload)); got != want {
 		t.Fatalf("replacement retained bytes = %d, want %d", got, want)
 	}
-	got, ok := s.get([]byte("entry-0"))
+	got, ok := s.get(testBlobID("entry-0"))
 	if !ok || !bytes.Equal(got, payload) {
 		t.Fatal("replacement did not store the payload")
 	}
 
 	// A rejected new id at the cap must leave the replacement's bytes intact.
-	if err := s.put([]byte("overflow-2"), nil); !errors.Is(err, errCursorBlobEntries) {
+	if err := s.put(testBlobID("overflow-2"), nil); !errors.Is(err, errCursorBlobEntries) {
 		t.Fatalf("over-cap insert error = %v, want %v", err, errCursorBlobEntries)
 	}
 	if got, want := s.RetainedBytes(), int64(len(payload)); got != want {
@@ -141,7 +145,7 @@ func TestKVBlobStorePerRunEntryCap(t *testing.T) {
 func TestKVBlobStoreReplacementByteAccounting(t *testing.T) {
 	s := newKVBlobStore()
 	original := bytes.Repeat([]byte("a"), 1<<10)
-	if err := s.put([]byte("dup"), original); err != nil {
+	if err := s.put(testBlobID("dup"), original); err != nil {
 		t.Fatalf("initial insert was rejected: %v", err)
 	}
 	if got, want := s.RetainedBytes(), int64(len(original)); got != want {
@@ -149,7 +153,7 @@ func TestKVBlobStoreReplacementByteAccounting(t *testing.T) {
 	}
 
 	larger := bytes.Repeat([]byte("b"), 2<<20)
-	if err := s.put([]byte("dup"), larger); err != nil {
+	if err := s.put(testBlobID("dup"), larger); err != nil {
 		t.Fatalf("larger replacement was rejected: %v", err)
 	}
 	if got, want := s.RetainedBytes(), int64(len(larger)); got != want {
@@ -157,7 +161,7 @@ func TestKVBlobStoreReplacementByteAccounting(t *testing.T) {
 	}
 
 	smaller := bytes.Repeat([]byte("c"), 1<<9)
-	if err := s.put([]byte("dup"), smaller); err != nil {
+	if err := s.put(testBlobID("dup"), smaller); err != nil {
 		t.Fatalf("smaller replacement was rejected: %v", err)
 	}
 	if got, want := s.RetainedBytes(), int64(len(smaller)); got != want {
@@ -167,20 +171,20 @@ func TestKVBlobStoreReplacementByteAccounting(t *testing.T) {
 	// Fill the remaining cap so replacing dup can only fit if the old entry's
 	// bytes were released before the check.
 	filler := make([]byte, cursorBlobStoreBytesMax-s.RetainedBytes())
-	if err := s.put([]byte("filler"), filler); err != nil {
+	if err := s.put(testBlobID("filler"), filler); err != nil {
 		t.Fatalf("filling the remaining cap was rejected: %v", err)
 	}
 	if got := s.RetainedBytes(); got != cursorBlobStoreBytesMax {
 		t.Fatalf("filled retained bytes = %d, want exactly %d", got, cursorBlobStoreBytesMax)
 	}
 
-	if err := s.put([]byte("dup"), bytes.Repeat([]byte("d"), len(smaller)+1)); !errors.Is(err, errCursorBlobBytes) {
+	if err := s.put(testBlobID("dup"), bytes.Repeat([]byte("d"), len(smaller)+1)); !errors.Is(err, errCursorBlobBytes) {
 		t.Fatalf("over-cap replacement error = %v, want %v", err, errCursorBlobBytes)
 	}
 	if got := s.RetainedBytes(); got != cursorBlobStoreBytesMax {
 		t.Fatalf("failed replacement changed retained bytes: got %d, want %d", got, cursorBlobStoreBytesMax)
 	}
-	got, ok := s.get([]byte("dup"))
+	got, ok := s.get(testBlobID("dup"))
 	if !ok || !bytes.Equal(got, smaller) {
 		t.Fatal("failed replacement lost or changed the existing entry")
 	}
@@ -297,10 +301,10 @@ func TestCursorHistoryBlobsRoundTrip(t *testing.T) {
 func TestCursorSetBlobHandlerByteCap(t *testing.T) {
 	t.Run("over cap", func(t *testing.T) {
 		s := newKVBlobStore()
-		if err := s.put([]byte("fill"), make([]byte, cursorBlobStoreBytesMax)); err != nil {
+		if err := s.put(testBlobID("fill"), make([]byte, cursorBlobStoreBytesMax)); err != nil {
 			t.Fatalf("filling to the exact cap was rejected: %v", err)
 		}
-		blobID := []byte("pushed")
+		blobID := testBlobID("pushed")
 		var out bytes.Buffer
 		err := handleKvServerMessage(&streamWriter{w: &out}, cursorKvSetBlobField(t, cursorKvSetBlobMessage(t, 7, blobID, []byte("x"))), s)
 		if !errors.Is(err, errCursorBlobBytes) {
@@ -319,7 +323,7 @@ func TestCursorSetBlobHandlerByteCap(t *testing.T) {
 
 	t.Run("normal set", func(t *testing.T) {
 		s := newKVBlobStore()
-		blobID, data := []byte("pushed"), []byte("payload")
+		blobID, data := testBlobID("pushed"), []byte("payload")
 		var out bytes.Buffer
 		err := handleKvServerMessage(&streamWriter{w: &out}, cursorKvSetBlobField(t, cursorKvSetBlobMessage(t, 8, blobID, data)), s)
 		if err != nil {
@@ -345,7 +349,7 @@ func TestCursorSetBlobHandlerEntryCap(t *testing.T) {
 	t.Run("over cap", func(t *testing.T) {
 		s := newKVBlobStore()
 		fillKVBlobEntries(t, s)
-		blobID := []byte("pushed-empty")
+		blobID := testBlobID("pushed-empty")
 		var out bytes.Buffer
 		err := handleKvServerMessage(&streamWriter{w: &out}, cursorKvSetBlobField(t, cursorKvSetBlobMessage(t, 10, blobID, nil)), s)
 		if !errors.Is(err, errCursorBlobEntries) {
@@ -367,7 +371,7 @@ func TestCursorSetBlobHandlerEntryCap(t *testing.T) {
 
 	t.Run("normal empty set", func(t *testing.T) {
 		s := newKVBlobStore()
-		blobID := []byte("pushed-empty")
+		blobID := testBlobID("pushed-empty")
 		var out bytes.Buffer
 		err := handleKvServerMessage(&streamWriter{w: &out}, cursorKvSetBlobField(t, cursorKvSetBlobMessage(t, 11, blobID, nil)), s)
 		if err != nil {
@@ -393,10 +397,10 @@ func TestCursorSetBlobHandlerEntryCap(t *testing.T) {
 // existing pump error path: the run ends TurnErrored and the blob is absent.
 func TestCursorSetBlobOverCapFailsPump(t *testing.T) {
 	s := newKVBlobStore()
-	if err := s.put([]byte("fill"), make([]byte, cursorBlobStoreBytesMax)); err != nil {
+	if err := s.put(testBlobID("fill"), make([]byte, cursorBlobStoreBytesMax)); err != nil {
 		t.Fatalf("filling to the exact cap was rejected: %v", err)
 	}
-	blobID := []byte("pushed")
+	blobID := testBlobID("pushed")
 	frames := env(t, cursorKvSetBlobMessage(t, 9, blobID, []byte("x")))
 	r := NewCursorRun(io.Discard, bytes.NewReader(frames), s, nil, time.Hour)
 	t.Cleanup(r.Close)
@@ -411,12 +415,100 @@ func TestCursorSetBlobOverCapFailsPump(t *testing.T) {
 	}
 }
 
+// TestKVBlobStoreRejectsInvalidIDShape pins the documented sha256 key shape at
+// both store doors: only a 32-byte id is admitted or looked up, so a malformed
+// or oversized upstream id can never become an unbounded map key.
+func TestKVBlobStoreRejectsInvalidIDShape(t *testing.T) {
+	s := newKVBlobStore()
+	for _, n := range []int{0, 1, 31, 33, 64} {
+		id := make([]byte, n)
+		if err := s.put(id, []byte("x")); !errors.Is(err, errCursorBlobID) {
+			t.Fatalf("%d-byte id put error = %v, want %v", n, err, errCursorBlobID)
+		}
+		if _, ok := s.get(id); ok {
+			t.Fatalf("%d-byte id resolved in the store; the shape must be rejected", n)
+		}
+	}
+	if s.RetainedEntries() != 0 || s.RetainedBytes() != 0 {
+		t.Fatalf("rejected ids changed retention: entries=%d bytes=%d", s.RetainedEntries(), s.RetainedBytes())
+	}
+	valid := make([]byte, cursorBlobIDLen)
+	if err := s.put(valid, []byte("x")); err != nil {
+		t.Fatalf("valid %d-byte id was rejected: %v", cursorBlobIDLen, err)
+	}
+	if got, ok := s.get(valid); !ok || !bytes.Equal(got, []byte("x")) {
+		t.Fatal("valid id did not round-trip")
+	}
+}
+
+// TestCursorSetBlobDetachesRetainedValue proves a one-byte server-pushed blob
+// carried in a multi-megabyte frame retains only its own bytes: the store owns
+// a detached, exact-capacity copy and cannot pin the frame.
+func TestCursorSetBlobDetachesRetainedValue(t *testing.T) {
+	s := newKVBlobStore()
+	blobID := testBlobID("pushed")
+	small := cursorKvSetBlobMessage(t, 1, blobID, []byte("x"))
+	msg := append(small, appendBytes(nil, 99, make([]byte, 4<<20))...)
+	var out bytes.Buffer
+	if err := handleKvServerMessage(&streamWriter{w: &out}, cursorKvSetBlobField(t, msg), s); err != nil {
+		t.Fatalf("normal set_blob failed: %v", err)
+	}
+	got, ok := s.get(blobID)
+	if !ok || !bytes.Equal(got, []byte("x")) {
+		t.Fatal("set_blob did not retain its value")
+	}
+	if cap(got) != len(got) {
+		t.Fatalf("stored blob len=%d cap=%d, want cap==len (detached from the frame)", len(got), cap(got))
+	}
+	if retained := s.RetainedBytes(); retained != 1 {
+		t.Fatalf("retained bytes = %d, want the 1-byte value only", retained)
+	}
+}
+
+// TestCursorExecDetachesRetainedID proves a one-byte exec id carried in a
+// multi-megabyte frame is detached before the pending map retains it, and that
+// pending accounting charges only the real fields.
+func TestCursorExecDetachesRetainedID(t *testing.T) {
+	ex := appendUint32(nil, fExecMessageID, 1)
+	ex = appendBytes(ex, fExecMessageExecID, []byte("e"))
+	ex = appendMessage(ex, fExecServerMcpArgs, appendString(nil, fMcpArgsName, "tool"))
+	ex = append(ex, appendBytes(nil, 99, make([]byte, 4<<20))...)
+	payload := appendMessage(nil, fAgentServerMessageExecServerMessage, ex)
+	fields, err := parseProtoFields(payload)
+	if err != nil {
+		t.Fatalf("decode AgentServerMessage: %v", err)
+	}
+	asm := firstField(fields, fAgentServerMessageExecServerMessage)
+	var call CursorToolCall
+	if err := handleExecServerMessage(&streamWriter{w: io.Discard}, asm, &call); err != nil {
+		t.Fatalf("handle exec message: %v", err)
+	}
+	if string(call.execIDStr) != "e" || cap(call.execIDStr) != len(call.execIDStr) {
+		t.Fatalf("exec id len=%d cap=%d, want a detached 1-byte value", len(call.execIDStr), cap(call.execIDStr))
+	}
+	r := NewCursorRun(io.Discard, bytes.NewReader(nil), nil, nil, time.Hour)
+	t.Cleanup(r.Close)
+	if !r.addPending(call) {
+		t.Fatal("normal pending call was rejected")
+	}
+	r.mu.Lock()
+	got := r.pending[call.CallID]
+	pendingBytes := r.pendingBytes
+	r.mu.Unlock()
+	if cap(got.execIDStr) != len(got.execIDStr) {
+		t.Fatalf("pending exec id len=%d cap=%d, want a detached value", len(got.execIDStr), cap(got.execIDStr))
+	}
+	if want := cursorRunToolCallSize(call); pendingBytes != want {
+		t.Fatalf("pending bytes = %d, want exactly the retained field size %d", pendingBytes, want)
+	}
+}
+
 // TestCursorSetBlobOverEntryCapFailsPump carries the entry-cap error through
 // the same pump path: the run ends TurnErrored and the new id is absent.
 func TestCursorSetBlobOverEntryCapFailsPump(t *testing.T) {
 	s := newKVBlobStore()
 	fillKVBlobEntries(t, s)
-	blobID := []byte("pushed-empty")
+	blobID := testBlobID("pushed-empty")
 	frames := env(t, cursorKvSetBlobMessage(t, 12, blobID, nil))
 	r := NewCursorRun(io.Discard, bytes.NewReader(frames), s, nil, time.Hour)
 	t.Cleanup(r.Close)

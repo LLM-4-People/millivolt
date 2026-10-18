@@ -12,6 +12,7 @@ package format
 // These are internal, non-tunable implementation details.
 
 import (
+	"errors"
 	"fmt"
 	"math"
 )
@@ -29,7 +30,23 @@ const (
 	// posture as adminjson's document depth bound. Internal safety guardrail,
 	// not a user-tunable setting.
 	protoValueMaxDepth = 128
+
+	// protoFieldCountMax bounds the fields materialized from one protobuf
+	// buffer. A protoField costs 48 bytes while the minimal field on the wire
+	// is 2 bytes, so without this bound a 32 MiB frame (connectMaxFrame) could
+	// allocate ~4 GiB of field structs. 65,536 fields is far above any
+	// legitimate message: the largest tool-argument map is a repeated map
+	// entry carrying at least a tag, length and key per argument, so 65,536
+	// arguments already require a multi-hundred-KiB object, orders of
+	// magnitude beyond a real tool schema or conversation. A denser buffer is
+	// malformed input and fails closed in both the strict and lenient parser
+	// paths. Internal safety guardrail, not a user-tunable setting.
+	protoFieldCountMax = 1 << 16
 )
+
+// errProtoFieldCount is the stable fail-closed reason for a buffer whose
+// decoded field count would exceed protoFieldCountMax.
+var errProtoFieldCount = errors.New("protobuf: field count limit exceeded")
 
 // appendVarint encodes v as a base-128 varint (little-endian groups, 7 bits
 // per byte, continuation bit set on all but the last).
@@ -100,6 +117,45 @@ func appendUint32(dst []byte, field int, v uint32) []byte {
 	return appendVarint(dst, uint64(v))
 }
 
+// varintLen returns the wire size of v encoded as a varint.
+func varintLen(v uint64) int {
+	n := 1
+	for v >= 0x80 {
+		v >>= 7
+		n++
+	}
+	return n
+}
+
+// tagLen returns the wire size of a field key.
+func tagLen(field, wire int) int {
+	return varintLen(uint64(field<<3 | wire))
+}
+
+// bytesFieldLen returns the encoded size of a length-delimited field carrying
+// an n-byte payload, including the empty-payload encoding appendBytes emits.
+func bytesFieldLen(field, n int) int {
+	return tagLen(field, wireBytes) + varintLen(uint64(n)) + n
+}
+
+// uint32FieldLen returns the encoded size of a varint uint32 field, matching
+// appendUint32's omission of the proto3 zero value.
+func uint32FieldLen(field int, v uint32) int {
+	if v == 0 {
+		return 0
+	}
+	return tagLen(field, wireVarint) + varintLen(uint64(v))
+}
+
+// stringFieldLen returns the encoded size of a length-delimited string field,
+// matching appendString's omission of the empty string.
+func stringFieldLen(field int, s string) int {
+	if s == "" {
+		return 0
+	}
+	return bytesFieldLen(field, len(s))
+}
+
 // protoField is one decoded field: its number, wire type, and payload.
 // For wireBytes, raw holds the length-delimited bytes (string/bytes/message).
 // For wireVarint, num holds the decoded varint value.
@@ -137,6 +193,9 @@ func parseProtoFieldsWire(msg []byte, fixedNumbers bool) ([]protoField, error) {
 	var fields []protoField
 	i := 0
 	for i < len(msg) {
+		if len(fields) >= protoFieldCountMax {
+			return nil, fmt.Errorf("%w (limit %d)", errProtoFieldCount, protoFieldCountMax)
+		}
 		key, n := consumeVarint(msg[i:])
 		if n <= 0 {
 			return nil, fmt.Errorf("protobuf: bad field key at offset %d", i)

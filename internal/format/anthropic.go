@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -24,7 +25,41 @@ const (
 	// guardrail against pathological lines, not user-tunable.
 	sseLineBufInit = 4 * 1024
 	sseLineBufMax  = 1024 * 1024
+
+	// nativeIdentityMaxBytes bounds provider-controlled identity strings
+	// (message id/model and tool-call id/name) at the translation boundary
+	// before they are echoed into every emitted frame. It matches the record
+	// retention bound for provider text and model names (512 bytes), so a
+	// normal identifier passes unchanged while a body-sized value cannot
+	// multiply across a stream. Internal safety guardrail, not user-tunable.
+	nativeIdentityMaxBytes = 512
+
+	// nativeToolBlocksMax bounds the concurrent tool_use blocks tracked while
+	// translating one Anthropic stream. Each open block retains its initial
+	// JSON until its stop; real parallel tool calls are single-digit, so 1024
+	// leaves ample headroom while failing a stream that opens unique blocks
+	// without ever closing them. Internal safety guardrail, not user-tunable.
+	nativeToolBlocksMax = 1024
 )
+
+var (
+	// errNativeIdentityTooLong is the stable fail-closed reason for an
+	// over-bound provider identity field.
+	errNativeIdentityTooLong = errors.New("anthropic: identity field exceeds limit")
+	// errNativeToolBlocks is the stable fail-closed reason for opening more
+	// concurrent tool blocks than nativeToolBlocksMax.
+	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
+)
+
+// checkNativeIdentity enforces nativeIdentityMaxBytes on one provider-controlled
+// identity value before the translator echoes or retains it.
+func checkNativeIdentity(field, value string) error {
+	if len(value) <= nativeIdentityMaxBytes {
+		return nil
+	}
+	return fmt.Errorf("%w (%s is %d bytes, limit %d)",
+		errNativeIdentityTooLong, field, len(value), nativeIdentityMaxBytes)
+}
 
 // MergeTokenCaps owns the token-ceiling precedence of the OpenAI wire's cap
 // pair: max_completion_tokens wins over max_tokens (the pair's documented
@@ -70,16 +105,17 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey st
 		return nil, errParseOpenAIBody(err)
 	}
 
-	system := in.System
+	var system strings.Builder
+	system.WriteString(in.System)
 	var messages []anthropicMessage
 	for _, m := range in.Messages {
 		// Extract system messages into the top-level system field.
 		if m.Role == "system" || m.Role == "developer" {
 			if s, ok := m.ContentString(); ok {
-				if system != "" {
-					system += "\n\n"
+				if system.Len() > 0 {
+					system.WriteString("\n\n")
 				}
-				system += s
+				system.WriteString(s)
 			}
 			continue
 		}
@@ -108,8 +144,8 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey st
 	if in.TopP != nil {
 		out["top_p"] = *in.TopP
 	}
-	if system != "" {
-		out["system"] = system
+	if system.Len() > 0 {
+		out["system"] = system.String()
 	}
 	if stops := parseStop(in.Stop); len(stops) > 0 {
 		out["stop_sequences"] = stops
@@ -340,14 +376,28 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, field := range []struct{ name, value string }{
+		{"id", in.ID},
+		{"model", in.Model},
+	} {
+		if err := checkNativeIdentity(field.name, field.value); err != nil {
+			return nil, err
+		}
+	}
 
-	var content string
+	var content strings.Builder
 	var toolCalls []map[string]any
 	for _, block := range in.Content {
 		switch block.Type {
 		case "text":
-			content += block.Text
+			content.WriteString(block.Text)
 		case "tool_use":
+			if err := checkNativeIdentity("tool id", block.ID); err != nil {
+				return nil, err
+			}
+			if err := checkNativeIdentity("tool name", block.Name); err != nil {
+				return nil, err
+			}
 			toolCalls = append(toolCalls, map[string]any{
 				"id":   block.ID,
 				"type": "function",
@@ -360,7 +410,7 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 	}
 
 	out := sse.Completion(in.ID, time.Now().Unix(), in.Model,
-		sse.AssistantMessage(content, toolCalls), mapFinishReason(in.StopReason), usage)
+		sse.AssistantMessage(content.String(), toolCalls), mapFinishReason(in.StopReason), usage)
 	return json.Marshal(out)
 }
 
@@ -515,6 +565,12 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			if err := json.Unmarshal(payload, &m); err != nil {
 				return fmt.Errorf("native message start: %w", err)
 			}
+			if err := checkNativeIdentity("id", m.Message.ID); err != nil {
+				return err
+			}
+			if err := checkNativeIdentity("model", m.Message.Model); err != nil {
+				return err
+			}
 			id = m.Message.ID
 			model = m.Message.Model
 			usage = m.Message.Usage
@@ -537,8 +593,17 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			}
 			if json.Unmarshal(payload, &c) == nil {
 				if c.ContentBlock.Type == "tool_use" {
+					if err := checkNativeIdentity("tool id", c.ContentBlock.ID); err != nil {
+						return err
+					}
+					if err := checkNativeIdentity("tool name", c.ContentBlock.Name); err != nil {
+						return err
+					}
 					if _, exists := toolCalls[c.Index]; exists {
 						return fmt.Errorf("duplicate native tool index %d", c.Index)
+					}
+					if len(toolCalls) >= nativeToolBlocksMax {
+						return fmt.Errorf("%w (limit %d)", errNativeToolBlocks, nativeToolBlocksMax)
 					}
 					initial := string(c.ContentBlock.Input)
 					if initial == "" || initial == "null" {
@@ -639,14 +704,17 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				delete(toolCalls, c.Index)
 			}
 		case "message_stop":
-			// Terminate the stream.
+			// Terminate the stream and release any blocks a malformed provider
+			// left open (their terminal stop events may never arrive).
 			sawMessageStop = true
+			clear(toolCalls)
 			if err := writeDone(); err != nil {
 				return err
 			}
 		case "error":
 			// Forward the error payload inline. A malformed payload is skipped
 			// (consistent with the other branches) - never emit an empty error.
+			clear(toolCalls)
 			var e anthropicErrorEvent
 			if err := json.Unmarshal(payload, &e); err != nil {
 				continue
