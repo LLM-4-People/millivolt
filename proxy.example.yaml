@@ -120,7 +120,7 @@ debug_capture_max_bytes: 1MiB
 # would exceed it; TTL expiry frees capacity. Bytes, not characters. 0 = unlimited.
 # Restart required.
 # Hot-reload: NO (restart required).
-#   type: bytes · range 0B..8GiB · default 512MiB
+#   type: bytes · range 16MiB..8GiB (0B = unlimited) · default 512MiB
 debug_store_max_bytes: 512MiB
 
 # Exchange an expired or expiring JWT when the client sends X-Proxy-Refresh-Token. All
@@ -210,7 +210,7 @@ max_inflight_requests: 10000
 # Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before
 # reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.
 # Hot-reload: yes.
-#   type: bytes · range 0B..64GiB · default 256MiB
+#   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB
 
 # How long a request may sit in the queue before 429. 0s is unlimited. Operator-hold time

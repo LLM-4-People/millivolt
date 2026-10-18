@@ -794,6 +794,14 @@ const (
 	DebugCaptureTTLMax      = 7 * 24 * time.Hour
 	DebugCaptureMaxBytesMin = 4 << 10  // 4 KiB
 	DebugCaptureMaxBytesMax = 16 << 20 // 16 MiB
+	// Total debug sidecar band. Zero means unlimited; nonzero values below
+	// the floor could not hold one maximum-size capture.
+	DebugStoreMaxBytesMin = 16 << 20 // 16 MiB
+	DebugStoreMaxBytesMax = 8 << 30  // 8 GiB
+	// Process-wide in-flight body budget band. Zero means unlimited; a
+	// nonzero budget below one maximum request body cannot admit real work.
+	MaxInflightBodyBytesMin = 1 << 20  // 1 MiB
+	MaxInflightBodyBytesMax = 64 << 30 // 64 GiB
 	// Ad-hoc query result bands (Validate, overlay, Settings schema).
 	StorageQueryMaxBytesMin = 4 << 10
 	StorageQueryMaxBytesMax = 64 << 20
@@ -1134,7 +1142,7 @@ func (c *Config) Validate() error {
 		return errRange("debug_capture_ttl", FormatDuration(DebugCaptureTTLMin), FormatDuration(DebugCaptureTTLMax), FormatDuration(c.DebugCaptureTTL))
 	}
 	if c.DebugStoreMaxBytes != 0 {
-		if err := checkByteSize("debug_store_max_bytes", c.DebugStoreMaxBytes, 16<<20, 8<<30); err != nil {
+		if err := checkByteSize("debug_store_max_bytes", c.DebugStoreMaxBytes, DebugStoreMaxBytesMin, DebugStoreMaxBytesMax); err != nil {
 			return err
 		}
 	}
@@ -1159,7 +1167,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("max_inflight_requests: must be 0..1000000, got %d", c.MaxInflightRequests)
 	}
 	if c.MaxInflightBodyBytes != 0 {
-		if err := checkByteSize("max_inflight_body_bytes", c.MaxInflightBodyBytes, 1<<20, 64<<30); err != nil {
+		if err := checkByteSize("max_inflight_body_bytes", c.MaxInflightBodyBytes, MaxInflightBodyBytesMin, MaxInflightBodyBytesMax); err != nil {
 			return err
 		}
 	}
