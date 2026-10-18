@@ -603,6 +603,7 @@ async function main() {
       ttft_p50:null, ttft_p95:null, tps_p50:null, tps_p95:null});
     const galleryAgg = {
       dim: 'provider', total: 10, error_total: 0, rail: {provider: 2},
+      scopeKey: w.eval('scopeQS()'),
       groups: [gateGroup('gate-alpha.example', 6), gateGroup('gate-beta.example', 4)],
     };
     let sizeCalls = 0;
@@ -2179,6 +2180,117 @@ async function main() {
     w.scheduleLogFill = savedFill;
   }
 
+  // ---- test 10a-cap: the durable archive is ascending oldest-to-newest, so
+  // the 20,000-row cap must trim its oldest edge and keep the newest archive
+  // rows contiguous with the live ring. Trimming the tail used to drop the
+  // newest record, including the boundary row beside the ring.
+  {
+    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: logPage,
+      data: w.eval('lastData')};
+    w.scheduleLogFill = () => {};
+    const base = 1600000000000;
+    w.__arcArchive = Array.from({length: 20000}, (_, i) =>
+      mkRec('arc' + String(i).padStart(5, '0'), 200, base + i * 1000));
+    w.__arcRing = mkRec('arc-ring', 200, base + 20000 * 1000);
+    w.eval('logArchive = window.__arcArchive; logCursor = {ms: 1600000000000, id: "arc00000"}; ' +
+      'logLimit = 0; logExhausted = false; logFetching = false; logFailures = 0; logFetchFailed = false;');
+    logPage = {records: [mkRec('arc-old', 200, base - 1000)], more: false,
+      cursor_ms: base - 1000, cursor_id: 'arc-old'};
+    w.fetchOlderLog();
+    await settleUntil(() => w.eval('logArchive.length') === 20000 &&
+      w.eval('logArchive[19999].id') === 'arc19999' && !w.eval('logFetching'));
+    const archived = w.eval('logArchive');
+    let contiguous = true;
+    for (let i = 1; i < archived.length; i++) {
+      if (Number(archived[i].id.slice(3)) !== Number(archived[i - 1].id.slice(3)) + 1) {
+        contiguous = false;
+        break;
+      }
+    }
+    check('the archive cap keeps the newest 20,000 rows (older page dropped)',
+      archived.length === 20000 && archived[0].id === 'arc00000' &&
+      archived[19999].id === 'arc19999' && !archived.some(r => r.id === 'arc-old'));
+    check('the retained archive remains one contiguous newest window', contiguous);
+    const merged = w.mergeLogArchive([w.eval('window.__arcRing')]);
+    check('newest archive rows stay adjacent to the live ring with no boundary gap',
+      merged.length === 20001 && merged[19998].id === 'arc19998' &&
+      merged[19999].id === 'arc19999' && merged[20000].id === 'arc-ring');
+    w.fetch = saved.fetch;
+    w.scheduleLogFill = saved.fill;
+    logPage = saved.page;
+    w.resetLogWindow();
+    w.renderAll(saved.data);
+    for (const key of ['__arcArchive', '__arcRing']) delete w[key];
+  }
+
+  // ---- test 10a-retry: a failed older-page fetch retries on a delayed,
+  // bounded owner and reports "history unavailable"; success clears it.
+  {
+    const saved = {fetch: w.fetch, fill: w.scheduleLogFill, page: logPage,
+      data: w.eval('lastData'), status: w.eval('filters.status')};
+    w.scheduleLogFill = () => {};
+    w.eval("filters.status = '';");
+    w.resetLogWindow();
+    w.eval('logFetching = false; logExhausted = false; logCursor = null;');
+    w.__retryPage = mkRec('retry-ok', 200, 1599990000000);
+    logPage = {records: [w.eval('window.__retryPage')], more: false,
+      cursor_ms: 1599990000000, cursor_id: 'retry-ok'};
+    const originalTimeout = w.setTimeout;
+    const retryCallbacks = [];
+    let calls = 0;
+    let failing = true;
+    w.fetch = (url, options) => {
+      if (!String(url).includes('/metrics/agg/log')) return saved.fetch(url, options);
+      calls++;
+      if (failing) return Promise.resolve({ok: false, status: 503, json: async () => ({error: 'history down'})});
+      return saved.fetch(url, options);
+    };
+    w.setTimeout = (fn, ms, ...args) => {
+      if (ms === w.eval('LOG_RETRY_MS')) {
+        retryCallbacks.push(() => fn(...args));
+        return 7100 + retryCallbacks.length;
+      }
+      return originalTimeout(fn, ms, ...args);
+    };
+    try {
+      w.fetchOlderLog();
+      await settleUntil(() => calls === 1 && !w.eval('logFetching') && w.eval('logFetchFailed'));
+      check('a failed older-page fetch shows history unavailable',
+        d.getElementById('f-stats').textContent.includes('history unavailable'));
+
+      let retries = 0;
+      while (retryCallbacks.length && retries < 10) {
+        const next = retryCallbacks.shift();
+        const before = calls;
+        retries++;
+        next();
+        await settleUntil(() => calls > before && !w.eval('logFetching'));
+      }
+      check('failed history fetches retry automatically but stop at the bounded budget',
+        calls === 4 && retries === w.eval('LOG_RETRY_LIMIT') &&
+        retryCallbacks.length === 0 && w.eval('logFailures') > w.eval('LOG_RETRY_LIMIT'));
+      check('the exhausted retry budget keeps the visible failure state',
+        d.getElementById('f-stats').textContent.includes('history unavailable'));
+
+      failing = false;
+      w.fetchOlderLog(); // a user scroll after the budget may try again
+      await settleUntil(() => calls === 5 && !w.eval('logFetchFailed') &&
+        !w.eval('logFetching') && rows().some(tr => tr.dataset.id === 'retry-ok'));
+      check('a user-triggered retry after the budget appends rows and clears the failure line',
+        !d.getElementById('f-stats').textContent.includes('history unavailable') &&
+        !w.eval('logFetchFailed') && w.eval('logFailures') === 0);
+    } finally {
+      w.setTimeout = originalTimeout;
+      w.fetch = saved.fetch;
+      w.scheduleLogFill = saved.fill;
+      logPage = saved.page;
+      w.eval('filters.status = ' + JSON.stringify(saved.status) + ';');
+      w.resetLogWindow();
+      w.renderAll(saved.data);
+      delete w.__retryPage;
+    }
+  }
+
   // ---- test 10b: the purge re-sync - no removal event exists, so the
   // whole-database delete (now the settings sheet's storage action) must
   // fetch a CURSOR-LESS bootstrap (mode 'full': a resume could never see
@@ -2451,11 +2563,15 @@ async function main() {
   const moneyCases = [
     [0, '0¢'], [0.5, '50¢'], [0.01, '1¢'], [0.0012, '0.12¢'],
     [0.00001, '0.001¢'], [0.99999, '99.999¢'], [1, '$1'], [3.5, '$3.5'],
-    [1234, '$1.23K'], [2500000, '$2.5M'], [-0.25, '-25¢'], [-2, '-$2'],
+    [999, '$999'], [999.4, '$999.4'], [999499, '$999.5K'], [999500, '$999.5K'],
+    [999999, '$1M'], [1000000, '$1M'], [1000500, '$1M'],
+    [1234, '$1.23K'], [2500000, '$2.5M'], [-0.25, '-25¢'], [-2, '-$2'], [-999999, '-$1M'],
   ];
   for (const [value, want] of moneyCases) {
     check(`money ${value} displays as ${want}`, w.eval(`fmtMoney(${value})`) === want);
   }
+  check('compact counts keep the shared 1000K to 1M rollover',
+    w.eval('fmt(999999) === "1M" && fmt(999500) === "999.5K" && fmt(999) === "999"'));
   check('unknown money stays unknown', w.eval('fmtMoney(null) === "-" && fmtMoney(NaN) === "-" && fmtMoney(Infinity) === "-"'));
   check('request log uses cents', w.reqRow({ ...mkRec('cents'), cost: 0.25 }).includes('25¢'));
   check('absent ttft is a placeholder, not 0ms', (() => {
@@ -4373,6 +4489,65 @@ async function main() {
     w.eval('settingsDoc = window.__settingsTestDoc; fillSettingsForm(settingsDoc)');
     w.closeSettings(true);
     delete w.__settingsTestDoc;
+  }
+
+  // A clean Settings reopen skips the whole form rebuild, but the live
+  // snapshot (last apply and effective runtime data) can change without a
+  // revision change. Reopening must refresh that panel alone: form nodes,
+  // scroll and focus stay exactly where the operator left them.
+  {
+    const originalFetch = w.fetch;
+    const base = JSON.parse(JSON.stringify(cfgDoc));
+    base.revision = 'live-panel-revision';
+    base.fields.unshift({ key: 'db_path', category: 'providers', label: 'Database path', kind: 'string', hot_reload: false });
+    base.values.db_path = 'private.db';
+    const docAt = (listen, at) => ({
+      ...JSON.parse(JSON.stringify(base)),
+      effective: {...base.values, listen},
+      last_reload: {ok: true, error: '', dropped_keys: [], restart_required: [], at},
+    });
+    let configDoc = docAt('127.0.0.1:9001', 1757777000000);
+    w.fetch = (url, opts) => {
+      if (!String(url).includes('/admin/config')) return originalFetch(url, opts);
+      return Promise.resolve({ok: true, json: async () => JSON.parse(JSON.stringify(configDoc))});
+    };
+    try {
+      w.openSettings();
+      await settleUntil(() => !d.getElementById('settings-sheet').hidden &&
+        /9001/.test(d.getElementById('settings-live').textContent) &&
+        !!d.querySelector('#settings-fields .st-row[data-key="db_path"]'));
+      const liveBefore = d.getElementById('settings-live').textContent;
+      const box = d.getElementById('settings-fields');
+      const row = box.querySelector('.st-row[data-key="db_path"]');
+      const input = row.querySelector('input[data-key="db_path"]');
+      input.focus();
+      box.scrollTop = 73;
+      w.closeSettings(true);
+      await settleUntil(() => d.getElementById('settings-sheet').hidden);
+
+      configDoc = docAt('127.0.0.1:9002', 1757779999000);
+      w.openSettings();
+      await settleUntil(() => !d.getElementById('settings-sheet').hidden &&
+        /9002/.test(d.getElementById('settings-live').textContent));
+      const liveAfter = d.getElementById('settings-live').textContent;
+      check('a clean Settings reopen refreshes the independent live panel',
+        liveAfter !== liveBefore && /9002/.test(liveAfter) &&
+        liveAfter.includes(new Date(1757779999000).toLocaleString()));
+      check('a clean Settings reopen preserves the form nodes and scroll position',
+        box.querySelector('.st-row[data-key="db_path"]') === row &&
+        row.querySelector('input[data-key="db_path"]') === input && box.scrollTop === 73);
+
+      const nextDoc = docAt('127.0.0.1:9003', 1757781111000);
+      configDoc = nextDoc;
+      input.focus();
+      await w.fetchSettings();
+      check('the skip refill keeps focus in the operator\'s form control',
+        d.activeElement === input && /9003/.test(d.getElementById('settings-live').textContent) &&
+        box.querySelector('.st-row[data-key="db_path"]') === row);
+    } finally {
+      w.fetch = originalFetch;
+      w.closeSettings(true);
+    }
   }
 
   // mrDraftChanged's dirty leg (the R9 lost finding): markSettingsDirty was
@@ -6951,7 +7126,9 @@ async function main() {
     check('live Requests status filters refresh explorer/footer regardless of breakdown dimension', w.explorerWantsLiveStatus());
     reply(pending[4], 999);
     await sleep(10);
-    check('an old status response cannot paint under the new selection', w.eval('explorerAgg') === previousExplorer);
+    check('an old status response cannot paint under the new selection',
+      w.eval('explorerAgg') === null && w.eval('explorerAgg') !== previousExplorer &&
+      d.getElementById('f-scope').textContent.startsWith('… of '));
     reply(pending[5], 0);
     await sleep(10);
     check('zero live matches is a real full-scope count', d.getElementById('f-scope').textContent.startsWith('0 of '));
@@ -6961,6 +7138,169 @@ async function main() {
     w.navigateTo([]);
     await sleep(20);
     check('unfiltered footer reads global KPI immediately', !d.getElementById('f-scope').textContent.includes('…'));
+  }
+
+  // ---- test 12i-bis: a failed explorer scan for a new scope must not leave
+  // the old scope's cards visible, and the dashboard tick must retry it.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
+    const originalFetch = w.fetch;
+    const gallery = d.getElementById('xp-gallery');
+    const calls = [];
+    let bFailures = 0;
+    let bPending = 0;
+    let failB = true;
+    const ent = (name, n) => ({name, n, cost:0, in:10, out:5, cache:2, tools:0,
+      err_final:0, rate_limit_requests:0, cost_per_mtok:null,
+      ttft_p50:null, ttft_p95:null, tps_p50:null, tps_p95:null});
+    const payload = (isB) => ({
+      dim: 'provider', total: isB ? 20 : 10, error_total: 0,
+      rail: {provider: isB ? 20 : 10},
+      groups: [ent(isB ? 'b-node.example' : 'a-node.example', isB ? 20 : 10)],
+      scope: {matches: isB ? 20 : 10, errors: 0},
+    });
+    w.fetch = (url, options) => {
+      const u = String(url);
+      if (!u.includes('/metrics/agg/explorer')) return originalFetch(url, options);
+      const f = new URL(u, 'http://x').searchParams.get('f') || '';
+      const isB = f === 'provider:scope-b.example';
+      calls.push({f, isB});
+      if (isB && failB) {
+        bFailures++;
+        bPending++;
+        return Promise.resolve({ok: false, status: 503, json: async () => ({error: 'scan unavailable'})})
+          .finally(() => { bPending--; });
+      }
+      return Promise.resolve({ok: true, json: async () => payload(isB)});
+    };
+    try {
+      w.navigateTo([{dim: 'provider', id: 'scope-a.example'}]);
+      await settleUntil(() => !!gallery.querySelector('[data-xp-key="a-node.example"]'));
+      check('explorer success paints the requested scope cards',
+        calls.some(c => !c.isB) && !!gallery.querySelector('[data-xp-key="a-node.example"]') &&
+        !/breakdown unavailable/.test(gallery.textContent));
+
+      w.navigateTo([{dim: 'provider', id: 'scope-b.example'}]);
+      await settleUntil(() => bFailures === 1 && /breakdown unavailable/.test(gallery.textContent));
+      check('a failed new-scope explorer fetch removes the old scope cards',
+        !!gallery.querySelector('[data-xp-key="a-node.example"]') === false &&
+        gallery.querySelectorAll('.xp-node').length === 0 &&
+        /breakdown unavailable/.test(gallery.textContent));
+      check('the failed scope shows an honest loading/failure state instead of old cards',
+        gallery.querySelector('.empty') !== null && !/a-node\.example/.test(gallery.textContent));
+
+      w.refreshExplorerIfStale();
+      await settleUntil(() => bFailures === 2 && bPending === 0);
+      check('the stale-refresh owner retries a failed scope even while live data is unchanged',
+        calls.filter(c => c.isB).length >= 2 && calls[calls.length - 1].f === 'provider:scope-b.example');
+
+      failB = false;
+      w.refreshExplorerIfStale();
+      await settleUntil(() => !!gallery.querySelector('[data-xp-key="b-node.example"]'));
+      check('a restored explorer endpoint repaints scope B and clears the failure state',
+        !!gallery.querySelector('[data-xp-key="b-node.example"]') &&
+        !gallery.querySelector('[data-xp-key="a-node.example"]') &&
+        !/breakdown unavailable/.test(gallery.textContent));
+    } finally {
+      failB = false;
+      w.fetch = originalFetch;
+      w.navigateTo([]);
+      await sleep(20);
+    }
+  }
+
+  // ---- test 12i-ter: a live-status explorer count refresh rebuilds the
+  // dimension rail, but keyboard focus must stay on the same rail item.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
+    if (w.eval('_xpLiveTimer')) w.eval('clearTimeout(_xpLiveTimer); _xpLiveTimer = null;');
+    const originalFetch = w.fetch;
+    const originalTimeout = w.setTimeout;
+    let railModel = 3;
+    let liveRefresh = null;
+    w.fetch = (url, options) => {
+      const u = String(url);
+      if (!u.includes('/metrics/agg/explorer')) return originalFetch(url, options);
+      return Promise.resolve({ok: true, json: async () => ({
+        dim: 'status', total: 30, error_total: 0, rail: {provider: 1, model: railModel},
+        groups: [], scope: {matches: 30, errors: 0},
+      })});
+    };
+    try {
+      w.navigateTo([{dim: 'by', id: 'status'}]);
+      await settleUntil(() => d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim === 'status' &&
+        w.eval('!!explorerAgg && explorerAgg.dim === "status"'));
+      const rail = d.getElementById('xp-rail');
+      const focused = rail.querySelector('.xp-rail-item[data-xp-dim="model"]');
+      focused.focus();
+      check('the explorer rail can take keyboard focus before its count changes',
+        d.activeElement === focused && focused.querySelector('.rail-n').textContent === '3');
+
+      railModel = 999;
+      w.setTimeout = (fn, ms, ...args) => {
+        if (ms === w.eval('EXPLORER_LIVE_REFRESH_MS')) {
+          liveRefresh = () => fn(...args);
+          return 4242;
+        }
+        return originalTimeout(fn, ms, ...args);
+      };
+      fire('begin', {record: {...mkRec('rail-focus1', 200, 1700000600000)}, in_flight: 1});
+      w.setTimeout = originalTimeout;
+      check('a live-status event schedules the explorer refresh owner', typeof liveRefresh === 'function');
+      if (liveRefresh) liveRefresh();
+      await settleUntil(() => d.querySelector('#xp-rail [data-xp-dim="model"] .rail-n')?.textContent === '999');
+      const next = d.querySelector('#xp-rail [data-xp-dim="model"]');
+      check('a rail count repaint keeps focus on the same dimension button',
+        next !== focused && d.activeElement === next &&
+        next.querySelector('.rail-n').textContent === '999');
+    } finally {
+      w.setTimeout = originalTimeout;
+      w.fetch = originalFetch;
+      try { fire('end', {record: mkRec('rail-focus1', 200, 1700000600000), in_flight: 0}); } catch (e) {}
+      w.eval('if (_xpLiveTimer) { clearTimeout(_xpLiveTimer); _xpLiveTimer = null; }');
+      w.navigateTo([]);
+      await sleep(20);
+    }
+  }
+
+  // ---- test 12i-quater: #/request/<id> is inert. The old request leaf was
+  // removed from EXPLORER_DIMS, so the route must not become a bogus filter
+  // and must never throw. Normal filter, status and breakdown routes still
+  // parse through the same hash owner.
+  {
+    let probe = null, error = null;
+    try {
+      probe = w.eval(`(() => {
+        const savedStatus = filters.status;
+        history.replaceState(null, '', '#/request/req-123');
+        const request = explorerState();
+        const requestSegments = parseHash();
+        const requestScope = scopeQS();
+        history.replaceState(null, '', '#/provider/a.example/by/model');
+        const normal = explorerState();
+        filters.status = '500';
+        const scope = scopeQS();
+        filters.status = savedStatus;
+        history.replaceState(null, '', location.pathname + location.search);
+        return {
+          requestSegments: requestSegments.length,
+          requestFilters: request.filters.length,
+          requestDim: request.activeDim,
+          requestScope,
+          normalFilters: normal.filters,
+          normalDim: normal.activeDim,
+          scope,
+        };
+      })()`);
+    } catch (e) { error = e; }
+    check('#/request/<id> is ignored without a bogus filter or an exception',
+      error === null && !!probe && probe.requestSegments === 0 &&
+      probe.requestFilters === 0 && probe.requestDim === 'provider' && probe.requestScope === '');
+    check('normal explorer filter, status and by routes still parse',
+      !!probe && probe.normalFilters.length === 1 &&
+      probe.normalFilters[0].dim === 'provider' && probe.normalFilters[0].id === 'a.example' &&
+      probe.normalDim === 'model' && probe.scope.includes('s=500') &&
+      probe.scope.includes('f=provider%3Aa.example'));
   }
 
   // ---- test 12j: a rail click changes only the breakdown dimension (view

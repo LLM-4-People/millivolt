@@ -18,12 +18,28 @@ let logArchive = [];
 let logFetching = false;
 let logExhausted = false;
 let logCursor = null; // exact durable (started_at, id) keyset, independent of ring arrival order
+// A failed older-page fetch is retried by one delayed owner, not a tight
+// timer: logRetryTimer is that single pending retry, logFailures counts
+// consecutive failures so the automatic budget stays bounded, and
+// logFetchFailed keeps the visible "history unavailable" state until a
+// success or a window reset. A user scroll may retry after the budget.
+let logRetryTimer = null;
+let logFailures = 0;
+let logFetchFailed = false;
+const LOG_RETRY_LIMIT = 3; // automatic retries after the initial attempt
+const LOG_RETRY_MS = 2000; // delayed retry cadence; never a tight loop
 // Bumped by resetLogWindow; a store-page fetch that resolves after a window
 // reset belongs to the old scope and must be dropped, never merged into the
 // new one (a stale page would paint rows the new scope excludes).
 let logFetchGen = 0;
 const logNearPx = 96; // load-more slack (a few row heights), not a tunable
 const logNearSlackPx = 8; // fill-test tolerance: sub-pixel rounding never reads as scrollable room
+function clearLogRetry() {
+  if (logRetryTimer != null) {
+    clearTimeout(logRetryTimer);
+    logRetryTimer = null;
+  }
+}
 
 // The provider-card collapse chevron is shared by the chart metrics picker
 // and the lazily loaded settings sheet, so it belongs to the always-loaded
@@ -216,8 +232,27 @@ const X429_COUNTING_RULE = 'Requests with final or retried HTTP 429; each reques
 
 // MAGNITUDES is the one compact-scale ladder (divisor + suffix) every large
 // number formatter walks down: 1e9 → B, 1e6 → M, 1e3 → K, largest first.
-// fmt and fmtMoney share it; their rounding and unit styling stay their own.
+// compactMagnitude owns the shared scale walk and its 1000K → 1M rollover;
+// fmt and fmtMoney only own their rounding and unit styling.
 const MAGNITUDES = [[1e9, 'B'], [1e6, 'M'], [1e3, 'K']];
+// compactMagnitude returns {value, suffix} for one finite absolute value:
+// below 1000 the value stays exact with no suffix; at or above 1000 the value
+// is rounded to two decimals at the chosen scale. A rounded 1000 at K or M
+// rolls into the next suffix so money and counts never print "1000K".
+function compactMagnitude(n) {
+  const a = Math.abs(Number(n));
+  for (let i = 0; i < MAGNITUDES.length; i++) {
+    const [div, suf] = MAGNITUDES[i];
+    if (a < div) continue;
+    let v = Math.round((a / div) * 100) / 100;
+    if (v >= 1000 && i > 0) {
+      v = Math.round((v / 1000) * 100) / 100;
+      return {value: v, suffix: MAGNITUDES[i - 1][1]};
+    }
+    return {value: v, suffix: suf};
+  }
+  return {value: a, suffix: ''};
+}
 // fmt is the single compact number formatter for the whole dashboard: exact
 // below 1000, then K/M/B with up to 2 decimals (698479531 → "698.48M"). Every
 // surface uses it, so big counts never overflow a tile; vt() tooltips carry the
@@ -227,16 +262,8 @@ const fmt = n => {
   const neg = n < 0 ? '-' : '';
   const a = Math.abs(Number(n));
   if (a < 1000) return neg + a.toLocaleString();
-  for (const [div, suf] of MAGNITUDES) {
-    if (a >= div) {
-      let v = a / div;
-      v = Math.round(v * 100) / 100; // 2 decimals
-      if (v >= 1000 && div < 1e9) { v = Math.round((v / 1000) * 100) / 100; // roll 1000K → 1M
-        return neg + v.toString() + MAGNITUDES[MAGNITUDES.findIndex(u => u[0] === div) - 1][1]; }
-      return neg + v.toString() + suf;
-    }
-  }
-  return neg + a.toLocaleString();
+  const m = compactMagnitude(a);
+  return neg + m.value.toString() + m.suffix;
 };
 // fmtFull is the exact grouped form (698479531 → "698,479,531") for tooltips.
 const fmtFull = n => n == null ? '-' : Number(n).toLocaleString();
@@ -278,10 +305,8 @@ const fmtMoney = x => {
   };
   if (cents) return trim(a * 100);
   if (a < 1000) return trim(a);
-  for (const [div, suf] of MAGNITUDES) {
-    if (a >= div) return trim(Math.round((a / div) * 100) / 100) + suf;
-  }
-  return trim(a);
+  const m = compactMagnitude(a);
+  return trim(m.value) + m.suffix;
 };
 // Percentage formatting. toFixed rounds, so a strictly-sub-100 ratio like
 // 99.996% would print as "100.0%" / "100.00%" and falsely claim a perfect rate
@@ -312,13 +337,16 @@ const $ = id => document.getElementById(id);
 //   mode    - 'reuse' dedupes the same key; 'refresh' replaces settled data
 //             but lets in-flight work finish; 'invalidate' also cancels
 //             same-key work (restart/purge/config made that result stale).
+//   failFn  - optional; called only when the current request reports failure,
+//             never for superseded or deduped work, so a failed scan can own
+//             its visible error state without racing newer requests.
 // Guarantees: (1) the newest issued request's response always applies; (2) an
 // identical key can optionally dedupe (no duplicate in-flight fetches for the
 // same key); (3) a fetch failure unpins the dedupe so the next trigger works;
 // (4) superseded work is cancelled instead of delaying the new selection.
 function requestGate(dedupe) {
   let seq = 0, pinned = null, controller = null;
-  return function run(key, fetchFn, applyFn, mode = 'reuse') {
+  return function run(key, fetchFn, applyFn, mode = 'reuse', failFn = null) {
     if (dedupe && key === pinned && (mode === 'reuse' || (controller && mode !== 'invalidate'))) return;
     pinned = key;
     const my = ++seq;
@@ -327,7 +355,7 @@ function requestGate(dedupe) {
     fetchFn((payload, ok) => {
       if (my !== seq) return false; // superseded by a newer request
       controller = null;
-      if (!ok) { pinned = null; return false; } // failure unpins the dedupe
+      if (!ok) { pinned = null; if (failFn) failFn(); return false; } // failure unpins the dedupe
       applyFn(payload);
       return true;
     }, controller.signal);

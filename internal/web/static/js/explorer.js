@@ -20,7 +20,6 @@ const EXPLORER_DIMS = {
   status:       { field: null },   // derived: statusClass() → 2xx/4xx/5xx/err/cancel + live paused/streaming/throttled/pending
   time:         { field: null },   // derived: timeBucket() buckets start → four local-time windows (weekend/night/work/evening)
   tool:         { field: null },   // derived: multi-valued over tool_names[]
-  request:      { field: 'id' },
   error:        { field: null },
   // 'by' is the breakdown-dimension marker (view state, not a filter): a
   // trailing `by/<dim>` hash segment sets which dimension the gallery groups by.
@@ -131,8 +130,7 @@ const TIME_BUCKET_LABELS = {
   weekend: 'weekend',
 };
 
-// XP_RAIL_DIMS is the dimension rail order (nine dims). The hash router's
-// EXPLORER_DIMS also has a "request" dim (for leaf deep links).
+// XP_RAIL_DIMS is the dimension rail order (nine dims).
 const XP_RAIL_DIMS = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key'];
 const XP_LANDING_DIM = 'provider'; // gallery breakdown on the empty (global) path
 
@@ -151,7 +149,7 @@ function explorerState() {
   // Split segments into the breakdown marker (trailing by/<dim>) and the filter
   // set (everything else). Dedup filters by dim (last one wins). Only the nine
   // Rail dims may scope (XP_RAIL_DIMS) - parity with the server's validDims:
-  // the request leaf and the by marker are view state, never filters.
+  // the by marker is view state, never a filter.
   let breakdown = XP_LANDING_DIM;
   const filterMap = new Map();
   for (const s of segments) {
@@ -279,6 +277,13 @@ function explorerRailCount(dim, payload) {
 // expando and must be repainted even while module state still matches.
 let _dimTriggerKey = null;
 function renderDimRail(st) {
+  // The rail is rebuilt through updateSection, so a count-only repaint
+  // replaces the focused button. Remember the dimension that owned focus and
+  // restore it only when this render actually wrote the rail.
+  const rail = $('xp-rail');
+  const focused = rail && document.activeElement && rail.contains(document.activeElement)
+    ? document.activeElement.closest('.xp-rail-item[data-xp-dim]') : null;
+  const focusedDim = focused ? focused.dataset.xpDim : null;
   // distinct-value counts come from the server aggregate (since inception),
   // for every dimension in one payload - no client-side grouping.
   const html = XP_RAIL_DIMS.map(dim => {
@@ -288,7 +293,10 @@ function renderDimRail(st) {
     // scope's shape. Share-of-total lives on the node-cards, where it differs.)
     return `<button type="button" class="xp-rail-item${on ? ' active' : ''}" style="--ent:${entityType(dim).color}" data-xp-dim="${dim}" aria-pressed="${on}">${entityBadge(dim, '', entityType(dim).label)}<span class="rail-n">${explorerRailCount(dim, explorerAgg)}</span></button>`;
   }).join('');
-  updateSection('xp-rail', html);
+  if (updateSection('xp-rail', html) && focusedDim) {
+    const next = rail.querySelector(`.xp-rail-item[data-xp-dim="${CSS.escape(focusedDim)}"]`);
+    if (next) next.focus();
+  }
   const trig = $('xp-dim-trigger');
   if (trig) {
     const dim = st.activeDim;
@@ -326,18 +334,17 @@ function toggleDimMenu() {
 // Card = entityBadge + request count + KPI row + sparkline with error overlay
 // + error tally. Clicking a card toggles that value as a log filter.
 function renderGallery(st) {
-  // request is a pure leaf (no value breakdown); the request log already
-  // lists the scoped rows.
-  if (st.activeDim === 'request') {
-    updateSection('xp-gallery', '');
-    return;
-  }
-  // The gallery renders the server's since-inception breakdown for the active
-  // dimension (groups pre-sorted desc, pre-capped - the server is the single
-  // owner of both, the client applies no cuts or math).
-  const payload = explorerAgg && explorerAgg.dim === st.activeDim ? explorerAgg : null;
+  // Scope identity, not innerHTML replacement, gates the cards: a payload for
+  // another filter/status set (or another breakdown dimension) is unusable.
+  // The matching payload carries groups pre-sorted and pre-capped by the
+  // server; the client applies no cuts or math.
+  const scopeKey = scopeQS();
+  const payload = explorerAgg && explorerAgg.dim === st.activeDim &&
+    explorerAgg.scopeKey === scopeKey ? explorerAgg : null;
   if (!payload) {
-    updateSection('xp-gallery', `<div class="empty">loading breakdown…</div>`);
+    const failed = explorerFailure && explorerFailure.scopeKey === scopeKey &&
+      explorerFailure.dim === st.activeDim;
+    updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`);
     return;
   }
   if (!payload.groups || !payload.groups.length) {

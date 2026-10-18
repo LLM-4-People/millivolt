@@ -182,6 +182,11 @@ function fetchSettings(discard = false) {
       if (settingsIsOpen()) {
         if (skip) {
           settingsStatus(settingsBaseStatus(doc));
+          // The live snapshot (last apply, effective listen/store) changes
+          // independently of the form revision. Refresh only this panel; the
+          // rendered rows, editor validation state and accepted baseline stay
+          // untouched so focus, scroll and the clean draft survive.
+          fillSettingsLive(doc);
           showSettingsCat();
           updateSettingsActions();
         } else {

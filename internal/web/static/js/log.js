@@ -15,6 +15,9 @@ const logHTML = new Map();
 // unlimited history. Twenty thousand records bounds this page's retained JSON
 // at a few megabytes while still covering deep operator scroll sessions; the
 // server keyset cursor remains valid, so fetching continues below the trim.
+// logArchive is ascending oldest-to-newest, so the cap drops from the oldest
+// end: the newest archive rows stay adjacent to the live ring and the retained
+// window is the newest bounded archive window.
 const LOG_ARCHIVE_MAX = 20000;
 function logPageSize() { return dashCfg.log_rows; }
 function logCap() { return logLimit > 0 ? logLimit : logPageSize(); }
@@ -27,6 +30,9 @@ function resetLogWindow() {
   logFetching = false;
   logExhausted = false;
   logCursor = null;
+  logFailures = 0;
+  logFetchFailed = false;
+  clearLogRetry();
   logFetchGen++;
   const box = $('tbl-requests');
   // An untouched/empty log is already at zero. Even assigning zero forces
@@ -176,6 +182,9 @@ function updateLogStats(d) {
   const shown = logHTML.size;
   if (shown && shown < loaded) el.textContent = fmt(shown) + ' of ' + fmt(loaded) + ' records';
   else el.textContent = fmt(loaded) + ' records';
+  // The retry owner keeps trying on its own; the status line stays honest
+  // until a page lands or the window resets.
+  if (logFetchFailed) el.textContent += ' · history unavailable';
 }
 
 function renderRequestsIncremental(recs) {
@@ -342,8 +351,22 @@ function maybeLoadMoreLog() {
   fetchOlderLog();
 }
 
+// scheduleLogRetry is the one delayed retry owner for a failed older-page
+// fetch. The generation check makes a scope/window reset unable to receive a
+// stale retry; the consecutive-failure budget stops the automatic path after
+// LOG_RETRY_LIMIT attempts, where a user scroll may try again.
+function scheduleLogRetry(gen) {
+  if (logRetryTimer != null) return;
+  logRetryTimer = setTimeout(() => {
+    logRetryTimer = null;
+    if (gen !== logFetchGen || logFetching || logExhausted || !lastData) return;
+    fetchOlderLog();
+  }, LOG_RETRY_MS);
+}
+
 function fetchOlderLog() {
   if (logFetching || logExhausted) return;
+  clearLogRetry(); // a manual fill owns the next attempt, not a stale timer
   logFetching = true;
   const gen = logFetchGen;
   const before = logCursor;
@@ -356,6 +379,8 @@ function fetchOlderLog() {
     if (gen !== logFetchGen) return; // scope/window reset mid-flight: drop the stale page
     logFetching = false;
     if (!applyModelCanon(p?.model_canon)) return;
+    logFailures = 0;
+    logFetchFailed = false;
     const next = p && Number.isSafeInteger(p.cursor_ms) && typeof p.cursor_id === 'string' && p.cursor_id
       ? {ms: p.cursor_ms, id: p.cursor_id} : null;
     const advanced = next && (!before || next.ms < before.ms || next.ms === before.ms && next.id !== before.id);
@@ -375,15 +400,25 @@ function fetchOlderLog() {
     }
     if (added.length) {
       logArchive = added.reverse().concat(logArchive);
-      if (logArchive.length > LOG_ARCHIVE_MAX) logArchive.length = LOG_ARCHIVE_MAX;
+      // Ascending oldest-to-newest: trim the oldest rows so the newest archive
+      // window stays contiguous with the live ring at the top of the merge.
+      const excess = logArchive.length - LOG_ARCHIVE_MAX;
+      if (excess > 0) logArchive.splice(0, excess);
       const merged = mergeLogArchive(ringScoped);
       logLimit = Math.min(merged.length, Math.max(logCap() + added.length, logPageSize()));
       appendOlderLogRows(merged);
-      updateLogStats();
     }
+    // A successful retry clears "history unavailable" even when the page was a
+    // duplicate-only reply with nothing new to append.
+    updateLogStats();
     if (!logExhausted) scheduleLogFill();
   }).catch(() => {
-    if (gen === logFetchGen) logFetching = false;
+    if (gen !== logFetchGen) return; // reset already cleared the retry state
+    logFetching = false;
+    logFailures++;
+    logFetchFailed = true;
+    updateLogStats();
+    if (logFailures <= LOG_RETRY_LIMIT) scheduleLogRetry(gen);
   });
 }
 

@@ -111,7 +111,13 @@ self.addEventListener('fetch', (event) => {
     const cache = await caches.open(CACHE);
     try {
       const fresh = await fetch(req);
-      if (fresh.ok && shellPath(url.pathname)) cache.put(req, fresh.clone());
+      if (fresh.ok && shellPath(url.pathname)) {
+        try {
+          await cache.put(req, fresh.clone());
+        } catch {
+          // A full or unavailable CacheStorage must not fail the response.
+        }
+      }
       return fresh;
     } catch (err) {
       const hit = await cache.match(req);

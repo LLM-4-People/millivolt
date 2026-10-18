@@ -323,9 +323,23 @@ async function main() {
     cache.failPut.add(req.url);
     worker.resetFetches();
     const res = await worker.dispatch(req);
-    check('a cache write failure never breaks the fetched response',
-      !!res && res.body === 'fresh:1' && worker.fetches().length === 1,
-      JSON.stringify({ body: res && res.body, fetches: worker.fetches() }));
+    check('a cache write failure never breaks the exact-version fetched response',
+      !!res && res.body === 'fresh:1' && worker.fetches().length === 1 &&
+        cache.puts.includes(req.url),
+      JSON.stringify({ body: res && res.body, fetches: worker.fetches(), puts: cache.puts }));
+    cache.failPut.delete(req.url);
+  }
+
+  {
+    const cache = worker.store(CACHE_NAME);
+    const req = worker.request('/dash/js/quota-network-first.js');
+    cache.failPut.add(req.url);
+    worker.resetFetches();
+    const res = await worker.dispatch(req);
+    check('a cache write failure never breaks the network-first fetched response',
+      !!res && res.body === 'fresh:1' && worker.fetches().length === 1 &&
+        cache.puts.includes(req.url),
+      JSON.stringify({ body: res && res.body, fetches: worker.fetches(), puts: cache.puts }));
     cache.failPut.delete(req.url);
   }
 

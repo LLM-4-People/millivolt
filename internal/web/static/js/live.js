@@ -14,6 +14,11 @@ let dashboardReloading = false;
 let kpiAgg = null;
 let chartAgg = null;
 let explorerAgg = null;
+// explorerFailure identifies the scope/dimension whose last scan failed. A
+// payload is usable only while its scopeKey and dim still match the current
+// view; anything else falls back to an honest loading/failure state instead
+// of painting another scope's cards.
+let explorerFailure = null;
 let _pendingRevision = -1; // server lifecycle revision, scoped to the accepted feed
 
 // EMPTY_KPI is the pre-aggregation KPI document: the same wire key set the
@@ -117,6 +122,19 @@ function explorerReq() {
 function fetchExplorer(mode = 'reuse') {
   const q = explorerReq();
   const scope = scopeQS();
+  const dim = explorerState().activeDim;
+  // A request for another scope invalidates the old payload before its own
+  // response lands. Repaint immediately so the gallery cannot keep showing
+  // cards that the new scope did not produce.
+  if (explorerAgg && explorerAgg.scopeKey !== scope) {
+    explorerAgg = null;
+    explorerFailure = null;
+    renderExplorer();
+    updateScopeLine();
+  } else if (explorerFailure && explorerFailure.scopeKey !== scope) {
+    explorerFailure = null;
+    renderExplorer();
+  }
   // Capture the feed/canonicalization state this payload will reflect. A live
   // tick can then skip the refetch when nothing changed, instead of folding
   // all history on a timer.
@@ -130,22 +148,46 @@ function fetchExplorer(mode = 'reuse') {
   }, p => {
     // Hash state can change before its navigation event dispatches.
     if (q !== explorerReq()) { fetchExplorer(); return; }
+    if (!p || typeof p !== 'object') { markExplorerFailure(scope, dim); return; }
     explorerAgg = p;
     explorerAgg.fetchedAt = Date.now();
     explorerAgg.scopeKey = scope;
     explorerAgg.srcSeq = srcSeq;
     explorerAgg.srcFeed = srcFeed;
     explorerAgg.srcRev = srcRev;
+    explorerFailure = null;
     renderExplorer();
     updateScopeLine();
-  }, mode);
+  }, mode, () => {
+    // Only the current request reaches this callback (requestGate drops
+    // superseded work), so a failed new scope cannot leave old cards visible.
+    if (q !== explorerReq()) { fetchExplorer(); return; }
+    markExplorerFailure(scope, dim);
+  });
+}
+// markExplorerFailure makes the current view unavailable: the payload is
+// cleared (scope identity is the gate, never innerHTML), and the gallery
+// renders a failure message while the dashboard tick retries.
+function markExplorerFailure(scope, dim) {
+  explorerAgg = null;
+  explorerFailure = {scopeKey: scope, dim};
+  renderExplorer();
+  updateScopeLine();
+}
+// explorerPayloadCurrent reports whether the cached payload describes the
+// current scope and breakdown dimension. A missing, foreign-scope or
+// stale-dimension payload must be refetched even when live data is unchanged.
+function explorerPayloadCurrent() {
+  return !!(explorerAgg && explorerAgg.scopeKey === scopeQS() &&
+    explorerAgg.dim === explorerState().activeDim);
 }
 // refreshExplorerIfStale re-derives the breakdown from the server only when
 // the cached payload aged out AND something it depends on changed: records,
 // the feed epoch, or the canonicalization rules. An idle instance therefore
-// stops folding all history four times a minute per tab.
+// stops folding all history four times a minute per tab. A failed or foreign
+// payload is not usable at any age, so the next tick retries it.
 function refreshExplorerIfStale() {
-  if (!explorerAgg) { fetchExplorer(); return; }
+  if (!explorerPayloadCurrent()) { fetchExplorer('refresh'); return; }
   if (Date.now() - explorerAgg.fetchedAt <= dashCfg.explorer_stale_ms) return;
   if (explorerAgg.srcSeq === lastSeq && explorerAgg.srcFeed === feedId && explorerAgg.srcRev === modelRevision) return;
   fetchExplorer('refresh');
