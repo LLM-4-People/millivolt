@@ -418,15 +418,16 @@ def verify_docs_copy(path):
             # aggregate. It is derived from the already-published rows, but its
             # shape and finite arithmetic are revalidated like every other fact.
             totals = _json(metadata['totals'])
-            require(type(totals) is dict and totals.get('v') == 1
+            require(type(totals) is dict and totals.get('v') == 2
                     and type(totals.get('epoch')) is int and totals['epoch'] >= 0
+                    and type(totals.get('high_rowid')) is int and totals['high_rowid'] >= 0
                     and not totals.get('invalid', False),
                     'unexpected persisted totals')
             integer_keys = {'requests', 'errors', 'input_tokens', 'output_tokens',
                             'cache_read_tokens', 'reasoning_tokens', 'ttft_sum', 'ttft_n',
                             'tps_n', 'cost_reqs'}
             float_keys = {'cost', 'tps_sum', 'cost_in_out'}
-            require(set(totals) <= {'v', 'epoch', 'invalid'} | integer_keys | float_keys,
+            require(set(totals) <= {'v', 'epoch', 'high_rowid', 'invalid'} | integer_keys | float_keys,
                     'unexpected persisted totals fields')
             for name in integer_keys:
                 require(type(totals.get(name)) is int and totals[name] >= 0,

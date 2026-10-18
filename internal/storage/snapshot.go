@@ -21,6 +21,20 @@ import (
 // restore cannot mutate an open store.
 const pendingSnapshotSuffix = ".incoming"
 
+const (
+	// pendingSnapshotPreviousSuffix is the rollback sibling an admission moves
+	// the live database (and its sidecars) to before installing the incoming
+	// file. Its presence marks an uncommitted admission: boot restores it.
+	pendingSnapshotPreviousSuffix = ".previous"
+	// pendingSnapshotInvalidSuffix quarantines a staged file that failed
+	// integrity or in-place initialization. The live database stays live.
+	pendingSnapshotInvalidSuffix = ".invalid"
+	// pendingSnapshotInterruptedSuffix quarantines a staged file left behind
+	// by an admission that crashed before commit; recovery restores the
+	// previous database and preserves the unused bytes for inspection.
+	pendingSnapshotInterruptedSuffix = ".invalid-interrupted"
+)
+
 // PendingSnapshotPath is the staged SQLite file Open admits for path.
 func PendingSnapshotPath(path string) string {
 	return path + pendingSnapshotSuffix
@@ -197,30 +211,275 @@ func publishSnapshot(path string, write func(io.Writer) error) error {
 	return nil
 }
 
+// snapshotAdmission is an installed pending snapshot. Open commits it only
+// after the store is fully constructed and the writer goroutine starts; any
+// earlier error rolls it back to the previous database.
+type snapshotAdmission struct {
+	path      string
+	installed bool // incoming now lives at path
+	previous  bool // the live database (and sidecars) moved to .previous
+}
+
 // admitPendingSnapshot installs a staged replacement database before Open.
-// Its errors are returned bare: Open owns the single "pending snapshot:"
-// label (every cause, including the final rename, carries exactly one
-// prefix from that one wrap).
-func admitPendingSnapshot(path string) error {
+// Nothing destructive happens until the incoming file passes both the shared
+// integrity check and the same schema/trigger/migrate initializer Open runs,
+// so a structurally valid but incompatible file is quarantined while the live
+// database stays untouched. Its errors are returned bare: Open owns the
+// single "pending snapshot:" label.
+func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
+	if err := recoverInterruptedSnapshot(path); err != nil {
+		return nil, err
+	}
 	incoming := path + pendingSnapshotSuffix
 	if err := backup.CheckDatabaseFile(incoming); err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
 		if !errors.Is(err, backup.ErrInvalidSnapshot) {
+			return nil, err
+		}
+		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
+			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
+		}
+		log.Printf("storage: pending snapshot rejected: %v", err)
+		return nil, nil
+	}
+	if err := preflightPendingSnapshot(incoming); err != nil {
+		// An incoming file that cannot be initialized in place is no more
+		// usable than an integrity-invalid one: preserve its bytes as
+		// quarantine and keep serving the live database.
+		if qerr := quarantinePendingSnapshot(incoming, pendingSnapshotInvalidSuffix); qerr != nil {
+			log.Printf("storage: quarantine pending snapshot %s: %v", incoming, qerr)
+		}
+		log.Printf("storage: pending snapshot rejected: %v", err)
+		return nil, nil
+	}
+	a := &snapshotAdmission{path: path}
+	if err := a.install(); err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+// preflightPendingSnapshot initializes the staged database in place before any
+// live file is touched. It opens read-write with the standard bounded busy
+// wait and switches to a rollback journal: admission renames only the main
+// file over the live path, so a WAL sidecar left behind would either be lost
+// or apply to the wrong database. The initializer is the same one Open runs,
+// so a snapshot admitted here cannot fail Open's schema sequence later.
+func preflightPendingSnapshot(path string) error {
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)", path, sqliteBusyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return err
+	}
+	db.SetMaxOpenConns(1)
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode=DELETE").Scan(&mode); err != nil {
+		db.Close()
+		return fmt.Errorf("journal_mode: %w", err)
+	}
+	if !strings.EqualFold(mode, "delete") {
+		db.Close()
+		return fmt.Errorf("journal_mode: got %q, want delete", mode)
+	}
+	if err := initializeDatabase(db, path); err != nil {
+		db.Close()
+		return err
+	}
+	if err := db.Close(); err != nil {
+		return fmt.Errorf("close preflight database: %w", err)
+	}
+	// A clean close after switching to DELETE leaves no sidecar. Remove any
+	// stale one only now: deleting a WAL while it is open would discard its
+	// committed pages.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := removeIfExists(path + suffix); err != nil {
 			return err
 		}
-		_ = os.Rename(incoming, incoming+".invalid")
-		log.Printf("storage: pending snapshot rejected: %v", err)
+	}
+	return nil
+}
+
+// recoverInterruptedSnapshot is the boot fence for an admission that crashed
+// before commit. A .previous main file means the new database was never
+// committed, so its path/sidecars are removed and the previous set restored.
+// A staged .incoming from that attempt is quarantined rather than re-admitted
+// (an operator can inspect and re-stage it deliberately).
+func recoverInterruptedSnapshot(path string) error {
+	previous := path + pendingSnapshotPreviousSuffix
+	if _, err := os.Stat(previous); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// A previous sidecar without its main file is commit debris: commit
+		// removes the main sibling first, then the sidecars.
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if err := removeIfExists(previous + suffix); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
-	if err := removeIfExists(path + "-wal"); err != nil {
+	if _, err := os.Stat(path); err == nil {
+		// The incoming file already replaced path: remove the uncommitted new
+		// set before restoring the previous one.
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := removeIfExists(path + suffix); err != nil {
+				return err
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	} else {
+		// Crash between renaming the live database and renaming the incoming
+		// file: sidecars still at path belong to the previous database.
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if _, err := os.Stat(path + suffix); err == nil {
+				if err := os.Rename(path+suffix, previous+suffix); err != nil {
+					return err
+				}
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		src := previous + suffix
+		if _, err := os.Stat(src); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if err := os.Rename(src, path+suffix); err != nil {
+			return err
+		}
+	}
+	incoming := path + pendingSnapshotSuffix
+	if _, err := os.Stat(incoming); err == nil {
+		// Failing here must not fall through to admission: re-admitting the
+		// interrupted file is exactly what this fence exists to prevent.
+		if err := quarantinePendingSnapshot(incoming, pendingSnapshotInterruptedSuffix); err != nil {
+			return fmt.Errorf("quarantine interrupted pending snapshot: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := removeIfExists(path + "-shm"); err != nil {
+	log.Printf("storage: restored database from interrupted pending snapshot at %s", path)
+	return nil
+}
+
+// install moves the live database aside and renames the preflighted incoming
+// file over it. Any failure restores the previous set before returning.
+func (a *snapshotAdmission) install() error {
+	previous := a.path + pendingSnapshotPreviousSuffix
+	incoming := a.path + pendingSnapshotSuffix
+	if _, err := os.Stat(a.path); err == nil {
+		if _, err := os.Stat(previous); err == nil {
+			return fmt.Errorf("rollback sibling already exists: %s", previous)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := os.Rename(a.path, previous); err != nil {
+			return err
+		}
+		a.previous = true
+		for _, suffix := range []string{"-wal", "-shm"} {
+			live := a.path + suffix
+			if _, err := os.Stat(live); err == nil {
+				if err := os.Rename(live, previous+suffix); err != nil {
+					return errors.Join(err, a.restorePrevious())
+				}
+			} else if !os.IsNotExist(err) {
+				return errors.Join(err, a.restorePrevious())
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	} else {
+		// A sidecar without its live database cannot belong to the incoming
+		// file; remove it so it cannot apply to the database after the rename.
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if err := removeIfExists(a.path + suffix); err != nil {
+				return err
+			}
+		}
+	}
+	if err := os.Rename(incoming, a.path); err != nil {
+		return errors.Join(err, a.restorePrevious())
+	}
+	a.installed = true
+	return nil
+}
+
+// restorePrevious undoes an installed or partially installed admission. The
+// uncommitted new file is removed first; then every previous sibling that
+// exists is renamed back over the live name.
+func (a *snapshotAdmission) restorePrevious() error {
+	var errs []error
+	if a.installed {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if err := removeIfExists(a.path + suffix); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		a.installed = false
+	}
+	if a.previous {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			src := a.path + pendingSnapshotPreviousSuffix + suffix
+			if _, err := os.Stat(src); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				errs = append(errs, err)
+				continue
+			}
+			if err := os.Rename(src, a.path+suffix); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		a.previous = false
+	}
+	return errors.Join(errs...)
+}
+
+// rollback restores the pre-admission database. It is safe on a nil admission
+// and on a store that never installed anything.
+func (a *snapshotAdmission) rollback() error {
+	if a == nil {
+		return nil
+	}
+	return a.restorePrevious()
+}
+
+// commit makes the admission permanent. The previous main file is removed
+// first: once it is gone the admission cannot be rolled back, so a later
+// sidecar cleanup failure is logged instead of failing a serving store.
+func (a *snapshotAdmission) commit() error {
+	if a == nil || !a.previous {
+		return nil
+	}
+	if err := removeIfExists(a.path + pendingSnapshotPreviousSuffix); err != nil {
 		return err
 	}
-	return os.Rename(incoming, path)
+	a.previous = false
+	for _, suffix := range []string{"-wal", "-shm"} {
+		stale := a.path + pendingSnapshotPreviousSuffix + suffix
+		if err := removeIfExists(stale); err != nil {
+			log.Printf("storage: remove pending snapshot rollback sidecar %s: %v", stale, err)
+		}
+	}
+	return nil
+}
+
+// quarantinePendingSnapshot preserves rejected bytes under a diagnostic name
+// instead of deleting them. Callers decide whether a failed rename is fatal:
+// an integrity/preflight rejection can leave the file for the next boot, while
+// interrupted-admission recovery must not fall through to admitting it again.
+func quarantinePendingSnapshot(incoming, suffix string) error {
+	return os.Rename(incoming, incoming+suffix)
 }
 
 func removeIfExists(path string) error {
@@ -383,7 +642,11 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		if err != nil {
 			return inserted, skipped, mergePhaseError(debugErr, "projection epoch after backup merge", err)
 		}
-		if err := saveTotals(tctx, tx, totals, false, epoch); err != nil {
+		highRowID, err := projectionHighRowID(tctx, tx)
+		if err != nil {
+			return inserted, skipped, mergePhaseError(debugErr, "projection high rowid after backup merge", err)
+		}
+		if err := saveTotals(tctx, tx, totals, false, epoch, highRowID); err != nil {
 			return inserted, skipped, mergePhaseError(debugErr, "persist totals after backup merge", err)
 		}
 	}

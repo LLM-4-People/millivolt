@@ -13,7 +13,9 @@ import (
 
 // The column order matches the one record-value list in insertBatch. Every
 // column is written explicitly; SQL defaults never determine retained values.
-const insertColumns = `INSERT OR REPLACE INTO requests
+// It is an append-only INSERT: a repeated id keeps the first durable row and
+// is reported as not inserted, so totals can count exactly the rows on disk.
+const insertColumns = `INSERT INTO requests
 		(id, provider, model, key_hash, user_agent, client, client_ip, client_lang,
 		 stream, status_code,
 		 started_at, duration_ms, ttft_ms, first_token_at, last_token_at, chunks,
@@ -36,6 +38,11 @@ const insertColumns = `INSERT OR REPLACE INTO requests
 		 chars_system, chars_user, chars_assistant, chars_tool,
 		 images, attachments, last_turn_role, client_meta, req_reasoning_effort, req_verbosity,
 		 debug, debug_session_id, req_param_presence)`
+
+// insertConflict makes the writer idempotent without rewriting an existing
+// row. A duplicate id is a no-op: the first durable row wins and RowsAffected
+// reports zero, which is what keeps the append-only totals exact.
+const insertConflict = " ON CONFLICT(id) DO NOTHING"
 
 // batchInsert retains at most one prepared statement. A batch starts with
 // placeholders only for nonzero values, and promotes additional columns as
@@ -60,7 +67,10 @@ func (p *batchInsert) close() {
 	}
 }
 
-func (p *batchInsert) exec(values []any) error {
+// exec inserts one record and reports whether it actually created a row. A
+// duplicate id is skipped by insertConflict and returns false, so the caller's
+// batch totals add exactly the durable rows.
+func (p *batchInsert) exec(values []any) (bool, error) {
 	if p.bound == nil {
 		p.bound = make([]bool, len(values))
 	}
@@ -74,7 +84,7 @@ func (p *batchInsert) exec(values []any) error {
 	if changed {
 		if p.stmt != nil {
 			if err := p.stmt.Close(); err != nil {
-				return err
+				return false, err
 			}
 			p.stmt = nil
 		}
@@ -94,9 +104,10 @@ func (p *batchInsert) exec(values []any) error {
 			}
 		}
 		query.WriteByte(')')
+		query.WriteString(insertConflict)
 		stmt, err := p.tx.Prepare(query.String())
 		if err != nil {
-			return err
+			return false, err
 		}
 		p.stmt = stmt
 	}
@@ -106,8 +117,15 @@ func (p *batchInsert) exec(values []any) error {
 			args = append(args, value)
 		}
 	}
-	_, err := p.stmt.Exec(args...)
-	return err
+	res, err := p.stmt.Exec(args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func insertZero(value any) bool {
@@ -136,7 +154,9 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 	defer insert.close()
 	// Read the base only after Begin: the sole writer connection serializes
 	// this batch against merge (which holds it through its own totals install).
-	next, degraded := s.totalsForBatch(records)
+	// Only rows this batch actually inserts are added below, so a duplicate
+	// id cannot make totals claim a row that does not exist.
+	next, degraded := s.totalsBase()
 
 	// One values slice is reused for every row: a fresh 98-element []any per
 	// record was the batch's largest avoidable allocation.
@@ -177,15 +197,23 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			}
 		}
 		values = appendRecordValues(values[:0], r, hdrJSON, toolNamesJSON, attemptsJSON)
-		if err := insert.exec(values); err != nil {
+		inserted, err := insert.exec(values)
+		if err != nil {
 			return err
+		}
+		if inserted {
+			next.Add(r)
 		}
 	}
 	epoch, err := projectionEpoch(context.Background(), tx)
 	if err != nil {
 		return fmt.Errorf("read projection epoch: %w", err)
 	}
-	if err := saveTotals(context.Background(), tx, next, degraded, epoch); err != nil {
+	highRowID, err := projectionHighRowID(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("read projection high rowid: %w", err)
+	}
+	if err := saveTotals(context.Background(), tx, next, degraded, epoch, highRowID); err != nil {
 		return fmt.Errorf("persist totals: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

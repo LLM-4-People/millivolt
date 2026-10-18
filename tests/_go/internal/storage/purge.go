@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -447,6 +448,46 @@ func TestFlushWaitsForConcurrentCloseDrain(t *testing.T) {
 				t.Fatalf("Close error=%v, fail=%v", err, fail)
 			}
 		})
+	}
+}
+
+// TestPurgeRollbackKeepsDebugBytesAccounted pins the sidecar counter's commit
+// boundary: a purge computes the post-delete byte total inside its
+// transaction, but a forced rollback restores the sidecars and must therefore
+// leave the counter untouched. Publishing the in-transaction total before
+// commit would understate usage and let the next capture exceed the cap.
+func TestPurgeRollbackKeepsDebugBytesAccounted(t *testing.T) {
+	opts := testOpts
+	opts.DebugMaxBytes = 1000
+	s := openPurgeTestStore(t, opts)
+	b := metrics.NewBuffer(4)
+	s.Recorder(b).Record(&metrics.Record{ID: "old", Start: time.Now(), StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	const payloadSize = 900
+	if err := s.SaveDebugCapture(t.Context(), "old", "session", time.Now().UnixMilli(), 0, make([]byte, payloadSize)); err != nil {
+		t.Fatal(err)
+	}
+	if got := debugAccounting(t, s); got != payloadSize {
+		t.Fatalf("seeded debug bytes = %d, want %d", got, payloadSize)
+	}
+	if _, err := s.db.Exec(`CREATE TRIGGER deny_purge BEFORE DELETE ON requests BEGIN SELECT RAISE(ABORT, 'denied'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Clear(t.Context(), nil, b); err == nil {
+		t.Fatal("purge succeeded while its request delete was rejected")
+	}
+	if got := debugAccounting(t, s); got != payloadSize {
+		t.Fatalf("debug bytes after rolled-back purge = %d, want %d (the counter must follow the committed rows)", got, payloadSize)
+	}
+	if raw, err := s.LoadDebugCapture(t.Context(), "old"); err != nil || len(raw) != payloadSize {
+		t.Fatalf("sidecar after rolled-back purge = %d bytes, %v; want %d", len(raw), err, payloadSize)
+	}
+	if err := s.SaveDebugCapture(t.Context(), "new", "session", time.Now().UnixMilli(), 0, make([]byte, payloadSize)); err == nil {
+		t.Fatal("capture accepted after rollback even though it exceeds the cap")
+	} else if !strings.Contains(err.Error(), "store limit") {
+		t.Fatalf("cap error after rollback = %v", err)
 	}
 }
 

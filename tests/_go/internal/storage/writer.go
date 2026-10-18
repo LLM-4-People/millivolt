@@ -90,7 +90,7 @@ func TestBatchInsertMatchesFullBindings(t *testing.T) {
 		if _, err := full.Exec(row...); err != nil {
 			t.Fatal(err)
 		}
-		if err := plan.exec(append([]any(nil), row...)); err != nil {
+		if _, err := plan.exec(append([]any(nil), row...)); err != nil {
 			t.Fatal(err)
 		}
 		if i == 0 {
@@ -199,6 +199,50 @@ func TestWrittenSetEvictsOldestAtCap(t *testing.T) {
 	}
 	if s.Totals().Requests != 3 {
 		t.Fatalf("totals = %+v, want all three rows accounted", s.Totals())
+	}
+}
+
+// TestDuplicateRecordIDCountsOnce pins the writer's append-only contract: a
+// repeated id is skipped by ON CONFLICT DO NOTHING, the first durable row wins,
+// and totals count exactly the rows on disk instead of every Record call.
+func TestDuplicateRecordIDCountsOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duplicate.db")
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := &metrics.Record{ID: "same-id", Provider: "first.example", StatusCode: 200, Start: time.Now()}
+	duplicate := &metrics.Record{ID: "same-id", Provider: "second.example", StatusCode: 500, Start: time.Now()}
+	metrics.FinalizeRecord(first)
+	metrics.FinalizeRecord(duplicate)
+	s.Record(first)
+	s.Record(duplicate)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, s); n != 1 {
+		t.Fatalf("durable rows = %d, want 1", n)
+	}
+	if got := s.Totals(); got.Requests != 1 || got.Errors != 0 {
+		t.Fatalf("totals after duplicate id = %+v, want 1 request / 0 errors (first clean row wins)", got)
+	}
+	rows, err := s.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Provider != "first.example" || rows[0].StatusCode != 200 {
+		t.Fatalf("durable row after duplicate = %#v, want the first inserted row", rows)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if got := reopened.Totals(); got.Requests != 1 || got.Errors != 0 {
+		t.Fatalf("reloaded totals after duplicate id = %+v, want 1 request / 0 errors", got)
 	}
 }
 

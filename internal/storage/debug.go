@@ -207,9 +207,13 @@ func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatc
 		}
 		s.debugMu.Unlock()
 		if needsReseed {
-			if err := s.resetDebugBytes(ctx, conn); err != nil {
+			// The DELETE above autocommitted, so this fresh read is the exact
+			// committed sidecar total. Publish it only after a successful read.
+			n, err := debugByteTotal(ctx, conn)
+			if err != nil {
 				return total, false, err
 			}
+			s.installDebugBytes(n)
 		}
 		if len(ids) < debugExpireBatch {
 			return total, false, nil

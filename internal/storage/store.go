@@ -546,12 +546,41 @@ func cantOpenContext(err error, path string) error {
 	return fmt.Errorf("%w: cannot open %q: %s", err, path, cause)
 }
 
+// initializeDatabase is the one owner of the startup schema sequence: the
+// fresh-database schema, the owned analytical trigger definitions, and the
+// forward migrations. Open runs it on the live file; the pending-snapshot
+// preflight runs the identical sequence on the staged file before admission,
+// so a snapshot that would fail here is quarantined before any live file is
+// touched. Labels are part of Open's observable error contract.
+func initializeDatabase(db *sql.DB, path string) error {
+	if _, err := db.Exec(schema); err != nil {
+		return fmt.Errorf("schema: %w", cantOpenContext(err, path))
+	}
+	if err := ensureProjectionTriggers(db); err != nil {
+		return fmt.Errorf("analytical projection triggers: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	return nil
+}
+
 // Open opens (or creates) the SQLite database at path and starts the
 // background writer. Call Close to shut down cleanly. opts carries the
 // pipeline tunables (channel/batch sizes, flush cadence, query timeout).
 func Open(path string, opts Options) (*Store, error) {
-	if err := admitPendingSnapshot(path); err != nil {
+	admission, err := admitPendingSnapshot(path)
+	if err != nil {
 		return nil, fmt.Errorf("pending snapshot: %w", err)
+	}
+	// fail restores the pre-admission database before Open returns an error
+	// after an admission. The rollback error is joined instead of masking the
+	// construction failure that triggered it.
+	fail := func(err error) (*Store, error) {
+		if rerr := admission.rollback(); rerr != nil {
+			return nil, errors.Join(err, fmt.Errorf("pending snapshot: rollback: %w", rerr))
+		}
+		return nil, err
 	}
 	// Pragmas ride the DSN so every pooled connection gets them: modernc
 	// applies each _pragma at connection open (busy_timeout sorted ahead of
@@ -580,19 +609,11 @@ func Open(path string, opts Options) (*Store, error) {
 		"&_pragma=journal_size_limit(67108864)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return fail(fmt.Errorf("open sqlite: %w", err))
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if err := initializeDatabase(db, path); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("schema: %w", cantOpenContext(err, path))
-	}
-	if err := ensureProjectionTriggers(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("analytical projection triggers: %w", err)
-	}
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
+		return fail(err)
 	}
 	db.SetMaxOpenConns(sqliteWriterConns)
 	// Planner statistics are a read-path guardrail, not request data. They let
@@ -611,7 +632,7 @@ func Open(path string, opts Options) (*Store, error) {
 	rdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&"+busy)
 	if err != nil {
 		db.Close()
-		return nil, fmt.Errorf("open read pool: %w", err)
+		return fail(fmt.Errorf("open read pool: %w", err))
 	}
 	// Bound the pool: database/sql defaults to unlimited connections, and each
 	// SQLite connection carries its own page cache (about 2 MiB by default) in
@@ -666,6 +687,14 @@ func Open(path string, opts Options) (*Store, error) {
 	cancel()
 	s.wg.Add(1)
 	go s.writer()
+	// The store is fully constructed and serving: the admitted snapshot is now
+	// permanent, so remove its rollback sibling. A cleanup failure before the
+	// sibling's main file is gone rolls the admission back and fails boot
+	// instead of leaving a database that the next boot would silently revert.
+	if err := admission.commit(); err != nil {
+		closeErr := s.Close()
+		return fail(errors.Join(fmt.Errorf("pending snapshot: commit: %w", err), closeErr))
+	}
 	return s, nil
 }
 
@@ -783,15 +812,19 @@ type rowQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// debugByteTotal reads the sidecar byte sum on the caller's transaction/connection.
+// debugByteTotal is the compute-only sidecar read on the caller's
+// transaction/connection. It never publishes the counter: a transaction's
+// uncommitted state may still roll back, so only its committer may call
+// installDebugBytes with this value afterwards.
 func debugByteTotal(ctx context.Context, q rowQuerier) (int64, error) {
 	var n int64
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n)
 	return n, err
 }
 
-// installDebugBytes publishes a sidecar byte total; callers own whether the
-// backing transaction has committed yet.
+// installDebugBytes publishes a committed sidecar byte total. Callers must
+// establish that the backing transaction (if any) committed: publishing an
+// in-transaction total before commit lets a rollback silently bypass the cap.
 func (s *Store) installDebugBytes(n int64) {
 	s.debugMu.Lock()
 	s.debugBytes, s.debugSeeded = n, true
@@ -803,18 +836,6 @@ func (s *Store) installDebugBytes(n int64) {
 // SaveDebugCapture retries before enforcing the cap.
 func (s *Store) seedDebugBytes(ctx context.Context) error {
 	n, err := debugByteTotal(ctx, s.db)
-	if err != nil {
-		return err
-	}
-	s.installDebugBytes(n)
-	return nil
-}
-
-// resetDebugBytes recomputes the counter after a bulk mutation (purge) or an
-// expiry batch whose freed-byte subtraction could not be proven exact, on the
-// caller's transaction/connection.
-func (s *Store) resetDebugBytes(ctx context.Context, q rowQuerier) error {
-	n, err := debugByteTotal(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -1064,11 +1085,12 @@ func (s *Store) account(records []*metrics.Record, next *Totals) {
 	s.accountingRevision.Add(1)
 }
 
-// totalsForBatch computes the committed batch's aggregate from the current
-// in-memory value. The caller holds the sole writer connection (Begin has
-// returned), so no merge/purge can publish between this read and the commit;
-// merge holds that same connection from its first statement through install.
-func (s *Store) totalsForBatch(records []*metrics.Record) (Totals, bool) {
+// totalsBase returns the in-memory aggregate the next batch builds on. The
+// caller holds the sole writer connection (Begin has returned), so no
+// merge/purge can publish between this read and the commit; merge holds that
+// same connection from its first statement through install. The batch adds
+// only rows it actually inserted, so duplicate ids cannot inflate totals.
+func (s *Store) totalsBase() (Totals, bool) {
 	s.aggMu.Lock()
 	next := s.totals
 	built := s.totalsBuilt
@@ -1076,9 +1098,6 @@ func (s *Store) totalsForBatch(records []*metrics.Record) (Totals, bool) {
 	s.aggMu.Unlock()
 	if !built {
 		next = Totals{}
-	}
-	for _, r := range records {
-		next.Add(r)
 	}
 	return next, degraded
 }
@@ -1167,7 +1186,7 @@ func (s *Store) computeTotals(ctx context.Context) error {
 func (s *Store) computeTotalsWith(ctx context.Context, afterRead func() error) error {
 	const attempts = 3
 	for attempt := 0; attempt < attempts; attempt++ {
-		t, epoch, err := s.readTotalsSnapshot(ctx)
+		t, epoch, highRowID, err := s.readTotalsSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -1176,7 +1195,7 @@ func (s *Store) computeTotalsWith(ctx context.Context, afterRead func() error) e
 				return err
 			}
 		}
-		ok, err := s.persistTotalsIfCurrent(ctx, t, epoch)
+		ok, err := s.persistTotalsIfCurrent(ctx, t, epoch, highRowID)
 		if err != nil {
 			return err
 		}
@@ -1191,31 +1210,37 @@ func (s *Store) computeTotalsWith(ctx context.Context, afterRead func() error) e
 }
 
 // readTotalsSnapshot reads the rows and their mutation witness from one
-// consistent read transaction. The epoch is the same one the writer-side
-// recheck compares against.
-func (s *Store) readTotalsSnapshot(ctx context.Context) (Totals, int64, error) {
+// consistent read transaction. The epoch and high rowid are the same witness
+// the writer-side recheck compares against.
+func (s *Store) readTotalsSnapshot(ctx context.Context) (Totals, int64, int64, error) {
 	tx, err := s.rdb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return Totals{}, 0, err
+		return Totals{}, 0, 0, err
 	}
 	defer tx.Rollback()
 	t, err := readTotals(ctx, tx)
 	if err != nil {
-		return Totals{}, 0, err
+		return Totals{}, 0, 0, err
 	}
 	epoch, err := projectionEpoch(ctx, tx)
 	if err != nil {
-		return Totals{}, 0, err
+		return Totals{}, 0, 0, err
 	}
-	return t, epoch, nil
+	highRowID, err := projectionHighRowID(ctx, tx)
+	if err != nil {
+		return Totals{}, 0, 0, err
+	}
+	return t, epoch, highRowID, nil
 }
 
-// persistTotalsIfCurrent commits the document only when the mutation epoch
-// still matches the read snapshot. Holding the sole writer connection through
-// installTotals prevents an in-process commit from landing between the check
-// and publication; the next boot rebuilds if an unsupported external writer
-// commits after the check.
-func (s *Store) persistTotalsIfCurrent(ctx context.Context, t Totals, epoch int64) (bool, error) {
+// persistTotalsIfCurrent commits the document only when both mutation
+// witnesses still match the read snapshot: the epoch covers rewrites,
+// removals and out-of-order rowids, and the high rowid covers ordinary
+// appends that leave the epoch unchanged. Holding the sole writer connection
+// through installTotals prevents an in-process commit from landing between the
+// check and publication; the next boot rebuilds if an unsupported external
+// writer commits after the check.
+func (s *Store) persistTotalsIfCurrent(ctx context.Context, t Totals, epoch, highRowID int64) (bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return false, err
@@ -1230,21 +1255,14 @@ func (s *Store) persistTotalsIfCurrent(ctx context.Context, t Totals, epoch int6
 	if err != nil {
 		return false, err
 	}
-	if current != epoch {
-		return false, nil
-	}
-	// The projection epoch advances on destructive and out-of-order changes,
-	// not on ordinary appends (which are the projection's fast path). A row
-	// count proves no append landed between the read snapshot and this check;
-	// updates are already covered by the epoch.
-	var rows int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests`).Scan(&rows); err != nil {
+	currentHigh, err := projectionHighRowID(ctx, tx)
+	if err != nil {
 		return false, err
 	}
-	if rows != t.Requests {
+	if current != epoch || currentHigh != highRowID {
 		return false, nil
 	}
-	if err := saveTotals(ctx, tx, t, false, epoch); err != nil {
+	if err := saveTotals(ctx, tx, t, false, current, currentHigh); err != nil {
 		return false, fmt.Errorf("persist totals: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1278,17 +1296,22 @@ func (s *Store) TotalsDegraded() bool {
 // document: a semantics change bumps it and forces one rebuilding scan.
 const totalsMetaKey = "totals"
 
-const totalsMetaVersion = 1
+const totalsMetaVersion = 2
 
 // totalsDoc is the persisted shape. Totals' JSON tags are the dashboard API
 // contract; this type owns the storage contract separately.
 type totalsDoc struct {
 	V int `json:"v"`
 	// Epoch is the projection mutation epoch observed after the same
-	// transaction's request triggers. Any later external INSERT/UPDATE/DELETE
-	// (or a crash-repaired row) advances it, so a stale document is detected
-	// at boot and rebuilt instead of trusted over authoritative SQLite rows.
-	Epoch     int64   `json:"epoch"`
+	// transaction's request triggers. Rewrites, removals and out-of-order
+	// rowids advance it, so a stale document is detected at boot and rebuilt
+	// instead of trusted over authoritative SQLite rows.
+	Epoch int64 `json:"epoch"`
+	// HighRowID is the projection high-water mark observed in the same
+	// transaction. An ordinary external append keeps the epoch unchanged but
+	// always advances this mark, so it catches the one mutation the epoch
+	// deliberately leaves out of the fast path.
+	HighRowID int64   `json:"high_rowid"`
 	Invalid   bool    `json:"invalid,omitempty"`
 	Requests  int64   `json:"requests"`
 	Errors    int64   `json:"errors"`
@@ -1305,9 +1328,9 @@ type totalsDoc struct {
 	CostInOut float64 `json:"cost_in_out"`
 }
 
-func totalsDocument(t Totals, invalid bool, epoch int64) totalsDoc {
+func totalsDocument(t Totals, invalid bool, epoch, highRowID int64) totalsDoc {
 	return totalsDoc{
-		V: totalsMetaVersion, Epoch: epoch, Invalid: invalid || t.err != nil,
+		V: totalsMetaVersion, Epoch: epoch, HighRowID: highRowID, Invalid: invalid || t.err != nil,
 		Requests: t.Requests, Errors: t.Errors, Cost: t.Cost,
 		InputTok: t.InputTok, OutputTok: t.OutputTok,
 		CacheRead: t.CacheRead, Reasoning: t.Reasoning,
@@ -1328,13 +1351,15 @@ func (d totalsDoc) totals() Totals {
 	}
 }
 
-// saveTotals writes the aggregate on the caller's transaction/connection. It
-// must share the mutation's transaction: a totals row ahead of or behind the
-// request rows would turn a crash into silently wrong since-inception KPIs.
+// saveTotals writes the aggregate and both mutation witnesses on the caller's
+// transaction/connection. It must share the mutation's transaction: a totals
+// row ahead of or behind the request rows would turn a crash into silently
+// wrong since-inception KPIs, and a witness read outside that transaction
+// could bless an aggregate that never saw its rows.
 func saveTotals(ctx context.Context, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, t Totals, invalid bool, epoch int64) error {
-	b, err := json.Marshal(totalsDocument(t, invalid, epoch))
+}, t Totals, invalid bool, epoch, highRowID int64) error {
+	b, err := json.Marshal(totalsDocument(t, invalid, epoch, highRowID))
 	if err != nil {
 		return err
 	}
@@ -1349,12 +1374,12 @@ func loadTotals(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }) (t Totals, found bool, err error) {
 	var raw string
-	var epoch int64
-	// One statement reads the document and its mutation witness from the same
-	// SQLite snapshot, so a concurrent commit cannot land between them.
-	err = db.QueryRowContext(ctx, `SELECT m.value, s.epoch
+	var epoch, highRowID int64
+	// One statement reads the document and both mutation witnesses from the
+	// same SQLite snapshot, so a concurrent commit cannot land between them.
+	err = db.QueryRowContext(ctx, `SELECT m.value, s.epoch, s.high_rowid
 		FROM meta AS m CROSS JOIN request_projection_state AS s
-		WHERE m.key = ? AND s.singleton = 1`, totalsMetaKey).Scan(&raw, &epoch)
+		WHERE m.key = ? AND s.singleton = 1`, totalsMetaKey).Scan(&raw, &epoch, &highRowID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Totals{}, false, nil
 	}
@@ -1369,9 +1394,9 @@ func loadTotals(ctx context.Context, db interface {
 	if d.V != totalsMetaVersion || d.Invalid {
 		return Totals{}, false, nil
 	}
-	if epoch != d.Epoch {
+	if epoch != d.Epoch || highRowID != d.HighRowID {
 		// Authoritative rows changed outside this store's transaction (the
-		// projection trigger fired); the cached aggregate is no longer exact.
+		// projection triggers fired); the cached aggregate is no longer exact.
 		return Totals{}, false, nil
 	}
 	return d.totals(), true, nil
@@ -1385,6 +1410,17 @@ func projectionEpoch(ctx context.Context, db interface {
 	var epoch int64
 	err := db.QueryRowContext(ctx, `SELECT epoch FROM request_projection_state WHERE singleton = 1`).Scan(&epoch)
 	return epoch, err
+}
+
+// projectionHighRowID reads the append witness next to the epoch on the
+// caller's transaction/connection. Ordinary inserts advance it without
+// touching the epoch, so a persisted totals document must record both.
+func projectionHighRowID(ctx context.Context, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) (int64, error) {
+	var highRowID int64
+	err := db.QueryRowContext(ctx, `SELECT high_rowid FROM request_projection_state WHERE singleton = 1`).Scan(&highRowID)
+	return highRowID, err
 }
 
 func readTotals(ctx context.Context, db interface {

@@ -148,7 +148,11 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	} else if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
 		return PurgeResult{}, err
 	}
-	if err := s.resetDebugBytes(cmd.ctx, tx); err != nil {
+	// Read the post-delete sidecar total inside the transaction but publish it
+	// only after commit: a forced rollback restores the rows, so the counter
+	// must still count them or the debug cap is silently bypassed.
+	debugBytes, err := debugByteTotal(cmd.ctx, tx)
+	if err != nil {
 		return PurgeResult{}, err
 	}
 	res, err := tx.ExecContext(cmd.ctx, "DELETE FROM requests"+where, args...)
@@ -175,7 +179,11 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 		if err != nil {
 			return PurgeResult{}, err
 		}
-		if err := saveTotals(cmd.ctx, tx, totals, false, epoch); err != nil {
+		highRowID, err := projectionHighRowID(cmd.ctx, tx)
+		if err != nil {
+			return PurgeResult{}, err
+		}
+		if err := saveTotals(cmd.ctx, tx, totals, false, epoch, highRowID); err != nil {
 			return PurgeResult{}, err
 		}
 	}
@@ -183,6 +191,7 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 		return PurgeResult{}, err
 	}
 	// Do not consult ctx after commit: these in-memory effects are mandatory.
+	s.installDebugBytes(debugBytes)
 	if hasTotals {
 		s.installTotals(totals)
 	}

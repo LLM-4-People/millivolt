@@ -152,6 +152,291 @@ func TestOpenQuarantinesInvalidPendingSnapshot(t *testing.T) {
 	}
 }
 
+// TestOpenQuarantinesIncompatiblePendingSnapshot is the regression for the
+// admission ordering bug: a structurally valid SQLite file whose requests
+// table cannot be migrated must be rejected during preflight, before the live
+// database is moved or removed. The original row must survive and the live
+// file must keep its identity.
+func TestOpenQuarantinesIncompatiblePendingSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	dst, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := dst.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	incoming := PendingSnapshotPath(dstPath)
+	bad, err := sql.Open("sqlite", incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bad.Exec(`CREATE TABLE requests (id TEXT PRIMARY KEY); INSERT INTO requests(id) VALUES ('incompatible')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := bad.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// The integrity/header admission passes: only the schema initializer can
+	// reject this file, which is exactly the preflight the bug skipped.
+	if err := backup.CheckDatabaseFile(incoming); err != nil {
+		t.Fatalf("fixture should pass the integrity check: %v", err)
+	}
+
+	reopened, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatalf("Open after incompatible pending snapshot: %v", err)
+	}
+	defer reopened.Close()
+	got, err := reopened.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "keep-old" {
+		t.Fatalf("live rows after incompatible pending = %#v, want keep-old", got)
+	}
+	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
+		t.Fatal("incompatible pending was not consumed")
+	}
+	if _, err := os.Stat(incoming + ".invalid"); err != nil {
+		t.Fatalf("incompatible pending was not quarantined: %v", err)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
+		t.Fatal("rejected pending left a rollback sibling")
+	}
+	after, err := os.Stat(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("live database file was replaced by the rejected pending snapshot")
+	}
+}
+
+// TestPendingSnapshotRollbackRestoresLiveDatabase pins the admission object's
+// rollback contract: after a compatible incoming database is installed, a
+// rollback removes it and restores the original database and sidecars.
+func TestPendingSnapshotRollbackRestoresLiveDatabase(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	live, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSnapshot(dstPath, packedSnapshot(t, "replacement")); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("compatible pending snapshot was not admitted")
+	}
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "replacement" {
+		t.Fatalf("installed ids = %v, want [replacement]", ids)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); err != nil {
+		t.Fatalf("admission did not keep a rollback sibling: %v", err)
+	}
+	if err := admission.rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	after, err := os.ReadFile(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rollback did not restore the original live database bytes")
+	}
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "keep-old" {
+		t.Fatalf("restored ids = %v, want [keep-old]", ids)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
+		t.Fatal("rollback left its previous sibling behind")
+	}
+}
+
+// TestOpenRecoversInterruptedPendingSnapshot pins the boot fence: a .previous
+// sibling means an admission never committed, so the previous database is
+// restored and the staged incoming file is quarantined with its own suffix.
+func TestOpenRecoversInterruptedPendingSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	live, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(dstPath, dstPath+".previous"); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSnapshot(dstPath, packedSnapshot(t, "interrupted")); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "keep-old" {
+		t.Fatalf("rows after interrupted-admission recovery = %#v, want keep-old", got)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
+		t.Fatal("boot recovery left its previous sibling behind")
+	}
+	incoming := PendingSnapshotPath(dstPath)
+	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
+		t.Fatal("boot recovery re-admitted the interrupted incoming file")
+	}
+	if _, err := os.Stat(incoming + ".invalid-interrupted"); err != nil {
+		t.Fatalf("boot recovery did not quarantine the interrupted incoming file: %v", err)
+	}
+}
+
+// TestOpenRecoversInterruptedPendingSnapshotAfterInstall covers the other
+// crash window: the incoming file already replaced the live path but commit
+// never ran. Boot must discard the uncommitted new database and restore the
+// previous one.
+func TestOpenRecoversInterruptedPendingSnapshotAfterInstall(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	live, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSnapshot(dstPath, packedSnapshot(t, "uncommitted")); err != nil {
+		t.Fatal(err)
+	}
+	admission, err := admitPendingSnapshot(dstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admission == nil {
+		t.Fatal("compatible pending snapshot was not admitted")
+	}
+	// Simulate a crash here: no commit, no rollback, store never opened.
+	if ids := readRequestIDs(t, dstPath); len(ids) != 1 || ids[0] != "uncommitted" {
+		t.Fatalf("installed ids = %v, want [uncommitted]", ids)
+	}
+	reopened, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	got, err := reopened.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "keep-old" {
+		t.Fatalf("rows after post-install recovery = %#v, want keep-old", got)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
+		t.Fatal("boot recovery left its previous sibling behind")
+	}
+}
+
+// TestOpenAdmitsPendingSnapshotOverLiveAndCommits pins the successful replace
+// path with a live database present: the incoming rows win, and commit removes
+// the rollback sibling.
+func TestOpenAdmitsPendingSnapshotOverLiveAndCommits(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	live, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Record(&metrics.Record{ID: "old-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSnapshot(dstPath, packedSnapshot(t, "replacement")); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	ids := readRequestIDs(t, dstPath)
+	if len(ids) != 1 || ids[0] != "replacement" {
+		t.Fatalf("admitted ids = %v, want [replacement]", ids)
+	}
+	if _, err := os.Stat(dstPath + ".previous"); !os.IsNotExist(err) {
+		t.Fatal("commit left its rollback sibling behind")
+	}
+	if _, err := os.Stat(PendingSnapshotPath(dstPath)); !os.IsNotExist(err) {
+		t.Fatal("admission left the incoming file behind")
+	}
+}
+
+func readRequestIDs(t *testing.T, path string) []string {
+	t.Helper()
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT id FROM requests ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
 func TestOpenLeavesPendingOnUnreadableIncoming(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("root bypasses file permissions")
@@ -177,7 +462,11 @@ func TestOpenLeavesPendingOnUnreadableIncoming(t *testing.T) {
 	}
 }
 
-func TestOpenAbortsAdmitWhenSidecarCannotBeRemoved(t *testing.T) {
+// TestOpenRestoresLiveWhenSidecarRenameFails pins rollback safety for the
+// sidecar moves: the live database is moved aside with its WAL/SHM siblings,
+// so a sidecar rename that cannot complete must abort admission and restore
+// the original files instead of deleting or replacing the live database.
+func TestOpenRestoresLiveWhenSidecarRenameFails(t *testing.T) {
 	for _, sidecar := range []string{"-wal", "-shm"} {
 		t.Run(sidecar, func(t *testing.T) {
 			dir := t.TempDir()
@@ -195,12 +484,18 @@ func TestOpenAbortsAdmitWhenSidecarCannotBeRemoved(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			const stale = "stale-sidecar"
+			if err := os.WriteFile(dstPath+sidecar, []byte(stale), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			// Block the rollback name: renaming the sidecar over a non-empty
+			// directory fails after the live main file was already moved.
+			blockPath(t, dstPath+".previous"+sidecar)
 			if err := StageSnapshot(dstPath, packedSnapshot(t, "incoming-row")); err != nil {
 				t.Fatal(err)
 			}
-			blockRemove(t, dstPath+sidecar)
 			if _, err := Open(dstPath, testOpts); err == nil {
-				t.Fatal("Open succeeded when a WAL/SHM sidecar could not be removed")
+				t.Fatal("Open succeeded when a live WAL/SHM sidecar could not be moved aside")
 			} else {
 				msg := err.Error()
 				if !strings.Contains(msg, "pending snapshot") {
@@ -221,13 +516,16 @@ func TestOpenAbortsAdmitWhenSidecarCannotBeRemoved(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !bytes.Equal(before, after) {
-				t.Fatal("live database was replaced after a sidecar remove failure")
+				t.Fatal("live database was replaced after a sidecar rename failure")
+			}
+			if got, err := os.ReadFile(dstPath + sidecar); err != nil || string(got) != stale {
+				t.Fatalf("live sidecar after failed admission = %q, %v; want the original bytes", got, err)
 			}
 		})
 	}
 }
 
-func blockRemove(t *testing.T, path string) {
+func blockPath(t *testing.T, path string) {
 	t.Helper()
 	_ = os.Remove(path)
 	if err := os.Mkdir(path, 0o700); err != nil {

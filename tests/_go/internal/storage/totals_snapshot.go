@@ -9,9 +9,10 @@ import (
 )
 
 // TestComputeTotalsRevalidatesEpoch forces a commit between the totals read
-// snapshot and the writer-side save. The rebuild must notice the moved epoch,
-// retry, and persist/install the rows it actually counted; stamping the old
-// count with the new epoch would make loadTotals accept an undercount.
+// snapshot and the writer-side save. The rebuild must notice the moved
+// witness (here the high rowid advanced by an ordinary append), retry, and
+// persist/install the rows it actually counted; stamping the old count with
+// the new witness would make loadTotals accept an undercount.
 func TestComputeTotalsRevalidatesEpoch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "totals-snapshot.db")
 	s, err := Open(path, testOpts)
