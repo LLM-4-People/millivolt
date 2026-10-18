@@ -6056,6 +6056,138 @@ async function main() {
     delete w.__filterDoc;
   }
 
+  // ---- settings search haystack cache: fillSettingsForm stamps each rendered
+  // row once with its lowercase label + key + help join, and showSettingsCat
+  // then serves both row visibility and every rail badge from one row query
+  // and one pass. A three-category fixture pins the cross-category badges,
+  // the active/aria state, the singular/plural copy, the empty result, the
+  // refill replacement and the back-to-category restore.
+  {
+    const doc = {
+      revision: 'search-cache-r1',
+      fields: [
+        { key: 'alpha_rate', category: 'rate', label: 'Legacy alpha rate', help: 'old wording ceiling', kind: 'int', hot_reload: true },
+        { key: 'beta_rate', category: 'rate', label: 'Beta rate', help: 'shared limit', kind: 'int', hot_reload: false },
+        { key: 'gamma_window', category: 'window', label: 'Gamma window', help: 'ledger size', kind: 'int', hot_reload: true },
+        { key: 'delta_window', category: 'window', label: 'Delta window', help: 'ledger cadence', kind: 'int', hot_reload: false },
+        { key: 'epsilon_client', category: 'client', label: 'Epsilon client', help: 'client ledger label', kind: 'string', hot_reload: true },
+        { key: 'zeta_client', category: 'client', label: 'Zeta client', help: 'unrelated note', kind: 'string', hot_reload: true },
+      ],
+      categories: [
+        { id: 'rate', label: 'Rate', help: 'rate controls' },
+        { id: 'window', label: 'Windows', help: 'window controls' },
+        { id: 'client', label: 'Clients', help: 'client controls' },
+      ],
+      values: { alpha_rate: 1, beta_rate: 2, gamma_window: 3, delta_window: 4, epsilon_client: 'one', zeta_client: 'two' },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    w.__searchCacheDoc = doc;
+    w.eval("settingsCat = 'rate'; settingsDoc = window.__searchCacheDoc; fillSettingsForm(settingsDoc)");
+    d.getElementById('settings-sheet').hidden = false;
+    const box = d.getElementById('settings-fields');
+    const rail = d.getElementById('settings-rail');
+    const q = d.getElementById('settings-q');
+    const visibleKeys = () => [...box.querySelectorAll('.st-row')]
+      .filter(r => !r.hidden).map(r => r.dataset.key);
+    const badges = () => Object.fromEntries([...rail.querySelectorAll('.st-rail-item')]
+      .map(b => [b.dataset.stCat, Number(b.querySelector('.rail-n').textContent)]));
+    const railState = id => {
+      const b = rail.querySelector(`[data-st-cat="${id}"]`);
+      return { hit: b.classList.contains('has-hit'), miss: b.classList.contains('is-miss'),
+        active: b.classList.contains('active'), current: b.getAttribute('aria-current') };
+    };
+    const cachedRows = [...box.querySelectorAll('.st-row')];
+    check('every rendered settings row caches its exact lowercase haystack',
+      cachedRows.length === 8 && cachedRows.every(row => row.dataset.search ===
+        ((row.dataset.label || '') + ' ' + (row.dataset.key || '') + ' ' + (row.dataset.help || '')).toLowerCase()) &&
+      box.querySelector('.st-row[data-key="gamma_window"]').dataset.search === 'gamma window gamma_window ledger size');
+    // One hook around the fields container proves the keystroke path reads
+    // the rendered rows once, not once per rail item.
+    const nativeQSA = box.querySelectorAll.bind(box);
+    let rowQueries = 0;
+    box.querySelectorAll = sel => { if (sel === '.st-row') rowQueries++; return nativeQSA(sel); };
+    q.value = '  LEDGER  ';
+    w.filterSettings();
+    delete box.querySelectorAll;
+    check('one settings row query serves a keystroke regardless of rail length',
+      rail.querySelectorAll('.st-rail-item').length === 3 && rowQueries === 1);
+    check('a trimmed lowercase query shows every cross-category hit with exact copy',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['gamma_window', 'delta_window', 'epsilon_client']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '3 matches' &&
+      d.querySelector('#settings-pane-hd p').textContent === 'ledger');
+    check('one query pass sets every rail badge and its hit/miss class',
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1}) &&
+      !railState('rate').hit && railState('rate').miss &&
+      railState('window').hit && !railState('window').miss &&
+      railState('client').hit && !railState('client').miss);
+    check('a query clears the active rail item and aria-current',
+      ['rate', 'window', 'client'].every(id => !railState(id).active && railState(id).current === 'false'));
+    w.eval("settingsCat = 'window'; showSettingsCat()");
+    check('switching category under a query keeps every hit and badge unchanged',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['gamma_window', 'delta_window', 'epsilon_client']) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 2, client: 1}) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '3 matches' &&
+      ['rate', 'window', 'client'].every(id => !railState(id).active && railState(id).current === 'false'));
+    q.value = 'zeta';
+    w.filterSettings();
+    check('a one-row query uses the singular copy and one badge hit',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['zeta_client']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '1 match' &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 1}) &&
+      railState('client').hit && railState('rate').miss && railState('window').miss);
+    q.value = 'delta_window';
+    w.filterSettings();
+    check('a row key alone is part of the cached search haystack',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['delta_window']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '1 match' &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 1, client: 0}));
+    q.value = 'no-such-setting';
+    w.filterSettings();
+    check('an empty result hides every row and marks every rail item a miss',
+      visibleKeys().length === 0 &&
+      d.querySelector('#settings-pane-hd h4').textContent === '0 matches' &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 0, window: 0, client: 0}) &&
+      ['rate', 'window', 'client'].every(id => railState(id).miss));
+    w.eval("settingsCat = 'rate'");
+    q.value = '';
+    w.filterSettings();
+    check('clearing the query restores the active category rows and full badges',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['alpha_rate', 'beta_rate']) &&
+      JSON.stringify(badges()) === JSON.stringify({rate: 2, window: 2, client: 2}) &&
+      d.querySelector('#settings-pane-hd h4').textContent === 'Rate' &&
+      d.querySelector('#settings-pane-hd p').textContent === 'rate controls' &&
+      railState('rate').active && railState('rate').current === 'page' &&
+      ['rate', 'window', 'client'].every(id => !railState(id).hit && !railState(id).miss));
+    q.value = 'legacy';
+    w.filterSettings();
+    check('the pre-refill label term is searchable', JSON.stringify(visibleKeys()) === JSON.stringify(['alpha_rate']));
+    const next = JSON.parse(JSON.stringify(doc));
+    next.revision = 'search-cache-r2';
+    next.fields.find(f => f.key === 'alpha_rate').label = 'Current alpha rate';
+    next.fields.find(f => f.key === 'alpha_rate').help = 'new wording ceiling';
+    w.__searchCacheNext = next;
+    w.eval('settingsDoc = window.__searchCacheNext; fillSettingsForm(settingsDoc)');
+    check('a refill replaces the cached haystack instead of keeping stale text',
+      box.querySelector('.st-row[data-key="alpha_rate"]').dataset.search === 'current alpha rate alpha_rate new wording ceiling');
+    q.value = 'legacy';
+    w.filterSettings();
+    check('the old label stops matching after the refill', visibleKeys().length === 0);
+    q.value = 'current';
+    w.filterSettings();
+    check('the refill label is the row text the search now sees',
+      JSON.stringify(visibleKeys()) === JSON.stringify(['alpha_rate']) &&
+      d.querySelector('#settings-pane-hd h4').textContent === '1 match');
+    q.value = '';
+    w.filterSettings();
+    w.eval("settingsCat = 'providers'");
+    w.__searchCacheRestore = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__searchCacheRestore; fillSettingsForm(settingsDoc)');
+    w.closeSettings(true);
+    delete w.__searchCacheDoc;
+    delete w.__searchCacheNext;
+    delete w.__searchCacheRestore;
+  }
+
   // ---- test 12d: a stale tick's pending snapshot must never regress an
   // in-flight row's retry progress (attempts are append-only - an older
   // snapshot carries fewer absorbed attempts than a just-arrived SSE update).

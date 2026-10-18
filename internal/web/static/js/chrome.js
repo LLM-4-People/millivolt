@@ -877,6 +877,10 @@ function fillSettingsForm(doc) {
   box.querySelectorAll('.sc-wrap').forEach(wrap => { validateSubConversationsDraft(wrap); scSyncCount(wrap); });
   fillSettingsLive(doc);
   settingsStatus(doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist');
+  // Cache each rendered row's search haystack beside the value snapshot: the
+  // per-keystroke filter and every rail badge read this copy instead of the
+  // row dataset text.
+  settingsCacheHaystacks(box);
   // One full collection establishes the accepted baseline for both the full
   // snapshot and the per-key map. Every later keystroke compares just its own
   // key against these entries; a refill starts the draft clean.
@@ -1282,6 +1286,9 @@ function paintBackupPane() {
   box.querySelectorAll('[data-backup]').forEach(el => el.remove());
   box.insertAdjacentHTML('beforeend', settingsBackupHTML(settingsDoc));
   wireBackupPane();
+  // The repaint replaces the backup rows; re-cache before the filter reads
+  // them.
+  settingsCacheHaystacks(box);
   showSettingsCat();
 }
 
@@ -3540,6 +3547,19 @@ function updateSettingsActions(dirtyOverride) {
   if (revert) revert.disabled = !dirty || busy;
 }
 
+// settingsCacheHaystacks owns the search haystack of every rendered row: one
+// lowercase label + key + help copy, stamped after a form rebuild or a
+// backup-pane repaint. showSettingsCat's keystroke pass reads only this cached
+// text, so neither the row filter nor the rail badge counts re-read or
+// re-lowercase the dataset for each rail item.
+function settingsCacheHaystacks(box) {
+  if (!box) return;
+  box.querySelectorAll('.st-row').forEach(row => {
+    row.dataset.search = ((row.dataset.label || '') + ' ' + (row.dataset.key || '') + ' ' +
+      (row.dataset.help || '')).toLowerCase();
+  });
+}
+
 function showSettingsCat() {
   const box = $('settings-fields');
   const hd = $('settings-pane-hd');
@@ -3549,17 +3569,20 @@ function showSettingsCat() {
   const cats = (settingsDoc && settingsDoc.categories) || [];
   const cat = cats.find(c => c.id === settingsCat) || cats[0];
   let shown = 0, restarts = 0;
-  // Both the row filter and the rail badge counts search the same
-  // label + key + help haystack.
-  const rowMatches = row => ((row.dataset.label || '') + ' ' + (row.dataset.key || '') + ' ' + (row.dataset.help || '')).toLowerCase().includes(q);
+  // One row pass serves both visibility and every rail badge count. The
+  // cached haystack replaces the per-badge array scans.
+  const perCat = new Map();
   box.querySelectorAll('.st-row').forEach(row => {
-    const hit = !q || rowMatches(row);
-    const inCat = !q && row.dataset.cat === (cat && cat.id);
-    row.hidden = q ? !hit : !inCat;
-    if (!row.hidden) {
+    const catId = row.dataset.cat;
+    const hit = !q ? catId === (cat && cat.id) : (row.dataset.search || '').includes(q);
+    row.hidden = !hit;
+    if (hit) {
       shown++;
       if (row.dataset.hot === '0') restarts++;
     }
+    // Without a query a badge is the category total, visible or not; with a
+    // query it counts only that category's matching rows.
+    if (!q || hit) perCat.set(catId, (perCat.get(catId) || 0) + 1);
   });
   if (hd) {
     const banner = (!q && restarts) ? '<div class="st-banner">takes a process restart</div>' : '';
@@ -3572,12 +3595,7 @@ function showSettingsCat() {
       const on = !q && btn.dataset.stCat === settingsCat;
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-current', on ? 'page' : 'false');
-      const id = btn.dataset.stCat;
-      const n = [...box.querySelectorAll('.st-row')].filter(r => {
-        if (r.dataset.cat !== id) return false;
-        if (!q) return true;
-        return rowMatches(r);
-      }).length;
+      const n = perCat.get(btn.dataset.stCat) || 0;
       const badge = btn.querySelector('.rail-n');
       if (badge) badge.textContent = n;
       btn.classList.toggle('has-hit', !!q && n > 0);
