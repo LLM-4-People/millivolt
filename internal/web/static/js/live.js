@@ -392,12 +392,15 @@ function renderLive() {
   updateScopeLine();
 }
 
-// Canonical scope and active breakdown of the last full render. Every full
-// path (navigation, status filter, bootstrap/restart, purge) updates these,
-// so a later by-only navigation is compared against the actual last render,
-// not just the last hash-routed one.
+// Canonical scope and active breakdown of the last full render. Full paths
+// (navigation, status filter, bootstrap/restart, purge) update these, so a
+// later by-only navigation is compared against the actual last render, not
+// just the last hash-routed one. _routedHash gates the update while a hash
+// change is still queued: a renderAll that sees the un-dispatched hash must
+// not claim that scope before onNavigate issues its explorer/chart fetches.
 let _navScopeKey = null;
 let _navActiveDim = null;
+let _routedHash = null;
 
 function renderAll(data) {
   lastData = data;
@@ -424,8 +427,13 @@ function renderAll(data) {
   // in exactly one place).
   refreshFooterState();
   updateScopeLine();
-  _navScopeKey = explorerScopeKey(explorerFilters());
-  _navActiveDim = explorerState().activeDim;
+  // Claim this scope only when the router has dispatched it. A render between
+  // a hash assignment and its hashchange (for example a bootstrap tick) must
+  // leave the pending scope for onNavigate to route and fetch.
+  if (location.hash === _routedHash) {
+    _navScopeKey = explorerScopeKey(explorerFilters());
+    _navActiveDim = explorerState().activeDim;
+  }
 }
 
 // ---------- live updates via SSE ----------
@@ -846,6 +854,7 @@ armDashboardTicks();
 onNavigate(() => {
   const st = explorerState();
   const scopeKey = explorerScopeKey(st.filters);
+  _routedHash = location.hash;
   if (!lastData || scopeKey !== _navScopeKey) {
     _navScopeKey = scopeKey;
     _navActiveDim = st.activeDim;

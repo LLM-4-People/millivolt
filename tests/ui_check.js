@@ -6650,6 +6650,28 @@ async function main() {
       w.eval('logArchive.length') === 0 && rows().length === 3);
   }
 
+  // ---- test 12k: a render between a hash assignment and its queued
+  // hashchange must not claim the pending scope. Otherwise onNavigate sees
+  // the new scope as already rendered, skips the full path, and never fetches
+  // the chart/explorer for the new filter set.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;');
+    const scopeBefore = w.eval('_navScopeKey');
+    try {
+      w.eval("location.hash = '#/provider/pending.example'");
+      w.eval('renderAll(lastData)');
+      check('a render before the queued hashchange leaves the pending scope unclaimed',
+        w.eval('_navScopeKey') === scopeBefore);
+      await sleep(30);
+      check('the queued hashchange still routes the new scope',
+        w.eval('_navScopeKey') !== scopeBefore &&
+        w.eval('_routedHash') === w.eval('location.hash'));
+    } finally {
+      w.navigateTo([]);
+      await sleep(20);
+    }
+  }
+
   // Frontend changes reload through the existing bootstrap boundary only.
   // jsdom reports navigation as not implemented; the harness-start
   // jsdomError listener counts that actual reload signal (jsdomReloads)
