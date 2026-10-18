@@ -873,7 +873,7 @@ func markPostCommitGone(rec *metrics.Record, err error) {
 // outcome is surfaced as an error to both the client and the dashboard instead
 // of a silently empty success.
 func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.CursorRun, result providerformat.TurnResult, emit func(map[string]any, any) error, rec *metrics.Record, id string, rr cursorTurnRender, resumeRequest bool) {
-	applyCursorUsage(rec, &result, rr.estimatedInput())
+	applyCursorUsage(rec, &result, rr.estimate)
 	// A failed post-commit write here means the LOCAL client disconnected
 	// mid-turn. Cursor's documented exception: the committed upstream 200
 	// stays the record's status - mark the disconnect flag only, never
@@ -1032,7 +1032,7 @@ func emitHTTPError(w http.ResponseWriter, body string, code int) error {
 
 // writeRunJSON renders a non-streaming chat.completion from a turn result.
 func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorRun, result providerformat.TurnResult, content string, toolCalls []map[string]any, rec *metrics.Record, id string, rr cursorTurnRender, resumeRequest bool) {
-	applyCursorUsage(rec, &result, rr.estimatedInput())
+	applyCursorUsage(rec, &result, rr.estimate)
 	// A failed post-commit write here means the LOCAL client disconnected
 	// before the completion - or the error body below - was delivered.
 	// Cursor's documented exception (the same contract as finishRunTurn and
@@ -1102,7 +1102,7 @@ func cursorUsage(prompt, output, reasoning int64) (metrics.Usage, error) {
 // applyCursorUsage validates before either renderer can park or emit success.
 // A rejected proto count invalidates the whole sample, including any earlier
 // partial count, and the existing error path closes the run.
-func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, estimate int64) {
+func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, estimate func() int64) {
 	if errors.Is(result.Err, metrics.ErrMetricRange) {
 		invalidateUsage(rec, result.Err)
 		result.Outcome = providerformat.TurnErrored
@@ -1110,7 +1110,9 @@ func applyCursorUsage(rec *metrics.Record, result *providerformat.TurnResult, es
 	}
 	prompt := result.Prompt
 	if prompt == 0 || result.Outcome == providerformat.TurnErrored {
-		prompt = estimate
+		if estimate != nil {
+			prompt = estimate()
+		}
 	}
 	usage, err := cursorUsage(prompt, result.Output, result.Reasoning)
 	if err != nil {

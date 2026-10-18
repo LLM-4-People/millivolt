@@ -11,6 +11,38 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
+// TestCursorInputEstimateIsLazy pins the fallback boundary: Cursor's exact
+// prompt count must not trigger the whole-body estimate decode, while a
+// zero-count or errored turn still falls back to it. The estimate closure is
+// the only owner that may decode the request history.
+func TestCursorInputEstimateIsLazy(t *testing.T) {
+	calls := 0
+	estimate := func() int64 { calls++; return 42 }
+	rec := &metrics.Record{}
+	res := providerformat.TurnResult{Outcome: providerformat.TurnFinished, Prompt: 10, Output: 2}
+	applyCursorUsage(rec, &res, estimate)
+	if calls != 0 {
+		t.Fatalf("estimate called %d times with an exact prompt count", calls)
+	}
+	if rec.Usage.InputTokens != 10 || rec.Usage.OutputTokens != 2 {
+		t.Fatalf("usage = %+v, want exact 10/2", rec.Usage)
+	}
+
+	rec = &metrics.Record{}
+	res = providerformat.TurnResult{Outcome: providerformat.TurnFinished, Prompt: 0, Output: 2}
+	applyCursorUsage(rec, &res, estimate)
+	if calls != 1 || rec.Usage.InputTokens != 42 {
+		t.Fatalf("zero prompt: calls=%d input=%d, want 1/42", calls, rec.Usage.InputTokens)
+	}
+
+	rec = &metrics.Record{}
+	res = providerformat.TurnResult{Outcome: providerformat.TurnErrored, Prompt: 10, Output: 2}
+	applyCursorUsage(rec, &res, estimate)
+	if calls != 2 || rec.Usage.InputTokens != 42 {
+		t.Fatalf("errored turn: calls=%d input=%d, want 2/42", calls, rec.Usage.InputTokens)
+	}
+}
+
 // The non-streaming cursor completion and the streaming usage chunk must
 // render usage through the SAME owner (usageWire). OpenAI carries
 // completion_tokens_details.reasoning_tokens on both surfaces; the
