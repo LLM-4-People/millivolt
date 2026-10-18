@@ -50,6 +50,11 @@ const (
 	snapshotStateCommitted = "committed"
 )
 
+// snapshotSidecarSuffixes is the ordered set of SQLite sidecar suffixes the
+// admission protocol moves, removes, and restores. WAL precedes SHM: the SHM
+// file is a derived index that is meaningless without its WAL.
+var snapshotSidecarSuffixes = []string{"-wal", "-shm"}
+
 // snapshotDirSyncHook is a test seam (production nil) for observing or failing
 // directory durability. It runs wherever the snapshot protocol syncs the
 // database directory.
@@ -312,7 +317,7 @@ func publishSnapshot(path string, write func(io.Writer) error) error {
 	// any sidecar belonging to a superseded incoming snapshot before the new
 	// main is renamed into place, so a crash can never pair the new database
 	// with stale WAL frames.
-	for _, suffix := range []string{"-wal", "-shm"} {
+	for _, suffix := range snapshotSidecarSuffixes {
 		if err := removeIfExists(incoming + suffix); err != nil {
 			return err
 		}
@@ -414,7 +419,7 @@ func preflightPendingSnapshot(path string) error {
 	// A clean close after switching to DELETE leaves no sidecar. Remove any
 	// stale one only now: deleting a WAL while it is open would discard its
 	// committed pages.
-	for _, suffix := range []string{"-wal", "-shm"} {
+	for _, suffix := range snapshotSidecarSuffixes {
 		if err := removeIfExists(path + suffix); err != nil {
 			return err
 		}
@@ -473,12 +478,13 @@ func probeWriterInsert(db *sql.DB) error {
 // before or during commit. The durable state marker, not the presence of one
 // sidecar, decides the transition:
 //
-//   - pending: the new database was never committed. Its path set is removed,
-//     the previous main+sidecar set is restored, and the staged incoming file
-//     is quarantined. This also covers a crash inside an earlier recovery:
-//     a main already restored at path is left alone while its remaining
-//     sidecars move back, so a committed WAL frame is never mistaken for
-//     commit debris.
+//   - pending: the new database was never committed. While the previous main
+//     is still aside, every file at the live name is the uncommitted incoming
+//     set: its sidecars are removed before its main, then the previous
+//     main+sidecar set is restored and the staged incoming file is
+//     quarantined. This also covers a crash inside an earlier recovery: a main
+//     already restored at path is left alone while its remaining sidecars move
+//     back, so a committed WAL frame is never mistaken for commit debris.
 //   - committed: the replacement is permanent. Any surviving rollback set is
 //     a stale directory entry and is removed without reverting live rows.
 //   - no marker: a live database wins over a stale rollback entry; restore is
@@ -525,10 +531,31 @@ func recoverInterruptedSnapshot(path string) error {
 	return syncSnapshotDir(filepath.Dir(path))
 }
 
-// restorePendingSnapshot restores the previous database set. If the previous
-// main was already renamed back by an interrupted recovery, the live main is
-// left in place and only the remaining previous sidecars move; removing it
-// would discard the committed database the recovery already restored.
+// restorePendingSnapshot restores the previous database set.
+//
+// When the previous main still exists, the live-set removal phase did not
+// finish. Admission moves the live sidecars before the live main, so every
+// file at the live name then belongs to the uncommitted incoming set (or is an
+// orphaned incoming sidecar): its sidecars are removed before its main. That
+// covers a recovery that removed the incoming main but crashed before its WAL;
+// a surviving WAL must never look like an incoming sibling for the restored
+// previous main.
+//
+// The one exception is a staged incoming main, which proves the replacement
+// never reached the live name. A pending marker from the earlier
+// main-before-sidecars ordering can therefore have a committed previous WAL
+// still at the live name; it is moved back into the rollback set rather than
+// deleted.
+//
+// Once the previous main moved back, a crash before its sidecars leaves a live
+// main plus `.previous-wal`. Those remaining sidecars are renamed back, never
+// discarded, so committed WAL frames survive.
+//
+// Markerless recovery (an admission from before the durable marker existed)
+// cannot distinguish a previous WAL left at the live name by the old
+// main-before-sidecars ordering from an incoming WAL left behind by the old
+// recovery. It keeps live sidecars, which favors committed frames over
+// discarding them; the marked states above are unambiguous.
 func restorePendingSnapshot(path, previous, state string) error {
 	previousMain := false
 	if _, err := os.Stat(previous); err == nil {
@@ -536,19 +563,56 @@ func restorePendingSnapshot(path, previous, state string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if previousMain {
-		// A path main file here is the uncommitted incoming replacement.
-		if _, err := os.Stat(path); err == nil {
-			for _, suffix := range []string{"", "-wal", "-shm"} {
-				if err := removeIfExists(path + suffix); err != nil {
+	if previousMain && state == snapshotStatePending {
+		incoming := path + pendingSnapshotSuffix
+		if _, err := os.Stat(incoming); err == nil {
+			// The staged incoming main was never installed, so live sidecars
+			// cannot belong to it. Move them into the rollback set: the
+			// earlier main-before-sidecars ordering could have left a
+			// committed previous WAL at the live name.
+			for _, suffix := range snapshotSidecarSuffixes {
+				src := path + suffix
+				if _, err := os.Stat(src); err != nil {
+					if os.IsNotExist(err) {
+						continue
+					}
+					return err
+				}
+				dst := previous + suffix
+				if _, err := os.Stat(dst); err == nil {
+					return fmt.Errorf("both live and rollback snapshot sidecars exist: %s", suffix)
+				} else if !os.IsNotExist(err) {
+					return err
+				}
+				if err := os.Rename(src, dst); err != nil {
 					return err
 				}
 			}
 		} else if !os.IsNotExist(err) {
 			return err
+		} else {
+			// Remove the incoming sidecars before the incoming main so a crash
+			// can never leave an uncommitted WAL behind with no main for the
+			// next boot to classify.
+			for _, suffix := range snapshotSidecarSuffixes {
+				if err := removeIfExists(path + suffix); err != nil {
+					return err
+				}
+			}
+			if err := removeIfExists(path); err != nil {
+				return err
+			}
 		}
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
+	if previousMain {
+		// The previous main moves back before its sidecars. A crash between
+		// the two leaves a live main plus `.previous-wal`, which the next boot
+		// resumes instead of treating the WAL as debris.
+		if err := os.Rename(previous, path); err != nil {
+			return err
+		}
+	}
+	for _, suffix := range snapshotSidecarSuffixes {
 		src := previous + suffix
 		if _, err := os.Stat(src); err != nil {
 			if os.IsNotExist(err) {
@@ -588,7 +652,7 @@ func removeSnapshotDebris(previous string) error {
 	if err := removeIfExists(previous); err != nil {
 		return err
 	}
-	for _, suffix := range []string{"-wal", "-shm"} {
+	for _, suffix := range snapshotSidecarSuffixes {
 		if err := removeIfExists(previous + suffix); err != nil {
 			log.Printf("storage: remove rollback sidecar %s: %v", previous+suffix, err)
 		}
@@ -600,6 +664,8 @@ func removeSnapshotDebris(previous string) error {
 // file over it. Any failure restores the previous set before returning. The
 // pending state marker is durable before the first rename, so a crash at any
 // step is recoverable without guessing from the files that happen to exist.
+// Sidecars move before the main: while a previous main exists, every sidecar
+// at the live name is then identifiable as incoming debris.
 func (a *snapshotAdmission) install() error {
 	previous := a.path + pendingSnapshotPreviousSuffix
 	incoming := a.path + pendingSnapshotSuffix
@@ -615,11 +681,10 @@ func (a *snapshotAdmission) install() error {
 		return fmt.Errorf("write pending snapshot state: %w", err)
 	}
 	if _, err := os.Stat(a.path); err == nil {
-		if err := os.Rename(a.path, previous); err != nil {
-			return err
-		}
+		// The rollback flag covers sidecar-only progress: if a sidecar move
+		// fails before the main moves, rollback still has a set to restore.
 		a.previous = true
-		for _, suffix := range []string{"-wal", "-shm"} {
+		for _, suffix := range snapshotSidecarSuffixes {
 			live := a.path + suffix
 			if _, err := os.Stat(live); err == nil {
 				if err := os.Rename(live, previous+suffix); err != nil {
@@ -629,12 +694,15 @@ func (a *snapshotAdmission) install() error {
 				return errors.Join(err, a.restorePrevious())
 			}
 		}
+		if err := os.Rename(a.path, previous); err != nil {
+			return errors.Join(err, a.restorePrevious())
+		}
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
 		// A sidecar without its live database cannot belong to the incoming
 		// file; remove it so it cannot apply to the database after the rename.
-		for _, suffix := range []string{"-wal", "-shm"} {
+		for _, suffix := range snapshotSidecarSuffixes {
 			if err := removeIfExists(a.path + suffix); err != nil {
 				return err
 			}
@@ -651,41 +719,83 @@ func (a *snapshotAdmission) install() error {
 }
 
 // restorePrevious undoes an installed or partially installed admission. The
-// uncommitted new file is removed first; then every previous sibling that
-// exists is renamed back over the live name. The pending state marker is
-// cleared only after the restore itself is durable, so a crash mid-restore
-// resumes it on the next boot.
+// uncommitted sidecars are removed before the uncommitted main, so a crash can
+// never leave an incoming WAL behind to attach to a restored main. The previous
+// main is restored before its sidecars: a crash between those renames leaves a
+// live main plus remaining `.previous-*` files, which the next boot resumes.
+//
+// An installed incoming set must be fully removed before the previous set is
+// touched. If any live sidecar or main removal fails, the previous phase is
+// skipped: renaming the previous main over a live incoming main while an
+// incoming WAL still occupies the live name would leave those frames attached
+// to the restored database. Flags, marker and previous set all survive for the
+// next Open to retry.
+//
+// Every phase keeps its flag while it is incomplete, and the pending state
+// marker is cleared only after every required removal, rename, and directory
+// sync succeeds. A failure therefore leaves the next Open the full evidence
+// and fence it needs to retry without discarding committed WAL frames.
 func (a *snapshotAdmission) restorePrevious() error {
 	var errs []error
 	if a.installed {
-		for _, suffix := range []string{"", "-wal", "-shm"} {
+		removed := true
+		for _, suffix := range snapshotSidecarSuffixes {
 			if err := removeIfExists(a.path + suffix); err != nil {
 				errs = append(errs, err)
+				removed = false
 			}
+		}
+		if removed {
+			if err := removeIfExists(a.path); err != nil {
+				errs = append(errs, err)
+				removed = false
+			}
+		}
+		if !removed {
+			return errors.Join(errs...)
 		}
 		a.installed = false
 	}
 	if a.previous {
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			src := a.path + pendingSnapshotPreviousSuffix + suffix
-			if _, err := os.Stat(src); err != nil {
-				if os.IsNotExist(err) {
+		previousMain := true
+		src := a.path + pendingSnapshotPreviousSuffix
+		if _, err := os.Stat(src); err != nil {
+			if !os.IsNotExist(err) {
+				errs = append(errs, err)
+				previousMain = false
+			}
+		} else if err := os.Rename(src, a.path); err != nil {
+			errs = append(errs, err)
+			previousMain = false
+		}
+		if previousMain {
+			remaining := false
+			for _, suffix := range snapshotSidecarSuffixes {
+				src := a.path + pendingSnapshotPreviousSuffix + suffix
+				if _, err := os.Stat(src); err != nil {
+					if !os.IsNotExist(err) {
+						errs = append(errs, err)
+						remaining = true
+					}
 					continue
 				}
-				errs = append(errs, err)
-				continue
+				if err := os.Rename(src, a.path+suffix); err != nil {
+					errs = append(errs, err)
+					remaining = true
+				}
 			}
-			if err := os.Rename(src, a.path+suffix); err != nil {
-				errs = append(errs, err)
+			if !remaining {
+				a.previous = false
 			}
 		}
-		a.previous = false
 	}
 	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
 		errs = append(errs, err)
 	}
-	if err := removeSnapshotState(a.path); err != nil {
-		errs = append(errs, err)
+	if len(errs) == 0 {
+		if err := removeSnapshotState(a.path); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -732,7 +842,7 @@ func (a *snapshotAdmission) commit() error {
 // boot classifies the whole set again, and no stale WAL can attach to a later
 // incoming file.
 func quarantinePendingSnapshot(incoming, suffix string) error {
-	for _, sidecar := range []string{"-wal", "-shm"} {
+	for _, sidecar := range snapshotSidecarSuffixes {
 		if err := os.Rename(incoming+sidecar, incoming+sidecar+suffix); err != nil && !os.IsNotExist(err) {
 			return err
 		}
