@@ -830,11 +830,16 @@ body budget (default 256 MiB); requests above either bound are refused with
 per group) and `max_queue_wait` (default 10m) bound a held or saturated
 provider's parked work; both accept explicit `0` = unlimited. Independent
 per-key/header concurrency remains unlimited by default. The scheduler retains
-at most 100000 distinct provider+key groups and 4096 header-created provider
-limits, refusing new ones past those bounds rather than growing process memory
-without limit. A new request body has a ten-minute total read budget, SSE
-writes have a one-minute per-event progress bound, and an upstream body that
-stops sending for ten minutes is canceled.
+at most 100000 distinct provider+key groups, evicting the least-recently-idle
+group (no in-flight or queued work) to admit a new key at the bound; a new key
+is refused only when every retained group has active work, so a table full of
+active groups still fails closed. Recent pacing/backoff state for evicted
+groups is kept in a separate 4096-entry bounded LRU. The scheduler also
+retains at most 4096 header-created provider limits, refusing new ones past
+that bound rather than growing process memory without limit. A new request
+body has a ten-minute total read budget, SSE writes have a one-minute
+per-event progress bound, and an upstream body that stops sending for ten
+minutes is canceled.
 
 Request and token budgets start full when enabled and refill continuously at
 the configured count/window rate. Request budget is charged once per proxy

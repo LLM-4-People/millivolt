@@ -41,12 +41,24 @@ type Options struct {
 	Storm      StormOptions
 }
 
-// maxSchedulerGroups bounds distinct per-provider+key groups retained for the
-// process lifetime. A hostile client rotating keys can otherwise grow the map
-// without limit; the bound is generous for real deployments (100k keys).
+// maxSchedulerGroups bounds distinct per-provider+key groups retained at once.
+// A hostile client rotating keys can otherwise grow the map without limit; the
+// bound is generous for real deployments (100k keys). At
+// the bound a new key evicts the least-recently-idle group (no in-flight slot
+// and no queued waiter); a group with active work is never evicted, so a table
+// full of active work still refuses new keys with ErrGroupLimit.
 const maxSchedulerGroups = 100_000
 
-// providerIndex is the scheduler's provider-scoped group index. queued counts
+// maxSchedulerPacingStates bounds the pacing/backoff state retained for groups
+// removed by idle eviction. The LRU carries only a recent victim's small
+// timing fields, never the group object, queue, provider link or pacer, so it
+// cannot recreate the growth the group cap exists to bound.
+const maxSchedulerPacingStates = 4_096
+
+// providerIndex is the scheduler's provider-scoped group index. The attributed
+// groups form a doubly linked list guarded by mu; eviction unlinks one group in
+// O(1), and a provider drain snapshots only groups whose queue is non-empty.
+// queued counts
 // the indexed groups whose queue currently holds at least one live waiter. A
 // provider drain reads it under Scheduler.mu as a witness that returns before
 // walking (and locking) an idle provider's groups. Each group stores a pointer
@@ -54,25 +66,97 @@ const maxSchedulerGroups = 100_000
 // queue-transition owner under the group's own mutex, so maintaining the count
 // never needs Scheduler.mu.
 type providerIndex struct {
-	groups []*group
+	mu     sync.Mutex
+	head   *group
+	tail   *group
+	live   int
 	queued atomic.Int64
 }
 
+// linkLocked appends g at the provider's tail. Callers hold idx.mu.
+func (idx *providerIndex) linkLocked(g *group) {
+	if g.providerListed {
+		return
+	}
+	g.providerListed = true
+	g.providerPrev = idx.tail
+	g.providerNext = nil
+	if idx.tail != nil {
+		idx.tail.providerNext = g
+	} else {
+		idx.head = g
+	}
+	idx.tail = g
+	idx.live++
+}
+
+// unlinkLocked removes g from the provider's list in O(1). Callers hold idx.mu.
+func (idx *providerIndex) unlinkLocked(g *group) {
+	if !g.providerListed {
+		return
+	}
+	if g.providerPrev != nil {
+		g.providerPrev.providerNext = g.providerNext
+	} else {
+		idx.head = g.providerNext
+	}
+	if g.providerNext != nil {
+		g.providerNext.providerPrev = g.providerPrev
+	} else {
+		idx.tail = g.providerPrev
+	}
+	g.providerPrev, g.providerNext = nil, nil
+	g.providerListed = false
+	idx.live--
+}
+
+// queuedSnapshot returns the groups whose lock-free witness says a live waiter
+// is queued. It allocates only for those groups, so a provider with many idle
+// keys does not pay an allocation per drain.
+func (idx *providerIndex) queuedSnapshot() []*group {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	var out []*group
+	for g := idx.head; g != nil; g = g.providerNext {
+		if g.hasQueued.Load() {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
 // Scheduler manages ordered queues per group key.
+//
+// Lock order: s.mu -> g.mu, s.mu -> idleMu, s.mu -> providerIndex.mu,
+// s.mu -> pacingLRU.mu, and g.mu -> idleMu. A path holding idleMu,
+// providerIndex.mu or pacingLRU.mu never waits for s.mu or g.mu, and
+// drainProvider releases providerIndex.mu before touching a group.
 type Scheduler struct {
-	mu     sync.Mutex // guards opts, groups and providerGroups
+	mu     sync.Mutex // guards opts, groups, groupCap, providerGroups and group retirement
 	opts   Options
 	groups map[string]*group
+	// groupCap bounds len(groups). It is maxSchedulerGroups in production;
+	// package tests lower it to exercise eviction without creating 100k
+	// groups. Guarded by mu.
+	groupCap int
 	// providerGroups indexes groups by their attributed provider, so a
 	// provider throttle release drains only that provider's groups instead of
-	// scanning every group. Guarded by mu. A group is appended exactly once,
-	// on its first non-empty attribution, and is never removed because groups
-	// themselves are retained for the process lifetime (bounded by
-	// maxSchedulerGroups). A future group-removal path must delete its index
-	// entry under the same lock and retire that group's counter pointer with
-	// the entry.
+	// scanning every group. Guarded by mu. A group is linked exactly once, on
+	// its first non-empty attribution, and eviction unlinks it under the same
+	// lock and retires that group's counter pointer with the entry.
 	providerGroups map[string]*providerIndex
 	storms         stormState
+	// idleMu guards the idle-group LRU (idleHead/idleTail and each group's
+	// idle links). A group with no in-flight slot and no queued waiter sits on
+	// this list; the head is the oldest eviction candidate. Transition owners
+	// add and remove a group while holding its g.mu, and eviction re-verifies
+	// idleness under that same g.mu before removing it.
+	idleMu   sync.Mutex
+	idleHead *group
+	idleTail *group
+	// pacing carries the pacing/backoff fields of recently evicted idle
+	// groups, bounded by maxSchedulerPacingStates.
+	pacing pacingLRU
 
 	// policy is the operator hold set (all / new-unseen / named
 	// clients / named providers). Read via atomic pointer so drain can
@@ -99,7 +183,7 @@ type Scheduler struct {
 // config.Default(), never re-derived here, so there is exactly one source of
 // truth and no conflicting fallback values.
 func New(opts Options) *Scheduler {
-	s := &Scheduler{opts: opts, groups: make(map[string]*group), providerGroups: make(map[string]*providerIndex), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
+	s := &Scheduler{opts: opts, groups: make(map[string]*group), groupCap: maxSchedulerGroups, providerGroups: make(map[string]*providerIndex), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
 	s.policy.Store(&policySnap{})
 	s.publishGatesLocked()
 	s.storms.configure(opts.Storm)
@@ -129,13 +213,36 @@ func (s *Scheduler) UpdateOptions(opts Options) {
 // group is a single FIFO queue with concurrency and pacing state.
 type group struct {
 	sched *Scheduler
+	// key is the provider|key identity this group was created for. It is
+	// immutable and lets eviction delete the exact map entry without trusting
+	// a caller-supplied key.
+	key string
 	// provider is the Record.Provider this group was first attributed to by
 	// AcquireWith. It is written only under mu, together with the
-	// providerGroups index append, and is immutable once non-empty: the
+	// providerGroups index link, and is immutable once non-empty: the
 	// proxy's group key includes the provider, so one key cannot legitimately
 	// switch providers. An empty group can still be created by the internal
 	// lookup paths; its first non-empty AcquireWith attributes it.
-	provider       string
+	provider string
+	// providerIdx is the attributed index (nil until attribution), guarded by
+	// Scheduler.mu. providerPrev/providerNext/providerListed are the index
+	// list links, guarded by providerIdx.mu.
+	providerIdx    *providerIndex
+	providerPrev   *group
+	providerNext   *group
+	providerListed bool
+	// idlePrev/idleNext order idle groups for LRU eviction and are guarded by
+	// Scheduler.idleMu. idleListed is a lock-free fast-path witness for that
+	// membership; it changes under idleMu. Activity transitions, which hold
+	// g.mu, skip the idle lock when it is false; eviction re-verifies idleness
+	// under g.mu. A listed group is idle (inFlight == 0 and queued == 0).
+	idlePrev   *group
+	idleNext   *group
+	idleListed atomic.Bool
+	// retired is set under mu only after eviction re-verified that no
+	// in-flight slot or queued waiter remains. A stale Acquire that looked the
+	// group up before eviction must observe it and retry against the map.
+	retired        bool
 	maxConcurrent  int
 	inFlight       int
 	nextAllowedAt  time.Time     // do not send before this time (after rate limit)
@@ -205,12 +312,16 @@ func (s *Scheduler) groupFor(key string, maxConcurrent int) *group {
 func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool) *group {
 	g, ok := s.groups[key]
 	if !ok {
-		g = &group{sched: s, maxConcurrent: maxConcurrent, sendKick: make(chan struct{})}
+		g = &group{sched: s, key: key, maxConcurrent: maxConcurrent, sendKick: make(chan struct{})}
 		g.pacer.fn = func() {
 			g.kickSend()
 			g.drain()
 		}
+		s.adoptPacingLocked(g)
 		s.groups[key] = g
+		s.idleMu.Lock()
+		s.idlePushLocked(g)
+		s.idleMu.Unlock()
 		return g
 	}
 	if applyCap && g.maxConcurrent != maxConcurrent {
@@ -221,9 +332,9 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 	return g
 }
 
-// attributeProviderLocked records g in the provider index on its first
+// attributeProviderLocked links g into the provider index on its first
 // non-empty attribution. The caller must hold s.mu. Provider identity is
-// written here and nowhere else, under the same lock as the index append, so a
+// written here and nowhere else, under the same lock as the index link, so a
 // concurrent drain either sees the group in the index or observes the group
 // before this Acquire's admission attempt (see drainProvider's lost-wake
 // argument). Internal group lookups (Trip/FailSend/WaitSend/BackoffFor) never
@@ -245,13 +356,267 @@ func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 		idx = &providerIndex{}
 		s.providerGroups[provider] = idx
 	}
-	idx.groups = append(idx.groups, g)
+	g.providerIdx = idx
 	g.mu.Lock()
 	g.providerQueued = &idx.queued
 	if g.hasQueued.Load() {
 		idx.queued.Add(1)
 	}
 	g.mu.Unlock()
+	idx.mu.Lock()
+	idx.linkLocked(g)
+	idx.mu.Unlock()
+}
+
+// idlePushLocked appends g as the most recently idle group. Callers hold
+// idleMu.
+func (s *Scheduler) idlePushLocked(g *group) {
+	if g.idleListed.Load() {
+		return
+	}
+	g.idlePrev = s.idleTail
+	g.idleNext = nil
+	if s.idleTail != nil {
+		s.idleTail.idleNext = g
+	} else {
+		s.idleHead = g
+	}
+	s.idleTail = g
+	g.idleListed.Store(true)
+}
+
+// idleUnlinkLocked removes g from the idle order in O(1). Callers hold idleMu.
+func (s *Scheduler) idleUnlinkLocked(g *group) bool {
+	if !g.idleListed.Load() {
+		return false
+	}
+	if g.idlePrev != nil {
+		g.idlePrev.idleNext = g.idleNext
+	} else {
+		s.idleHead = g.idleNext
+	}
+	if g.idleNext != nil {
+		g.idleNext.idlePrev = g.idlePrev
+	} else {
+		s.idleTail = g.idlePrev
+	}
+	g.idlePrev, g.idleNext = nil, nil
+	g.idleListed.Store(false)
+	return true
+}
+
+// markGroupBusyLocked removes g from the idle order when its first in-flight
+// slot or queued waiter appears. Callers hold g.mu.
+func (s *Scheduler) markGroupBusyLocked(g *group) {
+	if !g.idleListed.Load() {
+		return
+	}
+	s.idleMu.Lock()
+	s.idleUnlinkLocked(g)
+	s.idleMu.Unlock()
+}
+
+// markGroupIdleLocked appends g when its last live slot or waiter is gone.
+// Callers hold g.mu.
+func (s *Scheduler) markGroupIdleLocked(g *group) {
+	if g.retired || g.inFlight != 0 || g.queued != 0 {
+		return
+	}
+	s.idleMu.Lock()
+	s.idlePushLocked(g)
+	s.idleMu.Unlock()
+}
+
+// popIdleGroupLocked removes and returns the least-recently-idle group, or nil
+// when no group is idle.
+func (s *Scheduler) popIdleGroupLocked() *group {
+	s.idleMu.Lock()
+	defer s.idleMu.Unlock()
+	g := s.idleHead
+	if g == nil {
+		return nil
+	}
+	s.idleUnlinkLocked(g)
+	return g
+}
+
+// makeGroupRoomLocked evicts least-recently-idle groups until the group map has
+// room for one new key or no idle candidate remains. Callers hold s.mu.
+func (s *Scheduler) makeGroupRoomLocked() {
+	for len(s.groups) >= s.groupCap {
+		g := s.popIdleGroupLocked()
+		if g == nil {
+			return
+		}
+		if !s.evictIdleGroupLocked(g) {
+			// The candidate acquired work after it was listed; it is no
+			// longer idle, so continue with the next witness.
+			continue
+		}
+	}
+}
+
+// evictIdleGroupLocked removes g from the group map and provider index after
+// re-checking under g.mu that it has no in-flight slot and no queued waiter.
+// The re-check is the authority: a stale Acquire that looked g up before this
+// critical section either publishes work first (so eviction refuses) or sees
+// the retired flag and retries against the map. Callers hold s.mu.
+func (s *Scheduler) evictIdleGroupLocked(g *group) bool {
+	g.mu.Lock()
+	if g.retired || g.inFlight != 0 || g.queued != 0 {
+		g.mu.Unlock()
+		return false
+	}
+	g.retired = true
+	// The group pacer's timer closure retains g; stop it so eviction cannot
+	// leave one timer per evicted group alive for the pacing window.
+	g.pacer.stop()
+	pacing := pacingState{
+		nextAllowedAt:  g.nextAllowedAt,
+		backoff:        g.backoff,
+		requestBackoff: g.requestBackoff,
+		tripped:        g.tripped,
+	}
+	g.mu.Unlock()
+	// A release that observed the last in-flight slot may have re-added g to
+	// the idle order after the pop that selected it. Remove any such entry;
+	// markGroupIdleLocked now sees retired and cannot add another.
+	s.idleMu.Lock()
+	s.idleUnlinkLocked(g)
+	s.idleMu.Unlock()
+	if s.groups[g.key] != g {
+		// Defensive: a group no longer owning the map entry is unreachable.
+		return false
+	}
+	delete(s.groups, g.key)
+	s.detachProviderLocked(g)
+	if !pacing.nextAllowedAt.IsZero() || pacing.backoff != 0 || pacing.requestBackoff != 0 || pacing.tripped {
+		s.pacing.put(g.key, pacing)
+	}
+	return true
+}
+
+// detachProviderLocked unlinks g from its provider index and drops an index
+// that has no live groups left, so a client rotating providers cannot retain
+// one empty entry per provider. Callers hold s.mu.
+func (s *Scheduler) detachProviderLocked(g *group) {
+	idx := g.providerIdx
+	if idx == nil {
+		return
+	}
+	g.providerIdx = nil
+	idx.mu.Lock()
+	idx.unlinkLocked(g)
+	empty := idx.live == 0
+	idx.mu.Unlock()
+	if empty && s.providerGroups[g.provider] == idx {
+		delete(s.providerGroups, g.provider)
+	}
+}
+
+// pacingState is the small subset of a group's timing state carried across an
+// idle eviction. It never references the group, its queue, its provider or its
+// pacer, so retained victims stay cheap and bounded.
+type pacingState struct {
+	key            string
+	nextAllowedAt  time.Time
+	backoff        time.Duration
+	requestBackoff time.Duration
+	tripped        bool
+	prev, next     *pacingState
+}
+
+// pacingLRU is a fixed-capacity least-recently-used map of pacingState values.
+// mu guards every field. It is touched only at group creation and idle
+// eviction, never on the admission hot path.
+type pacingLRU struct {
+	mu     sync.Mutex
+	states map[string]*pacingState
+	head   *pacingState
+	tail   *pacingState
+}
+
+// put inserts or replaces key's pacing state and evicts the oldest state past
+// the bound.
+func (p *pacingLRU) put(key string, st pacingState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.states == nil {
+		p.states = make(map[string]*pacingState, maxSchedulerPacingStates)
+	}
+	if old := p.states[key]; old != nil {
+		p.unlinkLocked(old)
+		delete(p.states, key)
+	}
+	node := &pacingState{
+		key:            key,
+		nextAllowedAt:  st.nextAllowedAt,
+		backoff:        st.backoff,
+		requestBackoff: st.requestBackoff,
+		tripped:        st.tripped,
+		prev:           p.tail,
+	}
+	if p.tail != nil {
+		p.tail.next = node
+	} else {
+		p.head = node
+	}
+	p.tail = node
+	p.states[key] = node
+	for len(p.states) > maxSchedulerPacingStates && p.head != nil {
+		oldest := p.head
+		p.unlinkLocked(oldest)
+		delete(p.states, oldest.key)
+	}
+}
+
+// take removes and returns key's pacing state.
+func (p *pacingLRU) take(key string) (pacingState, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	node := p.states[key]
+	if node == nil {
+		return pacingState{}, false
+	}
+	p.unlinkLocked(node)
+	delete(p.states, key)
+	return pacingState{
+		nextAllowedAt:  node.nextAllowedAt,
+		backoff:        node.backoff,
+		requestBackoff: node.requestBackoff,
+		tripped:        node.tripped,
+	}, true
+}
+
+func (p *pacingLRU) unlinkLocked(n *pacingState) {
+	if n.prev != nil {
+		n.prev.next = n.next
+	} else {
+		p.head = n.next
+	}
+	if n.next != nil {
+		n.next.prev = n.prev
+	} else {
+		p.tail = n.prev
+	}
+	n.prev, n.next = nil, nil
+}
+
+// adoptPacingLocked copies a recently evicted group's pacing state into a
+// freshly created group and restores its pacer deadline. The group is not
+// published yet, so no group lock is needed. Callers hold s.mu.
+func (s *Scheduler) adoptPacingLocked(g *group) {
+	st, ok := s.pacing.take(g.key)
+	if !ok {
+		return
+	}
+	g.nextAllowedAt = st.nextAllowedAt
+	g.backoff = st.backoff
+	g.requestBackoff = st.requestBackoff
+	g.tripped = st.tripped
+	if g.nextAllowedAt.After(time.Now()) {
+		g.pacer.arm(g.nextAllowedAt, false)
+	}
 }
 
 // AcquireWith blocks until the group's head-of-queue slot is available,
@@ -261,19 +626,31 @@ func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 // frees the slot, or an error if the context is cancelled or the wait
 // exceeds MaxWait.
 func (s *Scheduler) AcquireWith(ctx context.Context, key string, maxConcurrent int, hooks WaiterHooks) (Release, error) {
-	s.mu.Lock()
-	if _, exists := s.groups[key]; !exists && len(s.groups) >= maxSchedulerGroups {
-		// A client that rotates keys forever must not grow the group map for
-		// the process lifetime. Existing keys keep working; a brand-new key is
-		// refused with the queue-full class (429 at the proxy boundary).
+	for {
+		s.mu.Lock()
+		if _, exists := s.groups[key]; !exists {
+			// A client that rotates keys forever must not grow the group map
+			// for the process lifetime. Reclaim the least-recently-idle
+			// groups first; a brand-new key is refused only when every
+			// retained group has in-flight or queued work.
+			s.makeGroupRoomLocked()
+			if len(s.groups) >= s.groupCap {
+				s.mu.Unlock()
+				return nil, ErrGroupLimit
+			}
+		}
+		g := s.groupForLocked(key, maxConcurrent, true)
+		s.attributeProviderLocked(g, hooks.Provider)
+		opts := s.opts
 		s.mu.Unlock()
-		return nil, ErrGroupLimit
+		release, err := g.acquire(ctx, opts, hooks)
+		if err == errGroupRetired {
+			// The group was idle and evicted between lookup and admission;
+			// retry against whatever the map holds now.
+			continue
+		}
+		return release, err
 	}
-	g := s.groupForLocked(key, maxConcurrent, true)
-	s.attributeProviderLocked(g, hooks.Provider)
-	opts := s.opts
-	s.mu.Unlock()
-	return g.acquire(ctx, opts, hooks)
 }
 
 // Stats is a point-in-time snapshot of scheduler occupancy.
@@ -595,6 +972,10 @@ func (g *group) kickC() <-chan struct{} {
 func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (Release, error) {
 	enqueued := time.Now()
 	g.mu.Lock()
+	if g.retired {
+		g.mu.Unlock()
+		return nil, errGroupRetired
+	}
 	// Provider attribution happened under s.mu in AcquireWith before this
 	// call, so the group is already visible to provider-scoped drains.
 	// Fast path: queue empty, capacity available, past pacing window, not held,
@@ -607,6 +988,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 		ok, lease, wait := g.sched.tryAdmit(hooks.Provider, hooks.EstTokens)
 		if ok {
 			g.inFlight++
+			g.sched.markGroupBusyLocked(g)
 			g.mu.Unlock()
 			return g.slotRelease(lease), nil
 		}
@@ -635,6 +1017,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	g.queue = append(g.queue, w)
 	g.queued++
 	g.syncQueueLocked()
+	g.sched.markGroupBusyLocked(g)
 	if w.holdID != "" && opts.MaxWait > 0 {
 		// Stamp hold start here so a waiter that hasn't entered the wait
 		// loop yet still excludes pause time from MaxWait.
@@ -784,6 +1167,7 @@ func (g *group) release() {
 	if g.inFlight > 0 {
 		g.inFlight--
 	}
+	g.sched.markGroupIdleLocked(g)
 	g.mu.Unlock()
 	g.drain()
 }
@@ -929,6 +1313,7 @@ func (g *group) removeWaiter(w *waiter) {
 	if found {
 		g.syncQueueLocked()
 	}
+	g.sched.markGroupIdleLocked(g)
 	g.mu.Unlock()
 	w.dropHold(g.sched)
 	if !found {
@@ -1016,6 +1401,9 @@ var (
 	// ErrHoldNotFound is returned when ReplaceHold targets an unknown id.
 	ErrHoldNotFound = errorString("pause hold not found")
 	errMaxWait      = errorString("queue wait exceeded")
+	// errGroupRetired tells AcquireWith that its looked-up group was evicted
+	// as idle before admission; the acquisition retries against the map.
+	errGroupRetired = errorString("scheduler group retired")
 )
 
 type errorString string

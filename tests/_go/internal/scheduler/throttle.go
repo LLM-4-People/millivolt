@@ -831,6 +831,31 @@ func providerQueuedGroups(s *Scheduler, provider string) int64 {
 	return 0
 }
 
+// snapshot returns every attributed group. The caller must not hold idx.mu.
+func (idx *providerIndex) snapshot() []*group {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	out := make([]*group, 0, idx.live)
+	for g := idx.head; g != nil; g = g.providerNext {
+		out = append(out, g)
+	}
+	return out
+}
+
+// providerGroupsSnapshot returns a provider's live attributed groups. The
+// index may lose its last group and be dropped from the map after the lookup,
+// but the pointer itself stays valid, so the snapshot locks the index rather
+// than the scheduler.
+func providerGroupsSnapshot(s *Scheduler, provider string) []*group {
+	s.mu.Lock()
+	idx := s.providerGroups[provider]
+	s.mu.Unlock()
+	if idx == nil {
+		return nil
+	}
+	return idx.snapshot()
+}
+
 // TestProviderIndexAdoptsQueuedGroupAtAttribution pins the empty->non-empty
 // transition that happens before attribution: an empty-provider Acquire can
 // park a waiter behind an operator hold, and a later provider-bearing Acquire
@@ -941,13 +966,7 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 				return
 			default:
 			}
-			s.mu.Lock()
-			var groups []*group
-			if idx := s.providerGroups[provider]; idx != nil {
-				groups = append(groups, idx.groups...)
-			}
-			s.mu.Unlock()
-			for _, g := range groups {
+			for _, g := range providerGroupsSnapshot(s, provider) {
 				g.mu.Lock()
 				nonEmpty := g.queued > 0
 				if g.hasQueued.Load() != nonEmpty {
@@ -1013,13 +1032,7 @@ func TestProviderQueuedCounterRaceWithCancellationAndCreation(t *testing.T) {
 	if got := providerQueuedGroups(s, provider); got != 0 {
 		t.Fatalf("provider queued groups = %d, want 0 after every queue drained", got)
 	}
-	s.mu.Lock()
-	var final []*group
-	if idx := s.providerGroups[provider]; idx != nil {
-		final = append(final, idx.groups...)
-	}
-	s.mu.Unlock()
-	for _, g := range final {
+	for _, g := range providerGroupsSnapshot(s, provider) {
 		g.mu.Lock()
 		if g.hasQueued.Load() || g.queued != 0 {
 			t.Errorf("drained group retained witness=%v queued=%d", g.hasQueued.Load(), g.queued)

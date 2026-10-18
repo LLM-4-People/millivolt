@@ -526,31 +526,31 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 }
 
 // drainProvider wakes only the groups attributed to provider. It reads the
-// provider index's queued-group counter and slice header under mu, releases mu
-// before touching any group, and returns immediately when the counter says no
-// indexed group holds a live waiter. Otherwise it walks the header and skips
-// groups whose lock-free witness is false without locking them, so idle groups
-// cannot delay a provider release. Preserving the s.mu -> g.mu order every
-// other path uses: no path takes g.mu and then waits for s.mu. The header (not
-// its elements) is copied, so no allocation scales with the provider's group
-// count. Elements already published are immutable and append writes only at or
-// beyond the snapshot length, so the walk is race-free while a concurrent first
-// Acquire appends a new group; the counter may include a group appended after
-// the header snapshot, which only costs a harmless walk of the older slice.
+// provider index's queued-group counter under mu, releases mu before touching
+// any group, and returns immediately when the counter says no indexed group
+// holds a live waiter. Otherwise it snapshots only groups whose lock-free
+// witness is true under the index mutex, so idle groups neither allocate nor
+// delay a provider release beyond the short walk, and no allocation scales
+// with a provider's idle group count. Preserving the s.mu -> g.mu order every
+// other path uses: no path takes g.mu and then waits for s.mu; the index lock
+// is released before any g.drain.
 //
 // A release cannot lose a wake to a group created concurrently with it: the
-// new group is appended, its provider published and its counter pointer
+// new group is linked, its provider published and its counter pointer
 // installed under mu before its Acquire attempts admission or enqueues. A drain
 // that misses it therefore ran before that admission attempt. If the attempt
 // then blocks, its in-flight slot holders were admitted before the block and
-// their releases run after the append, so one of them drains the group; a
+// their releases run after the link, so one of them drains the group; a
 // blocked token/request bucket also arms a provider timer that re-runs this
-// drain after the append. A waiter that enqueues after this drain's counter
+// drain after the link. A waiter that enqueues after this drain's counter
 // check is covered by its own post-enqueue g.drain when capacity was released,
 // or by the later release that observes the counter the enqueue transition set
 // (see acquire's g.drain call after enqueue). The enqueue transition and the
 // counter move under the same g.mu owner, so a group cannot be counted while
 // empty or omitted while a live waiter waits.
+//
+// Eviction cannot remove a group whose queue holds a live waiter, so a
+// non-zero witness keeps every relevant group linked across this snapshot.
 //
 // Empty provider identity has no gate of its own (gate("") is nil); callers
 // that do reach here with an empty provider keep the previous full-drain
@@ -567,9 +567,8 @@ func (s *Scheduler) drainProvider(provider string) {
 		s.mu.Unlock()
 		return
 	}
-	groups := idx.groups
 	s.mu.Unlock()
-	for _, g := range groups {
+	for _, g := range idx.queuedSnapshot() {
 		if !g.hasQueued.Load() {
 			continue
 		}
