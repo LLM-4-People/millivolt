@@ -11,7 +11,9 @@ import (
 )
 
 // One immutable compiled rule set per current configuration, shared by query
-// folds and observer metadata. Per-query name memoization remains local.
+// folds and observer metadata. Per-query fold memoization remains local to
+// modelCanonizer; the observer's cross-call name memo below is keyed by this
+// cache's revision.
 type modelRuleCache struct {
 	mu      sync.Mutex
 	current *compiledModelRules
@@ -43,6 +45,64 @@ func (c *modelRuleCache) get(rules config.ModelCanon) *compiledModelRules {
 	return c.current
 }
 
+// modelNameMemoMax bounds the shared raw-to-canonical name memo. Model names
+// are client-controlled, so an unbounded memo is a process-lifetime leak.
+// Overflow names are still canonicalized per call; only retention stops.
+const modelNameMemoMax = 8192
+
+// modelNameMemo memoizes canonical spellings across observer calls. Entries
+// are keyed by the compiled rule revision: a revision change discards the old
+// map, so values produced by superseded rules are unreachable. The map is
+// bounded by modelNameMemoMax.
+type modelNameMemo struct {
+	mu       sync.Mutex
+	revision string
+	names    map[string]string
+}
+
+// begin selects revision for one observation, discarding every entry from a
+// superseded rule revision. The per-entry get/put revision checks keep
+// interleaved observations correct if another goroutine switches revision
+// concurrently.
+func (m *modelNameMemo) begin(revision string) {
+	m.mu.Lock()
+	if m.revision != revision || m.names == nil {
+		m.revision = revision
+		m.names = make(map[string]string)
+	}
+	m.mu.Unlock()
+}
+
+// get returns the memoized canonical spelling for name under revision. A
+// different current revision is a miss, never a stale hit.
+func (m *modelNameMemo) get(revision, name string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.revision != revision {
+		return "", false
+	}
+	canon, ok := m.names[name]
+	return canon, ok
+}
+
+// put records one canonical spelling under revision. A changed revision
+// replaces the whole map first; once the map is full, a new name is not
+// retained (the caller still returns the computed value).
+func (m *modelNameMemo) put(revision, name, canon string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.revision != revision || m.names == nil {
+		m.revision = revision
+		m.names = make(map[string]string)
+	}
+	if len(m.names) >= modelNameMemoMax {
+		if _, exists := m.names[name]; !exists {
+			return
+		}
+	}
+	m.names[name] = canon
+}
+
 type modelObserverState struct {
 	Rules    *[]config.ModelRule `json:"rules,omitempty"`
 	Revision string              `json:"revision"`
@@ -59,6 +119,7 @@ func (a *AggAPI) ObserveModelNames(names []string) any {
 func (a *AggAPI) observeModelNames(full bool, names []string) any {
 	rules := a.modelCanon()
 	compiled := a.modelRules.get(rules)
+	a.modelNames.begin(compiled.revision)
 	out := modelObserverState{Revision: compiled.revision, Names: make(map[string]string)}
 	if full {
 		if rules.Rules == nil {
@@ -68,7 +129,12 @@ func (a *AggAPI) observeModelNames(full bool, names []string) any {
 	}
 	for _, name := range names {
 		if _, exists := out.Names[name]; !exists {
-			out.Names[name] = config.ApplyModelRules(compiled.exec, name)
+			canon, ok := a.modelNames.get(compiled.revision, name)
+			if !ok {
+				canon = config.ApplyModelRules(compiled.exec, name)
+				a.modelNames.put(compiled.revision, name, canon)
+			}
+			out.Names[name] = canon
 		}
 	}
 	return out

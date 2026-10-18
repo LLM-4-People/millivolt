@@ -267,7 +267,11 @@ authoritative snapshots install a new revision. Deltas, archive and Debug names
 merge under that revision, with recapture on conflicts. Browser dictionaries
 prune to loaded rows/selector needs. RE2 patterns do not execute in JavaScript.
 The installed observer provider is an immutable atomic holder, so SSE
-record/end serialization never takes the ring lock.
+record/end serialization never takes the ring lock. Canonical names are
+memoized across observer calls under the compiled rules revision, and each
+known-name vocabulary caches its sorted view under a set revision. Both caches
+are bounded and invalidate on content change, so bootstrap polls do not re-run
+the rules or re-sort thousands of names.
 
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.

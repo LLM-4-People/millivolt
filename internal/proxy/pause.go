@@ -170,8 +170,14 @@ type pauseRuntime struct {
 // to. Empty names are never recorded; the model set stores canonical names,
 // so callers canonicalize before add/seed.
 type nameSet struct {
-	mu    sync.Mutex
-	names map[string]struct{}
+	mu       sync.Mutex
+	names    map[string]struct{}
+	revision uint64
+	sorted   []string
+	// sortedRevision is the revision the cached sorted view was built from.
+	// Zero matches the empty set, whose list is nil (preserving the former
+	// slices.Sorted result for nil and empty maps).
+	sortedRevision uint64
 }
 
 // nameSetMax bounds one operator-known vocabulary. These lists exist for
@@ -180,7 +186,8 @@ type nameSet struct {
 // (early names win; the operator can still use exact live values).
 const nameSetMax = 4096
 
-// add records one observed name.
+// add records one observed name. revision advances only when the stored set
+// changes, so duplicate observations keep the cached sorted view valid.
 func (n *nameSet) add(name string) {
 	if name == "" {
 		return
@@ -189,37 +196,52 @@ func (n *nameSet) add(name string) {
 	if n.names == nil {
 		n.names = make(map[string]struct{})
 	}
-	if _, exists := n.names[name]; !exists && len(n.names) >= nameSetMax {
+	if _, exists := n.names[name]; exists || len(n.names) >= nameSetMax {
 		n.mu.Unlock()
 		return
 	}
 	n.names[name] = struct{}{}
+	n.revision++
 	n.mu.Unlock()
 }
 
 // seed bulk-records a restored list (durable-store lists, restored holds and
-// sessions).
+// sessions). revision advances once when any name is newly stored.
 func (n *nameSet) seed(names []string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.names == nil {
 		n.names = make(map[string]struct{})
 	}
+	changed := false
 	for _, name := range names {
 		if name == "" {
 			continue
 		}
-		if _, exists := n.names[name]; !exists && len(n.names) >= nameSetMax {
+		if _, exists := n.names[name]; exists {
+			continue
+		}
+		if len(n.names) >= nameSetMax {
 			continue
 		}
 		n.names[name] = struct{}{}
+		changed = true
+	}
+	if changed {
+		n.revision++
 	}
 }
 
-// list returns the known names in lexicographic order.
+// list returns the known names in lexicographic order. The sorted view is
+// rebuilt only when revision changes, and callers get a clone so appending to
+// or mutating the result cannot corrupt the cache.
 func (n *nameSet) list() []string {
 	n.mu.Lock()
-	out := slices.Sorted(maps.Keys(n.names))
+	if n.sortedRevision != n.revision {
+		n.sorted = slices.Sorted(maps.Keys(n.names))
+		n.sortedRevision = n.revision
+	}
+	out := slices.Clone(n.sorted)
 	n.mu.Unlock()
 	return out
 }

@@ -95,6 +95,7 @@ type AggAPI struct {
 	kpiMemo      kpiMemo
 	projection   historyProjection
 	modelRules   modelRuleCache
+	modelNames   modelNameMemo
 	// testHooks is nil in production; package tests use it to sequence the
 	// in-flight coalescing cases without timing assumptions.
 	testHooks *aggregateTestHooks
