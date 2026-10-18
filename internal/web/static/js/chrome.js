@@ -637,6 +637,13 @@ function applyDashValues(v) {
 
 let settingsCat = '';
 let settingsSnap = '';
+// The full snapshot above is the exact saved draft identity. The per-key map
+// and changed set make the keystroke path incremental: each entry is the JSON
+// of one key's collected value, rebuilt whenever the form is refilled or a
+// save establishes a new baseline.
+let settingsSnapByKey = null;
+let settingsChangedKeys = new Set();
+let settingsKeyEls = new Map(); // config key -> its [data-key] control/editor
 let settingsQ = '';
 let settingsReq = 0; // newest settings request owns state; saves invalidate older GETs
 let backupMode = 'replace';
@@ -683,6 +690,10 @@ function settingsIsDirty() {
 
 function settingsDirtyCount(values) {
   if (!settingsSnap) return 0;
+  // The dirty path maintains the changed-key set directly; callers that pass
+  // an explicit collection (or run before a per-key snapshot exists) keep the
+  // original full comparison, so the count cannot drift from the saved shape.
+  if (!values && settingsSnapByKey) return settingsChangedKeys.size;
   try {
     const a = JSON.parse(settingsSnap);
     const b = values || collectSettingsValues();
@@ -793,6 +804,12 @@ function fillSettingsForm(doc) {
     rail.innerHTML = '';
     if (hd) hd.innerHTML = '';
     fillSettingsLive(null);
+    // No accepted document means no draft baseline: an old snapshot must not
+    // keep the form dirty (or Apply armed) after a failed reload.
+    settingsSnap = '';
+    settingsSnapByKey = null;
+    settingsChangedKeys = new Set();
+    settingsKeyEls = new Map();
     settingsStatus(SETTINGS_LOAD_FAIL);
     updateSettingsActions();
     return;
@@ -845,7 +862,11 @@ function fillSettingsForm(doc) {
   box.querySelectorAll('.sc-wrap').forEach(wrap => { validateSubConversationsDraft(wrap); scSyncCount(wrap); });
   fillSettingsLive(doc);
   settingsStatus(doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist');
-  settingsSnap = settingsFingerprint();
+  // One full collection establishes the accepted baseline for both the full
+  // snapshot and the per-key map. Every later keystroke compares just its own
+  // key against these entries; a refill starts the draft clean.
+  settingsCacheSnapshots(collectSettingsValues());
+  settingsKeyEls = settingsKeyElementMap(box);
   showSettingsCat();
   updateSettingsActions();
 }
@@ -1919,7 +1940,7 @@ function mrPreview(wrap) {
 // call the validate+preview pair directly - no draft mutation happens
 // there, so they must not mark the sheet.
 function mrDraftChanged(wrap) {
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(wrap));
   validateModelRulesDraft(wrap);
   mrPreview(wrap);
 }
@@ -1973,7 +1994,7 @@ function mrApplyTemplate(sel) {
   const rows = wrap.querySelectorAll('.mr-row');
   const row = rows[rows.length - 1];
   validateMrRow(row, null);
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(sel));
   mrPreview(wrap);
   const from = row.querySelector('.mr-from');
   if (from && !from.value) from.focus();
@@ -2521,7 +2542,7 @@ function roSyncCount(wrap) {
 // mrDraftChanged discipline): mark the sheet dirty, revalidate the whole
 // draft, renumber the cards and refresh the count.
 function roDraftChanged(wrap) {
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(wrap));
   validateRequestOverridesDraft(wrap);
   roRenumber(wrap);
   roSyncCount(wrap);
@@ -2814,7 +2835,7 @@ function scSyncCount(wrap) {
 // roDraftChanged discipline): mark the sheet dirty, revalidate the whole
 // draft, renumber the cards and refresh the count.
 function scDraftChanged(wrap) {
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(wrap));
   validateSubConversationsDraft(wrap);
   scRenumber(wrap);
   scSyncCount(wrap);
@@ -2855,7 +2876,7 @@ function addAliasRow(row) {
   (wrap ? wrap.querySelector('.al-rows') : row).insertAdjacentHTML('beforeend', aliasRowHTML(from, to));
   if (fromIn) fromIn.value = '';
   if (toIn) toIn.value = '';
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(row));
 }
 
 // providersAddHTML renders the "+ add provider" control that lives in the
@@ -2902,7 +2923,7 @@ function addCostKey(sec) {
   if ([...chips.querySelectorAll('.prov-chip')].some(c => c.dataset.cost === path)) { flashBadInput(input); return; }
   chips.insertAdjacentHTML('beforeend', costChipHTML(path));
   input.value = '';
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(sec));
 }
 
 // The same free-field owner is called after add, remove and field changes.
@@ -2924,7 +2945,7 @@ function addMappingRow(sec, kind) {
   if (!map || !sel?.value) return;
   map.insertAdjacentHTML('beforeend', usage ? usageRowHTML(sel.value, '', canonicalUsageFields()) : modelRowHTML(sel.value, '', canonicalModelFields()));
   syncMappingPicker(sec, kind);
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(sec));
 }
 function addUsageRow(sec) { addMappingRow(sec, 'usage'); }
 function addModelRow(sec) { addMappingRow(sec, 'model'); }
@@ -2947,7 +2968,7 @@ function addHeaderRow(sec) {
   map.insertAdjacentHTML('beforeend', headerRowHTML(name, value));
   nameIn.value = '';
   valIn.value = '';
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(sec));
 }
 
 // provWrapFrom resolves the cards container for anything inside the
@@ -2969,7 +2990,7 @@ function addProviderLabel(label, node) {
   closeProvMenus();
   const card = [...wrap.querySelectorAll('.st-prov')].pop();
   if (card && card.scrollIntoView) card.scrollIntoView({ block: 'nearest' });
-  markSettingsDirty();
+  markSettingsDirty(settingsKeyFor(wrap));
 }
 
 function addProviderCard(trigger) {
@@ -3013,7 +3034,7 @@ function roRemovalFocusTarget(container, removed, itemSelector, controlSelector,
 
 function providersEditorClick(e) {
   const t = e.target;
-  if (t.closest('[data-al-rm]')) { t.closest('.al-row').remove(); markSettingsDirty(); return; }
+  if (t.closest('[data-al-rm]')) { const key = settingsKeyFor(t); t.closest('.al-row').remove(); markSettingsDirty(key); return; }
   if (t.closest('[data-al-add]')) { addAliasRow(t.closest('.prov-add')); return; }
   if (t.closest('[data-mr-rm]')) { const wrap = t.closest('.mr-wrap'); t.closest('.mr-row').remove(); mrDraftChanged(wrap); return; }
   if (t.closest('[data-mr-add]')) { addModelRuleRow(t.closest('.mr-add')); return; }
@@ -3091,7 +3112,7 @@ function providersEditorClick(e) {
   if (t.closest('[data-sc-p-rm]')) { const wrap = t.closest('.sc-wrap'); t.closest('.sc-prow').remove(); scDraftChanged(wrap); return; }
   if (t.closest('[data-sc-param-add]')) { addScParamRow(t.closest('.sc-card')); return; }
   if (t.closest('[data-sc-add]')) { addScCard(t.closest('.sc-wrap')); return; }
-  if (t.closest('[data-prov-rm]')) { t.closest('.st-prov').remove(); markSettingsDirty(); return; }
+  if (t.closest('[data-prov-rm]')) { const key = settingsKeyFor(t); t.closest('.st-prov').remove(); markSettingsDirty(key); return; }
   if (t.closest('[data-prov-collapse]')) { toggleProvCollapse(t.closest('.st-prov')); return; }
   // The header band itself toggles collapse - except its interactive parts.
   const hd = t.closest('.prov-hd');
@@ -3116,12 +3137,13 @@ function providersEditorClick(e) {
   if (t.closest('[data-prov-chip-rm]')) {
     const chip = t.closest('.prov-chip');
     const roW = t.closest('.ro-wrap');
+    const key = settingsKeyFor(chip);
     const focusTarget = roW ? roRemovalFocusTarget(chip.parentElement, chip, '.prov-chip', '[data-prov-chip-rm]', '.ro-rh-in') : null;
     chip.remove();
     if (roW) {
       roDraftChanged(roW);
       if (focusTarget) focusTarget.focus();
-    } else markSettingsDirty();
+    } else markSettingsDirty(key);
     return;
   }
   // Usage and model mapping rows share one remove branch: both remove their
@@ -3130,9 +3152,10 @@ function providersEditorClick(e) {
   const rowRm = t.closest('[data-prov-urow-rm], [data-prov-mrow-rm]');
   if (rowRm) {
     const sec = t.closest('.prov-sec');
+    const key = settingsKeyFor(sec);
     t.closest('.prov-urow').remove();
     syncMappingPicker(sec, rowRm.matches('[data-prov-urow-rm]') ? 'usage' : 'model');
-    markSettingsDirty();
+    markSettingsDirty(key);
     return;
   }
   if (t.closest('[data-prov-add-cost]')) { addCostKey(t.closest('.prov-sec')); return; }
@@ -3141,12 +3164,13 @@ function providersEditorClick(e) {
   if (t.closest('[data-prov-hrow-rm]')) {
     const row = t.closest('.prov-hrow');
     const roW = t.closest('.ro-wrap');
+    const key = settingsKeyFor(row);
     const focusTarget = roW ? roRemovalFocusTarget(row.parentElement, row, '.prov-hrow', '.sp-hname', '.prov-add-h .sp-hname') : null;
     row.remove();
     if (roW) {
       roDraftChanged(roW);
       if (focusTarget) focusTarget.focus();
-    } else markSettingsDirty();
+    } else markSettingsDirty(key);
     return;
   }
   if (t.closest('[data-prov-add-header]')) { addHeaderRow(t.closest('.prov-sec')); const roW = t.closest('.ro-wrap'); if (roW) roDraftChanged(roW); return; }
@@ -3163,7 +3187,7 @@ function wireSettingsDelegation() {
   box.dataset.provWired = '1';
   const dirty = e => {
     if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]') || e.target.closest('[data-purge]'))) return;
-    if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty();
+    if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty(settingsKeyFor(e.target));
   };
   box.addEventListener('input', e => {
     validateSettingsScalar(e.target);
@@ -3294,10 +3318,12 @@ function wireSettingsDelegation() {
 }
 wireSettingsDelegation();
 
-function collectSettingsValues(validate = false) {
-  const out = Object.create(null);
-  const box = $('settings-fields');
-  if (!box) return out;
+// collectSettingsFieldValue reads one keyed control or composite editor into
+// the Go-facing value for its config key. The full collector and the per-key
+// dirty collector share this function, so an incremental read cannot drift
+// from the saved shape.
+function collectSettingsFieldValue(el, validate = false) {
+  const k = el.dataset.key;
   const put = (map, key, value, input) => {
     if (validate && (!key || Object.hasOwn(map, key))) {
       throw Object.assign(new Error(key ? 'duplicate mapping: ' + key : 'mapping name is required'), { input });
@@ -3315,96 +3341,171 @@ function collectSettingsValues(validate = false) {
       put(into, f, p, row.querySelector(fieldSel));
     });
   };
+  if (el.dataset.kind === 'providers') {
+    const m = Object.create(null);
+    el.querySelectorAll('.st-prov').forEach(card => {
+      const label = String((card.querySelector('.sp-label') || {}).value || '').trim();
+      const cost = [...new Set([...card.querySelectorAll('.prov-chip')].map(c => String(c.dataset.cost || '').trim()).filter(Boolean))];
+      const usage = Object.create(null);
+      collectMappingRows(card, '.prov-umap .prov-urow', '.sp-ufield', '.sp-upath', usage);
+      const modelsKeys = Object.create(null);
+      collectMappingRows(card, '.prov-mmap .prov-urow', '.sp-mfield', '.sp-mkey', modelsKeys);
+      const headers = Object.create(null);
+      card.querySelectorAll('.prov-hmap .prov-hrow').forEach(row => {
+        const n = String((row.querySelector('.sp-hname') || {}).value || '').trim();
+        const v = String((row.querySelector('.sp-hval') || {}).value || '');
+        put(headers, n, v, row.querySelector('.sp-hname'));
+      });
+      // Ensured tools are one comma-separated input; empty segments drop
+      // and the rest ride the shared server validator (empty and
+      // duplicate names reject at save, like every other editor field).
+      const ensureTools = String((card.querySelector('.sp-etools') || {}).value || '')
+        .split(',').map(s => s.trim()).filter(Boolean);
+      put(m, label, {
+        cost_keys: cost,
+        usage_keys: usage,
+        models_path: String((card.querySelector('.sp-mpath') || {}).value || '').trim(),
+        models_keys: modelsKeys,
+        ensure_tools: ensureTools,
+        headers: headers,
+      }, card.querySelector('.sp-label'));
+    });
+    return m;
+  }
+  if (el.dataset.kind === 'model_rules') return collectModelRules(el);
+  if (el.dataset.kind === 'request_overrides') return collectRequestOverrides(el, put);
+  if (el.dataset.kind === 'sub_conversations') return collectSubConversations(el);
+  if (el.dataset.kind === 'aliases') {
+    const m = Object.create(null);
+    el.querySelectorAll('.al-row').forEach(row => {
+      const from = String((row.querySelector('.al-from') || {}).value || '').trim();
+      const to = String((row.querySelector('.al-to') || {}).value || '').trim();
+      // Keep incomplete/self mappings in the draft; the shared server
+      // validator rejects them rather than silently deleting a saved row.
+      put(m, from, to, row.querySelector('.al-from'));
+    });
+    return m;
+  }
+  if (el.type === 'checkbox') return !!el.checked;
+  if (el.tagName === 'TEXTAREA') return el.value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (el.type === 'number') {
+    const n = Number(el.value);
+    if (validate && (!el.checkValidity() || !Number.isSafeInteger(n))) {
+      throw Object.assign(new Error(k + ': enter a valid integer'), { input: el });
+    }
+    return el.value.trim() && Number.isFinite(n) ? n : el.value;
+  }
+  return el.value;
+}
+
+function collectSettingsValues(validate = false) {
+  const out = Object.create(null);
+  const box = $('settings-fields');
+  if (!box) return out;
   box.querySelectorAll('[data-key]').forEach(el => {
     if (el.disabled) return;
     if (el.classList.contains('st-row')) return;
     const k = el.dataset.key;
     if (!k) return;
-    if (el.dataset.kind === 'providers') {
-      const m = Object.create(null);
-      el.querySelectorAll('.st-prov').forEach(card => {
-        const label = String((card.querySelector('.sp-label') || {}).value || '').trim();
-        const cost = [...new Set([...card.querySelectorAll('.prov-chip')].map(c => String(c.dataset.cost || '').trim()).filter(Boolean))];
-        const usage = Object.create(null);
-        collectMappingRows(card, '.prov-umap .prov-urow', '.sp-ufield', '.sp-upath', usage);
-        const modelsKeys = Object.create(null);
-        collectMappingRows(card, '.prov-mmap .prov-urow', '.sp-mfield', '.sp-mkey', modelsKeys);
-        const headers = Object.create(null);
-        card.querySelectorAll('.prov-hmap .prov-hrow').forEach(row => {
-          const n = String((row.querySelector('.sp-hname') || {}).value || '').trim();
-          const v = String((row.querySelector('.sp-hval') || {}).value || '');
-          put(headers, n, v, row.querySelector('.sp-hname'));
-        });
-        // Ensured tools are one comma-separated input; empty segments drop
-        // and the rest ride the shared server validator (empty and
-        // duplicate names reject at save, like every other editor field).
-        const ensureTools = String((card.querySelector('.sp-etools') || {}).value || '')
-          .split(',').map(s => s.trim()).filter(Boolean);
-        put(m, label, {
-          cost_keys: cost,
-          usage_keys: usage,
-          models_path: String((card.querySelector('.sp-mpath') || {}).value || '').trim(),
-          models_keys: modelsKeys,
-          ensure_tools: ensureTools,
-          headers: headers,
-        }, card.querySelector('.sp-label'));
-      });
-      out[k] = m;
-      return;
-    }
-    if (el.dataset.kind === 'model_rules') {
-      out[k] = collectModelRules(el);
-      return;
-    }
-    if (el.dataset.kind === 'request_overrides') {
-      out[k] = collectRequestOverrides(el, put);
-      return;
-    }
-    if (el.dataset.kind === 'sub_conversations') {
-      out[k] = collectSubConversations(el);
-      return;
-    }
-    if (el.dataset.kind === 'aliases') {
-      const m = Object.create(null);
-      el.querySelectorAll('.al-row').forEach(row => {
-        const from = String((row.querySelector('.al-from') || {}).value || '').trim();
-        const to = String((row.querySelector('.al-to') || {}).value || '').trim();
-        // Keep incomplete/self mappings in the draft; the shared server
-        // validator rejects them rather than silently deleting a saved row.
-        put(m, from, to, row.querySelector('.al-from'));
-      });
-      out[k] = m;
-      return;
-    }
-    if (el.type === 'checkbox') { out[k] = !!el.checked; return; }
-    if (el.tagName === 'TEXTAREA') {
-      out[k] = el.value.split('\n').map(s => s.trim()).filter(Boolean);
-      return;
-    }
-    if (el.type === 'number') {
-      const n = Number(el.value);
-      if (validate && (!el.checkValidity() || !Number.isSafeInteger(n))) {
-        throw Object.assign(new Error(k + ': enter a valid integer'), { input: el });
-      }
-      out[k] = el.value.trim() && Number.isFinite(n) ? n : el.value;
-      return;
-    }
-    out[k] = el.value;
+    out[k] = collectSettingsFieldValue(el, validate);
   });
   return out;
+}
+
+// settingsKeyElementMap indexes the rendered controls and composite editors
+// by config key once per fill, so a keystroke resolves its owner without
+// walking every category. Each composite editor (providers, aliases, model
+// rules, request overrides, sub-conversations) owns one key on its single
+// [data-key] container, so this map loses nothing the full collector reads.
+function settingsKeyElementMap(box) {
+  const map = new Map();
+  if (!box) return map;
+  box.querySelectorAll('[data-key]').forEach(el => {
+    if (el.classList.contains('st-row')) return;
+    const key = el.dataset.key;
+    if (!key) return;
+    const list = map.get(key);
+    if (list) list.push(el);
+    else map.set(key, [el]);
+  });
+  return map;
+}
+
+// settingsKeyFor resolves an edited control to its owning config key: the
+// control's own data-key or the nearest keyed container. Empty means the
+// dirty path must fall back to the full collector.
+function settingsKeyFor(node) {
+  const keyed = node && node.closest && node.closest('[data-key]');
+  return keyed && keyed.dataset && keyed.dataset.key ? keyed.dataset.key : '';
+}
+
+// settingsValueSnap serializes one key exactly as the full snapshot would;
+// undefined (a key the collector omits) stays distinct from a string value.
+function settingsValueSnap(value) {
+  const text = JSON.stringify(value);
+  return text === undefined ? 'undefined' : text;
+}
+
+// settingsCacheSnapshots publishes one baseline for both dirty readers.
+function settingsCacheSnapshots(values) {
+  settingsSnap = JSON.stringify(values);
+  settingsSnapByKey = Object.create(null);
+  Object.keys(values).forEach(key => {
+    settingsSnapByKey[key] = settingsValueSnap(values[key]);
+  });
+  settingsChangedKeys = new Set();
+}
+
+// collectSettingsValue is the per-key collector: the same value the full
+// collector produces for that key, without reading any other field.
+function collectSettingsValue(key) {
+  const els = settingsKeyEls.get(key);
+  let value;
+  if (!els) return value;
+  els.forEach(el => {
+    if (!el.disabled) value = collectSettingsFieldValue(el, false);
+  });
+  return value;
+}
+
+// settingsResyncChangedKeys is the no-resolvable-key fallback: one full
+// collection rebuilds the changed set and the hot path resumes per key.
+function settingsResyncChangedKeys() {
+  const values = collectSettingsValues();
+  const baseline = settingsSnapByKey || Object.create(null);
+  const changed = new Set();
+  const keys = new Set([...Object.keys(baseline), ...Object.keys(values)]);
+  keys.forEach(key => {
+    const before = Object.hasOwn(baseline, key) ? baseline[key] : 'undefined';
+    const now = Object.hasOwn(values, key) ? settingsValueSnap(values[key]) : 'undefined';
+    if (before !== now) changed.add(key);
+  });
+  settingsChangedKeys = changed;
+  return changed.size;
 }
 
 function settingsFingerprint() {
   return JSON.stringify(collectSettingsValues());
 }
 
-function markSettingsDirty() {
+function markSettingsDirty(key) {
   if (settingsDoc && settingsDoc.writable) {
-    // One collection feeds both the per-key count and the dirty gate. The
-    // previous path collected and stringified the whole form twice per
-    // keystroke on the settings surface.
-    const values = collectSettingsValues();
-    const n = settingsDirtyCount(values);
+    let n = 0;
+    if (settingsSnap) {
+      if (key && settingsSnapByKey && settingsKeyEls.has(key)) {
+        // Hot path: one resolved key, one collection, one snapshot compare.
+        // Structural add/remove/renumber actions pass their editor's key
+        // explicitly; scalar edits resolve the control's own data-key.
+        const before = Object.hasOwn(settingsSnapByKey, key) ? settingsSnapByKey[key] : 'undefined';
+        const now = settingsValueSnap(collectSettingsValue(key));
+        if (now === before) settingsChangedKeys.delete(key);
+        else settingsChangedKeys.add(key);
+        n = settingsChangedKeys.size;
+      } else {
+        // No resolvable key: correctness first, with one full collection.
+        n = settingsResyncChangedKeys();
+      }
+    }
     if (n) settingsStatus(n === 1 ? '1 unsaved' : n + ' unsaved');
     else settingsStatus(settingsRestartNotice(settingsDoc));
     updateSettingsActions(n > 0);
@@ -3574,7 +3675,15 @@ function applySettings() {
       if (j.last_reload) settingsDoc.last_reload = j.last_reload;
       applyDashValues(j.effective || j.values);
       if (unchanged) fillSettingsForm(settingsDoc);
-      else settingsSnap = submitted; // typing during the save remains unsaved
+      else {
+        // Typing during the save remains unsaved. Rebase the per-key
+        // snapshots to the accepted POST values and resync once, so the
+        // unsaved count names exactly the keys that changed after the
+        // submission rather than every key changed since the last fill.
+        settingsCacheSnapshots(values);
+        settingsKeyEls = settingsKeyElementMap($('settings-fields'));
+        settingsResyncChangedKeys();
+      }
     }
     if (!r.ok) throw new Error(j.error || r.statusText);
     const restart = settingsRestartNotice(settingsDoc);
