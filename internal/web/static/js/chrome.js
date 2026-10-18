@@ -369,9 +369,9 @@ function askOperatorToken() {
 
 // All operator mutations share confirmation, busy and issue-order gates.
 const operatorState = {
-  pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState },
-  debug: { revision: 0, busy: false, menu: 'debug-menu', count: 'debug-count', valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState, sync: syncDebugMenuState },
-  throttle: { revision: 0, busy: false, menu: 'limits-menu', count: 'lim-count', valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState, sync: syncLimitsMenuState },
+  pause: { revision: 0, busy: false, menu: 'pause-menu', count: 'pause-count', valid: st => st?.ok === true && Array.isArray(st.holds), apply: applyPauseState, sync: syncPauseMenuState, refresh: refreshPauseMenuDisplay },
+  debug: { revision: 0, busy: false, menu: 'debug-menu', count: 'debug-count', valid: st => st?.ok === true && Array.isArray(st.sessions), apply: applyDebugState, sync: syncDebugMenuState, refresh: refreshDebugMenuDisplay },
+  throttle: { revision: 0, busy: false, menu: 'limits-menu', count: 'lim-count', valid: st => st?.ok === true && Array.isArray(st.throttles), apply: applyThrottleState, sync: syncLimitsMenuState, refresh: refreshLimitsMenuDisplay },
 };
 document.addEventListener('click', e => {
   const button = e.target.closest('[data-operator]');
@@ -407,11 +407,16 @@ function operatorCountClear(kind) {
 }
 // resyncOperatorSurfaces is the shared apply-state epilogue: re-sync the
 // kind's header menu when it is open, then schedule a live repaint when a
-// snapshot exists. The per-kind pre-work (footer refresh, pressed bits)
-// stays at its apply site.
-function resyncOperatorSurfaces(kind) {
+// snapshot exists. displayOnly polls (occupancy, elapsed and capture counts)
+// take the kind's refresh path, which updates the affected text without
+// touching the form or checklist nodes. The per-kind pre-work (footer
+// refresh, pressed bits) stays at its apply site.
+function resyncOperatorSurfaces(kind, displayOnly = false) {
   const menu = $(operatorState[kind].menu);
-  if (menu && !menu.hidden) operatorState[kind].sync();
+  if (menu && !menu.hidden) {
+    if (displayOnly && operatorState[kind].refresh) operatorState[kind].refresh();
+    else operatorState[kind].sync();
+  }
   if (lastData) scheduleRenderLive();
 }
 async function mutateOperator(kind, body, after) {
@@ -451,6 +456,14 @@ async function mutateOperator(kind, body, after) {
 let _pauseStateSig = '';
 let _throttleStateSig = '';
 let _debugStateSig = '';
+// Structural menu signatures exclude display-only poll fields (queue
+// occupancy, elapsed run time and capture counts). They are refreshed in
+// place by each kind's refresh function; everything that changes rows,
+// checklist vocabulary, selection or take-ability still runs the full sync.
+let _pauseMenuSig = '';
+let _debugMenuSig = '';
+let _limitsMenuSig = '';
+let _limitsProviderSig = '';
 function applyPauseState(st, revision = operatorState.pause.revision) {
   if (!acceptOperator('pause', st, revision)) return;
   const sig = JSON.stringify(st);
@@ -467,8 +480,9 @@ function applyPauseState(st, revision = operatorState.pause.revision) {
     queued: typeof st.queued === 'number' ? st.queued : 0,
     default_max_queued: typeof st.default_max_queued === 'number' ? st.default_max_queued : 0,
   };
+  const displayOnly = pauseMenuStructuralSig() === _pauseMenuSig;
   refreshFooterState();
-  resyncOperatorSurfaces('pause');
+  resyncOperatorSurfaces('pause', displayOnly);
 }
 
 function applyThrottleState(st, revision = operatorState.throttle.revision) {
@@ -481,9 +495,10 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
     [KNOWN_PROVIDERS_KEY]: Array.isArray(st[KNOWN_PROVIDERS_KEY]) ? st[KNOWN_PROVIDERS_KEY] : [],
     active: !!st.active,
   };
+  const displayOnly = limitsMenuStructuralSig() === _limitsMenuSig;
   const btn = $('btn-limits');
   if (btn) btn.setAttribute('aria-pressed', throttleState.active ? 'true' : 'false');
-  resyncOperatorSurfaces('throttle');
+  resyncOperatorSurfaces('throttle', displayOnly);
 }
 
 const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-restart': 'restart-menu' };
@@ -3731,8 +3746,9 @@ function applyDebugState(st, revision = operatorState.debug.revision) {
     ttl: st.ttl || '',
     max_bytes: st.max_bytes == null || st.max_bytes === '' ? '' : String(st.max_bytes),
   };
+  const displayOnly = debugMenuStructuralSig() === _debugMenuSig;
   refreshFooterState();
-  resyncOperatorSurfaces('debug');
+  resyncOperatorSurfaces('debug', displayOnly);
 }
 
 // toggleHdrMenu is the one header-menu toggle branch: stop the event,
@@ -3754,7 +3770,7 @@ function toggleHdrMenu(e, menuId, prepare, after) {
 }
 
 function togglePauseMenu(e) {
-  toggleHdrMenu(e, 'pause-menu', () => { resetPauseMenuForm(); syncPauseMenuState(); });
+  toggleHdrMenu(e, 'pause-menu', resetPauseMenuForm);
 }
 
 function holdLive(h) {
@@ -3826,24 +3842,185 @@ function updatePauseApplyEnabled() {
 // known yet, and the limits provider select carries it as its empty option.
 // JS owns the text; the stylesheet only paints its muted look (.pause-none).
 const NONE_YET_NOTE = 'none yet - they appear as requests arrive';
-const noneYetNoteHTML = () => `<div class="pause-none">${NONE_YET_NOTE}</div>`;
+const noneYetNoteElement = () => {
+  const note = document.createElement('div');
+  note.className = 'pause-none';
+  note.textContent = NONE_YET_NOTE;
+  return note;
+};
+
+// The operator menus repaint from a five-second poll. These setters write
+// only values that actually changed, and the reconcilers below keep every
+// unchanged row and checkbox node in place: the operator's focus, checked
+// state and scroll position survive an occupancy or elapsed-time update.
+function setNodeText(el, text) {
+  if (el && el.textContent !== text) el.textContent = text;
+}
+function setNodeDisabled(el, disabled) {
+  const value = !!disabled;
+  if (el && el.disabled !== value) el.disabled = value;
+}
+function setNodeClass(el, name, on) {
+  const value = !!on;
+  if (el && el.classList.contains(name) !== value) el.classList.toggle(name, value);
+}
+function setNodeData(el, key, value) {
+  if (el && el.dataset[key] !== value) el.dataset[key] = value;
+}
+
+// takenNameSet is the one per-fill taken-set builder: the predicate runs
+// once per name in this fill and callers test membership from the set.
+function takenNameSet(names, taken) {
+  const out = new Set();
+  if (typeof taken !== 'function') return out;
+  for (const name of names || []) if (taken(name)) out.add(name);
+  return out;
+}
+
+// reconcileKeyedChildren is the shared in-place reconciler for checklist and
+// hold rows. Every managed child carries its stable key in a data attribute,
+// so rows that entered or left the vocabulary are the only ones appended or
+// removed; existing rows are moved only when their order genuinely changed.
+// A malformed skeleton (missing/duplicate keys, a foreign row) returns false
+// before any mutation so the caller can fall back to a full rebuild.
+function reconcileKeyedChildren(box, first, items, keyOf, attr, createRow, paintRow, validRow) {
+  const keys = items.map(keyOf);
+  if (new Set(keys).size !== keys.length) return false;
+  const existing = new Map();
+  for (let el = first ? first.nextElementSibling : box.firstElementChild; el; el = el.nextElementSibling) {
+    const key = el.dataset[attr];
+    if (key === undefined || existing.has(key) || (validRow && !validRow(el))) return false;
+    existing.set(key, el);
+  }
+  let ref = first ? first.nextElementSibling : box.firstElementChild;
+  for (let i = 0; i < items.length; i++) {
+    const key = keys[i];
+    let row = existing.get(key);
+    if (row) existing.delete(key);
+    else row = createRow(items[i], key);
+    if (row !== ref) box.insertBefore(row, ref);
+    else ref = ref.nextElementSibling;
+    paintRow(row, items[i], key);
+  }
+  for (const row of existing.values()) row.remove();
+  return true;
+}
+
+// rebuildKeyedChildren is the documented fallback: the same create/paint
+// owners, run over a cleared managed range when in-place reconciliation is
+// not provably safe.
+function rebuildKeyedChildren(box, first, items, keyOf, attr, createRow, paintRow) {
+  let node = first ? first.nextSibling : box.firstChild;
+  while (node) {
+    const next = node.nextSibling;
+    node.remove();
+    node = next;
+  }
+  for (const item of items) {
+    const key = keyOf(item);
+    const row = createRow(item, key);
+    paintRow(row, item, key);
+    box.append(row);
+  }
+}
+
+const isCheckRow = el => el.tagName === 'LABEL' && el.classList.contains('pause-check') &&
+  !!el.querySelector('input[type=checkbox]');
+
+function createCheckRow() {
+  const label = document.createElement('label');
+  label.className = 'pause-check';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  label.append(input);
+  return label;
+}
+
+function paintCheckRow(label, name, on, taken, policy) {
+  setNodeData(label, 'checkKey', name);
+  const input = label.querySelector('input[type=checkbox]');
+  if (input.value !== name) input.value = name;
+  if (input.checked !== on) input.checked = on;
+  setNodeDisabled(input, taken || policy.busy);
+  setNodeClass(label, 'taken', taken);
+  if (input.onchange !== policy.onchange) input.onchange = policy.onchange;
+  const text = ' ' + name;
+  const node = input.nextSibling;
+  if (!node || node.nodeType !== Node.TEXT_NODE) input.after(document.createTextNode(text));
+  else if (node.nodeValue !== text) node.nodeValue = text;
+}
+
+// fillCheckList reconciles a checklist against its vocabulary, keeping the
+// shared none-yet note when the list is empty.
+function fillCheckList(box, items, keyOf, createRow, paintRow) {
+  if (!box) return;
+  if (!items.length) {
+    const note = [...box.children].find(el => el.classList.contains('pause-none'));
+    if (note && box.children.length === 1) setNodeText(note, NONE_YET_NOTE);
+    else box.replaceChildren(note || noneYetNoteElement());
+    return;
+  }
+  const note = [...box.children].find(el => el.classList.contains('pause-none'));
+  if (note) note.remove();
+  if (!reconcileKeyedChildren(box, null, items, keyOf, 'checkKey', createRow, paintRow, isCheckRow)) {
+    box.replaceChildren();
+    rebuildKeyedChildren(box, null, items, keyOf, 'checkKey', createRow, paintRow);
+  }
+}
+
+function createHoldRow(editOperator, actionOperator, actionLabel) {
+  const row = document.createElement('div');
+  row.className = 'pause-hold';
+  const edit = document.createElement('button');
+  edit.className = 'hold-edit';
+  edit.dataset.operator = editOperator;
+  const action = document.createElement('button');
+  action.className = 'btn';
+  action.dataset.operator = actionOperator;
+  action.textContent = actionLabel;
+  row.append(edit, action);
+  return row;
+}
+
+const isHoldRow = el => el.classList.contains('pause-hold');
+
+// renderKeyedRows reconciles a header plus one row per stable item id. It
+// rebuilds only when the container skeleton is not the expected
+// header-and-rows shape.
+function renderKeyedRows(box, header, items, keyOf, createRow, paintRow, validRow = isHoldRow) {
+  if (!box) return;
+  if (!items.length) {
+    if (box.firstChild) box.replaceChildren();
+    return;
+  }
+  let head = box.firstElementChild;
+  if (!head || !head.classList.contains('pause-known-hd')) {
+    head = document.createElement('div');
+    head.className = 'pause-known-hd';
+    box.replaceChildren(head);
+  }
+  setNodeText(head, header);
+  if (!reconcileKeyedChildren(box, head, items, keyOf, 'rowKey', createRow, paintRow, validRow)) {
+    rebuildKeyedChildren(box, head, items, keyOf, 'rowKey', createRow, paintRow);
+  }
+}
 
 // fillCheckRows is the one builder for the operator checklist rows (pause
 // clients/providers and debug clients/providers/models): one labeled
 // checkbox per known name, checked from the caller's picked set, disabled
-// when the name is already taken by another hold or session (policy.taken)
-// or the surface is busy (policy.busy), with the caller's change hook. An
-// empty list renders the shared none-yet note instead.
+// when the name is already taken by another hold or session (policy.takenSet
+// or policy.taken) or the surface is busy (policy.busy), with the caller's
+// change hook. An empty list renders the shared none-yet note instead.
 function fillCheckRows(box, names, picked, policy) {
   if (!box) return;
+  const list = names || [];
   const keep = picked instanceof Set ? picked : new Set();
-  const taken = policy.taken || (() => false);
-  box.innerHTML = (names || []).map(c => {
-    const isTaken = taken(c);
-    const on = keep.has(c) && !isTaken;
-    return `<label class="pause-check${isTaken?' taken':''}"><input type="checkbox" value="${escapeHtml(c)}" ${on?'checked':''} ${isTaken || policy.busy ? 'disabled' : ''}> ${escapeHtml(c)}</label>`;
-  }).join('') || noneYetNoteHTML();
-  box.querySelectorAll('input').forEach(el => { el.onchange = policy.onchange; });
+  const takenNames = policy.takenSet instanceof Set
+    ? policy.takenSet : takenNameSet(list, policy.taken);
+  fillCheckList(box, list, c => c, createCheckRow, (label, name) => {
+    const isTaken = takenNames.has(name);
+    paintCheckRow(label, name, keep.has(name) && !isTaken, isTaken, policy);
+  });
 }
 
 function fillPauseChecks(box, names, picked) {
@@ -3864,25 +4041,61 @@ function holdScopeLabel(h) {
   return bits.join(' + ') || 'hold';
 }
 
+function pauseHoldLabel(h) {
+  const left = [holdScopeLabel(h)];
+  // The system label of an auto-created quota hold - the operator sees why
+  // a hold they did not create is parking the provider.
+  if (h.reason) left.push(h.reason);
+  const until = pauseUntilLabel(h.until);
+  if (until) left.push(until);
+  else if (h.duration) left.push(h.duration);
+  if (h.max_queued > 0) left.push('cap ' + h.max_queued);
+  const q = typeof h.queued === 'number' && h.queued > 0 ? ' · q ' + h.queued : '';
+  return left.join(' · ') + q;
+}
+
+function paintPauseHoldRow(row, h) {
+  setNodeData(row, 'rowKey', h.id || '');
+  const edit = row.querySelector('[data-operator="pause-edit"]');
+  const resume = row.querySelector('[data-operator="pause-resume"]');
+  setNodeData(edit, 'value', h.id || '');
+  setNodeData(resume, 'value', h.id || '');
+  setNodeText(edit, pauseHoldLabel(h));
+  setNodeDisabled(edit, operatorState.pause.busy);
+  setNodeDisabled(resume, operatorState.pause.busy);
+  setNodeClass(row, 'editing', pauseEditID === h.id);
+}
+
+const isPauseHoldRow = el => isHoldRow(el) &&
+  !!el.querySelector('[data-operator="pause-edit"]') && !!el.querySelector('[data-operator="pause-resume"]');
+
 function renderPauseHolds() {
-  const box = $('pf-holds');
-  if (!box) return;
-  const holds = liveHolds();
-  if (!holds.length) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="pause-known-hd">Active holds</div>' + holds.map(h => {
-    const left = [holdScopeLabel(h)];
-    // The system label of an auto-created quota hold - the operator sees why
-    // a hold they did not create is parking the provider.
-    if (h.reason) left.push(h.reason);
-    const until = pauseUntilLabel(h.until);
-    if (until) left.push(until);
-    else if (h.duration) left.push(h.duration);
-    if (h.max_queued > 0) left.push('cap ' + h.max_queued);
-    const q = typeof h.queued === 'number' && h.queued > 0 ? ' · q ' + h.queued : '';
-    const editing = pauseEditID === h.id ? ' editing' : '';
-    return `<div class="pause-hold${editing}"><button class="hold-edit" data-operator="pause-edit" data-value="${escapeHtml(h.id)}" ${operatorState.pause.busy ? 'disabled' : ''}>${escapeHtml(left.join(' · '))}${q}</button>` +
-      `<button class="btn" ${operatorState.pause.busy ? 'disabled' : ''} data-operator="pause-resume" data-value="${escapeHtml(h.id)}">Resume</button></div>`;
-  }).join('');
+  renderKeyedRows($('pf-holds'), 'Active holds', liveHolds(), h => h.id || '',
+    () => createHoldRow('pause-edit', 'pause-resume', 'Resume'), paintPauseHoldRow, isPauseHoldRow);
+}
+
+function pauseMenuStructuralSig() {
+  const holds = (pauseState.holds || []).map(h => [
+    h.id || '', !!h.all, !!h.new, h.clients || [], h.providers || [], h.known_at_new || [],
+    h.duration || '', h.until || '', Number(h.max_queued) || 0, h.reason || '',
+  ]);
+  return JSON.stringify([holds, pauseState.clients || [], pauseState.providers || [],
+    pauseState[KNOWN_CLIENTS_KEY] || [], pauseState[KNOWN_PROVIDERS_KEY] || [],
+    pauseState.until || null, Number(pauseState.default_max_queued) || 0]);
+}
+
+// refreshPauseMenuDisplay owns the live half of the pause menu: the queued
+// count line, the per-hold queue count, and the header/resume state that
+// follows hold liveness. Checklist drafts, taken names and hold structure are
+// untouched unless the apply gate saw a structural change.
+function refreshPauseMenuDisplay() {
+  const resume = $('btn-pause-resume');
+  if (resume) resume.disabled = operatorState.pause.busy || !pauseActive();
+  const hd = document.querySelector('#pause-menu .clear-menu-hd');
+  if (hd) hd.textContent = pauseEditID ? 'Edit hold…' : (pauseActive() ? 'Holding requests…' : 'Hold requests…');
+  const count = $('pause-count');
+  if (count && !count.dataset.err) count.textContent = pauseActive() ? pauseStatusBits().join(' · ') : '';
+  renderPauseHolds();
 }
 
 // knownNames is the one known-name derivation for the pause/debug/limits
@@ -3895,9 +4108,11 @@ function knownNames(state, key, ...extra) {
   return [...out].sort();
 }
 
-function refreshPauseKnownLists() {
-  const pickedC = new Set(selectedCheckboxValues('pf-clients'));
-  const pickedP = new Set(selectedCheckboxValues('pf-providers'));
+function refreshPauseKnownLists(picks) {
+  const pickedC = picks && picks.clients instanceof Set
+    ? picks.clients : new Set(selectedCheckboxValues('pf-clients'));
+  const pickedP = picks && picks.providers instanceof Set
+    ? picks.providers : new Set(selectedCheckboxValues('pf-providers'));
   const knownC = knownNames(pauseState, KNOWN_CLIENTS_KEY, pauseState.clients, pickedC);
   const knownP = knownNames(pauseState, KNOWN_PROVIDERS_KEY, pauseState.providers, pickedP);
   fillPauseChecks($('pf-clients'), knownC, pickedC);
@@ -3905,41 +4120,38 @@ function refreshPauseKnownLists() {
   onPauseScopeChange();
 }
 
-function syncPauseMenuState() {
-  fillPauseControls();
+function syncPauseMenuState(picks) {
   if (pauseEditID && !liveHolds().some(h => h.id === pauseEditID)) {
     pauseEditID = '';
-    resetPauseMenuForm();
+    resetPauseMenuValues();
+    picks = { clients: new Set(), providers: new Set() };
   }
-  refreshPauseKnownLists();
+  fillPauseControls();
+  refreshPauseKnownLists(picks);
   const cap = $('pf-cap');
   if (cap && document.activeElement !== cap) {
     cap.placeholder = pauseState.default_max_queued > 0 ? String(pauseState.default_max_queued) : 'unlimited';
   }
-  const resume = $('btn-pause-resume');
-  if (resume) resume.disabled = operatorState.pause.busy || !pauseActive();
   ['pf-scope', 'pf-dur', 'pf-cap'].forEach(id => { if ($(id)) $(id).disabled = operatorState.pause.busy; });
-  const hd = document.querySelector('#pause-menu .clear-menu-hd');
-  if (hd) {
-    hd.textContent = pauseEditID ? 'Edit hold…' : (pauseActive() ? 'Holding requests…' : 'Hold requests…');
-  }
-  const count = $('pause-count');
-  if (count && !count.dataset.err) count.textContent = pauseActive() ? pauseStatusBits().join(' · ') : '';
-  renderPauseHolds();
+  refreshPauseMenuDisplay();
   updatePauseApplyEnabled();
+  _pauseMenuSig = pauseMenuStructuralSig();
 }
 
-function resetPauseMenuForm() {
+// resetPauseMenuValues clears the editable draft without painting: the one
+// following sync owns the single list paint.
+function resetPauseMenuValues() {
   pauseEditID = '';
-  fillPauseControls();
   if ($('pf-scope')) $('pf-scope').value = '';
   if ($('pf-dur')) $('pf-dur').value = '';
   const cap = $('pf-cap');
   if (cap) cap.value = '';
   operatorCountClear('pause');
-  fillPauseChecks($('pf-clients'), knownNames(pauseState, KNOWN_CLIENTS_KEY, pauseState.clients), new Set());
-  fillPauseChecks($('pf-providers'), knownNames(pauseState, KNOWN_PROVIDERS_KEY, pauseState.providers), new Set());
-  onPauseScopeChange();
+}
+
+function resetPauseMenuForm() {
+  resetPauseMenuValues();
+  syncPauseMenuState({ clients: new Set(), providers: new Set() });
 }
 
 function holdMatchesRecord(h, r) {
@@ -3994,24 +4206,22 @@ function editPauseHold(id) {
   if (!id || operatorState.pause.busy) return;
   if (pauseEditID === id) {
     resetPauseMenuForm();
-    syncPauseMenuState();
     return;
   }
   const h = liveHolds().find(x => x.id === id);
   if (!h) return;
   pauseEditID = id;
-  fillPauseControls();
-  if ($('pf-scope')) $('pf-scope').value = h.all ? 'all' : (h.new ? 'new' : '');
+  fillSelectPairs($('pf-scope'), PAUSE_SCOPES, h.all ? 'all' : (h.new ? 'new' : ''));
   fillSelectPairs($('pf-dur'), PAUSE_DURS, h.duration || '');
   const cap = $('pf-cap');
   if (cap) cap.value = typeof h.max_queued === 'number' ? String(h.max_queued) : '';
   operatorCountClear('pause');
-  const knownC = knownNames(pauseState, KNOWN_CLIENTS_KEY, h.clients);
-  const knownP = knownNames(pauseState, KNOWN_PROVIDERS_KEY, h.providers);
-  fillPauseChecks($('pf-clients'), knownC, new Set(h.clients || []));
-  fillPauseChecks($('pf-providers'), knownP, new Set(h.providers || []));
-  onPauseScopeChange();
-  syncPauseMenuState();
+  // The picked sets ride the single sync: it paints the checklists once with
+  // the hold's exact scope while preserving the size controls just set.
+  syncPauseMenuState({
+    clients: new Set(h.clients || []),
+    providers: new Set(h.providers || []),
+  });
 }
 
 function applyPauseMenu() {
@@ -4051,13 +4261,41 @@ function limitByProvider(name) {
   return (throttleState.throttles || []).find(t => t && t.provider === name) || null;
 }
 
+// selectPairSigs remembers the last option vocabulary per select. A poll
+// whose pairs are unchanged must not replace the option list: that would
+// close an open picker and drop the operator's selection position.
+const selectPairSigs = new WeakMap();
+// setSelectValue sets one select's value, keeping exactly one custom option
+// for a saved value outside the curated pairs and removing it once the value
+// is curated again. Curated choices are suggestions, not permission to erase
+// a saved value.
+function setSelectValue(sel, value) {
+  const v = value == null ? '' : String(value);
+  let custom = null;
+  for (const option of sel.options) if (option.dataset.pairCustom === '1') { custom = option; break; }
+  const curated = [...sel.options].some(o => o.value === v && o.dataset.pairCustom !== '1');
+  if (curated) {
+    if (custom) custom.remove();
+  } else if (custom) {
+    if (custom.value !== v) custom.value = v;
+    const label = v || 'off';
+    if (custom.textContent !== label) custom.textContent = label;
+  } else {
+    const option = new Option(v || 'off', v);
+    option.dataset.pairCustom = '1';
+    sel.add(option);
+  }
+  if (sel.value !== v) sel.value = v;
+}
+
 function fillSelectPairs(sel, pairs, value) {
   if (!sel || !pairs) return;
-  sel.innerHTML = pairs.map(([val, lab]) => `<option value="${escapeHtml(String(val))}">${escapeHtml(lab)}</option>`).join('');
-  const v = value == null ? '' : String(value);
-  // Curated choices are suggestions, not permission to erase a saved value.
-  if (!pairs.some(([val]) => String(val) === v)) sel.add(new Option(v || 'off', v));
-  sel.value = v;
+  const sig = JSON.stringify(pairs);
+  if (selectPairSigs.get(sel) !== sig) {
+    selectPairSigs.set(sel, sig);
+    sel.innerHTML = pairs.map(([val, lab]) => `<option value="${escapeHtml(String(val))}">${escapeHtml(lab)}</option>`).join('');
+  }
+  setSelectValue(sel, value);
 }
 
 const PAUSE_SCOPES = [
@@ -4093,7 +4331,7 @@ function fillPauseControls() {
 const DEBUG_DURS = [['', 'I stop']].concat(PAUSE_DURS.slice(1));
 
 function toggleDebugMenu(e) {
-  toggleHdrMenu(e, 'debug-menu', () => { resetDebugMenuForm(); syncDebugMenuState(); });
+  toggleHdrMenu(e, 'debug-menu', resetDebugMenuForm);
 }
 
 function liveDebugSessions() {
@@ -4108,13 +4346,21 @@ function otherDebugSessions() {
   return liveDebugSessions().filter(h => h.id !== debugEditID);
 }
 
-function debugNameTaken(kind, name) {
+// debugTakenNameSet is the one taken-name derivation for a debug checklist
+// fill: the other sessions are scanned once and every name they exclusively
+// scope is collected. A name shared by a session with another scoped
+// dimension stays selectable (the scheduler matches dimensions AND).
+function debugTakenNameSet(kind) {
+  const key = kind === 'client' ? 'clients' : kind === 'provider' ? 'providers' : kind === 'model' ? 'models' : '';
+  const out = new Set();
+  if (!key) return out;
   for (const h of otherDebugSessions()) {
-    if (kind === 'client' && (h.clients || []).includes(name) && !(h.providers || []).length && !(h.models || []).length) return true;
-    if (kind === 'provider' && (h.providers || []).includes(name) && !(h.clients || []).length && !(h.models || []).length) return true;
-    if (kind === 'model' && (h.models || []).includes(name) && !(h.clients || []).length && !(h.providers || []).length) return true;
+    if (kind === 'client' && ((h.providers || []).length || (h.models || []).length)) continue;
+    if (kind === 'provider' && ((h.clients || []).length || (h.models || []).length)) continue;
+    if (kind === 'model' && ((h.clients || []).length || (h.providers || []).length)) continue;
+    for (const name of h[key] || []) out.add(name);
   }
-  return false;
+  return out;
 }
 
 
@@ -4175,9 +4421,47 @@ function updateDebugApplyEnabled() {
   btn.textContent = debugEditID ? 'Update' : 'Start';
 }
 
+function paintDebugModelRow(label, g, keep, takenNames) {
+  setNodeData(label, 'checkKey', g.display);
+  const title = g.variants.join(' · ');
+  if (label.title !== title) label.title = title;
+  const taken = g.variants.some(v => takenNames.has(v));
+  const on = !taken && (keep.has(g.display) || g.variants.some(v => keep.has(v)));
+  const input = label.querySelector('input[type=checkbox]');
+  if (input.value !== g.display) input.value = g.display;
+  if (input.checked !== on) input.checked = on;
+  setNodeDisabled(input, taken || operatorState.debug.busy);
+  setNodeClass(label, 'taken', taken);
+  if (input.onchange !== updateDebugApplyEnabled) input.onchange = updateDebugApplyEnabled;
+  const text = ' ' + g.display;
+  const node = input.nextSibling;
+  if (!node || node.nodeType !== Node.TEXT_NODE) input.after(document.createTextNode(text));
+  else if (node.nodeValue !== text) node.nodeValue = text;
+  // The multi-variant count is display-only; keep its span so a poll cannot
+  // replace the label the operator is reading.
+  const extra = g.variants.length > 1 ? '+' + (g.variants.length - 1) : '';
+  let count = [...label.children].find(el => el.dataset.pauseExtra === '1');
+  if (extra) {
+    if (!count) {
+      label.append(document.createTextNode(' '));
+      count = document.createElement('span');
+      count.dataset.pauseExtra = '1';
+      count.setAttribute('aria-hidden', 'true');
+      count.style.color = 'var(--muted)';
+      label.append(count);
+    }
+    if (count.textContent !== extra) count.textContent = extra;
+  } else if (count) {
+    const space = count.previousSibling;
+    if (space && space.nodeType === Node.TEXT_NODE && space.nodeValue === ' ') space.remove();
+    count.remove();
+  }
+}
+
 function fillDebugChecks(box, names, picked, kind) {
   if (!box) return;
   const keep = picked instanceof Set ? picked : new Set();
+  const takenNames = debugTakenNameSet(kind);
   if (kind === 'model') {
     // Grouped display (dbgGroupedModels builds the groups; dbgModelGroups
     // carries them): one checkbox per spelling group, value = the group's
@@ -4185,16 +4469,12 @@ function fillDebugChecks(box, names, picked, kind) {
     // when the session is applied. `keep` may hold raw names (edit path) or
     // display names (refresh path) - either marks the group checked.
     dbgModelGroups = dbgGroupedModels(names);
-    box.innerHTML = dbgModelGroups.map(g => {
-      const taken = g.variants.some(v => debugNameTaken('model', v));
-      const on = !taken && (keep.has(g.display) || g.variants.some(v => keep.has(v)));
-      const extra = g.variants.length > 1
-        ? ` <span style="color:var(--muted)" aria-hidden="true">+${g.variants.length - 1}</span>` : '';
-      return `<label class="pause-check${taken?' taken':''}" title="${escapeHtml(g.variants.join(' · '))}"><input type="checkbox" value="${escapeHtml(g.display)}" ${on?'checked':''} ${taken || operatorState.debug.busy ? 'disabled' : ''}> ${escapeHtml(g.display)}${extra}</label>`;
-    }).join('') || noneYetNoteHTML();
-    box.querySelectorAll('input').forEach(el => { el.onchange = updateDebugApplyEnabled; });
+    fillCheckList(box, dbgModelGroups, g => g.display, createCheckRow,
+      (label, g) => paintDebugModelRow(label, g, keep, takenNames));
   } else {
-    fillCheckRows(box, names, picked, { taken: c => debugNameTaken(kind, c), busy: operatorState.debug.busy, onchange: updateDebugApplyEnabled });
+    fillCheckRows(box, names, picked, {
+      takenSet: takenNames, busy: operatorState.debug.busy, onchange: updateDebugApplyEnabled,
+    });
   }
 }
 
@@ -4223,31 +4503,74 @@ function debugRanLabel(h) {
   return hmBreakdown(Math.max(1, Math.round(ms / 60000)));
 }
 
-function renderDebugSessions() {
-  const box = $('df-holds');
-  if (!box) return;
-  const holds = liveDebugSessions();
-  if (!holds.length) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="pause-known-hd">Active sessions</div>' + holds.map(h => {
-    const left = [debugScopeLabel(h)];
-    const until = pauseUntilLabel(h.until);
-    if (until) left.push(until);
-    else if (h.duration) left.push(h.duration);
-    else left.push('until stop');
-    const ran = debugRanLabel(h);
-    if (ran) left.push('ran ' + ran);
-    const n = typeof h.captures === 'number' ? h.captures : 0;
-    left.push(n + ' req');
-    const editing = debugEditID === h.id ? ' editing' : '';
-    return `<div class="pause-hold${editing}"><button class="hold-edit" data-operator="debug-edit" data-value="${escapeHtml(h.id)}" ${operatorState.debug.busy ? 'disabled' : ''}>${escapeHtml(left.join(' · '))}</button>` +
-      `<button class="btn" data-operator="debug-stop" data-value="${escapeHtml(h.id)}" ${operatorState.debug.busy ? 'disabled' : ''}>Stop</button></div>`;
-  }).join('');
+function debugSessionLabel(h) {
+  const left = [debugScopeLabel(h)];
+  const until = pauseUntilLabel(h.until);
+  if (until) left.push(until);
+  else if (h.duration) left.push(h.duration);
+  else left.push('until stop');
+  const ran = debugRanLabel(h);
+  if (ran) left.push('ran ' + ran);
+  const n = typeof h.captures === 'number' ? h.captures : 0;
+  left.push(n + ' req');
+  return left.join(' · ');
 }
 
-function refreshDebugKnownLists() {
-  const pickedC = new Set(selectedCheckboxValues('df-clients'));
-  const pickedP = new Set(selectedCheckboxValues('df-providers'));
-  const pickedM = new Set(selectedCheckboxValues('df-models'));
+function paintDebugSessionRow(row, h) {
+  setNodeData(row, 'rowKey', h.id || '');
+  const edit = row.querySelector('[data-operator="debug-edit"]');
+  const stop = row.querySelector('[data-operator="debug-stop"]');
+  setNodeData(edit, 'value', h.id || '');
+  setNodeData(stop, 'value', h.id || '');
+  setNodeText(edit, debugSessionLabel(h));
+  setNodeDisabled(edit, operatorState.debug.busy);
+  setNodeDisabled(stop, operatorState.debug.busy);
+  setNodeClass(row, 'editing', debugEditID === h.id);
+}
+
+const isDebugSessionRow = el => isHoldRow(el) &&
+  !!el.querySelector('[data-operator="debug-edit"]') && !!el.querySelector('[data-operator="debug-stop"]');
+
+function renderDebugSessions() {
+  renderKeyedRows($('df-holds'), 'Active sessions', liveDebugSessions(), h => h.id || '',
+    () => createHoldRow('debug-edit', 'debug-stop', 'Stop'), paintDebugSessionRow, isDebugSessionRow);
+}
+
+function debugMenuStructuralSig() {
+  const sessions = (debugState.sessions || []).map(h => [
+    h.id || '', h.clients || [], h.providers || [], h.models || [],
+    h.duration || '', h.until || '',
+  ]);
+  // Expiry changes taken-name and row membership while every raw session
+  // field stays put. The live id set is the exact liveness witness: when a
+  // session expires (or arrives live) between polls, the full sync must run.
+  const live = liveDebugSessions().map(h => h.id || '');
+  return JSON.stringify([!!debugState.enabled, live, sessions,
+    debugState[KNOWN_CLIENTS_KEY] || [], debugState[KNOWN_PROVIDERS_KEY] || [],
+    debugState[KNOWN_MODELS_KEY] || [], debugState.until || null,
+    typeof modelRevision === 'undefined' ? null : modelRevision]);
+}
+
+// refreshDebugMenuDisplay updates the elapsed time, capture counts and
+// session liveness that change on every poll without touching the checklist
+// drafts.
+function refreshDebugMenuDisplay() {
+  const stop = $('btn-debug-stop');
+  if (stop) stop.disabled = operatorState.debug.busy || !debugActive();
+  const hd = document.querySelector('#debug-menu .clear-menu-hd');
+  if (hd) hd.textContent = debugEditID ? 'Edit session…' : (debugActive() ? 'Capturing debug…' : 'Capture debug…');
+  const count = $('debug-count');
+  if (count && !count.dataset.err) count.textContent = debugActive() ? debugStatusBits().join(' · ') : '';
+  renderDebugSessions();
+}
+
+function refreshDebugKnownLists(picks) {
+  const pickedC = picks && picks.clients instanceof Set
+    ? picks.clients : new Set(selectedCheckboxValues('df-clients'));
+  const pickedP = picks && picks.providers instanceof Set
+    ? picks.providers : new Set(selectedCheckboxValues('df-providers'));
+  const pickedM = picks && picks.models instanceof Set
+    ? picks.models : new Set(selectedCheckboxValues('df-models'));
   const knownC = knownNames(debugState, KNOWN_CLIENTS_KEY, pickedC);
   const knownP = knownNames(debugState, KNOWN_PROVIDERS_KEY, pickedP);
   const knownM = knownNames(debugState, KNOWN_MODELS_KEY, pickedM);
@@ -4257,34 +4580,31 @@ function refreshDebugKnownLists() {
   updateDebugApplyEnabled();
 }
 
-function syncDebugMenuState() {
-  fillSelectPairs($('df-dur'), DEBUG_DURS, debugMenuDuration());
+function syncDebugMenuState(picks) {
   if (debugEditID && !liveDebugSessions().some(h => h.id === debugEditID)) {
     debugEditID = '';
-    resetDebugMenuForm();
+    resetDebugMenuValues();
+    picks = { clients: new Set(), providers: new Set(), models: new Set() };
   }
-  refreshDebugKnownLists();
-  const stop = $('btn-debug-stop');
-  if (stop) stop.disabled = operatorState.debug.busy || !debugActive();
+  fillSelectPairs($('df-dur'), DEBUG_DURS, debugMenuDuration());
+  refreshDebugKnownLists(picks);
   if ($('df-dur')) $('df-dur').disabled = operatorState.debug.busy;
-  const hd = document.querySelector('#debug-menu .clear-menu-hd');
-  if (hd) {
-    hd.textContent = debugEditID ? 'Edit session…' : (debugActive() ? 'Capturing debug…' : 'Capture debug…');
-  }
-  const count = $('debug-count');
-  if (count && !count.dataset.err) count.textContent = debugActive() ? debugStatusBits().join(' · ') : '';
-  renderDebugSessions();
+  refreshDebugMenuDisplay();
   updateDebugApplyEnabled();
+  _debugMenuSig = debugMenuStructuralSig();
+}
+
+// resetDebugMenuValues clears the editable draft without painting: the one
+// following sync owns the single list paint.
+function resetDebugMenuValues() {
+  debugEditID = '';
+  if ($('df-dur')) $('df-dur').value = '';
+  operatorCountClear('debug');
 }
 
 function resetDebugMenuForm() {
-  debugEditID = '';
-  fillSelectPairs($('df-dur'), DEBUG_DURS, '');
-  operatorCountClear('debug');
-  fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY), new Set(), 'client');
-  fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY), new Set(), 'provider');
-  fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY), new Set(), 'model');
-  updateDebugApplyEnabled();
+  resetDebugMenuValues();
+  syncDebugMenuState({ clients: new Set(), providers: new Set(), models: new Set() });
 }
 
 function debugMatchesRecord(h, r) {
@@ -4313,7 +4633,6 @@ function editDebugSession(id) {
   if (!id || operatorState.debug.busy) return;
   if (debugEditID === id) {
     resetDebugMenuForm();
-    syncDebugMenuState();
     return;
   }
   const h = liveDebugSessions().find(x => x.id === id);
@@ -4321,10 +4640,13 @@ function editDebugSession(id) {
   debugEditID = id;
   fillSelectPairs($('df-dur'), DEBUG_DURS, h.duration || '');
   operatorCountClear('debug');
-  fillDebugChecks($('df-clients'), knownNames(debugState, KNOWN_CLIENTS_KEY, h.clients), new Set(h.clients || []), 'client');
-  fillDebugChecks($('df-providers'), knownNames(debugState, KNOWN_PROVIDERS_KEY, h.providers), new Set(h.providers || []), 'provider');
-  fillDebugChecks($('df-models'), knownNames(debugState, KNOWN_MODELS_KEY, h.models), new Set(h.models || []), 'model');
-  syncDebugMenuState();
+  // The picked sets ride the single sync: every checklist is painted once
+  // with the session's exact raw scope.
+  syncDebugMenuState({
+    clients: new Set(h.clients || []),
+    providers: new Set(h.providers || []),
+    models: new Set(h.models || []),
+  });
 }
 
 function applyDebugMenu() {
@@ -4365,8 +4687,10 @@ function syncLimitsMenuState() {
   const known = knownNames(throttleState, KNOWN_PROVIDERS_KEY,
     (throttleState.throttles || []).map(t => t.provider).filter(Boolean));
   const sel = $('lim-provider');
-  const keep = sel ? sel.value : '';
-  if (sel) {
+  const providerSig = JSON.stringify(known);
+  if (sel && providerSig !== _limitsProviderSig) {
+    _limitsProviderSig = providerSig;
+    const keep = sel.value;
     const empty = known.length ? '' : `<option value="">${NONE_YET_NOTE}</option>`;
     sel.innerHTML = empty + known.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
     if (keep && known.includes(keep)) sel.value = keep;
@@ -4374,6 +4698,7 @@ function syncLimitsMenuState() {
   updateLimitCount();
   renderLimitHolds();
   updateLimitsApplyEnabled();
+  _limitsMenuSig = limitsMenuStructuralSig();
 }
 
 function onLimitProviderChange() {
@@ -4447,21 +4772,63 @@ function clearLimitsMenu() {
   return mutateOperator('throttle', { provider, clear: true }, onLimitProviderChange);
 }
 
+function limitHoldLabel(t) {
+  const bits = [];
+  if (t.concurrency) bits.push('×' + t.concurrency);
+  if (t.requests) bits.push(t.requests + '/' + (t.request_window || ''));
+  if (t.tokens) bits.push(fmt(t.tokens) + ' tok/' + (t.token_window || ''));
+  return (t.provider || '') + ' · ' + bits.join(' · ');
+}
+
+function createLimitHoldRow() {
+  const row = document.createElement('div');
+  row.className = 'pause-hold';
+  const button = document.createElement('button');
+  button.className = 'hold-edit';
+  button.dataset.operator = 'limit-edit';
+  const source = document.createElement('span');
+  source.className = 'lim-src';
+  row.append(button, source);
+  return row;
+}
+
+function paintLimitHoldRow(row, t) {
+  setNodeData(row, 'rowKey', t.provider || '');
+  const button = row.querySelector('[data-operator="limit-edit"]');
+  const source = row.querySelector('.lim-src');
+  const src = t.source === 'header' ? 'header' : 'ui';
+  setNodeData(button, 'value', t.provider || '');
+  setNodeText(button, limitHoldLabel(t));
+  setNodeDisabled(button, operatorState.throttle.busy);
+  setNodeText(source, src);
+  setNodeClass(source, 'header', src === 'header');
+  setNodeClass(source, 'ui', src === 'ui');
+  setNodeClass(row, 'editing', !!( $('lim-provider') && $('lim-provider').value === t.provider));
+}
+
+const isLimitHoldRow = el => isHoldRow(el) &&
+  !!el.querySelector('[data-operator="limit-edit"]') && !!el.querySelector('.lim-src');
+
 function renderLimitHolds() {
-  const box = $('lim-holds');
-  if (!box) return;
-  const rows = throttleState.throttles || [];
-  if (!rows.length) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="pause-known-hd">Active limits</div>' + rows.map(t => {
-    const bits = [];
-    if (t.concurrency) bits.push('×' + t.concurrency);
-    if (t.requests) bits.push(t.requests + '/' + (t.request_window || ''));
-    if (t.tokens) bits.push(fmt(t.tokens) + ' tok/' + (t.token_window || ''));
-    const src = t.source === 'header' ? 'header' : 'ui';
-    const editing = ($('lim-provider') && $('lim-provider').value === t.provider) ? ' editing' : '';
-    return `<div class="pause-hold${editing}"><button class="hold-edit" data-operator="limit-edit" data-value="${escapeHtml(t.provider)}" ${operatorState.throttle.busy ? 'disabled' : ''}>${escapeHtml(t.provider)} · ${escapeHtml(bits.join(' · '))}</button>` +
-      `<span class="lim-src ${src}">${escapeHtml(src)}</span></div>`;
-  }).join('');
+  renderKeyedRows($('lim-holds'), 'Active limits', throttleState.throttles || [], t => t.provider || '',
+    createLimitHoldRow, paintLimitHoldRow, isLimitHoldRow);
+}
+
+function limitsMenuStructuralSig() {
+  const rows = (throttleState.throttles || []).map(t => [
+    t.provider || '', Number(t.concurrency) || 0, Number(t.requests) || 0,
+    t.request_window || '', Number(t.tokens) || 0, t.token_window || '',
+    t.source || '', t.updated_by || '',
+  ]);
+  return JSON.stringify([rows, throttleState[KNOWN_PROVIDERS_KEY] || []]);
+}
+
+// refreshLimitsMenuDisplay owns occupancy-only limits updates: the live
+// count line and the hold rows. The provider options and the editable cap
+// fields are untouched unless the apply gate saw a structural change.
+function refreshLimitsMenuDisplay() {
+  updateLimitCount();
+  renderLimitHolds();
 }
 
 function editLimitProvider(name) {

@@ -5748,6 +5748,250 @@ async function main() {
     w.resetDebugMenuForm();
   }
 
+  // ---- operator poll stability: pause/debug/limits lists update in place.
+  // Bootstrap polls include live occupancy (pause queued, debug ran_ms and
+  // captures, limits in-flight/queued/remaining). Those are display-only
+  // changes, so the renderers must keep the existing nodes, focus, checked
+  // selections and scroll position instead of rebuilding each list. One
+  // structural test below pins the exact replacement path too.
+  {
+    const debugFixture = (sessions, known = {}) => observerFixture({
+      ok: true, enabled: sessions.length > 0, sessions,
+      known_clients: known.clients || [], known_providers: known.providers || [],
+      known_models: known.models || [], until: null, ttl: '24h', max_bytes: '1MiB',
+      model_canon: modelFixture(),
+    });
+    const pauseFixture = (holds, queued, known = {}) => ({
+      ok: true, paused: holds.length > 0, holds, queued,
+      clients: [], providers: [],
+      known_clients: known.clients || [], known_providers: known.providers || [],
+      until: null, default_max_queued: 0,
+    });
+    const limitFixture = (counts, providers = ['provider-a']) => ({
+      ok: true, active: true, known_providers: providers,
+      throttles: [{
+        provider: 'provider-a', source: 'ui', concurrency: 2,
+        requests: 10, request_window: '1m', tokens: 0, token_window: '',
+        in_flight: counts[0], queued: counts[1], requests_remaining: counts[2],
+        requests_capacity: 20, tokens_remaining: 0, tokens_capacity: 0,
+      }],
+    });
+
+    // Debug: an elapsed/capture-only poll must not replace the focused model
+    // checkbox or the active-session row; the row text still advances.
+    d.getElementById('debug-menu').hidden = false;
+    w.applyDebugState(debugFixture(
+      [{ id: 'flow-dbg', clients: ['client-a'], duration: '15m', ran_ms: 60000, captures: 2 }],
+      { clients: ['client-a', 'client-b'], models: ['model-a', 'model-b'] }));
+    const debugModel = d.querySelector('#df-models input[value="model-a"]');
+    debugModel.focus();
+    debugModel.checked = true;
+    const debugHold = d.querySelector('#df-holds .pause-hold');
+    const debugDur = d.getElementById('df-dur');
+    const debugDurOption = debugDur.options[0];
+    w.applyDebugState(debugFixture(
+      [{ id: 'flow-dbg', clients: ['client-a'], duration: '15m', ran_ms: 180000, captures: 9 }],
+      { clients: ['client-a', 'client-b'], models: ['model-a', 'model-b'] }));
+    check('debug elapsed/capture polling keeps the focused model checkbox and session row in place',
+      d.activeElement === debugModel && debugModel.isConnected && debugModel.checked &&
+      d.querySelector('#df-models input[value="model-a"]') === debugModel &&
+      d.querySelector('#df-holds .pause-hold') === debugHold &&
+      debugHold.textContent.includes('ran 3m') && debugHold.textContent.includes('9 req'));
+    check('debug duration options are not rebuilt by an elapsed-only poll',
+      d.getElementById('df-dur') === debugDur && debugDur.options[0] === debugDurOption);
+
+    // Expiry: a timed session expiring between polls changes the taken-name
+    // vocabulary without changing any raw session field. Liveness therefore
+    // belongs in the structural gate, not only in the row renderer.
+    {
+      const OriginalDate = w.Date;
+      let fakeNow = OriginalDate.now();
+      class FakeDate extends OriginalDate {
+        constructor(...args) { super(...(args.length ? args : [fakeNow])); }
+        static now() { return fakeNow; }
+      }
+      const until = new OriginalDate(fakeNow + 60000).toISOString();
+      try {
+        w.Date = FakeDate;
+        w.applyDebugState(debugFixture(
+          [{ id: 'expiry-dbg', models: ['model-a'], until, ran_ms: 1000, captures: 0 }],
+          { models: ['model-a', 'model-b'] }));
+        w.resetDebugMenuForm();
+        const takenModel = d.querySelector('#df-models input[value="model-a"]');
+        const keptModel = d.querySelector('#df-models input[value="model-b"]');
+        check('a live exclusive debug model scope disables its model row',
+          !!takenModel && takenModel.disabled && takenModel.closest('label').classList.contains('taken'));
+        keptModel.focus();
+        keptModel.checked = true;
+        fakeNow += 120000;
+        w.applyDebugState(debugFixture(
+          [{ id: 'expiry-dbg', models: ['model-a'], until, ran_ms: 2000, captures: 3 }],
+          { models: ['model-a', 'model-b'] }));
+        check('an expired debug session runs the full sync and re-enables its exclusive model scope',
+          d.querySelector('#df-models input[value="model-a"]') === takenModel &&
+          !takenModel.disabled && !takenModel.closest('label').classList.contains('taken') &&
+          d.querySelector('#df-models input[value="model-b"]') === keptModel &&
+          d.activeElement === keptModel && keptModel.checked &&
+          d.getElementById('df-holds').textContent === '');
+      } finally {
+        w.Date = OriginalDate;
+        w.applyDebugState(debugFixture([], { models: ['model-a', 'model-b'] }));
+      }
+    }
+
+    // Pause: queued occupancy must repaint the count and hold text without
+    // replacing the focused client checkbox or the hold row.
+    d.getElementById('pause-menu').hidden = false;
+    w.applyPauseState(pauseFixture(
+      [{ id: 'flow-hold', all: true, duration: '15m', queued: 1 }], 1,
+      { clients: ['client-a', 'client-b'] }));
+    const pauseClient = d.querySelector('#pf-clients input[value="client-a"]');
+    pauseClient.focus();
+    pauseClient.checked = true;
+    const pauseHold = d.querySelector('#pf-holds .pause-hold');
+    const pauseDur = d.getElementById('pf-dur');
+    const pauseDurOption = pauseDur.options[0];
+    w.applyPauseState(pauseFixture(
+      [{ id: 'flow-hold', all: true, duration: '15m', queued: 6 }], 7,
+      { clients: ['client-a', 'client-b'] }));
+    check('pause occupancy polling keeps the focused checklist selection and hold row in place',
+      d.activeElement === pauseClient && pauseClient.isConnected && pauseClient.checked &&
+      d.querySelector('#pf-clients input[value="client-a"]') === pauseClient &&
+      d.querySelector('#pf-holds .pause-hold') === pauseHold &&
+      pauseHold.textContent.includes('q 6') &&
+      d.getElementById('pause-count').textContent === 'paused · queued 7');
+    check('pause duration options are not rebuilt by an occupancy-only poll',
+      d.getElementById('pf-dur') === pauseDur && pauseDur.options[0] === pauseDurOption);
+
+    // Limits: in-flight/queued/remaining are display-only. The provider
+    // select and the focused hold row must survive the poll.
+    d.getElementById('limits-menu').hidden = false;
+    w.applyThrottleState(limitFixture([1, 0, 19]));
+    const limitProvider = d.getElementById('lim-provider');
+    const limitProviderOption = limitProvider.options[0];
+    const limitHold = d.querySelector('#lim-holds .pause-hold');
+    const limitButton = limitHold.querySelector('[data-operator="limit-edit"]');
+    limitButton.focus();
+    w.applyThrottleState(limitFixture([4, 3, 15]));
+    check('limits occupancy polling keeps the provider select, focused hold row and live count in place',
+      d.activeElement === limitButton && limitButton.isConnected &&
+      d.getElementById('lim-provider') === limitProvider &&
+      limitProvider.options[0] === limitProviderOption &&
+      d.querySelector('#lim-holds .pause-hold') === limitHold &&
+      d.getElementById('lim-count').textContent === 'set in UI · in-flight 4 · queued 3 · 15/20 req');
+
+    // Opening each menu paints every checklist once: the reset owns the
+    // values, the sync owns the single list paint.
+    {
+      w.hideHdrMenu('debug-menu');
+      const paints = {};
+      const originalFill = w.fillDebugChecks;
+      w.fillDebugChecks = function (box, names, picked, kind) {
+        paints[kind] = (paints[kind] || 0) + 1;
+        return originalFill.apply(this, arguments);
+      };
+      try { w.toggleDebugMenu({ stopPropagation() {} }); }
+      finally { w.fillDebugChecks = originalFill; }
+      check('opening Debug paints each checklist once',
+        paints.client === 1 && paints.provider === 1 && paints.model === 1);
+      w.hideHdrMenu('debug-menu');
+
+      const pausePaints = {};
+      const originalRows = w.fillCheckRows;
+      w.fillCheckRows = function (box) {
+        if (box) pausePaints[box.id] = (pausePaints[box.id] || 0) + 1;
+        return originalRows.apply(this, arguments);
+      };
+      try { w.togglePauseMenu({ stopPropagation() {} }); }
+      finally { w.fillCheckRows = originalRows; }
+      check('opening Pause paints each checklist once',
+        pausePaints['pf-clients'] === 1 && pausePaints['pf-providers'] === 1);
+      w.hideHdrMenu('pause-menu');
+    }
+
+    // Structural changes still render exact content: session/hold rows add
+    // and remove, and vocabulary names enter and leave the checklist.
+    {
+      d.getElementById('debug-menu').hidden = false;
+      w.applyDebugState(debugFixture(
+        [{ id: 'structure-1', clients: ['client-a'], duration: '15m', ran_ms: 0, captures: 0 }],
+        { clients: ['client-a'], models: ['model-a'] }));
+      w.resetDebugMenuForm();
+      const debugRow = () => [...d.querySelectorAll('#df-holds .pause-hold')]
+        .map(row => row.querySelector('.hold-edit').textContent);
+      check('a debug session renders its exact scope, duration and capture count',
+        JSON.stringify(debugRow()) === JSON.stringify(['client-a · 15m · 0 req']) &&
+        d.querySelector('#df-holds [data-operator="debug-stop"]').textContent === 'Stop');
+      const oldClient = d.querySelector('#df-clients input[value="client-a"]');
+      w.applyDebugState(debugFixture(
+        [{ id: 'structure-2', providers: ['provider-a'], duration: '1h', ran_ms: 0, captures: 0 }],
+        { clients: ['client-b'], models: ['model-b'] }));
+      check('a replaced debug session and vocabulary renders the new exact rows and removes the old name',
+        JSON.stringify(debugRow()) === JSON.stringify(['provider-a · 1h · 0 req']) &&
+        !oldClient.isConnected && !d.querySelector('#df-clients input[value="client-a"]') &&
+        d.querySelector('#df-clients label').textContent.trim() === 'client-b' &&
+        d.querySelector('#df-models input[value="model-b"]').type === 'checkbox');
+      w.applyDebugState(debugFixture([], { clients: ['client-b'], models: ['model-b'] }));
+      check('stopping every debug session removes the row and its header',
+        d.getElementById('df-holds').textContent === '' && !d.querySelector('#df-holds .pause-hold'));
+
+      d.getElementById('pause-menu').hidden = false;
+      w.applyPauseState(pauseFixture([], 0, { clients: ['client-a'] }));
+      w.resetPauseMenuForm();
+      check('no pause holds renders an empty hold container', d.getElementById('pf-holds').textContent === '');
+      w.applyPauseState(pauseFixture(
+        [{ id: 'structure-hold', all: true, duration: '15m', queued: 0 }], 0,
+        { clients: ['client-a'] }));
+      const pauseRow = () => [...d.querySelectorAll('#pf-holds .pause-hold')]
+        .map(row => row.querySelector('.hold-edit').textContent);
+      check('a pause hold renders its exact scope and duration with its Resume action',
+        JSON.stringify(pauseRow()) === JSON.stringify(['all requests · 15m']) &&
+        d.querySelector('#pf-holds [data-operator="pause-resume"]').textContent === 'Resume');
+      w.applyPauseState(pauseFixture(
+        [{ id: 'structure-hold', all: true, duration: '15m', queued: 0 },
+          { id: 'structure-hold-2', clients: ['client-b'], duration: '1h', queued: 0 }], 0,
+        { clients: ['client-a', 'client-b'] }));
+      check('a second pause hold appends its exact row and vocabulary name',
+        JSON.stringify(pauseRow()) === JSON.stringify(['all requests · 15m', 'client-b · 1h']) &&
+        !!d.querySelector('#pf-clients input[value="client-b"]'));
+      w.applyPauseState(pauseFixture([], 0, { clients: [] }));
+      check('removing every pause hold clears the rows and known clients',
+        d.getElementById('pf-holds').textContent === '' &&
+        !d.querySelector('#pf-clients input[value="client-b"]'));
+
+      d.getElementById('limits-menu').hidden = false;
+      w.applyThrottleState({ ok: true, active: true, known_providers: ['provider-a'],
+        throttles: [{ provider: 'provider-a', source: 'ui', concurrency: 2 }] });
+      const limitRows = () => [...d.querySelectorAll('#lim-holds .pause-hold')]
+        .map(row => row.querySelector('[data-operator="limit-edit"]').textContent);
+      check('a limits row renders its exact cap and source',
+        JSON.stringify(limitRows()) === JSON.stringify(['provider-a · ×2']) &&
+        d.querySelector('#lim-holds .lim-src').textContent === 'ui');
+      w.applyThrottleState({ ok: true, active: true, known_providers: ['provider-a', 'provider-b'],
+        throttles: [{ provider: 'provider-a', source: 'ui', concurrency: 2 },
+          { provider: 'provider-b', source: 'header', updated_by: 'edge' }] });
+      check('a second limits row appends with its source badge and provider option',
+        JSON.stringify(limitRows()) === JSON.stringify(['provider-a · ×2', 'provider-b · ']) &&
+        JSON.stringify([...d.getElementById('lim-provider').options].map(o => o.value)) ===
+          JSON.stringify(['provider-a', 'provider-b']) &&
+        d.querySelectorAll('#lim-holds .lim-src')[1].textContent === 'header');
+      w.applyThrottleState({ ok: true, active: false, known_providers: ['provider-a'], throttles: [] });
+      check('removing every limits row clears the container', d.getElementById('lim-holds').textContent === '');
+
+      w.applyPauseState({ ok: true, paused: false, holds: [], known_clients: [], known_providers: [] });
+      w.resetPauseMenuForm();
+      w.hideHdrMenu('pause-menu');
+      w.applyDebugState(observerFixture({ ok: true, enabled: false, sessions: [],
+        known_clients: [], known_providers: [], known_models: [],
+        ttl: '24h', max_bytes: '1MiB', model_canon: modelFixture() }));
+      w.resetDebugMenuForm();
+      w.hideHdrMenu('debug-menu');
+      w.applyThrottleState({ ok: true, active: false, throttles: [], known_providers: [] });
+      w.syncLimitsMenuState();
+      w.hideHdrMenu('limits-menu');
+    }
+  }
+
   // ---- GAP-5 pin: the settings search filter (rowMatches/showSettingsCat).
   // No jsdom check ever set settingsQ or typed into settings-q, so the row
   // filter, the "N matches" header and the rail badge counts were unpinned.
@@ -6571,9 +6815,10 @@ async function main() {
     }
   }
 
-  // Delegated operator actions replace their own clicked node synchronously.
-  // Outside-click dismissal must use the original event path, not detached
-  // target ancestry, for both edits and pending/confirmed mutations.
+  // Delegated operator actions repaint in place, so the clicked node stays
+  // connected through the action itself. Outside-click dismissal still uses
+  // the original event path rather than live target ancestry, for both edits
+  // and pending/confirmed mutations.
   for (const [kind, action] of [['pause','pause-edit'], ['pause','pause-resume'], ['debug','debug-edit'], ['debug','debug-stop'], ['limits','limit-edit']]) {
     const isolated = dashboardDOM(assembleHTML(), pageOptions);
     const sw = isolated.window, sd = sw.document;
@@ -6595,8 +6840,8 @@ async function main() {
       let originalPathInside = false;
       sd.addEventListener('click', e => { if (e.target === button) originalPathInside = e.composedPath().includes(menu); });
       button.click();
-      check(action + ' stays open when its own delegated click detaches the target',
-        !button.isConnected && originalPathInside && !menu.hidden);
+      check(action + ' keeps its clicked row in place and stays open through its own delegated click',
+        button.isConnected && originalPathInside && !menu.hidden);
       if (resolveMutation) {
         const confirmed = kind === 'pause' ? {...pause,paused:false,holds:[]} : {...debug,sessions:[debug.sessions[1]]};
         resolveMutation({ok:true,json:async()=>confirmed});
