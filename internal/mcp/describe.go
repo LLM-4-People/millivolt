@@ -255,8 +255,8 @@ var ErrorKeyExamples = []string{"server_error|500|"}
 // renamed on either side cannot drift.
 var RequestIndexes = []string{
 	"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
-	"idx_requests_provider(provider)",
-	"idx_requests_model(model)",
+	"idx_requests_provider_log(provider, started_at, id): exact provider equality in the same cursor order, so a filtered page is one range scan with no sort",
+	"idx_requests_model_log(model, started_at, id): exact stored-model equality in the same cursor order; a canonical spelling still matches in Go when rules rewrite names",
 	"idx_request_debug_expires(expires_at): the capture TTL sweep",
 	"idx_request_debug_session(session_id): captures by session",
 	"there is NO index on status_code, error_type or cost - nor on any column the indexes above do not cover; filtering on anything else scans the table",

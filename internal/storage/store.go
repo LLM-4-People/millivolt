@@ -252,8 +252,8 @@ CREATE TABLE IF NOT EXISTS requests (
 	` + requestParamPresenceDDL + `
 );
 	CREATE INDEX IF NOT EXISTS idx_requests_log ON requests (started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_provider ON requests (provider);
-CREATE INDEX IF NOT EXISTS idx_requests_model ON requests (model);
+CREATE INDEX IF NOT EXISTS idx_requests_provider_log ON requests (provider, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_model_log ON requests (model, started_at, id);
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -595,11 +595,10 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	db.SetMaxOpenConns(sqliteWriterConns)
-	// Planner statistics are a read-path guardrail, not request data. Without
-	// them SQLite may choose a provider/model equality index and sort the
-	// whole match set before LIMIT; with statistics it keeps the ordered log
-	// index. Refresh only when absent or materially stale so ordinary boots
-	// pay no write.
+	// Planner statistics are a read-path guardrail, not request data. They let
+	// SQLite cost the ordered log index against the provider/model equality
+	// indexes instead of relying on default guesses. Refresh only when absent
+	// or materially stale so ordinary boots pay no write.
 	ensureRequestStatistics(db)
 
 	// Read pool: with WAL, readers don't block the single writer. Dashboard
@@ -1431,16 +1430,25 @@ func readTotals(ctx context.Context, db interface {
 }
 
 // migrate brings an existing requests table up to the current schema: it adds
-// any missing columns (forward-compatible, never drops history) and repairs
-// data that violates a column invariant older binaries could write. It owns
-// the invariant "attempts holds valid JSON" - the HasError purge predicate
-// runs json_each over that column, and SQLite raises "malformed JSON" on any
-// non-JSON value, denying the errors-only purge/count/export outright.
+// any missing columns (forward-compatible, never drops history), removes
+// superseded indexes and repairs data that violates a column invariant older
+// binaries could write. It owns the invariant "attempts holds valid JSON" -
+// the HasError purge predicate runs json_each over that column, and SQLite
+// raises "malformed JSON" on any non-JSON value, denying the errors-only
+// purge/count/export outright.
 func migrate(db *sql.DB) error {
-	// The compound cursor index replaces its timestamp-only predecessor once;
-	// creating the canonical index is owned by schema above.
-	if _, err := db.Exec("DROP INDEX IF EXISTS idx_requests_started_at"); err != nil {
-		return err
+	// The canonical ordered log indexes replace their timestamp-only and
+	// single-column provider/model predecessors once; creating the canonical
+	// indexes is owned by schema above. DROP IF EXISTS keeps every re-run
+	// harmless and never touches the replacements.
+	for _, index := range []string{
+		"idx_requests_started_at",
+		"idx_requests_provider",
+		"idx_requests_model",
+	} {
+		if _, err := db.Exec("DROP INDEX IF EXISTS " + index); err != nil {
+			return err
+		}
 	}
 	if _, err := db.Exec(requestDebugDDL); err != nil {
 		return fmt.Errorf("request_debug: %w", err)
@@ -1804,15 +1812,13 @@ func (f *LogFilter) where() (string, []any) {
 	return clause, args
 }
 
-// QueryBefore pages durable records newest-first below an exact (time,id)
-// cursor. filter predicates are applied by SQLite before decoding; callers
-// that need canonical-model or class semantics still match in Go.
-func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogFilter, limit int) ([]*metrics.Record, error) {
-	if limit <= 0 {
-		return nil, nil
-	}
-	ctx, cancel := s.withQueryTimeout(ctx)
-	defer cancel()
+// buildQueryBefore is the single owner of the durable log page statement:
+// newest-first below an exclusive (started_at,id) cursor, with SQL-safe exact
+// predicates applied by SQLite before decoding. The provider and raw-model
+// equality indexes end in the same (started_at,id) order, so their pages need
+// one range scan and no sort; callers that need canonical-model or class
+// semantics still match in Go.
+func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any) {
 	q := `SELECT ` + recordColumns + ` FROM requests WHERE 1=1`
 	var args []any
 	if before != nil {
@@ -1824,6 +1830,19 @@ func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogF
 	args = append(args, pushArgs...)
 	q += ` ORDER BY started_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
+	return q, args
+}
+
+// QueryBefore pages durable records newest-first below an exact (time,id)
+// cursor. filter predicates are applied by SQLite before decoding; callers
+// that need canonical-model or class semantics still match in Go.
+func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogFilter, limit int) ([]*metrics.Record, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ctx, cancel := s.withQueryTimeout(ctx)
+	defer cancel()
+	q, args := buildQueryBefore(before, filter, limit)
 	rows, err := s.rdb.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err

@@ -105,7 +105,7 @@ AUXILIARY_TYPES = {
     'sqlite_stat4': dict.fromkeys(('tbl', 'idx', 'neq', 'nlt', 'ndlt', 'sample'), 'TEXT'),
 }
 INDEX_TABLES = {
-    **dict.fromkeys(('idx_requests_log', 'idx_requests_provider', 'idx_requests_model',
+    **dict.fromkeys(('idx_requests_log', 'idx_requests_provider_log', 'idx_requests_model_log',
                     'sqlite_autoindex_requests_1'), 'requests'),
     **dict.fromkeys(('idx_request_debug_expires', 'idx_request_debug_session',
                     'sqlite_autoindex_request_debug_1'), 'request_debug'),

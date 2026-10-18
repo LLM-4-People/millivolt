@@ -788,6 +788,8 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 	indexes := strings.Join(out.Indexes, " ")
 	for _, needle := range []string{
 		"idx_requests_log(started_at, id)",
+		"idx_requests_provider_log(provider, started_at, id)",
+		"idx_requests_model_log(model, started_at, id)",
 		"idx_request_debug_expires(expires_at)",
 		"idx_request_debug_session(session_id)",
 		"NO index on status_code, error_type or cost",
@@ -796,7 +798,7 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 			t.Fatalf("the index reference must state %q, got %q", needle, indexes)
 		}
 	}
-	for _, forbidden := range []string{"request_debug(payload)", "started_at alone"} {
+	for _, forbidden := range []string{"request_debug(payload)", "started_at alone", "idx_requests_provider(provider)", "idx_requests_model(model)"} {
 		if strings.Contains(indexes, forbidden) {
 			t.Fatalf("the index reference still contains %q: %q", forbidden, indexes)
 		}

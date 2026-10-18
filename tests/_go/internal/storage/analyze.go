@@ -14,7 +14,8 @@ import (
 // TestOpenBuildsRequestStatistics pins the planner-statistics lifecycle: a
 // grown history whose analyzed row count drifted far enough is re-analyzed at
 // open, before the projection preload and any dashboard read. Without this,
-// SQLite can sort every provider/model match before LIMIT.
+// SQLite costs the log and equality indexes from default guesses instead of
+// the stored row distribution.
 func TestOpenBuildsRequestStatistics(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "stats.db")
 	s, err := Open(path, testOpts)
