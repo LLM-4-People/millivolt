@@ -28,14 +28,40 @@ var staticFS embed.FS
 // (not a proxy.yaml tunable).
 const DashPrefix = "/dash/"
 
+const (
+	// staticRevalidateCacheControl makes the browser revalidate a static
+	// response against its ETag on every load. Unversioned or stale-version
+	// /dash URLs, and every brand/PWA path, keep this policy so an old index
+	// cannot pin new bytes under an old URL.
+	staticRevalidateCacheControl = "no-cache"
+	// dashImmutableCacheControl is safe only for a /dash URL whose v query
+	// exactly names this process's embedded content version: a rebuild
+	// changes the version before it can change the bytes under that URL.
+	// It is private to the operator's browser: a Bearer-authenticated first
+	// load can also carry a session cookie, so a shared cache must not retain
+	// that response even though the asset bytes themselves are not secret.
+	dashImmutableCacheControl = "private, max-age=31536000, immutable"
+)
+
+// dashVersionQuery is the local asset URL's content-version query key. The
+// shell stamps it from the same marker as its meta identity; ServeDash matches
+// it and never lets it participate in the asset lookup path.
+const dashVersionQuery = "v"
+
 // staticAllow is the RFC 9110 Allow value for dashboard static (index,
 // favicon, DashPrefix). Mux patterns stay unmethoded so POST cannot fall
 // through to the LLM proxy; the method gate is this helper.
 const staticAllow = "GET, HEAD"
 
-// dashboardVersionMarker is replaced once at startup, after the source
-// assets have been fingerprinted, so the version never hashes itself.
+// dashboardVersionMarker is replaced at startup after the source assets have
+// been fingerprinted, so the version never hashes itself. The shell carries it
+// in the authoritative meta stamp and in every local asset URL's v query; the
+// service worker carries it once in its cache name.
 const dashboardVersionMarker = "__DASHBOARD_VERSION__"
+
+// dashboardVersionMeta is the shell's single authoritative version stamp,
+// required exactly once before loadStatic replaces every marker occurrence.
+const dashboardVersionMeta = `<meta name="dashboard-version" content="` + dashboardVersionMarker + `">`
 
 // dashboardBootstrapMarker is the sole insertion point for request-time
 // state. It remains in the static source identity; live data never changes
@@ -170,8 +196,8 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 		}
 	}
 	index := string(cache[dashboardIndexPath].body)
-	if strings.Count(index, dashboardVersionMarker) != 1 {
-		panic("load dashboard assets: index must contain exactly one dashboard version marker")
+	if strings.Count(index, dashboardVersionMeta) != 1 {
+		panic("load dashboard assets: index must contain exactly one dashboard version meta marker")
 	}
 	if strings.Count(index, dashboardBootstrapMarker) != 1 {
 		panic("load dashboard assets: index must contain exactly one dashboard bootstrap marker")
@@ -181,7 +207,10 @@ func loadStatic(fsys fs.FS) (map[string]*staticAsset, string) {
 		panic("load dashboard assets: service worker must contain exactly one dashboard version marker")
 	}
 	version := etagHex([]byte(identity.String()))
-	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.Replace(index, dashboardVersionMarker, version, 1)), true)
+	// Every shell marker is intentional: the meta stamp, one per local asset
+	// URL, and the service worker's cache name. Replace all of them so the
+	// served index never advertises the source spelling.
+	cache[dashboardIndexPath] = newStaticAsset([]byte(strings.ReplaceAll(index, dashboardVersionMarker, version)), true)
 	cache[dashboardSWPath] = newStaticAsset([]byte(strings.Replace(sw, dashboardVersionMarker, version, 1)), true)
 	return cache, version
 }
@@ -201,7 +230,12 @@ func rejectUnlessGetHead(w http.ResponseWriter, r *http.Request) bool {
 // acceptsGzip negotiation gate. Do not wrap static routes in Gzip again.
 func writeStaticCached(w http.ResponseWriter, r *http.Request, contentType, cacheControl string, a *staticAsset) {
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", cacheControl)
+	// The operator gate can set no-store before this handler runs, for an
+	// authenticated response that also mints a session cookie. Never override
+	// a stricter policy that an earlier owner already set.
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", cacheControl)
+	}
 	w.Header().Set("ETag", a.etag)
 	w.Header().Add("Vary", "Accept-Encoding")
 	if etagMatches(r.Header.Get("If-None-Match"), a.etag) {
@@ -310,15 +344,18 @@ func Brand(urlPath string) http.Handler {
 			w.Header().Set("Service-Worker-Allowed", "/")
 		}
 		cache, _ := staticAssets()
-		writeStaticCached(w, r, spec.ctype, "no-cache", cache[spec.file])
+		writeStaticCached(w, r, spec.ctype, staticRevalidateCacheControl, cache[spec.file])
 	})
 }
 
 // ServeDash is the single choke point for dashboard CSS/JS. It serves only
 // allowlisted extensions from the precomputed cache (avoiding per-request
-// embed.FS.ReadFile + sha256 + gzip pool cycle). Unknown paths and `..` are
-// 404; other methods are 405. Never a directory listing and never a
-// fall-through to the proxy.
+// embed.FS.ReadFile + sha256 + gzip pool cycle). A URL whose v query exactly
+// matches the embedded content version is immutable; a missing or stale
+// version keeps no-cache revalidation, so an old index cannot pin new bytes
+// under an old URL. The query never participates in the asset lookup path.
+// Unknown paths and `..` are 404; other methods are 405. Never a directory
+// listing and never a fall-through to the proxy.
 func ServeDash(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnlessGetHead(w, r) {
 		return
@@ -328,13 +365,17 @@ func ServeDash(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	cache, _ := staticAssets()
+	cache, version := staticAssets()
 	a := cache["static/"+rel]
 	if a == nil {
 		http.NotFound(w, r)
 		return
 	}
-	writeStaticCached(w, r, ct, "no-cache", a)
+	cacheControl := staticRevalidateCacheControl
+	if values := r.URL.Query()[dashVersionQuery]; len(values) == 1 && values[0] == version {
+		cacheControl = dashImmutableCacheControl
+	}
+	writeStaticCached(w, r, ct, cacheControl, a)
 }
 
 // dashFile maps a request path to an embedded relative file. ok is false

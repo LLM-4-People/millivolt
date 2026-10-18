@@ -102,6 +102,15 @@ func TestServeDashKnownAndUnknown(t *testing.T) {
 		t.Fatalf("unknown → %d, want 404", rec.Code)
 	}
 
+	// The version query is request metadata, not a lookup path segment: an
+	// unknown path stays 404 even with the current version attached.
+	req = httptest.NewRequest(http.MethodGet, DashPrefix+"nope.js?v="+dashboardContentVersion(), nil)
+	rec = httptest.NewRecorder()
+	ServeDash(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("versioned unknown → %d, want 404", rec.Code)
+	}
+
 	req = httptest.NewRequest(http.MethodPost, core, nil)
 	rec = httptest.NewRecorder()
 	ServeDash(rec, req)
@@ -539,17 +548,22 @@ func moduleRoot(t *testing.T) string {
 
 var dashRefRe = regexp.MustCompile(`(?:href|src)="` + regexp.QuoteMeta(DashPrefix) + `([^"]+)"`)
 
-func dashRelsFromIndex(html string) []string {
+// dashAssetRef is one local /dash/ reference in the shell: the embedded
+// relative path plus the raw query it carries. The version query is request
+// metadata, never part of the asset lookup path.
+type dashAssetRef struct{ rel, query string }
+
+func dashRefsFromIndex(html string) []dashAssetRef {
 	ms := dashRefRe.FindAllStringSubmatch(html, -1)
-	out := make([]string, 0, len(ms))
+	out := make([]dashAssetRef, 0, len(ms))
 	seen := map[string]bool{}
 	for _, m := range ms {
-		rel := m[1]
-		if seen[rel] {
+		rel, query, _ := strings.Cut(m[1], "?")
+		if seen[rel+"?"+query] {
 			continue
 		}
-		seen[rel] = true
-		out = append(out, rel)
+		seen[rel+"?"+query] = true
+		out = append(out, dashAssetRef{rel: rel, query: query})
 	}
 	return out
 }
@@ -572,19 +586,34 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		t.Error("index.html still inlines the app script - split failed")
 	}
 
-	rels := dashRelsFromIndex(html)
+	rels := dashRefsFromIndex(html)
 	if len(rels) == 0 {
 		t.Fatalf("index.html has no %s assets", DashPrefix)
 	}
+	version := dashboardContentVersion()
 	referenced := map[string]bool{}
-	for _, rel := range rels {
-		referenced[rel] = true
-		if _, _, ok := dashFile(DashPrefix + rel); !ok {
-			t.Errorf("index refs %s but dashFile rejects it", rel)
+	for _, ref := range rels {
+		referenced[ref.rel] = true
+		if ref.query != "v="+version {
+			t.Errorf("index refs %s%s?%s, want exactly ?v=%s", DashPrefix, ref.rel, ref.query, version)
 		}
-		if !dashExists(rel) {
-			t.Errorf("index refs missing embed static/%s", rel)
+		if _, _, ok := dashFile(DashPrefix + ref.rel); !ok {
+			t.Errorf("index refs %s but dashFile rejects it", ref.rel)
 		}
+		if !dashExists(ref.rel) {
+			t.Errorf("index refs missing embed static/%s", ref.rel)
+		}
+		rec := httptest.NewRecorder()
+		ServeDash(rec, httptest.NewRequest(http.MethodGet, DashPrefix+ref.rel+"?"+ref.query, nil))
+		if rec.Code != http.StatusOK {
+			t.Errorf("versioned %s → %d, want 200", ref.rel, rec.Code)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != dashImmutableCacheControl {
+			t.Errorf("versioned %s: Cache-Control = %q, want immutable", ref.rel, cc)
+		}
+	}
+	if meta := `<meta name="dashboard-version" content="` + version + `">`; strings.Count(html, meta) != 1 || strings.Contains(html, dashboardVersionMarker) {
+		t.Fatal("served index must carry exactly one stamped dashboard version meta and no unstamped marker")
 	}
 
 	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
@@ -664,25 +693,88 @@ func TestStaticETagRevalidation(t *testing.T) {
 	}
 }
 
-// TestStaticFreshnessContract pins the cache-busting story end to end:
-// every /dash asset revalidates on each load (no-cache + ETag - never a
-// long max-age without a content-hashed URL), and the served service
-// worker stamps a content-identity cache name so a rebuild rotates the
-// offline shell. A served marker, or a caching directive that lets online
-// clients keep stale bytes, is exactly the staleness bug class this guards.
+// TestStaticFreshnessContract pins the cache-busting story end to end.
+// Versionless and stale-version /dash URLs revalidate on each load
+// (no-cache + ETag) so an old index cannot pin new bytes under an old URL;
+// only a URL carrying the process's exact content version is immutable.
+// The served service worker stamps a content-identity cache name so a
+// rebuild rotates the offline shell. A served marker, or a caching
+// directive that lets online clients keep stale bytes, is exactly the
+// staleness bug class this guards.
 func TestStaticFreshnessContract(t *testing.T) {
+	const immutable = dashImmutableCacheControl
+	version := dashboardContentVersion()
 	for _, rel := range []string{"js/chart.js", "css/dashboard.css", "vendor/uplot.js"} {
+		assetPath := DashPrefix + rel
+
 		rec := httptest.NewRecorder()
-		ServeDash(rec, httptest.NewRequest(http.MethodGet, DashPrefix+rel, nil))
+		ServeDash(rec, httptest.NewRequest(http.MethodGet, assetPath, nil))
 		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
-			t.Fatalf("%s: Cache-Control = %q, want no-cache (revalidate every load)", rel, cc)
+			t.Fatalf("%s: unversioned Cache-Control = %q, want no-cache (revalidate every load)", rel, cc)
+		}
+		etag := rec.Header().Get("ETag")
+		if etag == "" {
+			t.Fatalf("%s: missing ETag to revalidate against", rel)
+		}
+		req := httptest.NewRequest(http.MethodGet, assetPath, nil)
+		req.Header.Set("If-None-Match", etag)
+		rec = httptest.NewRecorder()
+		ServeDash(rec, req)
+		if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+			t.Fatalf("%s: unversioned If-None-Match → %d with %d bytes, want body-less 304", rel, rec.Code, rec.Body.Len())
+		}
+
+		// The shell's exact version is immutable, and the representation's
+		// validators, encoding and conditional behavior stay intact.
+		versioned := assetPath + "?v=" + version
+		req = httptest.NewRequest(http.MethodGet, versioned, nil)
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec = httptest.NewRecorder()
+		ServeDash(rec, req)
+		if cc := rec.Header().Get("Cache-Control"); cc != immutable {
+			t.Fatalf("%s: versioned Cache-Control = %q, want %q", rel, cc, immutable)
+		}
+		if rec.Header().Get("ETag") != etag || rec.Header().Get("Vary") != "Accept-Encoding" {
+			t.Fatalf("%s: versioned response lost its validators: %v", rel, rec.Header())
+		}
+		if rec.Header().Get("Content-Encoding") != "gzip" {
+			t.Fatalf("%s: versioned response dropped the negotiated gzip body", rel)
+		}
+		req = httptest.NewRequest(http.MethodGet, versioned, nil)
+		req.Header.Set("If-None-Match", etag)
+		rec = httptest.NewRecorder()
+		ServeDash(rec, req)
+		if rec.Code != http.StatusNotModified || rec.Body.Len() != 0 {
+			t.Fatalf("%s: versioned If-None-Match → %d with %d bytes, want body-less 304", rel, rec.Code, rec.Body.Len())
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != immutable {
+			t.Fatalf("%s: versioned 304 Cache-Control = %q, want %q", rel, cc, immutable)
+		}
+
+		// A stale version must never be immutable: the URL does not describe
+		// the bytes this process now serves.
+		req = httptest.NewRequest(http.MethodGet, assetPath+"?v=old", nil)
+		rec = httptest.NewRecorder()
+		ServeDash(rec, req)
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s: stale-version Cache-Control = %q, want no-cache", rel, cc)
 		}
 		if rec.Header().Get("ETag") == "" {
-			t.Fatalf("%s: missing ETag to revalidate against", rel)
+			t.Fatalf("%s: stale-version response lost its revalidation tag", rel)
 		}
 	}
 	rec := httptest.NewRecorder()
 	Brand("/sw.js").ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sw.js", nil))
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Fatalf("served sw.js Cache-Control = %q, want no-cache", cc)
+	}
+	for _, brandPath := range []string{"/favicon.svg", "/manifest.webmanifest"} {
+		brandRec := httptest.NewRecorder()
+		Brand(brandPath).ServeHTTP(brandRec, httptest.NewRequest(http.MethodGet, brandPath, nil))
+		if cc := brandRec.Header().Get("Cache-Control"); cc != "no-cache" {
+			t.Fatalf("%s Cache-Control = %q, want no-cache", brandPath, cc)
+		}
+	}
 	body := rec.Body.String()
 	if strings.Contains(body, dashboardVersionMarker) {
 		t.Fatal("served sw.js still contains the unstamped __DASHBOARD_VERSION__ marker")
@@ -696,7 +788,7 @@ func TestStaticFreshnessContract(t *testing.T) {
 	if cacheName == nil {
 		t.Fatal("served sw.js does not build its shell cache from the stamped version")
 	}
-	version := cacheName[1]
+	version = cacheName[1]
 	if len(version) < 8 {
 		t.Fatalf("served sw.js cache version = %q, want a content identity hash", version)
 	}
@@ -704,6 +796,26 @@ func TestStaticFreshnessContract(t *testing.T) {
 	// (the single source of truth loadStatic computes from every asset).
 	if version != dashboardContentVersion() {
 		t.Fatalf("sw.js cache identity %q != dashboardContentVersion() %q", version, dashboardContentVersion())
+	}
+}
+
+// TestDashPreservesGateNoStore pins the gate's stricter policy: a Bearer
+// request that mints a session cookie sets no-store before ServeDash runs.
+// The versioned immutable policy must never override it on that response.
+func TestDashPreservesGateNoStore(t *testing.T) {
+	version := dashboardContentVersion()
+	rec := httptest.NewRecorder()
+	rec.Header().Set("Cache-Control", "no-store")
+	ServeDash(rec, httptest.NewRequest(http.MethodGet,
+		DashPrefix+"js/chart.js?v="+version, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("versioned asset with gate policy → %d", rec.Code)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("gate no-store was overwritten by %q", cc)
+	}
+	if rec.Header().Get("ETag") == "" {
+		t.Fatal("gate-policy asset lost its revalidation tag")
 	}
 }
 
@@ -992,9 +1104,15 @@ func TestDashboardBootstrapMarshalFailure(t *testing.T) {
 }
 
 func TestLoadStaticVersion(t *testing.T) {
+	fixtureIndex := func() []byte {
+		return []byte(dashboardVersionMeta +
+			`<link rel="stylesheet" href="` + DashPrefix + `css/app.css?` + dashVersionQuery + `=` + dashboardVersionMarker + `">` +
+			`<script defer src="` + DashPrefix + `js/app.js?` + dashVersionQuery + `=` + dashboardVersionMarker + `"></script>` +
+			`<script id="dashboard-bootstrap" type="application/json">` + dashboardBootstrapMarker + `</script>`)
+	}
 	fixture := func() fstest.MapFS {
 		files := fstest.MapFS{
-			dashboardIndexPath:   {Data: []byte(`<meta name="dashboard-version" content="__DASHBOARD_VERSION__"><script id="dashboard-bootstrap" type="application/json">__DASHBOARD_BOOTSTRAP__</script>`)},
+			dashboardIndexPath:   {Data: fixtureIndex()},
 			dashboardFaviconPath: {Data: []byte(`<svg/>`)},
 			"static/css/app.css": {Data: []byte(`body{color:white}`)},
 			"static/js/app.js":   {Data: []byte(`const ready=true;`)},
@@ -1012,10 +1130,14 @@ func TestLoadStaticVersion(t *testing.T) {
 	if version != rebuiltVersion || base[dashboardIndexPath].etag != rebuilt[dashboardIndexPath].etag {
 		t.Fatal("identical asset rebuild changed the version or HTML validator")
 	}
-	if !strings.Contains(string(base[dashboardIndexPath].body), `content="`+version+`"`) || strings.Contains(string(base[dashboardIndexPath].body), dashboardVersionMarker) {
-		t.Fatal("cached index did not replace its source marker with the asset version")
+	served := string(base[dashboardIndexPath].body)
+	if !strings.Contains(served, `content="`+version+`"`) || strings.Contains(served, dashboardVersionMarker) {
+		t.Fatal("cached index did not replace every source marker with the asset version")
 	}
-	if strings.Count(string(base[dashboardIndexPath].body), dashboardBootstrapMarker) != 1 {
+	if got := strings.Count(served, "?"+dashVersionQuery+"="+version); got != 2 {
+		t.Fatalf("cached index stamped %d asset URLs, want 2", got)
+	}
+	if strings.Count(served, dashboardBootstrapMarker) != 1 {
 		t.Fatal("cached shell must retain its request-time state marker")
 	}
 	for _, changed := range []string{dashboardIndexPath, "static/css/app.css", "static/js/app.js", dashboardFaviconPath} {
@@ -1027,8 +1149,10 @@ func TestLoadStaticVersion(t *testing.T) {
 				t.Fatal("changed asset retained the dashboard version")
 			}
 			index := next[dashboardIndexPath]
-			if index.etag == base[dashboardIndexPath].etag || !strings.Contains(string(index.body), `content="`+nextVersion+`"`) {
-				t.Fatal("asset change did not update the served HTML version and ETag")
+			nextServed := string(index.body)
+			if index.etag == base[dashboardIndexPath].etag || !strings.Contains(nextServed, `content="`+nextVersion+`"`) ||
+				strings.Count(nextServed, "?"+dashVersionQuery+"="+nextVersion) != 2 {
+				t.Fatal("asset change did not update the served HTML version and every asset URL")
 			}
 			for p, old := range base {
 				if p != changed && p != dashboardIndexPath && p != dashboardSWPath && old.etag != next[p].etag {
@@ -1079,7 +1203,8 @@ func completeStatic(index, sw []byte) fstest.MapFS {
 }
 
 func TestLoadStaticFailsClosed(t *testing.T) {
-	validIndex := []byte(dashboardVersionMarker + dashboardBootstrapMarker)
+	versionedRef := `<script defer src="` + DashPrefix + `js/app.js?` + dashVersionQuery + `=` + dashboardVersionMarker + `"></script>`
+	validIndex := []byte(dashboardVersionMeta + versionedRef + dashboardBootstrapMarker)
 	validSW := []byte("const CACHE='millivolt-shell-" + dashboardVersionMarker + "';")
 	cases := []struct {
 		name, want string
@@ -1088,10 +1213,10 @@ func TestLoadStaticFailsClosed(t *testing.T) {
 		{"missing tree", "load dashboard assets", fstest.MapFS{}},
 		{"missing index", "missing " + dashboardIndexPath, fstest.MapFS{dashboardFaviconPath: {Data: []byte(`<svg/>`)}}},
 		{"missing favicon", "missing ", fstest.MapFS{dashboardIndexPath: {Data: validIndex}}},
-		{"missing marker", "exactly one dashboard version marker", completeStatic([]byte(`<html/>`+dashboardBootstrapMarker), validSW)},
-		{"duplicate marker", "exactly one dashboard version marker", completeStatic([]byte(dashboardVersionMarker+dashboardVersionMarker+dashboardBootstrapMarker), validSW)},
-		{"missing bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMarker), validSW)},
-		{"duplicate bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMarker+dashboardBootstrapMarker+dashboardBootstrapMarker), validSW)},
+		{"missing marker", "exactly one dashboard version meta marker", completeStatic([]byte(`<html/>`+dashboardBootstrapMarker), validSW)},
+		{"duplicate marker", "exactly one dashboard version meta marker", completeStatic([]byte(dashboardVersionMeta+dashboardVersionMeta+dashboardBootstrapMarker), validSW)},
+		{"missing bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMeta), validSW)},
+		{"duplicate bootstrap marker", "exactly one dashboard bootstrap marker", completeStatic([]byte(dashboardVersionMeta+dashboardBootstrapMarker+dashboardBootstrapMarker), validSW)},
 		{"missing SW marker", "exactly one dashboard version marker", completeStatic(validIndex, []byte("const CACHE='millivolt-shell';"))},
 		{"duplicate SW marker", "exactly one dashboard version marker", completeStatic(validIndex, append(append([]byte{}, validSW...), dashboardVersionMarker...))},
 		{"unreadable asset", "load dashboard assets", unreadableStaticFS{fstest.MapFS{dashboardIndexPath: {Data: validIndex}}}},

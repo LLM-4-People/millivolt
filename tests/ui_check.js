@@ -50,17 +50,19 @@ const STATIC = path.join(__dirname, '..', 'internal/web/static');
 const TEST_DASHBOARD_VERSION = '0000000000000001';
 function assembleHTML(bootstrap) {
   let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
-  html = html.replace('__DASHBOARD_VERSION__', TEST_DASHBOARD_VERSION);
+  html = html.replaceAll('__DASHBOARD_VERSION__', TEST_DASHBOARD_VERSION);
   if (bootstrap !== undefined) {
     const data = typeof bootstrap === 'string' ? bootstrap : JSON.stringify(observerFixture({pending_revision: 0, ...bootstrap})).replace(/</g, '\\u003c');
     html = html.replace('__DASHBOARD_BOOTSTRAP__', () => data);
   }
-  html = html.replace(/<link\s+rel="stylesheet"\s+href="\/dash\/([^"]+)"\s*>/g, (_, rel) => {
-    return `<style>\n${fs.readFileSync(path.join(STATIC, rel), 'utf8')}\n</style>`;
+  // Local asset URLs carry the ?v= version query; jsdom reads the file after
+  // stripping it, exactly as the server's lookup path does.
+  html = html.replace(/<link\s+rel="stylesheet"\s+href="\/dash\/([^"]+)"\s*>/g, (_, ref) => {
+    return `<style>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</style>`;
   });
   const scripts = [];
-  html = html.replace(/<script\b[^>]*\bsrc="\/dash\/([^"]+)"[^>]*><\/script>/g, (_, rel) => {
-    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, rel), 'utf8')}\n</script>`);
+  html = html.replace(/<script\b[^>]*\bsrc="\/dash\/([^"]+)"[^>]*><\/script>/g, (_, ref) => {
+    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</script>`);
     return '';
   });
   // Inline scripts cannot defer. Put the same ordered scripts after the DOM
