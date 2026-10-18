@@ -94,20 +94,25 @@ func (a *AggAPI) chart(ctx context.Context, winMin int, fs []scopeFilter, status
 	if cacheable {
 		cached = a.chartMemo.get(key)
 	}
+	// An uncached All window owns its minimum and fold under one lease. A
+	// cached entry already pinned the minimum at the same data revision, so
+	// the normal single-lease fold below is enough.
+	if winMin == 0 && cached == nil {
+		var rawFrom int64
+		var fold *chartFold
+		if err := a.streamAllChart(ctx, mcz, status, fs, now, func(minStart, _, _ int64, _ int, f *chartFold) {
+			rawFrom, fold = minStart, f
+		}); err != nil {
+			return chartPayload{}, err
+		}
+		return a.storeChartResult(ctx, key, cacheable, winMin, rawFrom, now, fold.payload(now))
+	}
 	rawFrom := now - int64(winMin)*60000
 	if winMin == 0 {
-		if cached != nil {
-			if cached.value.empty {
-				rawFrom = now
-			} else {
-				rawFrom = cached.value.rawFrom
-			}
+		if cached.value.empty {
+			rawFrom = now
 		} else {
-			var err error
-			rawFrom, err = minStartScoped(ctx, a, mcz, fs, status, now)
-			if err != nil {
-				return chartPayload{}, err
-			}
+			rawFrom = cached.value.rawFrom
 		}
 	}
 	from, step, count := chartWindowEdges(now, rawFrom)
@@ -124,7 +129,13 @@ func (a *AggAPI) chart(ctx context.Context, winMin int, fs []scopeFilter, status
 	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, nil); err != nil {
 		return chartPayload{}, err
 	}
-	p := fold.payload(now)
+	return a.storeChartResult(ctx, key, cacheable, winMin, rawFrom, now, fold.payload(now))
+}
+
+// storeChartResult publishes a completed chart only when the data revision is
+// unchanged, then returns the payload. The caller computes the payload outside
+// the projection lease.
+func (a *AggAPI) storeChartResult(ctx context.Context, key aggregateKey, cacheable bool, winMin int, rawFrom, now int64, p chartPayload) (chartPayload, error) {
 	empty := true
 	for _, b := range p.Buckets {
 		if b.Req > 0 {

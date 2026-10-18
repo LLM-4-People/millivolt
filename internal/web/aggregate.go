@@ -702,6 +702,12 @@ func newChartFold(from, step int64, count int, statusCode string, fs []scopeFilt
 // Both durable and ring-only modes use the same exact rank reader.
 func (f *chartFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	f.fs = bindScope(f.fs, p, mcz)
+	f.prepareBound(p)
+}
+
+// prepareBound is prepare for callers that already bound their filters under
+// the same projection lease.
+func (f *chartFold) prepareBound(p *projectionData) {
 	if p == nil {
 		return
 	}
@@ -931,6 +937,70 @@ func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []sc
 		return ctx.Err()
 	})
 	return min, err
+}
+
+// streamAllChart computes the All-window scoped minimum and folds the chart
+// under ONE ring snapshot and ONE projection lease. Splitting them let a row
+// committed between the two leases contribute an older start than the one the
+// window was built from, omitting it for that response. The minimum pass and
+// fold still see the same immutable contributions.
+func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, statusCode string, fs []scopeFilter, now int64, ready func(minStart, from, step int64, count int, fold *chartFold)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	ring := a.ringSnapshot(0)
+	return a.withProjection(ctx, func(p *projectionData) error {
+		if p != nil {
+			fs = bindScope(fs, p, mcz)
+		}
+		min := now
+		upd := func(c *contrib) {
+			if scopedMatch(c, statusCode, fs) && c.start < min {
+				min = c.start
+			}
+		}
+		if p != nil {
+			if len(fs) == 0 && statusCode == "" {
+				if p.hasStart && p.minStart < min {
+					min = p.minStart
+				}
+			} else {
+				for i := range p.rows {
+					upd(&p.rows[i])
+				}
+			}
+		}
+		for _, r := range ring {
+			if p != nil {
+				if _, duplicate := p.ids[r.ID]; duplicate {
+					continue
+				}
+			}
+			c := fromRecord(r, mcz)
+			upd(&c)
+		}
+		from, step, count := chartWindowEdges(now, min)
+		fold := newChartFold(from, step, count, statusCode, fs)
+		fold.prepareBound(p)
+		if p != nil {
+			if err := p.visitSince(from, fold.fold); err != nil {
+				return err
+			}
+		}
+		for _, r := range ring {
+			if p != nil {
+				if _, duplicate := p.ids[r.ID]; duplicate {
+					continue
+				}
+			}
+			c := fromRecord(r, mcz)
+			if err := fold.fold(&c); err != nil {
+				return err
+			}
+		}
+		ready(min, from, step, count, fold)
+		return ctx.Err()
+	})
 }
 
 // ---------- bootstrap: shared initial-page and live state ----------
