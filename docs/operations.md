@@ -532,10 +532,14 @@ Restore streams the upload through the `backup_max_bytes` ceiling into one
 private staging file and decodes it with the same header, zstd, SHA-256 and
 member-framing checks. The database member is written straight into a private
 file on the live database's volume instead of being materialized on the heap;
-only config bytes stay buffered. It validates that hash, the zstd frame, config
-`Validate()`, and `PRAGMA integrity_check` before applying anything. Decode
-refuses an uncompressed payload larger than the Schema maximum for
-`backup_max_bytes`, so a small compressed file cannot expand without bound.
+config bytes stay buffered within a 16 MiB retention bound. A config member
+that declares a larger size is rejected before its bytes are copied, and
+encoding refuses to emit one, so an older archive whose config member exceeds
+that bound fails restore. The bound covers only the config member; the database
+member stays streamed under the payload ceiling. It validates that hash, the
+zstd frame, config `Validate()`, and `PRAGMA integrity_check` before applying
+anything. Decode refuses an uncompressed payload larger than the Schema maximum
+for `backup_max_bytes`, so a small compressed file cannot expand without bound.
 Download lists how many live settings differ from default and how many stored
 requests would be packed. Picking a file first inspects the archive: created
 time, size, request span, and each config key as default vs modified vs the

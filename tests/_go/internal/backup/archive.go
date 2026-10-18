@@ -539,6 +539,204 @@ func TestDecodeRejectsOversizePayload(t *testing.T) {
 	}
 }
 
+// TestEncodeConfigMemberCap pins the config retention guardrail on the encode
+// side: exactly the cap is accepted and round-trips, while one byte more is
+// refused before any staging artifact exists. The cap applies only to the
+// config member, so these fixtures never approach the archive payload ceiling.
+func TestEncodeConfigMemberCap(t *testing.T) {
+	created := time.Unix(1_700_000_123, 0).UTC()
+	atCap := configYAMLOfSize(t, configMemberMax)
+	overCap := configYAMLOfSize(t, configMemberMax+1)
+	limit := int64(config.BackupMaxBytesMax)
+
+	stage := t.TempDir()
+	path, size, err := EncodeFile(stage, Archive{Created: created, Config: atCap}, limit)
+	if err != nil {
+		t.Fatalf("EncodeFile at the config cap: %v", err)
+	}
+	if path == "" || size <= 0 {
+		t.Fatalf("EncodeFile at the config cap returned path=%q size=%d", path, size)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("Decode at the config cap: %v", err)
+	}
+	if !bytes.Equal(got.Config, atCap) {
+		t.Fatal("config at the cap changed on round-trip")
+	}
+	if err := Validate("", got); err != nil {
+		t.Fatalf("config at the cap failed Validate: %v", err)
+	}
+	buffered, err := Encode(stage, Archive{Created: created, Config: atCap})
+	if err != nil {
+		t.Fatalf("Encode at the config cap: %v", err)
+	}
+	if !bytes.Equal(buffered, raw) {
+		t.Fatal("Encode and EncodeFile disagree at the config cap")
+	}
+	assertNoArchiveStaging(t, stage)
+
+	reject := func(t *testing.T, encode func(dir string, a Archive) (string, error)) {
+		t.Helper()
+		stage := t.TempDir()
+		path, err := encode(stage, Archive{Created: created, Config: overCap})
+		if err == nil || !strings.Contains(err.Error(), "config member exceeds") {
+			t.Fatalf("over-cap config encode = %v, want the config cap error", err)
+		}
+		if path != "" {
+			t.Fatalf("over-cap config encode returned path %q", path)
+		}
+		ents, err := os.ReadDir(stage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ents) != 0 {
+			t.Fatalf("over-cap config encode left staging entries: %v", ents)
+		}
+	}
+	t.Run("EncodeFile", func(t *testing.T) {
+		reject(t, func(dir string, a Archive) (string, error) {
+			path, size, err := EncodeFile(dir, a, limit)
+			if path != "" || size != 0 {
+				t.Fatalf("rejected EncodeFile returned path=%q size=%d", path, size)
+			}
+			return path, err
+		})
+	})
+	t.Run("Encode", func(t *testing.T) {
+		reject(t, func(dir string, a Archive) (string, error) {
+			_, err := Encode(dir, a)
+			return "", err
+		})
+	})
+}
+
+// TestDecodeConfigMemberCap pins the shared byte decoder: an over-cap config
+// member is rejected with the cap error, and a declared length alone is
+// rejected before the decoder copies a body that is not there.
+func TestDecodeConfigMemberCap(t *testing.T) {
+	created := time.Unix(1_700_000_123, 0).UTC()
+	overCap := configYAMLOfSize(t, configMemberMax+1)
+
+	raw := framedArchive(t, flagConfig, created, framedMember(memberConfig, overCap))
+	got, err := Decode(raw)
+	if err == nil || !strings.Contains(err.Error(), "config member exceeds") {
+		t.Fatalf("over-cap config decode = %v, want the config cap error", err)
+	}
+	if got.Config != nil {
+		t.Fatalf("over-cap config decode retained %d config bytes", len(got.Config))
+	}
+
+	// The declared length is rejected before the body is read: this archive
+	// has no member body at all, so a decoder that copied first would report
+	// truncation instead of the cap.
+	declared := binary.BigEndian.AppendUint64([]byte{memberConfig}, uint64(configMemberMax+1))
+	forged := framedArchive(t, flagConfig, created, declared)
+	if _, err := Decode(forged); err == nil || !strings.Contains(err.Error(), "config member exceeds") {
+		t.Fatalf("declared over-cap config decode = %v, want the config cap error before the body", err)
+	}
+}
+
+// TestDecodeFileConfigMemberCap pins the file decoder's shared cap: it refuses
+// an over-cap config member before buffering it and removes any database
+// staging it already created.
+func TestDecodeFileConfigMemberCap(t *testing.T) {
+	created := time.Unix(1_700_000_123, 0).UTC()
+	cfgPayload := framedMember(memberConfig, configYAMLOfSize(t, configMemberMax+1))
+	dbPayload := framedMember(memberDatabase, packedRequestsDB(t))
+	cases := []struct {
+		name    string
+		flags   byte
+		payload []byte
+	}{
+		{"config-only", flagConfig, append([]byte(nil), cfgPayload...)},
+		{"database-first", flagConfig | flagDatabase, append(append([]byte(nil), dbPayload...), cfgPayload...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := framedArchive(t, tc.flags, created, tc.payload)
+			path := filepath.Join(t.TempDir(), "backup.mvb")
+			if err := os.WriteFile(path, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stage := t.TempDir()
+			got, err := DecodeFile(stage, path)
+			if got.DatabasePath != "" {
+				if err := os.RemoveAll(filepath.Dir(got.DatabasePath)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err == nil || !strings.Contains(err.Error(), "config member exceeds") {
+				t.Fatalf("over-cap config file decode = %v, want the config cap error", err)
+			}
+			if got.Config != nil || got.DatabasePath != "" {
+				t.Fatalf("failed decode returned a partial archive: %+v", got)
+			}
+			ents, err := os.ReadDir(stage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ents) != 0 {
+				t.Fatalf("over-cap config file decode left staging: %v", ents)
+			}
+		})
+	}
+}
+
+// TestDatabaseMemberAboveConfigCapDecodes proves the cap is config-only: a
+// database member larger than configMemberMax still decodes and stages because
+// it stays under the archive payload ceiling.
+func TestDatabaseMemberAboveConfigCapDecodes(t *testing.T) {
+	dbPath, dbSize := packedRequestsDBFile(t, configMemberMax+1)
+	if dbSize <= int64(configMemberMax) {
+		t.Fatalf("database fixture size = %d, want above the %d-byte config cap", dbSize, configMemberMax)
+	}
+	created := time.Unix(1_700_000_123, 0).UTC()
+	stage := t.TempDir()
+	archivePath, _, err := EncodeFile(stage, Archive{Created: created, DatabasePath: dbPath}, int64(config.BackupMaxBytesMax))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(raw)
+	if err != nil {
+		t.Fatalf("database member above the config cap: %v", err)
+	}
+	if int64(len(got.Database)) != dbSize {
+		t.Fatalf("decoded database size = %d, want %d", len(got.Database), dbSize)
+	}
+	restoreStage := t.TempDir()
+	fileGot, err := DecodeFile(restoreStage, archivePath)
+	if err != nil {
+		t.Fatalf("file decode of a database member above the config cap: %v", err)
+	}
+	info, err := os.Stat(fileGot.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != dbSize {
+		t.Fatalf("staged database size = %d, want %d", info.Size(), dbSize)
+	}
+	if err := os.RemoveAll(filepath.Dir(fileGot.DatabasePath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(archivePath); err != nil {
+		t.Fatal(err)
+	}
+	assertNoArchiveStaging(t, stage)
+	assertNoRestoreStaging(t, restoreStage)
+}
+
 func TestReadCappedDoesNotDrainOversizeSource(t *testing.T) {
 	src := bytes.NewReader(bytes.Repeat([]byte("y"), 8<<20))
 	if _, err := readCapped(src, 1024); err == nil {
@@ -1143,6 +1341,18 @@ func assertNoArchiveStaging(t *testing.T, dir string) {
 			t.Fatalf("staging file left behind: %s", e.Name())
 		}
 	}
+}
+
+// configYAMLOfSize builds a comment-only YAML document of exactly size bytes.
+// Comments keep the cap fixtures valid for config.LoadBytes without a large
+// schema body, so a test can reach the limit without multi-GiB data.
+func configYAMLOfSize(t testing.TB, size int) []byte {
+	t.Helper()
+	if size < 3 {
+		t.Fatalf("config fixture size %d is too small for a comment", size)
+	}
+	doc := append([]byte("# "), bytes.Repeat([]byte("x"), size-3)...)
+	return append(doc, '\n')
 }
 
 // largeValidConfig builds a YAML document whose comments carry enough

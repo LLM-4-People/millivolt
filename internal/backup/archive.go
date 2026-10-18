@@ -86,7 +86,26 @@ const (
 	// selfCheckBuffer bounds the comparison buffer of the streaming
 	// self-check; it is reused for every member chunk.
 	selfCheckBuffer = 32 << 10
+
+	// configMemberMax bounds the retained config member. Schema YAML is a
+	// small document, so 16 MiB leaves ample headroom for operator comments
+	// while keeping a crafted archive from forcing a multi-gigabyte heap
+	// allocation before config.LoadBytes. This is a retention guardrail, not
+	// a Config tunable and not a database member cap: the database member
+	// stays streamed under payloadMax.
+	configMemberMax = 16 << 20
 )
+
+// checkConfigMemberSize is the one config-member retention gate. EncodeFile
+// rejects a source config above the bound before staging anything, and the
+// shared decode framing owner rejects a declared member above it before the
+// consumer can copy the body into heap.
+func checkConfigMemberSize(size int64) error {
+	if size > configMemberMax {
+		return fmt.Errorf("backup config member exceeds %d bytes", configMemberMax)
+	}
+	return nil
+}
 
 // zstdStream is an io.Reader that does not implement Bytes or Len, so
 // klauspost cannot DecodeAll a compressed body under 128KiB into an
@@ -211,6 +230,9 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 		return "", 0, fmt.Errorf("backup size limit is invalid")
 	}
 	if err := a.checkMemberSources(); err != nil {
+		return "", 0, err
+	}
+	if err := checkConfigMemberSize(int64(len(a.Config))); err != nil {
 		return "", 0, err
 	}
 	if a.flags() == 0 {
@@ -832,6 +854,9 @@ func decodeMembers(r io.Reader, flags byte, limit int64, consume memberConsumer)
 		case memberConfig:
 			if flags&flagConfig == 0 {
 				return fmt.Errorf("backup config member is not flagged")
+			}
+			if err := checkConfigMemberSize(int64(size)); err != nil {
+				return err
 			}
 		case memberDatabase:
 			if flags&flagDatabase == 0 {
