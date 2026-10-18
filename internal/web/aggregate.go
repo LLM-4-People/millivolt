@@ -748,13 +748,13 @@ type chartFold struct {
 	decBucket  []uint8
 	membership []uint8
 	order      metricOrders
-	// orderSource is the projection's all-history view, retained only while
-	// the read lease is held. freezeOrder materializes it after the fold only
-	// when the recent tail cannot answer the window.
+	// orderSource is the projection's metric view, retained only while the
+	// read lease is held. freezeOrder materializes either reader after the fold
+	// knows whether the recent tail can answer the window.
 	orderSource *projectionMetrics
-	// recent is the tail order for bounded windows; recentFrom is its first
-	// covered projection row (0-based). minMemberRow is the earliest in-window
-	// durable row, so the tail is safe only when it covers that row.
+	// recent is the materialized tail order for bounded windows; recentFrom is
+	// its first covered projection row (0-based). minMemberRow is the earliest
+	// in-window durable row, so the tail is safe only when it covers that row.
 	recent       metricOrders
 	recentFrom   int
 	minMemberRow uint32
@@ -788,11 +788,16 @@ func (f *chartFold) prepareBound(p *projectionData) {
 	}
 	f.membership = make([]uint8, len(p.rows))
 	f.orderSource = &p.metrics
-	f.recent = p.metrics.recent
 	f.recentFrom = p.metrics.recentFrom
 }
 
-// freezeOrder resolves the all-history order once the fold knows whether the
+// recentCovers reports whether the retained tail covers every in-window
+// durable row. Row indices are 1-based; recentFrom is a 0-based slice start.
+func (f *chartFold) recentCovers() bool {
+	return f.hasMember && f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom
+}
+
+// freezeOrder materializes the selected order once the fold knows whether the
 // retained tail covers every member. It must run under the projection lease;
 // the fast path skips the O(history) merge entirely.
 func (f *chartFold) freezeOrder() {
@@ -801,7 +806,13 @@ func (f *chartFold) freezeOrder() {
 	if source == nil {
 		return
 	}
-	if !f.hasMember || (f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom) {
+	if f.recentCovers() {
+		// The exact base+pending tail merge is memoized per published
+		// snapshot; payload runs after the lease, so materialize it here.
+		f.recent = source.recentOrder()
+		return
+	}
+	if !f.hasMember {
 		return
 	}
 	f.order = source.allOrder()
@@ -891,8 +902,7 @@ func (f *chartFold) payload(now int64) chartPayload {
 	order := f.order
 	// Every durable row in this window is inside the retained tail, so the
 	// exact ranks can read the short sorted order instead of all history.
-	// Row indices are 1-based; recentFrom is a 0-based slice start.
-	if f.hasMember && f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom {
+	if f.recentCovers() {
 		order = f.recent
 	}
 	ttft, periodTTFT, ttftStat := rankPercentilesStats(order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)

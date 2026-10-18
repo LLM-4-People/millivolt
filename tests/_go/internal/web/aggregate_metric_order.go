@@ -681,16 +681,17 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 	}
 	checkBound := func() {
 		t.Helper()
-		if got := len(m.recent.ttft); got != recentMetricRows {
+		recent := m.recentOrder()
+		if got := len(recent.ttft); got != recentMetricRows {
 			t.Fatalf("retained TTFT samples = %d, want %d", got, recentMetricRows)
 		}
-		if got := len(m.recent.tps); got != recentMetricRows {
+		if got := len(recent.tps); got != recentMetricRows {
 			t.Fatalf("retained TPS samples = %d, want %d", got, recentMetricRows)
 		}
-		if got := len(m.recent.dec); got != recentMetricRows {
+		if got := len(recent.dec); got != recentMetricRows {
 			t.Fatalf("retained decode samples = %d, want %d", got, recentMetricRows)
 		}
-		for _, s := range m.recent.ttft {
+		for _, s := range recent.ttft {
 			if int(s.row) < m.recentFrom {
 				t.Fatalf("recent TTFT sample row %d predates recentFrom %d", s.row, m.recentFrom)
 			}
@@ -705,20 +706,21 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 		}
 		counts := []int{n - from}
 		all := m.allOrder()
+		recent := m.recentOrder()
 		allTTFT, allPeriodTTFT, allStatTTFT := rankPercentilesStats(all.ttft, mask, counts, nil, nil)
-		recentTTFT, recentPeriodTTFT, recentStatTTFT := rankPercentilesStats(m.recent.ttft, mask, counts, nil, nil)
+		recentTTFT, recentPeriodTTFT, recentStatTTFT := rankPercentilesStats(recent.ttft, mask, counts, nil, nil)
 		if !reflect.DeepEqual(allTTFT, recentTTFT) || !reflect.DeepEqual(allPeriodTTFT, recentPeriodTTFT) ||
 			!reflect.DeepEqual(allStatTTFT, recentStatTTFT) {
 			t.Fatalf("TTFT tail ranks differ from all-history ranks (from=%d)", from)
 		}
 		allTPS, allPeriodTPS, allStatTPS := rankPercentilesStats(all.tps, mask, counts, nil, nil)
-		recentTPS, recentPeriodTPS, recentStatTPS := rankPercentilesStats(m.recent.tps, mask, counts, nil, nil)
+		recentTPS, recentPeriodTPS, recentStatTPS := rankPercentilesStats(recent.tps, mask, counts, nil, nil)
 		if !reflect.DeepEqual(allTPS, recentTPS) || !reflect.DeepEqual(allPeriodTPS, recentPeriodTPS) ||
 			!reflect.DeepEqual(allStatTPS, recentStatTPS) {
 			t.Fatalf("TPS tail ranks differ from all-history ranks (from=%d)", from)
 		}
 		allDec, allPeriodDec := rankPercentiles(all.dec, mask, counts, nil, nil)
-		recentDec, recentPeriodDec := rankPercentiles(m.recent.dec, mask, counts, nil, nil)
+		recentDec, recentPeriodDec := rankPercentiles(recent.dec, mask, counts, nil, nil)
 		if !reflect.DeepEqual(allDec, recentDec) || !reflect.DeepEqual(allPeriodDec, recentPeriodDec) {
 			t.Fatalf("decode tail ranks differ from all-history ranks (from=%d)", from)
 		}
@@ -728,7 +730,7 @@ func TestProjectionRecentOrderMatchesAllForTailWindows(t *testing.T) {
 	// A delta below the rebuild cadence advances the window and merges only
 	// new samples; the previously published arrays must stay untouched.
 	oldBuiltAt := m.recentBuiltAt
-	publishedTTFT := m.recent.ttft
+	publishedTTFT := m.recentOrder().ttft
 	publishedTTFTCopy := slices.Clone(publishedTTFT)
 	delta := make([]contrib, 1000)
 	for i := range delta {

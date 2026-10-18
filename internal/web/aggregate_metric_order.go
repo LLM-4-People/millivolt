@@ -22,11 +22,12 @@ type metricSample[T ~int64 | ~float64] struct {
 const (
 	recentMetricRows        = 65536
 	recentMetricRebuildRows = 16384
-	// metricOrderPendingSamples bounds the uncompacted all-history delta. A
-	// sub-threshold append copies at most this many samples however long the
-	// retained history is; reaching the bound folds base+pending into one new
-	// immutable base. 16384 samples cap the extra pending memory at roughly
-	// 256 KiB, while making the O(history) fold rare instead of per append.
+	// metricOrderPendingSamples bounds the uncompacted all-history and
+	// recent-tail deltas. A sub-threshold append copies at most this many
+	// samples however long the retained history is; reaching the bound folds
+	// base+pending into one new immutable base. 16384 samples cap the extra
+	// pending memory at roughly 256 KiB, while making the O(history) fold rare
+	// instead of per append.
 	metricOrderPendingSamples = 16384
 )
 
@@ -72,10 +73,14 @@ type projectionMetrics struct {
 	base    metricOrders
 	pending metricOrders
 	view    *metricOrderView
-	// recent is a value-sorted order over the last recentMetricRows rows. It
-	// may retain already-out-of-tail samples between rebuilds; consumers only
-	// use it when their earliest required row is >= recentFrom.
-	recent        metricOrders
+	// recentBase is the immutable compacted order over the last
+	// recentMetricRows rows at the last rebuild. recentPending is the value
+	// sorted delta since then; recentOrder merges both on demand. The base may
+	// retain already-out-of-tail samples between rebuilds; consumers only use
+	// the order when their earliest required row is >= recentFrom.
+	recentBase    metricOrders
+	recentPending metricOrders
+	recentView    *metricOrderView
 	recentFrom    int
 	recentBuiltAt int
 }
@@ -84,17 +89,32 @@ type projectionMetrics struct {
 // Chart and explorer share this one reader path. The merge runs once per
 // published snapshot and is cached; it never mutates base or pending.
 func (m *projectionMetrics) allOrder() metricOrders {
-	if m.pending.sampleCount() == 0 {
-		return m.base
+	return mergeMetricOrderView(m.base, m.pending, m.view)
+}
+
+// recentOrder returns the exact ascending tail order of recentBase+pending.
+// Bounded chart windows whose earliest required row is inside the tail share
+// this one reader path. The merge runs once per published snapshot and is
+// cached; it never mutates either input.
+func (m *projectionMetrics) recentOrder() metricOrders {
+	return mergeMetricOrderView(m.recentBase, m.recentPending, m.recentView)
+}
+
+// mergeMetricOrderView merges an immutable base with its value-sorted pending
+// delta through one view holder. The holder is shared by snapshot copies; a
+// new append installs a fresh holder, so no reader can observe later mutation.
+func mergeMetricOrderView(base, pending metricOrders, view *metricOrderView) metricOrders {
+	if pending.sampleCount() == 0 {
+		return base
 	}
-	if m.view == nil {
+	if view == nil {
 		// A zero projectionMetrics has no published snapshot to cache on.
-		return mergeMetricOrderSets(m.base, m.pending)
+		return mergeMetricOrderSets(base, pending)
 	}
-	m.view.once.Do(func() {
-		m.view.order = mergeMetricOrderSets(m.base, m.pending)
+	view.once.Do(func() {
+		view.order = mergeMetricOrderSets(base, pending)
 	})
-	return m.view.order
+	return view.order
 }
 
 func mergeMetricOrderSets(base, pending metricOrders) metricOrders {
@@ -151,7 +171,9 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	if from == 0 {
 		m.base = added
 		m.pending = metricOrders{}
-		m.recent = metricOrders{}
+		m.recentBase = metricOrders{}
+		m.recentPending = metricOrders{}
+		m.recentView = nil
 		m.recentFrom = 0
 		m.recentBuiltAt = 0
 	} else {
@@ -167,6 +189,11 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	if len(rows) <= recentMetricRows {
 		// No tail is read until the history exceeds recentMetricRows; leave
 		// the recent order empty instead of aliasing the all-history slices.
+		m.recentBase = metricOrders{}
+		m.recentPending = metricOrders{}
+		m.recentView = nil
+		m.recentFrom = 0
+		m.recentBuiltAt = 0
 		return
 	}
 	// Rebuild before merging a large catch-up: replaying a batch that is
@@ -179,7 +206,14 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	// passes an earlier from (not the incremental append contract) must not
 	// merge those rows again or its samples would be double-counted.
 	if from >= m.recentFrom {
-		m.recent.mergeSorted(added)
+		m.recentPending.mergeSorted(added)
+		if m.recentPending.sampleCount() >= metricOrderPendingSamples {
+			m.recentBase.mergeSorted(m.recentPending)
+			m.recentPending = metricOrders{}
+		}
+		// The tail order changed; retire its cached merge while snapshot
+		// copies keep the old holder and its immutable slices.
+		m.recentView = &metricOrderView{}
 	}
 	if next := len(rows) - recentMetricRows; next > m.recentFrom {
 		m.recentFrom = next
@@ -189,13 +223,16 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	// cadence.
 }
 
-// rebuildRecent recreates the tail order from the newest recentMetricRows
-// rows and releases samples that have fallen out of the tail.
+// rebuildRecent recreates the tail base from the newest recentMetricRows rows,
+// clears the pending delta and its view, and releases samples that have fallen
+// out of the tail.
 func (m *projectionMetrics) rebuildRecent(rows []contrib) {
 	from := max(0, len(rows)-recentMetricRows)
 	orders := collectMetricOrders(rows, from)
 	orders.sort()
-	m.recent = orders
+	m.recentBase = orders
+	m.recentPending = metricOrders{}
+	m.recentView = nil
 	m.recentFrom = from
 	m.recentBuiltAt = len(rows)
 }

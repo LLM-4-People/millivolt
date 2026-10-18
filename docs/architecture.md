@@ -229,7 +229,11 @@ base+pending once. Chart and explorer read the exact merged order through one
 view owner, which caches the merge per published snapshot and never mutates
 either input. A full rebuild replaces the base and clears pending. A retained
 last-65,536-row order serves bounded chart windows whose earliest in-window
-durable row is inside that tail; older or unscoped windows fall back to the
+durable row is inside that tail. It uses the same compacted base plus bounded
+pending delta design and its own per-snapshot view holder, so a sub-threshold
+catch-up merges only its new batch instead of copying the tail; a rebuild of
+the newest 65,536 rows replaces its base, clears the pending delta and releases
+samples that fell out of the tail. Older or unscoped windows fall back to the
 all-history order, so the fast path never changes rank or stat results.
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
