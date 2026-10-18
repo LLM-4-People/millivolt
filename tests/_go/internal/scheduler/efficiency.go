@@ -444,6 +444,32 @@ func BenchmarkThrottledReleaseOtherProviders(b *testing.B) {
 	}
 }
 
+// BenchmarkIdleProviderDrain measures a provider-scoped drain when every
+// attributed group has an empty queue. The provider queued-group counter must
+// let the drain return before locking any group, so time and allocation must
+// stay flat as G grows instead of scaling with the group count.
+func BenchmarkIdleProviderDrain(b *testing.B) {
+	const provider = "provider.example"
+	ctx := context.Background()
+	for _, groups := range []int{1, 1000, 10000} {
+		b.Run(strconv.Itoa(groups), func(b *testing.B) {
+			s := New(Options{})
+			for i := 0; i < groups; i++ {
+				release, err := s.AcquireWith(ctx, provider+"|"+strconv.Itoa(i), 0, WaiterHooks{Provider: provider})
+				if err != nil {
+					b.Fatal(err)
+				}
+				release(0)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				s.drainProvider(provider)
+			}
+		})
+	}
+}
+
 // BenchmarkThrottlePolicyListing contrasts the policy-only persistence listing
 // with the dashboard's live-occupancy listing. G groups are precreated and
 // attributed to one provider with one active gate; queued waiters are installed

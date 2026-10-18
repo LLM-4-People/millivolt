@@ -46,6 +46,18 @@ type Options struct {
 // without limit; the bound is generous for real deployments (100k keys).
 const maxSchedulerGroups = 100_000
 
+// providerIndex is the scheduler's provider-scoped group index. queued counts
+// the indexed groups whose queue currently holds at least one live waiter. A
+// provider drain reads it under Scheduler.mu as a witness that returns before
+// walking (and locking) an idle provider's groups. Each group stores a pointer
+// to this counter at its first attribution and adjusts it from the single
+// queue-transition owner under the group's own mutex, so maintaining the count
+// never needs Scheduler.mu.
+type providerIndex struct {
+	groups []*group
+	queued atomic.Int64
+}
+
 // Scheduler manages ordered queues per group key.
 type Scheduler struct {
 	mu     sync.Mutex // guards opts, groups and providerGroups
@@ -57,8 +69,9 @@ type Scheduler struct {
 	// on its first non-empty attribution, and is never removed because groups
 	// themselves are retained for the process lifetime (bounded by
 	// maxSchedulerGroups). A future group-removal path must delete its index
-	// entry under the same lock.
-	providerGroups map[string][]*group
+	// entry under the same lock and retire that group's counter pointer with
+	// the entry.
+	providerGroups map[string]*providerIndex
 	storms         stormState
 
 	// policy is the operator hold set (all / new-unseen / named
@@ -86,7 +99,7 @@ type Scheduler struct {
 // config.Default(), never re-derived here, so there is exactly one source of
 // truth and no conflicting fallback values.
 func New(opts Options) *Scheduler {
-	s := &Scheduler{opts: opts, groups: make(map[string]*group), providerGroups: make(map[string][]*group), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
+	s := &Scheduler{opts: opts, groups: make(map[string]*group), providerGroups: make(map[string]*providerIndex), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
 	s.policy.Store(&policySnap{})
 	s.publishGatesLocked()
 	s.storms.configure(opts.Storm)
@@ -135,6 +148,12 @@ type group struct {
 	queue          []*waiter     // live waiters; cancelled entries are nil tombstones
 	queued         int           // live waiter count (excludes tombstones)
 	tombstones     int           // nil entries awaiting drain's compaction pass
+	// hasQueued mirrors queued > 0 for lock-free drainProvider probes.
+	// providerQueued is the owning provider index's queued-group counter,
+	// installed at first attribution. Both move together, only under mu, at the
+	// queue's empty/non-empty transition - syncQueueLocked is the sole owner.
+	hasQueued      atomic.Bool
+	providerQueued *atomic.Int64
 	mu             sync.Mutex
 }
 
@@ -209,12 +228,30 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 // before this Acquire's admission attempt (see drainProvider's lost-wake
 // argument). Internal group lookups (Trip/FailSend/WaitSend/BackoffFor) never
 // attribute a provider; only an AcquireWith with hooks.Provider does.
+//
+// The group also adopts the index's queued-group counter here, under g.mu (the
+// established s.mu -> g.mu order). A group can already hold waiters when it is
+// first attributed - an empty-provider Acquire can queue it behind an operator
+// hold first - so count a pre-existing non-empty queue exactly once: its
+// enqueue transition ran while providerQueued was nil, and every later
+// transition is owned by syncQueueLocked.
 func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
 	if provider == "" || g.provider != "" {
 		return
 	}
 	g.provider = provider
-	s.providerGroups[provider] = append(s.providerGroups[provider], g)
+	idx := s.providerGroups[provider]
+	if idx == nil {
+		idx = &providerIndex{}
+		s.providerGroups[provider] = idx
+	}
+	idx.groups = append(idx.groups, g)
+	g.mu.Lock()
+	g.providerQueued = &idx.queued
+	if g.hasQueued.Load() {
+		idx.queued.Add(1)
+	}
+	g.mu.Unlock()
 }
 
 // AcquireWith blocks until the group's head-of-queue slot is available,
@@ -597,6 +634,7 @@ func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (R
 	}
 	g.queue = append(g.queue, w)
 	g.queued++
+	g.syncQueueLocked()
 	if w.holdID != "" && opts.MaxWait > 0 {
 		// Stamp hold start here so a waiter that hasn't entered the wait
 		// loop yet still excludes pause time from MaxWait.
@@ -761,6 +799,7 @@ func (g *group) drain() {
 	defer g.mu.Unlock()
 	now := time.Now()
 	read, kept := 0, 0
+	granted := false
 	for read < len(g.queue) &&
 		(g.maxConcurrent == 0 || g.inFlight < g.maxConcurrent) &&
 		!now.Before(g.nextAllowedAt) {
@@ -797,6 +836,7 @@ func (g *group) drain() {
 		read++
 		g.queued--
 		g.inFlight++
+		granted = true
 		// Non-blocking send: w.ch is buffered (cap 1) so this always succeeds
 		// for a popped waiter. A waiter that was cancelled before reading the
 		// grant is reconciled by removeWaiter's phantom-slot decrement.
@@ -815,6 +855,9 @@ func (g *group) drain() {
 		// it survive the one-pass compaction above.
 		g.compactLocked()
 	}
+	if granted {
+		g.syncQueueLocked()
+	}
 }
 
 // compactLocked drops tombstoned waiters in one sweep. removeWaiter tombstones
@@ -830,6 +873,31 @@ func (g *group) compactLocked() {
 	clear(g.queue[len(live):])
 	g.queue = live
 	g.tombstones = 0
+}
+
+// syncQueueLocked is the sole owner of the queue empty/non-empty witness and
+// its provider counter transition. Callers hold g.mu after mutating g.queued
+// (enqueue, drain grant, removeWaiter tombstone); queue compaction only drops
+// nil tombstones and never changes that live count, so it needs no separate
+// transition. No queue reset/close path exists today; a future one must route
+// through this same transition. hasQueued mirrors queued > 0 for lock-free
+// drainProvider skips, and providerQueued moves exactly on the edge, so the
+// per-provider count can never go negative or stay positive with an empty
+// queue.
+func (g *group) syncQueueLocked() {
+	nonEmpty := g.queued > 0
+	if g.hasQueued.Load() == nonEmpty {
+		return
+	}
+	g.hasQueued.Store(nonEmpty)
+	if g.providerQueued == nil {
+		return
+	}
+	if nonEmpty {
+		g.providerQueued.Add(1)
+	} else {
+		g.providerQueued.Add(-1)
+	}
 }
 
 func (g *group) removeWaiter(w *waiter) {
@@ -858,6 +926,9 @@ func (g *group) removeWaiter(w *waiter) {
 	// Bound tombstone retention without paying a full shift per cancel. Decide
 	// under the lock: the threshold reads queue state that drain mutates.
 	needCompact := found && !headRemoved && g.tombstones >= max(1, len(g.queue)/8)
+	if found {
+		g.syncQueueLocked()
+	}
 	g.mu.Unlock()
 	w.dropHold(g.sched)
 	if !found {

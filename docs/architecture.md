@@ -55,9 +55,12 @@ request and concurrency limits layered at the same grant owner. Acquisition
 release settles exactly once. The provider gate and token-bucket epoch captured
 at admission keep clearing/replacing a cap from charging another generation's
 reservation. A provider-to-groups index in `Scheduler` records each group on
-its first attributed acquire; a provider release reads that provider's slice
-header under the scheduler mutex, releases it, and only then drains those
-groups, so unrelated groups are neither scanned nor locked.
+its first attributed acquire and counts the indexed groups with a live queue.
+A provider release reads that counter and the provider's slice header under the
+scheduler mutex, releases it, returns without touching any group when the
+counter is zero, and otherwise skips groups whose per-group queued witness is
+false before draining the rest. Unrelated groups are neither scanned nor
+locked.
 
 [tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
 from response policy. Exchange adapters return credential data only; the shared
