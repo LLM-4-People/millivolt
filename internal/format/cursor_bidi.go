@@ -535,6 +535,9 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 		return call
 	}
 	argv := map[string]any{}
+	// One field budget for the whole args map: nested Value containers and
+	// every entry share the frame allowance instead of resetting it per entry.
+	budget := newProtoFieldBudget()
 	for _, a := range args {
 		switch a.num {
 		case fMcpArgsName:
@@ -547,7 +550,7 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 			call.CallID = string(a.raw)
 		case fMcpArgsArgs:
 			// map<string, bytes(Value)> entry: field 1 = key (string), field 2 = value (Value).
-			if k, v, ok := decodeStringValueMapEntry(a.raw); ok {
+			if k, v, ok := decodeStringValueMapEntry(a.raw, budget); ok {
 				argv[k] = v
 			}
 		}

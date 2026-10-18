@@ -31,22 +31,49 @@ const (
 	// not a user-tunable setting.
 	protoValueMaxDepth = 128
 
-	// protoFieldCountMax bounds the fields materialized from one protobuf
-	// buffer. A protoField costs 48 bytes while the minimal field on the wire
-	// is 2 bytes, so without this bound a 32 MiB frame (connectMaxFrame) could
-	// allocate ~4 GiB of field structs. 65,536 fields is far above any
-	// legitimate message: the largest tool-argument map is a repeated map
-	// entry carrying at least a tag, length and key per argument, so 65,536
-	// arguments already require a multi-hundred-KiB object, orders of
-	// magnitude beyond a real tool schema or conversation. A denser buffer is
-	// malformed input and fails closed in both the strict and lenient parser
-	// paths. Internal safety guardrail, not a user-tunable setting.
+	// protoFieldCountMax bounds the fields materialized from one top-level
+	// protobuf frame. A protoField costs 48 bytes while the minimal field on
+	// the wire is 2 bytes, so without this bound a 32 MiB frame
+	// (connectMaxFrame) could allocate ~4 GiB of field structs. 65,536 fields
+	// is far above any legitimate message: the largest tool-argument map is a
+	// repeated map entry carrying at least a tag, length and key per argument,
+	// so 65,536 arguments already require a multi-hundred-KiB object, orders
+	// of magnitude beyond a real tool schema or conversation. The recursive
+	// Value/Struct/List/map decode of one frame shares one budget (see
+	// protoFieldBudget), so a dense nested value cannot reset it per level. A
+	// denser buffer is malformed input and fails closed in both the strict and
+	// lenient parser paths. Internal safety guardrail, not a user-tunable
+	// setting.
 	protoFieldCountMax = 1 << 16
 )
 
-// errProtoFieldCount is the stable fail-closed reason for a buffer whose
+// errProtoFieldCount is the stable fail-closed reason for a frame whose
 // decoded field count would exceed protoFieldCountMax.
 var errProtoFieldCount = errors.New("protobuf: field count limit exceeded")
+
+// protoFieldBudget is the decoded-field budget for one top-level frame. The
+// wire parser and every recursive Value/Struct/List/map decode charge into
+// the same budget, so nesting a container cannot buy a fresh allowance.
+// Budgets are per decode call, never package state, so concurrent frames do
+// not share or race on a count.
+type protoFieldBudget struct {
+	remaining int
+}
+
+// newProtoFieldBudget starts a frame with the full decoded-field allowance.
+func newProtoFieldBudget() *protoFieldBudget {
+	return &protoFieldBudget{remaining: protoFieldCountMax}
+}
+
+// consume charges one decoded field, failing closed once the frame has spent
+// its allowance.
+func (b *protoFieldBudget) consume() error {
+	if b.remaining <= 0 {
+		return fmt.Errorf("%w (limit %d)", errProtoFieldCount, protoFieldCountMax)
+	}
+	b.remaining--
+	return nil
+}
 
 // appendVarint encodes v as a base-128 varint (little-endian groups, 7 bits
 // per byte, continuation bit set on all but the last).
@@ -170,16 +197,18 @@ type protoField struct {
 // Unknown fields are tolerated (returned) so callers can ignore them; only a
 // structurally malformed buffer (truncated varint, overrun length) errors.
 // The returned slices alias into msg - callers must not retain them past msg's
-// lifetime, which is fine for our single-pass decode.
+// lifetime, which is fine for our single-pass decode. Each call is one frame
+// and starts a fresh field budget; recursive decoders use
+// parseProtoFieldsWire with the caller's budget instead.
 func parseProtoFields(msg []byte) ([]protoField, error) {
-	return parseProtoFieldsWire(msg, false)
+	return parseProtoFieldsWire(msg, false, newProtoFieldBudget())
 }
 
 // parseProtoFieldsLenient is parseProtoFields but tolerates a fixed64 (wire 1)
 // field by reading 8 bytes into raw, so google.protobuf.Value number fields
 // decode. All other wire types behave as parseProtoFields (fail closed).
 func parseProtoFieldsLenient(msg []byte) ([]protoField, error) {
-	return parseProtoFieldsWire(msg, true)
+	return parseProtoFieldsWire(msg, true, newProtoFieldBudget())
 }
 
 // parseProtoFieldsWire is the one wire-format parser, parameterized by the
@@ -188,13 +217,14 @@ func parseProtoFieldsLenient(msg []byte) ([]protoField, error) {
 // encodings (wires 1 and 5) on top, for the google.protobuf.Value shim. Any
 // other wire type (group, or a fixed type in strict mode) means we're
 // misaligned or the schema grew a type we don't model: fail closed rather
-// than mis-parse.
-func parseProtoFieldsWire(msg []byte, fixedNumbers bool) ([]protoField, error) {
+// than mis-parse. Every parsed field charges budget, including fields of
+// nested containers, so the frame-wide bound survives recursion.
+func parseProtoFieldsWire(msg []byte, fixedNumbers bool, budget *protoFieldBudget) ([]protoField, error) {
 	var fields []protoField
 	i := 0
 	for i < len(msg) {
-		if len(fields) >= protoFieldCountMax {
-			return nil, fmt.Errorf("%w (limit %d)", errProtoFieldCount, protoFieldCountMax)
+		if err := budget.consume(); err != nil {
+			return nil, err
 		}
 		key, n := consumeVarint(msg[i:])
 		if n <= 0 {
@@ -288,11 +318,12 @@ func subFields(f *protoField) ([]protoField, error) {
 // decodeMapEntry splits one map<string, bytes> entry message: field 1
 // carries the key string, field 2 the value bytes. ok=false when the entry
 // is malformed or the key is empty, so each caller keeps its own skip or
-// fail policy.
-func decodeMapEntry(raw []byte) (key string, val []byte, ok bool) {
-	fields, err := parseProtoFields(raw)
+// fail policy. A non-nil error is a frame-level failure (the shared field
+// budget ran out) that callers must propagate instead of skipping.
+func decodeMapEntry(raw []byte, budget *protoFieldBudget) (key string, val []byte, ok bool, err error) {
+	fields, err := parseProtoFieldsWire(raw, false, budget)
 	if err != nil {
-		return "", nil, false
+		return "", nil, false, err
 	}
 	for _, f := range fields {
 		if f.num == 1 {
@@ -301,36 +332,42 @@ func decodeMapEntry(raw []byte) (key string, val []byte, ok bool) {
 			val = f.raw
 		}
 	}
-	return key, val, key != ""
+	return key, val, key != "", nil
 }
 
 // decodeStringValueMapEntry decodes a map<string, bytes> entry, then decodes
 // the value bytes as a google.protobuf.Value shim. Returns the key and the
-// decoded Go value.
-func decodeStringValueMapEntry(entry []byte) (string, any, bool) {
-	key, valBytes, ok := decodeMapEntry(entry)
-	if !ok {
+// decoded Go value. budget is the enclosing frame's field budget, shared by
+// the entry and every Value container below it.
+func decodeStringValueMapEntry(entry []byte, budget *protoFieldBudget) (string, any, bool) {
+	key, valBytes, ok, err := decodeMapEntry(entry, budget)
+	if err != nil || !ok {
 		return "", nil, false
 	}
-	v, valid := decodeProtoValue(valBytes, 0)
+	v, valid := decodeProtoValue(valBytes, 0, budget)
 	return key, v, valid
 }
 
 // decodeProtoValue decodes the google.protobuf.Value shim:
 // oneof kind { null=1, number=2 (fixed64), string=3, bool=4, struct=5, list=6 }.
 // Falls back to the raw bytes as a UTF-8 string when it isn't a Value envelope
-// (some servers send plain text). Returns ok=false only on a structurally
-// malformed buffer; Value nesting deeper than protoValueMaxDepth counts as
-// malformed (each container hop adds one level; the entry point passes 0).
-func decodeProtoValue(b []byte, depth int) (any, bool) {
+// (some servers send plain text). Returns ok=false on a structurally malformed
+// buffer, an exhausted frame field budget, or Value nesting deeper than
+// protoValueMaxDepth (each container hop adds one level; the entry point
+// passes 0). The latter two are hard failures: an over-budget or over-deep
+// frame must never be admitted as a raw string argument.
+func decodeProtoValue(b []byte, depth int, budget *protoFieldBudget) (any, bool) {
 	if depth > protoValueMaxDepth {
 		return nil, false
 	}
 	if len(b) == 0 {
 		return nil, true
 	}
-	fields, err := parseProtoFieldsLenient(b)
+	fields, err := parseProtoFieldsWire(b, true, budget)
 	if err != nil {
+		if errors.Is(err, errProtoFieldCount) {
+			return nil, false
+		}
 		// Not a Value envelope - treat as raw UTF-8 text (cursor2api does this).
 		return string(b), true
 	}
@@ -349,9 +386,9 @@ func decodeProtoValue(b []byte, depth int) (any, bool) {
 			}
 			return f.raw, true
 		case 5: // struct_value: map<string, Value>
-			return decodeProtoStruct(f.raw, depth+1)
+			return decodeProtoStruct(f.raw, depth+1, budget)
 		case 6: // list_value: repeated Value
-			return decodeProtoList(f.raw, depth+1)
+			return decodeProtoList(f.raw, depth+1, budget)
 		case 1: // null_value
 			return nil, true
 		}
@@ -360,9 +397,11 @@ func decodeProtoValue(b []byte, depth int) (any, bool) {
 }
 
 // decodeProtoStruct decodes a Struct (map<string, Value> at field 1). depth is
-// the caller's nesting level, already incremented for this container.
-func decodeProtoStruct(b []byte, depth int) (map[string]any, bool) {
-	fields, err := parseProtoFields(b)
+// the caller's nesting level, already incremented for this container. budget
+// is the enclosing frame's field budget; an exhausted budget fails the whole
+// decode instead of dropping the entry that hit it.
+func decodeProtoStruct(b []byte, depth int, budget *protoFieldBudget) (map[string]any, bool) {
+	fields, err := parseProtoFieldsWire(b, false, budget)
 	if err != nil {
 		return nil, false
 	}
@@ -372,11 +411,17 @@ func decodeProtoStruct(b []byte, depth int) (map[string]any, bool) {
 			continue
 		}
 		// each entry: map<string, Value> with field 1 = key, field 2 = Value
-		k, vb, ok := decodeMapEntry(f.raw)
+		k, vb, ok, err := decodeMapEntry(f.raw, budget)
+		if err != nil {
+			if errors.Is(err, errProtoFieldCount) {
+				return nil, false
+			}
+			continue
+		}
 		if !ok {
 			continue
 		}
-		v, vok := decodeProtoValue(vb, depth)
+		v, vok := decodeProtoValue(vb, depth, budget)
 		if !vok {
 			return nil, false
 		}
@@ -386,9 +431,10 @@ func decodeProtoStruct(b []byte, depth int) (map[string]any, bool) {
 }
 
 // decodeProtoList decodes a ListValue (repeated Value at field 1). depth is
-// the caller's nesting level, already incremented for this container.
-func decodeProtoList(b []byte, depth int) ([]any, bool) {
-	fields, err := parseProtoFields(b)
+// the caller's nesting level, already incremented for this container. budget
+// is the enclosing frame's field budget.
+func decodeProtoList(b []byte, depth int, budget *protoFieldBudget) ([]any, bool) {
+	fields, err := parseProtoFieldsWire(b, false, budget)
 	if err != nil {
 		return nil, false
 	}
@@ -397,7 +443,7 @@ func decodeProtoList(b []byte, depth int) ([]any, bool) {
 		if f.num != 1 {
 			continue
 		}
-		v, ok := decodeProtoValue(f.raw, depth)
+		v, ok := decodeProtoValue(f.raw, depth, budget)
 		if !ok {
 			return nil, false
 		}

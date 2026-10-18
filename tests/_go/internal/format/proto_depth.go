@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -85,7 +86,7 @@ func deepStructFrame(t *testing.T, levels int) []byte {
 // must still decode to the correct nested value.
 func TestProtoValueDepthBound(t *testing.T) {
 	// Within the bound: 64 levels decode to the correctly nested value.
-	if _, v, ok := decodeStringValueMapEntry(deepValueFrame(t, 64)); !ok {
+	if _, v, ok := decodeStringValueMapEntry(deepValueFrame(t, 64), newProtoFieldBudget()); !ok {
 		t.Fatal("a 64-level Value frame failed to decode")
 	} else {
 		for i := 0; i < 64; i++ {
@@ -100,10 +101,10 @@ func TestProtoValueDepthBound(t *testing.T) {
 		}
 	}
 	// Past the bound: fail closed, never decode, never recurse.
-	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 400)); ok {
+	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 400), newProtoFieldBudget()); ok {
 		t.Fatal("a 400-level Value frame decoded; the depth bound must fail closed")
 	}
-	if _, ok := decodeProtoValue(deepValueFrameRaw(t, 400), 0); ok {
+	if _, ok := decodeProtoValue(deepValueFrameRaw(t, 400), 0, newProtoFieldBudget()); ok {
 		t.Fatal("decodeProtoValue must reject a too-deep frame")
 	}
 	// The exact gate boundary: the deepest Value sits at depth == wrapper
@@ -113,17 +114,17 @@ func TestProtoValueDepthBound(t *testing.T) {
 	if protoValueMaxDepth != 128 {
 		t.Fatalf("protoValueMaxDepth = %d; the pinned gate is 128 decode / 129 fail closed", protoValueMaxDepth)
 	}
-	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 128)); !ok {
+	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 128), newProtoFieldBudget()); !ok {
 		t.Fatal("a 128-level Value frame failed to decode; exactly 128 must pass the gate")
 	}
-	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 129)); ok {
+	if _, _, ok := decodeStringValueMapEntry(deepValueFrame(t, 129), newProtoFieldBudget()); ok {
 		t.Fatal("a 129-level Value frame decoded; 129 (protoValueMaxDepth+1) must fail closed")
 	}
 	// struct_value hops count against the same budget.
-	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 128)); !ok {
+	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 128), newProtoFieldBudget()); !ok {
 		t.Fatal("a 128-level struct frame failed to decode; struct hops share the 128 budget")
 	}
-	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 129)); ok {
+	if _, _, ok := decodeStringValueMapEntry(deepStructFrame(t, 129), newProtoFieldBudget()); ok {
 		t.Fatal("a 129-level struct frame decoded; struct hops must fail closed at 129")
 	}
 }
@@ -133,7 +134,7 @@ func TestProtoValueDepthBound(t *testing.T) {
 // string_value("deep") decodes through the mcp_args entry door to
 // map[string]any{"k": "deep"}.
 func TestProtoStructValueDoor(t *testing.T) {
-	k, v, ok := decodeStringValueMapEntry(deepStructFrame(t, 1))
+	k, v, ok := decodeStringValueMapEntry(deepStructFrame(t, 1), newProtoFieldBudget())
 	if !ok {
 		t.Fatal("a struct_value frame failed to decode")
 	}
@@ -178,6 +179,112 @@ func mcpArgsEntry(key string, value []byte) []byte {
 	return append(entry, value...)
 }
 
+// deepWideStructValue builds a google.protobuf.Value `levels` struct_value
+// hops deep. Every Struct level carries `siblings` map entries: the first
+// entry embeds the next level, the rest carry empty Value messages. Four
+// levels of 65,535 siblings is ~4.25 MiB of wire and ~786k decoded fields if
+// every container level restarts the field budget - the shape the flat
+// per-slice bound missed.
+func deepWideStructValue(levels, siblings int) []byte {
+	const key = "sibling-key" // 11 bytes pads the fixture to ~4.25 MiB
+	value := []byte{}         // empty Value decodes as nil
+	for level := 0; level < levels; level++ {
+		emptyEntry := appendTag(nil, 1, wireBytes)
+		emptyEntry = appendVarint(emptyEntry, uint64(len(key)))
+		emptyEntry = append(emptyEntry, key...)
+		emptyEntry = appendTag(emptyEntry, 2, wireBytes)
+		emptyEntry = appendVarint(emptyEntry, 0)
+
+		var strct []byte
+		for i := 0; i < siblings; i++ {
+			entry := emptyEntry
+			if i == 0 {
+				entry = appendTag(nil, 1, wireBytes)
+				entry = appendVarint(entry, uint64(len(key)))
+				entry = append(entry, key...)
+				entry = appendTag(entry, 2, wireBytes)
+				entry = appendVarint(entry, uint64(len(value)))
+				entry = append(entry, value...)
+			}
+			strct = appendTag(strct, 1, wireBytes) // Struct.fields
+			strct = appendVarint(strct, uint64(len(entry)))
+			strct = append(strct, entry...)
+		}
+		wrapped := appendTag(nil, 5, wireBytes) // Value.struct_value
+		wrapped = appendVarint(wrapped, uint64(len(strct)))
+		value = append(wrapped, strct...)
+	}
+	return value
+}
+
+// TestProtoNestedFieldBudget pins the frame-wide decoded-field budget. Before
+// the budget was threaded, parseProtoFieldsWire checked only its own slice, so
+// every nested map entry, Struct and ListValue parse got a fresh 65,536-field
+// allowance. A 4.25 MiB frame with four Struct levels of 65,535 siblings
+// materialized ~786k fields (~206 MB observed, scaling toward ~1.5 GiB at the
+// 32 MiB connect frame cap). Through production parseMcpArgs the whole tree
+// must now fail closed and allocate well under 48 MiB.
+func TestProtoNestedFieldBudget(t *testing.T) {
+	const levels, siblings = 4, 65_535
+	value := deepWideStructValue(levels, siblings)
+	mcp := appendString(nil, fMcpArgsName, "nested")
+	mcp = appendMessage(mcp, fMcpArgsArgs, mcpArgsEntry("deep", value))
+	if len(mcp) < 4<<20 || len(mcp) > 5<<20 {
+		t.Fatalf("fixture wire = %d bytes, want the measured ~4.25 MiB shape", len(mcp))
+	}
+
+	// The entry door fails closed rather than returning the frame as text.
+	if _, _, ok := decodeStringValueMapEntry(mcpArgsEntry("deep", value), newProtoFieldBudget()); ok {
+		t.Fatal("over-budget nested Value decoded; the shared field budget must fail closed")
+	}
+
+	call := parseMcpArgs(&protoField{wire: wireBytes, raw: mcp})
+	if call.Name != "nested" || call.Args != "" {
+		t.Fatalf("parseMcpArgs name = %q args = %q, want the over-budget entry dropped", call.Name, call.Args)
+	}
+	alloc := allocDelta(func() { parseMcpArgs(&protoField{wire: wireBytes, raw: mcp}) })
+	if alloc > 48<<20 {
+		t.Fatalf("over-budget nested frame allocated %d bytes, want a bounded <48 MiB", alloc)
+	}
+	t.Logf("nested field frame: %d wire bytes, %d bytes allocated", len(mcp), alloc)
+}
+
+// TestProtoValueFieldBudgetPropagates pins the raw-string fallback boundary: a
+// Value envelope whose own field count exhausts the budget is a hard parse
+// failure, not plain text to admit verbatim, while genuinely malformed
+// non-Value bytes keep the established raw-string fallback.
+func TestProtoValueFieldBudgetPropagates(t *testing.T) {
+	dense := bytes.Repeat([]byte{0x08, 0x00}, protoFieldCountMax+1)
+	if _, ok := decodeProtoValue(dense, 0, newProtoFieldBudget()); ok {
+		t.Fatal("over-budget Value decoded; errProtoFieldCount must not fall back to raw text")
+	}
+	if v, ok := decodeProtoValue([]byte{0x07}, 0, newProtoFieldBudget()); !ok || v != "\x07" {
+		t.Fatalf("malformed non-Value = %#v/%v, want the raw-string fallback", v, ok)
+	}
+}
+
+// TestProtoFieldBudgetPerFrame pins that the budget is per decode call, not
+// package state: two near-cap frames decoded concurrently must both keep the
+// full allowance, and the race detector must see no shared counter.
+func TestProtoFieldBudgetPerFrame(t *testing.T) {
+	frame := bytes.Repeat([]byte{0x08, 0x00}, protoFieldCountMax/2)
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = parseProtoFields(frame)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent frame %d: %v", i, err)
+		}
+	}
+}
+
 // TestParseMcpArgsSkipsHostileArgEntries pins the consumer leg of the
 // mcp_args map: parseMcpArgs must keep every good entry and silently skip
 // hostile ones (an empty-key entry decodes ok=false and is dropped), so one
@@ -210,7 +317,7 @@ func TestParseMcpArgsSkipsHostileArgEntries(t *testing.T) {
 	}
 }
 
-// TestProtoFieldCountBudget pins the per-buffer decoded-field budget. A minimal
+// TestProtoFieldCountBudget pins the frame-wide decoded-field budget. A minimal
 // field is 2 wire bytes but one protoField is 48 bytes, so a 4 MiB dense frame
 // previously produced 2,097,152 fields and a ~528 MB allocation; a 32 MiB
 // frame extrapolated to ~4 GiB. The budget must fail closed for both parser

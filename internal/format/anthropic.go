@@ -288,26 +288,50 @@ func parseStop(raw json.RawMessage) []string {
 	return nil
 }
 
+// parseToolChoice maps OpenAI's tool_choice shapes to Anthropic's. The typed
+// decode retains only function.name: unknown, wide, or deeply nested members
+// are skipped instead of being materialized as map[string]any per node, so a
+// body-sized tool_choice cannot amplify the translation. Non-string name
+// values keep their original JSON rather than decoding an unbounded value
+// tree; the name is the only member the translator ever reads.
 func parseToolChoice(raw json.RawMessage) any {
 	if len(raw) == 0 {
 		return nil
 	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		switch s {
+	var shorthand string
+	if err := json.Unmarshal(raw, &shorthand); err == nil {
+		switch shorthand {
 		case "auto", "none":
-			return map[string]any{"type": s}
+			return map[string]any{"type": shorthand}
 		case "required":
 			return map[string]any{"type": "any"}
 		}
+		return nil
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err == nil {
-		if fn, ok := obj["function"].(map[string]any); ok {
-			return map[string]any{"type": "tool", "name": fn["name"]}
-		}
+	var obj struct {
+		Function *struct {
+			Name json.RawMessage `json:"name"`
+		} `json:"function"`
 	}
-	return nil
+	if err := json.Unmarshal(raw, &obj); err != nil || obj.Function == nil {
+		return nil
+	}
+	return map[string]any{"type": "tool", "name": toolChoiceName(obj.Function.Name)}
+}
+
+// toolChoiceName preserves the established tool_choice name behavior: absent
+// or null becomes nil, a JSON string becomes its Go string, and any other
+// JSON value passes through verbatim without materializing its tree.
+func toolChoiceName(raw json.RawMessage) any {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err == nil {
+		return s
+	}
+	return raw
 }
 
 // anthropicErrorEvent is Anthropic's error payload shape as both surfaces

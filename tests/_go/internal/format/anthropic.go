@@ -619,6 +619,133 @@ func TestTranslateResponseContentAllocationLinear(t *testing.T) {
 	}
 }
 
+// TestTranslateRequestToolChoiceShapes pins every accepted and rejected
+// tool_choice shape at the translator owner. Object cases compare the emitted
+// tool_choice document byte-for-byte against fixed fixtures, including the
+// established absent-name null and non-string-name pass-through behavior.
+func TestTranslateRequestToolChoiceShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string // empty means the key is absent
+		want string // empty means the translated request carries no tool_choice
+	}{
+		{"absent", "", ""},
+		{"null", "null", ""},
+		{"auto", `"auto"`, `{"type":"auto"}`},
+		{"none", `"none"`, `{"type":"none"}`},
+		{"required", `"required"`, `{"type":"any"}`},
+		{"unknown shorthand", `"sometimes"`, ""},
+		{"function object", `{"type":"function","function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
+		{"object without type", `{"function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
+		{"empty name", `{"function":{"name":""}}`, `{"name":"","type":"tool"}`},
+		{"function without name", `{"function":{}}`, `{"name":null,"type":"tool"}`},
+		{"null name", `{"function":{"name":null}}`, `{"name":null,"type":"tool"}`},
+		{"non-string name", `{"function":{"name":7}}`, `{"name":7,"type":"tool"}`},
+		{"null function", `{"function":null}`, ""},
+		{"string function", `{"function":"weather"}`, ""},
+		{"array", `[1,2]`, ""},
+		{"number", `7`, ""},
+		{"boolean", `true`, ""},
+		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
+			if tc.raw != "" {
+				body += `,"tool_choice":` + tc.raw
+			}
+			body += `}`
+			out, err := TranslateRequest([]byte(body), 64, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				ToolChoice json.RawMessage `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if len(got.ToolChoice) != 0 {
+					t.Fatalf("tool_choice = %s, want absent", got.ToolChoice)
+				}
+				return
+			}
+			if string(got.ToolChoice) != tc.want {
+				t.Fatalf("tool_choice = %s, want %s", got.ToolChoice, tc.want)
+			}
+		})
+	}
+}
+
+// hostileToolChoiceBody builds one MiB of tool_choice payload beside a valid
+// tools array. The nested shape floods a top-level array member, the wide
+// shape floods the top-level object, and the function shape floods a member
+// of the function object itself. All three are amplification the former
+// map[string]any decode paid for even though only function.name is retained.
+func hostileToolChoiceBody(shape string) []byte {
+	var body strings.Builder
+	body.WriteString(`{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}],"tool_choice":{"function":`)
+	switch shape {
+	case "function":
+		body.WriteString(`{"name":"f","x":[`)
+	case "nested":
+		body.WriteString(`{"name":"f"},"x":[`)
+	case "wide":
+		body.WriteString(`{"name":"f"},"x":{`)
+	}
+	for i := 0; body.Len() < 1<<20; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		if shape == "wide" {
+			fmt.Fprintf(&body, `"k%06d":0`, i)
+		} else {
+			body.WriteString(`{}`)
+		}
+	}
+	switch shape {
+	case "function":
+		body.WriteString(`]}`)
+	case "nested":
+		body.WriteString(`]`)
+	case "wide":
+		body.WriteString(`}`)
+	}
+	body.WriteString(`}}`)
+	return []byte(body.String())
+}
+
+// TestTranslateRequestToolChoiceDecodeAllocationBounded is the translator
+// regression: a one MiB nested, wide, or function-local tool_choice must cost
+// a small constant beyond the request bytes, not a per-node materialization.
+// The former map[string]any decode allocated about 57x the value (~60 MiB).
+func TestTranslateRequestToolChoiceDecodeAllocationBounded(t *testing.T) {
+	for _, name := range []string{"nested", "wide", "function"} {
+		t.Run(name, func(t *testing.T) {
+			body := hostileToolChoiceBody(name)
+			// Warm the decoder and prove the hostile shape still translates.
+			out, err := TranslateRequest(body, 64, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				ToolChoice map[string]any `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ToolChoice["type"] != "tool" || got.ToolChoice["name"] != "f" {
+				t.Fatalf("translated tool_choice = %#v, want type tool name f", got.ToolChoice)
+			}
+			alloc := allocDelta(func() { _, _ = TranslateRequest(body, 64, "") })
+			if alloc > 4<<20 {
+				t.Fatalf("%d-byte tool_choice allocated %d bytes, want <= 4 MiB", len(body), alloc)
+			}
+			t.Logf("%s tool_choice: %d bytes, %d bytes allocated", name, len(body), alloc)
+		})
+	}
+}
+
 // TestNativeIdentityBound pins one 512-byte cap on provider identity fields on
 // both translation surfaces. An overlong value fails with the stable sentinel
 // before it can be echoed into output; values at the cap remain accepted.
