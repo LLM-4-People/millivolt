@@ -156,13 +156,16 @@ invalid usage or error terminal frames fail explicitly. A validated turn-ended
 marker plus EOF remains a supported completion convention; bare EOF without
 completion is not a clean success. The event queue carries an internal retained
 byte budget and the pending tool-call map internal count and payload byte caps;
-the KV blob store carries per-run byte and entry caps, and the parked-run store
-admits a candidate only when the aggregate retained blob bytes and entries of
-all parked runs stay within its budgets. The entry caps bound unique zero-length
-blobs that the byte cap cannot charge. Exceeding a run bound fails the run
-closed with a stable descriptive error instead of retaining unbounded memory;
-an over-cap history fails the request and a refused park cold-starts the next
-turn. None of these bounds is operator-tunable.
+the KV blob store carries per-run byte and entry caps. The parked-run store
+enforces aggregate budgets across all parked runs: retained pending plus queued
+event bytes, retained blob bytes, and blob entries. It holds one per-run
+pending-plus-queued allowance free for the run being actively driven, and it
+rejects admission or growth that would cross an aggregate bound. The entry caps
+bound unique zero-length blobs that the byte cap cannot charge. Exceeding a run
+or aggregate parked bound fails closed with a stable descriptive error instead
+of retaining unbounded memory; an over-cap history fails the request and a
+refused park cold-starts the next turn. None of these bounds is
+operator-tunable.
 
 When the upstream requests a client tool, the proxy returns OpenAI tool calls
 and parks the native stream. A later matching tool-result tail can resume that

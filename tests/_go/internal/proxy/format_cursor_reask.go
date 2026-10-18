@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 
 	"golang.org/x/net/http2"
@@ -101,6 +102,9 @@ func TestCursorVoidReaskFreshUser(t *testing.T) {
 
 	if !strings.Contains(got, `"content":"finally an answer"`) {
 		t.Fatalf("re-ask answer missing: %s", got)
+	}
+	if strings.Count(got, "finally an answer") != 1 {
+		t.Fatalf("the re-ask answer must be emitted exactly once: %s", got)
 	}
 	if strings.Contains(got, `"code":"empty_turn"`) {
 		t.Fatalf("a recovered re-ask must not surface empty_turn: %s", got)
@@ -213,16 +217,15 @@ func TestCursorReaskDisabledByConfig(t *testing.T) {
 }
 
 // TestCursorVoidReaskResetsTurnMetrics pins resetTurnMetrics's effect through
-// reaskAfterVoid: the voided first turn streams a text delta (so the record
-// carries a first-turn FirstTokenAt/LastTokenAt) but NO token delta (Output
-// stays 0, keeping the void classification), then the re-ask runs. The
-// finalized record must report only the second turn: TTFT measured from the
-// re-ask's first delta (the first delta is separated from it by a fixed
-// 200ms gap in the fixture, so a stale kept timestamp cannot pass) and the
-// re-ask's token count.
+// reaskAfterVoid: the voided first turn emits nothing visible, then the re-ask
+// runs. The finalized record must report only the second turn: TTFT measured
+// from the re-ask's first delta (the re-ask starts after the first turn's fixed
+// gap, so a stale kept timestamp cannot pass) and the re-ask's token count.
+// The direct test below pins the reset itself, because a genuinely void turn
+// has no visible timestamp to leak.
 func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 	const voidGap = 200 * time.Millisecond
-	var firstDeltaAt time.Time
+	var reaskStart time.Time
 	var calls atomic.Int32
 	h2s := &http2.Server{}
 	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -237,11 +240,7 @@ func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 		cursorConnectHandshake(t, w, body, fl)
 
 		if calls.Add(1) == 1 {
-			// The void: one tokenless text delta (the timing footprint the
-			// reset must erase), a fixed gap, then turn end with zero tokens.
-			firstDeltaAt = time.Now()
-			w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "tokenless fragment")))))
-			fl.Flush()
+			// The void: no deltas, a fixed gap, then turn end with zero tokens.
 			time.Sleep(voidGap)
 			w.Write(cframe(cmsg(1, cmsg(14, nil))))
 			w.Write(cend("{}"))
@@ -249,6 +248,7 @@ func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 			return
 		}
 		// The re-ask answers with its own delta and token count.
+		reaskStart = time.Now()
 		w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "finally an answer")))))
 		w.Write(cframe(cmsg(1, cmsg(8, cvint(1, 3)))))
 		w.Write(cframe(cmsg(1, cmsg(14, nil))))
@@ -278,50 +278,141 @@ func TestCursorVoidReaskResetsTurnMetrics(t *testing.T) {
 	if rec.Usage.OutputTokens != 3 {
 		t.Fatalf("output tokens = %d, want the re-ask's 3 (per-turn usage window)", rec.Usage.OutputTokens)
 	}
-	// TTFT must come from the re-ask's first delta: the voided turn's delta
-	// landed a full voidGap earlier, so a FirstTokenAt kept from it sits well
-	// before firstDeltaAt + half the gap.
-	if rec.FirstTokenAt.Before(firstDeltaAt.Add(voidGap / 2)) {
-		t.Fatalf("FirstTokenAt = %v, want it re-stamped by the re-ask (after %v); the voided turn's delta landed at %v",
-			rec.FirstTokenAt, firstDeltaAt.Add(voidGap/2), firstDeltaAt)
+	if rec.FirstTokenAt.IsZero() {
+		t.Fatal("the re-ask's delta must stamp FirstTokenAt")
+	}
+	if rec.FirstTokenAt.Before(reaskStart) {
+		t.Fatalf("FirstTokenAt = %v, want the re-ask's own delta (after %v), never a stale turn timestamp",
+			rec.FirstTokenAt, reaskStart)
 	}
 	if rec.LastTokenAt.Before(rec.FirstTokenAt) {
 		t.Fatalf("LastTokenAt %v before FirstTokenAt %v", rec.LastTokenAt, rec.FirstTokenAt)
 	}
 }
 
+// TestReaskAfterVoidResetsTurnMetrics is the direct reset pin: a record that
+// already carries turn timing and usage must be cleared when a voided run is
+// absorbed and the re-ask succeeds.
+func TestReaskAfterVoidResetsTurnMetrics(t *testing.T) {
+	s := &Server{cursorRuns: newCursorRunStore(time.Hour)}
+	rec := &metrics.Record{
+		StatusCode:   200,
+		FirstTokenAt: time.Now().Add(-time.Hour),
+		LastTokenAt:  time.Now().Add(-time.Minute),
+		Usage:        metrics.Usage{InputTokens: 9, OutputTokens: 4, TotalTokens: 13},
+	}
+	voided := providerformat.NewCursorRun(io.Discard, emptyReader{}, nil, func() {}, time.Hour)
+	next := providerformat.NewCursorRun(io.Discard, emptyReader{}, nil, func() {}, time.Hour)
+	defer next.Close()
+	got := s.reaskAfterVoid(voided, rec, func() (*providerformat.CursorRun, error) { return next, nil })
+	if got != next {
+		t.Fatalf("reaskAfterVoid returned %v, want the re-ask run", got)
+	}
+	if !rec.FirstTokenAt.IsZero() || !rec.LastTokenAt.IsZero() || rec.Usage != (metrics.Usage{}) {
+		t.Fatalf("re-ask did not reset the turn window: first=%v last=%v usage=%+v",
+			rec.FirstTokenAt, rec.LastTokenAt, rec.Usage)
+	}
+	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorType != cursorEmptyTurn {
+		t.Fatalf("absorbed void facts lost: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestCursorVoidTokenlessVisibleFragmentIsNotReasked pins the root cause of the
+// duplicated-answer bug: visibility is an emitted-output fact, not a token
+// count. A resume turn that streams visible text but reports no token delta must
+// finish normally; the client must never receive a second answer from a re-ask.
+func TestCursorVoidTokenlessVisibleFragmentIsNotReasked(t *testing.T) {
+	var calls atomic.Int32
+	h2s := &http2.Server{}
+	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := r.Body
+		w.Header().Set("Content-Type", "application/connect+proto")
+		fl := w.(http.Flusher)
+		w.WriteHeader(200)
+		readFrame(t, body)
+		cursorConnectHandshake(t, w, body, fl)
+		if calls.Add(1) == 1 {
+			// Visible output, but no TokenDeltaUpdate: Output stays 0.
+			w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "tokenless fragment")))))
+			w.Write(cframe(cmsg(1, cmsg(14, nil))))
+			w.Write(cend("{}"))
+			fl.Flush()
+			return
+		}
+		w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "finally an answer")))))
+		w.Write(cframe(cmsg(1, cmsg(8, cvint(1, 3)))))
+		w.Write(cframe(cmsg(1, cmsg(14, nil))))
+		w.Write(cend("{}"))
+		fl.Flush()
+	}), h2s))
+	upstream.EnableHTTP2 = true
+	upstream.Start()
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	resp, err := http.DefaultClient.Do(cursorVoidRequest(srv, upstream))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	got := string(b)
+	if strings.Count(got, "tokenless fragment") != 1 {
+		t.Fatalf("visible fragment must be emitted exactly once: %s", got)
+	}
+	if strings.Contains(got, "finally an answer") {
+		t.Fatalf("a tokenless visible fragment must not be re-asked: %s", got)
+	}
+	if strings.Contains(got, `"code":"empty_turn"`) {
+		t.Fatalf("visible output must not be classified as a void: %s", got)
+	}
+	if strings.Count(got, "data: [DONE]") != 1 {
+		t.Fatalf("exactly one [DONE], got: %s", got)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("upstream Run calls = %d, want 1 (visible output is not void)", n)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.Usage.OutputTokens != 0 {
+		t.Fatalf("visible tokenless turn record: error=%v output=%d, want success/0", rec.IsError(), rec.Usage.OutputTokens)
+	}
+	if rec.FinishReason != "stop" {
+		t.Fatalf("finish reason = %q, want stop", rec.FinishReason)
+	}
+}
+
 // TestCursorVoidReaskFailureKeepsVoidTimeline pins the failed-re-ask contract:
-// when the void turn emitted a tokenless text delta and the re-ask then fails,
-// the surfaced response is still the VOID's, so the record must keep
-// describing the voided attempt. The re-ask's admission stamps FinalAttemptAt
-// (Retries > 0 after the absorb) and its >= 400 response adopts transport
-// timing inside openCursorHTTP; left in place, TTFT computes
-// FirstTokenAt - FinalAttemptAt < 0 and the timing describes an attempt whose
-// response the client never received. Both must roll back to the void's.
+// when a genuinely empty void turn is followed by a failed re-ask, the surfaced
+// response is still the VOID's, so the record must keep describing the voided
+// attempt. The re-ask's admission stamps FinalAttemptAt (Retries > 0 after the
+// absorb) and its >= 400 response adopts transport timing inside openCursorHTTP;
+// left in place, the record describes an attempt whose response the client never
+// received. Both must roll back to the void's.
 func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
-	// voidGap separates the void's tokenless delta from the turn end, so a
-	// re-ask-anchored TTFT is negative by a wide, unambiguous margin.
-	// reaskDelay delays the failed re-ask's 500 headers, so its adopted
-	// ttfb sits structurally far above the void run's own fast send.
+	// voidGap separates the void's send from the re-ask, so a re-ask-anchored
+	// FinalAttemptAt is unambiguously later. reaskDelay delays the failed
+	// re-ask's 500 headers, so its adopted ttfb sits structurally far above the
+	// void run's own fast send.
 	const voidGap = 200 * time.Millisecond
 	const reaskDelay = 300 * time.Millisecond
-	var voidDeltaAt time.Time
+	var reaskStart time.Time
 	var calls atomic.Int32
 	h2s := &http2.Server{}
 	upstream := httptest.NewUnstartedServer(h2c.NewHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body := r.Body
 		if calls.Add(1) == 1 {
-			// The void: one tokenless text delta (the FirstTokenAt
-			// footprint), a fixed gap, then turn end with zero tokens.
+			// The void: no deltas at all, a fixed gap, then turn end with zero
+			// tokens (nothing visible was emitted, so it is void-eligible).
 			w.Header().Set("Content-Type", "application/connect+proto")
 			w.Header().Set("X-Request-Id", "req-void")
 			fl := w.(http.Flusher)
 			w.WriteHeader(200)
 			readFrame(t, body)
 			cursorConnectHandshake(t, w, body, fl)
-			voidDeltaAt = time.Now()
-			w.Write(cframe(cmsg(1, cmsg(1, cstr(1, "tokenless fragment")))))
-			fl.Flush()
 			time.Sleep(voidGap)
 			w.Write(cframe(cmsg(1, cmsg(14, nil))))
 			w.Write(cend("{}"))
@@ -330,6 +421,7 @@ func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 		}
 		// The re-ask fails: a 500 whose headers sit reaskDelay out, so the
 		// timing it would adopt is distinguishable from the void run's.
+		reaskStart = time.Now()
 		time.Sleep(reaskDelay)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(500)
@@ -369,17 +461,14 @@ func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorType != cursorEmptyTurn {
 		t.Fatalf("the absorbed void attempt must stay logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
 	}
-	if rec.FirstTokenAt.IsZero() {
-		t.Fatal("the void's tokenless text delta must have stamped FirstTokenAt, or the TTFT pin below is vacuous")
+	if !rec.FirstTokenAt.IsZero() {
+		t.Fatalf("FirstTokenAt = %v, want zero for a genuinely empty void turn", rec.FirstTokenAt)
 	}
-	if rec.TTFTMs < 0 {
-		t.Fatalf("TTFTMs = %d, want >= 0 (the surfaced void's own token timeline; a FinalAttemptAt kept from the failed re-ask's admission lands after the void's token and turns TTFT negative)", rec.TTFTMs)
-	}
-	// FinalAttemptAt must describe the surfaced void's own send, which began
-	// before the void's delta landed. The failed re-ask's admission stamp
-	// sits a full voidGap after the delta and fails this.
-	if !rec.FinalAttemptAt.Before(voidDeltaAt) {
-		t.Fatalf("FinalAttemptAt = %v, want the surfaced void's own attempt (before the void's delta at %v), never the failed re-ask's admission", rec.FinalAttemptAt, voidDeltaAt)
+	// FinalAttemptAt was zero before the re-ask; the failed re-ask's admission
+	// stamp must be rolled back. A kept stamp lands at or after reaskStart.
+	if !rec.FinalAttemptAt.IsZero() {
+		t.Fatalf("FinalAttemptAt = %v, want the surfaced void's pre-re-ask value (zero), never the failed re-ask's admission at %v",
+			rec.FinalAttemptAt, reaskStart)
 	}
 	// The failed re-ask's 500 response adopted its transport timing inside
 	// openCursorHTTP before the opener discarded it; the surfaced record must

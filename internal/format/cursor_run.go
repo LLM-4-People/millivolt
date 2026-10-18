@@ -57,7 +57,11 @@ type TurnResult struct {
 	// Reasoning is always 0: Cursor's wire reports a single combined output
 	// counter with no answer/reasoning split.
 	Reasoning int64
-	Err       error // when Outcome == TurnErrored
+	// VisibleOutput reports whether the turn emitted any client-visible delta:
+	// non-empty content/reasoning text or a tool call. It is the void
+	// predicate's only signal - token usage is not a visibility signal.
+	VisibleOutput bool
+	Err           error // when Outcome == TurnErrored
 	// ClientAbort marks a TurnErrored caused by writing the turn's OpenAI SSE
 	// to the LOCAL client failing (emitDelta error - the client disconnected
 	// mid-stream). That is a cancellation, not an upstream failure, so the
@@ -125,6 +129,12 @@ type CursorRun struct {
 	// it, so a parked run's next resume also reports the real cause.
 	closeErr error
 
+	// retention is the parked-run store's aggregate byte observer. While a run
+	// is parked the store installs it through SetRetentionLimit; it is called
+	// under mu with the run's pending+queued total after every accounting
+	// change, and a non-nil error fails the run closed. Guarded by mu.
+	retention func(total int64) error
+
 	// usage accumulators (pump-written). usagePrompt is the conversation's
 	// current context occupancy (checkpoint token_details.used_tokens);
 	// usageDeltaSum is the per-turn OUTPUT total accumulated from
@@ -171,6 +181,12 @@ const cursorRunPendingCap = 4096
 // frames) from retaining gigabytes. Internal safety guardrail, not
 // user-tunable.
 const cursorRunPendingBytesMax = 64 << 20 // 64 MiB
+
+// CursorRunRetainedBytesMax returns the per-run cap on pending tool-call plus
+// queued event payload bytes. The parked-run store reserves exactly this
+// allowance outside its aggregate parked stream budget for the one run being
+// actively driven, so the two bounds cannot drift apart.
+func CursorRunRetainedBytesMax() int64 { return cursorRunPendingBytesMax + cursorRunEventBytesMax }
 
 // cursorRunEventValueDepthMax bounds the recursive event-size walker. Event
 // payloads built by this adapter are shallow; the bound keeps a hostile or
@@ -247,6 +263,10 @@ func (r *CursorRun) pushEvent(ev runEvent) bool {
 			errCursorRunEventBytes, ev.size, r.queuedBytes, cursorRunEventBytesMax))
 		return false
 	}
+	if err := r.notifyRetentionLocked(r.pendingBytes + r.queuedBytes + ev.size); err != nil {
+		r.failClosedLocked(err)
+		return false
+	}
 	r.queuedBytes += ev.size
 	r.mu.Unlock()
 
@@ -260,6 +280,7 @@ func (r *CursorRun) pushEvent(ev runEvent) bool {
 		if r.queuedBytes < 0 {
 			r.queuedBytes = 0
 		}
+		_ = r.notifyRetentionLocked(r.pendingBytes + r.queuedBytes)
 		r.mu.Unlock()
 		return false
 	}
@@ -278,6 +299,7 @@ func (r *CursorRun) releaseEvent(ev runEvent) {
 	if r.queuedBytes < 0 {
 		r.queuedBytes = 0
 	}
+	_ = r.notifyRetentionLocked(r.pendingBytes + r.queuedBytes)
 	r.mu.Unlock()
 }
 
@@ -313,10 +335,111 @@ func (r *CursorRun) addPending(call CursorToolCall) bool {
 			errCursorRunPendingBytes, size, base, cursorRunPendingBytesMax))
 		return false
 	}
+	if err := r.notifyRetentionLocked(base + size + r.queuedBytes); err != nil {
+		r.failClosedLocked(err)
+		return false
+	}
 	r.pending[call.CallID] = call
 	r.pendingBytes = base + size
 	r.mu.Unlock()
 	return true
+}
+
+// retainedBytesLocked returns the pending tool-call plus queued-event byte
+// total the aggregate parked budget accounts. Callers hold r.mu.
+func (r *CursorRun) retainedBytesLocked() int64 {
+	total := r.pendingBytes
+	if total < 0 {
+		total = 0
+	}
+	total += r.queuedBytes
+	if total < 0 {
+		total = 0
+	}
+	return total
+}
+
+// notifyRetentionLocked reports a candidate pending+queued total to the
+// parked-run store's aggregate observer. It is called before a growth is
+// committed, so a denial leaves both per-run accounting and retained payload
+// unchanged; shrinks are always accepted. Callers hold r.mu.
+func (r *CursorRun) notifyRetentionLocked(total int64) error {
+	if r.retention == nil {
+		return nil
+	}
+	return r.retention(total)
+}
+
+// SetRetentionLimit installs the parked-run store's aggregate observers: one
+// for this run's pending+queued bytes and one for its KV blob store. Both are
+// invoked immediately with the current totals, so a run that already exceeds
+// the aggregate bound is refused before it is indexed as parked. A later
+// rejected growth fails the run closed. The store must call
+// ClearRetentionLimits when it releases the run.
+func (r *CursorRun) SetRetentionLimit(stream func(total int64) error, blobs func(bytes int64, entries int) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return errors.New("cursor: run closed before retention limits were installed")
+	}
+	if r.retention != nil {
+		return errors.New("cursor: run retention limits already installed")
+	}
+	if stream == nil && blobs == nil {
+		return errors.New("cursor: retention limits require an observer")
+	}
+	if stream != nil {
+		if err := stream(r.retainedBytesLocked()); err != nil {
+			return err
+		}
+	}
+	if blobs != nil {
+		if err := r.blobs.SetRetentionLimit(blobs); err != nil {
+			if stream != nil {
+				_ = stream(0)
+			}
+			return err
+		}
+	}
+	r.retention = stream
+	return nil
+}
+
+// ClearRetentionLimits releases both aggregate observers and reports zero to
+// each, so the parked-run store's counters drop the run's bytes exactly once.
+// It is idempotent.
+func (r *CursorRun) ClearRetentionLimits() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.retention != nil {
+		_ = r.retention(0)
+		r.retention = nil
+	}
+	r.blobs.ClearRetentionLimit()
+}
+
+// PendingBytes returns the exact bytes retained by pending tool calls. The
+// parked-run store uses it to enforce its aggregate stream budget; the value is
+// O(1) and never scans the pending map.
+func (r *CursorRun) PendingBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.pendingBytes < 0 {
+		return 0
+	}
+	return r.pendingBytes
+}
+
+// QueuedBytes returns the exact payload bytes retained by queued or in-flight
+// events. The parked-run store uses it to enforce its aggregate stream budget;
+// the value is O(1) and never scans the event channel.
+func (r *CursorRun) QueuedBytes() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.queuedBytes < 0 {
+		return 0
+	}
+	return r.queuedBytes
 }
 
 // cursorRunToolCallSize is the single retained-size owner for a pending tool
@@ -342,6 +465,7 @@ func (r *CursorRun) takePendingLocked(id string) (CursorToolCall, bool) {
 	if r.pendingBytes < 0 {
 		r.pendingBytes = 0
 	}
+	_ = r.notifyRetentionLocked(r.pendingBytes + r.queuedBytes)
 	return call, true
 }
 
@@ -460,6 +584,7 @@ func (r *CursorRun) activeTurn(ctx context.Context, drive func() TurnResult) Tur
 func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResult {
 	var calls []CursorToolCall
 	seen := map[string]bool{}
+	visible := false
 	var settle *time.Timer
 	var idle <-chan time.Time
 	expired := false
@@ -477,7 +602,7 @@ func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResu
 			select {
 			case ev, ok = <-r.events:
 			default:
-				return r.finish(TurnParked, calls, nil)
+				return r.finish(TurnParked, calls, nil, visible)
 			}
 		} else {
 			select {
@@ -496,18 +621,21 @@ func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResu
 			closeErr := r.closeErr
 			r.mu.Unlock()
 			if closeErr != nil {
-				return r.finish(TurnErrored, calls, closeErr)
+				return r.finish(TurnErrored, calls, closeErr, visible)
 			}
-			return r.finish(TurnErrored, calls, io.ErrUnexpectedEOF)
+			return r.finish(TurnErrored, calls, io.ErrUnexpectedEOF, visible)
 		}
 		r.releaseEvent(ev)
 		switch ev.kind {
 		case evDelta:
+			if cursorVisibleDelta(ev.delta) {
+				visible = true
+			}
 			if emitDelta != nil {
 				if err := emitDelta(ev.delta); err != nil {
 					// Writing to the local client failed (it disconnected
 					// mid-stream): a cancellation, not an upstream error.
-					return TurnResult{Outcome: TurnErrored, Err: err, ClientAbort: true}
+					return TurnResult{Outcome: TurnErrored, Err: err, VisibleOutput: visible, ClientAbort: true}
 				}
 			}
 		case evToolCall:
@@ -516,12 +644,13 @@ func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResu
 			}
 			seen[ev.toolCall.CallID] = true
 			calls = append(calls, *ev.toolCall)
+			visible = true
 			if emitDelta != nil {
 				if err := emitDelta(map[string]any{"tool_calls": []map[string]any{{
 					"index": len(calls) - 1, "id": ev.toolCall.CallID, "type": "function",
 					"function": map[string]any{"name": ev.toolCall.Name, "arguments": ev.toolCall.Args},
 				}}}); err != nil {
-					return TurnResult{Outcome: TurnErrored, Err: err, ClientAbort: true}
+					return TurnResult{Outcome: TurnErrored, Err: err, VisibleOutput: visible, ClientAbort: true}
 				}
 			}
 			// Don't park on the first call: Cursor may issue MULTIPLE tool
@@ -537,20 +666,37 @@ func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResu
 			}
 			expired = false
 		case evDone:
-			return r.finish(TurnFinished, calls, nil)
+			return r.finish(TurnFinished, calls, nil, visible)
 		case evErr:
-			return r.finish(TurnErrored, calls, ev.err)
+			return r.finish(TurnErrored, calls, ev.err, visible)
 		}
 	}
 }
 
+// cursorVisibleDelta reports whether an emitted delta carries client-visible
+// output: non-empty answer or reasoning text, or at least one tool call. The
+// void predicate uses the turn-wide OR of this at the emit boundary, never a
+// token-usage count.
+func cursorVisibleDelta(delta map[string]any) bool {
+	if s, ok := delta["content"].(string); ok && s != "" {
+		return true
+	}
+	if s, ok := delta["reasoning_content"].(string); ok && s != "" {
+		return true
+	}
+	if calls, ok := delta["tool_calls"].([]map[string]any); ok && len(calls) > 0 {
+		return true
+	}
+	return false
+}
+
 // finish assembles the TurnResult with the usage snapshot.
-func (r *CursorRun) finish(outcome TurnOutcome, calls []CursorToolCall, err error) TurnResult {
+func (r *CursorRun) finish(outcome TurnOutcome, calls []CursorToolCall, err error, visible bool) TurnResult {
 	prompt, output, reasoning := r.usageSnapshot()
 	if errors.Is(err, metrics.ErrMetricRange) {
 		prompt, output, reasoning = 0, 0, 0
 	}
-	return TurnResult{Outcome: outcome, ToolCalls: calls, Prompt: prompt, Output: output, Reasoning: reasoning, Err: err}
+	return TurnResult{Outcome: outcome, ToolCalls: calls, Prompt: prompt, Output: output, Reasoning: reasoning, VisibleOutput: visible, Err: err}
 }
 
 // ToolResult is one client-supplied answer for a parked tool call, keyed by

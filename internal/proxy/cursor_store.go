@@ -24,6 +24,8 @@ package proxy
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -48,6 +50,25 @@ const cursorParkedBlobBytesMax = 512 << 20 // 512 MiB
 // cursorRunMax * 65,536 entries; one million admits many normal conversations
 // while failing later parks closed. Internal safety guardrail, not user-tunable.
 const cursorParkedBlobEntriesMax = 1_000_000
+
+// cursorParkedStreamBytesMax bounds the aggregate retained pending tool-call
+// payload plus queued event payload of all parked runs in one store. The
+// per-run caps alone allow cursorRunMax * 128 MiB; 512 MiB admits many normal
+// conversations while failing later parks (or growth of an already parked run)
+// closed. Internal safety guardrail, not user-tunable.
+const cursorParkedStreamBytesMax = 512 << 20 // 512 MiB
+
+var (
+	// errCursorParkedStreamBytes is the stable fail-closed reason for a parked
+	// run whose pending+queued bytes would exceed the aggregate stream budget.
+	errCursorParkedStreamBytes = errors.New("cursor: parked run stream byte limit exceeded")
+	// errCursorParkedBlobBytes is the stable fail-closed reason for a parked
+	// run whose KV store would exceed the aggregate blob byte budget.
+	errCursorParkedBlobBytes = errors.New("cursor: parked run blob byte limit exceeded")
+	// errCursorParkedBlobEntries is the stable fail-closed reason for a parked
+	// run whose KV store would exceed the aggregate blob entry budget.
+	errCursorParkedBlobEntries = errors.New("cursor: parked run blob entry limit exceeded")
+)
 
 // Only an immutable fingerprint is retained; no routing credential is stored.
 type cursorScope [sha256.Size]byte
@@ -84,21 +105,36 @@ type cursorRunStore struct {
 	entries       map[*providerformat.CursorRun]*cursorRunEntry
 	timer         *time.Timer
 	timerRevision uint64
-	// blobBytesMax and blobEntriesMax are the aggregate retained-blob budgets
-	// applied at park time. newCursorRunStore seeds them from the production
-	// caps; they are store state (not configuration) so tests can exercise the
-	// boundaries without allocating the production budget.
-	blobBytesMax   int64
-	blobEntriesMax int
+	// streamBytesMax, streamReserveBytes, blobBytesMax and blobEntriesMax are
+	// the aggregate budgets applied to parked runs. newCursorRunStore seeds
+	// them from the production caps; they are store state (not configuration)
+	// so tests can exercise the boundaries without allocating the production
+	// budget. streamReserveBytes is the per-run pending+queued allowance kept
+	// free outside the parked stream budget for the run being actively driven.
+	streamBytesMax     int64
+	streamReserveBytes int64
+	blobBytesMax       int64
+	blobEntriesMax     int
+
+	// retentionMu guards the aggregate counters below. It is separate from mu
+	// because parked-run growth hooks run under a run's own lock and must never
+	// take mu (store operations take mu and then these counters). The hooks are
+	// the only writers while a run is parked, so all four budgets stay O(1).
+	retentionMu sync.Mutex
+	streamBytes int64
+	blobBytes   int64
+	blobEntries int
 }
 
 func newCursorRunStore(ttl time.Duration) *cursorRunStore {
 	return &cursorRunStore{
-		ttl:            ttl,
-		byCall:         map[cursorCallKey]*cursorRunEntry{},
-		entries:        map[*providerformat.CursorRun]*cursorRunEntry{},
-		blobBytesMax:   cursorParkedBlobBytesMax,
-		blobEntriesMax: cursorParkedBlobEntriesMax,
+		ttl:                ttl,
+		byCall:             map[cursorCallKey]*cursorRunEntry{},
+		entries:            map[*providerformat.CursorRun]*cursorRunEntry{},
+		streamBytesMax:     cursorParkedStreamBytesMax,
+		streamReserveBytes: providerformat.CursorRunRetainedBytesMax(),
+		blobBytesMax:       cursorParkedBlobBytesMax,
+		blobEntriesMax:     cursorParkedBlobEntriesMax,
 	}
 }
 
@@ -113,8 +149,9 @@ func (s *cursorRunStore) UpdateTTL(ttl time.Duration) {
 }
 
 // park registers a run as parked on the given pending tool_call_ids. Returns
-// false (and does not park) if at capacity or over the aggregate blob budgets -
-// the caller then closes the run and the client cold-starts on the next request.
+// false (and does not park) if at capacity or over an aggregate pending/queued
+// stream or blob budget - the caller then closes the run and the client
+// cold-starts on the next request.
 func (s *cursorRunStore) park(scope cursorScope, run *providerformat.CursorRun) bool {
 	ids := run.PendingToolCallIDs()
 	list := make([]string, 0, len(ids))
@@ -137,15 +174,19 @@ func (s *cursorRunStore) parkWith(scope cursorScope, run *providerformat.CursorR
 	if len(s.entries) >= cursorRunMax || run.Closed() || s.entries[run] != nil {
 		return false
 	}
-	if !s.blobBudgetAllowsLocked(run) {
-		return false
-	}
 	e := &cursorRunEntry{run: run, scope: scope, pending: map[string]bool{}, at: time.Now()}
 	for _, id := range ids {
 		if id == "" || e.pending[id] || s.byCall[cursorCallKey{scope, id}] != nil {
 			return false
 		}
 		e.pending[id] = true
+	}
+	// The hooks both validate the candidate's current retained bytes against
+	// the aggregate budgets and install themselves for later growth. A
+	// rejected candidate leaves the store's counters untouched.
+	streamLimit, blobLimit := s.retentionLimits()
+	if err := run.SetRetentionLimit(streamLimit, blobLimit); err != nil {
+		return false
 	}
 	s.entries[run] = e
 	for id := range e.pending {
@@ -154,33 +195,106 @@ func (s *cursorRunStore) parkWith(scope cursorScope, run *providerformat.CursorR
 	return true
 }
 
-// blobBudgetAllowsLocked reports whether admitting run would keep the parked
-// store's aggregate retained blob bytes and entries within blobBytesMax and
-// blobEntriesMax. It reads O(1) accessors under s.mu; no blob contents are
-// scanned or copied, and existing parked entries are never evicted or mutated
-// to make room. Caller holds s.mu.
-func (s *cursorRunStore) blobBudgetAllowsLocked(run *providerformat.CursorRun) bool {
-	totalBytes := run.BlobBytes()
-	if totalBytes < 0 || totalBytes > s.blobBytesMax {
+// retentionLimits builds the two per-run observers installed while a run is
+// parked. Each closure tracks its own last reported total and applies the
+// delta to the store's aggregate counters: a positive delta is refused when it
+// would cross the corresponding budget, a negative one always releases. The
+// closures run under the run's own mutex (stream) or the blob store's mutex
+// (blobs) and only touch retentionMu, never s.mu.
+func (s *cursorRunStore) retentionLimits() (stream func(total int64) error, blobs func(bytes int64, entries int) error) {
+	var streamLast int64
+	stream = func(total int64) error {
+		delta := total - streamLast
+		if delta == 0 {
+			return nil
+		}
+		if !s.applyStreamDelta(delta) {
+			return fmt.Errorf("%w (run %d bytes, parked %d, limit %d)",
+				errCursorParkedStreamBytes, total, s.streamUsed(), s.parkedStreamLimit())
+		}
+		streamLast = total
+		return nil
+	}
+
+	var blobLastBytes int64
+	var blobLastEntries int
+	blobs = func(bytes int64, entries int) error {
+		bytesDelta := bytes - blobLastBytes
+		entriesDelta := entries - blobLastEntries
+		if bytesDelta == 0 && entriesDelta == 0 {
+			return nil
+		}
+		if err := s.applyBlobDelta(bytesDelta, entriesDelta); err != nil {
+			return fmt.Errorf("%w (run %d bytes/%d entries, parked %d bytes/%d entries)",
+				err, bytes, entries, s.blobBytesUsed(), s.blobEntriesUsed())
+		}
+		blobLastBytes, blobLastEntries = bytes, entries
+		return nil
+	}
+	return stream, blobs
+}
+
+// parkedStreamLimit is the aggregate parked pending+queued budget after
+// reserving one per-run allowance for the actively driven run. The reserve is
+// not part of parked accounting, so one active run at its own per-run caps
+// keeps total stream retention within cursorParkedStreamBytesMax.
+func (s *cursorRunStore) parkedStreamLimit() int64 {
+	limit := s.streamBytesMax - s.streamReserveBytes
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+func (s *cursorRunStore) applyStreamDelta(delta int64) bool {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	if delta > 0 && delta > s.parkedStreamLimit()-s.streamBytes {
 		return false
 	}
-	totalEntries := run.BlobEntries()
-	if totalEntries < 0 || totalEntries > s.blobEntriesMax {
-		return false
-	}
-	for _, e := range s.entries {
-		n := e.run.BlobBytes()
-		if n < 0 || n > s.blobBytesMax-totalBytes {
-			return false
-		}
-		totalBytes += n
-		entries := e.run.BlobEntries()
-		if entries < 0 || entries > s.blobEntriesMax-totalEntries {
-			return false
-		}
-		totalEntries += entries
+	s.streamBytes += delta
+	if s.streamBytes < 0 {
+		s.streamBytes = 0
 	}
 	return true
+}
+
+func (s *cursorRunStore) applyBlobDelta(bytesDelta int64, entriesDelta int) error {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	if bytesDelta > 0 && bytesDelta > s.blobBytesMax-s.blobBytes {
+		return errCursorParkedBlobBytes
+	}
+	if entriesDelta > 0 && int64(entriesDelta) > int64(s.blobEntriesMax)-int64(s.blobEntries) {
+		return errCursorParkedBlobEntries
+	}
+	s.blobBytes += bytesDelta
+	if s.blobBytes < 0 {
+		s.blobBytes = 0
+	}
+	s.blobEntries += entriesDelta
+	if s.blobEntries < 0 {
+		s.blobEntries = 0
+	}
+	return nil
+}
+
+func (s *cursorRunStore) streamUsed() int64 {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	return s.streamBytes
+}
+
+func (s *cursorRunStore) blobBytesUsed() int64 {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	return s.blobBytes
+}
+
+func (s *cursorRunStore) blobEntriesUsed() int {
+	s.retentionMu.Lock()
+	defer s.retentionMu.Unlock()
+	return s.blobEntries
 }
 
 // findByToolTail returns the parked run owning the LONGEST contiguous trailing
@@ -222,8 +336,10 @@ func (s *cursorRunStore) findByToolTail(scope cursorScope, ids []string) (*provi
 	return target.run, tail
 }
 
-// removeLocked drops an entry from both indexes.
+// removeLocked drops an entry from both indexes and releases the run's
+// aggregate retention accounting exactly once.
 func (s *cursorRunStore) removeLocked(e *cursorRunEntry) {
+	e.run.ClearRetentionLimits()
 	delete(s.entries, e.run)
 	for id := range e.pending {
 		key := cursorCallKey{e.scope, id}

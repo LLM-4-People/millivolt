@@ -6,11 +6,14 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -253,12 +256,140 @@ func estimateInputTokens(body []byte) int64 {
 	return int64(len(in.Messages)) + chars/4 + cursorAgentContextBaseTokens
 }
 
-// accumulateJSONDelta folds a streamed delta into a non-streaming completion.
-func accumulateJSONDelta(content *strings.Builder, toolCalls *[]map[string]any, delta map[string]any) {
+// Non-streaming Cursor completions buffer the whole answer before writing one
+// JSON body. cursorJSONOutputBytesMax is the internal accumulated-output
+// budget: it bounds content, reasoning text when present, tool-call arguments
+// and a conservative encoder allowance, so `stream:false` cannot materialize an
+// unbounded upstream turn. Sized above normal completions (an 8 MiB answer fits
+// with room to spare) and far below a hostile 32 MiB-frame stream. Internal
+// safety guardrail, not user-tunable.
+const cursorJSONOutputBytesMax = 16 << 20 // 16 MiB
+
+// cursorJSONEnvelopeBytes reserves room for the completion envelope (id,
+// object, created, model, choices, usage) and JSON syntax outside the measured
+// deltas.
+const cursorJSONEnvelopeBytes = 4 << 10
+
+// Per-delta/per-tool-call syntax allowances keep the accounting close to the
+// encoder's real output without marshaling every delta twice.
+const (
+	cursorJSONDeltaOverhead    = 64
+	cursorJSONToolCallOverhead = 96
+)
+
+// errCursorJSONOutputBytes is the stable fail-closed reason for exceeding the
+// non-streaming accumulated-output budget.
+var errCursorJSONOutputBytes = errors.New("cursor: non-streaming output byte limit exceeded")
+
+// cursorJSONAccumulator is the single owner of non-streaming Cursor output:
+// the content builder, tool-call slice and the byte budget are updated
+// together, so a delta that would overflow never appends partial output.
+type cursorJSONAccumulator struct {
+	content   strings.Builder
+	toolCalls []map[string]any
+	bytes     int64
+	max       int64
+}
+
+func newCursorJSONAccumulator() *cursorJSONAccumulator {
+	return &cursorJSONAccumulator{bytes: cursorJSONEnvelopeBytes, max: cursorJSONOutputBytesMax}
+}
+
+// reset clears a voided turn's accumulation before a re-ask turn reuses it.
+func (a *cursorJSONAccumulator) reset() {
+	a.content.Reset()
+	a.toolCalls = a.toolCalls[:0]
+	a.bytes = cursorJSONEnvelopeBytes
+}
+
+// add folds one streamed delta into the non-streaming completion. The size is
+// checked before either builder/slice is mutated, so an over-budget turn leaves
+// the accumulated output unchanged and the driver can return a bounded error.
+func (a *cursorJSONAccumulator) add(delta map[string]any) error {
+	size := cursorJSONDeltaSize(delta)
+	if size > a.max-a.bytes {
+		return fmt.Errorf("%w (delta %d bytes, accumulated %d, limit %d)",
+			errCursorJSONOutputBytes, size, a.bytes, a.max)
+	}
 	if c, ok := delta["content"].(string); ok {
-		content.WriteString(c)
+		a.content.WriteString(c)
 	}
 	if tcs, ok := delta["tool_calls"].([]map[string]any); ok {
-		*toolCalls = append(*toolCalls, tcs...)
+		a.toolCalls = append(a.toolCalls, tcs...)
 	}
+	a.bytes += size
+	return nil
+}
+
+// cursorJSONDeltaSize estimates the encoded bytes a delta contributes. Reasoning
+// text is counted even though the Cursor non-stream completion does not emit a
+// reasoning body: if a delta ever carries it, it is part of the turn's output
+// envelope. cursorJSONStringSize follows encoding/json's HTML-escaping policy, which
+// the final Encoder uses.
+func cursorJSONDeltaSize(delta map[string]any) int64 {
+	n := int64(cursorJSONDeltaOverhead)
+	if c, ok := delta["content"].(string); ok {
+		n += cursorJSONStringSize(c)
+	}
+	if r, ok := delta["reasoning_content"].(string); ok {
+		n += cursorJSONStringSize(r)
+	}
+	if tcs, ok := delta["tool_calls"].([]map[string]any); ok {
+		for _, tc := range tcs {
+			n += cursorJSONToolCallOverhead
+			if id, ok := tc["id"].(string); ok {
+				n += cursorJSONStringSize(id)
+			}
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					n += cursorJSONStringSize(name)
+				}
+				if args, ok := fn["arguments"].(string); ok {
+					n += cursorJSONStringSize(args)
+				}
+			}
+		}
+	}
+	return n
+}
+
+// cursorJSONStringSize returns the encoded length of s under encoding/json's default
+// HTML escaping: the short escapes (quote, backslash, \b, \f, \n, \r, \t) take
+// two bytes, other control bytes and <, >, & take six, invalid UTF-8 becomes
+// U+FFFD, and U+2028/U+2029 are escaped. This keeps the budget aligned with the
+// bytes json.Encoder writes without materializing a second copy of each string.
+func cursorJSONStringSize(s string) int64 {
+	var n int64
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c < utf8.RuneSelf {
+			switch c {
+			case '"', '\\', '\b', '\f', '\n', '\r', '\t':
+				n += 2
+			case '<', '>', '&':
+				n += 6
+			default:
+				if c < 0x20 {
+					n += 6
+				} else {
+					n++
+				}
+			}
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			n += 3 // encoding/json writes U+FFFD for invalid UTF-8
+			i++
+			continue
+		}
+		if r == '\u2028' || r == '\u2029' {
+			n += 6
+		} else {
+			n += int64(size)
+		}
+		i += size
+	}
+	return n
 }

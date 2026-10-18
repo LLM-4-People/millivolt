@@ -26,7 +26,7 @@ func TestRunRejectsUnrepresentableProtoCounts(t *testing.T) {
 		if !errors.Is(err, metrics.ErrMetricRange) {
 			t.Fatalf("checkpoint=%v accepted count outside int64: %v", checkpoint, err)
 		}
-		result := r.finish(TurnErrored, nil, err)
+		result := r.finish(TurnErrored, nil, err, false)
 		if result.Prompt != 0 || result.Output != 0 {
 			t.Fatalf("invalid usage exposed partial counts: %+v", result)
 		}
@@ -43,7 +43,7 @@ func TestRunCountAccumulationRejectsOverflowAtomically(t *testing.T) {
 	if r.usageDeltaSum != math.MaxInt64 {
 		t.Fatalf("failed update mutated counter to %d", r.usageDeltaSum)
 	}
-	if result := r.finish(TurnErrored, nil, err); result.Prompt != 0 || result.Output != 0 {
+	if result := r.finish(TurnErrored, nil, err, false); result.Prompt != 0 || result.Output != 0 {
 		t.Fatalf("partial usage exposed on failure: %+v", result)
 	}
 }

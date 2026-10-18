@@ -153,9 +153,45 @@ type KVBlobStore struct {
 	mu    sync.Mutex
 	m     map[string][]byte
 	bytes int64 // exact sum of retained blob lengths, guarded by mu
+	// retention is the parked-run store's aggregate blob observer. It is
+	// installed only while the owning run is parked and is called under mu
+	// with the candidate byte/entry totals before a put commits.
+	retention func(bytes int64, entries int) error
 }
 
 func newKVBlobStore() *KVBlobStore { return &KVBlobStore{m: map[string][]byte{}} }
+
+// SetRetentionLimit installs the aggregate blob observer used while the owning
+// run is parked. The initial call reports the store's current retained bytes
+// and entries, so an over-budget candidate is refused before it is parked; a
+// later rejected put leaves the map and byte accounting unchanged.
+func (s *KVBlobStore) SetRetentionLimit(limit func(bytes int64, entries int) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit == nil {
+		return errors.New("cursor: blob retention limit requires an observer")
+	}
+	if s.retention != nil {
+		return errors.New("cursor: blob retention limit already installed")
+	}
+	if err := limit(s.bytes, len(s.m)); err != nil {
+		return err
+	}
+	s.retention = limit
+	return nil
+}
+
+// ClearRetentionLimit releases the aggregate observer and reports zero, so the
+// parked-run store drops this run's blob bytes and entries exactly once. It is
+// idempotent.
+func (s *KVBlobStore) ClearRetentionLimit() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retention != nil {
+		_ = s.retention(0, 0)
+		s.retention = nil
+	}
+}
 
 // put stores data under id. It is the store's single insertion owner: a new id
 // is rejected when the map is already at cursorBlobStoreEntriesMax, and a new
@@ -182,6 +218,15 @@ func (s *KVBlobStore) put(id, data []byte) error {
 	if size > cursorBlobStoreBytesMax-base {
 		return fmt.Errorf("%w (blob %d bytes, retained %d, limit %d)",
 			errCursorBlobBytes, size, base, cursorBlobStoreBytesMax)
+	}
+	entries := len(s.m)
+	if !exists {
+		entries++
+	}
+	if s.retention != nil {
+		if err := s.retention(base+size, entries); err != nil {
+			return err
+		}
 	}
 	s.m[key] = data
 	s.bytes = base + size

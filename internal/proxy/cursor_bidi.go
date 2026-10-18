@@ -324,7 +324,7 @@ func (s *Server) serveCursorBidi(ctx context.Context, w http.ResponseWriter, r *
 	// (startCursorRun owns the cleanup closure and heartbeat cadence).
 	run := s.startCursorRun(pw, resp.Body, blobs, upstreamCancel)
 
-	// The one-shot re-ask: when the resume-action turn voids (0 output), the
+	// The one-shot re-ask: when the resume-action turn voids (nothing visible), the
 	// turn driver may transparently re-drive the SAME request as a fresh user
 	// turn (user_message_action) on a NEW upstream run - nothing visible was
 	// emitted for the void turn, so the client just sees the re-ask's answer
@@ -707,7 +707,7 @@ func (s *Server) reaskAfterVoid(run *providerformat.CursorRun, rec *metrics.Reco
 }
 
 // serveRunStream drives a fresh run's turn, writing OpenAI SSE. When a
-// resume-action turn voids (0 output tokens) and a re-ask opener is available,
+// resume-action turn voids (nothing visible was emitted) and a re-ask opener is available,
 // the void is absorbed as one transparent re-ask: a NEW run opens with the
 // same request re-translated as a fresh user turn, and its answer continues on
 // the SAME client stream (the void turn emitted nothing the client could see,
@@ -807,7 +807,8 @@ func recordCursorTools(rec *metrics.Record, calls []providerformat.CursorToolCal
 // tokens, finish stop - because there was nothing server-side to resume (the
 // parked stream was lost to a restart, TTL expiry, or an upstream stream
 // reset). Surfaced on the record, in the in-band SSE error, and in the
-// non-streaming error body.
+// non-streaming error body. The text is retained for wire compatibility; the
+// void predicate itself is the turn's visible-output flag, not its token count.
 const cursorVoidMsg = "cursor returned an empty turn for a resume-action continuation (0 output tokens, finish stop) - there was nothing to resume upstream"
 
 // cursorEmptyTurn is the void's error identity: the record's error type
@@ -816,7 +817,7 @@ const cursorVoidMsg = "cursor returned an empty turn for a resume-action continu
 const cursorEmptyTurn = "empty_turn"
 
 func cursorVoidTurn(resume bool, r providerformat.TurnResult) bool {
-	return resume && r.Outcome == providerformat.TurnFinished && r.Output == 0 && !r.ClientAbort
+	return resume && r.Outcome == providerformat.TurnFinished && !r.VisibleOutput && !r.ClientAbort
 }
 
 func stampCursorVoid(rec *metrics.Record) {
@@ -878,7 +879,7 @@ func cursorTurnErrorText(err error) string {
 // usage summary hasn't arrived yet (a parked turn ends before the summary
 // lands), the input side falls back to the request-payload estimate so a turn
 // never reports 0 input tokens. resumeRequest marks an empty-resume-action
-// continuation; when such a turn finishes with 0 output tokens (the void) the
+// continuation; when such a turn finishes with no visible output (the void) the
 // outcome is surfaced as an error to both the client and the dashboard instead
 // of a silently empty success.
 func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.CursorRun, result providerformat.TurnResult, emit func(map[string]any, any) error, rec *metrics.Record, id string, rr cursorTurnRender, resumeRequest bool) {
@@ -992,36 +993,43 @@ func usageChunk(w http.ResponseWriter, id, model string, includeUsage bool, prom
 // Mirrors serveRunStream's re-ask (nothing was written yet, so the retry is
 // fully transparent - the client sees only the re-ask's completion).
 func (s *Server) serveRunJSON(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, id string, rec *metrics.Record, rr cursorTurnRender, resumeRequest bool, reask func() (*providerformat.CursorRun, error)) {
-	var content strings.Builder
-	var toolCalls []map[string]any
+	acc := newCursorJSONAccumulator()
 	accumulate := func(delta map[string]any) error {
 		cursorTrackDelta(rec, delta)
-		accumulateJSONDelta(&content, &toolCalls, delta)
-		return nil
+		return acc.add(delta)
 	}
-	result := run.RunTurn(ctx, accumulate)
+	result := cursorJSONTurnResult(run.RunTurn(ctx, accumulate))
 	if cursorVoidTurn(resumeRequest, result) && reask != nil {
 		if next := s.reaskAfterVoid(run, rec, reask); next != nil {
-			content.Reset()
-			toolCalls = toolCalls[:0]
-			result = next.RunTurn(ctx, accumulate)
-			s.writeRunJSON(w, next, result, content.String(), toolCalls, rec, id, rr, true)
+			acc.reset()
+			result = cursorJSONTurnResult(next.RunTurn(ctx, accumulate))
+			s.writeRunJSON(w, next, result, acc.content.String(), acc.toolCalls, rec, id, rr, true)
 			return
 		}
 	}
-	s.writeRunJSON(w, run, result, content.String(), toolCalls, rec, id, rr, resumeRequest)
+	s.writeRunJSON(w, run, result, acc.content.String(), acc.toolCalls, rec, id, rr, resumeRequest)
 }
 
 // serveResumeJSON resumes a parked run and writes a single chat.completion.
 func (s *Server) serveResumeJSON(ctx context.Context, w http.ResponseWriter, run *providerformat.CursorRun, results []cursorToolResult, steerText string, id string, rec *metrics.Record, rr cursorTurnRender) {
-	var content strings.Builder
-	var toolCalls []map[string]any
-	result := run.ResumeTurn(ctx, cursorToolResultMap(results), steerText, func(delta map[string]any) error {
+	acc := newCursorJSONAccumulator()
+	result := cursorJSONTurnResult(run.ResumeTurn(ctx, cursorToolResultMap(results), steerText, func(delta map[string]any) error {
 		cursorTrackDelta(rec, delta)
-		accumulateJSONDelta(&content, &toolCalls, delta)
-		return nil
-	})
-	s.writeRunJSON(w, run, result, content.String(), toolCalls, rec, id, rr, false)
+		return acc.add(delta)
+	}))
+	s.writeRunJSON(w, run, result, acc.content.String(), acc.toolCalls, rec, id, rr, false)
+}
+
+// cursorJSONTurnResult reclassifies the accumulator's internal byte-budget
+// error. runTurn reports every emitDelta failure as a client abort, but this
+// failure is the proxy's own bounded-output guardrail, not a dead local client:
+// clearing ClientAbort lets writeRunJSON render the bounded 502 instead of
+// silently keeping the upstream 200. The run itself already stopped.
+func cursorJSONTurnResult(result providerformat.TurnResult) providerformat.TurnResult {
+	if errors.Is(result.Err, errCursorJSONOutputBytes) {
+		result.ClientAbort = false
+	}
+	return result
 }
 
 // emitHTTPError writes an HTTP error body with http.Error's exact observable
@@ -1038,6 +1046,21 @@ func emitHTTPError(w http.ResponseWriter, body string, code int) error {
 	w.WriteHeader(code)
 	_, err := fmt.Fprintln(w, body)
 	return err
+}
+
+// writeRunJSONError writes one non-streaming error body and mirrors the 502 on
+// the record only when the body reached the client. This path has written no
+// success bytes, so the record must describe the status the client received;
+// the streaming surfaces keep their already-committed 200 because headers were
+// sent before the turn failed. A failed error-body write is the LOCAL client
+// disconnecting: the documented Cursor outcome stays the upstream 200 plus
+// ClientDisconnected, never a 502 no client saw.
+func writeRunJSONError(w http.ResponseWriter, rec *metrics.Record, body string, code int) {
+	if err := emitHTTPError(w, body, code); err != nil {
+		markPostCommitGone(rec, err)
+		return
+	}
+	rec.StatusCode = code
 }
 
 // writeRunJSON renders a non-streaming chat.completion from a turn result.
@@ -1063,7 +1086,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		rec.ErrorType = "transform_error"
 		msg := cursorTurnErrorText(result.Err)
 		rec.ErrorMsg = msg
-		markPostCommitGone(rec, emitHTTPError(w, errJSON(typeAPIError, msg), http.StatusBadGateway))
+		writeRunJSONError(w, rec, errJSON(typeAPIError, msg), http.StatusBadGateway)
 		return
 	}
 	if result.Outcome == providerformat.TurnParked && !s.cursorRuns.park(rr.scope, run) {
@@ -1078,7 +1101,7 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 		// written yet, so surface it with a real HTTP error status + body.
 		stampCursorVoid(rec)
 		rec.FinishReason = "stop"
-		markPostCommitGone(rec, emitHTTPError(w, errJSON(cursorEmptyTurn, cursorVoidMsg), http.StatusBadGateway))
+		writeRunJSONError(w, rec, errJSON(cursorEmptyTurn, cursorVoidMsg), http.StatusBadGateway)
 		return
 	}
 
