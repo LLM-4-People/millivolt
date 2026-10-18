@@ -153,7 +153,14 @@ func (w *initialFeedWriter) Write(p []byte) (int, error) {
 	}
 	n, err := w.ResponseRecorder.Write(p)
 	if w.written != nil {
-		w.written <- struct{}{}
+		// A batched write carries several complete frames. Signal once per
+		// frame so tests that wait for event shapes remain meaningful.
+		for range strings.Count(string(p), "\n\n") {
+			select {
+			case w.written <- struct{}{}:
+			default:
+			}
+		}
 	}
 	return n, err
 }
