@@ -48,10 +48,18 @@ const maxSchedulerGroups = 100_000
 
 // Scheduler manages ordered queues per group key.
 type Scheduler struct {
-	mu     sync.Mutex // guards opts and groups
+	mu     sync.Mutex // guards opts, groups and providerGroups
 	opts   Options
 	groups map[string]*group
-	storms stormState
+	// providerGroups indexes groups by their attributed provider, so a
+	// provider throttle release drains only that provider's groups instead of
+	// scanning every group. Guarded by mu. A group is appended exactly once,
+	// on its first non-empty attribution, and is never removed because groups
+	// themselves are retained for the process lifetime (bounded by
+	// maxSchedulerGroups). A future group-removal path must delete its index
+	// entry under the same lock.
+	providerGroups map[string][]*group
+	storms         stormState
 
 	// policy is the operator hold set (all / new-unseen / named
 	// clients / named providers). Read via atomic pointer so drain can
@@ -78,7 +86,7 @@ type Scheduler struct {
 // config.Default(), never re-derived here, so there is exactly one source of
 // truth and no conflicting fallback values.
 func New(opts Options) *Scheduler {
-	s := &Scheduler{opts: opts, groups: make(map[string]*group), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
+	s := &Scheduler{opts: opts, groups: make(map[string]*group), providerGroups: make(map[string][]*group), kick: make(chan struct{}), holdCount: make(map[string]int), gates: make(map[string]*providerGate)}
 	s.policy.Store(&policySnap{})
 	s.publishGatesLocked()
 	s.storms.configure(opts.Storm)
@@ -107,8 +115,14 @@ func (s *Scheduler) UpdateOptions(opts Options) {
 
 // group is a single FIFO queue with concurrency and pacing state.
 type group struct {
-	sched          *Scheduler
-	provider       string // Record.Provider; set from WaiterHooks, used to drain throttles
+	sched *Scheduler
+	// provider is the Record.Provider this group was first attributed to by
+	// AcquireWith. It is written only under mu, together with the
+	// providerGroups index append, and is immutable once non-empty: the
+	// proxy's group key includes the provider, so one key cannot legitimately
+	// switch providers. An empty group can still be created by the internal
+	// lookup paths; its first non-empty AcquireWith attributes it.
+	provider       string
 	maxConcurrent  int
 	inFlight       int
 	nextAllowedAt  time.Time     // do not send before this time (after rate limit)
@@ -188,6 +202,21 @@ func (s *Scheduler) groupForLocked(key string, maxConcurrent int, applyCap bool)
 	return g
 }
 
+// attributeProviderLocked records g in the provider index on its first
+// non-empty attribution. The caller must hold s.mu. Provider identity is
+// written here and nowhere else, under the same lock as the index append, so a
+// concurrent drain either sees the group in the index or observes the group
+// before this Acquire's admission attempt (see drainProvider's lost-wake
+// argument). Internal group lookups (Trip/FailSend/WaitSend/BackoffFor) never
+// attribute a provider; only an AcquireWith with hooks.Provider does.
+func (s *Scheduler) attributeProviderLocked(g *group, provider string) {
+	if provider == "" || g.provider != "" {
+		return
+	}
+	g.provider = provider
+	s.providerGroups[provider] = append(s.providerGroups[provider], g)
+}
+
 // AcquireWith blocks until the group's head-of-queue slot is available,
 // respecting concurrency caps, rate-limit pacing, and operator pause
 // (AddHold / RestoreHolds). hooks carry the caller's client and provider
@@ -204,6 +233,7 @@ func (s *Scheduler) AcquireWith(ctx context.Context, key string, maxConcurrent i
 		return nil, ErrGroupLimit
 	}
 	g := s.groupForLocked(key, maxConcurrent, true)
+	s.attributeProviderLocked(g, hooks.Provider)
 	opts := s.opts
 	s.mu.Unlock()
 	return g.acquire(ctx, opts, hooks)
@@ -528,9 +558,8 @@ func (g *group) kickC() <-chan struct{} {
 func (g *group) acquire(ctx context.Context, opts Options, hooks WaiterHooks) (Release, error) {
 	enqueued := time.Now()
 	g.mu.Lock()
-	if hooks.Provider != "" && g.provider == "" {
-		g.provider = hooks.Provider
-	}
+	// Provider attribution happened under s.mu in AcquireWith before this
+	// call, so the group is already visible to provider-scoped drains.
 	// Fast path: queue empty, capacity available, past pacing window, not held,
 	// provider throttle admits. tryAdmit consumes RPM/TPM/concurrency - only
 	// call it when every other predicate already passed.

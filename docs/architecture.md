@@ -54,7 +54,10 @@ active requests. Admission is provider+key scoped, with provider-wide token,
 request and concurrency limits layered at the same grant owner. Acquisition
 release settles exactly once. The provider gate and token-bucket epoch captured
 at admission keep clearing/replacing a cap from charging another generation's
-reservation.
+reservation. A provider-to-groups index in `Scheduler` records each group on
+its first attributed acquire; a provider release reads that provider's slice
+header under the scheduler mutex, releases it, and only then drains those
+groups, so unrelated groups are neither scanned nor locked.
 
 [tokenrefresh.go](../internal/proxy/tokenrefresh.go) separates provider exchanges
 from response policy. Exchange adapters return credential data only; the shared

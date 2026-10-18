@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"context"
+	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -428,5 +430,243 @@ func TestBucketWaitClampedToCeiling(t *testing.T) {
 	c.enabled, c.rate, c.capacity, c.tokens = true, 2, 10, -5
 	if got := c.waitFor(1); got != 3*time.Second {
 		t.Fatalf("in-range bucket wait = %v, want exactly 3s", got)
+	}
+}
+
+// TestProviderDrainScopedToReleasedProvider pins the provider-to-groups index:
+// releasing alpha's last slot drains only alpha's groups. Beta's waiter stays
+// parked until beta itself releases, even though its gate is eligible and
+// alpha's drain visits every group that could become admissible for alpha.
+func TestProviderDrainScopedToReleasedProvider(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	providers := []string{"alpha.example", "beta.example"}
+	// Attribute several idle groups per provider before the caps are active so
+	// the index has more than the two queued groups below.
+	for _, provider := range providers {
+		for _, key := range []string{"idle-1", "idle-2"} {
+			release, err := s.AcquireWith(ctx, provider+"|"+key, 0, WaiterHooks{Provider: provider})
+			if err != nil {
+				t.Fatal(err)
+			}
+			release(0)
+		}
+	}
+	for _, provider := range providers {
+		s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	}
+
+	holdAlpha, err := s.AcquireWith(ctx, "alpha.example|held", 0, WaiterHooks{Provider: "alpha.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holdAlpha(0)
+	holdBeta, err := s.AcquireWith(ctx, "beta.example|held", 0, WaiterHooks{Provider: "beta.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holdBeta(0)
+
+	granted := make(chan string, 2)
+	for _, provider := range providers {
+		go func() {
+			release, err := s.AcquireWith(ctx, provider+"|queued", 0, WaiterHooks{Provider: provider})
+			if err != nil {
+				t.Errorf("%s waiter: %v", provider, err)
+				return
+			}
+			release(0)
+			granted <- provider
+		}()
+	}
+	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "both provider waiters to queue")
+
+	holdAlpha(0)
+	select {
+	case provider := <-granted:
+		if provider != "alpha.example" {
+			t.Fatalf("granted %q after alpha release, want alpha.example", provider)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("alpha release did not drain alpha's queued waiter")
+	}
+	select {
+	case provider := <-granted:
+		t.Fatalf("alpha release drained %q's queued work", provider)
+	case <-time.After(40 * time.Millisecond):
+	}
+
+	holdBeta(0)
+	select {
+	case provider := <-granted:
+		if provider != "beta.example" {
+			t.Fatalf("granted %q after beta release, want beta.example", provider)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("beta waiter was stranded after alpha's provider-scoped drain")
+	}
+}
+
+// TestProviderIndexAttributesGroupLearnedAfterCreation covers the only
+// provider transition a group has: empty to its first non-empty attribution.
+// The group is created by an unattributed Acquire, then learns its provider
+// while a same-provider holder on another group fills the cap. The holder's
+// release must find it through the index or the waiter would be stranded.
+func TestProviderIndexAttributesGroupLearnedAfterCreation(t *testing.T) {
+	s := New(Options{})
+	ctx := context.Background()
+	provider := "late.example"
+	release, err := s.AcquireWith(ctx, provider+"|late", 0, WaiterHooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release(0)
+	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+	holder, err := s.AcquireWith(ctx, provider+"|holder", 0, WaiterHooks{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder(0)
+
+	done := make(chan struct{})
+	go func() {
+		release, err := s.AcquireWith(ctx, provider+"|late", 0, WaiterHooks{Provider: provider})
+		if err != nil {
+			t.Errorf("late-attributed waiter: %v", err)
+			return
+		}
+		release(0)
+		close(done)
+	}()
+	waitFor(t, func() bool { return s.Stats().Queued >= 1 }, "late-attributed waiter to queue")
+
+	holder(0)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("group learned after creation was not in the provider index")
+	}
+}
+
+// TestProviderDrainReleasesSchedulerLockBeforeGroup pins the lock order
+// documented on drainProvider. With a group mutex held, a provider drain must
+// still let another actor take the scheduler mutex; holding s.mu while blocked
+// on g.mu would deadlock against paths that take s.mu -> g.mu.
+func TestProviderDrainReleasesSchedulerLockBeforeGroup(t *testing.T) {
+	s := New(Options{})
+	provider := "lock.example"
+	release, err := s.AcquireWith(context.Background(), provider+"|k", 0, WaiterHooks{Provider: provider})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release(0)
+	g := s.groupFor(provider+"|k", 0)
+	g.mu.Lock()
+	drained := make(chan struct{})
+	go func() {
+		s.drainProvider(provider)
+		close(drained)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if s.mu.TryLock() {
+			s.mu.Unlock()
+			break
+		}
+		if time.Now().After(deadline) {
+			g.mu.Unlock()
+			<-drained
+			t.Fatal("provider drain held the scheduler mutex while waiting for a group lock")
+		}
+		runtime.Gosched()
+	}
+	g.mu.Unlock()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("provider drain did not finish after the group lock was released")
+	}
+}
+
+// TestProviderDrainConcurrentGroupCreation exercises the index publication
+// race the drain path must tolerate: waiters acquire, release and create new
+// provider groups while concurrent drains walk the index. Every acquire uses a
+// bounded context, so a dropped wake or lock-order deadlock surfaces as an
+// error instead of an unbounded hang.
+func TestProviderDrainConcurrentGroupCreation(t *testing.T) {
+	s := New(Options{})
+	provider := "concurrent.example"
+	s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 4}})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	const (
+		workers = 24
+		rounds  = 60
+	)
+	errs := make(chan error, workers)
+	var wg sync.WaitGroup
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < rounds; i++ {
+				key := fmt.Sprintf("%s|shared-%d", provider, i%8)
+				if i%4 == 0 {
+					// A brand-new group must become visible to concurrent drains
+					// before this Acquire can park behind the provider gate.
+					key = fmt.Sprintf("%s|new-%d-%d", provider, worker, i)
+				}
+				release, err := s.AcquireWith(ctx, key, 0, WaiterHooks{Provider: provider})
+				if err != nil {
+					errs <- err
+					return
+				}
+				runtime.Gosched()
+				release(0)
+			}
+		}(worker)
+	}
+
+	stop := make(chan struct{})
+	var drainers sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		drainers.Add(1)
+		go func() {
+			defer drainers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				s.drainProvider(provider)
+				runtime.Gosched()
+			}
+		}()
+	}
+	var stopOnce sync.Once
+	stopDrainers := func() {
+		stopOnce.Do(func() {
+			close(stop)
+			drainers.Wait()
+		})
+	}
+	defer stopDrainers()
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("concurrent acquire/release and group creation did not settle")
+	}
+	stopDrainers()
+	close(errs)
+	for err := range errs {
+		t.Errorf("acquire while draining: %v", err)
+	}
+	if st := s.Stats(); st.InFlight != 0 || st.Queued != 0 {
+		t.Fatalf("concurrent drain left occupancy behind: %+v", st)
 	}
 }

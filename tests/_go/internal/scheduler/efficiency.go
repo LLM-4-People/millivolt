@@ -373,6 +373,77 @@ func BenchmarkQueueDrain(b *testing.B) {
 	}
 }
 
+// BenchmarkThrottledRelease measures the provider-scoped release drain. Groups
+// are attributed before the cap is installed (each setup release is then a
+// plain group drain, keeping setup O(G)); the measured AcquireWith + release
+// runs under an active provider concurrency gate. The provider-to-groups index
+// must make the per-release allocation independent of G instead of copying
+// every group in the scheduler.
+func BenchmarkThrottledRelease(b *testing.B) {
+	const provider = "provider.example"
+	ctx := context.Background()
+	for _, groups := range []int{1, 100, 1000, 10000} {
+		b.Run(strconv.Itoa(groups), func(b *testing.B) {
+			s := New(Options{})
+			keys := make([]string, groups)
+			for i := range keys {
+				keys[i] = provider + "|" + strconv.Itoa(i)
+				release, err := s.AcquireWith(ctx, keys[i], 0, WaiterHooks{Provider: provider})
+				if err != nil {
+					b.Fatal(err)
+				}
+				release(0)
+			}
+			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				release, err := s.AcquireWith(ctx, keys[0], 0, WaiterHooks{Provider: provider})
+				if err != nil {
+					b.Fatal(err)
+				}
+				release(0)
+			}
+		})
+	}
+}
+
+// BenchmarkThrottledReleaseOtherProviders holds the released provider at one
+// group and adds G groups on other providers. A provider-scoped drain must be
+// independent of unrelated group count in both time and allocation.
+func BenchmarkThrottledReleaseOtherProviders(b *testing.B) {
+	const provider = "provider.example"
+	ctx := context.Background()
+	for _, groups := range []int{1, 100, 1000, 10000} {
+		b.Run(strconv.Itoa(groups), func(b *testing.B) {
+			s := New(Options{})
+			release, err := s.AcquireWith(ctx, provider+"|target", 0, WaiterHooks{Provider: provider})
+			if err != nil {
+				b.Fatal(err)
+			}
+			release(0)
+			for i := 0; i < groups; i++ {
+				other := "other-" + strconv.Itoa(i) + ".example"
+				release, err := s.AcquireWith(ctx, other+"|key", 0, WaiterHooks{Provider: other})
+				if err != nil {
+					b.Fatal(err)
+				}
+				release(0)
+			}
+			s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1}})
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				release, err := s.AcquireWith(ctx, provider+"|target", 0, WaiterHooks{Provider: provider})
+				if err != nil {
+					b.Fatal(err)
+				}
+				release(0)
+			}
+		})
+	}
+}
+
 // TestGateLookupNeverWaitsForThrottleWriters pins the lock-order fix: gate()
 // is called from admission while a group mutex is held, and throttle writers
 // hold throttleMu while taking that same group mutex. A gate lookup must read

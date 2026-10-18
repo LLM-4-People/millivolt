@@ -507,14 +507,37 @@ func (s *Scheduler) armThrottleDrain(provider string, d time.Duration) {
 	g.mu.Unlock()
 }
 
+// drainProvider wakes only the groups attributed to provider. It reads the
+// provider's slice header under mu and releases mu before touching any group,
+// preserving the s.mu -> g.mu order every other path uses; no path takes g.mu
+// and then waits for s.mu. The header (not its elements) is copied, so no
+// allocation scales with the provider's group count. Elements already
+// published are immutable and append writes only at or beyond the snapshot
+// length, so the walk is race-free while a concurrent first Acquire appends a
+// new group.
+//
+// A release cannot lose a wake to a group created concurrently with it: the
+// new group is appended and its provider published under mu before its Acquire
+// attempts admission or enqueues. A drain that misses it therefore ran before
+// that admission attempt. If the attempt then blocks, its in-flight slot
+// holders were admitted before the block and their releases run after the
+// append, so one of them drains the group. A blocked token/request bucket also
+// arms a provider timer that re-runs this drain after the append.
+//
+// Empty provider identity has no gate of its own (gate("") is nil); callers
+// that do reach here with an empty provider keep the previous full-drain
+// fallback instead of silently skipping every group. An unknown non-empty
+// provider has no attributed groups and correctly drains nothing.
 func (s *Scheduler) drainProvider(provider string) {
-	for _, g := range s.snapshotGroups() {
-		g.mu.Lock()
-		match := provider == "" || g.provider == provider
-		g.mu.Unlock()
-		if match {
-			g.drain()
-		}
+	if provider == "" {
+		s.drainAll()
+		return
+	}
+	s.mu.Lock()
+	groups := s.providerGroups[provider]
+	s.mu.Unlock()
+	for _, g := range groups {
+		g.drain()
 	}
 }
 
