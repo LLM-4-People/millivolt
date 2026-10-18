@@ -106,6 +106,8 @@ AUXILIARY_TYPES = {
 }
 INDEX_TABLES = {
     **dict.fromkeys(('idx_requests_log', 'idx_requests_provider_log', 'idx_requests_model_log',
+                    'idx_requests_client_log', 'idx_requests_key_log',
+                    'idx_requests_conversation_log', 'idx_requests_status_log',
                     'sqlite_autoindex_requests_1'), 'requests'),
     **dict.fromkeys(('idx_request_debug_expires', 'idx_request_debug_session',
                     'sqlite_autoindex_request_debug_1'), 'request_debug'),

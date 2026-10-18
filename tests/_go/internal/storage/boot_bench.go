@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,19 +36,38 @@ func copyFile(tb testing.TB, src, dst string) {
 
 const benchLegacyIndexRows = 10_000
 
-// legacyIndexNames are the canonical composite indexes schema creates. They
-// are stripped from the seed so the measured Open has to rebuild them.
-var legacyIndexNames = []string{
-	"idx_requests_log",
-	"idx_requests_provider_log",
-	"idx_requests_model_log",
+// schemaRequestIndexNames lists every named index the startup schema sequence
+// created on requests. The legacy benchmark strips exactly this set instead of
+// keeping a second copy of the DDL, so a renamed or added index cannot quietly
+// stop being rebuilt by the measured Open.
+func schemaRequestIndexNames(tb testing.TB, db *sql.DB) []string {
+	tb.Helper()
+	rows, err := db.Query(`SELECT name FROM sqlite_master
+		WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NOT NULL
+		ORDER BY name`)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			tb.Fatal(err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		tb.Fatal(err)
+	}
+	return names
 }
 
 // benchLegacyIndexSeed seeds a current-schema database, checkpoints it, then
-// removes the canonical composite indexes and the planner statistics table on
-// a raw connection. Each measured Open therefore runs the schema's index
-// creation, migrate and ensureRequestStatistics work a legacy database needs.
-func benchLegacyIndexSeed(b *testing.B) string {
+// removes every named requests index and the planner statistics table on a raw
+// connection. Each measured Open therefore runs the schema's index creation,
+// migrate and ensureRequestStatistics work a legacy database needs.
+func benchLegacyIndexSeed(b *testing.B) (string, []string) {
 	b.Helper()
 	seed := filepath.Join(b.TempDir(), "legacy-index-seed.db")
 	s, err := Open(seed, testOpts)
@@ -66,8 +87,12 @@ func benchLegacyIndexSeed(b *testing.B) string {
 	if _, err := raw.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		b.Fatal(err)
 	}
-	for _, name := range legacyIndexNames {
-		if _, err := raw.Exec("DROP INDEX IF EXISTS " + name); err != nil {
+	names := schemaRequestIndexNames(b, raw)
+	if len(names) == 0 {
+		b.Fatal("legacy seed has no named requests indexes to strip; the schema contract is no longer exercised")
+	}
+	for _, name := range names {
+		if _, err := raw.Exec(`DROP INDEX IF EXISTS "` + strings.ReplaceAll(name, `"`, `""`) + `"`); err != nil {
 			b.Fatalf("drop index %s: %v", name, err)
 		}
 	}
@@ -76,12 +101,11 @@ func benchLegacyIndexSeed(b *testing.B) string {
 	}
 	var remaining int
 	if err := raw.QueryRow(`SELECT COUNT(*) FROM sqlite_master
-		WHERE (type = 'index' AND name IN ('idx_requests_log', 'idx_requests_provider_log', 'idx_requests_model_log'))
-		   OR (type = 'table' AND name = 'sqlite_stat1')`).Scan(&remaining); err != nil {
+		WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NOT NULL`).Scan(&remaining); err != nil {
 		b.Fatal(err)
 	}
 	if remaining != 0 {
-		b.Fatalf("legacy seed still carries %d canonical indexes or statistics tables", remaining)
+		b.Fatalf("legacy seed still carries %d named requests indexes", remaining)
 	}
 	if _, err := raw.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 		b.Fatal(err)
@@ -89,16 +113,17 @@ func benchLegacyIndexSeed(b *testing.B) string {
 	if err := raw.Close(); err != nil {
 		b.Fatal(err)
 	}
-	return seed
+	return seed, names
 }
 
-// BenchmarkOpenLegacyIndexBuild measures Open on a 10k-row database whose
-// canonical composite indexes and planner statistics were stripped: schema
-// index creation, migrations and ensureRequestStatistics (ANALYZE) run inside
-// the timer. Seed construction and per-iteration file copies stay outside it.
+// BenchmarkOpenLegacyIndexBuild measures Open on a 10k-row database whose named
+// requests indexes and planner statistics were stripped: migrate's index
+// creation, the rest of migrate and ensureRequestStatistics (ANALYZE) run
+// inside the timer. Seed construction and per-iteration file copies stay
+// outside it.
 func BenchmarkOpenLegacyIndexBuild(b *testing.B) {
 	b.StopTimer()
-	seed := benchLegacyIndexSeed(b)
+	seed, wantIndexes := benchLegacyIndexSeed(b)
 	dir := b.TempDir()
 	b.ResetTimer()
 	b.StartTimer()
@@ -114,10 +139,16 @@ func BenchmarkOpenLegacyIndexBuild(b *testing.B) {
 		if got := s.Totals().Requests; got != benchLegacyIndexRows {
 			b.Fatalf("totals = %d, want %d", got, benchLegacyIndexRows)
 		}
+		gotIndexes := schemaRequestIndexNames(b, s.rdb)
 		if err := s.Close(); err != nil {
 			b.Fatal(err)
 		}
 		b.StopTimer()
+		// The measured Open must rebuild exactly the indexes the seed stripped,
+		// or the benchmark silently stops exercising the schema's index work.
+		if !slices.Equal(gotIndexes, wantIndexes) {
+			b.Fatalf("rebuilt indexes = %v, want %v", gotIndexes, wantIndexes)
+		}
 		if err := os.Remove(path); err != nil {
 			b.Fatal(err)
 		}

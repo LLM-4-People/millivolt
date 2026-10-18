@@ -18,10 +18,12 @@ var createIndexDDL = regexp.MustCompile(`(?s)CREATE INDEX IF NOT EXISTS\s+(\w+)\
 // durable schema creates must be published with exactly those columns, every
 // published index must exist, and the published no-index claim must name
 // exactly the columns no index covers. An index added, removed, renamed or
-// re-columned on either side fails here.
+// re-columned on either side fails here. Log indexes come from
+// requestLogIndexDDL, which migrate runs after adding legacy columns; the rest
+// live in schema itself.
 func TestRequestIndexReferenceMatchesTheDurableSchema(t *testing.T) {
 	declared := map[string]string{}
-	for _, match := range createIndexDDL.FindAllStringSubmatch(schema, -1) {
+	for _, match := range createIndexDDL.FindAllStringSubmatch(schema+requestLogIndexDDL, -1) {
 		declared[match[1]] = normalizeIndexColumns(match[2])
 	}
 	if len(declared) == 0 {
@@ -57,8 +59,8 @@ func TestRequestIndexReferenceMatchesTheDurableSchema(t *testing.T) {
 	// The published claim that nothing indexes these columns must stay true.
 	// The list is the named exemplar subset the reference calls out, not the
 	// full unindexed set: every column the declared indexes do not cover is
-	// unindexed too, so the reference states the class, not just these three.
-	unindexed := []string{"status_code", "error_type", "cost"}
+	// unindexed too, so the reference states the class, not just these two.
+	unindexed := []string{"error_type", "cost"}
 	for name, columns := range declared {
 		for _, column := range unindexed {
 			if strings.Contains(columns, column) {

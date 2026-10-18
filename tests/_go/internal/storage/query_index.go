@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,10 @@ func assertOrderedRequestLogIndexes(t *testing.T, db *sql.DB) {
 		{"idx_requests_log", []string{"started_at", "id"}},
 		{"idx_requests_provider_log", []string{"provider", "started_at", "id"}},
 		{"idx_requests_model_log", []string{"model", "started_at", "id"}},
+		{"idx_requests_client_log", []string{"client", "started_at", "id"}},
+		{"idx_requests_key_log", []string{"key_hash", "started_at", "id"}},
+		{"idx_requests_conversation_log", []string{"conversation_id", "started_at", "id"}},
+		{"idx_requests_status_log", []string{"status_code", "started_at", "id"}},
 	} {
 		if !requestIndexExists(t, db, tc.name) {
 			t.Fatalf("canonical index %s is missing", tc.name)
@@ -178,29 +183,40 @@ func explainQueryPlan(t *testing.T, db *sql.DB, query string, args []any) string
 }
 
 // TestQueryBeforeEqualityUsesOrderedCompositeIndex pins the plan for the exact
-// production QueryBefore statement: provider or raw-model equality chooses its
+// production QueryBefore statement: every LogFilter equality field chooses its
 // ordered composite index and SQLite performs no sort, with and without the
-// exclusive cursor bound.
+// exclusive cursor bound. A future schema change that drops, renames or
+// re-columns one of these indexes fails here instead of silently turning a
+// filtered page into a whole-log scan.
 func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
 	s := openTestStore(t)
 	seedQueryBeforeRows(t, s, 5_000, 10, 10)
 
-	providerFilter := &LogFilter{All: []LogPredicate{{Field: LogProvider, Value: "provider-03"}}}
-	modelFilter := &LogFilter{All: []LogPredicate{{Field: LogModel, Value: "model-03"}}}
 	cursor := &LogCursor{StartMs: queryBeforeFixtureStartMs + 2_500, ID: "row-002500"}
 	for _, tc := range []struct {
 		name   string
 		before *LogCursor
-		filter *LogFilter
+		field  LogField
+		value  string
 		index  string
 	}{
-		{"provider", nil, providerFilter, "idx_requests_provider_log"},
-		{"model", nil, modelFilter, "idx_requests_model_log"},
-		{"provider_cursor", cursor, providerFilter, "idx_requests_provider_log"},
-		{"model_cursor", cursor, modelFilter, "idx_requests_model_log"},
+		{"provider", nil, LogProvider, "provider-03", "idx_requests_provider_log"},
+		{"model", nil, LogModel, "model-03", "idx_requests_model_log"},
+		{"client", nil, LogClient, "client-003", "idx_requests_client_log"},
+		{"key_hash", nil, LogKeyHash, "key-000005", "idx_requests_key_log"},
+		{"conversation", nil, LogConversation, "conv-000005", "idx_requests_conversation_log"},
+		{"status", nil, LogStatus, "500", "idx_requests_status_log"},
+		{"status_common", nil, LogStatus, "200", "idx_requests_status_log"},
+		{"provider_cursor", cursor, LogProvider, "provider-03", "idx_requests_provider_log"},
+		{"model_cursor", cursor, LogModel, "model-03", "idx_requests_model_log"},
+		{"client_cursor", cursor, LogClient, "client-003", "idx_requests_client_log"},
+		{"key_hash_cursor", cursor, LogKeyHash, "key-000005", "idx_requests_key_log"},
+		{"conversation_cursor", cursor, LogConversation, "conv-000005", "idx_requests_conversation_log"},
+		{"status_cursor", cursor, LogStatus, "500", "idx_requests_status_log"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query, args, err := buildQueryBefore(tc.before, tc.filter, 200)
+			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
+			query, args, err := buildQueryBefore(tc.before, filter, 200)
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
@@ -219,6 +235,94 @@ func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestQueryBeforeEveryEqualityFieldPages verifies the SQL predicate and the
+// fixture's Go expectation agree for every LogFilter equality field, with and
+// without the exclusive cursor. Expected ids come from queryBeforeFixtureRow,
+// the same owner that seeds the rows, so the test asserts page semantics rather
+// than restating the fixture by hand.
+func TestQueryBeforeEveryEqualityFieldPages(t *testing.T) {
+	s := openTestStore(t)
+	const rows = 2_000
+	seedQueryBeforeRows(t, s, rows, 10, 10)
+	cursorRow := queryBeforeFixtureRow(rows/2, 10, 10)
+	cursor := &LogCursor{StartMs: cursorRow.Start.UnixMilli(), ID: cursorRow.ID}
+	for _, tc := range []struct {
+		name  string
+		field LogField
+		value string
+	}{
+		{"provider", LogProvider, "provider-03"},
+		{"model", LogModel, "model-03"},
+		{"client", LogClient, "client-003"},
+		{"key_hash", LogKeyHash, "key-000005"},
+		{"conversation", LogConversation, "conv-000005"},
+		{"status", LogStatus, "500"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
+			for _, before := range []*LogCursor{nil, cursor} {
+				got, err := s.QueryBefore(t.Context(), before, filter, rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ids := make([]string, len(got))
+				for i, record := range got {
+					ids[i] = record.ID
+					if !queryBeforeFixtureMatches(record, tc.field, tc.value) {
+						t.Fatalf("page leaked record %s for %s=%q", record.ID, tc.name, tc.value)
+					}
+				}
+				stop := rows
+				label := "no cursor"
+				if before != nil {
+					stop = rows / 2
+					label = "cursor"
+				}
+				want := queryBeforeExpectedIDs(tc.field, tc.value, stop)
+				if !reflect.DeepEqual(ids, want) {
+					t.Fatalf("%s (%s): page ids = %v, want %v", tc.name, label, ids, want)
+				}
+			}
+		})
+	}
+}
+
+// queryBeforeFixtureMatches is the test-side mirror of the LogField to column
+// mapping. It reads the fixture owner's records rather than trusting the SQL
+// query under test.
+func queryBeforeFixtureMatches(r *metrics.Record, field LogField, value string) bool {
+	switch field {
+	case LogProvider:
+		return r.Provider == value
+	case LogClient:
+		return r.Client == value
+	case LogKeyHash:
+		return r.KeyHash == value
+	case LogConversation:
+		return r.ConversationID == value
+	case LogModel:
+		return r.Model == value
+	case LogStatus:
+		return strconv.Itoa(r.StatusCode) == value
+	default:
+		return false
+	}
+}
+
+// queryBeforeExpectedIDs lists the fixture ids below stop in newest-first log
+// order, matching one equality. The fixture's distinct millisecond timestamps
+// make the id tie-break unnecessary in this expectation.
+func queryBeforeExpectedIDs(field LogField, value string, stop int) []string {
+	out := make([]string, 0)
+	for i := stop - 1; i >= 0; i-- {
+		record := queryBeforeFixtureRow(i, 10, 10)
+		if queryBeforeFixtureMatches(record, field, value) {
+			out = append(out, record.ID)
+		}
+	}
+	return out
 }
 
 // TestQueryBeforeProviderAndModelPagesPreserveOrder pins the filtered page

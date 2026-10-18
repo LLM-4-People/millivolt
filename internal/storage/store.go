@@ -150,6 +150,19 @@ const requestDebugDDL = `CREATE TABLE IF NOT EXISTS request_debug (
 CREATE INDEX IF NOT EXISTS idx_request_debug_expires ON request_debug (expires_at);
 CREATE INDEX IF NOT EXISTS idx_request_debug_session ON request_debug (session_id);`
 
+// requestLogIndexDDL is the single owner of the ordered log indexes. It runs
+// after migrate, not inside the fresh schema, because client, conversation_id
+// and the other equality columns were added by ALTER TABLE on legacy databases:
+// creating an index on a column that does not exist yet fails the whole boot
+// before the migration can add it.
+const requestLogIndexDDL = `CREATE INDEX IF NOT EXISTS idx_requests_log ON requests (started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_provider_log ON requests (provider, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_model_log ON requests (model, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_client_log ON requests (client, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_key_log ON requests (key_hash, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_conversation_log ON requests (conversation_id, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_requests_status_log ON requests (status_code, started_at, id);`
+
 var schema = `
 CREATE TABLE IF NOT EXISTS requests (
 	id TEXT PRIMARY KEY,
@@ -251,10 +264,7 @@ CREATE TABLE IF NOT EXISTS requests (
 	debug_session_id TEXT NOT NULL DEFAULT '',
 	` + requestParamPresenceDDL + `
 );
-	CREATE INDEX IF NOT EXISTS idx_requests_log ON requests (started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_provider_log ON requests (provider, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_model_log ON requests (model, started_at, id);
-CREATE TABLE IF NOT EXISTS meta (
+	CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
 );
@@ -1564,9 +1574,10 @@ func readTotals(ctx context.Context, db interface {
 // purge/count/export outright.
 func migrate(db *sql.DB) error {
 	// The canonical ordered log indexes replace their timestamp-only and
-	// single-column provider/model predecessors once; creating the canonical
-	// indexes is owned by schema above. DROP IF EXISTS keeps every re-run
-	// harmless and never touches the replacements.
+	// single-column provider/model predecessors once. Creation is owned by
+	// requestLogIndexDDL below, after the column pass, because some leading
+	// columns are added by ALTER TABLE on legacy databases. DROP IF EXISTS
+	// keeps every re-run harmless and never touches the replacements.
 	for _, index := range []string{
 		"idx_requests_started_at",
 		"idx_requests_provider",
@@ -1695,6 +1706,12 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, attemptsRepairMetaKey); err != nil {
 			return fmt.Errorf("repair attempts marker: %w", err)
 		}
+	}
+	// Every leading equality column now exists, whether this database was just
+	// created with the full schema or upgraded by the ALTER pass above. Build
+	// the ordered log indexes once; IF NOT EXISTS keeps later boots cheap.
+	if _, err := db.Exec(requestLogIndexDDL); err != nil {
+		return fmt.Errorf("log indexes: %w", err)
 	}
 	return nil
 }
@@ -1947,10 +1964,10 @@ func (f *LogFilter) where() (string, []any, error) {
 
 // buildQueryBefore is the single owner of the durable log page statement:
 // newest-first below an exclusive (started_at,id) cursor, with SQL-safe exact
-// predicates applied by SQLite before decoding. The provider and raw-model
-// equality indexes end in the same (started_at,id) order, so their pages need
-// one range scan and no sort; callers that need canonical-model or class
-// semantics still match in Go.
+// predicates applied by SQLite before decoding. Every LogFilter equality field
+// has an index ending in the same (started_at,id) order, so its page needs one
+// range scan and no sort; callers that need canonical-model or class semantics
+// still match in Go.
 func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
 	q := `SELECT ` + recordColumns + `, NULL AS debug_capture FROM requests WHERE 1=1`
 	var args []any

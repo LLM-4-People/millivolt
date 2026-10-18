@@ -163,10 +163,13 @@ work, and preserves existing conflict/rollback semantics. Record columns,
 migration, scanner and request-parameter presence bits must evolve together;
 explicit zero/false is not absence.
 
-The durable log order is `(started_at, id)`. Exact provider and stored-model
-equality each have an ordered composite index ending in that key, so a filtered
-log page, count, export or purge scans one index range in cursor order instead
-of sorting its match set. Canonical model rules still match in Go.
+The durable log order is `(started_at, id)`. Every exact `LogFilter` equality
+field - provider, client, key hash, conversation id, model and status code -
+has an ordered composite index ending in that key, so a filtered log page,
+count, export or purge scans one index range in cursor order instead of sorting
+or scanning its match set. SQLite uses one index per query and rechecks any
+remaining equality predicates against each row. Canonical model rules and
+status classes still match in Go.
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
 boundary and publishes one command. The writer flushes earlier records, deletes
