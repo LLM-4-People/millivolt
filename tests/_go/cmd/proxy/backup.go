@@ -1476,3 +1476,442 @@ func TestDBStageDirNamesLiveStoreVolumeAfterReloadPathChange(t *testing.T) {
 		t.Fatal("replace staged at the store's boot path, want the config path")
 	}
 }
+
+// assertNoPreservedPending pins the admission-slot guard cleanup: a preserved
+// pre-existing pending snapshot is either restored to the slot on failure or
+// removed after a successful restore, never left as a hidden sibling.
+func assertNoPreservedPending(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".millivolt-restore-pending-") {
+			t.Fatalf("preserved pending snapshot left behind: %s", e.Name())
+		}
+	}
+}
+
+// TestRestoreConfigDatabaseStageFailureLeavesStateUntouched pins the H3
+// transaction order: the database stages before the config is written, so an
+// archived db_path under a missing directory answers 400 with the config file,
+// liveCfg, and pending admission slot exactly as they were. A later boot can
+// only open the pre-restore path.
+func TestRestoreConfigDatabaseStageFailureLeavesStateUntouched(t *testing.T) {
+	liveReloadFixture(t)
+	store, _, livePath, dir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{ID: "stage-failure", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := config.Default()
+	start.MaxRetries = 1
+	start.DBPath = livePath
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = start.Clone()
+	liveStore = store
+
+	archived := config.Default()
+	archived.MaxRetries = 42
+	archived.DBPath = filepath.Join(dir, "missing-subdir", "next.db")
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, archived); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeConfig, err := os.ReadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeLive := liveCfg.Clone()
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status %d body %s, want 400 from database staging", rr.Code, rr.Body.String())
+	}
+	afterConfig, err := os.ReadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeConfig, afterConfig) {
+		t.Fatalf("failed restore rewrote the config file:\nbefore=%q\nafter=%q", beforeConfig, afterConfig)
+	}
+	if diff := config.DiffKeys(liveCfg, beforeLive); len(diff) != 0 {
+		t.Fatalf("failed restore changed liveCfg keys %v", diff)
+	}
+	if liveCfg.MaxRetries != 1 || liveCfg.DBPath != livePath {
+		t.Fatalf("liveCfg max_retries=%d db_path=%q, want the pre-restore values", liveCfg.MaxRetries, liveCfg.DBPath)
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(archived.DBPath)); !os.IsNotExist(err) {
+		t.Fatal("failed restore staged a pending snapshot at the archived db_path")
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(livePath)); !os.IsNotExist(err) {
+		t.Fatal("failed restore staged a pending snapshot at the live db_path")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "missing-subdir")); !os.IsNotExist(err) {
+		t.Fatal("failed restore created the archived db_path directory")
+	}
+	assertNoPreservedPending(t, dir)
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreConfigApplyFailureRollsBackConfigAndPending covers both
+// post-staging config failures (write and reload) with and without a
+// pre-existing pending snapshot: the config file and liveCfg return to their
+// exact pre-restore values, a newly staged snapshot is removed, and a
+// pre-existing snapshot is restored byte-for-byte.
+func TestRestoreConfigApplyFailureRollsBackConfigAndPending(t *testing.T) {
+	for _, phase := range []string{"write", "reload"} {
+		for _, preexisting := range []bool{false, true} {
+			name := phase + "/empty"
+			if preexisting {
+				name = phase + "/preexisting"
+			}
+			t.Run(name, func(t *testing.T) {
+				liveReloadFixture(t)
+				store, _, livePath, liveDir := openLiveStoreFixture(t)
+				store.Record(&metrics.Record{ID: "apply-failure", Provider: "neutral.example", Model: "n", StatusCode: 200})
+				if err := store.Flush(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := store.Snapshot(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				start := config.Default()
+				start.MaxRetries = 1
+				start.DBPath = livePath
+				if err := config.WriteFile(liveConfigPath, start); err != nil {
+					t.Fatal(err)
+				}
+				liveCfg = start.Clone()
+				liveStore = store
+
+				targetDir := t.TempDir()
+				target := filepath.Join(targetDir, "restored.db")
+				archived := config.Default()
+				archived.MaxRetries = 42
+				archived.DBPath = target
+				var yaml bytes.Buffer
+				if err := config.WriteYAML(&yaml, archived); err != nil {
+					t.Fatal(err)
+				}
+				raw, err := backup.Encode(liveDir, backup.Archive{Config: yaml.Bytes(), Database: data})
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeConfig, err := os.ReadFile(liveConfigPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeLive := liveCfg.Clone()
+				oldPending := []byte("pre-existing pending snapshot")
+				if preexisting {
+					if err := os.WriteFile(storage.PendingSnapshotPath(target), oldPending, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				t.Cleanup(func() {
+					restoreConfigWriteHook = nil
+					restoreConfigReloadHook = nil
+				})
+				switch phase {
+				case "write":
+					restoreConfigWriteHook = func(string, *config.Config) error {
+						return errors.New("injected config write failure")
+					}
+				case "reload":
+					restoreConfigReloadHook = func() ([]string, error) {
+						// Model a reload that touched the live snapshot before
+						// failing so rollback has real state to put back.
+						liveMu.Lock()
+						liveCfg = config.Default()
+						liveCfg.MaxRetries = 99
+						liveMu.Unlock()
+						return nil, errors.New("injected config reload failure")
+					}
+				}
+
+				mux := http.NewServeMux()
+				registerBackupRoutes(mux)
+				rr := httptest.NewRecorder()
+				mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=1", bytes.NewReader(raw)))
+				if rr.Code != http.StatusBadRequest {
+					t.Fatalf("status %d body %s, want 400 from the config phase", rr.Code, rr.Body.String())
+				}
+				afterConfig, err := os.ReadFile(liveConfigPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(beforeConfig, afterConfig) {
+					t.Fatalf("failed restore did not restore the config bytes:\nbefore=%q\nafter=%q", beforeConfig, afterConfig)
+				}
+				if diff := config.DiffKeys(liveCfg, beforeLive); len(diff) != 0 {
+					t.Fatalf("failed restore did not restore liveCfg keys %v", diff)
+				}
+				if liveCfg.MaxRetries != 1 || liveCfg.DBPath != livePath {
+					t.Fatalf("liveCfg max_retries=%d db_path=%q, want the pre-restore values", liveCfg.MaxRetries, liveCfg.DBPath)
+				}
+				pending := storage.PendingSnapshotPath(target)
+				if preexisting {
+					got, err := os.ReadFile(pending)
+					if err != nil {
+						t.Fatalf("pre-existing pending snapshot was not restored: %v", err)
+					}
+					if !bytes.Equal(got, oldPending) {
+						t.Fatalf("pending snapshot = %q, want the preserved pre-existing bytes", got)
+					}
+				} else if _, err := os.Stat(pending); !os.IsNotExist(err) {
+					t.Fatal("failed restore left the newly staged pending snapshot")
+				}
+				assertNoPreservedPending(t, targetDir)
+				assertNoRestoreStaging(t, liveDir)
+			})
+		}
+	}
+}
+
+// TestRestoreConfigDatabaseReplacePublishesBoth pins the successful
+// config+database replace: the prepared config is written and hot-reloaded, the
+// snapshot is published at the effective db_path (replacing any older pending
+// slot), and the restart contract still reports db_path.
+func TestRestoreConfigDatabaseReplacePublishesBoth(t *testing.T) {
+	liveReloadFixture(t)
+	store, _, livePath, liveDir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{ID: "replace-success", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := config.Default()
+	start.MaxRetries = 1
+	start.DBPath = livePath
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = start.Clone()
+	liveStore = store
+
+	targetDir := t.TempDir()
+	target := filepath.Join(targetDir, "restored.db")
+	archived := config.Default()
+	archived.MaxRetries = 42
+	archived.DBPath = target
+	// Keep db_path out of StartupBoundChanges so the handler's appended
+	// db_path is the only one; the boot snapshot is test-only here.
+	bootCfg = archived.Clone()
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, archived); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(liveDir, backup.Archive{Config: yaml.Bytes(), Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storage.PendingSnapshotPath(target), []byte("older pending snapshot"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restore status %d body %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		OK              bool     `json:"ok"`
+		RestartRequired []string `json:"restart_required"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || !slices.Equal(body.RestartRequired, []string{"db_path"}) {
+		t.Fatalf("restore json %+v, want ok with restart_required [db_path]", body)
+	}
+	got, err := config.LoadFile(liveConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MaxRetries != 42 || got.DBPath != target {
+		t.Fatalf("config file max_retries=%d db_path=%q, want 42 and %q", got.MaxRetries, got.DBPath, target)
+	}
+	if liveCfg.MaxRetries != 42 || liveCfg.DBPath != target {
+		t.Fatalf("liveCfg max_retries=%d db_path=%q, want 42 and %q", liveCfg.MaxRetries, liveCfg.DBPath, target)
+	}
+	pending, err := os.ReadFile(storage.PendingSnapshotPath(target))
+	if err != nil {
+		t.Fatalf("successful restore did not publish the pending snapshot: %v", err)
+	}
+	if !bytes.Equal(pending, data) {
+		t.Fatal("pending snapshot bytes differ from the archive member")
+	}
+	assertNoPreservedPending(t, targetDir)
+	assertNoRestoreStaging(t, liveDir)
+}
+
+// TestRestoreConfigDatabaseMergeStillMerges preserves the combined merge path:
+// the database merge runs before the config phase, both members apply, no
+// pending replacement is staged, and a merge needs no restart.
+func TestRestoreConfigDatabaseMergeStillMerges(t *testing.T) {
+	liveReloadFixture(t)
+	live, opts, livePath, dir := openLiveStoreFixture(t)
+	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	src, err := storage.Open(filepath.Join(dir, "merge-src.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "backup-row", Provider: "backup.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := config.Default()
+	start.MaxRetries = 1
+	start.DBPath = livePath
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = start.Clone()
+	liveStore = live
+
+	archived := config.Default()
+	archived.MaxRetries = 42
+	archived.DBPath = livePath
+	bootCfg = archived.Clone()
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, archived); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=1&database_mode=merge", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("merge status %d body %s", rr.Code, rr.Body.String())
+	}
+	var body struct {
+		OK              bool     `json:"ok"`
+		RestartRequired []string `json:"restart_required"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.OK || len(body.RestartRequired) != 0 {
+		t.Fatalf("merge json %+v, want ok with no restart", body)
+	}
+	if got, err := config.LoadFile(liveConfigPath); err != nil || got.MaxRetries != 42 {
+		t.Fatalf("merged config max_retries=%v err=%v, want 42", got, err)
+	}
+	rows, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]bool{}
+	for _, r := range rows {
+		byID[r.ID] = true
+	}
+	if !byID["live-row"] || !byID["backup-row"] {
+		t.Fatalf("merged rows = %v, want the live and backup rows", byID)
+	}
+	if _, err := os.Stat(storage.PendingSnapshotPath(livePath)); !os.IsNotExist(err) {
+		t.Fatal("merge staged a replace snapshot")
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreInspectLiveConfigFailsClosed pins C7: a configured but unreadable
+// or missing live config makes inspect fail closed instead of comparing the
+// archive against fabricated Default() values. An instance started without
+// -config still documents its Default comparison in the success row.
+func TestRestoreInspectLiveConfigFailsClosed(t *testing.T) {
+	liveReloadFixture(t)
+	archived := config.Default()
+	archived.MaxRetries = 2
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, archived); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode("", backup.Archive{Config: yaml.Bytes()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	inspect := func() *httptest.ResponseRecorder {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(raw)))
+		return rr
+	}
+	assertUnavailable := func(rr *httptest.ResponseRecorder) {
+		t.Helper()
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("inspect status %d body %s, want 400", rr.Code, rr.Body.String())
+		}
+		var body struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("inspect error body %q: %v", rr.Body.String(), err)
+		}
+		if !strings.Contains(body.Error, "live config unavailable") {
+			t.Fatalf("inspect error %q does not report the unavailable live config", body.Error)
+		}
+		if strings.Contains(rr.Body.String(), "vs_live") || strings.Contains(rr.Body.String(), `"ok":true`) {
+			t.Fatalf("inspect fabricated a success diff: %s", rr.Body.String())
+		}
+	}
+
+	if err := os.WriteFile(liveConfigPath, []byte("not: [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+
+	if err := os.Remove(liveConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	assertUnavailable(inspect())
+
+	liveConfigPath = ""
+	rr := inspect()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("no-path inspect status %d body %s", rr.Code, rr.Body.String())
+	}
+	ins := decodeRestoreInspectStrict(t, rr.Body.Bytes())
+	if !ins.OK || !slices.Contains(ins.Config.VsLive, "max_retries") {
+		t.Fatalf("no-path inspect vs_live=%v, want the documented Default comparison", ins.Config.VsLive)
+	}
+}

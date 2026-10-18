@@ -719,13 +719,23 @@ func applyCLIOverrides(cfg *config.Config) {
 // and they are reported as restart_required. The live cfg pointer is
 // repointed to a fresh clone so a second reload diffs against the latest
 // snapshot.
+//
+// reloadMu serializes reload transactions. A caller that must keep its own
+// config read, write, reload and rollback in one transaction with every other
+// reload trigger (backup restore) holds reloadMu and calls reloadConfigLocked.
 func reloadConfig() ([]string, error) {
-	// One reload at a time, but never hold the reader lock across file I/O or
-	// the history-wide provider-alias rewrite: dashboard bootstrap, backup
-	// status, the restart watch and shutdown read liveMu and must not stall
-	// behind an operator reload.
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
+	return reloadConfigLocked()
+}
+
+// reloadConfigLocked is reloadConfig for a caller that already holds reloadMu.
+// The caller must not take reloadMu again; see applyRestoreConfig.
+func reloadConfigLocked() ([]string, error) {
+	// Never hold the reader lock across file I/O or the history-wide
+	// provider-alias rewrite: dashboard bootstrap, backup status, the restart
+	// watch and shutdown read liveMu and must not stall behind an operator
+	// reload.
 	liveMu.Lock()
 	current, store, srv, buf := liveCfg, liveStore, liveProxy, liveBuf
 	liveMu.Unlock()

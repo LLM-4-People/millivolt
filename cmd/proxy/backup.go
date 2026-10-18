@@ -45,6 +45,11 @@ const (
 	// restoreUploadBuffer bounds the streaming upload copy, so the request body
 	// never becomes one heap-sized slice.
 	restoreUploadBuffer = 32 << 10
+
+	// restorePendingBackupPattern names the private sibling that holds a
+	// pre-existing pending snapshot while a replace restore stages a new one.
+	// A failed config phase restores it to the admission slot byte-for-byte.
+	restorePendingBackupPattern = ".millivolt-restore-pending-*"
 )
 
 func handleBackup(w http.ResponseWriter, r *http.Request) {
@@ -237,24 +242,73 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no database member")
 		return
 	}
+	// Apply as one ordered transaction. The database phase runs before the
+	// config phase, so a failed stage or merge never leaves a config written
+	// against a database that was not applied. A replace stage only publishes
+	// PendingSnapshotPath and is fully reversible; a live merge rewrites rows
+	// in place and has no rollback. A config write/reload failure therefore
+	// rolls the config back but leaves a completed merge applied. That is the
+	// remaining merge limitation, not an atomicity guarantee.
 	restart := []string{}
+	var configPlan *restoreConfigPlan
+	var dbGuard *restorePendingGuard
+	dbRestart := false
 	if wantConfig {
-		skipped, err := restoreConfig(arch.Config, configMode)
+		// Keep this transaction's config read, write, reload and rollback
+		// serialized with SIGHUP, Settings saves, and /admin/reload.
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
+		plan, err := prepareRestoreConfig(arch.Config, configMode)
 		if err != nil {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		configPlan = plan
+	}
+	if wantDB {
+		dbPath := ""
+		var store *storage.Store
+		if configPlan != nil {
+			// Stage at the path the next boot will open after the prepared
+			// config and CLI overrides take effect.
+			dbPath = configPlan.dbPath
+		} else {
+			liveMu.Lock()
+			if liveCfg != nil {
+				dbPath = liveCfg.DBPath
+			}
+			liveMu.Unlock()
+		}
+		if dbMode == "merge" {
+			liveMu.Lock()
+			store = liveStore
+			liveMu.Unlock()
+		}
+		needRestart, guard, err := applyRestoreDatabase(r.Context(), dbPath, arch.DatabasePath, dbMode, store)
+		if err != nil {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		dbRestart, dbGuard = needRestart, guard
+	}
+	if configPlan != nil {
+		skipped, err := applyRestoreConfig(configPlan)
+		if err != nil {
+			if dbGuard != nil {
+				if rbErr := dbGuard.rollback(); rbErr != nil {
+					err = fmt.Errorf("%w; %v", err, rbErr)
+				}
+			}
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		restart = append(restart, skipped...)
 	}
-	if wantDB {
-		needRestart, err := restoreDatabase(r.Context(), arch.DatabasePath, dbMode)
-		if err != nil {
-			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		if needRestart {
-			restart = append(restart, "db_path")
-		}
+	if dbGuard != nil {
+		dbGuard.discard()
+	}
+	if dbRestart {
+		restart = append(restart, "db_path")
 	}
 	// ok is the operator action plane's shared success marker (the dashboard
 	// trusts the HTTP status; the restore tests pin it, tests/_go/cmd/proxy/backup.go).
@@ -486,7 +540,26 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 	return a, cleanup, nil
 }
 
-func restoreConfig(raw []byte, mode string) ([]string, error) {
+// restoreConfigPlan is the prepared, not-yet-applied config member of a
+// restore. Preparation is read-only: it loads and validates the incoming
+// config, applies merge/CLI overrides, validates the effective config, and
+// computes the db_path the next boot will open. previousBytes/previousLive are
+// the exact pre-restore state a failed write or reload must put back.
+type restoreConfigPlan struct {
+	path           string
+	next           *config.Config
+	dbPath         string
+	previousLive   *config.Config
+	previousBytes  []byte
+	previousMode   os.FileMode
+	previousExists bool
+}
+
+// prepareRestoreConfig owns the read-only config phase. It never writes or
+// reloads; the caller stages the database against dbPath, then calls
+// applyRestoreConfig. The caller must hold reloadMu so the file it read cannot
+// change between preparation and application.
+func prepareRestoreConfig(raw []byte, mode string) (*restoreConfigPlan, error) {
 	incoming, skipped, err := config.LoadBytes(raw)
 	if err != nil {
 		return nil, err
@@ -499,6 +572,7 @@ func restoreConfig(raw []byte, mode string) ([]string, error) {
 	}
 	liveMu.Lock()
 	path := liveConfigPath
+	previousLive := liveCfg
 	overrides := map[string]struct{}{}
 	if liveListenOverride != "" {
 		overrides["listen"] = struct{}{}
@@ -509,6 +583,13 @@ func restoreConfig(raw []byte, mode string) ([]string, error) {
 	liveMu.Unlock()
 	if path == "" {
 		return nil, fmt.Errorf("no config file; start with -config to restore settings")
+	}
+	// Capture the file before loading it: a merge needs the parsed current
+	// config, while a failed write/reload must restore the exact bytes, not a
+	// re-rendered document that would lose the operator's formatting.
+	previousBytes, previousMode, previousExists, err := readRestoreConfigFile(path)
+	if err != nil {
+		return nil, err
 	}
 	cur, err := config.LoadFile(path)
 	if err != nil {
@@ -539,12 +620,233 @@ func restoreConfig(raw []byte, mode string) ([]string, error) {
 	if err := next.Validate(); err != nil {
 		return nil, err
 	}
-	if err := config.WriteFile(path, next); err != nil {
-		return nil, err
-	}
-	return reloadConfig()
+	// reloadConfig applies the CLI overrides to the loaded file. Compute the
+	// same effective snapshot here so a config+database replace stages at the
+	// path the next boot will actually open.
+	effective := next.Clone()
+	applyCLIOverrides(effective)
+	return &restoreConfigPlan{
+		path:           path,
+		next:           next,
+		dbPath:         effective.DBPath,
+		previousLive:   previousLive,
+		previousBytes:  previousBytes,
+		previousMode:   previousMode,
+		previousExists: previousExists,
+	}, nil
 }
 
+// readRestoreConfigFile captures the live config file for rollback. A missing
+// file is not an error: LoadFile treats it as defaults and a restore may create
+// it. Any other read failure aborts before the restore writes anything.
+func readRestoreConfigFile(path string) (raw []byte, mode os.FileMode, exists bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, false, nil
+		}
+		return nil, 0, false, err
+	}
+	raw, err = os.ReadFile(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	return raw, info.Mode().Perm(), true, nil
+}
+
+// applyRestoreConfig writes the prepared config and reloads it. The caller must
+// hold reloadMu. On either failure it puts the previous file bytes and the
+// previous live config snapshot back; the caller then rolls back the database
+// admission slot.
+func applyRestoreConfig(plan *restoreConfigPlan) ([]string, error) {
+	if err := writeRestoreConfig(plan.path, plan.next); err != nil {
+		return nil, rollbackRestoreConfig(plan, err)
+	}
+	skipped, err := reloadRestoreConfig()
+	if err != nil {
+		return nil, rollbackRestoreConfig(plan, err)
+	}
+	return skipped, nil
+}
+
+// restoreConfigWriteHook and restoreConfigReloadHook are test seams (production
+// nil). The reload hook runs with reloadMu held and must not call reloadConfig.
+var (
+	restoreConfigWriteHook  func(string, *config.Config) error
+	restoreConfigReloadHook func() ([]string, error)
+)
+
+// writeRestoreConfig uses the existing atomic config writer; the hook only
+// injects the write failure a test cannot produce after database staging.
+func writeRestoreConfig(path string, cfg *config.Config) error {
+	if restoreConfigWriteHook != nil {
+		return restoreConfigWriteHook(path, cfg)
+	}
+	return config.WriteFile(path, cfg)
+}
+
+// reloadRestoreConfig is reloadConfigLocked with a test seam for a post-staging
+// reload failure. The caller holds reloadMu.
+func reloadRestoreConfig() ([]string, error) {
+	if restoreConfigReloadHook != nil {
+		return restoreConfigReloadHook()
+	}
+	return reloadConfigLocked()
+}
+
+// rollbackRestoreConfig restores the live snapshot and the exact previous file
+// bytes. It always attempts the file restore even when the reload failed after
+// a successful write.
+func rollbackRestoreConfig(plan *restoreConfigPlan, cause error) error {
+	liveMu.Lock()
+	liveCfg = plan.previousLive
+	liveMu.Unlock()
+	if err := restoreConfigFile(plan.path, plan.previousBytes, plan.previousMode, plan.previousExists); err != nil {
+		return fmt.Errorf("%w; roll back config file: %v", cause, err)
+	}
+	return cause
+}
+
+// restoreConfigFile atomically replaces path with the captured pre-restore
+// bytes, or removes it when the restore created it. It is the rollback owner,
+// not a second config writer: the prepared document still goes through
+// config.WriteFile.
+func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) error {
+	if !exists {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-restore-*")
+	if err != nil {
+		return err
+	}
+	staged := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(staged)
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(raw); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(staged, path)
+}
+
+// restorePendingGuard owns a pre-existing admission slot while a replace
+// restore stages a new snapshot. A pending snapshot is one self-contained
+// rollback-journal file: the staging owner removes superseded -wal/-shm
+// sidecars before publish, so the slot is a single file.
+type restorePendingGuard struct {
+	pending string
+	backup  string
+}
+
+// captureRestorePending moves a pre-existing pending snapshot aside so a failed
+// config phase can restore it byte-for-byte instead of deleting it. No pending
+// file means the guard only owns removing its newly staged successor.
+func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
+	pending := storage.PendingSnapshotPath(dbPath)
+	g := &restorePendingGuard{pending: pending}
+	if _, err := os.Lstat(pending); err != nil {
+		if os.IsNotExist(err) {
+			return g, nil
+		}
+		return nil, fmt.Errorf("inspect pending snapshot: %w", err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(pending), restorePendingBackupPattern)
+	if err != nil {
+		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	}
+	backup := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(backup)
+		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	}
+	if err := os.Rename(pending, backup); err != nil {
+		_ = os.Remove(backup)
+		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
+	}
+	g.backup = backup
+	return g, nil
+}
+
+// rollback restores the pre-existing pending snapshot, or removes the newly
+// staged one when the slot was empty. The new file is replaced by rename when
+// an old snapshot exists, so no failure window deletes the preserved bytes.
+func (g *restorePendingGuard) rollback() error {
+	if g == nil {
+		return nil
+	}
+	if g.backup != "" {
+		if err := os.Rename(g.backup, g.pending); err != nil {
+			return fmt.Errorf("restore preserved pending snapshot: %w", err)
+		}
+		g.backup = ""
+		return nil
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(g.pending + suffix); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove staged pending snapshot: %w", err)
+		}
+	}
+	return nil
+}
+
+// discard releases the preserved copy after every later restore phase has
+// succeeded. The new pending snapshot stays in the admission slot.
+func (g *restorePendingGuard) discard() {
+	if g == nil || g.backup == "" {
+		return
+	}
+	if err := os.Remove(g.backup); err != nil && !os.IsNotExist(err) {
+		log.Printf("restore: remove preserved pending snapshot %s: %v", g.backup, err)
+	}
+	g.backup = ""
+}
+
+// applyRestoreDatabase applies the database member at dbPath. Replace stages
+// the validated snapshot at PendingSnapshotPath and returns the guard that owns
+// the admission slot; the caller must discard it after a later config phase
+// succeeds or roll it back on failure. Merge writes through the live store and
+// cannot be rolled back.
+func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, store *storage.Store) (restart bool, guard *restorePendingGuard, err error) {
+	if dbPath == "" {
+		return false, nil, storage.ErrStorageDisabled
+	}
+	if mode == "merge" {
+		if store == nil {
+			return false, nil, storage.ErrStorageDisabled
+		}
+		_, _, err := store.MergeSnapshotFile(ctx, source)
+		return false, nil, err
+	}
+	guard, err = captureRestorePending(dbPath)
+	if err != nil {
+		return false, nil, err
+	}
+	if err := storage.StageSnapshotFile(dbPath, source); err != nil {
+		if rbErr := guard.rollback(); rbErr != nil {
+			return false, nil, fmt.Errorf("%w; %v", err, rbErr)
+		}
+		return false, nil, err
+	}
+	return true, guard, nil
+}
+
+// restoreDatabase is the standalone database-only path. It stages at the live
+// config's db_path, not the running store's boot file: the staged snapshot
+// applies at the next restart, which opens the persisted db_path
+// (startup-bound), so the restore targets the path that boot will actually
+// open - a reload that changed db_path stages the new volume while the store
+// keeps the old one. The decoded member streams into a destination-side
+// temporary file, so the database never returns to the heap.
 func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err error) {
 	liveMu.Lock()
 	dbPath := ""
@@ -553,24 +855,32 @@ func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err 
 	}
 	store := liveStore
 	liveMu.Unlock()
-	if dbPath == "" {
-		return false, storage.ErrStorageDisabled
-	}
-	if mode == "merge" {
-		if store == nil {
-			return false, storage.ErrStorageDisabled
-		}
-		_, _, err := store.MergeSnapshotFile(ctx, path)
+	restart, guard, err := applyRestoreDatabase(ctx, dbPath, path, mode, store)
+	if err != nil {
 		return false, err
 	}
-	// Replace stages next to the live CONFIG's db_path, not the running
-	// store's boot file: the staged snapshot applies at the next restart,
-	// which opens the persisted db_path (startup-bound), so the restore
-	// targets the path that boot will actually open - a reload that changed
-	// db_path stages the new volume while the store keeps the old one. The
-	// decoded member streams into a destination-side temporary file, so the
-	// database never returns to the heap.
-	return true, storage.StageSnapshotFile(dbPath, path)
+	guard.discard()
+	return restart, nil
+}
+
+// restoreInspectLiveConfig loads the config an inspect compares the archive
+// against. A configured path that is missing or unreadable fails closed: the
+// document must never present a diff against fabricated defaults. Only an
+// instance started without -config (path == "") compares against Default(),
+// which is then its effective config.
+func restoreInspectLiveConfig(path string) (*config.Config, error) {
+	if path == "" {
+		return config.Default(), nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("live config unavailable: %w", err)
+	}
+	cur, _, err := config.LoadBytes(raw)
+	if err != nil {
+		return nil, fmt.Errorf("live config unavailable: %w", err)
+	}
+	return cur, nil
 }
 
 func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
@@ -589,11 +899,10 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 		liveMu.Lock()
 		path := liveConfigPath
 		liveMu.Unlock()
-		live := config.Default()
-		if path != "" {
-			if cur, err := config.LoadFile(path); err == nil {
-				live = cur
-			}
+		live, err := restoreInspectLiveConfig(path)
+		if err != nil {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+			return
 		}
 		out["config"] = map[string]any{
 			"present":  true,
