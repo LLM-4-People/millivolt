@@ -90,7 +90,9 @@ func TestTurnSettlingRetainsDeltasAndErrors(t *testing.T) {
 		{kind: evDelta, delta: map[string]any{"reasoning_content": "after second call"}},
 		{kind: evErr, err: wantErr},
 	} {
-		r.events <- ev
+		if !r.pushEvent(ev) {
+			t.Fatal("normal small event was rejected by the queue guardrail")
+		}
 	}
 	var deltas int
 	result := r.RunTurn(t.Context(), func(delta map[string]any) error {
@@ -101,6 +103,12 @@ func TestTurnSettlingRetainsDeltasAndErrors(t *testing.T) {
 	})
 	if deltas != 2 || len(result.ToolCalls) != 2 || !errors.Is(result.Err, wantErr) {
 		t.Fatalf("settling discarded queued events: deltas=%d result=%+v", deltas, result)
+	}
+	r.mu.Lock()
+	queued := r.queuedBytes
+	r.mu.Unlock()
+	if queued != 0 {
+		t.Fatalf("queued-byte accounting after receive = %d, want 0", queued)
 	}
 }
 

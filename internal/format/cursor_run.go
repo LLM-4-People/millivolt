@@ -83,6 +83,7 @@ type runEvent struct {
 	delta    map[string]any
 	toolCall *CursorToolCall
 	err      error
+	size     int64 // retained payload bytes, set once by pushEvent
 }
 
 const (
@@ -108,6 +109,21 @@ type CursorRun struct {
 	events  chan runEvent             // pump -> current turn driver
 	closed  bool                      // Close's teardown has run (including pump exit)
 	pending map[string]CursorToolCall // tool_call_id -> call awaiting a result
+	// pendingBytes is the sum of cursorRunToolCallSize over pending, so the
+	// count cap cannot be defeated by a few maximal argument strings. addPending
+	// and takePendingLocked are its only mutators, both under r.mu.
+	pendingBytes int64
+
+	// queuedBytes is the sum of runEvent.size for events queued or in flight
+	// from the pump to the turn driver. pushEvent is the only adder and
+	// releaseEvent is the only subtractor. It is meaningful only while the run
+	// is open: a fail-closed run may leave queued events undrained, so the
+	// residual counter is intentionally irrelevant once Close has run.
+	queuedBytes int64
+	// closeErr is the first fail-closed guardrail reason, surfaced to the
+	// driver instead of the generic unexpected-EOF close. Close does not clear
+	// it, so a parked run's next resume also reports the real cause.
+	closeErr error
 
 	// usage accumulators (pump-written). usagePrompt is the conversation's
 	// current context occupancy (checkpoint token_details.used_tokens);
@@ -136,6 +152,48 @@ const cursorToolSettleIdleMs = 800 * time.Millisecond
 // user-tunable.
 const runEventChanBuf = 64
 
+// cursorRunEventBytesMax bounds the payload bytes retained by events queued or
+// in flight in CursorRun.events. Upstream frames can be connectMaxFrame (32
+// MiB) each, so the 64-slot channel alone could retain gigabytes; this budget
+// is generous for normal small deltas while failing a hostile/slow run closed
+// long before that. Internal safety guardrail, not user-tunable.
+const cursorRunEventBytesMax = 64 << 20 // 64 MiB
+
+// cursorRunPendingCap bounds CursorRun.pending. It applies only to new call
+// ids; duplicate/stale ids keep their existing replace/skip behavior. Internal
+// safety guardrail, not user-tunable.
+const cursorRunPendingCap = 4096
+
+// cursorRunPendingBytesMax bounds the aggregate CallID/Name/Args/exec-id bytes
+// retained in CursorRun.pending. Normal parallel tool calls carry small JSON
+// arguments (typically well under a few hundred KiB), so 64 MiB leaves ample
+// headroom while preventing the count cap's worst case (4096 maximal 32 MiB
+// frames) from retaining gigabytes. Internal safety guardrail, not
+// user-tunable.
+const cursorRunPendingBytesMax = 64 << 20 // 64 MiB
+
+// cursorRunEventValueDepthMax bounds the recursive event-size walker. Event
+// payloads built by this adapter are shallow; the bound keeps a hostile or
+// future nested value from turning accounting into unbounded recursion.
+const cursorRunEventValueDepthMax = 16
+
+// cursorRunEventSizeLimit saturates the walker one byte past the admission
+// bound: an event that can never fit needs no exact size, and saturation keeps
+// measuring a hostile payload's work bounded.
+const cursorRunEventSizeLimit = cursorRunEventBytesMax + 1
+
+var (
+	// errCursorRunEventBytes is the stable fail-closed reason for exceeding
+	// the queued-event byte budget.
+	errCursorRunEventBytes = errors.New("cursor: run event queue byte limit exceeded")
+	// errCursorRunPendingCap is the stable fail-closed reason for exceeding
+	// the pending tool-call count cap.
+	errCursorRunPendingCap = errors.New("cursor: pending tool call limit exceeded")
+	// errCursorRunPendingBytes is the stable fail-closed reason for exceeding
+	// the pending tool-call payload budget.
+	errCursorRunPendingBytes = errors.New("cursor: pending tool call byte limit exceeded")
+)
+
 // NewCursorRun wraps an established bidi stream. out is the request-body
 // writer (kept open), in the response reader, blobs the KV store, closeFn
 // tears down the HTTP exchange on Close, and heartbeat is the ClientHeartbeat
@@ -160,6 +218,212 @@ func NewCursorRun(out io.Writer, in io.Reader, blobs *KVBlobStore, closeFn func(
 
 // Start launches the pump + heartbeat.
 func (r *CursorRun) Start() { go r.pump() }
+
+// failClosedLocked records err as the run's terminal reason and tears it down
+// through Close, so the pump exits and closes the FIFO event stream after any
+// already-queued events. The caller holds r.mu; it is released before Close
+// re-acquires it.
+func (r *CursorRun) failClosedLocked(err error) {
+	if r.closeErr == nil {
+		r.closeErr = err
+	}
+	r.mu.Unlock()
+	r.Close()
+}
+
+// pushEvent is the single pump→driver queue owner: it measures the event once,
+// enforces the queued-byte budget before enqueueing, and accounts the bytes for
+// releaseEvent. An over-budget event is never queued; the run fails closed and
+// the driver reports errCursorRunEventBytes instead of an unexpected EOF.
+func (r *CursorRun) pushEvent(ev runEvent) bool {
+	ev.size = cursorRunEventSize(ev)
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return false
+	}
+	if ev.size > cursorRunEventBytesMax-r.queuedBytes {
+		r.failClosedLocked(fmt.Errorf("%w (event %d bytes, queued %d, limit %d)",
+			errCursorRunEventBytes, ev.size, r.queuedBytes, cursorRunEventBytesMax))
+		return false
+	}
+	r.queuedBytes += ev.size
+	r.mu.Unlock()
+
+	select {
+	case r.events <- ev:
+		return true
+	case <-r.stopPump:
+		// The event was reserved but never queued (Close won the select).
+		r.mu.Lock()
+		r.queuedBytes -= ev.size
+		if r.queuedBytes < 0 {
+			r.queuedBytes = 0
+		}
+		r.mu.Unlock()
+		return false
+	}
+}
+
+// releaseEvent subtracts one event's accounted bytes exactly once when the
+// driver receives it. Both receive branches in runTurn (the normal select and
+// the settle/idle drain) converge here. The clamp is defensive: a direct
+// test-injected event has size 0, and queuedBytes must never go negative.
+func (r *CursorRun) releaseEvent(ev runEvent) {
+	if ev.size == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.queuedBytes -= ev.size
+	if r.queuedBytes < 0 {
+		r.queuedBytes = 0
+	}
+	r.mu.Unlock()
+}
+
+// addPending registers a tool call awaiting a result. Both the count cap and
+// the aggregate payload budget apply to new ids; a duplicate replaces exactly
+// as before but is re-measured so the budget never retains stale bytes.
+// Exceeding either bound fails the whole run closed instead of retaining an
+// unbounded map.
+func (r *CursorRun) addPending(call CursorToolCall) bool {
+	size := cursorRunToolCallSize(call)
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return false
+	}
+	old, exists := r.pending[call.CallID]
+	if !exists && len(r.pending) >= cursorRunPendingCap {
+		r.failClosedLocked(fmt.Errorf("%w (limit %d)", errCursorRunPendingCap, cursorRunPendingCap))
+		return false
+	}
+	base := r.pendingBytes
+	if base < 0 {
+		base = 0
+	}
+	if exists {
+		base -= cursorRunToolCallSize(old)
+		if base < 0 {
+			base = 0
+		}
+	}
+	if size > cursorRunPendingBytesMax-base {
+		r.failClosedLocked(fmt.Errorf("%w (call %d bytes, pending %d, limit %d)",
+			errCursorRunPendingBytes, size, base, cursorRunPendingBytesMax))
+		return false
+	}
+	r.pending[call.CallID] = call
+	r.pendingBytes = base + size
+	r.mu.Unlock()
+	return true
+}
+
+// cursorRunToolCallSize is the single retained-size owner for a pending tool
+// call. It reuses the event walker's saturating string accounting and counts
+// every payload field the pending map retains.
+func cursorRunToolCallSize(call CursorToolCall) int64 {
+	n := cursorRunAddSize(0, int64(len(call.CallID)))
+	n = cursorRunAddSize(n, int64(len(call.Name)))
+	n = cursorRunAddSize(n, int64(len(call.Args)))
+	n = cursorRunAddSize(n, int64(len(call.execIDStr)))
+	return n
+}
+
+// takePendingLocked removes one pending call and releases its accounted bytes.
+// It is the single pending-deletion owner; callers hold r.mu.
+func (r *CursorRun) takePendingLocked(id string) (CursorToolCall, bool) {
+	call, ok := r.pending[id]
+	if !ok {
+		return CursorToolCall{}, false
+	}
+	delete(r.pending, id)
+	r.pendingBytes -= cursorRunToolCallSize(call)
+	if r.pendingBytes < 0 {
+		r.pendingBytes = 0
+	}
+	return call, true
+}
+
+// cursorRunEventSize estimates the bytes an event retains. It walks the actual
+// payload fields instead of serializing a JSON copy: delta values plus the tool
+// call's retained fields via cursorRunToolCallSize. Errors count their message,
+// which is all a terminal event retains. The walk saturates at
+// cursorRunEventSizeLimit.
+func cursorRunEventSize(ev runEvent) int64 {
+	n := cursorRunValueSize(ev.delta, 0)
+	if ev.toolCall != nil {
+		n = cursorRunAddSize(n, cursorRunToolCallSize(*ev.toolCall))
+	}
+	if ev.err != nil {
+		n = cursorRunAddSize(n, int64(len(ev.err.Error())))
+	}
+	return n
+}
+
+// cursorRunValueSize is the bounded recursive walker behind cursorRunEventSize.
+// Unknown value types count as zero: this adapter only constructs strings,
+// scalars, map[string]any, []any and []map[string]any event payloads, and a
+// reflection-based fallback would add cost for shapes that cannot occur.
+func cursorRunValueSize(v any, depth int) int64 {
+	if depth > cursorRunEventValueDepthMax {
+		return 0
+	}
+	switch x := v.(type) {
+	case nil:
+		return 0
+	case string:
+		return cursorRunAddSize(0, int64(len(x)))
+	case []byte:
+		return cursorRunAddSize(0, int64(len(x)))
+	case bool:
+		return 1
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return 8
+	case map[string]any:
+		var n int64
+		for k, vv := range x {
+			n = cursorRunAddSize(n, int64(len(k)))
+			n = cursorRunAddSize(n, cursorRunValueSize(vv, depth+1))
+			if n >= cursorRunEventSizeLimit {
+				return cursorRunEventSizeLimit
+			}
+		}
+		return n
+	case []any:
+		var n int64
+		for _, vv := range x {
+			n = cursorRunAddSize(n, cursorRunValueSize(vv, depth+1))
+			if n >= cursorRunEventSizeLimit {
+				return cursorRunEventSizeLimit
+			}
+		}
+		return n
+	case []map[string]any:
+		var n int64
+		for _, vv := range x {
+			n = cursorRunAddSize(n, cursorRunValueSize(vv, depth+1))
+			if n >= cursorRunEventSizeLimit {
+				return cursorRunEventSizeLimit
+			}
+		}
+		return n
+	default:
+		return 0
+	}
+}
+
+// cursorRunAddSize adds a nonnegative payload length, saturating at the walker
+// limit so hostile sizes cannot overflow the int64 estimate.
+func cursorRunAddSize(n, add int64) int64 {
+	if add <= 0 {
+		return n
+	}
+	if n >= cursorRunEventSizeLimit-add {
+		return cursorRunEventSizeLimit
+	}
+	return n + add
+}
 
 // pendingHas reports whether the call id is still awaiting a result (the pump
 // registers every exec before surfacing it; a buffered event whose pending
@@ -226,9 +490,17 @@ func (r *CursorRun) runTurn(emitDelta func(delta map[string]any) error) TurnResu
 		if !ok {
 			// Pump termination is observed only AFTER every queued event.
 			// Ordinary EOF/errors have explicit terminal events; a close with
-			// none is interrupted work, never a fabricated empty success.
+			// none is interrupted work, never a fabricated empty success. A
+			// fail-closed guardrail recorded its descriptive reason first.
+			r.mu.Lock()
+			closeErr := r.closeErr
+			r.mu.Unlock()
+			if closeErr != nil {
+				return r.finish(TurnErrored, calls, closeErr)
+			}
 			return r.finish(TurnErrored, calls, io.ErrUnexpectedEOF)
 		}
+		r.releaseEvent(ev)
 		switch ev.kind {
 		case evDelta:
 			if emitDelta != nil {
@@ -307,7 +579,11 @@ func (r *CursorRun) ResumeTurn(ctx context.Context, results map[string]ToolResul
 func (r *CursorRun) resumeTurn(results map[string]ToolResult, steerText string, emitDelta func(delta map[string]any) error) TurnResult {
 	r.mu.Lock()
 	if r.closed {
+		closeErr := r.closeErr
 		r.mu.Unlock()
+		if closeErr != nil {
+			return TurnResult{Outcome: TurnErrored, Err: closeErr}
+		}
 		return TurnResult{Outcome: TurnErrored, Err: fmt.Errorf("cursor: parked stream closed before results arrived")}
 	}
 	for id := range results {
@@ -325,10 +601,7 @@ func (r *CursorRun) resumeTurn(results map[string]ToolResult, steerText string, 
 	// Write each result into the stream, releasing the blocked turn(s).
 	for id, res := range results {
 		r.mu.Lock()
-		call, ok := r.pending[id]
-		if ok {
-			delete(r.pending, id)
-		}
+		call, ok := r.takePendingLocked(id)
 		r.mu.Unlock()
 		if !ok {
 			return TurnResult{Outcome: TurnErrored, Err: fmt.Errorf("cursor: tool call %q vanished", id)}
@@ -420,14 +693,7 @@ func (r *CursorRun) pump() {
 		}
 	}()
 
-	push := func(ev runEvent) bool {
-		select {
-		case r.events <- ev:
-			return true
-		case <-r.stopPump:
-			return false
-		}
-	}
+	push := r.pushEvent
 
 	for {
 		select {
@@ -486,9 +752,9 @@ func (r *CursorRun) pump() {
 			}
 			if call.Name != "" {
 				tc := CursorToolCall{CallID: call.CallID, Name: call.Name, Args: call.Args, execID: call.execID, execIDStr: call.execIDStr}
-				r.mu.Lock()
-				r.pending[call.CallID] = tc
-				r.mu.Unlock()
+				if !r.addPending(tc) {
+					return
+				}
 				if !push(runEvent{kind: evToolCall, toolCall: &tc}) {
 					return
 				}

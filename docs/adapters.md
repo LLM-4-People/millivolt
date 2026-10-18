@@ -154,7 +154,10 @@ The run owns a bidirectional HTTP/2 transport, framed messages, heartbeat,
 context/KV replies and one ordered event queue. Malformed known nested messages,
 invalid usage or error terminal frames fail explicitly. A validated turn-ended
 marker plus EOF remains a supported completion convention; bare EOF without
-completion is not a clean success.
+completion is not a clean success. The event queue carries an internal retained
+byte budget and the pending tool-call map internal count and payload byte caps;
+exceeding any bound fails the run closed with a stable descriptive error instead
+of retaining unbounded memory. None of these bounds is operator-tunable.
 
 When the upstream requests a client tool, the proxy returns OpenAI tool calls
 and parks the native stream. A later matching tool-result tail can resume that
