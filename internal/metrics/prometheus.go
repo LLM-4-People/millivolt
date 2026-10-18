@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // HandlePrometheus renders the /metrics/prometheus exposition. It reuses the
@@ -73,7 +74,7 @@ func renderPrometheusExposition(records []*Record) (string, error) {
 	// the single record pass, including no-TTFT records.
 	writeHeader("llm_proxy_requests_by_provider", "Requests grouped by provider (current ring).", "gauge")
 	for _, p := range sortedKeys(agg.ProviderCounts) {
-		fmt.Fprintf(&b, "llm_proxy_requests_by_provider{provider=%q} %d\n", p, agg.ProviderCounts[p])
+		fmt.Fprintf(&b, "llm_proxy_requests_by_provider{provider=\"%s\"} %d\n", prometheusLabelValue(p), agg.ProviderCounts[p])
 	}
 
 	// TTFT summary across all requests with a captured TTFT. Aggregate has
@@ -83,9 +84,9 @@ func renderPrometheusExposition(records []*Record) (string, error) {
 	ttfts := agg.TTFTSamples
 	slices.Sort(ttfts)
 	if len(ttfts) > 0 {
-		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.5\"} %g\n", Percentile(ttfts, 50)/1e3)
-		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.95\"} %g\n", Percentile(ttfts, 95)/1e3)
-		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.99\"} %g\n", Percentile(ttfts, 99)/1e3)
+		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"%s\"} %g\n", prometheusLabelValue("0.5"), Percentile(ttfts, 50)/1e3)
+		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"%s\"} %g\n", prometheusLabelValue("0.95"), Percentile(ttfts, 95)/1e3)
+		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"%s\"} %g\n", prometheusLabelValue("0.99"), Percentile(ttfts, 99)/1e3)
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_sum %g\n", float64(agg.TTFTSumMs)/1e3)
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_count %d\n", len(ttfts))
 	}
@@ -95,4 +96,37 @@ func renderPrometheusExposition(records []*Record) (string, error) {
 
 func sortedKeys(m map[string]int) []string {
 	return slices.Sorted(maps.Keys(m))
+}
+
+// prometheusLabelValue escapes one label value for the Prometheus text
+// exposition format. The format requires escaping only backslash, double
+// quote, and line feed; every other valid UTF-8 sequence is legal raw. Invalid
+// UTF-8 bytes are replaced with U+FFFD so one client-minted label can never
+// make the whole scrape unparseable. Ordinary values return unchanged.
+func prometheusLabelValue(s string) string {
+	if utf8.ValidString(s) && !strings.ContainsAny(s, "\\\"\n") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			b.WriteRune(utf8.RuneError)
+			i++
+			continue
+		}
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
 }

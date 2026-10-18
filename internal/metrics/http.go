@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
@@ -49,8 +50,27 @@ func RejectUnlessGet(w http.ResponseWriter, r *http.Request) bool {
 // analyzer); importing it back would be a cycle.
 func SetStreamHeaders(h http.Header) {
 	h.Set("Content-Type", "text/event-stream")
-	h.Set("Cache-Control", "no-cache")
+	// The operator gate stages no-store beside the session cookie it mints for
+	// a Bearer-authenticated dashboard stream. Preserve that stricter directive
+	// instead of downgrading the authenticated response to no-cache; plain and
+	// cursor streams keep the SSE default.
+	if !hasNoStoreCacheControl(h.Values("Cache-Control")) {
+		h.Set("Cache-Control", "no-cache")
+	}
 	h.Set("Connection", "keep-alive")
+}
+
+// hasNoStoreCacheControl reports whether any Cache-Control directive list
+// already carries the no-store directive (case-insensitive).
+func hasNoStoreCacheControl(values []string) bool {
+	for _, value := range values {
+		for _, directive := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(directive), "no-store") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // cursorParam resolves the resume cursor for a live-feed request - the ONE

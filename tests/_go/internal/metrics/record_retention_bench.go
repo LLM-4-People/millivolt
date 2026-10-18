@@ -32,7 +32,7 @@ func BenchmarkBufferRecordRetentionHostile(b *testing.B) {
 		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
 	}
 	attempts := make([]RetryAttempt, 1)
-	toolNames := make([]string, retainedRecordToolNamesMax+1)
+	toolNames := make([]string, RetainedToolNamesMax+1)
 	for i := range toolNames {
 		toolNames[i] = "tool"
 	}

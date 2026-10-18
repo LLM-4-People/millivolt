@@ -30,7 +30,11 @@ const (
 	// bound plus the two-byte s:/k: namespace prefix.
 	retainedRecordConversationMax = 514
 	retainedRecordToolNameMax     = 128
-	retainedRecordToolNamesMax    = 64
+	// RetainedToolNamesMax is the maximum retained distinct tool-name count.
+	// It is exported because the SSE analyzer applies the same cap while the
+	// stream is still running, so its dedupe set can never grow past what the
+	// record boundary would retain.
+	RetainedToolNamesMax          = 64
 	retainedRecordDebugSessionMax = 128
 )
 
@@ -129,14 +133,14 @@ func truncateUTF8(s string, cut int) string {
 	return s[:cut] + recordTruncationSuffix
 }
 
-// retainedToolNames keeps at most the first retainedRecordToolNamesMax names,
-// each at most retainedRecordToolNameMax bytes, in order. It returns the input
+// retainedToolNames keeps at most the first RetainedToolNamesMax names, each
+// at most retainedRecordToolNameMax bytes, in order. It returns the input
 // slice unchanged when every name fits, and otherwise returns a new slice so a
 // caller-owned list is never mutated.
 func retainedToolNames(in []string) []string {
 	keep := len(in)
-	if keep > retainedRecordToolNamesMax {
-		keep = retainedRecordToolNamesMax
+	if keep > RetainedToolNamesMax {
+		keep = RetainedToolNamesMax
 	}
 	bounded := keep != len(in)
 	if !bounded {

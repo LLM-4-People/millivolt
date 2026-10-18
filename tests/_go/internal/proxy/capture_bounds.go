@@ -3,6 +3,8 @@ package proxy
 import (
 	"fmt"
 	"net/http"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -104,6 +106,70 @@ func TestCaptureHeadersBoundsHostileValues(t *testing.T) {
 	}
 	if total > retainedHeadersMaxBytes {
 		t.Fatalf("retained header bytes = %d, want <= %d", total, retainedHeadersMaxBytes)
+	}
+}
+
+// TestCaptureHeadersBoundsEntryCount pins the retained-entry cap separately
+// from the text budget: an upstream can send tens of thousands of short unique
+// names that all fit the 16 KiB text budget, so without an entry cap the
+// retained map (and its bucket array) would scale with the upstream header
+// count. Selection stays deterministic (sorted names), ordinary and redacted
+// headers keep their exact bytes, and the retained heap stays bounded.
+func TestCaptureHeadersBoundsEntryCount(t *testing.T) {
+	normal := http.Header{
+		"Content-Type":  {"application/json"},
+		"X-Request-Id":  {"abc-123"},
+		"Authorization": {"Bearer secret"},
+	}
+	want := http.Header{
+		"Content-Type":  {"application/json"},
+		"X-Request-Id":  {"abc-123"},
+		"Authorization": {"[REDACTED]"},
+	}
+	if got := captureHeaders(normal, "Authorization"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("normal/redacted headers changed: got %#v, want %#v", got, want)
+	}
+
+	build := func(n int) http.Header {
+		h := make(http.Header, n)
+		for i := 0; i < n; i++ {
+			h[fmt.Sprintf("x%05d", i)] = []string{"v"}
+		}
+		return h
+	}
+	atCap := captureHeaders(build(retainedHeaderEntriesMax), "Authorization")
+	if len(atCap) != retainedHeaderEntriesMax {
+		t.Fatalf("retained entries = %d, want the full cap %d", len(atCap), retainedHeaderEntriesMax)
+	}
+
+	huge := build(60000)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	out := captureHeaders(huge, "Authorization")
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(huge)
+	runtime.KeepAlive(out)
+	if len(out) != retainedHeaderEntriesMax {
+		t.Fatalf("60k-name header map retained %d entries, want the cap %d", len(out), retainedHeaderEntriesMax)
+	}
+	for _, name := range []string{"x00000", "x00255"} {
+		if _, ok := out[name]; !ok {
+			t.Fatalf("sorted selection did not retain %s", name)
+		}
+	}
+	if _, ok := out["x00256"]; ok {
+		t.Fatal("retained an entry beyond the sorted cap")
+	}
+	// A map sized from the 60k input used about 6.1 MiB of retained buckets
+	// for the same text budget; the cap keeps the whole retained map well
+	// under this bound. The signed delta tolerates GC releasing unrelated
+	// benchmark allocations (HeapAlloc is unsigned).
+	heap := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	t.Logf("60k-name header map retained %d entries in %d heap bytes", len(out), heap)
+	if heap > 512<<10 {
+		t.Fatalf("60k-name retained heap = %d bytes, want <= %d", heap, 512<<10)
 	}
 }
 

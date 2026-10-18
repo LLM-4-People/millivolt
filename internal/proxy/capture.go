@@ -122,9 +122,12 @@ func redactHeaderName(name, authHeader string) bool {
 // capture sidecar. Names are capped too and charged with their value in every
 // branch, including redacted credential headers: an overlong name is skipped
 // rather than truncated into a colliding map key, and the fixed redaction
-// marker still spends the shared budget.
+// marker still spends the shared budget. The byte budget alone does not bound
+// the map: thousands of short names fit it while the map's bucket array still
+// scales with the upstream header count, so the retained entry count has its
+// own cap.
 func captureHeaders(h http.Header, authHeader string) http.Header {
-	out := make(http.Header, len(h))
+	out := make(http.Header)
 	// Deterministic total budget: names are visited in sorted order so which
 	// oversized headers survive does not depend on map iteration order. A
 	// header map otherwise bounded only per value could retain 64 KiB per name
@@ -136,6 +139,12 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 	slices.Sort(names)
 	used := 0
 	for _, name := range names {
+		// Names are visited in sorted order, so the admitted set is
+		// deterministic. Once the entry cap is reached no later name can be
+		// added; stop rather than scan a hostile 60k-name map to the end.
+		if len(out) >= retainedHeaderEntriesMax {
+			break
+		}
 		// Judge the name before redaction: an overlong credential-bearing name
 		// must not allocate a lowercase copy or reach the retained map.
 		if len(name) > retainedHeaderNameMax {
@@ -187,6 +196,7 @@ const (
 	retainedHeaderNameMax    = 512   // one retained header name; a longer name is skipped
 	retainedHeaderValueMax   = 4096  // one retained header value
 	retainedHeaderValuesMax  = 16    // values retained per header name
+	retainedHeaderEntriesMax = 256   // names retained across one header map
 	retainedHeadersMaxBytes  = 16384 // total retained bytes across one header map
 	retainedTruncationSuffix = "…"
 )

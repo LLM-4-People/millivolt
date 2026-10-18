@@ -28,7 +28,6 @@ package sse
 import (
 	"bytes"
 	"encoding/json"
-	"slices"
 	"strings"
 	"time"
 
@@ -51,8 +50,13 @@ type Analyzer struct {
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 
-	toolCalls    int
+	toolCalls int
+	// toolNames is the retained first-seen name list and toolNameSet is its
+	// O(1) membership index. Both are bounded by metrics.RetainedToolNamesMax
+	// while the stream is still running, so the record cap cannot be exceeded
+	// before Fill; every tool call is counted independently.
 	toolNames    []string
+	toolNameSet  map[string]struct{}
 	finishReason string
 
 	// terminatorSeen records that the stream's documented end-of-stream marker
@@ -254,7 +258,11 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Count tool calls and capture their names. Each distinct tool call carries
 	// an "id" in its first delta chunk; subsequent argument chunks repeat the
 	// tool_calls key but do not include "id". The outer chunk `"id":"1"` is
-	// excluded by searching only within the tool_calls array.
+	// excluded by searching only within the tool_calls array. The retained name
+	// set is first-seen order and capped while streaming: dedupe is one map
+	// probe instead of a scan over every earlier name, and once the cap is
+	// reached new names are dropped (calls are still counted) so neither the
+	// list nor the set can grow with a hostile stream.
 	if hasToolCall {
 		var calls []struct {
 			ID       string `json:"id"`
@@ -268,9 +276,18 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 					continue
 				}
 				a.toolCalls++
-				if name := call.Function.Name; name != "" && !slices.Contains(a.toolNames, name) {
-					a.toolNames = append(a.toolNames, name)
+				name := call.Function.Name
+				if name == "" || len(a.toolNames) >= metrics.RetainedToolNamesMax {
+					continue
 				}
+				if a.toolNameSet == nil {
+					a.toolNameSet = make(map[string]struct{}, metrics.RetainedToolNamesMax)
+				}
+				if _, duplicate := a.toolNameSet[name]; duplicate {
+					continue
+				}
+				a.toolNameSet[name] = struct{}{}
+				a.toolNames = append(a.toolNames, name)
 			}
 		}
 	}
