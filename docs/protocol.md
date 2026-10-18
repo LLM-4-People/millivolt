@@ -58,6 +58,18 @@ ring, analytics or durable store: classified client and language 256 bytes,
 user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
 are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
 
+Finalized and pending record text is retention-bounded at the record boundary
+before it enters the live ring, pending view or durable store: path 1024 bytes,
+method 32 bytes, model, provider model, provider request id, provider server,
+finish reason, error type and error code 512 bytes each, each tool name 128
+bytes with at most 64 retained in order, and debug session id 128 bytes.
+Absorbed-attempt provider model, provider request id, provider server, error
+type and error code use the same 512-byte bound. Longer values are cut on a
+UTF-8 boundary and end with `…`; normal values are unchanged. Attempt error
+messages keep their existing owner's bound. These record bounds do not alter
+debug capture bodies, retained headers, content previews, request-parameter
+JSON or operator-configured provider names.
+
 One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
 Absent headers preserve limits; `0`, `off`, `none` or `unlimited` clear them.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.

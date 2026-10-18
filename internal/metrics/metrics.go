@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 // Usage is the normalized token/cache accounting for a single request. Fields
@@ -484,11 +483,7 @@ func TruncatePreview(s string) string {
 	if len(s) <= PreviewMaxBytes {
 		return s
 	}
-	cut := PreviewMaxBytes
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "…"
+	return truncateUTF8(s, PreviewMaxBytes)
 }
 
 // HasErrorKey reports whether b contains a top-level-candidate "error" key,

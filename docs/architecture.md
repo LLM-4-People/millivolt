@@ -113,6 +113,13 @@ the live end nor durable accounting. A drawer fetch for the id waits on the
 marker, then reads the authoritative store; a resolved marker without a row
 keeps the normal 404.
 
+`Buffer.Record`, `PublishLive` and `Backfill` share the one record-retention
+pass ([internal/metrics/retain.go](../internal/metrics/retain.go)) at that
+boundary. It bounds client-controlled paths/methods and provider-controlled
+model/request/finish/error text, tool names and attempt metadata; normal values
+stay byte-identical. The bounds and the UTF-8 cut marker are documented in the
+[protocol](protocol.md).
+
 Existing lock order keeps sequence assignment and finalized publication ordered.
 A feed epoch changes on restart/deletion; queued fanout retains its mutation
 epoch. Subscribers attach before snapshot capture and overflow retires that

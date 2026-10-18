@@ -227,6 +227,9 @@ func (b *Buffer) Record(r *Record) {
 	if r == nil {
 		return // never store a nil record
 	}
+	// Bound client/provider text once, before the finalized record enters the
+	// ring and the durable queue (the recorder enqueues this same record).
+	retainRecord(r)
 	b.subsMu.Lock()
 	b.mu.Lock()
 	seq, feed := b.pushLocked(r)
@@ -364,6 +367,9 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 		copy(att, r.Attempts)
 		snap.Attempts = att
 	}
+	// Pending/live JSON is bounded too; the snapshot copy keeps the live
+	// record's still-mutating text and attempt slice out of the retention pass.
+	retainRecordSnapshot(&snap)
 	// Maintain the pending registry - the single owner of "what is in flight
 	// right now". It lets a dashboard that (re)loads mid-request still see the
 	// streaming row: snapshot payloads carry these pending snapshots alongside
@@ -511,6 +517,9 @@ func (b *Buffer) Backfill(records []*Record) {
 		if r == nil {
 			continue // never store a nil record
 		}
+		// Restored rows can predate a bound, so apply the same retention pass
+		// before they enter the live ring. Normal history is unchanged.
+		retainRecord(r)
 		b.pushLocked(r)
 	}
 }
