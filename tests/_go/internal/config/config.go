@@ -841,8 +841,11 @@ func TestMCPSettingsValidateRejections(t *testing.T) {
 		mutate func(*Config)
 		key    string
 	}{
-		{"page size below floor", func(c *Config) { c.MCPPageSize = 0 }, "mcp_page_size"},
-		{"query rows below floor", func(c *Config) { c.MCPQueryMaxRows = 0 }, "mcp_query_max_rows"},
+		{"page size zero", func(c *Config) { c.MCPPageSize = 0 }, "mcp_page_size"},
+		{"page size below floor", func(c *Config) { c.MCPPageSize = 9 }, "mcp_page_size"},
+		{"page size above ceiling", func(c *Config) { c.MCPPageSize = 501 }, "mcp_page_size"},
+		{"query rows zero", func(c *Config) { c.MCPQueryMaxRows = 0 }, "mcp_query_max_rows"},
+		{"query rows above ceiling", func(c *Config) { c.MCPQueryMaxRows = 100001 }, "mcp_query_max_rows"},
 		{"query bytes below floor", func(c *Config) { c.MCPQueryMaxBytes = 0 }, "mcp_query_max_bytes"},
 		{"capture bytes below floor", func(c *Config) { c.MCPCaptureMaxBytes = 0 }, "mcp_capture_max_bytes"},
 		{"query timeout zero", func(c *Config) { c.MCPQueryTimeout = 0 }, "mcp_query_timeout"},
@@ -861,6 +864,99 @@ func TestMCPSettingsValidateRejections(t *testing.T) {
 				t.Fatalf("Validate() = %q, want the rejection to name %q", err, tc.key)
 			}
 		})
+	}
+}
+
+// TestMCPBandBoundaries pins that both ends of the MCP bands are accepted at
+// the config boundary, not only the floors the endpoint used to enforce.
+func TestMCPBandBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"page size minimum", func(c *Config) { c.MCPPageSize = 10 }},
+		{"page size maximum", func(c *Config) { c.MCPPageSize = 500 }},
+		{"query rows minimum", func(c *Config) { c.MCPQueryMaxRows = 1 }},
+		{"query rows maximum", func(c *Config) { c.MCPQueryMaxRows = 100000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Default()
+			tc.mutate(c)
+			if err := c.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want the boundary accepted", err)
+			}
+		})
+	}
+}
+
+// TestMCPBandsInSchema pins the dashboard ranges to the same constants and the
+// query field's help to its default-plus-explicit-ceiling contract.
+func TestMCPBandsInSchema(t *testing.T) {
+	for _, tc := range []struct {
+		key      string
+		min, max int
+	}{
+		{"mcp_page_size", 10, 500},
+		{"mcp_query_max_rows", 1, 100000},
+	} {
+		field := FieldByKey(tc.key)
+		if field == nil {
+			t.Fatalf("%s is missing from Schema()", tc.key)
+		}
+		if field.Min == nil || int(*field.Min) != tc.min || field.Max == nil || int(*field.Max) != tc.max {
+			t.Fatalf("%s range = %v..%v, want %d..%d", tc.key, field.Min, field.Max, tc.min, tc.max)
+		}
+	}
+	help := FieldByKey("mcp_query_max_rows").Help
+	for _, needle := range []string{"Default client-side row limit", "omits max_rows", "explicit max_rows"} {
+		if !strings.Contains(help, needle) {
+			t.Fatalf("mcp_query_max_rows help %q must state %q", help, needle)
+		}
+	}
+}
+
+// TestConfigDocumentSizeBound pins the 16 MiB config-document contract used by
+// the backup config member. A valid config must still validate and encode; a
+// provider header value that pushes the canonical YAML over the bound must be
+// rejected at Validate, not only when a backup is encoded or restored.
+func TestConfigDocumentSizeBound(t *testing.T) {
+	tooLarge := Default()
+	tooLarge.Providers = map[string]ProviderOverride{
+		"p": {Headers: map[string]string{"x-large": strings.Repeat("x", 17<<20)}},
+	}
+	err := tooLarge.Validate()
+	if err == nil || !strings.Contains(err.Error(), "config document") ||
+		!strings.Contains(err.Error(), FormatByteSize(ConfigDocumentMaxBytes)) {
+		t.Fatalf("Validate() = %v, want the config-document size rejection", err)
+	}
+	tooLarge.Providers = nil
+
+	// Build an at-cap document from the canonical writer, so the boundary is
+	// the same one the backup encoder receives.
+	atCap := Default()
+	atCap.Providers = map[string]ProviderOverride{
+		"p": {Headers: map[string]string{"x-large": ""}},
+	}
+	var base bytes.Buffer
+	if err := WriteYAML(&base, atCap); err != nil {
+		t.Fatal(err)
+	}
+	headerBytes := ConfigDocumentMaxBytes - base.Len()
+	if headerBytes <= 0 {
+		t.Fatalf("default document is already %d bytes, above the %d-byte bound", base.Len(), ConfigDocumentMaxBytes)
+	}
+	atCap.Providers["p"] = ProviderOverride{
+		Headers: map[string]string{"x-large": strings.Repeat("x", headerBytes)},
+	}
+	var rendered bytes.Buffer
+	if err := WriteYAML(&rendered, atCap); err != nil {
+		t.Fatal(err)
+	}
+	if rendered.Len() != ConfigDocumentMaxBytes {
+		t.Fatalf("at-cap document = %d bytes, want exactly %d", rendered.Len(), ConfigDocumentMaxBytes)
+	}
+	if err := atCap.Validate(); err != nil {
+		t.Fatalf("at-cap config Validate() = %v, want accepted", err)
 	}
 }
 

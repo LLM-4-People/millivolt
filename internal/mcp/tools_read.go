@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
 // QueryInput is a single bounded SELECT.
@@ -29,15 +31,16 @@ const queryAdvice = "narrow the SELECT (fewer columns, a WHERE range, or a GROUP
 	"this tool has no cursor, so paging is done in SQL with keyset pagination"
 
 // Query runs one bounded SELECT and truncates client-side with an explicit
-// marker. The proxy's own row and byte limits still apply (413); this cap is
-// the volume a model can read.
+// marker. The proxy's own row and byte limits still apply (413); this limit is
+// the volume a model can read. An explicit max_rows wins over the configured
+// default, up to config.MCPQueryMaxRowsMax.
 func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error) {
 	limit := in.MaxRows
 	if limit <= 0 {
 		limit = s.limits.QueryMaxRows
 	}
-	if limit > maxQueryRowsCeiling {
-		return nil, fmt.Errorf("max_rows must be at most %d", maxQueryRowsCeiling)
+	if limit > config.MCPQueryMaxRowsMax {
+		return nil, fmt.Errorf("max_rows must be at most %d", config.MCPQueryMaxRowsMax)
 	}
 	// The row cap is not a volume bound: a short wide row can be larger than a
 	// long narrow one, so the encoded-size cap runs after it and is reported
@@ -56,10 +59,6 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 	}
 	return &QueryOutput{Rows: page.Rows, RowCount: len(page.Rows), Bytes: page.Bytes, Truncation: truncation}, nil
 }
-
-// maxQueryRowsCeiling is an internal sanity bound so a typo cannot ask for a
-// billion rows. It is not a proxy limit; the proxy enforces its own.
-const maxQueryRowsCeiling = 100000
 
 // ExploreInput is a faceted breakdown request.
 type ExploreInput struct {
@@ -344,9 +343,10 @@ type SnapshotOutput struct {
 	OlderHistory  string           `json:"older_history" jsonschema:"how to reach records older than this snapshot"`
 }
 
-// Snapshot returns the live bootstrap snapshot. The full payload is capped at
-// 2 * dash_log_rows records when durable storage backs the ring, so older
-// history needs the durable log page.
+// Snapshot returns the live bootstrap snapshot. When durable storage backs the
+// ring, the full payload is capped at 2 * dash_log_rows records, so older
+// history needs the durable log page. With storage off the ring is the only
+// history and the snapshot is not capped.
 func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutput, error) {
 	limit := in.MaxRecords
 	if limit <= 0 {

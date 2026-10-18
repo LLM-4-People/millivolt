@@ -107,8 +107,8 @@ type PredicateDoc struct {
 
 // LimitDoc reports the server's result limits.
 type LimitDoc struct {
-	QueryMaxRows        int    `json:"query_max_rows" jsonschema:"this server's client-side cap on query rows"`
-	QueryMaxRowsCeiling int    `json:"query_max_rows_ceiling" jsonschema:"hard client-side ceiling for a query max_rows argument"`
+	QueryMaxRows        int    `json:"query_max_rows" jsonschema:"default row limit when max_rows is omitted; an explicit max_rows may raise it up to query_max_rows_ceiling"`
+	QueryMaxRowsCeiling int    `json:"query_max_rows_ceiling" jsonschema:"hard client-side ceiling for an explicit query max_rows argument"`
 	QueryMaxBytes       int    `json:"query_max_bytes" jsonschema:"this server's client-side cap on the encoded size of one query result"`
 	LogPageMin          int    `json:"log_page_min" jsonschema:"smallest durable log page the proxy accepts"`
 	LogPageMax          int    `json:"log_page_max" jsonschema:"largest durable log page the proxy accepts"`
@@ -131,7 +131,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		KnownTools:   []string{},
 		Limits: LimitDoc{
 			QueryMaxRows:        s.limits.QueryMaxRows,
-			QueryMaxRowsCeiling: maxQueryRowsCeiling,
+			QueryMaxRowsCeiling: config.MCPQueryMaxRowsMax,
 			QueryMaxBytes:       s.limits.QueryMaxBytes,
 			LogPageMin:          logPageMin,
 			LogPageMax:          logPageMax,
@@ -154,7 +154,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			"There is NO unixnow() function in this SQLite build. For a relative window use strftime('%s','now')*1000, " +
 				"for example WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour.",
 			"Use keyset pagination (WHERE (started_at, id) < (?, ?)) rather than OFFSET for deep history; OFFSET degrades on every page.",
-			"For history older than the snapshot window, use the records tool with its paired before_ms/before_id cursor. The snapshot is capped at 2 * dash_log_rows records.",
+			"For history older than the snapshot window, use the records tool with its paired before_ms/before_id cursor. " + snapshotCapRule,
 			"dashboard_version is a frontend asset fingerprint, not an API version. There is no API versioning and no published stability contract.",
 			"Filters in the export and purge grammars match raw stored values, never canonicalized model names. " +
 				"The explore, chart and records scope filters are the opposite: they match the CANONICAL model spelling the proxy derives " +
@@ -346,16 +346,23 @@ func observedToolNames(records []map[string]any) []string {
 // them even before any query runs; the config-driven storage_query_max_rows is
 // quoted as prose because it is per-deployment.
 //
-// The log page band is derived from the proxy's own config owner rather than
-// restated, so a band change cannot leave a stale number in the reference. The
+// The log page band is derived from the MCP config band rather than restated,
+// so a band change cannot leave a stale number in the reference. The
 // explorer/chart caps have no exported owner (internal/web xpNodeCap and
 // chartMaxBuckets+1), so they remain literals pinned by a contract test.
 const (
-	logPageMin              = config.DashLogRowsMin
-	logPageMax              = config.DashLogRowsMax
+	logPageMin              = config.MCPPageSizeMin
+	logPageMax              = config.MCPPageSizeMax
 	explorerMaxGroups       = 24
 	chartMaxBuckets         = 31
 	serverQueryRowLimitNote = "storage_query_max_rows (per-deployment, 413 past it); storage_query_max_bytes bounds the encoded result"
+
+	// snapshotCapRule is the one statement of the full-snapshot bound, shared
+	// by the snapshot tool description and this reference. The multiplier
+	// matches internal/web BootRingCapMul: cmd/proxy applies it only when
+	// durable storage backs the ring and leaves the limit at 0 otherwise, so
+	// the storage-off branch is part of the contract rather than an omission.
+	snapshotCapRule = "A full snapshot is capped at 2 * dash_log_rows records when durable storage is enabled; with storage off the ring is the only history and the snapshot is not capped."
 )
 
 // tableDocs is the column reference. It documents the columns an analysis

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -89,8 +90,11 @@ func TestLimitsValidation(t *testing.T) {
 		want   string
 	}{
 		{"no query rows", func(l *Limits) { l.QueryMaxRows = 0 }, "query max rows"},
+		{"query rows above ceiling", func(l *Limits) { l.QueryMaxRows = 100001 }, "query max rows"},
 		{"no query bytes", func(l *Limits) { l.QueryMaxBytes = 0 }, "query max bytes"},
 		{"no page size", func(l *Limits) { l.PageSize = 0 }, "page size"},
+		{"page size below floor", func(l *Limits) { l.PageSize = 9 }, "page size"},
+		{"page size above ceiling", func(l *Limits) { l.PageSize = 501 }, "page size"},
 		{"no capture bytes", func(l *Limits) { l.CaptureBytes = 0 }, "capture bytes"},
 		{"no query timeout", func(l *Limits) { l.QueryTimeout = 0 }, "query timeout"},
 		{"no timeout", func(l *Limits) { l.Timeout = 0 }, "request timeout"},
@@ -103,6 +107,131 @@ func TestLimitsValidation(t *testing.T) {
 				t.Fatalf("limits error = %v, want one mentioning %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLimitsBandBoundaries pins that Limits.Validate accepts the shared band
+// endpoints and rejects one past either end.
+func TestLimitsBandBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Limits)
+	}{
+		{"page size minimum", func(l *Limits) { l.PageSize = 10 }},
+		{"page size maximum", func(l *Limits) { l.PageSize = 500 }},
+		{"query rows minimum", func(l *Limits) { l.QueryMaxRows = 1 }},
+		{"query rows maximum", func(l *Limits) { l.QueryMaxRows = 100000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			limits := defaultTestLimits()
+			tc.mutate(&limits)
+			if err := limits.Validate(); err != nil {
+				t.Fatalf("Validate() = %v, want the boundary accepted", err)
+			}
+		})
+	}
+}
+
+// TestMCPBoundaryConfigServesDefaultCalls pins that a config at either end of
+// both bands still arms an endpoint whose default records, values, audit and
+// query calls work. The bug was a config band wider than the tool band: the
+// config validated, then every default call failed.
+func TestMCPBoundaryConfigServesDefaultCalls(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		pageSize     int
+		queryMaxRows int
+	}{
+		{"minimums", 10, 1},
+		{"maximums", 500, 100000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.MCPPageSize = tc.pageSize
+			cfg.MCPQueryMaxRows = tc.queryMaxRows
+			if err := cfg.Validate(); err != nil {
+				t.Fatalf("boundary config Validate() = %v", err)
+			}
+			limits := LimitsFromConfig(cfg)
+			if err := limits.Validate(); err != nil {
+				t.Fatalf("boundary Limits.Validate() = %v", err)
+			}
+
+			rows := make([]string, 0, 5)
+			for i := range 5 {
+				rows = append(rows, `{"id":"r`+string(rune('a'+i))+`","started_at":`+strconv.Itoa(50-i)+`,"value":"v`+string(rune('a'+i))+`","requests":1}`)
+			}
+			proxy := newFakeProxy(t)
+			proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+			proxy.json(http.MethodGet, logPath,
+				`{"records":[`+strings.Join(rows, ",")+`],"more":false,"cursor_ms":46,"cursor_id":"ra"}`)
+			proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+			service := newTestService(t, proxy, limits)
+			ctx := context.Background()
+
+			query, err := service.query(ctx, QueryInput{SQL: "SELECT id FROM requests"})
+			if err != nil {
+				t.Fatalf("default query: %v", err)
+			}
+			if want := min(5, tc.queryMaxRows); query.RowCount != want {
+				t.Fatalf("default query row count = %d, want %d", query.RowCount, want)
+			}
+			if _, err := service.records(ctx, RecordsInput{}); err != nil {
+				t.Fatalf("default records: %v", err)
+			}
+			if _, err := service.values(ctx, ValuesInput{Dim: "client"}); err != nil {
+				t.Fatalf("default values: %v", err)
+			}
+			if _, err := service.auditCapturesList(ctx, AuditCapturesListInput{}); err != nil {
+				t.Fatalf("default audit captures list: %v", err)
+			}
+		})
+	}
+}
+
+// TestExplicitMaxRowsAboveConfiguredDefault preserves the documented query
+// contract: max_rows is the default, not a cap, so an explicit argument may
+// exceed it up to the config maximum.
+func TestExplicitMaxRowsAboveConfiguredDefault(t *testing.T) {
+	cfg := config.Default()
+	cfg.MCPQueryMaxRows = 1
+	limits := LimitsFromConfig(cfg)
+	if err := limits.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	rows := make([]string, 0, 5)
+	for i := range 5 {
+		rows = append(rows, `{"id":"r`+strconv.Itoa(i)+`"}`)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, schemaPath, `[`+strings.Join(rows, ",")+`]`)
+	service := newTestService(t, proxy, limits)
+
+	defaulted, err := service.query(context.Background(), QueryInput{SQL: "SELECT 1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaulted.RowCount != 1 {
+		t.Fatalf("default query rows = %d, want the configured default 1", defaulted.RowCount)
+	}
+	explicit, err := service.query(context.Background(), QueryInput{SQL: "SELECT 1", MaxRows: 5})
+	if err != nil {
+		t.Fatalf("explicit max_rows above the default: %v", err)
+	}
+	if explicit.RowCount != 5 || explicit.Truncation.Truncated {
+		t.Fatalf("explicit max_rows = %+v, want all 5 rows without truncation", explicit)
+	}
+	atCeiling, err := service.query(context.Background(),
+		QueryInput{SQL: "SELECT 1", MaxRows: 100000})
+	if err != nil {
+		t.Fatalf("max_rows at the ceiling: %v", err)
+	}
+	if atCeiling.RowCount != 5 {
+		t.Fatalf("max_rows at the ceiling returned %d rows, want 5", atCeiling.RowCount)
+	}
+	if _, err := service.query(context.Background(),
+		QueryInput{SQL: "SELECT 1", MaxRows: 100001}); err == nil {
+		t.Fatal("max_rows above the ceiling must be refused")
 	}
 }
 
@@ -234,7 +363,7 @@ func TestQueryTruncatesWithAnExplicitMarker(t *testing.T) {
 	if fits.Truncation.Truncated || fits.Truncation.Marker != "" || fits.RowCount != 12 {
 		t.Fatalf("a fitting result must not claim truncation: %+v", fits.Truncation)
 	}
-	if _, err := service.query(context.Background(), QueryInput{SQL: "SELECT 1", MaxRows: maxQueryRowsCeiling + 1}); err == nil {
+	if _, err := service.query(context.Background(), QueryInput{SQL: "SELECT 1", MaxRows: config.MCPQueryMaxRowsMax + 1}); err == nil {
 		t.Fatal("an absurd max_rows must be refused")
 	}
 }
@@ -295,7 +424,7 @@ func TestListingToolsTruncateWithAMarker(t *testing.T) {
 	})
 
 	limits := defaultTestLimits()
-	limits.PageSize = 5
+	limits.PageSize = config.MCPPageSizeMin
 	service := newTestService(t, proxy, limits)
 	ctx := context.Background()
 

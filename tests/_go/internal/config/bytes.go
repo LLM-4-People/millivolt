@@ -1,8 +1,10 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -98,6 +100,34 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+// TestFormatDurationBoundaries pins the signed extremes. Negating
+// math.MinInt64 overflows int64, so the old implementation emitted a second
+// minus and formatted a negative magnitude again.
+func TestFormatDurationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		d    time.Duration
+		want string
+	}{
+		{time.Duration(math.MinInt64), "-2562047h47m16.854775808s"},
+		{-time.Second, "-1s"},
+		{0, "0s"},
+		{time.Second, "1s"},
+		{time.Duration(math.MaxInt64), "2562047h47m16.854775807s"},
+	} {
+		got := FormatDuration(tc.d)
+		if got != tc.want {
+			t.Errorf("FormatDuration(%d) = %q, want %q", int64(tc.d), got, tc.want)
+		}
+		minus := strings.Count(got, "-")
+		if tc.d < 0 && minus != 1 {
+			t.Errorf("FormatDuration(%d) = %q has %d minus signs, want exactly one", int64(tc.d), got, minus)
+		}
+		if tc.d >= 0 && minus != 0 {
+			t.Errorf("FormatDuration(%d) = %q must not carry a minus sign", int64(tc.d), got)
+		}
+	}
+}
+
 // TestFormatDurationSpellingsParseBack pins that every spelling
 // FormatDuration emits parses back through time.ParseDuration to the same
 // duration. The dashboard's parseGoDuration mirrors that grammar for the
@@ -119,6 +149,8 @@ func TestFormatDurationSpellingsParseBack(t *testing.T) {
 		3 * time.Hour,
 		24 * time.Hour,
 		-5 * time.Second,
+		time.Duration(math.MinInt64),
+		time.Duration(math.MaxInt64),
 	} {
 		s := FormatDuration(d)
 		back, err := time.ParseDuration(s)
@@ -150,6 +182,37 @@ func TestFormatByteSize(t *testing.T) {
 	}
 	if FormatByteSize(1000) != "1000B" {
 		t.Errorf("1000 = %s", FormatByteSize(1000))
+	}
+}
+
+// TestFormatByteSizeBoundaries pins the signed extremes and the exact
+// unit-selection table. math.MinInt64 must format once, not recurse forever on
+// a negation that stays negative.
+func TestFormatByteSizeBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		n    int64
+		want string
+	}{
+		{math.MinInt64, "-8589934592GiB"},
+		{-1, "-1B"},
+		{-1536, "-1536B"},
+		{0, "0B"},
+		{1, "1B"},
+		{1024, "1KiB"},
+		{1536, "1536B"},
+		{1 << 20, "1MiB"},
+		{math.MaxInt64, "9223372036854775807B"},
+	} {
+		got := FormatByteSize(tc.n)
+		if got != tc.want {
+			t.Errorf("FormatByteSize(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+		if tc.n < 0 && strings.Count(got, "-") != 1 {
+			t.Errorf("FormatByteSize(%d) = %q must carry exactly one minus sign", tc.n, got)
+		}
+		if tc.n >= 0 && strings.Contains(got, "-") {
+			t.Errorf("FormatByteSize(%d) = %q must not carry a minus sign", tc.n, got)
+		}
 	}
 }
 

@@ -143,7 +143,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "snapshot",
 		Title:       "Read the live snapshot",
-		Description: "The dashboard's live snapshot: ring sequence, feed id, in-flight and since-inception totals, the durable-storage signal and the most recent records. A full snapshot is capped at 2 * dash_log_rows records and has no cursor of its own, so older history needs the records tool with its cursor. It reads the in-memory RING, so on a proxy with storage off it is the only source of history at all.",
+		Description: "The dashboard's live snapshot: ring sequence, feed id, in-flight and since-inception totals, the durable-storage signal and the most recent records. " + snapshotCapRule + " It has no cursor of its own, so older history needs the records tool with its cursor. It reads the in-memory RING, so it is available either way.",
 		Annotations: readOnly("Read the live snapshot"),
 	}, s.snapshot)
 

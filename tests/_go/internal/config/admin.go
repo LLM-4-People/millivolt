@@ -42,6 +42,24 @@ func TestSettingsStrictSaveBoundary(t *testing.T) {
 	}
 }
 
+// TestSettingsMinInt64ByteSizeStaysAlive is the C1 regression: the admin
+// range check formats the rejected value, and formatting math.MinInt64 used to
+// negate it, overflow, and recurse until the process died with a stack
+// overflow. The handler must answer 400 and leave the test process running.
+func TestSettingsMinInt64ByteSizeStaysAlive(t *testing.T) {
+	h := &Handler{Path: filepath.Join(t.TempDir(), "config.yaml")}
+	rr := settingsPost(h, configRevision(Default()), `{"backup_max_bytes":-9223372036854775808}`)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("MinInt64 byte size: status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "backup_max_bytes") {
+		t.Fatalf("rejection must name the field: %s", rr.Body.String())
+	}
+	if _, err := os.Stat(h.Path); !os.IsNotExist(err) {
+		t.Fatalf("rejected MinInt64 value wrote a file: %v", err)
+	}
+}
+
 // TestSettingsControlByteLabelErrorStaysDecodable is the L6 regression: a
 // provider_aliases key carrying a control byte reaches the operator error
 // body through Validate's label echo. The old body spliced the message with

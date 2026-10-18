@@ -559,13 +559,14 @@ mcp_enabled: true
 # Default page for the records, values and audit capture listings the endpoint serves to a
 # model. Restart required.
 # Hot-reload: NO (restart required).
-#   type: int · range >= 1 · default 50
+#   type: int · range 10..500 · default 50
 mcp_page_size: 50
 
-# Client-side row cap on one query tool result; the proxy's own storage_query_max_rows
+# Default client-side row limit when a query call omits max_rows. An explicit max_rows may
+# raise it up to this setting's maximum; the proxy's own storage_query_max_rows still
 # answers 413 first. Restart required.
 # Hot-reload: NO (restart required).
-#   type: int · range >= 1 · default 200
+#   type: int · range 1..100000 · default 200
 mcp_query_max_rows: 200
 
 # Client-side cap on the encoded size of one query tool result. Keeps whole rows,

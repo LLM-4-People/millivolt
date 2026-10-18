@@ -810,13 +810,22 @@ const (
 	// Settings backup archive band (Validate, overlay, Schema).
 	BackupMaxBytesMin = 1 << 20 // 1 MiB
 	BackupMaxBytesMax = 4 << 30 // 4 GiB
-	// MCP endpoint result-size floors (Validate, Schema, and internal/mcp's
-	// Limits.Validate). The same single-owner constants are what the
-	// endpoint enforces at service construction, so the config boundary and
-	// the endpoint cannot drift apart; internal/mcp limits.go carries no
-	// second copy.
-	MCPPageSizeMin        = 1
+	// ConfigDocumentMaxBytes is the one bound on the rendered configuration
+	// document. Validate enforces it against the same WriteYAML output the
+	// backup encoder retains, and internal/backup reuses it as the config
+	// member cap, so a valid config can never produce an archive member the
+	// decoder refuses. It is a retention guardrail, not a tunable.
+	ConfigDocumentMaxBytes = 16 << 20 // 16 MiB
+	// MCP endpoint result-size bands (Validate, Schema, and internal/mcp's
+	// Limits.Validate). The same single-owner constants are what the endpoint
+	// enforces at service construction, so the config boundary and the endpoint
+	// cannot drift apart; internal/mcp limits.go carries no second copy. The
+	// query row value is the default used when max_rows is omitted; an explicit
+	// max_rows may rise to MCPQueryMaxRowsMax.
+	MCPPageSizeMin        = 10
+	MCPPageSizeMax        = 500
 	MCPQueryMaxRowsMin    = 1
+	MCPQueryMaxRowsMax    = 100000
 	MCPQueryMaxBytesMin   = 1
 	MCPCaptureMaxBytesMin = 1
 )
@@ -1400,6 +1409,22 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	return c.validateDocumentSize()
+}
+
+// validateDocumentSize enforces the config-document retention bound on the
+// canonical YAML the backup encoder retains. Rendering the whole document here
+// is acceptable because config changes are not a hot path, and using the same
+// writer keeps the validation and archive boundaries from drifting.
+func (c *Config) validateDocumentSize() error {
+	var buf bytes.Buffer
+	if err := WriteYAML(&buf, c); err != nil {
+		return fmt.Errorf("config document: render: %w", err)
+	}
+	if buf.Len() > ConfigDocumentMaxBytes {
+		return fmt.Errorf("config document: must be at most %s (%d bytes), got %d bytes",
+			FormatByteSize(ConfigDocumentMaxBytes), ConfigDocumentMaxBytes, buf.Len())
+	}
 	return nil
 }
 
@@ -1814,17 +1839,24 @@ func validateQueryLimits(c *Config) error {
 	return nil
 }
 
-// validateMCPLimits checks the MCP endpoint's result-size floors at the config
+// validateMCPLimits checks the MCP endpoint's result-size bands at the config
 // boundary. The constants are the single band owner: internal/mcp's
 // Limits.Validate enforces the same ones at service construction, so the
-// Settings write path and the endpoint cannot drift apart. The two mcp
-// timeouts join the positive-duration list in Validate instead.
+// Settings write path and the endpoint cannot drift apart. The query row pair
+// is a default plus its explicit argument ceiling, not a cap on every query.
+// The two mcp timeouts join the positive-duration list in Validate instead.
 func validateMCPLimits(c *Config) error {
-	if c.MCPPageSize < MCPPageSizeMin {
-		return fmt.Errorf("mcp_page_size: must be >= %d, got %d", MCPPageSizeMin, c.MCPPageSize)
-	}
-	if c.MCPQueryMaxRows < MCPQueryMaxRowsMin {
-		return fmt.Errorf("mcp_query_max_rows: must be >= %d, got %d", MCPQueryMaxRowsMin, c.MCPQueryMaxRows)
+	for _, limit := range [...]struct {
+		key             string
+		value, min, max int
+	}{
+		{"mcp_page_size", c.MCPPageSize, MCPPageSizeMin, MCPPageSizeMax},
+		{"mcp_query_max_rows", c.MCPQueryMaxRows, MCPQueryMaxRowsMin, MCPQueryMaxRowsMax},
+	} {
+		if limit.value < limit.min || limit.value > limit.max {
+			return errRange(limit.key,
+				strconv.FormatInt(int64(limit.min), 10), strconv.FormatInt(int64(limit.max), 10), strconv.FormatInt(int64(limit.value), 10))
+		}
 	}
 	if c.MCPQueryMaxBytes < MCPQueryMaxBytesMin {
 		return fmt.Errorf("mcp_query_max_bytes: must be >= %s, got %s",

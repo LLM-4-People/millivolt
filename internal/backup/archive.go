@@ -87,13 +87,13 @@ const (
 	// self-check; it is reused for every member chunk.
 	selfCheckBuffer = 32 << 10
 
-	// configMemberMax bounds the retained config member. Schema YAML is a
-	// small document, so 16 MiB leaves ample headroom for operator comments
-	// while keeping a crafted archive from forcing a multi-gigabyte heap
-	// allocation before config.LoadBytes. This is a retention guardrail, not
-	// a Config tunable and not a database member cap: the database member
-	// stays streamed under payloadMax.
-	configMemberMax = 16 << 20
+	// configMemberMax bounds the retained config member. It is exactly the
+	// config document bound Config.Validate enforces on the canonical rendered
+	// YAML, so a config the proxy accepts can always be encoded and decoded;
+	// this keeps a crafted archive from forcing a multi-gigabyte heap
+	// allocation before config.LoadBytes. It is a retention guardrail, not a
+	// database member cap: the database member stays streamed under payloadMax.
+	configMemberMax = config.ConfigDocumentMaxBytes
 )
 
 // checkConfigMemberSize is the one config-member retention gate. EncodeFile

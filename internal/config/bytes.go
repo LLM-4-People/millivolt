@@ -52,19 +52,35 @@ func checkByteSize(key string, got ByteSize, min, max int64) error {
 // FormatByteSize renders a byte budget the way proxy.yaml writes it. Coarsest
 // exact unit from byteSizeUnits wins. Values that are not a whole KiB/MiB/GiB
 // keep an explicit B suffix so they are never unitless integers.
+//
+// The magnitude is unsigned so math.MinInt64 formats instead of overflowing:
+// negating it as an int64 would leave it negative and recurse forever.
 func FormatByteSize(n int64) string {
-	if n < 0 {
-		return "-" + FormatByteSize(-n)
+	negative := n < 0
+	var magnitude uint64
+	if negative {
+		magnitude = uint64(-(n + 1)) + 1
+	} else {
+		magnitude = uint64(n)
 	}
+	s := formatByteMagnitude(magnitude)
+	if negative {
+		return "-" + s
+	}
+	return s
+}
+
+func formatByteMagnitude(n uint64) string {
 	if n == 0 {
 		return "0" + byteSizeUnits[len(byteSizeUnits)-1].name
 	}
 	for _, u := range byteSizeUnits {
-		if u.size > 1 && n%u.size == 0 {
-			return strconv.FormatInt(n/u.size, 10) + u.name
+		size := uint64(u.size)
+		if size > 1 && n%size == 0 {
+			return strconv.FormatUint(n/size, 10) + u.name
 		}
 	}
-	return strconv.FormatInt(n, 10) + byteSizeUnits[len(byteSizeUnits)-1].name
+	return strconv.FormatUint(n, 10) + byteSizeUnits[len(byteSizeUnits)-1].name
 }
 
 // byteValueString renders a KindBytes value in its canonical string form:

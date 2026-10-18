@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -703,6 +704,41 @@ func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte
 	return append(out, zbuf.Bytes()...)
 }
 
+// TestParseRestoreModePresence pins that an absent key keeps the documented
+// replace default while an explicit empty or whitespace value is a malformed
+// mode, never a silent replace.
+func TestParseRestoreModePresence(t *testing.T) {
+	for _, key := range []string{"config_mode", "database_mode"} {
+		for _, tc := range []struct {
+			name    string
+			q       url.Values
+			want    string
+			wantErr bool
+		}{
+			{"absent", url.Values{}, "replace", false},
+			{"empty", url.Values{key: {""}}, "", true},
+			{"whitespace", url.Values{key: {" \t "}}, "", true},
+			{"merge", url.Values{key: {"merge"}}, "merge", false},
+			{"replace", url.Values{key: {"replace"}}, "replace", false},
+			{"uppercase", url.Values{key: {" MERGE "}}, "merge", false},
+			{"invalid", url.Values{key: {"bogus"}}, "", true},
+		} {
+			t.Run(key+"/"+tc.name, func(t *testing.T) {
+				got, err := parseRestoreMode(tc.q, key)
+				if tc.wantErr {
+					if err == nil || !strings.Contains(err.Error(), key) {
+						t.Fatalf("parseRestoreMode(%q) = %q, %v, want a %s error", tc.name, got, err, key)
+					}
+					return
+				}
+				if err != nil || got != tc.want {
+					t.Fatalf("parseRestoreMode(%q) = %q, %v, want %q", tc.name, got, err, tc.want)
+				}
+			})
+		}
+	}
+}
+
 // TestBackupRestoreAdoptStrictQuery pins the destructive plane's strict-query
 // adoption: both routes parse the raw query string, so a malformed pair can
 // never be silently dropped into a broader action (inspect=%zz must not turn
@@ -780,6 +816,8 @@ func TestBackupRestoreAdoptStrictQuery(t *testing.T) {
 		{"an invalid restore database member answers the member grammar's 400", "/admin/restore?database=x", http.MethodPost, "database: want 1 or 0"},
 		{"an invalid config_mode answers the 400, never a silent replace", "/admin/restore?config_mode=bogus", http.MethodPost, "config_mode: want merge or replace"},
 		{"an invalid database_mode answers the 400, never a silent replace", "/admin/restore?database_mode=bogus", http.MethodPost, "database_mode: want merge or replace"},
+		{"an explicit empty config_mode is denied, never the replace default", "/admin/restore?config_mode=", http.MethodPost, "config_mode: empty value; want merge or replace"},
+		{"an explicit whitespace database_mode is denied, never the replace default", "/admin/restore?database_mode=%20", http.MethodPost, "database_mode: empty value; want merge or replace"},
 		{"a backup parse error outranks the duplicate key", "/admin/backup?config=1&config=0&bad=%zz", http.MethodGet, "invalid query"},
 		{"a backup duplicate outranks the unknown key", "/admin/backup?config=1&config=0&bogus=1", http.MethodGet, "duplicate config"},
 		{"a backup unknown key outranks the value grammar", "/admin/backup?config=x&bogus=1", http.MethodGet, "unknown key bogus"},

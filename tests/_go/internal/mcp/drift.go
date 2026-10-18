@@ -62,7 +62,7 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 		t.Fatalf("error filter keys = %v, want %v (owner: internal/web errorKey)", got, want)
 	}
 
-	// Log page band: internal/config DashLogRowsMin/Max owns the band and
+	// Log page band: internal/config MCPPageSizeMin/Max owns the band and
 	// describe.go defines logPageMin/logPageMax from that owner. Comparing the
 	// mirror to the owner is a self-comparison (both sides resolve to the same
 	// constant) and can never fail, and it still passes when the derivation is
@@ -79,10 +79,10 @@ func TestDescribeMirrorsTheProxyOwners(t *testing.T) {
 	if !ok {
 		t.Fatal("RecordsInput has no Limit field")
 	}
-	wantLimit := fmt.Sprintf("page size, %d to %d", config.DashLogRowsMin, config.DashLogRowsMax)
+	wantLimit := fmt.Sprintf("page size, %d to %d", config.MCPPageSizeMin, config.MCPPageSizeMax)
 	limitTag := string(limitField.Tag.Get("jsonschema"))
 	if got := regexp.MustCompile(`page size, [0-9]+ to [0-9]+`).FindString(limitTag); got != wantLimit {
-		t.Fatalf("RecordsInput.Limit schema states %q, want %q (owner: internal/config DashLogRowsMin/Max): %q",
+		t.Fatalf("RecordsInput.Limit schema states %q, want %q (owner: internal/config MCPPageSizeMin/Max): %q",
 			got, wantLimit, limitTag)
 	}
 
@@ -156,8 +156,8 @@ func assertLogPageBandDerivesFromConfig(t *testing.T) {
 		}
 	}
 	for _, want := range []struct{ constant, owner string }{
-		{"logPageMin", "DashLogRowsMin"},
-		{"logPageMax", "DashLogRowsMax"},
+		{"logPageMin", "MCPPageSizeMin"},
+		{"logPageMax", "MCPPageSizeMax"},
 	} {
 		if definedFrom[want.constant] != want.owner {
 			t.Fatalf("describe.go's %s must be defined from internal/config %s, not a same-value literal (found %q)",
@@ -248,13 +248,21 @@ func TestPagingToolsNameTheirRealCursorArguments(t *testing.T) {
 	}
 }
 
-// TestSnapshotCapNamesTheRingOwner pins the "8 * dash_log_rows" formula to
-// web.BootRingCapMul, the exported owner of the snapshot multiplier. The
-// production text states the multiplier as a number because the
-// per-deployment dash_log_rows value is not known here, and importing
-// internal/web would embed the whole dashboard in the MCP binary.
-func TestSnapshotCapNamesTheRingOwner(t *testing.T) {
+// TestSnapshotCapNamesBothStorageBranches pins the formula to
+// web.BootRingCapMul and pins the storage-off branch that the old text
+// omitted. cmd/proxy applies the cap only when a store backs the ring and sets
+// the limit to 0 otherwise, so the static text must state both outcomes.
+func TestSnapshotCapNamesBothStorageBranches(t *testing.T) {
 	formula := strconv.Itoa(web.BootRingCapMul) + " * dash_log_rows"
+	assertBranches := func(surface, text string) {
+		t.Helper()
+		for _, needle := range []string{formula, "storage off", "not capped"} {
+			if !strings.Contains(text, needle) {
+				t.Fatalf("%s must state %q: %q", surface, needle, text)
+			}
+		}
+	}
+
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
@@ -263,9 +271,8 @@ func TestSnapshotCapNamesTheRingOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(reference.Notes, " "), formula) {
-		t.Fatalf("the describe note must state the snapshot cap %q: %q", formula, reference.Notes)
-	}
+	assertBranches("the describe note", strings.Join(reference.Notes, " "))
+
 	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
 	listed, err := session.ListTools(t.Context(), nil)
 	if err != nil {
@@ -275,9 +282,7 @@ func TestSnapshotCapNamesTheRingOwner(t *testing.T) {
 		if tool.Name != "snapshot" {
 			continue
 		}
-		if !strings.Contains(tool.Description, formula) {
-			t.Fatalf("the snapshot description must state %q: %q", formula, tool.Description)
-		}
+		assertBranches("the snapshot description", tool.Description)
 		return
 	}
 	t.Fatal("the snapshot tool is not registered")

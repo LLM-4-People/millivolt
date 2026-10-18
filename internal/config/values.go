@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strconv"
 	"strings"
@@ -103,6 +104,11 @@ func OverlayNonDefault(dst, src *Config) error {
 func FormatDuration(d time.Duration) string {
 	if d == 0 {
 		return "0s"
+	}
+	// Duration.String handles math.MinInt64 without negating it, so the
+	// fallback below never sees the one value whose magnitude overflows int64.
+	if d == time.Duration(math.MinInt64) {
+		return d.String()
 	}
 	neg := d < 0
 	if neg {

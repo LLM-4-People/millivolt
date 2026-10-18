@@ -117,13 +117,13 @@ semantics below, correct SQL is guesswork.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, the complete result-limit set (query rows and bytes, the row ceiling, log page band, default page size, explorer group and chart bucket caps, Prometheus line cap and capture byte budget), and the working SQL idioms for this build. |
+| `describe` | Live SQLite schema, the complete `requests`/`request_debug`/`meta` column reference, the exact health predicates, a value vocabulary for every filter dimension, the live known client/provider/model and tool names, the indexes, the complete result-limit set (the query row default and explicit `max_rows` ceiling, query bytes, log page band, default page size, explorer group and chart bucket caps, Prometheus line cap and capture byte budget), and the working SQL idioms for this build. |
 | `query` | One bounded `SELECT`, clamped on both rows and encoded size, truncating with an explicit marker. The only tool that can express a time range. |
 | `values` | The distinct values one dimension has in durable history, most frequent first, so a filter value is discovered rather than guessed. |
 | `explore` | Faceted breakdown over all matching history by one dimension, with at most 24 groups. No time window. |
 | `chart` | Server-authoritative time series, at most 31 clock-aligned buckets. Cannot group. |
 | `records` | One durable newest-first log page, with the paired `before_ms`/`before_id` cursor and the page's `model_canon` map. |
-| `snapshot` | The dashboard's live snapshot: sequence, feed, counters, storage signal, recent records. |
+| `snapshot` | The dashboard's live snapshot: sequence, feed, counters, storage signal, recent records. With durable storage enabled, a full snapshot is capped at `2 * dash_log_rows`; with storage off the ring is the only history and the snapshot is not capped. |
 | `prometheus` | The text exposition, which covers the ring rather than durable since-inception totals. |
 | `audit_status` | Capture sessions, their scope and live capture counts, the scope vocabularies, and the storage prerequisite. |
 | `audit_start` | Start or edit one capture session. Requires `confirm: "start capture"` and refuses when durable storage is off. |

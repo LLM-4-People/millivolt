@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/storage"
 	"github.com/LLM-4-People/millivolt/internal/web"
 )
@@ -156,11 +158,21 @@ func TestDescribeRequestShapeAndOutput(t *testing.T) {
 	}
 	// Exact literals, not the package constants the describe text is assigned
 	// from: comparing against the owning constants moved with the owner, so
-	// changing the owner failed nothing. Owners: internal/config DashLogRowsMax
+	// changing the owner failed nothing. Owners: internal/config MCPPageSizeMax
 	// (log page ceiling) and internal/config Default(), mapped through
 	// mcp.LimitsFromConfig (query rows and bytes).
 	if out.Limits.QueryMaxRows != 200 || out.Limits.LogPageMax != 500 {
-		t.Fatalf("limits mapping = %+v, want the published query row cap 200 and log page ceiling 500", out.Limits)
+		t.Fatalf("limits mapping = %+v, want the published query-row default 200 and log page ceiling 500", out.Limits)
+	}
+	// The configured query row value is a default, not a cap: an explicit
+	// max_rows may rise to the published ceiling.
+	queryField, ok := reflect.TypeOf(LimitDoc{}).FieldByName("QueryMaxRows")
+	if !ok {
+		t.Fatal("LimitDoc has no QueryMaxRows field")
+	}
+	tag := string(queryField.Tag.Get("jsonschema"))
+	if !strings.Contains(tag, "default row limit when max_rows is omitted") || strings.Contains(tag, "cap") {
+		t.Fatalf("query_max_rows schema text %q must state the default, not a cap", tag)
 	}
 	// The reference must carry the health predicates and the unit facts, or a
 	// model cannot write correct SQL.
@@ -806,10 +818,10 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 	// Every advertised result limit is present, including the ones the tool
 	// enforces itself rather than the proxy. Pinned to exact literals rather
 	// than the package constants the describe text is assigned from, so a
-	// change on the owning side fails here. Owners: internal/mcp tools_read.go
-	// maxQueryRowsCeiling and prometheusMaxLines, and internal/config
-	// Default(), mapped through mcp.LimitsFromConfig (page size, capture
-	// bytes, query bytes).
+	// change on the owning side fails here. Owners: internal/config
+	// MCPQueryMaxRowsMax and internal/mcp prometheusMaxLines, plus
+	// internal/config Default(), mapped through mcp.LimitsFromConfig (page
+	// size, capture bytes, query bytes).
 	if out.Limits.QueryMaxRowsCeiling != 100_000 ||
 		out.Limits.PrometheusMaxLines != 400 ||
 		out.Limits.DefaultPageSize != 50 ||
@@ -952,7 +964,7 @@ func TestTruncationAdviceIsPerTool(t *testing.T) {
 		Body: strings.Repeat("x 1\n", prometheusMaxLines+2),
 	})
 	limits := defaultTestLimits()
-	limits.PageSize = 5
+	limits.PageSize = config.MCPPageSizeMin
 	service := newTestService(t, proxy, limits)
 	ctx := context.Background()
 

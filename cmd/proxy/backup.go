@@ -305,11 +305,15 @@ func queryFlag(q url.Values, key string) (bool, error) {
 }
 
 func parseRestoreMode(q url.Values, key string) (string, error) {
-	if _, ok := q[key]; !ok {
+	if _, present := q[key]; !present {
 		return "replace", nil
 	}
 	switch strings.ToLower(strings.TrimSpace(q.Get(key))) {
-	case "", "replace":
+	case "":
+		// An explicit empty value is not the absent default: it names no mode,
+		// so accepting it would silently select the broader replace action.
+		return "", fmt.Errorf("%s: empty value; want merge or replace", key)
+	case "replace":
 		return "replace", nil
 	case "merge":
 		return "merge", nil

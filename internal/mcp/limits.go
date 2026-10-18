@@ -33,8 +33,10 @@ const ProxyTokenEnv = "MILLIVOLT_OPERATOR_TOKEN"
 // below enforces internal/config's band constants, so this package carries no
 // second copy of either.
 type Limits struct {
-	// QueryMaxRows bounds a `query` result client-side. The proxy enforces its
-	// own storage_query_max_rows (and answers 413 past it), which can be much
+	// QueryMaxRows is the default client-side row limit for a `query` call that
+	// omits max_rows. An explicit max_rows may raise it, up to
+	// config.MCPQueryMaxRowsMax. The proxy enforces its own
+	// storage_query_max_rows (and answers 413 past it), which can be much
 	// larger; this is the volume a model can actually read.
 	QueryMaxRows int
 	// QueryMaxBytes bounds the ENCODED size of one `query` result client-side.
@@ -43,7 +45,8 @@ type Limits struct {
 	// model cannot read and which is spent on columns it did not ask for. The
 	// clamp keeps whole rows, so a truncated result is still valid JSON.
 	QueryMaxBytes int
-	// PageSize is the default page for records and audit capture listings.
+	// PageSize is the default page for records, values and audit capture
+	// listings.
 	PageSize int
 	// CaptureBytes is the size above which a stored capture document is
 	// withheld whole instead of being returned. A capture carries full request
@@ -72,18 +75,20 @@ func LimitsFromConfig(c *config.Config) Limits {
 	}
 }
 
-// Validate rejects a limits set that could not page or could hang. The floors
-// are internal/config's band constants, the same single owner config.Validate
+// Validate rejects a limits set that could not page or could hang. The bands
+// are internal/config's constants, the same single owner config.Validate
 // enforces on the mcp_* fields, so the config boundary and this constructor
 // guard cannot drift apart.
 func (l Limits) Validate() error {
 	switch {
-	case l.QueryMaxRows < config.MCPQueryMaxRowsMin:
-		return fmt.Errorf("query max rows must be at least %d", config.MCPQueryMaxRowsMin)
+	case l.QueryMaxRows < config.MCPQueryMaxRowsMin || l.QueryMaxRows > config.MCPQueryMaxRowsMax:
+		return fmt.Errorf("query max rows must be %d..%d, got %d",
+			config.MCPQueryMaxRowsMin, config.MCPQueryMaxRowsMax, l.QueryMaxRows)
 	case l.QueryMaxBytes < config.MCPQueryMaxBytesMin:
 		return fmt.Errorf("query max bytes must be at least %d", config.MCPQueryMaxBytesMin)
-	case l.PageSize < config.MCPPageSizeMin:
-		return fmt.Errorf("page size must be at least %d", config.MCPPageSizeMin)
+	case l.PageSize < config.MCPPageSizeMin || l.PageSize > config.MCPPageSizeMax:
+		return fmt.Errorf("page size must be %d..%d, got %d",
+			config.MCPPageSizeMin, config.MCPPageSizeMax, l.PageSize)
 	case l.CaptureBytes < config.MCPCaptureMaxBytesMin:
 		return fmt.Errorf("capture bytes must be at least %d", config.MCPCaptureMaxBytesMin)
 	case l.QueryTimeout <= 0:

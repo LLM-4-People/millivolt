@@ -532,11 +532,13 @@ Restore streams the upload through the `backup_max_bytes` ceiling into one
 private staging file and decodes it with the same header, zstd, SHA-256 and
 member-framing checks. The database member is written straight into a private
 file on the live database's volume instead of being materialized on the heap;
-config bytes stay buffered within a 16 MiB retention bound. A config member
-that declares a larger size is rejected before its bytes are copied, and
-encoding refuses to emit one, so an older archive whose config member exceeds
-that bound fails restore. The bound covers only the config member; the database
-member stays streamed under the payload ceiling. It validates that hash, the
+config bytes stay buffered within the same 16 MiB config-document bound
+`Config.Validate` enforces on the canonical rendered YAML, so a config that
+validates can never exceed what an archive may retain. A config member that
+declares a larger size is rejected before its bytes are copied, and encoding
+refuses to emit one, so an older archive whose config member exceeds that bound
+fails restore. The bound covers only the config member; the database member
+stays streamed under the payload ceiling. It validates that hash, the
 zstd frame, config `Validate()`, and `PRAGMA integrity_check` before applying
 anything. Decode refuses an uncompressed payload larger than the Schema maximum
 for `backup_max_bytes`, so a small compressed file cannot expand without bound.
@@ -547,7 +549,9 @@ live file. Inspect validates and counts the decoded database file in place and
 computes its overlap with the live store without writing another copy.
 Config **replace** writes the backup document. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
-stay unless the backup also customized them. Either way the restored config
+stay unless the backup also customized them. An omitted `config_mode` or
+`database_mode` defaults to replace; an explicitly empty or whitespace value is
+rejected as malformed rather than treated as absent. Either way the restored config
 hot-applies through the same owner as a Settings save, is reflected in
 `last_reload`, and reports restart-required keys. Database
 **replace** streams the decoded file into a pending snapshot next to `db_path`,
@@ -673,7 +677,7 @@ the credential gates both.
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
 | `POST /admin/purge` | Delete matching finalized records; genuinely no body means all. An empty/invalid supplied object is rejected. |
 | `GET /admin/backup` | Download the self-checked `.mvb` Settings backup archive of config and/or database members. `?config=1` and `?database=1` select members, defaulting to both when no key is given; an explicit empty selection is an error. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
-| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, database request span) without applying anything. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace; success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
+| `POST /admin/restore` | Restore an uploaded `.mvb` Settings backup archive, validated before anything is applied. `?inspect=1` previews the archive (created time, member sizes, config keys vs default and live, database request span) without applying anything. `?config=1` and `?database=1` select members as on backup; `?config_mode=` and `?database_mode=` take merge or replace and default to replace when omitted; an explicit empty or whitespace value is rejected as malformed. Success reports the `restart_required` keys. The query grammar is strict: parse errors, repeated or unknown keys, and malformed values all return 400. |
 | `GET /metrics/export` | Download all or exactly filtered finalized records as a gzip artifact named `millivolt-logs-<timestamp>.json.gz`; gunzip it for the JSON array. Debug-only export can contain sensitive sidecars. |
 | `GET /metrics/query?q=` | Restricted SELECT with timeout/output limits; 503 when durable storage is disabled. Not a hostile-query sandbox. |
 | `GET /metrics/bootstrap` | Dashboard state and full/incremental recent-record snapshot. |
