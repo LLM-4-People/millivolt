@@ -5699,6 +5699,33 @@ async function main() {
     check('clock timer restarts on visible', clockRestarted);
     const tickRestarted = w.eval('typeof _dashTickTimer === "number" && _dashTickTimer !== null');
     check('tick timer restarts on visible', tickRestarted);
+
+    // A live-status explorer view must not schedule refetches while hidden.
+    w.eval(`window.__origFetchExplorer = fetchExplorer;
+      window.__origWantsLive = explorerWantsLiveStatus;
+      fetchExplorer = () => { window.__xpRefreshCount = (window.__xpRefreshCount || 0) + 1; };
+      explorerWantsLiveStatus = () => true;
+      window.__xpRefreshCount = 0; _xpLiveTimer = null;`);
+    Object.defineProperty(w.document, 'hidden', { value: true, configurable: true });
+    w.eval('document.dispatchEvent(new Event("visibilitychange"))');
+    w.eval('scheduleExplorerLiveRefresh()');
+    await sleep(1100);
+    check('hidden tab does not schedule a live-status explorer refresh',
+      w.eval('_xpLiveTimer === null && window.__xpRefreshCount === 0'));
+    check('live-status explorer cadence stays at or above one second',
+      w.eval('EXPLORER_LIVE_REFRESH_MS >= 1000'));
+    Object.defineProperty(w.document, 'hidden', { value: false, configurable: true });
+    w.eval('d3.dispatchEvent(new Event("visibilitychange"))'.replace('d3', 'document'));
+    await sleep(20);
+    check('returning to view refreshes a live-status explorer immediately',
+      w.eval('window.__xpRefreshCount === 1'));
+    w.eval('scheduleExplorerLiveRefresh()');
+    await sleep(1100);
+    check('visible tab keeps the throttled live-status refresh',
+      w.eval('window.__xpRefreshCount === 2 && _xpLiveTimer === null'));
+    w.eval(`fetchExplorer = window.__origFetchExplorer;
+      explorerWantsLiveStatus = window.__origWantsLive;
+      delete window.__origFetchExplorer; delete window.__origWantsLive; delete window.__xpRefreshCount;`);
   }
 
   // ---- test 12i: record-then-end gauge correction - the server publishes

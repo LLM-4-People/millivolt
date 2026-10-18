@@ -142,13 +142,16 @@ function explorerWantsLiveStatus() {
 // Live-status explorer refresh cadence: coalesce a burst of lifecycle events
 // into one server refetch. Throttled, not debounced: a sustained event stream
 // must still refresh at the cadence instead of resetting the timer forever.
-const EXPLORER_LIVE_REFRESH_MS = 250;
+// A hidden tab must not schedule work; the visibility handler refreshes once
+// on return, so a backgrounded dashboard cannot keep every tab refetching.
+const EXPLORER_LIVE_REFRESH_MS = 1000;
 let _xpLiveTimer = null;
 function scheduleExplorerLiveRefresh() {
-  if (!explorerWantsLiveStatus()) return;
+  if (document.hidden || !explorerWantsLiveStatus()) return;
   if (_xpLiveTimer) return;
   _xpLiveTimer = setTimeout(() => {
     _xpLiveTimer = null;
+    if (document.hidden) return;
     fetchExplorer('refresh');
   }, EXPLORER_LIVE_REFRESH_MS);
 }
@@ -735,8 +738,10 @@ document.addEventListener('visibilitychange', () => {
     armDashboardTicks();
     dashReleaseBackgroundLock();
     // Flush any state that changed while hidden (SSE may have delivered
-    // new records while the aggregate payloads aged).
+    // new records while the aggregate payloads aged). A live-status explorer
+    // view refreshes immediately instead of waiting for the next event.
     fetchBootstrap('resume');
+    if (explorerWantsLiveStatus()) fetchExplorer('refresh');
     scheduleRenderLive();
   }
 });
