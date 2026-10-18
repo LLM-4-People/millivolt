@@ -31,6 +31,29 @@ func decodeLogFilter(w http.ResponseWriter, r *http.Request) (storage.PurgeFilte
 	return f, true, f.Validate()
 }
 
+// rejectPurgeQuery denies every query key on the body-only purge routes before
+// their body is decoded. The documented purge predicate travels only in the
+// JSON body, so an ignored query key would select the default, broader
+// action: POST /admin/purge?provider=alpha with no body would delete all
+// history instead of the named provider. The shared strict parse runs first,
+// so a malformed pair the lenient read would silently drop cannot turn a
+// requested filter into that same full delete. UnknownQueryKey then owns the
+// closed-set rule and its "unknown key <name>" wording; these routes consume
+// no keys, so duplicate and case-variant spellings are unlisted keys too and
+// fail the same way.
+func rejectPurgeQuery(w http.ResponseWriter, r *http.Request) bool {
+	q, err := adminjson.StrictQuery(r)
+	if err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "invalid query")
+		return false
+	}
+	if err := adminjson.UnknownQueryKey(q); err != nil {
+		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	return true
+}
+
 // exportLogFilter exposes exactly the same predicate fields as JSON count and
 // clear. Unknown/duplicate keys and invalid booleans fail closed, never broaden.
 func exportLogFilter(q url.Values) (storage.PurgeFilter, error) {
@@ -172,6 +195,9 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 		if !rejectUnless(w, r, http.MethodPost) {
 			return
 		}
+		if !rejectPurgeQuery(w, r) {
+			return
+		}
 		f, hasBody, err := decodeLogFilter(w, r)
 		if err == nil && hasBody && f.IsEmpty() {
 			err = errors.New("empty purge filter; send no body to delete everything")
@@ -207,6 +233,9 @@ func registerLogRoutes(mux *http.ServeMux, buffer *metrics.Buffer, store *storag
 	})
 	mux.HandleFunc("/admin/purge/count", func(w http.ResponseWriter, r *http.Request) {
 		if !rejectUnless(w, r, http.MethodPost) {
+			return
+		}
+		if !rejectPurgeQuery(w, r) {
 			return
 		}
 		f, _, err := decodeLogFilter(w, r)

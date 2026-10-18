@@ -101,6 +101,102 @@ func TestLogFilterRejectsMalformedAndNullConstraints(t *testing.T) {
 	}
 }
 
+// TestPurgeRoutesRejectQueryFilters pins the body-only purge grammar: the
+// documented predicate never travels in the query string, and an ignored key
+// would run the default, broader action (?provider=alpha with no body deleted
+// all history). Every query key, including repeated and case-variant
+// spellings, is denied before the body is read, and a malformed pair is a 400
+// rather than a dropped query; the documented empty-body and body-filter
+// commands keep working afterward.
+func TestPurgeRoutesRejectQueryFilters(t *testing.T) {
+	for _, durable := range []bool{false, true} {
+		t.Run(fmt.Sprint(durable), func(t *testing.T) {
+			mux, b, s := logRoutesForTest(t, durable)
+			var recorder metrics.Recorder = b
+			if s != nil {
+				recorder = s.Recorder(b)
+			}
+			for _, provider := range []string{"target", "unrelated"} {
+				recorder.Record(&metrics.Record{ID: provider, Provider: provider, StatusCode: 500, Start: time.Now()})
+			}
+			if s != nil {
+				if err := s.Flush(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			untouched := func(t *testing.T, label string) {
+				t.Helper()
+				if b.Len() != 2 {
+					t.Fatalf("%s: ring=%d, want 2", label, b.Len())
+				}
+				if s != nil {
+					n, err := s.CountWhere(t.Context(), storage.PurgeFilter{})
+					if err != nil || n != 2 {
+						t.Fatalf("%s: durable=%d err=%v, want 2", label, n, err)
+					}
+				}
+			}
+			for _, tc := range []struct {
+				name    string
+				query   string
+				body    string
+				wantErr string
+			}{
+				{"filter key only", "provider=alpha", "", "unknown key provider"},
+				{"repeated filter key", "provider=alpha&provider=target", "", "unknown key provider"},
+				{"case variant", "Provider=alpha", "", "unknown key Provider"},
+				{"bare key", "provider", "", "unknown key provider"},
+				{"malformed pair", "provider=%zz", "", "invalid query"},
+				{"unknown key with filter body", "inspect=1", `{"provider":"target"}`, "unknown key inspect"},
+				{"unknown key before a malformed body", "provider=alpha", "not json", "unknown key provider"},
+			} {
+				for _, route := range []string{"/admin/purge", "/admin/purge/count"} {
+					t.Run(tc.name+" "+route, func(t *testing.T) {
+						var body io.Reader
+						if tc.body != "" {
+							body = strings.NewReader(tc.body)
+						}
+						w := httptest.NewRecorder()
+						mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, route+"?"+tc.query, body))
+						var got struct {
+							Error string `json:"error"`
+						}
+						if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusBadRequest || got.Error != tc.wantErr || w.Header().Get("Content-Type") != "application/json" {
+							t.Fatalf("status=%d type=%q body=%q, want 400 application/json %q", w.Code, w.Header().Get("Content-Type"), w.Body.String(), tc.wantErr)
+						}
+						untouched(t, tc.name+" "+route)
+					})
+				}
+			}
+			// The documented body-filter command still deletes exactly the
+			// matching rows, and a genuinely query-less, body-less request still
+			// deletes everything.
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", strings.NewReader(`{"provider":"target"}`)))
+			if w.Code != http.StatusOK || b.Len() != 1 {
+				t.Fatalf("filtered purge: status=%d body=%q ring=%d, want 200 and one row", w.Code, w.Body.String(), b.Len())
+			}
+			if s != nil {
+				n, err := s.CountWhere(t.Context(), storage.PurgeFilter{})
+				if err != nil || n != 1 {
+					t.Fatalf("filtered purge: durable=%d err=%v, want one row", n, err)
+				}
+			}
+			w = httptest.NewRecorder()
+			mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/admin/purge", nil))
+			if w.Code != http.StatusOK || b.Len() != 0 {
+				t.Fatalf("full purge: status=%d body=%q ring=%d, want 200 and no rows", w.Code, w.Body.String(), b.Len())
+			}
+			if s != nil {
+				n, err := s.CountWhere(t.Context(), storage.PurgeFilter{})
+				if err != nil || n != 0 {
+					t.Fatalf("full purge: durable=%d err=%v, want no rows", n, err)
+				}
+			}
+		})
+	}
+}
+
 func TestLogCountExportAndClearSharePredicate(t *testing.T) {
 	for _, durable := range []bool{false, true} {
 		t.Run(fmt.Sprint(durable), func(t *testing.T) {
