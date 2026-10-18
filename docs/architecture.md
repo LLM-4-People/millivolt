@@ -218,7 +218,9 @@ writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before
 decoding, plus raw model equality when no canonical rules rewrite names. The
 Go scope matcher remains authoritative for canonical models, status classes,
-errors, tools, time buckets and live-only classes.
+errors, tools, time buckets and live-only classes. Ad-hoc SELECT results are
+encoded once during the bounded scan and the endpoint writes that array
+directly; row/byte cap failure still precedes every response byte.
 
 Explorer uses dictionary IDs, scoped predicates and bitsets. Projected metric
 samples stay in shared sorted orders: single-valued dimensions retain one group

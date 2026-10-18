@@ -2361,26 +2361,77 @@ func (s *Store) Close() error {
 	return err
 }
 
+// queryRenderHook is a test seam (production leaves it nil). It reports a
+// completed ad-hoc rendering: queryRenderRows once Query materializes its row
+// slice, queryRenderJSON once the endpoint assembles the full JSON result. The
+// endpoint regression test requires exactly one JSON rendering and no rows
+// rendering, which fails if the handler re-marshals a Query row slice.
+var queryRenderHook func(kind string)
+
+const (
+	queryRenderRows = "rows"
+	queryRenderJSON = "json"
+)
+
 // Query owns ad-hoc SELECT execution time and result resource bounds. The
 // SELECT-only HTTP restriction stays in HandleQuery. SQLite working memory
 // (sorting/aggregate intermediates) is not a strict per-query heap budget.
-func (s *Store) Query(ctx context.Context, query string, args ...any) (out []map[string]any, err error) {
+// The shared scan already encodes each row for the byte cap; this path keeps
+// only the decoded rows because it has no response body to build.
+func (s *Store) Query(ctx context.Context, query string, args ...any) ([]map[string]any, error) {
+	out := make([]map[string]any, 0)
+	err := s.queryScan(ctx, query, nil, func(row map[string]any) {
+		out = append(out, row)
+	}, args...)
+	if err != nil {
+		return nil, err
+	}
+	if queryRenderHook != nil {
+		queryRenderHook(queryRenderRows)
+	}
+	return out, nil
+}
+
+// queryJSON executes the same bounded SELECT as Query and returns the complete
+// JSON array assembled from the per-row encodings the byte cap already
+// requires. This is the endpoint's one full-result encode: HandleQuery writes
+// these bytes directly instead of re-marshaling the rows. The array is only
+// returned after every row passed the caps, so a limit failure never leaves a
+// partial body.
+func (s *Store) queryJSON(ctx context.Context, query string, args ...any) ([]byte, error) {
+	out := make([]byte, 0, 2)
+	out = append(out, '[')
+	if err := s.queryScan(ctx, query, &out, nil, args...); err != nil {
+		return nil, err
+	}
+	out = append(out, ']')
+	if queryRenderHook != nil {
+		queryRenderHook(queryRenderJSON)
+	}
+	return out, nil
+}
+
+// queryScan is the one ad-hoc SELECT execution owner shared by Query and the
+// HTTP endpoint. It applies the query-only SQLite limits, scans rows, enforces
+// QueryMaxRows and QueryMaxBytes against the same per-row json.Marshal length,
+// and routes each row to its caller's rendering: keepRow collects the decoded
+// map, jsonOut collects the JSON array, and each caller supplies exactly one.
+// Engine-limit failures are mapped to ErrQueryLimit here, before either
+// rendering can expose a prefix.
+func (s *Store) queryScan(ctx context.Context, query string, jsonOut *[]byte, keepRow func(map[string]any), args ...any) (err error) {
 	defer func() {
-		if err != nil {
-			out = nil
-			if queryEngineLimit(err) {
-				err = fmt.Errorf("%w: %v", ErrQueryLimit, err)
-			}
+		if err != nil && queryEngineLimit(err) {
+			err = fmt.Errorf("%w: %v", ErrQueryLimit, err)
 		}
 	}()
 	if s.opts.QueryMaxBytes < 2 || s.opts.QueryMaxRows < 1 {
-		return nil, ErrQueryLimit
+		return ErrQueryLimit
 	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
 	conn, err := s.rdb.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer conn.Close()
 	type limit struct{ id, value int }
@@ -2402,7 +2453,7 @@ func (s *Store) Query(ctx context.Context, query string, args ...any) (out []map
 	for _, bound := range [...]limit{{sqlite3.SQLITE_LIMIT_LENGTH, s.opts.QueryMaxBytes}, {sqlite3.SQLITE_LIMIT_COLUMN, queryMaxColumns}} {
 		old, e := sqlite.Limit(conn, bound.id, bound.value)
 		if e != nil {
-			return nil, e
+			return e
 		}
 		previous = append(previous, limit{bound.id, old})
 	}
@@ -2410,20 +2461,20 @@ func (s *Store) Query(ctx context.Context, query string, args ...any) (out []map
 	// be installed here, not merely before Rows.Next/Scan.
 	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	out = make([]map[string]any, 0)
 	resultBytes := 2 // JSON array brackets, including the empty-array case
+	rowCount := 0
 	for rows.Next() {
-		if len(out) == s.opts.QueryMaxRows {
-			return nil, ErrQueryLimit
+		if rowCount == s.opts.QueryMaxRows {
+			return ErrQueryLimit
 		}
 		values := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
@@ -2431,27 +2482,36 @@ func (s *Store) Query(ctx context.Context, query string, args ...any) (out []map
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+			return err
 		}
-		m := make(map[string]any, len(cols))
+		row := make(map[string]any, len(cols))
 		for i, c := range cols {
-			m[c] = values[i]
+			row[c] = values[i]
 		}
-		encoded, e := json.Marshal(m)
+		encoded, e := json.Marshal(row)
 		if e != nil {
-			return nil, e
+			return e
 		}
 		separator := 0
-		if len(out) > 0 {
+		if rowCount > 0 {
 			separator = 1
 		}
 		if len(encoded) > s.opts.QueryMaxBytes-resultBytes-separator {
-			return nil, ErrQueryLimit
+			return ErrQueryLimit
 		}
 		resultBytes += len(encoded) + separator
-		out = append(out, m)
+		rowCount++
+		if jsonOut != nil {
+			if separator == 1 {
+				*jsonOut = append(*jsonOut, ',')
+			}
+			*jsonOut = append(*jsonOut, encoded...)
+		}
+		if keepRow != nil {
+			keepRow(row)
+		}
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 func queryEngineLimit(err error) bool {
@@ -2575,7 +2635,7 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 		fail(http.StatusBadRequest, err.Error())
 		return
 	}
-	rows, err := s.Query(r.Context(), query)
+	data, err := s.queryJSON(r.Context(), query)
 	if err != nil {
 		// The verbatim body serves the operator's browser (operator-gated
 		// path); the server-side log is the durable record of the cause.
@@ -2585,12 +2645,6 @@ func (s *Store) HandleQuery(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusRequestEntityTooLarge
 		}
 		fail(status, err.Error())
-		return
-	}
-	data, err := json.Marshal(rows)
-	if err != nil {
-		log.Printf("storage: query failed: %v", err)
-		fail(http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Write(data)
