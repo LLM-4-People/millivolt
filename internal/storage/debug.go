@@ -171,6 +171,8 @@ func (s *Store) CountDebugSession(ctx context.Context, sessionID string) (int64,
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
 	var n int64
-	err := s.rdb.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_debug WHERE session_id = ?`, sessionID).Scan(&n)
+	err := s.rdb.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM request_debug WHERE session_id = ? AND (expires_at = 0 OR expires_at > ?)`,
+		sessionID, time.Now().UnixMilli()).Scan(&n)
 	return n, err
 }
