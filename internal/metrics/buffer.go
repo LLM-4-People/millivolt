@@ -561,25 +561,35 @@ func (b *Buffer) removeWhereLocked(boundary *RemovalBoundary, match func(*Record
 type AggResult struct {
 	Err   error `json:"-"`
 	Total int   `json:"total"`
-	// ByProvider holds per-provider TTFT samples (ms) - only records with a
-	// captured TTFT (TTFTMs > 0), so no-token requests never skew percentiles.
-	ByProvider  map[string][]int64 `json:"by_provider"`
-	ByStatus    map[int]int        `json:"by_status"`
-	TotalInput  int64              `json:"total_input_tokens"`
-	TotalOutput int64              `json:"total_output_tokens"`
-	TotalCache  int64              `json:"total_cache_read"`
-	ErrorCount  int                `json:"error_count"`
-	ToolCalls   int64              `json:"tool_calls"`
+	// ProviderCounts counts every non-nil record per provider, including
+	// records with no captured TTFT. The Prometheus provider gauge reads it.
+	ProviderCounts map[string]int `json:"provider_counts"`
+	ByStatus       map[int]int    `json:"by_status"`
+	// TTFTSamples holds one flat TTFT sample set (ms) in record order - only
+	// records with a captured TTFT (TTFTMs > 0), so no-token requests never
+	// skew percentiles. The exposition sorts this slice in place.
+	TTFTSamples []int64 `json:"ttft_samples"`
+	// TTFTSumMs is the checked sum of TTFTSamples. On overflow it stays 0 and
+	// Err carries ErrMetricRange, so no wrapped or partial summary is emitted.
+	TTFTSumMs   int64 `json:"ttft_sum_ms"`
+	TotalInput  int64 `json:"total_input_tokens"`
+	TotalOutput int64 `json:"total_output_tokens"`
+	TotalCache  int64 `json:"total_cache_read"`
+	ErrorCount  int   `json:"error_count"`
+	ToolCalls   int64 `json:"tool_calls"`
 }
 
 // Aggregate computes lightweight aggregates over the given snapshot. Results
-// are O(n) in snapshot size.
+// are O(n) in snapshot size: one record pass owns every fact the Prometheus
+// exposition renders, including the per-provider counts, flat TTFT samples and
+// their checked sum.
 func Aggregate(records []*Record) *AggResult {
 	a := &AggResult{
-		ByProvider: make(map[string][]int64),
-		ByStatus:   make(map[int]int),
+		ProviderCounts: make(map[string]int),
+		ByStatus:       make(map[int]int),
 	}
 	a.Total = len(records)
+	ttftSumFailed := false
 	for _, r := range records {
 		if r == nil {
 			// Buffer.Record/Backfill still drop nils; this guards Prometheus
@@ -587,11 +597,24 @@ func Aggregate(records []*Record) *AggResult {
 			a.Total--
 			continue
 		}
+		a.ProviderCounts[r.Provider]++
 		a.ByStatus[r.StatusCode]++
 		// TTFTMs == 0 means "absent" (no token ever arrived), not "0 ms":
 		// no-token requests must not dilute TTFT aggregates or percentiles.
 		if r.TTFTMs > 0 {
-			a.ByProvider[r.Provider] = append(a.ByProvider[r.Provider], r.TTFTMs)
+			a.TTFTSamples = append(a.TTFTSamples, r.TTFTMs)
+			// A rejected sum must leave the field fail-closed at 0; continuing
+			// to fold after it would retain a partial total.
+			if !ttftSumFailed {
+				sum, err := SumCounts(a.TTFTSumMs, r.TTFTMs)
+				if err != nil {
+					a.Err = err
+					a.TTFTSumMs = 0
+					ttftSumFailed = true
+				} else {
+					a.TTFTSumMs = sum
+				}
+			}
 		}
 		if err := SumTerms(
 			Term{&a.TotalInput, r.Usage.InputTokens},

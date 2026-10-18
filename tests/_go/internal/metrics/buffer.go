@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -101,6 +102,44 @@ func TestAggregate(t *testing.T) {
 	}
 	if agg.ByStatus[500] != 1 {
 		t.Errorf("ByStatus[500] = %d", agg.ByStatus[500])
+	}
+	if agg.ProviderCounts["alpha"] != 2 || agg.ProviderCounts["beta"] != 2 {
+		t.Errorf("ProviderCounts = %v, want alpha=2 beta=2", agg.ProviderCounts)
+	}
+}
+
+// TestAggregatePrometheusDimensions pins the aggregate-owned facts the
+// exposition reads instead of walking the ring again: provider counts include
+// no-TTFT records and exclude nil records, TTFT samples stay in record order,
+// and the checked sum folds every positive sample exactly once.
+func TestAggregatePrometheusDimensions(t *testing.T) {
+	records := []*Record{
+		{Provider: "alpha", StatusCode: 200, TTFTMs: 300},
+		nil,
+		{Provider: "beta", StatusCode: 429, TTFTMs: 50},
+		{Provider: "alpha", StatusCode: 200},
+		{Provider: "beta", StatusCode: 500, TTFTMs: 100, ErrorType: "provider_error"},
+		{Provider: "gamma", StatusCode: 200},
+	}
+	agg := Aggregate(records)
+
+	if agg.Total != 5 {
+		t.Errorf("Total = %d, want 5 (nil excluded)", agg.Total)
+	}
+	wantCounts := map[string]int{"alpha": 2, "beta": 2, "gamma": 1}
+	for provider, want := range wantCounts {
+		if got := agg.ProviderCounts[provider]; got != want {
+			t.Errorf("ProviderCounts[%q] = %d, want %d", provider, got, want)
+		}
+	}
+	if got, want := agg.TTFTSamples, []int64{300, 50, 100}; !slices.Equal(got, want) {
+		t.Errorf("TTFTSamples = %v, want record order %v", got, want)
+	}
+	if agg.TTFTSumMs != 450 {
+		t.Errorf("TTFTSumMs = %d, want 450", agg.TTFTSumMs)
+	}
+	if agg.Err != nil {
+		t.Errorf("Err = %v, want nil", agg.Err)
 	}
 }
 
@@ -388,6 +427,9 @@ func TestAggregateToleratesNilRecord(t *testing.T) {
 	a := Aggregate([]*Record{{Provider: "p", Model: "m", StatusCode: 200}, nil, {Provider: "p"}})
 	if a.Total != 2 {
 		t.Errorf("Aggregate.Total = %d, want 2 (nil skipped)", a.Total)
+	}
+	if a.ProviderCounts["p"] != 2 {
+		t.Errorf("ProviderCounts[p] = %d, want 2 (nil skipped)", a.ProviderCounts["p"])
 	}
 
 	// The buffer must never store a nil via Record or Backfill.

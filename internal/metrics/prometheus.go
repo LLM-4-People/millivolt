@@ -6,7 +6,6 @@ import (
 	"maps"
 	"net/http"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -53,42 +52,24 @@ func HandlePrometheus(w http.ResponseWriter, r *http.Request, buf *Buffer) {
 	writeHeader("llm_proxy_tool_calls_total", "Total tool calls observed (current ring).", "gauge")
 	fmt.Fprintf(&b, "llm_proxy_tool_calls_total %d\n", agg.ToolCalls)
 
-	// Per-provider request counts (low-cardinality dimension). ByStatus is
-	// status-code keyed; per-provider counts come from the snapshot directly.
+	// Per-provider request counts (low-cardinality dimension). Aggregate owns
+	// the single record pass, including no-TTFT records.
 	writeHeader("llm_proxy_requests_by_provider", "Requests grouped by provider (current ring).", "gauge")
-	providerCounts := make(map[string]int)
-	for _, r := range records {
-		if r != nil {
-			providerCounts[r.Provider]++
-		}
-	}
-	for _, p := range sortedKeys(providerCounts) {
-		fmt.Fprintf(&b, "llm_proxy_requests_by_provider{provider=%q} %d\n", p, providerCounts[p])
+	for _, p := range sortedKeys(agg.ProviderCounts) {
+		fmt.Fprintf(&b, "llm_proxy_requests_by_provider{provider=%q} %d\n", p, agg.ProviderCounts[p])
 	}
 
-	// TTFT summary across all requests with a captured TTFT. ByProvider
-	// already excludes no-token records (TTFTMs == 0 means "absent").
+	// TTFT summary across all requests with a captured TTFT. Aggregate has
+	// already excluded no-token records (TTFTMs == 0 means "absent") and
+	// returned one flat record-ordered sample slice plus its checked sum.
 	writeHeader("llm_proxy_ttft_seconds", "Time to first token in seconds.", "summary")
-	var ttfts []int64
-	for _, vals := range agg.ByProvider {
-		ttfts = append(ttfts, vals...)
-	}
-	sort.Slice(ttfts, func(i, j int) bool { return ttfts[i] < ttfts[j] })
+	ttfts := agg.TTFTSamples
+	slices.Sort(ttfts)
 	if len(ttfts) > 0 {
-		var sum int64
-		for _, v := range ttfts {
-			var err error
-			sum, err = SumCounts(sum, v)
-			if err != nil {
-				log.Printf("metrics: ttft sum: %v", err)
-				http.Error(w, "metrics cannot be represented", http.StatusInternalServerError)
-				return
-			}
-		}
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.5\"} %g\n", Percentile(ttfts, 50)/1e3)
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.95\"} %g\n", Percentile(ttfts, 95)/1e3)
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds{quantile=\"0.99\"} %g\n", Percentile(ttfts, 99)/1e3)
-		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_sum %g\n", float64(sum)/1e3)
+		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_sum %g\n", float64(agg.TTFTSumMs)/1e3)
 		fmt.Fprintf(&b, "llm_proxy_ttft_seconds_count %d\n", len(ttfts))
 	}
 
