@@ -2,7 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -15,20 +19,175 @@ import (
 // string depending on the column's declared type).
 type rows []map[string]any
 
-// querySQL runs one bounded SELECT through the proxy's read-only SQL reader.
-// This is the single owner of a SQL statement leaving this server; the describe
-// tool's schema probe uses it too.
+// querySQL runs one bounded SELECT through the proxy's read-only SQL reader and
+// materializes every row. It serves the paths that need the whole result (the
+// describe schema probe, a capture page, the values fold); the query tool
+// streams through queryRows instead.
 func (c *Client) querySQL(ctx context.Context, statement string) (rows, error) {
-	if err := validateSelect(statement); err != nil {
+	values, err := queryValues(statement)
+	if err != nil {
 		return nil, err
 	}
-	values := url.Values{}
-	values.Set("q", statement)
 	var out rows
 	if err := c.getJSON(ctx, routeQuery, values, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// queryValues is the one owner of a SQL statement leaving this server: the
+// local pre-check plus the q parameter every SQL reader sends. The proxy
+// remains the authority on what runs.
+func queryValues(statement string) (url.Values, error) {
+	if err := validateSelect(statement); err != nil {
+		return nil, err
+	}
+	values := url.Values{}
+	values.Set("q", statement)
+	return values, nil
+}
+
+// queryPage is one streamed SELECT result. Rows holds only the prefix this
+// server keeps; Total is every element the proxy produced, including rows
+// decoded only to be counted.
+type queryPage struct {
+	Rows          []map[string]any
+	Bytes         int
+	Total         int
+	ByteTruncated bool
+}
+
+// queryRows runs one bounded SELECT and decodes the proxy's bare JSON array
+// element by element, so the full result is never materialized. It owns the
+// row cap and the encoded-size cap that used to run over a decoded slice:
+//
+//   - Rows keeps the source-order prefix inside rowLimit while the exact
+//     json.Marshal length of each row fits byteBudget.
+//   - Bytes is the sum of those encoded lengths for the kept rows.
+//   - Total counts every element, including the rows past either cap.
+//   - ByteTruncated reports that byteBudget withheld a row inside rowLimit, so
+//     the caller reports the byte clamp instead of the row clamp.
+//
+// The whole response body still has to be read to count Total, but it is not
+// retained, and a row past the caps is decoded into a throwaway value rather
+// than a map. The proxy's own bare-array response is unchanged.
+func (c *Client) queryRows(ctx context.Context, statement string, rowLimit, byteBudget int) (queryPage, error) {
+	values, err := queryValues(statement)
+	if err != nil {
+		return queryPage{}, err
+	}
+	// openRaw owns the failure-body bound and the *APIError shape, so an
+	// oversized failure is the read-budget error rather than a partial proxy
+	// message exactly as the buffered path reports it.
+	resp, err := c.openRaw(ctx, http.MethodGet, routeQuery, values)
+	if err != nil {
+		return queryPage{}, err
+	}
+	defer resp.Body.Close()
+	return decodeQueryRows(resp.StatusCode, resp.Body, rowLimit, byteBudget)
+}
+
+// decodeQueryRows is the one streaming decoder for the query route. It keeps
+// the JSON decode error shape the buffered path used, after deciding the read
+// budget first: readBody observed the whole body before unmarshaling, so a
+// body over budget is a read error even when its JSON is also malformed.
+func decodeQueryRows(status int, body io.Reader, rowLimit, byteBudget int) (queryPage, error) {
+	page := queryPage{Rows: []map[string]any{}}
+	bounded := newBoundedBody(body)
+	decoder := json.NewDecoder(bounded)
+	fail := func(err error) (queryPage, error) {
+		failure := bounded.failure
+		drainErr := bounded.drain()
+		if failure != nil {
+			return queryPage{}, readFailure(failure)
+		}
+		if drainErr != nil {
+			return queryPage{}, readFailure(drainErr)
+		}
+		if bounded.overflowed() {
+			return queryPage{}, readBudgetExceeded()
+		}
+		return queryPage{}, fmt.Errorf("millivolt returned HTTP %d with a body this tool could not decode as JSON (%d bytes): %v",
+			status, bounded.consumed(), err)
+	}
+
+	token, err := decoder.Token()
+	if err != nil {
+		return fail(err)
+	}
+	array := false
+	switch value := token.(type) {
+	case json.Delim:
+		if value != '[' {
+			return fail(errors.New("the result is not a JSON array"))
+		}
+		array = true
+	case nil:
+		// The buffered decode accepted a top-level null as an empty result;
+		// keep that acceptance instead of turning it into a new failure.
+	default:
+		return fail(errors.New("the result is not a JSON array"))
+	}
+	if array {
+		for decoder.More() {
+			page.Total++
+			// Past either cap a row still has to be validated and counted, but
+			// it must not become a map. Decoding into an empty struct skips
+			// every field and keeps the same object/null shape gate the map
+			// target had.
+			if page.Total > rowLimit || page.ByteTruncated {
+				var skipped struct{}
+				if err := decoder.Decode(&skipped); err != nil {
+					return fail(err)
+				}
+				continue
+			}
+			var row map[string]any
+			if err := decoder.Decode(&row); err != nil {
+				return fail(err)
+			}
+			encoded, err := json.Marshal(row)
+			if err != nil {
+				// A row the encoder cannot produce is not measurable, so it
+				// cannot be budgeted; keep it rather than silently dropping
+				// data, the materializing clamp's own rule.
+				page.Rows = append(page.Rows, row)
+				continue
+			}
+			if page.Bytes+len(encoded) > byteBudget {
+				// Whole rows only, and the first row that does not fit ends
+				// the kept prefix exactly as the old byte clamp did.
+				page.ByteTruncated = true
+				continue
+			}
+			page.Bytes += len(encoded)
+			page.Rows = append(page.Rows, row)
+		}
+		if _, err := decoder.Token(); err != nil {
+			return fail(err)
+		}
+	}
+	// json.Unmarshal rejected data after the array; keep that gate. Decoding
+	// into an empty struct again avoids materializing a trailing document.
+	var trailing struct{}
+	switch err := decoder.Decode(&trailing); {
+	case err == io.EOF:
+	case err == nil:
+		return fail(errors.New("unexpected data after the result array"))
+	default:
+		return fail(err)
+	}
+	failure := bounded.failure
+	if err := bounded.drain(); err != nil {
+		return queryPage{}, readFailure(err)
+	}
+	if failure != nil {
+		return queryPage{}, readFailure(failure)
+	}
+	if bounded.overflowed() {
+		return queryPage{}, readBudgetExceeded()
+	}
+	return page, nil
 }
 
 // validateSelect mirrors the proxy's own server-side gate (SELECT-prefixed, no

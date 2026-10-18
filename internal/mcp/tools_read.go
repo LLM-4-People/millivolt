@@ -39,20 +39,22 @@ func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error
 	if limit > maxQueryRowsCeiling {
 		return nil, fmt.Errorf("max_rows must be at most %d", maxQueryRowsCeiling)
 	}
-	result, err := s.client.querySQL(ctx, in.SQL)
+	// The row cap is not a volume bound: a short wide row can be larger than a
+	// long narrow one, so the encoded-size cap runs after it and is reported
+	// whenever it withheld something. Both caps are applied while the proxy's
+	// array is streamed, and both keep the proxy's own total, so a result cut
+	// by both limits cannot read as complete.
+	page, err := s.client.queryRows(ctx, in.SQL, limit, s.limits.QueryMaxBytes)
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(result, limit, "rows", queryAdvice)
-	// The row cap is not a volume bound: a short wide row can be larger than a
-	// long narrow one, so the encoded-size clamp runs after it and is reported
-	// whenever it withheld something. Its total stays the proxy's own row count,
-	// so a result cut by both limits cannot read as complete.
-	bySize, bySizeBytes, sizeTruncation := clampRowsToBytes(kept, len(result), s.limits.QueryMaxBytes, queryAdvice)
-	if sizeTruncation.Truncated {
-		return &QueryOutput{Rows: bySize, RowCount: len(bySize), Bytes: bySizeBytes, Truncation: sizeTruncation}, nil
+	var truncation Truncation
+	if page.ByteTruncated {
+		truncation = rowsTruncatedByBytes(len(page.Rows), page.Total, page.Bytes, s.limits.QueryMaxBytes, queryAdvice)
+	} else {
+		_, truncation = clampWithTotal(page.Rows, page.Total, limit, "rows", queryAdvice)
 	}
-	return &QueryOutput{Rows: kept, RowCount: len(kept), Bytes: bySizeBytes, Truncation: truncation}, nil
+	return &QueryOutput{Rows: page.Rows, RowCount: len(page.Rows), Bytes: page.Bytes, Truncation: truncation}, nil
 }
 
 // maxQueryRowsCeiling is an internal sanity bound so a typo cannot ask for a

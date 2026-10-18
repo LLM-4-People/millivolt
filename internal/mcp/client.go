@@ -422,19 +422,33 @@ func (c *Client) getText(ctx context.Context, path string, query url.Values) ([]
 // getRaw is the one bounded, authenticated body reader for a response the tool
 // does not decode itself.
 func (c *Client) getRaw(ctx context.Context, method, path string, query url.Values) ([]byte, error) {
+	resp, err := c.openRaw(ctx, method, path, query)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return readBody(resp.Body)
+}
+
+// openRaw performs one authenticated request and returns the success response
+// with its body unread, or the bounded *APIError a failure becomes. The caller
+// owns closing the returned body. It is the one failure-body reader for the
+// raw response paths: getRaw buffers the success body, and the streamed query
+// reader decodes it in place.
+func (c *Client) openRaw(ctx context.Context, method, path string, query url.Values) (*http.Response, error) {
 	resp, err := c.send(ctx, method, path, query, nil)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode >= 200 && resp.StatusCode <= 299 {
+		return resp, nil
 	}
 	defer resp.Body.Close()
 	body, err := readBody(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, newAPIError(resp, body, c.token)
-	}
-	return body, nil
+	return nil, newAPIError(resp, body, c.token)
 }
 
 // doJSON is the single request/response owner: URL assembly, the Bearer
@@ -536,12 +550,73 @@ func (c *Client) sendWith(httpClient *http.Client, ctx context.Context, method, 
 func readBody(body io.Reader) ([]byte, error) {
 	raw, err := io.ReadAll(io.LimitReader(body, MaxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read millivolt response: %v", err)
+		return nil, readFailure(err)
 	}
 	if len(raw) > MaxResponseBytes {
-		return nil, fmt.Errorf("millivolt response exceeded the %d byte read budget; narrow the request", MaxResponseBytes)
+		return nil, readBudgetExceeded()
 	}
 	return raw, nil
+}
+
+// readFailure and readBudgetExceeded are the one owners of the two read
+// outcomes, shared by readBody and the streaming query reader so a bounded
+// response cannot drift between the buffered and streamed paths.
+func readFailure(err error) error {
+	return fmt.Errorf("read millivolt response: %v", err)
+}
+
+func readBudgetExceeded() error {
+	return fmt.Errorf("millivolt response exceeded the %d byte read budget; narrow the request", MaxResponseBytes)
+}
+
+// boundedBody is the streaming form of readBody's budget: it supplies at most
+// MaxResponseBytes+1 bytes, never more, and reports whether the body reached
+// that count. A streamed query cannot use readBody first without materializing
+// the body this path exists to avoid, so the limit and its errors are shared
+// instead.
+type boundedBody struct {
+	body io.Reader
+	left int64
+	// failure is the first read error the body reported. A JSON decoder can
+	// turn that error into a decode failure, so keeping it lets the streamed
+	// path report the same read error readBody would.
+	failure error
+}
+
+func newBoundedBody(body io.Reader) *boundedBody {
+	return &boundedBody{body: body, left: MaxResponseBytes + 1}
+}
+
+func (b *boundedBody) Read(p []byte) (int, error) {
+	if b.left <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > b.left {
+		p = p[:b.left]
+	}
+	n, err := b.body.Read(p)
+	b.left -= int64(n)
+	if err != nil && err != io.EOF {
+		b.failure = err
+	}
+	return n, err
+}
+
+// overflowed reports whether the body supplied more than MaxResponseBytes
+// bytes. left starts at MaxResponseBytes+1, so reaching zero means the body
+// had at least the full budget plus the one byte readBody uses to detect the
+// overrun.
+func (b *boundedBody) overflowed() bool { return b.left <= 0 }
+
+// consumed is how many body bytes were supplied, capped at the overrun probe.
+func (b *boundedBody) consumed() int { return int(MaxResponseBytes + 1 - b.left) }
+
+// drain reads whatever is left so the budget decision and any read failure are
+// observed even when the decoder stopped at the array's end. It is a no-op
+// once the bound is reached.
+func (b *boundedBody) drain() error {
+	_, err := io.Copy(io.Discard, b)
+	return err
 }
 
 // redactionMarker replaces every credential form removed from model-visible

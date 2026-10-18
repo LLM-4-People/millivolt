@@ -1,7 +1,6 @@
 package mcp
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -138,54 +137,41 @@ const cursorAdvice = "page with the next_before_ms and next_before_id pair this 
 // wrong for every tool that has no cursor fields, and actively sends a model
 // looking for arguments its tool does not have.
 func clamp[T any](items []T, limit int, marker, advice string) ([]T, Truncation) {
-	if len(items) <= limit {
-		return list(items), Truncation{Shown: len(items), Total: len(items)}
+	return clampWithTotal(items, len(items), limit, marker, advice)
+}
+
+// clampWithTotal is clamp for a caller that counted the produced items without
+// materializing them all. total is what the proxy produced; items holds only
+// the prefix this server kept. The marker still names total, so a streamed
+// result cut by the row cap cannot report the retained prefix as complete.
+func clampWithTotal[T any](items []T, total, limit int, marker, advice string) ([]T, Truncation) {
+	if len(items) > limit {
+		items = items[:limit]
 	}
-	return items[:limit], Truncation{
-		Shown:     limit,
-		Total:     len(items),
+	if total <= limit {
+		return list(items), Truncation{Shown: len(items), Total: total}
+	}
+	return items, Truncation{
+		Shown:     len(items),
+		Total:     total,
 		Truncated: true,
 		Marker: fmt.Sprintf("truncated: %d of %d %s returned; %s",
-			limit, len(items), marker, advice),
+			len(items), total, marker, advice),
 	}
 }
 
-// clampRowsToBytes keeps whole rows while their encoded size fits the budget.
-// It never cuts inside a row, so a clamped result is still valid JSON a model
-// can act on; the withheld rows are reported with the same explicit marker the
-// row clamp uses, because a silently shortened result would read as a complete
-// one.
-//
-// rows is the already row-capped slice and total is how many rows the proxy
-// produced before that cap, so when BOTH limits fire the reported total is the
-// proxy's, not the smaller intermediate. Understating it would tell a model a
-// result was complete when it was not.
-func clampRowsToBytes(rows []map[string]any, total, budget int, advice string) ([]map[string]any, int, Truncation) {
-	kept := make([]map[string]any, 0, len(rows))
-	used := 0
-	for _, row := range rows {
-		encoded, err := json.Marshal(row)
-		if err != nil {
-			// A row the encoder cannot produce is not measurable, so it cannot
-			// be budgeted; keep it rather than silently dropping data.
-			kept = append(kept, row)
-			continue
-		}
-		if used+len(encoded) > budget {
-			break
-		}
-		used += len(encoded)
-		kept = append(kept, row)
-	}
-	if len(kept) == len(rows) {
-		return list(rows), used, Truncation{Shown: len(kept), Total: total}
-	}
-	return kept, used, Truncation{
-		Shown:     len(kept),
+// rowsTruncatedByBytes is the marker for a query result whose encoded-size
+// budget withheld rows. The streaming reader owns the counting and the
+// whole-row rule; this owns the wording, so the two query clamps report their
+// withholding in one place. total is the proxy's row count, not the row-capped
+// intermediate, so a result cut by both limits cannot read as complete.
+func rowsTruncatedByBytes(shown, total, used, budget int, advice string) Truncation {
+	return Truncation{
+		Shown:     shown,
 		Total:     total,
 		Truncated: true,
 		Marker: fmt.Sprintf("truncated: %d of %d rows returned, about %d of the %d byte result budget; %s",
-			len(kept), total, used, budget, advice),
+			shown, total, used, budget, advice),
 	}
 }
 
