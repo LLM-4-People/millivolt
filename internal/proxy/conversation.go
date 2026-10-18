@@ -437,7 +437,10 @@ func (t *ConversationTracker) Assign(client, keyHash, explicitID, trackedID stri
 	pk := convoKey(client, keyHash)
 	p := t.parts[pk]
 	if p == nil {
-		if len(t.parts) >= conversationPartitionsMax {
+		// Do not turn a client-controlled partition churn at the cap into an
+		// unthrottled full-map sweep. The oldest-entry eviction below still
+		// bounds memory; the periodic throttle above owns map-wide cleanup.
+		if len(t.parts) >= conversationPartitionsMax && now.Sub(t.lastSweep) >= t.idleGap {
 			t.sweepLocked(now)
 		}
 		for len(t.parts) >= conversationPartitionsMax && len(t.order) > 0 {

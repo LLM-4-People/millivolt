@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -61,6 +62,28 @@ func TestConversationConcurrentInterleaved(t *testing.T) {
 	}
 	if x1 == y1 {
 		t.Errorf("concurrent conversations share id %q, want distinct", x1)
+	}
+}
+
+// TestConversationCapSweepThrottled pins the cap branch to the same sweep
+// throttle as the normal path: adding a partition at the cap evicts the
+// oldest entry but must not run an O(partitions) scan on every request.
+func TestConversationCapSweepThrottled(t *testing.T) {
+	ct := NewConversationTracker(time.Hour, 4)
+	now := time.Now()
+	for i := 0; i < conversationPartitionsMax; i++ {
+		ct.Assign("cli", fmt.Sprintf("partition-%d", i), "", "", 1, now)
+	}
+	if len(ct.parts) != conversationPartitionsMax {
+		t.Fatalf("filled partitions = %d, want %d", len(ct.parts), conversationPartitionsMax)
+	}
+	ct.lastSweep = now
+	ct.Assign("cli", "partition-new", "", "", 1, now.Add(time.Second))
+	if !ct.lastSweep.Equal(now) {
+		t.Fatalf("cap insertion swept at %v, want the throttle to keep %v", ct.lastSweep, now)
+	}
+	if len(ct.parts) != conversationPartitionsMax {
+		t.Fatalf("partitions after eviction = %d, want %d", len(ct.parts), conversationPartitionsMax)
 	}
 }
 
