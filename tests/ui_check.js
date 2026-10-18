@@ -576,6 +576,115 @@ async function main() {
       child.querySelector('.xp-conversation-role').title==='Client-declared parent conversation');
   }
 
+  // Explorer render gates: unchanged aggregates must not rewrite the rail
+  // trigger or re-run gallery layout sizing.
+  {
+    const probe = d.createElement('div');
+    probe.id = 'xp-update-probe';
+    d.body.appendChild(probe);
+    try {
+      check('updateSection returns true for first and changed content',
+        w.updateSection('xp-update-probe', 'first') === true &&
+        w.updateSection('xp-update-probe', 'changed') === true);
+      check('updateSection returns false for identical content and a missing zone',
+        w.updateSection('xp-update-probe', 'changed') === false &&
+        w.updateSection('xp-update-probe-missing', 'content') === false);
+      check('updateSection still writes the latest content exactly', probe.innerHTML === 'changed');
+    } finally {
+      probe.remove();
+      w.eval("delete lastRender['xp-update-probe']");
+    }
+
+    const originalSizeGallery = w.sizeGallery;
+    const savedAgg = w.eval('explorerAgg');
+    const gallery = d.getElementById('xp-gallery');
+    const gateGroup = (name, n) => ({name, n, cost:0, in:10, out:5, cache:2, tools:0,
+      err_final:0, rate_limit_requests:0, cost_per_mtok:null,
+      ttft_p50:null, ttft_p95:null, tps_p50:null, tps_p95:null});
+    const galleryAgg = {
+      dim: 'provider', total: 10, error_total: 0, rail: {provider: 2},
+      groups: [gateGroup('gate-alpha.example', 6), gateGroup('gate-beta.example', 4)],
+    };
+    let sizeCalls = 0;
+    try {
+      w.sizeGallery = (...args) => { sizeCalls++; return originalSizeGallery(...args); };
+      w.__restoreGalleryAgg = savedAgg;
+      w.eval('explorerAgg = ' + JSON.stringify(galleryAgg));
+      w.renderGallery({activeDim: 'provider', filters: []});
+      const galleryHTML = gallery.innerHTML;
+      const firstCalls = sizeCalls;
+      check('a changed gallery payload writes its cards and runs sizing',
+        firstCalls === 1 && gallery.querySelectorAll('.xp-node').length === 2 &&
+        galleryHTML.includes('gate-alpha.example'));
+      w.renderGallery({activeDim: 'provider', filters: []});
+      check('an unchanged gallery render leaves the node, HTML and sizing untouched',
+        sizeCalls === firstCalls && gallery.innerHTML === galleryHTML &&
+        d.getElementById('xp-gallery') === gallery);
+      w.eval('explorerAgg = ' + JSON.stringify({
+        ...galleryAgg,
+        groups: [gateGroup('gate-alpha.example', 9), gateGroup('gate-beta.example', 4)],
+      }));
+      w.renderGallery({activeDim: 'provider', filters: []});
+      check('a changed group count repaints the cards and runs sizing again',
+        sizeCalls === firstCalls + 1 && gallery.innerHTML !== galleryHTML &&
+        gallery.querySelector('[data-xp-key="gate-alpha.example"] .xp-node-n')?.textContent.startsWith('9'));
+    } finally {
+      w.sizeGallery = originalSizeGallery;
+      w.eval('explorerAgg=window.__restoreGalleryAgg;delete window.__restoreGalleryAgg');
+      w.renderGallery(w.explorerState());
+    }
+
+    const trigger = d.getElementById('xp-dim-trigger');
+    let mutations = [];
+    const observer = new w.MutationObserver(records => mutations.push(...records));
+    observer.observe(trigger, {attributes: true, childList: true, subtree: true, characterData: true});
+    try {
+      w.__restoreRailAgg = savedAgg;
+      w.eval('explorerAgg = ' + JSON.stringify({dim: 'provider', rail: {provider: 77, model: 3}}));
+      w.renderDimRail({activeDim: 'provider', filters: []});
+      await sleep(0);
+      const firstMutations = mutations.length;
+      check('a changed rail payload repaints the dimension trigger',
+        firstMutations > 0 && trigger.querySelector('.rail-n')?.textContent === '77');
+      w.renderDimRail({activeDim: 'provider', filters: []});
+      await sleep(0);
+      check('an unchanged rail render does not touch the dimension trigger',
+        mutations.length === firstMutations);
+
+      mutations = [];
+      w.renderDimRail({activeDim: 'model', filters: []});
+      await sleep(0);
+      const expectedHost = d.createElement('div');
+      expectedHost.innerHTML = `<span class="xp-dim-by">by</span>${w.entityBadge('model', '', 'Model')}<span class="rail-n">3</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
+      check('an active-dimension change repaints the complete trigger presentation',
+        mutations.length > 0 && trigger.innerHTML === expectedHost.innerHTML &&
+        trigger.style.getPropertyValue('--ent') === '#CC79A7' &&
+        trigger.getAttribute('aria-label') === 'break down by Model' &&
+        trigger.title === 'break down by Model' &&
+        trigger.querySelector('.xp-dim-caret path')?.getAttribute('d') === 'M4 6.5 8 10.5 12 6.5');
+
+      mutations = [];
+      w.eval('explorerAgg = ' + JSON.stringify({dim: 'provider', rail: {provider: 77, model: 4}}));
+      w.renderDimRail({activeDim: 'model', filters: []});
+      await sleep(0);
+      check('a rail count change repaints the dimension trigger again',
+        mutations.length > 0 && trigger.querySelector('.rail-n')?.textContent === '4');
+
+      const staleHost = d.createElement('div');
+      staleHost.innerHTML = `<span class="xp-dim-by">by</span>${w.entityBadge('model', '', 'Model')}<span class="rail-n">4</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
+      const stale = trigger.cloneNode(false);
+      trigger.replaceWith(stale);
+      w.renderDimRail({activeDim: 'model', filters: []});
+      await sleep(0);
+      check('a replaced trigger node is repainted even while the module key matches',
+        stale.innerHTML === staleHost.innerHTML && stale.getAttribute('aria-label') === 'break down by Model');
+    } finally {
+      observer.disconnect();
+      w.eval('explorerAgg=window.__restoreRailAgg;delete window.__restoreRailAgg');
+      w.renderDimRail(w.explorerState());
+    }
+  }
+
   // ---- test 2: live 'record' event → incremental insertion, stable nodes ----
   const oldFifth = rows()[5];
   fire('record', { ...mkRec('reqnew0', 200, 1700000031000) }, '31');

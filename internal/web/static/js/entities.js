@@ -334,13 +334,16 @@ function recordErrorEntries(r) {
 }
 
 // ---------- targeted render (only re-render what changed) ----------
+// updateSection returns true only when it actually wrote: an existing node with
+// changed content. Identical content and a missing node write nothing.
 function updateSection(id, content) {
   const el = $(id);
-  if (!el) return;
+  if (!el) return false;
   const h = content;
-  if (lastRender[id] === h) return;
+  if (lastRender[id] === h) return false;
   lastRender[id] = h;
   el.innerHTML = content;
+  return true;
 }
 
 // LIVE_STATUS_FILTERS are the in-flight pills the request log actually draws.

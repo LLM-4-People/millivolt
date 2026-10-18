@@ -273,6 +273,11 @@ function explorerRailCount(dim, payload) {
   return fmt(summary.main) + ' main + ' + fmt(summary.sub) + ' sub' +
     (summary.unresolved ? ' + ' + fmt(summary.unresolved) + ' unresolved' : '');
 }
+// The shared dimension trigger sits outside the rail zone's updateSection
+// cache, so its presentation is keyed separately on the active dimension and
+// rendered count. The key also lives on the node: a replaced trigger has no
+// expando and must be repainted even while module state still matches.
+let _dimTriggerKey = null;
 function renderDimRail(st) {
   // distinct-value counts come from the server aggregate (since inception),
   // for every dimension in one payload - no client-side grouping.
@@ -287,11 +292,17 @@ function renderDimRail(st) {
   const trig = $('xp-dim-trigger');
   if (trig) {
     const dim = st.activeDim;
-    const label = entityType(dim).label;
-    trig.style.setProperty('--ent', entityType(dim).color);
-    trig.innerHTML = `<span class="xp-dim-by">by</span>${entityBadge(dim, '', label)}<span class="rail-n">${explorerRailCount(dim, explorerAgg)}</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
-    trig.setAttribute('aria-label', 'break down by ' + label);
-    trig.title = 'break down by ' + label;
+    const count = explorerRailCount(dim, explorerAgg);
+    const key = JSON.stringify([dim, count]);
+    if (_dimTriggerKey !== key || trig._xpDimKey !== key) {
+      _dimTriggerKey = key;
+      trig._xpDimKey = key;
+      const label = entityType(dim).label;
+      trig.style.setProperty('--ent', entityType(dim).color);
+      trig.innerHTML = `<span class="xp-dim-by">by</span>${entityBadge(dim, '', label)}<span class="rail-n">${count}</span><svg class="hdr-ico xp-dim-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>`;
+      trig.setAttribute('aria-label', 'break down by ' + label);
+      trig.title = 'break down by ' + label;
+    }
   }
 }
 
@@ -334,8 +345,9 @@ function renderGallery(st) {
     return;
   }
   const cards = payload.groups.map(e => xpNodeCard(st, e, payload)).join('');
-  updateSection('xp-gallery', cards);
-  sizeGallery();
+  // Only a changed gallery needs the post-layout sizing pass; an identical
+  // payload leaves both the DOM and the layout untouched.
+  if (updateSection('xp-gallery', cards)) sizeGallery();
 }
 
 // sizeGallery sizes the gallery once per render. In the locked viewport layout

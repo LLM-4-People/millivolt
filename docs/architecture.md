@@ -402,7 +402,11 @@ trim, reset, a live revision bump and a data replacement each rebuild it. The
 explorer memoizes its filter-set identity on the canonical, order-independent
 scope (filter set plus status, excluding the `by/<dim>` breakdown). A by-only
 hash change repaints the rail/gallery and fetches that one breakdown while the
-scoped log window, chart and drawer keep their state.
+scoped log window, chart and drawer keep their state. Unchanged explorer
+renders write nothing beyond card string construction: the rail and gallery
+HTML is compared before assignment, the shared dimension trigger is rewritten
+only when its dimension/count presentation key changes, and gallery layout
+sizing runs only after the gallery content actually changes.
 
 Server chart responses alone own buckets/totals at configured cadence. Presets,
 series, money/unit formatters and visible dimension order each have one registry.
