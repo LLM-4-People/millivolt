@@ -444,6 +444,47 @@ func BenchmarkThrottledReleaseOtherProviders(b *testing.B) {
 	}
 }
 
+// BenchmarkThrottlePolicyListing contrasts the policy-only persistence listing
+// with the dashboard's live-occupancy listing. G groups are precreated and
+// attributed to one provider with one active gate; queued waiters are installed
+// directly in group queues because the benchmark measures the listing walk, not
+// queue admission. ThrottlePolicies must stay independent of group count and
+// queue depth, while ListThrottles must visibly scale with both.
+func BenchmarkThrottlePolicyListing(b *testing.B) {
+	const provider = "provider.example"
+	for _, groups := range []int{1, 1000, 10000} {
+		for _, queued := range []int{0, 4} {
+			b.Run("groups="+strconv.Itoa(groups)+"/queued="+strconv.Itoa(queued), func(b *testing.B) {
+				s := New(Options{})
+				s.SetThrottle(Throttle{Provider: provider, Limit: Limit{Concurrency: 1, Requests: 1, ReqWindow: time.Hour}})
+				for i := 0; i < groups; i++ {
+					g := s.groupFor(provider+"|"+strconv.Itoa(i), 0)
+					for j := 0; j < queued; j++ {
+						g.queue = append(g.queue, &waiter{
+							ch:       make(chan struct{}, 1),
+							ctx:      context.Background(),
+							provider: provider,
+						})
+					}
+					g.queued = queued
+				}
+				b.Run("policies", func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						s.ThrottlePolicies()
+					}
+				})
+				b.Run("live", func(b *testing.B) {
+					b.ReportAllocs()
+					for b.Loop() {
+						s.ListThrottles()
+					}
+				})
+			})
+		}
+	}
+}
+
 // TestGateLookupNeverWaitsForThrottleWriters pins the lock-order fix: gate()
 // is called from admission while a group mutex is held, and throttle writers
 // hold throttleMu while taking that same group mutex. A gate lookup must read

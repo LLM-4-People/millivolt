@@ -354,8 +354,26 @@ func (s *Scheduler) UpdateThrottle(provider string, update func(Throttle) Thrott
 	return true
 }
 
+// ThrottlePolicies returns every active provider cap, sorted by provider,
+// without live occupancy. Durable persistence stores only policy, so it must
+// not pay ListThrottles' scan of every group and queued waiter. Every gate
+// policy write holds throttleMu, so reading g.throttle under that lock is
+// race-free and never takes a group mutex. Throttle has only value fields, so
+// the returned copies cannot alias later gate updates.
+func (s *Scheduler) ThrottlePolicies() []Throttle {
+	s.throttleMu.Lock()
+	out := make([]Throttle, 0, len(s.gates))
+	for _, g := range s.gates {
+		out = append(out, g.throttle)
+	}
+	s.throttleMu.Unlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].Provider < out[j].Provider })
+	return out
+}
+
 // ListThrottles returns every active provider cap, sorted by provider,
-// with live occupancy. The dashboard GET is this list.
+// with live occupancy. The dashboard GET is this list. Persistence uses the
+// policy-only ThrottlePolicies instead.
 func (s *Scheduler) ListThrottles() []ThrottleInfo {
 	queued := s.throttleQueued()
 	s.throttleMu.Lock()

@@ -169,14 +169,15 @@ func (s *Server) updateThrottle(provider string, update func(scheduler.Throttle)
 	return s.persistThrottles()
 }
 
-// latestThrottleSnap captures the scheduler's live provider caps in the
-// persisted shape. Called outside the generation lock for the first write and
-// under it on retry.
+// latestThrottleSnap captures the scheduler's provider caps in the persisted
+// shape. Occupancy is ephemeral and never stored, so this uses the policy-only
+// listing rather than the dashboard's live-occupancy scan. Called outside the
+// generation lock for the first write and under it on retry.
 func (s *Server) latestThrottleSnap() []persistedThrottle {
-	items := s.scheduler.ListThrottles()
+	items := s.scheduler.ThrottlePolicies()
 	snap := make([]persistedThrottle, 0, len(items))
-	for _, inf := range items {
-		snap = append(snap, throttleToPersisted(inf.Throttle))
+	for _, t := range items {
+		snap = append(snap, throttleToPersisted(t))
 	}
 	return snap
 }

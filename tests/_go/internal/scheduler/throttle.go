@@ -299,6 +299,137 @@ func TestThrottleListAndRestore(t *testing.T) {
 	}
 }
 
+// TestThrottlePoliciesMatchesListThrottles pins the policy-only listing to the
+// Throttle portion of the dashboard's live listing for every active provider,
+// including one with in-flight and queued occupancy and providers with none.
+// Persistence uses this listing, so its sorted policy set must stay identical
+// to what ListThrottles reports.
+func TestThrottlePoliciesMatchesListThrottles(t *testing.T) {
+	s := New(Options{})
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	for _, th := range []Throttle{
+		{Provider: "alpha.example", Limit: Limit{Requests: 30, ReqWindow: time.Minute}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
+		{Provider: "busy.example", Limit: Limit{Concurrency: 1}, Source: ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Provider: "zulu.example", Limit: Limit{Tokens: 9000, TokWindow: time.Hour}, Source: ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
+	} {
+		if !s.SetThrottle(th) {
+			t.Fatalf("failed to install policy for %s", th.Provider)
+		}
+	}
+
+	ctx := context.Background()
+	holder, err := s.AcquireWith(ctx, "busy.example|holder", 0, WaiterHooks{Provider: "busy.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder(0)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			release, err := s.AcquireWith(ctx, "busy.example|queued", 0, WaiterHooks{Provider: "busy.example"})
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			release(0)
+		}()
+	}
+	waitFor(t, func() bool { return s.Stats().Queued >= 2 }, "two throttled waiters to queue")
+
+	infos := s.ListThrottles()
+	policies := s.ThrottlePolicies()
+	if len(infos) != len(policies) {
+		t.Fatalf("listing lengths differ: ListThrottles=%d ThrottlePolicies=%d", len(infos), len(policies))
+	}
+	for i := range infos {
+		if infos[i].Provider != policies[i].Provider || infos[i].Throttle != policies[i] {
+			t.Fatalf("policy %d differs: ListThrottles=%+v ThrottlePolicies=%+v", i, infos[i].Throttle, policies[i])
+		}
+	}
+	if infos[1].Provider != "busy.example" || infos[1].InFlight != 1 || infos[1].Queued != 2 {
+		t.Fatalf("busy occupancy = %+v, want 1 in flight and 2 queued", infos[1])
+	}
+	if infos[0].InFlight != 0 || infos[0].Queued != 0 || infos[2].InFlight != 0 || infos[2].Queued != 0 {
+		t.Fatalf("idle occupancy leaked into live listing: %+v", infos)
+	}
+
+	holder(0)
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("queued waiters did not finish")
+	}
+}
+
+// TestThrottlePoliciesSnapshotSurvivesGateUpdate pins value semantics: a
+// returned policy snapshot must not change when its gate is later updated.
+// Throttle currently owns only value fields (its time.Time location pointer is
+// immutable), so the struct copy is sufficient; a future reference field would
+// fail this test without a deep copy.
+func TestThrottlePoliciesSnapshotSurvivesGateUpdate(t *testing.T) {
+	s := New(Options{})
+	base := time.Date(2026, time.February, 3, 4, 5, 6, 0, time.UTC)
+	initial := Throttle{
+		Provider:  "provider.example",
+		Limit:     Limit{Concurrency: 1, Requests: 7, ReqWindow: time.Minute, Tokens: 70, TokWindow: time.Hour},
+		Source:    ThrottleSourceUI,
+		UpdatedBy: "dashboard",
+		UpdatedAt: base,
+	}
+	if !s.SetThrottle(initial) {
+		t.Fatal("initial policy was not installed")
+	}
+	before := s.ThrottlePolicies()
+	if len(before) != 1 || before[0] != initial {
+		t.Fatalf("policy snapshot = %+v, want %+v", before, initial)
+	}
+
+	changed := initial
+	changed.Limit = Limit{Concurrency: 2, Requests: 8, ReqWindow: 2 * time.Minute, Tokens: 80, TokWindow: 2 * time.Hour}
+	changed.Source = ThrottleSourceHeader
+	changed.UpdatedBy = "client-b"
+	changed.UpdatedAt = base.Add(time.Hour)
+	if !s.SetThrottle(changed) {
+		t.Fatal("changed policy was not installed")
+	}
+	if before[0] != initial {
+		t.Fatalf("gate update mutated the earlier snapshot: %+v, want %+v", before[0], initial)
+	}
+	after := s.ThrottlePolicies()
+	if len(after) != 1 || after[0] != changed {
+		t.Fatalf("new snapshot = %+v, want %+v", after, changed)
+	}
+}
+
+// TestThrottlePoliciesDoesNotLockGroups pins the persistence path's lock
+// scope: policy listing must read gate policies under throttleMu without
+// taking a group mutex, so a busy group can never delay a durable save.
+func TestThrottlePoliciesDoesNotLockGroups(t *testing.T) {
+	s := New(Options{})
+	if !s.SetThrottle(Throttle{Provider: "provider.example", Limit: Limit{Concurrency: 1}}) {
+		t.Fatal("policy was not installed")
+	}
+	g := s.groupFor("provider.example|key", 0)
+	g.mu.Lock()
+	listed := make(chan []Throttle, 1)
+	go func() { listed <- s.ThrottlePolicies() }()
+	select {
+	case got := <-listed:
+		if len(got) != 1 || got[0].Provider != "provider.example" {
+			g.mu.Unlock()
+			t.Fatalf("policy listing = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		g.mu.Unlock()
+		t.Fatal("policy listing waited for a group lock")
+	}
+	g.mu.Unlock()
+}
+
 // TestThrottleQueuedAttributionPerProvider pins throttleQueued's per-provider
 // attribution: ListThrottles' Queued occupancy (the wire `queued` field) must
 // count each provider's own parked waiters and only those. Two waiters queue

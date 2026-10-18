@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -438,6 +439,108 @@ func TestThrottlePersistsAndRestores(t *testing.T) {
 	th := schedThrottleFor(p2.scheduler, "alpha.example")
 	if th.Limit.Concurrency != 2 || th.Limit.Requests != 20 {
 		t.Fatalf("restored = %+v", th.Limit)
+	}
+}
+
+// TestPersistedThrottleBytesMatchPolicyListing pins the durable document to
+// the policy-only listing. It runs while one provider has an in-flight slot
+// and a queued waiter, then compares the saved bytes with the document derived
+// from the dashboard's ListThrottles snapshot for the same policies. Occupancy
+// is ephemeral, so the two documents must be byte-identical and contain no
+// occupancy fields.
+func TestPersistedThrottleBytesMatchPolicyListing(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	store := &countingThrottlePersist{}
+	p.attachThrottlePersist(store)
+
+	base := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	policies := []scheduler.Throttle{
+		{Provider: "alpha.example", Limit: scheduler.Limit{Requests: 30, ReqWindow: time.Minute}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base},
+		{Provider: "busy.example", Limit: scheduler.Limit{Concurrency: 1}, Source: scheduler.ThrottleSourceHeader, UpdatedBy: "client-a", UpdatedAt: base.Add(time.Minute)},
+		{Provider: "zulu.example", Limit: scheduler.Limit{Tokens: 9000, TokWindow: time.Hour}, Source: scheduler.ThrottleSourceUI, UpdatedBy: "dashboard", UpdatedAt: base.Add(2 * time.Minute)},
+	}
+	for _, th := range policies {
+		if err := p.applyThrottle(th); err != nil {
+			t.Fatalf("apply %s: %v", th.Provider, err)
+		}
+	}
+
+	holder, err := p.scheduler.AcquireWith(context.Background(), "busy.example|holder", 0,
+		scheduler.WaiterHooks{Provider: "busy.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waiterDone := make(chan struct{})
+	go func() {
+		defer close(waiterDone)
+		release, err := p.scheduler.AcquireWith(context.Background(), "busy.example|queued", 0,
+			scheduler.WaiterHooks{Provider: "busy.example"})
+		if err != nil {
+			t.Errorf("queued acquire: %v", err)
+			return
+		}
+		release(0)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for p.scheduler.Stats().Queued == 0 {
+		if time.Now().After(deadline) {
+			holder(0)
+			<-waiterDone
+			t.Fatal("waiter never queued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	defer func() {
+		holder(0)
+		<-waiterDone
+	}()
+
+	// A policy change on another provider saves the document while busy.example
+	// still holds its in-flight slot and parked waiter.
+	changed := policies[0]
+	changed.Limit.Requests = 31
+	if err := p.applyThrottle(changed); err != nil {
+		t.Fatalf("apply changed policy: %v", err)
+	}
+
+	infos := p.scheduler.ListThrottles()
+	legacy := make([]persistedThrottle, 0, len(infos))
+	busyLive := false
+	for _, inf := range infos {
+		if inf.Provider == "busy.example" && inf.InFlight == 1 && inf.Queued == 1 {
+			busyLive = true
+		}
+		legacy = append(legacy, throttleToPersisted(inf.Throttle))
+	}
+	if !busyLive {
+		t.Fatalf("dashboard listing lost live occupancy: %+v", infos)
+	}
+	wantRaw, err := json.Marshal(persistedThrottleDoc{Throttles: legacy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := store.LoadThrottle(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, wantRaw) {
+		t.Fatalf("saved throttle document differs from ListThrottles-derived bytes\n got: %s\nwant: %s", raw, wantRaw)
+	}
+	snap := p.latestThrottleSnap()
+	if !reflect.DeepEqual(snap, legacy) {
+		t.Fatalf("latestThrottleSnap = %+v, want %+v", snap, legacy)
+	}
+	snapRaw, err := json.Marshal(persistedThrottleDoc{Throttles: snap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw, snapRaw) {
+		t.Fatalf("latestThrottleSnap bytes differ from the saved document\n got: %s\nwant: %s", snapRaw, raw)
+	}
+	for _, field := range []string{"in_flight", "queued", "requests_remaining", "tokens_remaining", "requests_capacity", "tokens_capacity"} {
+		if bytes.Contains(raw, []byte(field)) {
+			t.Fatalf("saved throttle document contains occupancy field %q: %s", field, raw)
+		}
 	}
 }
 
