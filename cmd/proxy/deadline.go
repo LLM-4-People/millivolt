@@ -40,12 +40,29 @@ func (h deadlineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // deadlineResponseWriter keeps the optional interfaces handlers rely on
 // (Flusher, Hijacker, ResponseController's Unwrap chain) while re-arming the
 // write deadline before each write.
-type deadlineResponseWriter struct{ http.ResponseWriter }
+type deadlineResponseWriter struct {
+	http.ResponseWriter
+	explicit    time.Time
+	hasExplicit bool
+}
 
 func (w *deadlineResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
+// SetWriteDeadline is the optional interface http.ResponseController looks for
+// before unwrapping. Capture the owner's shorter progress bound so the next
+// Write cannot replace it with the generic response bound.
+func (w *deadlineResponseWriter) SetWriteDeadline(t time.Time) error {
+	w.explicit = t
+	w.hasExplicit = !t.IsZero()
+	return http.NewResponseController(w.ResponseWriter).SetWriteDeadline(t)
+}
+
 func (w *deadlineResponseWriter) Write(p []byte) (int, error) {
-	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(responseWriteDeadline))
+	deadline := time.Now().Add(responseWriteDeadline)
+	if w.hasExplicit && w.explicit.Before(deadline) {
+		deadline = w.explicit
+	}
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(deadline)
 	return w.ResponseWriter.Write(p)
 }
 

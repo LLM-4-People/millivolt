@@ -74,6 +74,31 @@ func (w *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) { return w.
 // TestDeadlineWriterKeepsOptionalInterfaces pins that wrapping the outermost
 // writer does not break the Flusher/Hijacker assertions streaming and the
 // restart watch rely on.
+// TestDeadlineWriterPreservesShorterExplicitDeadline pins the interaction
+// between the delivery choke point and streaming owners: a one-minute SSE
+// progress bound set through ResponseController must survive the next Write,
+// while an ordinary write still gets the ten-minute default.
+func TestDeadlineWriterPreservesShorterExplicitDeadline(t *testing.T) {
+	inner := &deadlineWriter{}
+	w := &deadlineResponseWriter{ResponseWriter: inner}
+	explicit := time.Now().Add(time.Minute)
+	if err := http.NewResponseController(w).SetWriteDeadline(explicit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("event")); err != nil {
+		t.Fatal(err)
+	}
+	if !inner.writeDeadline.Equal(explicit) {
+		t.Fatalf("write deadline = %v, want the explicit %v", inner.writeDeadline, explicit)
+	}
+
+	plain := &deadlineWriter{}
+	(&deadlineResponseWriter{ResponseWriter: plain}).Write([]byte("body"))
+	if remaining := time.Until(plain.writeDeadline); remaining < 9*time.Minute {
+		t.Fatalf("ordinary write deadline = %v, want the ten-minute default", remaining)
+	}
+}
+
 func TestDeadlineWriterKeepsOptionalInterfaces(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
