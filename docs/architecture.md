@@ -177,6 +177,9 @@ scan plus a separate preload scan.
 Chart and explorer each retain one immutable last-result slot. Keys include
 validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
+The bootstrap KPI fold retains one exact totals slot keyed by the ring's
+finalized revision and the store's durable accounting revision; live counters
+are filled at serve time and the ring snapshot itself is never retained.
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before
@@ -226,6 +229,8 @@ carry exact raw-to-canonical names and a rules-content revision; only full
 authoritative snapshots install a new revision. Deltas, archive and Debug names
 merge under that revision, with recapture on conflicts. Browser dictionaries
 prune to loaded rows/selector needs. RE2 patterns do not execute in JavaScript.
+The installed observer provider is an immutable atomic holder, so SSE
+record/end serialization never takes the ring lock.
 
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.

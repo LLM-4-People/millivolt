@@ -466,6 +466,13 @@ type Store struct {
 	writtenCap   int
 	totals       Totals
 	totalsBuilt  bool
+	// accountingRevision is the exact witness for the durable KPI fold's memo
+	// key. It advances under aggMu in the same critical section that publishes
+	// totals or written-id changes, so before/after key reads can prove a fold
+	// observed one coherent durable state without taking the accounting lock.
+	// Its scope matches the in-memory totals snapshot: in-process accounting
+	// only (unsupported external writers are already outside that contract).
+	accountingRevision atomic.Uint64
 	// totalsDegraded reports that the boot scan failed and totals count
 	// only rows committed since (account() rebuilds from zero on the first
 	// post-boot commit). The dashboard surfaces the flag so the subset is
@@ -979,6 +986,10 @@ func (s *Store) account(records []*metrics.Record, next *Totals) {
 			s.markWrittenLocked(r.ID)
 		}
 	}
+	// Every successful account call follows a durable commit boundary. Publish
+	// a new revision even when a duplicate record leaves the folded values
+	// unchanged: a reader may have captured the old key before this commit.
+	s.accountingRevision.Add(1)
 }
 
 // totalsForBatch computes the committed batch's aggregate from the current
@@ -999,6 +1010,12 @@ func (s *Store) totalsForBatch(records []*metrics.Record) (Totals, bool) {
 	}
 	return next, degraded
 }
+
+// AccountingRevision returns the durable accounting witness used to validate
+// exact KPI fold memos. It advances under aggMu whenever totals or the
+// written-id set changes; reading it never takes that lock. A fold whose
+// before/after reads are equal observed one coherent durable state.
+func (s *Store) AccountingRevision() uint64 { return s.accountingRevision.Load() }
 
 // TotalsAndUnwritten captures totals and filters the caller-owned ring slice
 // under one accounting lock. A racing commit cannot remove a row from both
@@ -1053,11 +1070,16 @@ func (s *Store) MarkWritten(ids []string) {
 	}
 	s.aggMu.Lock()
 	defer s.aggMu.Unlock()
+	changed := false
 	for _, id := range ids {
 		if _, ok := s.written[id]; ok {
 			continue
 		}
 		s.markWrittenLocked(id)
+		changed = true
+	}
+	if changed {
+		s.accountingRevision.Add(1)
 	}
 }
 
@@ -1165,6 +1187,7 @@ func (s *Store) installTotals(t Totals) {
 	s.totals = t
 	s.totalsBuilt = true
 	s.totalsDegraded = false
+	s.accountingRevision.Add(1)
 	s.aggMu.Unlock()
 }
 

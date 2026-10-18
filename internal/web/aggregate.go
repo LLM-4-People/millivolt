@@ -92,6 +92,7 @@ type AggAPI struct {
 	// TTL, or per-scope map: memory stays bounded by the response shapes.
 	chartMemo    aggregateMemo[chartMemoPayload]
 	explorerMemo aggregateMemo[explorerPayload]
+	kpiMemo      kpiMemo
 	projection   historyProjection
 	modelRules   modelRuleCache
 	// Optional state providers wired by main.go so HandleBootstrap can carry
@@ -590,10 +591,67 @@ func (p kpiPayload) MarshalJSON() ([]byte, error) {
 	return json.Marshal(payload(p))
 }
 
+// kpiMemoKey identifies one exact KPI fold input state: the ring's finalized
+// content revision plus the store's durable accounting revision. Both owners
+// advance their counter inside the mutation lock before publishing, so a fold
+// bracketed by equal keys observed one coherent state. The accounting value is
+// zero when no store is configured.
+type kpiMemoKey struct {
+	finalized  uint64
+	accounting uint64
+}
+
+type kpiMemoEntry struct {
+	key    kpiMemoKey
+	totals storage.Totals
+}
+
+// kpiMemo is the single bounded slot for the bootstrap KPI fold. No TTL and no
+// per-view map: the exact key decides reuse. Only the folded totals are
+// retained; live counters are read at serve time.
+type kpiMemo struct {
+	mu    sync.Mutex
+	entry *kpiMemoEntry
+}
+
+func (m *kpiMemo) get(key kpiMemoKey) (storage.Totals, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.entry != nil && m.entry.key == key {
+		return m.entry.totals, true
+	}
+	return storage.Totals{}, false
+}
+
+func (m *kpiMemo) put(key kpiMemoKey, totals storage.Totals) {
+	m.mu.Lock()
+	m.entry = &kpiMemoEntry{key: key, totals: totals}
+	m.mu.Unlock()
+}
+
+// kpiMemoKey reads the two content witnesses. The ring revision covers every
+// finalized append, eviction, backfill, removal and reset; the store revision
+// covers durable totals and written-id changes, including direct Record
+// commits that never touch the ring.
+func (a *AggAPI) kpiMemoKey() kpiMemoKey {
+	finalized, _ := a.buf.Revisions()
+	key := kpiMemoKey{finalized: finalized}
+	if a.store != nil {
+		key.accounting = a.store.AccountingRevision()
+	}
+	return key
+}
+
 // kpi computes the global since-inception KPI aggregate (Totals + un-flushed
 // ring records, exact written-id dedupe) plus the inline unit-economics
-// fields. The ONE KPI surface - served inside /metrics/bootstrap.
+// fields. The ONE KPI surface - served inside /metrics/bootstrap. The folded
+// totals are memoized on the exact ring/durable revisions; the ring snapshot
+// itself and the live in-flight gauge are never memoized.
 func (a *AggAPI) kpi() kpiPayload {
+	key := a.kpiMemoKey()
+	if totals, ok := a.kpiMemo.get(key); ok {
+		return a.kpiFromTotals(totals)
+	}
 	t := storage.Totals{}
 	ring := a.buf.Snapshot()
 	if a.store != nil {
@@ -602,6 +660,16 @@ func (a *AggAPI) kpi() kpiPayload {
 	for _, r := range ring {
 		t.Add(r)
 	}
+	// Publishing only when the witnesses are unchanged keeps a concurrent
+	// commit's data from being labeled with a stale revision (the same
+	// before/after discipline as aggregateUnchanged).
+	if a.kpiMemoKey() == key {
+		a.kpiMemo.put(key, t)
+	}
+	return a.kpiFromTotals(t)
+}
+
+func (a *AggAPI) kpiFromTotals(t storage.Totals) kpiPayload {
 	// Unit economics derive inline from the folded totals (no storage change);
 	// nil when the denominator is 0. Both denominators count only
 	// cost-REPORTING requests (Totals.CostReqs / CostInOut, maintained by the
