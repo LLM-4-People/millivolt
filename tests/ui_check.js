@@ -6484,6 +6484,172 @@ async function main() {
     check('unfiltered footer reads global KPI immediately', !d.getElementById('f-scope').textContent.includes('…'));
   }
 
+  // ---- test 12j: a rail click changes only the breakdown dimension (view
+  // state, by/<dim>), not the log/chart scope. A by-only hash change must
+  // repaint the explorer and fetch just the new breakdown; the full render
+  // path (which resets the paged log window and rebuilds the chart/drawer)
+  // stays on real filter or status changes.
+  {
+    w.eval('clearInterval(_dashTickTimer); _dashTickTimer = null;'); // a tick must not mask the route
+    const navBase = 1700001000000;
+    fullPayload = { feed_id: 'feedB', seq: 200, incremental: false,
+      records: [
+        { ...mkRec('nav-a1', 200, navBase + 1000), provider: 'nav-a.example', __seq: 1 },
+        { ...mkRec('nav-a2', 200, navBase + 2000), provider: 'nav-a.example', __seq: 2 },
+        { ...mkRec('nav-b1', 500, navBase + 3000), provider: 'nav-b.example', __seq: 3 },
+      ],
+      counters: { in_flight: 0, total_requests: 3, total_errors: 1 } };
+    w.eval("fetchBootstrap('full')");
+    await settleUntil(() => rows().length === 3);
+
+    // Establish a filtered scope with one durable archive page below the ring,
+    // then give the log window a non-default limit and scroll position.
+    logPage = { records: [{ ...mkRec('nav-a-old', 200, navBase - 1000), provider: 'nav-a.example' }],
+      more: false, cursor_ms: navBase - 1000, cursor_id: 'nav-a-old' };
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 200; } });
+    w.navigateTo([{ dim: 'provider', id: 'nav-a.example' }]);
+    await settleUntil(() => w.eval('logArchive.length') === 1 && rows().length === 3 &&
+      !d.getElementById('f-scope').textContent.startsWith('…'));
+    Object.defineProperty(box, 'scrollHeight', { configurable: true, get() { return 4000; } });
+    box.scrollTop = 137;
+    w.eval('logLimit = 2');
+    w.openDrawer('nav-a1');
+    await sleep(20);
+
+    const filtersBefore = w.eval('explorerFilters()');
+    const derFBefore = w.eval('_derFS');
+    const chartBefore = w.eval('chartAgg');
+    const archiveBefore = w.eval('logArchive');
+    const limitBefore = w.eval('logLimit');
+    const htmlBefore = d.getElementById('tbl-requests').innerHTML;
+    const drawerBefore = d.getElementById('drawer-body').innerHTML;
+    const footerBefore = d.getElementById('f-scope').textContent;
+    const railBefore = d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim;
+    const priorXp = new URL(initialFetches.filter(u => u.includes('/metrics/agg/explorer')).pop() || '',
+      'http://x').searchParams;
+    check('the canonical filter key is order-independent and value-sensitive',
+      typeof w.explorerFilterKey === 'function' &&
+      w.explorerFilterKey([{ dim: 'provider', id: 'a' }, { dim: 'model', id: 'm' }]) ===
+        w.explorerFilterKey([{ dim: 'model', id: 'm' }, { dim: 'provider', id: 'a' }]) &&
+      w.explorerFilterKey([{ dim: 'provider', id: 'a' }]) !==
+        w.explorerFilterKey([{ dim: 'provider', id: 'b' }]));
+
+    const orig = {
+      renderAll: w.renderAll, fetchChart: w.fetchChart, renderChart: w.renderChart,
+      resetLogWindow: w.resetLogWindow, renderDrawer: w.renderDrawer,
+      renderExplorer: w.renderExplorer, fetchExplorer: w.fetchExplorer, fetch: w.fetch,
+    };
+    const calls = { renderAll: 0, fetchChart: 0, renderChart: 0, resetLogWindow: 0,
+      renderDrawer: 0, renderExplorer: 0, fetchExplorer: 0 };
+    const explorerURLs = [];
+    w.renderAll = (...a) => { calls.renderAll++; return orig.renderAll(...a); };
+    w.fetchChart = (...a) => { calls.fetchChart++; return orig.fetchChart(...a); };
+    w.renderChart = (...a) => { calls.renderChart++; return orig.renderChart(...a); };
+    w.resetLogWindow = (...a) => { calls.resetLogWindow++; return orig.resetLogWindow(...a); };
+    w.renderDrawer = (...a) => { calls.renderDrawer++; return orig.renderDrawer(...a); };
+    w.renderExplorer = (...a) => { calls.renderExplorer++; return orig.renderExplorer(...a); };
+    w.fetchExplorer = (...a) => { calls.fetchExplorer++; return orig.fetchExplorer(...a); };
+    w.fetch = (url, opts) => {
+      if (String(url).includes('/metrics/agg/explorer')) explorerURLs.push(String(url));
+      return orig.fetch(url, opts);
+    };
+    const fstatus = d.getElementById('f-status');
+    try {
+      // Real navigateTo path: same filter set + status, new breakdown only.
+      w.navigateTo([{ dim: 'provider', id: 'nav-a.example' }, { dim: 'by', id: 'model' }]);
+      await settleUntil(() => calls.renderExplorer > 0 && calls.fetchExplorer > 0 &&
+        explorerURLs.length > 0 && d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim === 'model');
+
+      check('by-only navigation does not run the full render path',
+        calls.renderAll === 0 && calls.fetchChart === 0 && calls.renderChart === 0 &&
+        calls.resetLogWindow === 0);
+      check('by-only navigation leaves the log window, archive, limit and scroll intact',
+        d.getElementById('tbl-requests').innerHTML === htmlBefore &&
+        w.eval('logArchive') === archiveBefore && w.eval('logLimit') === limitBefore &&
+        box.scrollTop === 137);
+      check('by-only navigation leaves the open drawer untouched',
+        calls.renderDrawer === 0 && d.getElementById('drawer-body').innerHTML === drawerBefore);
+      check('by-only navigation repaints the rail and fetches only the new breakdown',
+        calls.renderExplorer > 0 && calls.fetchExplorer === 1 && railBefore === 'provider' &&
+        d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim === 'model' &&
+        d.querySelector('#xp-rail .xp-rail-item[data-xp-dim="model"]')?.getAttribute('aria-pressed') === 'true');
+      const xpURL = new URL(explorerURLs[explorerURLs.length - 1], 'http://x').searchParams;
+      check('the new breakdown request keeps the same filter/status scope',
+        xpURL.get('dim') === 'model' && xpURL.get('f') === 'provider:nav-a.example' &&
+        (xpURL.get('s') || '') === '' && xpURL.get('f') === priorXp.get('f') &&
+        (xpURL.get('s') || '') === (priorXp.get('s') || ''));
+      check('by-only navigation keeps the cached filter-set identity (derive stays valid)',
+        w.eval('explorerFilters()') === filtersBefore && w.eval('_derFS') === derFBefore &&
+        w.eval('chartAgg') === chartBefore && d.getElementById('f-scope').textContent === footerBefore);
+
+      // Filter removal: drop the provider filter, keep the breakdown.
+      const beforeRemove = { renderAll: calls.renderAll, fetchChart: calls.fetchChart,
+        resetLogWindow: calls.resetLogWindow };
+      w.navigateTo([{ dim: 'by', id: 'model' }]);
+      await settleUntil(() => calls.renderAll === beforeRemove.renderAll + 1);
+      check('a real filter removal still runs the full path and resets the paged log',
+        calls.renderAll === beforeRemove.renderAll + 1 &&
+        calls.fetchChart === beforeRemove.fetchChart + 1 &&
+        calls.resetLogWindow === beforeRemove.resetLogWindow + 1 &&
+        w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0);
+
+      // Filter addition: scope to the other provider, same breakdown.
+      const beforeAdd = { renderAll: calls.renderAll, fetchChart: calls.fetchChart,
+        resetLogWindow: calls.resetLogWindow };
+      w.navigateTo([{ dim: 'provider', id: 'nav-b.example' }, { dim: 'by', id: 'model' }]);
+      await settleUntil(() => calls.renderAll === beforeAdd.renderAll + 1);
+      check('a real filter addition still runs the full path and resets the log',
+        calls.renderAll === beforeAdd.renderAll + 1 &&
+        calls.fetchChart === beforeAdd.fetchChart + 1 &&
+        calls.resetLogWindow === beforeAdd.resetLogWindow + 1);
+
+      // Status changes are independent of the hash and still invalidate the
+      // memoized filter set and reset the log window through doFilter.
+      const statusFiltersBefore = w.eval('explorerFilters()');
+      const beforeStatus = { renderAll: calls.renderAll, fetchChart: calls.fetchChart,
+        resetLogWindow: calls.resetLogWindow };
+      fstatus.value = '500';
+      fstatus.dispatchEvent(new w.Event('change'));
+      await sleep(20);
+      check('a status change still runs the full path and resets the log',
+        calls.renderAll === beforeStatus.renderAll + 1 &&
+        calls.fetchChart === beforeStatus.fetchChart + 1 &&
+        calls.resetLogWindow === beforeStatus.resetLogWindow + 1 &&
+        w.eval('logArchive.length') === 0);
+      check('a status change invalidates the memoized filter-set identity',
+        w.eval('explorerFilters()') !== statusFiltersBefore);
+
+      // The status filter lives outside the hash but is part of the full
+      // scope. After doFilter's full render establishes the new scope, a
+      // later by-only change must still stay on the explorer-only path.
+      const beforePostStatus = { renderAll: calls.renderAll, fetchChart: calls.fetchChart,
+        resetLogWindow: calls.resetLogWindow };
+      w.navigateTo([{ dim: 'provider', id: 'nav-b.example' }, { dim: 'by', id: 'client' }]);
+      await settleUntil(() => calls.renderExplorer > 0 &&
+        d.querySelector('#xp-rail .xp-rail-item.active')?.dataset.xpDim === 'client');
+      check('by-only navigation after a status change keeps the explorer-only path',
+        calls.renderAll === beforePostStatus.renderAll &&
+        calls.fetchChart === beforePostStatus.fetchChart &&
+        calls.resetLogWindow === beforePostStatus.resetLogWindow);
+    } finally {
+      w.renderAll = orig.renderAll;
+      w.fetchChart = orig.fetchChart;
+      w.renderChart = orig.renderChart;
+      w.resetLogWindow = orig.resetLogWindow;
+      w.renderDrawer = orig.renderDrawer;
+      w.renderExplorer = orig.renderExplorer;
+      w.fetchExplorer = orig.fetchExplorer;
+      w.fetch = orig.fetch;
+      fstatus.value = '';
+      fstatus.dispatchEvent(new w.Event('change'));
+      w.closeDrawer();
+    }
+    w.navigateTo([]);
+    await sleep(20);
+    check('the by-only suite restores the unfiltered log window',
+      w.eval('logArchive.length') === 0 && rows().length === 3);
+  }
+
   // Frontend changes reload through the existing bootstrap boundary only.
   // jsdom reports navigation as not implemented; the harness-start
   // jsdomError listener counts that actual reload signal (jsdomReloads)

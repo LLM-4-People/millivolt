@@ -361,7 +361,11 @@ editors and apply/revert/backup/purge behavior.
 One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
 pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.
 Incremental log groups preserve scroll/selection; archive paging uses paired
-timestamp/ID cursors and stays outside the live arrival-ordered ring.
+timestamp/ID cursors and stays outside the live arrival-ordered ring. The
+explorer memoizes its filter-set identity on the canonical, order-independent
+scope (filter set plus status, excluding the `by/<dim>` breakdown). A by-only
+hash change repaints the rail/gallery and fetches that one breakdown while the
+scoped log window, chart and drawer keep their state.
 
 Server chart responses alone own buckets/totals at configured cadence. Presets,
 series, money/unit formatters and visible dimension order each have one registry.

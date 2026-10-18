@@ -162,6 +162,18 @@ function explorerState() {
   return { segments, filters, activeDim: breakdown };
 }
 
+// explorerFilterKey canonicalizes a filter set to its order-independent
+// identity. The by/<dim> breakdown is view state, so explorerState has
+// already split it off; callers pass only the filter set. Each dim/id pair is
+// JSON-encoded so user values cannot collide with a delimiter.
+function explorerFilterKey(filters) {
+  const pairs = (filters || []).map(f => [f.dim, f.id]);
+  pairs.sort((a, b) => a[0] === b[0]
+    ? (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0)
+    : (a[0] < b[0] ? -1 : 1));
+  return JSON.stringify(pairs);
+}
+
 // ---------- observer-authored model names ----------
 // Go's rule executor is the only authority (RE2 and JavaScript differ).
 // Exact raw keys travel with a content revision; only full bootstrap or the

@@ -49,18 +49,35 @@ function kpiTotal() {
   const k = kpiNow();
   return (k.requests || 0) + kpiInFlight();
 }
+// explorerScopeKey is the canonical identity of the full log/chart/explorer
+// scope: the order-independent filter set plus the status filter. The by/<dim>
+// breakdown is view state and is deliberately excluded, so a by-only hash
+// change keeps the same scope identity.
+function explorerScopeKey(fs) {
+  return explorerFilterKey(fs) + '|s=' + JSON.stringify(filters.status || '');
+}
 // explorerFilters is the memoized explorer filter set for hot-path matching
-// (derive/scopeQS): the hash + status pair is the key, so per-event
-// code does one path parse instead of re-deriving the full explorer state per
-// record. explorerState itself stays the canonical derivation.
+// (derive/scopeQS). Its identity rides the canonical scope key, never the raw
+// hash: a by-only hash change returns the same array, so derive keeps its
+// cached scope; status changes and real filter additions/removals mint a new
+// identity. explorerState itself stays the canonical derivation.
 let _filCache = null;
 function explorerFilters() {
+  // The unchanged-hash fast path must stay cheaper than parsing the hash:
+  // derive() calls this on every live revision. A by-only hash change falls
+  // through to the canonical key and reuses the existing filter array.
   const hash = location.hash;
   if (_filCache && _filCache.hash === hash && _filCache.status === filters.status) {
     return _filCache.filters;
   }
   const fs = explorerState().filters;
-  _filCache = { hash, status: filters.status, filters: fs };
+  const key = explorerScopeKey(fs);
+  if (_filCache && _filCache.key === key) {
+    _filCache.hash = hash;
+    _filCache.status = filters.status;
+    return _filCache.filters;
+  }
+  _filCache = { hash, status: filters.status, key, filters: fs };
   return fs;
 }
 function scopeQS() {
@@ -375,6 +392,13 @@ function renderLive() {
   updateScopeLine();
 }
 
+// Canonical scope and active breakdown of the last full render. Every full
+// path (navigation, status filter, bootstrap/restart, purge) updates these,
+// so a later by-only navigation is compared against the actual last render,
+// not just the last hash-routed one.
+let _navScopeKey = null;
+let _navActiveDim = null;
+
 function renderAll(data) {
   lastData = data;
   // Reset scroll against the old layout, before any DOM writes. Setting it
@@ -400,6 +424,8 @@ function renderAll(data) {
   // in exactly one place).
   refreshFooterState();
   updateScopeLine();
+  _navScopeKey = explorerScopeKey(explorerFilters());
+  _navActiveDim = explorerState().activeDim;
 }
 
 // ---------- live updates via SSE ----------
@@ -814,11 +840,25 @@ armDashboardTicks();
 
 // Explorer: the URL hash drives the log's scope and the breakdown dimension.
 // onNavigate fires on hash change and once immediately (deep-link restore).
-// Dim/filter changes re-derive the breakdown server-side (cross-filter).
+// A changed filter set/status is a new scope and takes the full render path.
+// A by-only hash change is view state: repaint the explorer and fetch just the
+// new breakdown, leaving the log window, chart, drawer and footer intact.
 onNavigate(() => {
-  if (lastData) renderAll(lastData);
-  fetchExplorer();
-  fetchChart(); // chart is SCOPED to the log's filter set (all-history server-side)
+  const st = explorerState();
+  const scopeKey = explorerScopeKey(st.filters);
+  if (!lastData || scopeKey !== _navScopeKey) {
+    _navScopeKey = scopeKey;
+    _navActiveDim = st.activeDim;
+    if (lastData) renderAll(lastData);
+    fetchExplorer();
+    fetchChart(); // chart is SCOPED to the log's filter set (all-history server-side)
+    return;
+  }
+  if (st.activeDim !== _navActiveDim) {
+    _navActiveDim = st.activeDim;
+    renderExplorer();
+    fetchExplorer();
+  }
 });
 
 // ---------- boot: server-seeded state, one application gate ----------
