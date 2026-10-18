@@ -122,7 +122,10 @@ func BenchmarkQueryBeforeCount(b *testing.B) {
 		{"provider", &LogFilter{All: []LogPredicate{{Field: LogProvider, Value: "provider-03"}}}, benchQueryBeforeRows / benchQueryBeforeProviders},
 		{"model", &LogFilter{All: []LogPredicate{{Field: LogModel, Value: "model-03"}}}, benchQueryBeforeRows / benchQueryBeforeModels},
 	} {
-		where, args := tc.filter.where()
+		where, args, err := tc.filter.where()
+		if err != nil {
+			b.Fatal(err)
+		}
 		query := `SELECT COUNT(*) FROM requests WHERE 1=1` + where
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()

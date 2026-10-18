@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // pendingSnapshotSuffix is the validated SQLite file a Settings restore
@@ -33,7 +34,110 @@ const (
 	// by an admission that crashed before commit; recovery restores the
 	// previous database and preserves the unused bytes for inspection.
 	pendingSnapshotInterruptedSuffix = ".invalid-interrupted"
+	// pendingSnapshotStateSuffix is the durable admission-state marker. It is
+	// written and directory-synced before any rollback-set rename, and it is
+	// what recovery consults: the presence or absence of `.previous` alone
+	// cannot distinguish a pending restore from commit debris. A committed
+	// marker is left in place after a successful admission so a stale rollback
+	// entry resurrected by a lost directory update is still classified as
+	// debris instead of reverting committed rows.
+	pendingSnapshotStateSuffix = ".snapshot-state"
 )
+
+// Admission state values stored in pendingSnapshotStateSuffix.
+const (
+	snapshotStatePending   = "pending"
+	snapshotStateCommitted = "committed"
+)
+
+// snapshotDirSyncHook is a test seam (production nil) for observing or failing
+// directory durability. It runs wherever the snapshot protocol syncs the
+// database directory.
+var snapshotDirSyncHook func(string) error
+
+// syncSnapshotDir makes rename and unlink ordering durable. A directory entry
+// is not persistent until the containing directory is synced, so an admission
+// that trusts its renames without this can be reverted by a power loss.
+func syncSnapshotDir(dir string) error {
+	if snapshotDirSyncHook != nil {
+		return snapshotDirSyncHook(dir)
+	}
+	f, err := os.Open(dir)
+	if os.IsNotExist(err) {
+		// No directory means no snapshot entry can have been created there;
+		// Open still owns the canonical missing-directory diagnostic.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
+}
+
+// writeSnapshotState publishes the admission state as one atomic, durable
+// marker: temp file, file sync, rename, directory sync.
+func writeSnapshotState(path, state string) error {
+	target := path + pendingSnapshotStateSuffix
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-state-*")
+	if err != nil {
+		return err
+	}
+	staged := tmp.Name()
+	committed := false
+	defer func() {
+		_ = tmp.Close()
+		if !committed {
+			_ = os.Remove(staged)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return err
+	}
+	if _, err := tmp.WriteString(state + "\n"); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(staged, target); err != nil {
+		return err
+	}
+	committed = true
+	return syncSnapshotDir(filepath.Dir(path))
+}
+
+// readSnapshotState returns the durable admission state, or "" when no marker
+// exists. A malformed marker fails closed instead of guessing a transition.
+func readSnapshotState(path string) (string, error) {
+	raw, err := os.ReadFile(path + pendingSnapshotStateSuffix)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	state := strings.TrimSpace(string(raw))
+	switch state {
+	case snapshotStatePending, snapshotStateCommitted:
+		return state, nil
+	default:
+		return "", fmt.Errorf("invalid pending snapshot state %q", state)
+	}
+}
+
+// removeSnapshotState clears the marker only after the state it describes is
+// itself durable. The directory sync keeps a later boot from seeing a stale
+// marker against a newer file set.
+func removeSnapshotState(path string) error {
+	if err := removeIfExists(path + pendingSnapshotStateSuffix); err != nil {
+		return err
+	}
+	return syncSnapshotDir(filepath.Dir(path))
+}
 
 // PendingSnapshotPath is the staged SQLite file Open admits for path.
 func PendingSnapshotPath(path string) string {
@@ -204,11 +308,20 @@ func publishSnapshot(path string, write func(io.Writer) error) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	// The incoming file is a self-contained rollback-journal database. Remove
+	// any sidecar belonging to a superseded incoming snapshot before the new
+	// main is renamed into place, so a crash can never pair the new database
+	// with stale WAL frames.
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := removeIfExists(incoming + suffix); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(staged, incoming); err != nil {
 		return err
 	}
 	committed = true
-	return nil
+	return syncSnapshotDir(dir)
 }
 
 // snapshotAdmission is an installed pending snapshot. Open commits it only
@@ -287,6 +400,14 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
+	// Schema/migrate alone does not prove the writer can write this database.
+	// Run the exact writer INSERT (same column list, conflict clause and value
+	// list) inside a transaction and roll it back. An extra required column or
+	// an id without a unique key fails here, before the live file is touched.
+	if err := probeWriterInsert(db); err != nil {
+		db.Close()
+		return fmt.Errorf("writer insert probe: %w", err)
+	}
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close preflight database: %w", err)
 	}
@@ -301,47 +422,130 @@ func preflightPendingSnapshot(path string) error {
 	return nil
 }
 
-// recoverInterruptedSnapshot is the boot fence for an admission that crashed
-// before commit. A .previous main file means the new database was never
-// committed, so its path/sidecars are removed and the previous set restored.
-// A staged .incoming from that attempt is quarantined rather than re-admitted
-// (an operator can inspect and re-stage it deliberately).
-func recoverInterruptedSnapshot(path string) error {
-	previous := path + pendingSnapshotPreviousSuffix
-	if _, err := os.Stat(previous); err != nil {
-		if !os.IsNotExist(err) {
+// writerProbeIDAttempts bounds the sentinel-id search for the admission
+// insert probe. Sixteen collisions on a reserved prefix are not a real schema,
+// only tampering or a pathological fixture.
+const writerProbeIDAttempts = 16
+
+// probeWriterInsert proves the staged database accepts the writer's exact
+// INSERT: the shared column list, conflict target and value ordering. The row
+// is rolled back, so preflight leaves no data behind.
+func probeWriterInsert(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	insert := batchInsert{tx: tx}
+	defer insert.close()
+	// The probe must actually execute the INSERT: ON CONFLICT(id) DO NOTHING
+	// would make an existing sentinel id a silent no-op that never proves the
+	// table's required columns. Pick a free sentinel inside the transaction.
+	probeID := "millivolt-preflight"
+	free := false
+	for suffix := 0; suffix < writerProbeIDAttempts; suffix++ {
+		var exists int
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE id = ?)`, probeID).Scan(&exists); err != nil {
 			return err
 		}
-		// A previous sidecar without its main file is commit debris: commit
-		// removes the main sibling first, then the sidecars.
-		for _, suffix := range []string{"-wal", "-shm"} {
-			if err := removeIfExists(previous + suffix); err != nil {
-				return err
-			}
+		if exists == 0 {
+			free = true
+			break
 		}
-		return nil
+		probeID = fmt.Sprintf("millivolt-preflight-%d", suffix)
+	}
+	if !free {
+		return fmt.Errorf("no free preflight request id")
+	}
+	probe := &metrics.Record{ID: probeID, StatusCode: 200, Start: time.Unix(0, 0)}
+	values := appendRecordValues(nil, probe, jsonNull, jsonNull, jsonNull)
+	inserted, err := insert.exec(values)
+	if err != nil {
+		return err
+	}
+	if !inserted {
+		return fmt.Errorf("writer insert probe did not insert its row")
+	}
+	return tx.Rollback()
+}
+
+// recoverInterruptedSnapshot is the boot fence for an admission that crashed
+// before or during commit. The durable state marker, not the presence of one
+// sidecar, decides the transition:
+//
+//   - pending: the new database was never committed. Its path set is removed,
+//     the previous main+sidecar set is restored, and the staged incoming file
+//     is quarantined. This also covers a crash inside an earlier recovery:
+//     a main already restored at path is left alone while its remaining
+//     sidecars move back, so a committed WAL frame is never mistaken for
+//     commit debris.
+//   - committed: the replacement is permanent. Any surviving rollback set is
+//     a stale directory entry and is removed without reverting live rows.
+//   - no marker: a live database wins over a stale rollback entry; restore is
+//     only possible when the main file is missing.
+func recoverInterruptedSnapshot(path string) error {
+	state, err := readSnapshotState(path)
+	if err != nil {
+		return err
+	}
+	previous := path + pendingSnapshotPreviousSuffix
+	switch state {
+	case snapshotStateCommitted:
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("committed snapshot state but live database %s is missing", path)
+			}
+			return err
+		}
+		if err := removeSnapshotDebris(previous); err != nil {
+			return err
+		}
+		return syncSnapshotDir(filepath.Dir(path))
+	case snapshotStatePending:
+		return restorePendingSnapshot(path, previous, state)
 	}
 	if _, err := os.Stat(path); err == nil {
-		// The incoming file already replaced path: remove the uncommitted new
-		// set before restoring the previous one.
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			if err := removeIfExists(path + suffix); err != nil {
-				return err
-			}
+		// The live main file exists, so a leftover rollback entry cannot be the
+		// authoritative copy. Remove it instead of reverting committed rows.
+		if err := removeSnapshotDebris(previous); err != nil {
+			return err
 		}
+		return syncSnapshotDir(filepath.Dir(path))
 	} else if !os.IsNotExist(err) {
 		return err
-	} else {
-		// Crash between renaming the live database and renaming the incoming
-		// file: sidecars still at path belong to the previous database.
-		for _, suffix := range []string{"-wal", "-shm"} {
-			if _, err := os.Stat(path + suffix); err == nil {
-				if err := os.Rename(path+suffix, previous+suffix); err != nil {
+	}
+	if _, err := os.Stat(previous); err == nil {
+		return restorePendingSnapshot(path, previous, state)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := removeSnapshotDebris(previous); err != nil {
+		return err
+	}
+	return syncSnapshotDir(filepath.Dir(path))
+}
+
+// restorePendingSnapshot restores the previous database set. If the previous
+// main was already renamed back by an interrupted recovery, the live main is
+// left in place and only the remaining previous sidecars move; removing it
+// would discard the committed database the recovery already restored.
+func restorePendingSnapshot(path, previous, state string) error {
+	previousMain := false
+	if _, err := os.Stat(previous); err == nil {
+		previousMain = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if previousMain {
+		// A path main file here is the uncommitted incoming replacement.
+		if _, err := os.Stat(path); err == nil {
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				if err := removeIfExists(path + suffix); err != nil {
 					return err
 				}
-			} else if !os.IsNotExist(err) {
-				return err
 			}
+		} else if !os.IsNotExist(err) {
+			return err
 		}
 	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -356,6 +560,9 @@ func recoverInterruptedSnapshot(path string) error {
 			return err
 		}
 	}
+	if err := syncSnapshotDir(filepath.Dir(path)); err != nil {
+		return err
+	}
 	incoming := path + pendingSnapshotSuffix
 	if _, err := os.Stat(incoming); err == nil {
 		// Failing here must not fall through to admission: re-admitting the
@@ -366,21 +573,48 @@ func recoverInterruptedSnapshot(path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	if state != "" {
+		if err := removeSnapshotState(path); err != nil {
+			return err
+		}
+	}
 	log.Printf("storage: restored database from interrupted pending snapshot at %s", path)
 	return nil
 }
 
+// removeSnapshotDebris removes one rollback set: main file first, then its
+// sidecars. Sidecar removal is not fatal once the main marker is gone.
+func removeSnapshotDebris(previous string) error {
+	if err := removeIfExists(previous); err != nil {
+		return err
+	}
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if err := removeIfExists(previous + suffix); err != nil {
+			log.Printf("storage: remove rollback sidecar %s: %v", previous+suffix, err)
+		}
+	}
+	return nil
+}
+
 // install moves the live database aside and renames the preflighted incoming
-// file over it. Any failure restores the previous set before returning.
+// file over it. Any failure restores the previous set before returning. The
+// pending state marker is durable before the first rename, so a crash at any
+// step is recoverable without guessing from the files that happen to exist.
 func (a *snapshotAdmission) install() error {
 	previous := a.path + pendingSnapshotPreviousSuffix
 	incoming := a.path + pendingSnapshotSuffix
+	// A rollback sibling before the pending marker is written means the file
+	// set is already inconsistent. Fail without publishing a pending state:
+	// the next boot must not treat the live database as an uncommitted set.
+	if _, err := os.Stat(previous); err == nil {
+		return fmt.Errorf("rollback sibling already exists: %s", previous)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := writeSnapshotState(a.path, snapshotStatePending); err != nil {
+		return fmt.Errorf("write pending snapshot state: %w", err)
+	}
 	if _, err := os.Stat(a.path); err == nil {
-		if _, err := os.Stat(previous); err == nil {
-			return fmt.Errorf("rollback sibling already exists: %s", previous)
-		} else if !os.IsNotExist(err) {
-			return err
-		}
 		if err := os.Rename(a.path, previous); err != nil {
 			return err
 		}
@@ -410,12 +644,17 @@ func (a *snapshotAdmission) install() error {
 		return errors.Join(err, a.restorePrevious())
 	}
 	a.installed = true
+	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
+		return errors.Join(err, a.restorePrevious())
+	}
 	return nil
 }
 
 // restorePrevious undoes an installed or partially installed admission. The
 // uncommitted new file is removed first; then every previous sibling that
-// exists is renamed back over the live name.
+// exists is renamed back over the live name. The pending state marker is
+// cleared only after the restore itself is durable, so a crash mid-restore
+// resumes it on the next boot.
 func (a *snapshotAdmission) restorePrevious() error {
 	var errs []error
 	if a.installed {
@@ -442,6 +681,12 @@ func (a *snapshotAdmission) restorePrevious() error {
 		}
 		a.previous = false
 	}
+	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
+		errs = append(errs, err)
+	}
+	if err := removeSnapshotState(a.path); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -454,22 +699,27 @@ func (a *snapshotAdmission) rollback() error {
 	return a.restorePrevious()
 }
 
-// commit makes the admission permanent. The previous main file is removed
-// first: once it is gone the admission cannot be rolled back, so a later
-// sidecar cleanup failure is logged instead of failing a serving store.
+// commit makes the admission permanent. The committed marker is written and
+// directory-synced before the rollback set is removed: recovery then has a
+// durable fact to consult, instead of inferring commit from a missing file.
+// Once the marker is durable the replacement is live, so cleanup failures are
+// logged and left to the next boot rather than failing a serving store.
 func (a *snapshotAdmission) commit() error {
-	if a == nil || !a.previous {
+	if a == nil {
 		return nil
 	}
-	if err := removeIfExists(a.path + pendingSnapshotPreviousSuffix); err != nil {
+	if err := writeSnapshotState(a.path, snapshotStateCommitted); err != nil {
 		return err
 	}
-	a.previous = false
-	for _, suffix := range []string{"-wal", "-shm"} {
-		stale := a.path + pendingSnapshotPreviousSuffix + suffix
-		if err := removeIfExists(stale); err != nil {
-			log.Printf("storage: remove pending snapshot rollback sidecar %s: %v", stale, err)
+	if a.previous {
+		if err := removeSnapshotDebris(a.path + pendingSnapshotPreviousSuffix); err != nil {
+			log.Printf("storage: remove pending snapshot rollback set: %v", err)
+		} else {
+			a.previous = false
 		}
+	}
+	if err := syncSnapshotDir(filepath.Dir(a.path)); err != nil {
+		log.Printf("storage: sync database directory after snapshot commit: %v", err)
 	}
 	return nil
 }
@@ -478,7 +728,15 @@ func (a *snapshotAdmission) commit() error {
 // instead of deleting them. Callers decide whether a failed rename is fatal:
 // an integrity/preflight rejection can leave the file for the next boot, while
 // interrupted-admission recovery must not fall through to admitting it again.
+// Sidecars move first: a crash leaves the main at its original name so the next
+// boot classifies the whole set again, and no stale WAL can attach to a later
+// incoming file.
 func quarantinePendingSnapshot(incoming, suffix string) error {
+	for _, sidecar := range []string{"-wal", "-shm"} {
+		if err := os.Rename(incoming+sidecar, incoming+sidecar+suffix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	return os.Rename(incoming, incoming+suffix)
 }
 
@@ -569,12 +827,12 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 	if s == nil {
 		return 0, 0, ErrStorageDisabled
 	}
+	var debugDelta int64
 	// Admin mutations serialize: purge holds the same mutex, so a merge can
 	// never queue behind (or race) a delete and starve the writer twice.
 	s.purgeMu.Lock()
 	defer s.purgeMu.Unlock()
-	info, err := backup.InspectDatabaseFile(path)
-	if err != nil {
+	if _, err := backup.InspectDatabaseFile(path); err != nil {
 		return 0, 0, err
 	}
 	if err := s.Flush(); err != nil {
@@ -594,6 +852,12 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		return 0, 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_merge") }()
+	// Prove the backup's writable shape before touching any row. INNER-style
+	// column intersection alone would silently drop required columns or an
+	// incoming NOT NULL column that has no live home; both are data loss.
+	if err := preflightMergeSchema(ctx, conn); err != nil {
+		return 0, 0, fmt.Errorf("preflight backup merge: %w", err)
+	}
 	// Request rows, debug sidecars and the totals document commit as one
 	// transaction: a failure in any later phase rolls the earlier merges back
 	// instead of publishing rows whose totals were never persisted.
@@ -602,31 +866,37 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		return 0, 0, err
 	}
 	defer tx.Rollback()
+	skipped, err = countMergeDuplicates(ctx, tx, "requests")
+	if err != nil {
+		return 0, 0, fmt.Errorf("count duplicate request rows from backup: %w", err)
+	}
 	n, err := mergeAttachedTable(ctx, tx, "requests")
 	if err != nil {
 		return 0, 0, fmt.Errorf("merge request rows from backup: %w", err)
 	}
 	inserted = n
-	skipped = int64(info.Requests) - inserted
-	if skipped < 0 {
-		skipped = 0
-	}
-	var debugErr error
-	var debugBytes int64
-	debugBytesKnown := false
-	if _, err := s.mergeDebugTable(ctx, tx); err != nil {
-		debugErr = err
-	} else if s.debugMaxBytes > 0 {
-		// The held writer connection makes this transaction's sidecar sum the
-		// exact committed state. Read it now, publish it only after commit.
-		debugBytes, err = debugByteTotal(ctx, tx)
+	if s.debugMaxBytes > 0 {
+		// The net sidecar delta is applied under debugMu after commit. Never
+		// publish an absolute total computed in this transaction: a capture
+		// save cannot interleave while the writer connection is held, but the
+		// delta contract is shared with purge so both owners stay exact.
+		debugBefore, err := debugByteTotal(ctx, tx)
 		if err != nil {
-			debugErr = fmt.Errorf("debug byte counter after backup merge: %w", err)
-		} else {
-			debugBytesKnown = true
+			return 0, 0, fmt.Errorf("debug byte counter before backup merge: %w", err)
 		}
+		if _, err := s.mergeDebugTable(ctx, tx); err != nil {
+			return 0, 0, fmt.Errorf("merge debug captures from backup: %w", err)
+		}
+		debugAfter, err := debugByteTotal(ctx, tx)
+		if err != nil {
+			return 0, 0, fmt.Errorf("debug byte counter after backup merge: %w", err)
+		}
+		debugDelta = debugAfter - debugBefore
+	} else if _, err := mergeAttachedTable(ctx, tx, "request_debug"); err != nil {
+		return 0, 0, fmt.Errorf("merge debug captures from backup: %w", err)
 	}
 	var totals Totals
+	var totalsEpoch, totalsHighRowID int64
 	if inserted > 0 {
 		// The post-merge totals scan is maintenance work on the held writer
 		// connection: it legitimately reads all history and must not inherit the
@@ -636,50 +906,175 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		// The transaction sees its own merged rows, so this scan is exact.
 		totals, err = readTotals(tctx, tx)
 		if err != nil {
-			return inserted, skipped, mergePhaseError(debugErr, "totals after backup merge", err)
+			return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
 		}
-		epoch, err := projectionEpoch(tctx, tx)
+		totalsEpoch, err = projectionEpoch(tctx, tx)
 		if err != nil {
-			return inserted, skipped, mergePhaseError(debugErr, "projection epoch after backup merge", err)
+			return inserted, skipped, fmt.Errorf("projection epoch after backup merge: %w", err)
 		}
-		highRowID, err := projectionHighRowID(tctx, tx)
+		totalsHighRowID, err = projectionHighRowID(tctx, tx)
 		if err != nil {
-			return inserted, skipped, mergePhaseError(debugErr, "projection high rowid after backup merge", err)
+			return inserted, skipped, fmt.Errorf("projection high rowid after backup merge: %w", err)
 		}
-		if err := saveTotals(tctx, tx, totals, false, epoch, highRowID); err != nil {
-			return inserted, skipped, mergePhaseError(debugErr, "persist totals after backup merge", err)
+		if err := saveTotals(tctx, tx, totals, false, totalsEpoch, totalsHighRowID); err != nil {
+			return inserted, skipped, fmt.Errorf("persist totals after backup merge: %w", err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return inserted, skipped, mergePhaseError(debugErr, "commit backup merge", err)
+	if err := s.commitDebugDelta(tx, debugDelta); err != nil {
+		return inserted, skipped, fmt.Errorf("commit backup merge: %w", err)
 	}
 	// Committed: these in-memory publications are mandatory and never consult
 	// the caller's context.
-	if debugBytesKnown {
-		s.installDebugBytes(debugBytes)
-	}
 	if inserted > 0 {
-		s.installTotals(totals)
-	}
-	if debugErr != nil {
-		return inserted, skipped, debugErr
+		s.installTotals(totals, totalsEpoch, totalsHighRowID)
 	}
 	return inserted, skipped, nil
-}
-
-// mergePhaseError attaches a non-fatal debug merge error to the fatal phase
-// error, preserving both for errors.Is.
-func mergePhaseError(debugErr error, phase string, fatal error) error {
-	if debugErr != nil {
-		return fmt.Errorf("%w; %s: %w", debugErr, phase, fatal)
-	}
-	return fmt.Errorf("%s: %w", phase, fatal)
 }
 
 type mergeConn interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// mergeColumnDetails is the PRAGMA table_info view merge preflight needs:
+// whether a column is required and whether SQLite can supply it when omitted.
+type mergeColumnDetails struct {
+	name       string
+	notNull    bool
+	hasDefault bool
+}
+
+// tableColumnDetails reads one table's columns with their required/default
+// metadata. The schema/table arguments are allowlisted because the query is
+// built by concatenation.
+func tableColumnDetails(ctx context.Context, db mergeConn, schema, table string) ([]mergeColumnDetails, error) {
+	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
+		return nil, fmt.Errorf("unknown backup schema")
+	}
+	if table != "requests" && table != "request_debug" {
+		return nil, fmt.Errorf("unknown merge table")
+	}
+	query := "PRAGMA table_info(" + table + ")"
+	if schema != "" {
+		query = "PRAGMA " + schema + ".table_info(" + table + ")"
+	}
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cols []mergeColumnDetails
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			return nil, err
+		}
+		cols = append(cols, mergeColumnDetails{
+			name:       name,
+			notNull:    notNull != 0,
+			hasDefault: dflt.Valid,
+		})
+	}
+	return cols, rows.Err()
+}
+
+// preflightMergeSchema rejects a backup whose request or debug table cannot
+// accept the live writer's required values before the merge transaction
+// touches any row. Two directions matter: a live required column the backup
+// omits would insert NULL (or disappear), and an incoming required column the
+// live schema does not have would be silently dropped.
+func preflightMergeSchema(ctx context.Context, db mergeConn) error {
+	var name string
+	if err := db.QueryRowContext(ctx, `SELECT name FROM backup_merge.sqlite_master WHERE type='table' AND name='requests'`).Scan(&name); err != nil {
+		return fmt.Errorf("backup requests table: %w", err)
+	}
+	if err := preflightMergeTable(ctx, db, "requests"); err != nil {
+		return err
+	}
+	haveAttempts := false
+	incoming, err := tableColumnDetails(ctx, db, "backup_merge", "requests")
+	if err != nil {
+		return err
+	}
+	for _, col := range incoming {
+		if col.name == "attempts" {
+			haveAttempts = true
+			break
+		}
+	}
+	if haveAttempts {
+		var malformed int64
+		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_merge.requests
+			WHERE attempts IS NOT NULL AND attempts <> '' AND json_valid(attempts) = 0`).Scan(&malformed); err != nil {
+			return fmt.Errorf("backup requests.attempts: %w", err)
+		}
+		if malformed != 0 {
+			return fmt.Errorf("backup requests.attempts contains %d malformed JSON values", malformed)
+		}
+	}
+	if err := db.QueryRowContext(ctx, `SELECT name FROM backup_merge.sqlite_master WHERE type='table' AND name='request_debug'`).Scan(&name); err == nil {
+		if err := preflightMergeTable(ctx, db, "request_debug"); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return nil
+}
+
+func preflightMergeTable(ctx context.Context, db mergeConn, table string) error {
+	live, err := tableColumnDetails(ctx, db, "", table)
+	if err != nil {
+		return err
+	}
+	incoming, err := tableColumnDetails(ctx, db, "backup_merge", table)
+	if err != nil {
+		return err
+	}
+	liveSet := make(map[string]mergeColumnDetails, len(live))
+	for _, col := range live {
+		liveSet[col.name] = col
+	}
+	incomingSet := make(map[string]mergeColumnDetails, len(incoming))
+	for _, col := range incoming {
+		incomingSet[col.name] = col
+	}
+	if _, ok := incomingSet["id"]; !ok {
+		return fmt.Errorf("backup %s is missing the id column", table)
+	}
+	for _, col := range live {
+		if !col.notNull || col.hasDefault {
+			continue
+		}
+		if _, ok := incomingSet[col.name]; !ok {
+			return fmt.Errorf("backup %s is missing required column %q", table, col.name)
+		}
+	}
+	for _, col := range incoming {
+		if _, ok := liveSet[col.name]; ok {
+			continue
+		}
+		if col.notNull && !col.hasDefault {
+			return fmt.Errorf("backup %s has unsupported required column %q", table, col.name)
+		}
+	}
+	return nil
+}
+
+// countMergeDuplicates counts incoming ids that already exist live. The count
+// is the explicit skip count; constraint failures are no longer folded into
+// it, because INSERT OR IGNORE is gone.
+func countMergeDuplicates(ctx context.Context, db mergeConn, table string) (int64, error) {
+	if table != "requests" && table != "request_debug" {
+		return 0, fmt.Errorf("unknown merge table")
+	}
+	var n int64
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_merge.`+table+` AS incoming
+		WHERE EXISTS (SELECT 1 FROM main.`+table+` AS live WHERE live.id = incoming.id)`).Scan(&n)
+	return n, err
 }
 
 // mergeDebugTable enforces the sidecar byte cap during a restore merge. With
@@ -700,9 +1095,6 @@ func (s *Store) mergeDebugTable(ctx context.Context, db mergeConn) (int64, error
 	incoming, err := pragmaTableInfo(ctx, db, "backup_merge", "request_debug")
 	if err != nil {
 		return 0, err
-	}
-	if _, ok := incoming["payload"]; !ok {
-		return mergeAttachedTable(ctx, db, "request_debug")
 	}
 	where := ""
 	var args []any
@@ -759,8 +1151,23 @@ func mergeAttachedTableWhere(ctx context.Context, db mergeConn, table, where str
 	if len(cols) == 0 {
 		return 0, fmt.Errorf("backup %s has no columns in common", table)
 	}
+	selects := make([]string, len(cols))
+	for i, col := range cols {
+		quoted := `incoming."` + col + `"`
+		// Merge owns canonicalization of JSON-bearing columns: the legacy
+		// empty spelling becomes the canonical no-value document, while a
+		// non-empty value already passed preflight's json_valid check and is
+		// copied byte-for-byte.
+		if table == "requests" && col == "attempts" {
+			quoted = `CASE WHEN incoming."attempts" IS NULL OR incoming."attempts" = '' THEN 'null' ELSE incoming."attempts" END`
+		}
+		selects[i] = quoted
+	}
 	list := quoteIdents(cols)
-	q := "INSERT OR IGNORE INTO " + table + " (" + list + ") SELECT " + list +
+	// No INSERT OR IGNORE: the explicit NOT EXISTS owns duplicate suppression,
+	// and every other constraint failure must abort the merge transaction
+	// instead of silently discarding an incompatible row.
+	q := "INSERT INTO " + table + " (" + list + ") SELECT " + strings.Join(selects, ", ") +
 		" FROM backup_merge." + table + " AS incoming" +
 		" WHERE NOT EXISTS (SELECT 1 FROM main." + table + " AS live WHERE live.id = incoming.id)"
 	if where != "" {

@@ -97,29 +97,7 @@ func TestRecorderBoundsRecordRetentionInRingAndStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hostile := strings.Repeat("é", 1<<19) // one MiB, multi-byte so a bad cut breaks UTF-8
-	toolNames := make([]string, retentionStorageToolNamesMax+1)
-	for i := range toolNames {
-		toolNames[i] = "tool"
-	}
-	toolNames[0] = hostile
-	hostileRecord := &metrics.Record{
-		ID: "hostile", Provider: "fixture", Path: hostile, Method: hostile, Model: hostile,
-		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
-		FinishReason: hostile, ErrorType: hostile, ErrorCode: hostile,
-		DebugSessionID: hostile, ToolNames: toolNames,
-		Start: time.Now(), StatusCode: 503,
-		Attempts: []metrics.RetryAttempt{
-			{
-				StatusCode: 429, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "rate limited",
-				ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
-			},
-			{
-				StatusCode: 503, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "provider unavailable",
-				ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
-			},
-		},
-	}
+	hostileRecord := hostileRetentionRecord("hostile")
 	recorder.Record(normal)
 	recorder.Record(hostileRecord)
 	if err := s.Flush(); err != nil {
@@ -194,6 +172,92 @@ func TestRecorderBoundsRecordRetentionInRingAndStore(t *testing.T) {
 	} {
 		if got.len > int64(got.max) {
 			t.Fatalf("durable %s column = %d bytes, want <= %d", field, got.len, got.max)
+		}
+	}
+}
+
+func hostileRetentionRecord(id string) *metrics.Record {
+	hostile := strings.Repeat("é", 1<<19)
+	toolNames := make([]string, retentionStorageToolNamesMax+1)
+	for i := range toolNames {
+		toolNames[i] = "tool"
+	}
+	toolNames[0] = hostile
+	return &metrics.Record{
+		ID: id, Provider: "fixture", Path: hostile, Method: hostile, Model: hostile,
+		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
+		FinishReason: hostile, ErrorType: hostile, ErrorCode: hostile,
+		DebugSessionID: hostile, ToolNames: toolNames,
+		Start: time.Now(), StatusCode: 503,
+		Attempts: []metrics.RetryAttempt{
+			{
+				StatusCode: 429, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "rate limited",
+				ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
+			},
+			{
+				StatusCode: 503, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "provider unavailable",
+				ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
+			},
+		},
+	}
+}
+
+func retentionColumnValues(t *testing.T, s *Store, id string) map[string]string {
+	t.Helper()
+	var path, method, model, providerModel, requestID, server, finish, errorType, errorCode, debugSession, toolNames, attempts string
+	err := s.rdb.QueryRow(`SELECT path, method, model, provider_model, provider_request_id,
+		provider_server, finish_reason, error_type, error_code, debug_session_id,
+		tool_names, attempts FROM requests WHERE id = ?`, id).Scan(
+		&path, &method, &model, &providerModel, &requestID, &server,
+		&finish, &errorType, &errorCode, &debugSession, &toolNames, &attempts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[string]string{
+		"path": path, "method": method, "model": model,
+		"provider_model": providerModel, "provider_request_id": requestID,
+		"provider_server": server, "finish_reason": finish,
+		"error_type": errorType, "error_code": errorCode,
+		"debug_session_id": debugSession, "tool_names": toolNames, "attempts": attempts,
+	}
+}
+
+// TestDirectStoreRecordAppliesSharedRetention pins the exported Store.Record
+// contract: it is a valid metrics.Recorder without a ring, so the durable
+// boundary itself must apply the same retention as Recorder(buffer). The two
+// paths must persist identical bounded fields.
+func TestDirectStoreRecordAppliesSharedRetention(t *testing.T) {
+	direct, err := Open(filepath.Join(t.TempDir(), "direct-retention.db"), testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer direct.Close()
+	production, err := Open(filepath.Join(t.TempDir(), "production-retention.db"), testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer production.Close()
+
+	direct.Record(hostileRetentionRecord("hostile"))
+	production.Recorder(metrics.NewBuffer(4)).Record(hostileRetentionRecord("hostile"))
+	if err := direct.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := production.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	directRows, err := direct.LoadRecent(t.Context(), 1)
+	if err != nil || len(directRows) != 1 {
+		t.Fatalf("direct rows = %d, %v", len(directRows), err)
+	}
+	assertRecordRetention(t, "direct", directRows[0])
+
+	directColumns := retentionColumnValues(t, direct, "hostile")
+	productionColumns := retentionColumnValues(t, production, "hostile")
+	for column, want := range productionColumns {
+		if got := directColumns[column]; got != want {
+			t.Fatalf("direct %s differs from production recorder: got %d bytes, want %d bytes", column, len(got), len(want))
 		}
 	}
 }

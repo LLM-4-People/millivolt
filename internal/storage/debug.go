@@ -33,14 +33,32 @@ func (s *Store) SaveDebugCapture(ctx context.Context, id, sessionID string, capt
 			}
 			s.debugBytes, s.debugSeeded = n, true
 		}
-		var previous int64
-		err = conn.QueryRowContext(ctx, `SELECT LENGTH(CAST(payload AS BLOB)) FROM request_debug WHERE id = ?`, id).Scan(&previous)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		previous, err := s.debugCaptureBytes(ctx, conn, id)
+		if err != nil {
 			return err
 		}
 		next := s.debugBytes - previous + int64(len(payload))
 		if next > s.debugMaxBytes {
-			return fmt.Errorf("debug capture store limit reached (%d of %d bytes)", s.debugBytes, s.debugMaxBytes)
+			// Expired rows are invisible to reads but still counted until the
+			// periodic sweep. Reclaim them now, on this held connection and
+			// under debugMu, instead of refusing a capture the cap already
+			// allows on disk. The row being replaced may itself have expired,
+			// so re-read its committed length after the sweep.
+			_, more, sweepErr := s.expireDebugCapturesLocked(ctx, conn, time.Now().UnixMilli(), debugExpireBatchesPerSweep)
+			if more {
+				s.debugExpirePending.Store(true)
+			}
+			if sweepErr != nil {
+				return sweepErr
+			}
+			previous, err = s.debugCaptureBytes(ctx, conn, id)
+			if err != nil {
+				return err
+			}
+			next = s.debugBytes - previous + int64(len(payload))
+			if next > s.debugMaxBytes {
+				return fmt.Errorf("debug capture store limit reached (%d of %d bytes)", s.debugBytes, s.debugMaxBytes)
+			}
 		}
 		if _, err := conn.ExecContext(ctx,
 			`INSERT OR REPLACE INTO request_debug(id, session_id, captured_at, expires_at, payload) VALUES (?, ?, ?, ?, ?)`,
@@ -54,6 +72,17 @@ func (s *Store) SaveDebugCapture(ctx context.Context, id, sessionID string, capt
 		`INSERT OR REPLACE INTO request_debug(id, session_id, captured_at, expires_at, payload) VALUES (?, ?, ?, ?, ?)`,
 		id, sessionID, capturedAt, expiresAt, string(payload))
 	return err
+}
+
+// debugCaptureBytes reads one committed capture's payload length on the held
+// writer connection. An absent row contributes zero.
+func (s *Store) debugCaptureBytes(ctx context.Context, conn *sql.Conn, id string) (int64, error) {
+	var previous int64
+	err := conn.QueryRowContext(ctx, `SELECT LENGTH(CAST(payload AS BLOB)) FROM request_debug WHERE id = ?`, id).Scan(&previous)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return previous, err
 }
 
 // LoadDebugCapture returns the payload for id, or nil if absent or expired.
@@ -122,26 +151,32 @@ func (s *Store) ExpireDebugCaptures(ctx context.Context, beforeMs int64) (int64,
 	return total, err
 }
 
-// expireDebugCaptures deletes at most maxBatches batches and reports whether a
-// full final batch may leave more expired rows. Holding debugMu across each
-// select+delete keeps a concurrent capture from replacing a row between the two
-// statements and makes the cap-active counter subtraction exact.
+// expireDebugCaptures deletes at most maxBatches batches on the writer
+// connection. It holds debugMu for the whole bounded sweep: a concurrent save
+// cannot run without the same writer connection, so the lock only orders the
+// counter updates and makes the cap-active subtraction exact.
 func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatches int) (int64, bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return 0, false, err
 	}
 	defer conn.Close()
+	s.debugMu.Lock()
+	defer s.debugMu.Unlock()
+	return s.expireDebugCapturesLocked(ctx, conn, beforeMs, maxBatches)
+}
+
+// expireDebugCapturesLocked is the one bounded expiry implementation. Callers
+// must hold debugMu and own conn.
+func (s *Store) expireDebugCapturesLocked(ctx context.Context, conn *sql.Conn, beforeMs int64, maxBatches int) (int64, bool, error) {
 	withBytes := s.debugMaxBytes > 0
 	var total int64
 	for batch := 0; batch < maxBatches; batch++ {
 		if err := ctx.Err(); err != nil {
 			return total, false, err
 		}
-		s.debugMu.Lock()
 		rows, err := conn.QueryContext(ctx, debugExpireQuery(withBytes), beforeMs, debugExpireBatch)
 		if err != nil {
-			s.debugMu.Unlock()
 			return total, false, err
 		}
 		var ids []int64
@@ -152,25 +187,21 @@ func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatc
 				var n int64
 				if err := rows.Scan(&id, &n); err != nil {
 					rows.Close()
-					s.debugMu.Unlock()
 					return total, false, err
 				}
 				freed += n
 			} else if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				s.debugMu.Unlock()
 				return total, false, err
 			}
 			ids = append(ids, id)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			s.debugMu.Unlock()
 			return total, false, err
 		}
 		rows.Close()
 		if len(ids) == 0 {
-			s.debugMu.Unlock()
 			return total, false, nil
 		}
 		placeholders := make([]byte, 0, len(ids)*2)
@@ -184,17 +215,14 @@ func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatc
 		}
 		res, err := conn.ExecContext(ctx, `DELETE FROM request_debug WHERE rowid IN (`+string(placeholders)+`)`, args...)
 		if err != nil {
-			s.debugMu.Unlock()
 			return total, false, err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			s.debugMu.Unlock()
 			return total, false, err
 		}
 		total += n
 		exact := n == int64(len(ids))
-		needsReseed := false
 		if withBytes && s.debugSeeded {
 			// Under debugMu no in-process save can replace a selected row, so
 			// the subtraction is exact. A mismatched row count means an
@@ -202,18 +230,16 @@ func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatc
 			if exact {
 				s.debugBytes = max(0, s.debugBytes-freed)
 			} else {
-				needsReseed = true
+				// The DELETE above autocommitted, so this fresh read is the
+				// exact committed sidecar total. If it fails, stay unseeded so
+				// the next save reseeds instead of enforcing a stale counter.
+				reseeded, rerr := debugByteTotal(ctx, conn)
+				if rerr != nil {
+					s.debugSeeded = false
+					return total, false, rerr
+				}
+				s.debugBytes = reseeded
 			}
-		}
-		s.debugMu.Unlock()
-		if needsReseed {
-			// The DELETE above autocommitted, so this fresh read is the exact
-			// committed sidecar total. Publish it only after a successful read.
-			n, err := debugByteTotal(ctx, conn)
-			if err != nil {
-				return total, false, err
-			}
-			s.installDebugBytes(n)
 		}
 		if len(ids) < debugExpireBatch {
 			return total, false, nil

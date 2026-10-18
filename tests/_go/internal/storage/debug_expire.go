@@ -177,3 +177,47 @@ func debugAccountingState(t *testing.T, s *Store) (bool, int64) {
 	defer s.debugMu.Unlock()
 	return s.debugSeeded, s.debugBytes
 }
+
+// TestSaveDebugCaptureReclaimsExpiredBytesAtCap pins S12: expired rows stay
+// hidden from reads but must not block a new capture until the periodic sweep.
+// The cap path runs one bounded sweep on its held connection, and the counter
+// ends at the unexpired durable sum.
+func TestSaveDebugCaptureReclaimsExpiredBytesAtCap(t *testing.T) {
+	opts := testOpts
+	opts.DebugMaxBytes = 100
+	opts.FlushInterval = time.Hour // keep the periodic sweep out of this test
+	s, err := Open(filepath.Join(t.TempDir(), "debug-cap-expired.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now()
+	expired := now.Add(-time.Minute).UnixMilli()
+	payload := []byte("0123456789")
+	for i := range 9 {
+		if err := s.SaveDebugCapture(t.Context(), fmt.Sprintf("expired-%d", i), "sess", now.UnixMilli(), expired, payload); err != nil {
+			t.Fatalf("expired seed %d: %v", i, err)
+		}
+	}
+	if got := debugAccounting(t, s); got != 90 {
+		t.Fatalf("seeded expired bytes = %d, want 90", got)
+	}
+
+	fresh := []byte("fresh-capture-0123456789")
+	if err := s.SaveDebugCapture(t.Context(), "live", "sess", now.UnixMilli(), now.Add(time.Hour).UnixMilli(), fresh); err != nil {
+		t.Fatalf("capture rejected while only expired rows filled the cap: %v", err)
+	}
+	if got, want := debugAccounting(t, s), int64(len(fresh)); got != want {
+		t.Fatalf("debug counter after cap reclamation = %d, want %d", got, want)
+	}
+	var rows, bytes int64
+	if err := s.rdb.QueryRow(`SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&rows, &bytes); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 || bytes != int64(len(fresh)) {
+		t.Fatalf("durable sidecars after reclamation = %d rows / %d bytes, want 1 / %d", rows, bytes, len(fresh))
+	}
+	if got := debugAccounting(t, s); got != unresolvedDebugBytes(t, s) {
+		t.Fatalf("counter = %d, unexpired sum = %d", got, unresolvedDebugBytes(t, s))
+	}
+}

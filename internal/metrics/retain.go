@@ -38,6 +38,18 @@ const (
 // It is part of the bound: a truncated value is never longer than max bytes.
 const recordTruncationSuffix = "…"
 
+// RetainRecord applies the record-boundary text bounds to a finalized record
+// in place. It is the exported entry point for the durable enqueue boundary:
+// Store.Record has no ring, so it cannot rely on Buffer.Record applying the
+// shared retention pass. Both paths delegate to retainRecord, the one owner of
+// the bounds.
+func RetainRecord(r *Record) {
+	if r == nil {
+		return
+	}
+	retainRecord(r)
+}
+
 // retainRecord applies the record-boundary text bounds to a finalized record
 // in place, before it enters the ring and durable queue. The record and its
 // attempt slice are owned by the finalization path, so both are bounded in

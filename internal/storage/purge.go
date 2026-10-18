@@ -96,23 +96,14 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	}
 	s.sendMu.Unlock()
 	// Once published, wait for the actual transaction outcome. Cancellation is
-	// passed into SQL; it must not turn a committed delete into a reported failure
-	// before the matching ring removal and aggregate publication finish. The
-	// writer owns the buffered result channel, so returning on cancellation can
-	// never block it.
-	// Prefer a completed outcome when both the result and cancellation are
-	// ready: the transaction may have committed just before the deadline.
-	select {
-	case out := <-cmd.result:
-		return out.result, out.err
-	default:
-	}
-	select {
-	case out := <-cmd.result:
-		return out.result, out.err
-	case <-ctx.Done():
-		return PurgeResult{}, ctx.Err()
-	}
+	// passed into SQL; it must not turn a committed delete into a reported
+	// failure before the matching ring removal and aggregate publication finish.
+	// The command owns the purgeMu until it retires: returning on ctx.Done
+	// would release the lock with the command still pending, letting a second
+	// Clear overwrite it and silently lose one of the two deletions. The writer
+	// owns the buffered result channel, so waiting can never block it.
+	out := <-cmd.result
+	return out.result, out.err
 }
 
 func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
@@ -138,6 +129,14 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	// clear keeps the correlated subquery so only captures of matched requests
 	// go. Clearing every capture is wrong: a capture can precede its request's
 	// durable row.
+	var debugDelta int64
+	debugBefore := int64(0)
+	if s.debugMaxBytes > 0 {
+		debugBefore, err = debugByteTotal(cmd.ctx, tx)
+		if err != nil {
+			return PurgeResult{}, err
+		}
+	}
 	if cmd.filter == nil {
 		if _, err = tx.ExecContext(cmd.ctx,
 			`DELETE FROM request_debug WHERE id IN (
@@ -148,12 +147,16 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	} else if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
 		return PurgeResult{}, err
 	}
-	// Read the post-delete sidecar total inside the transaction but publish it
-	// only after commit: a forced rollback restores the rows, so the counter
-	// must still count them or the debug cap is silently bypassed.
-	debugBytes, err := debugByteTotal(cmd.ctx, tx)
-	if err != nil {
-		return PurgeResult{}, err
+	// The net sidecar delta, not an absolute total, is what a purge may
+	// publish: a capture save can land after this transaction commits, and an
+	// absolute install would overwrite its increment. The delta is applied
+	// under debugMu by commitDebugDelta, after the committed state is durable.
+	if s.debugMaxBytes > 0 {
+		debugAfter, err := debugByteTotal(cmd.ctx, tx)
+		if err != nil {
+			return PurgeResult{}, err
+		}
+		debugDelta = debugAfter - debugBefore
 	}
 	res, err := tx.ExecContext(cmd.ctx, "DELETE FROM requests"+where, args...)
 	if err != nil {
@@ -167,6 +170,7 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	// its aggregate is exactly zero without scanning; a filtered purge scans
 	// the survivors once. Both write the document in this transaction.
 	var totals Totals
+	var totalsEpoch, totalsHighRowID int64
 	hasTotals := n > 0
 	if hasTotals {
 		if cmd.filter != nil {
@@ -175,25 +179,24 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 				return PurgeResult{}, err
 			}
 		}
-		epoch, err := projectionEpoch(cmd.ctx, tx)
+		totalsEpoch, err = projectionEpoch(cmd.ctx, tx)
 		if err != nil {
 			return PurgeResult{}, err
 		}
-		highRowID, err := projectionHighRowID(cmd.ctx, tx)
+		totalsHighRowID, err = projectionHighRowID(cmd.ctx, tx)
 		if err != nil {
 			return PurgeResult{}, err
 		}
-		if err := saveTotals(cmd.ctx, tx, totals, false, epoch, highRowID); err != nil {
+		if err := saveTotals(cmd.ctx, tx, totals, false, totalsEpoch, totalsHighRowID); err != nil {
 			return PurgeResult{}, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.commitDebugDelta(tx, debugDelta); err != nil {
 		return PurgeResult{}, err
 	}
 	// Do not consult ctx after commit: these in-memory effects are mandatory.
-	s.installDebugBytes(debugBytes)
 	if hasTotals {
-		s.installTotals(totals)
+		s.installTotals(totals, totalsEpoch, totalsHighRowID)
 	}
 	result := PurgeResult{Deleted: n}
 	if cmd.buffer != nil {

@@ -200,7 +200,10 @@ func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
 		{"model_cursor", cursor, modelFilter, "idx_requests_model_log"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			query, args := buildQueryBefore(tc.before, tc.filter, 200)
+			query, args, err := buildQueryBefore(tc.before, tc.filter, 200)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
 			plan := explainQueryPlan(t, s.rdb, query, args)
 			if !strings.Contains(plan, "USING INDEX "+tc.index) && !strings.Contains(plan, "USING COVERING INDEX "+tc.index) {
 				t.Fatalf("plan does not use %s:\n%s", tc.index, plan)

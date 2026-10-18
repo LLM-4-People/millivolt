@@ -729,7 +729,7 @@ func TestSnapshotOverlapFileInspectsInPlace(t *testing.T) {
 	assertNoSnapshotStaging(t, live.stageDir())
 }
 
-func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {
+func TestMergeSnapshotRejectsIncompatibleDebugTable(t *testing.T) {
 	live := openTestStore(t)
 	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
 	if err := live.Flush(); err != nil {
@@ -757,15 +757,16 @@ func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = live.MergeSnapshot(t.Context(), brokenData)
-	if err == nil {
-		t.Fatal("merge succeeded with incompatible request_debug")
+	if _, _, err = live.MergeSnapshot(t.Context(), brokenData); err == nil {
+		t.Fatal("merge succeeded with an incompatible request_debug table")
+	} else if !strings.Contains(err.Error(), "request_debug") {
+		t.Fatalf("merge error %q does not name the incompatible debug table", err)
 	}
-	if live.Totals().Requests != 2 {
-		t.Fatalf("totals after failed debug merge = %d, want 2 (requests already inserted)", live.Totals().Requests)
+	if live.Totals().Requests != 1 {
+		t.Fatalf("totals after rejected debug merge = %d, want 1", live.Totals().Requests)
 	}
-	if n := countRows(t, live); n != 2 {
-		t.Fatalf("rows after failed debug merge = %d, want the merged request committed", n)
+	if n := countRows(t, live); n != 1 {
+		t.Fatalf("rows after rejected debug merge = %d, want only the live row", n)
 	}
 }
 

@@ -486,12 +486,13 @@ type Store struct {
 	// aggregators read both under the same lock, so a ring record is either
 	// "already durably counted" (skipped in the merge) or not - never both,
 	// never neither.
-	aggMu        sync.Mutex
-	written      map[string]struct{}
-	writtenOrder []string
-	writtenCap   int
-	totals       Totals
-	totalsBuilt  bool
+	aggMu         sync.Mutex
+	written       map[string]struct{}
+	writtenOrder  []string
+	writtenCap    int
+	totals        Totals
+	totalsBuilt   bool
+	totalsWitness totalsWitness
 	// accountingRevision is the exact witness for the durable KPI fold's memo
 	// key. It advances under aggMu in the same critical section that publishes
 	// totals or written-id changes, so before/after key reads can prove a fold
@@ -606,7 +607,13 @@ func Open(path string, opts Options) (*Store, error) {
 	dsn := path + "?" + busy +
 		"&_pragma=journal_mode(WAL)" +
 		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=journal_size_limit(67108864)"
+		"&_pragma=journal_size_limit(67108864)" +
+		// Take the write lock at BEGIN for every explicit transaction. A
+		// deferred BEGIN would establish a read snapshot before insertBatch
+		// compares its totals witness, so a restart-handoff writer committing
+		// in that window would turn the upgrade into SQLITE_BUSY_SNAPSHOT
+		// instead of the busy wait the writer contract promises.
+		"&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return fail(fmt.Errorf("open sqlite: %w", err))
@@ -671,8 +678,8 @@ func Open(path string, opts Options) (*Store, error) {
 	// budget, not the interactive query timeout). A failure logs and leaves
 	// totals degraded - never silently pretend they're right.
 	tctx, cancel := s.withMaintenanceTimeout(context.Background())
-	if persisted, ok, err := loadTotals(tctx, s.rdb); err == nil && ok {
-		s.installTotals(persisted)
+	if persisted, witness, ok, err := loadTotals(tctx, s.rdb); err == nil && ok {
+		s.installTotals(persisted, witness.epoch, witness.highRowID)
 	} else {
 		if err != nil {
 			log.Printf("storage: persisted totals unreadable (%v); rebuilding", err)
@@ -768,6 +775,8 @@ func requestStatisticsStale(ctx context.Context, db *sql.DB) (bool, error) {
 // full, the record is dropped (metrics are best-effort, not lossless).
 // Records arriving after Close are dropped too: a send on the closed channel
 // panics, which we recover and count as a drop rather than crash the proxy.
+// The shared retention boundary runs here as well: Store.Record is a valid
+// Recorder without a ring, and nothing may persist unbounded client text.
 func (s *Store) Record(r *metrics.Record) {
 	s.record(r, nil)
 }
@@ -783,12 +792,20 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 			s.incrDrops()
 		}
 	}()
+	// Bound exactly once at the shared publication fence. The ring path's
+	// Buffer.Record applies the retention owner before enqueueing this same
+	// record and must stay under sendMu: Clear captures the accepted count and
+	// the ring removal boundary in one critical section, so ring publication
+	// and the enqueue fence cannot straddle a purge. A direct Store.Record has
+	// no ring and applies retention here.
 	// Hold sendMu so Close cannot close ch between the shut check and the send
 	// (the select never blocks: the channel is buffered and default drops).
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	if buffer != nil {
 		buffer.Record(r)
+	} else {
+		metrics.RetainRecord(r)
 	}
 	if s.shut {
 		s.incrDrops()
@@ -812,11 +829,21 @@ type rowQuerier interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
+// debugByteTotalHook is a test seam (production nil). It can force the
+// compute-only sidecar read to fail so merge's commit-blocking accounting path
+// stays testable without a fault-injection driver.
+var debugByteTotalHook func() error
+
 // debugByteTotal is the compute-only sidecar read on the caller's
 // transaction/connection. It never publishes the counter: a transaction's
-// uncommitted state may still roll back, so only its committer may call
-// installDebugBytes with this value afterwards.
+// uncommitted state may still roll back, so only its committer may adjust the
+// counter afterwards.
 func debugByteTotal(ctx context.Context, q rowQuerier) (int64, error) {
+	if debugByteTotalHook != nil {
+		if err := debugByteTotalHook(); err != nil {
+			return 0, err
+		}
+	}
 	var n int64
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n)
 	return n, err
@@ -829,6 +856,36 @@ func (s *Store) installDebugBytes(n int64) {
 	s.debugMu.Lock()
 	s.debugBytes, s.debugSeeded = n, true
 	s.debugMu.Unlock()
+}
+
+// debugAfterCommitHook is a test seam (production nil). It runs after a
+// maintenance transaction commits and before its sidecar delta is published,
+// widening the exact window a concurrent capture must not lose.
+var debugAfterCommitHook func()
+
+// commitDebugDelta commits a maintenance transaction and applies its net
+// sidecar byte delta while holding debugMu. Holding the lock across commit
+// keeps a concurrent SaveDebugCapture (which needs the same writer connection)
+// from incrementing the counter between the committed state and its
+// publication, so the absolute publish bug becomes an exact delta applied to
+// the current value. When the counter is unseeded the delta is deliberately
+// dropped: the next save reseeds from durable rows and enforces the cap.
+func (s *Store) commitDebugDelta(tx *sql.Tx, delta int64) error {
+	s.debugMu.Lock()
+	defer s.debugMu.Unlock()
+	if err := tx.Commit(); err != nil {
+		// A COMMIT error leaves the outcome uncertain. Never keep enforcing
+		// the old absolute counter: the next save reseeds from durable rows.
+		s.debugSeeded = false
+		return err
+	}
+	if debugAfterCommitHook != nil {
+		debugAfterCommitHook()
+	}
+	if s.debugSeeded {
+		s.debugBytes = max(0, s.debugBytes+delta)
+	}
+	return nil
 }
 
 // seedDebugBytes initializes the sidecar byte counter from durable rows. The
@@ -923,8 +980,10 @@ func (s *Store) writer() {
 			result, firstErr = s.purgeTransaction(cmd)
 		}
 		// Clear holds purgeMu until this result is received, so another command
-		// cannot replace this one before the writer has retired it.
-		s.pendingPurge.Store(nil)
+		// cannot replace this one before the writer has retired it. Retire with
+		// compare-and-swap anyway: clearing an exact command can never discard a
+		// newer published command.
+		s.pendingPurge.CompareAndSwap(cmd, nil)
 		cmd.result <- purgeOutcome{result, firstErr}
 		return usedHeld, writeErr
 	}
@@ -1053,16 +1112,25 @@ func (s *Store) markWrittenLocked(id string) {
 // transaction; installing it (instead of re-adding) keeps memory and disk
 // identical. Called by the single writer goroutine, so it never races another
 // account().
-func (s *Store) account(records []*metrics.Record, next *Totals) {
+func (s *Store) account(records []*metrics.Record, next *Totals, witness totalsWitness, degraded bool) {
 	s.aggMu.Lock()
 	defer s.aggMu.Unlock()
 	if next != nil {
-		s.totals = *next
-		s.totalsBuilt = true
-		// The degraded flag describes a boot rebuild that never saw older
-		// rows; post-boot accounting cannot repair that, so it stays set
-		// (and keeps persisted documents marked invalid) until a later
-		// successful rebuild.
+		// A maintenance install (merge, purge, totals rebuild) can acquire the
+		// writer connection after this batch commits but before account runs.
+		// Such an install already counted this batch from durable rows, so a
+		// newer witness wins: never overwrite it with the batch's older base.
+		if !s.totalsBuilt || !totalsWitnessNewer(s.totalsWitness, witness) {
+			s.totals = *next
+			s.totalsBuilt = true
+			s.totalsWitness = witness
+			// The degraded flag describes a rebuild that never saw older rows.
+			// Post-boot accounting never clears it; only a later boot's
+			// successful full scan (or an explicit maintenance rebuild) does. A
+			// failed in-transaction rebuild sets it so the subset is never
+			// presented as since-inception.
+			s.totalsDegraded = s.totalsDegraded || degraded
+		}
 	} else {
 		if !s.totalsBuilt {
 			// Degraded mode: the initial rebuild failed. Count new rows from
@@ -1085,21 +1153,22 @@ func (s *Store) account(records []*metrics.Record, next *Totals) {
 	s.accountingRevision.Add(1)
 }
 
-// totalsBase returns the in-memory aggregate the next batch builds on. The
-// caller holds the sole writer connection (Begin has returned), so no
-// merge/purge can publish between this read and the commit; merge holds that
-// same connection from its first statement through install. The batch adds
-// only rows it actually inserted, so duplicate ids cannot inflate totals.
-func (s *Store) totalsBase() (Totals, bool) {
+// totalsBase returns the in-memory aggregate and the projection witness it
+// was read against. The caller holds the sole writer connection (Begin has
+// returned), so no merge/purge can publish between this read and the commit;
+// insertBatch still compares the witness inside its transaction because an
+// external restart-handoff writer can commit between boot and this batch.
+func (s *Store) totalsBase() (Totals, bool, bool, totalsWitness) {
 	s.aggMu.Lock()
 	next := s.totals
 	built := s.totalsBuilt
 	degraded := s.totalsDegraded
+	witness := s.totalsWitness
 	s.aggMu.Unlock()
 	if !built {
 		next = Totals{}
 	}
-	return next, degraded
+	return next, built, degraded, witness
 }
 
 // AccountingRevision returns the durable accounting witness used to validate
@@ -1268,14 +1337,15 @@ func (s *Store) persistTotalsIfCurrent(ctx context.Context, t Totals, epoch, hig
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
-	s.installTotals(t)
+	s.installTotals(t, current, currentHigh)
 	return true, nil
 }
 
-func (s *Store) installTotals(t Totals) {
+func (s *Store) installTotals(t Totals, epoch, highRowID int64) {
 	s.aggMu.Lock()
 	s.totals = t
 	s.totalsBuilt = true
+	s.totalsWitness = totalsWitness{epoch: epoch, highRowID: highRowID}
 	s.totalsDegraded = false
 	s.accountingRevision.Add(1)
 	s.aggMu.Unlock()
@@ -1297,6 +1367,25 @@ func (s *Store) TotalsDegraded() bool {
 const totalsMetaKey = "totals"
 
 const totalsMetaVersion = 2
+
+// totalsWitness is the projection state the in-memory totals were read or
+// computed against. A batch may only extend a base whose witness is still
+// current; otherwise it rebuilds from durable rows instead of blessing an
+// undercount with newer witnesses. Protected by aggMu.
+type totalsWitness struct {
+	epoch     int64
+	highRowID int64
+}
+
+// totalsWitnessNewer reports whether a describes a later projection mutation
+// than b. The epoch advances on rewrites/removals; within one epoch the high
+// rowid advances on appends.
+func totalsWitnessNewer(a, b totalsWitness) bool {
+	if a.epoch != b.epoch {
+		return a.epoch > b.epoch
+	}
+	return a.highRowID > b.highRowID
+}
 
 // totalsDoc is the persisted shape. Totals' JSON tags are the dashboard API
 // contract; this type owns the storage contract separately.
@@ -1367,12 +1456,13 @@ func saveTotals(ctx context.Context, db interface {
 	return err
 }
 
-// loadTotals returns the persisted aggregate. found is false for an absent,
-// malformed, invalid or older-version document, in which case the caller
-// rebuilds from the durable rows and rewrites the document.
+// loadTotals returns the persisted aggregate and the projection witness it was
+// written against. found is false for an absent, malformed, invalid or
+// older-version document, in which case the caller rebuilds from the durable
+// rows and rewrites the document.
 func loadTotals(ctx context.Context, db interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (t Totals, found bool, err error) {
+}) (t Totals, witness totalsWitness, found bool, err error) {
 	var raw string
 	var epoch, highRowID int64
 	// One statement reads the document and both mutation witnesses from the
@@ -1381,25 +1471,25 @@ func loadTotals(ctx context.Context, db interface {
 		FROM meta AS m CROSS JOIN request_projection_state AS s
 		WHERE m.key = ? AND s.singleton = 1`, totalsMetaKey).Scan(&raw, &epoch, &highRowID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Totals{}, false, nil
+		return Totals{}, totalsWitness{}, false, nil
 	}
 	if err != nil {
-		return Totals{}, false, err
+		return Totals{}, totalsWitness{}, false, err
 	}
 	var d totalsDoc
 	if err := json.Unmarshal([]byte(raw), &d); err != nil {
 		log.Printf("storage: persisted totals malformed (%v); rebuilding", err)
-		return Totals{}, false, nil
+		return Totals{}, totalsWitness{}, false, nil
 	}
 	if d.V != totalsMetaVersion || d.Invalid {
-		return Totals{}, false, nil
+		return Totals{}, totalsWitness{}, false, nil
 	}
 	if epoch != d.Epoch || highRowID != d.HighRowID {
 		// Authoritative rows changed outside this store's transaction (the
 		// projection triggers fired); the cached aggregate is no longer exact.
-		return Totals{}, false, nil
+		return Totals{}, totalsWitness{}, false, nil
 	}
-	return d.totals(), true, nil
+	return d.totals(), totalsWitness{epoch: epoch, highRowID: highRowID}, true, nil
 }
 
 // projectionEpoch reads the current mutation witness on the caller's
@@ -1654,10 +1744,13 @@ const recordColumns = `
 		debug, debug_session_id, req_param_presence
 	`
 
-// scanRecord scans one row (in the canonical recordColumns order) into a
-// metrics.Record, restoring the exact dashboard JSON shape (pointer request
-// params including explicit zero/false, derived timestamps, parsed JSON columns).
-func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
+// scanRecord scans one row (in the canonical recordColumns order plus the
+// caller's debug_capture column) into a metrics.Record, restoring the exact
+// dashboard JSON shape (pointer request params including explicit zero/false,
+// derived timestamps, parsed JSON columns). Queries that do not need a capture
+// select NULL for the trailing column; ExportWhere selects the sidecar payload
+// for the same row.
+func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 	var r metrics.Record
 	var startMs, durMs, ttftMs, firstMs, lastMs, firstAnswerMs int64
 	var respHdr, toolNames, attemptsJSON string
@@ -1671,6 +1764,7 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 	var clientMetaJSON string
 	var debugFlag int
 	var reqPresence int64
+	var debugCapture []byte
 	err := rows.Scan(
 		&r.ID, &r.Provider, &r.Model, &r.KeyHash, &r.UserAgent, &r.Client,
 		&r.ClientIP, &r.ClientLang, &r.Stream,
@@ -1695,9 +1789,10 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 		&r.Images, &r.Attachments, &r.LastTurnRole,
 		&clientMetaJSON, &r.ReqReasoningEffort, &r.ReqVerbosity,
 		&debugFlag, &r.DebugSessionID, &reqPresence,
+		&debugCapture,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	r.Start = time.UnixMilli(startMs)
 	r.End = r.Start.Add(time.Duration(durMs) * time.Millisecond)
@@ -1742,7 +1837,7 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, error) {
 			log.Printf("storage: parse client_meta for %s: %v", r.ID, err)
 		}
 	}
-	return &r, nil
+	return &r, debugCapture, nil
 }
 
 // decodeJSONColumn is the shared owner of the stored JSON-column decode:
@@ -1818,9 +1913,9 @@ type LogFilter struct {
 	All []LogPredicate
 }
 
-func (f *LogFilter) where() (string, []any) {
+func (f *LogFilter) where() (string, []any, error) {
 	if f == nil {
-		return "", nil
+		return "", nil, nil
 	}
 	var clause string
 	args := make([]any, 0, len(f.All))
@@ -1840,12 +1935,14 @@ func (f *LogFilter) where() (string, []any) {
 		case LogStatus:
 			column = "status_code"
 		default:
-			continue
+			// Deny by default: a typo or a future field must never silently
+			// broaden the page to unfiltered rows.
+			return "", nil, fmt.Errorf("unknown log field %d", p.Field)
 		}
 		clause += " AND " + column + " = ?"
 		args = append(args, p.Value)
 	}
-	return clause, args
+	return clause, args, nil
 }
 
 // buildQueryBefore is the single owner of the durable log page statement:
@@ -1854,19 +1951,22 @@ func (f *LogFilter) where() (string, []any) {
 // equality indexes end in the same (started_at,id) order, so their pages need
 // one range scan and no sort; callers that need canonical-model or class
 // semantics still match in Go.
-func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any) {
-	q := `SELECT ` + recordColumns + ` FROM requests WHERE 1=1`
+func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
+	q := `SELECT ` + recordColumns + `, NULL AS debug_capture FROM requests WHERE 1=1`
 	var args []any
 	if before != nil {
 		q += ` AND (started_at, id) < (?, ?)`
 		args = append(args, before.StartMs, before.ID)
 	}
-	push, pushArgs := filter.where()
+	push, pushArgs, err := filter.where()
+	if err != nil {
+		return "", nil, err
+	}
 	q += push
 	args = append(args, pushArgs...)
 	q += ` ORDER BY started_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
-	return q, args
+	return q, args, nil
 }
 
 // QueryBefore pages durable records newest-first below an exact (time,id)
@@ -1878,7 +1978,10 @@ func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogF
 	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
-	q, args := buildQueryBefore(before, filter, limit)
+	q, args, err := buildQueryBefore(before, filter, limit)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := s.rdb.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -1886,7 +1989,7 @@ func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogF
 	defer rows.Close()
 	var out []*metrics.Record
 	for rows.Next() {
-		r, err := scanRecord(rows)
+		r, _, err := scanRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1906,7 +2009,7 @@ func (s *Store) LoadRecent(ctx context.Context, n int) ([]*metrics.Record, error
 	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
-	rows, err := s.rdb.QueryContext(ctx, `SELECT `+recordColumns+` FROM requests ORDER BY started_at DESC, id DESC LIMIT ?`, n)
+	rows, err := s.rdb.QueryContext(ctx, `SELECT `+recordColumns+`, NULL AS debug_capture FROM requests ORDER BY started_at DESC, id DESC LIMIT ?`, n)
 	if err != nil {
 		return nil, err
 	}
@@ -1914,7 +2017,7 @@ func (s *Store) LoadRecent(ctx context.Context, n int) ([]*metrics.Record, error
 
 	var out []*metrics.Record
 	for rows.Next() {
-		r, err := scanRecord(rows)
+		r, _, err := scanRecord(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -1936,10 +2039,18 @@ func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (in
 	if err := f.Validate(); err != nil {
 		return 0, err
 	}
-	q := `SELECT ` + recordColumns + ` FROM requests`
-	where, args := f.build() // the same parameterized predicate as purge/count
+	// The page cursor and its debug capture ride one row from one pooled read
+	// connection. Loading each capture through a second connection would make
+	// enough concurrent exporters deadlock against the bounded read pool.
+	q := `SELECT ` + recordColumns + `, CASE WHEN requests.debug = 0 THEN NULL ELSE (
+		SELECT d.payload FROM request_debug AS d
+		WHERE d.id = requests.id AND (d.expires_at = 0 OR d.expires_at > ?)) END AS debug_capture
+		FROM requests`
+	args := []any{time.Now().UnixMilli()}
+	where, whereArgs := f.build() // the same parameterized predicate as purge/count
 	if where != "" {
 		q += ` WHERE ` + where
+		args = append(args, whereArgs...)
 	}
 	q += ` ORDER BY started_at ASC, id ASC`
 	rows, err := s.rdb.QueryContext(ctx, q, args...)
@@ -1952,11 +2063,11 @@ func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (in
 		return 0, err
 	}
 	for rows.Next() {
-		r, err := scanRecord(rows)
+		r, capture, err := scanRecord(rows)
 		if err != nil {
 			return 0, err
 		}
-		b, err := s.marshalExport(ctx, r)
+		b, err := marshalExport(r, capture)
 		if err != nil {
 			return 0, err
 		}
@@ -1980,25 +2091,21 @@ func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (in
 }
 
 // marshalExport encodes one record for log download. Debug captures ride
-// as a sibling "debug_capture" object so the ring JSON stays small.
-func (s *Store) marshalExport(ctx context.Context, r *metrics.Record) ([]byte, error) {
+// as a sibling "debug_capture" object so the ring JSON stays small. The
+// capture is read with the record's own export row, never through a second
+// read-pool acquisition.
+func marshalExport(r *metrics.Record, capture []byte) ([]byte, error) {
 	if r == nil {
 		return []byte("null"), nil
 	}
-	if !r.Debug {
+	if !r.Debug || len(capture) == 0 {
 		return json.Marshal(r)
 	}
 	type exportRec struct {
 		*metrics.Record
 		DebugCapture json.RawMessage `json:"debug_capture,omitempty"`
 	}
-	out := exportRec{Record: r}
-	if raw, err := s.LoadDebugCapture(ctx, r.ID); err != nil {
-		return nil, fmt.Errorf("load debug capture: %w", err)
-	} else if len(raw) > 0 {
-		out.DebugCapture = raw
-	}
-	return json.Marshal(out)
+	return json.Marshal(exportRec{Record: r, DebugCapture: capture})
 }
 
 // Flush drains every record buffered in the write channel and commits it,

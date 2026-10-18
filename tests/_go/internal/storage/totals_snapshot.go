@@ -39,7 +39,7 @@ func TestComputeTotalsRevalidatesEpoch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("computeTotalsWith: %v", err)
 	}
-	totals, found, err := loadTotals(t.Context(), s.rdb)
+	totals, _, found, err := loadTotals(t.Context(), s.rdb)
 	if err != nil {
 		t.Fatalf("loadTotals: %v", err)
 	}

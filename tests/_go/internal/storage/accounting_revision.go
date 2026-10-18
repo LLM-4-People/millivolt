@@ -15,7 +15,7 @@ func TestAccountingRevisionTracksEveryDurableMutation(t *testing.T) {
 	s := openTestStore(t)
 	base := s.AccountingRevision()
 
-	s.account([]*metrics.Record{{ID: "accounted", Start: time.Now(), StatusCode: 200}}, nil)
+	s.account([]*metrics.Record{{ID: "accounted", Start: time.Now(), StatusCode: 200}}, nil, totalsWitness{}, false)
 	afterAccount := s.AccountingRevision()
 	if afterAccount <= base {
 		t.Fatalf("account did not advance accounting revision: %d -> %d", base, afterAccount)
@@ -25,7 +25,7 @@ func TestAccountingRevisionTracksEveryDurableMutation(t *testing.T) {
 	}
 
 	next := Totals{Requests: 7}
-	s.account([]*metrics.Record{{ID: "accounted-next", Start: time.Now(), StatusCode: 200}}, &next)
+	s.account([]*metrics.Record{{ID: "accounted-next", Start: time.Now(), StatusCode: 200}}, &next, totalsWitness{}, false)
 	afterNext := s.AccountingRevision()
 	if afterNext <= afterAccount {
 		t.Fatalf("account(next) did not advance accounting revision: %d -> %d", afterAccount, afterNext)
@@ -51,7 +51,7 @@ func TestAccountingRevisionTracksEveryDurableMutation(t *testing.T) {
 		t.Fatalf("MarkWritten did not advance accounting revision: %d -> %d", afterNext, afterMark)
 	}
 
-	s.installTotals(Totals{Requests: 9, Errors: 1})
+	s.installTotals(Totals{Requests: 9, Errors: 1}, 0, 0)
 	afterInstall := s.AccountingRevision()
 	if afterInstall <= afterMark {
 		t.Fatalf("installTotals did not advance accounting revision: %d -> %d", afterMark, afterInstall)

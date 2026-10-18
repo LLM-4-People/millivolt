@@ -154,9 +154,37 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 	defer insert.close()
 	// Read the base only after Begin: the sole writer connection serializes
 	// this batch against merge (which holds it through its own totals install).
-	// Only rows this batch actually inserts are added below, so a duplicate
-	// id cannot make totals claim a row that does not exist.
-	next, degraded := s.totalsBase()
+	// The base carries the projection witness it was read or computed against.
+	// Compare that witness inside this transaction before extending it: an
+	// external restart-handoff writer may have committed rows after the base
+	// was loaded, and stamping the old base with the newer witness would
+	// persist an undercount that survives every reopen.
+	next, built, degraded, baseWitness := s.totalsBase()
+	baseEpoch, err := projectionEpoch(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("read projection epoch: %w", err)
+	}
+	baseHighRowID, err := projectionHighRowID(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("read projection high rowid: %w", err)
+	}
+	if !built || baseEpoch != baseWitness.epoch || baseHighRowID != baseWitness.highRowID {
+		// Rebuild from the transaction's committed view. The insert has not
+		// started, so this is exactly the pre-batch state. A failed rebuild
+		// keeps the previous base and marks the persisted document degraded:
+		// never bless an aggregate whose witness did not match. The scan is
+		// bounded by the maintenance budget so a straggler cannot hold the
+		// writer indefinitely.
+		rebuildCtx, cancel := s.withMaintenanceTimeout(context.Background())
+		rebuilt, rebuildErr := readTotals(rebuildCtx, tx)
+		cancel()
+		if rebuildErr != nil {
+			degraded = true
+			log.Printf("storage: rebuild stale totals base: %v", rebuildErr)
+		} else {
+			next, degraded = rebuilt, false
+		}
+	}
 
 	// One values slice is reused for every row: a fresh 98-element []any per
 	// record was the batch's largest avoidable allocation.
@@ -219,7 +247,7 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.account(records, &next)
+	s.account(records, &next, totalsWitness{epoch: epoch, highRowID: highRowID}, degraded)
 	return nil
 }
 
