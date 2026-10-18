@@ -13,7 +13,7 @@ defines their supported combinations.
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
-| [internal/backup](../internal/backup/archive.go) | Self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256). |
+| [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256). |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |

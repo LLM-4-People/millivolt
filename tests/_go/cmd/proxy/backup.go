@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -96,6 +98,143 @@ func TestBackupRestoreConfigRoundTrip(t *testing.T) {
 	if liveCfg.MaxRetries != 9 {
 		t.Fatalf("restore max_retries=%d, want 9", liveCfg.MaxRetries)
 	}
+}
+
+// TestBackupHandlerStreamsFileWithContentLength pins the download path: the
+// response is served from the encoded staging file, Content-Length is that
+// file's size, the artifact headers are unchanged, and the bytes equal what
+// backup.Encode emits for the same archive and Created moment.
+func TestBackupHandlerStreamsFileWithContentLength(t *testing.T) {
+	liveReloadFixture(t)
+	cfg := config.Default()
+	cfg.MaxRetries = 7
+	if err := config.WriteFile(liveConfigPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	t.Setenv("TMPDIR", stage)
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?config=1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("backup status %d body %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.Bytes()
+	if cl := rr.Header().Get("Content-Length"); cl != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d", cl, len(body))
+	}
+	if ct := rr.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	if dispo := rr.Header().Get("Content-Disposition"); !strings.HasPrefix(dispo, `attachment; filename="millivolt-backup-`) {
+		t.Fatalf("Content-Disposition = %q, want an attachment backup name", dispo)
+	}
+	arch, err := backup.Decode(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.Validate("", arch); err != nil {
+		t.Fatal(err)
+	}
+	want, err := backup.Encode("", backup.Archive{Created: arch.Created, Config: arch.Config})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, want) {
+		t.Fatal("handler bytes differ from backup.Encode for the same archive")
+	}
+	assertNoBackupStaging(t, stage)
+}
+
+// TestBackupHandlerCapFailsClosed proves a snapshot over backup_max_bytes is
+// rejected during encode, before a partial artifact or success response can
+// be served, and the staging file is removed.
+func TestBackupHandlerCapFailsClosed(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{
+		ID:         "oversize-backup",
+		Provider:   "neutral.example",
+		Model:      "n",
+		StatusCode: 200,
+		UserAgent:  incompressibleText(2 << 20),
+	})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveCfg.BackupMaxBytes = config.BackupMaxBytesMin
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?database=1", nil))
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s, want 413", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "backup exceeds backup_max_bytes") {
+		t.Fatalf("body %q does not name the cap", rr.Body.String())
+	}
+	assertNoBackupStaging(t, dir)
+}
+
+// TestBackupHandlerRemovesStagingOnWriteFailure pins the download cleanup
+// owner: a client that disappears mid-body still leaves no staging artifact.
+func TestBackupHandlerRemovesStagingOnWriteFailure(t *testing.T) {
+	liveReloadFixture(t)
+	if err := config.WriteFile(liveConfigPath, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	t.Setenv("TMPDIR", stage)
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	mux.ServeHTTP(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/backup?config=1", nil))
+	assertNoBackupStaging(t, stage)
+}
+
+type failingWriter struct{ header http.Header }
+
+func (w *failingWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (w *failingWriter) WriteHeader(int) {}
+
+func (w *failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("client disconnected")
+}
+
+func assertNoBackupStaging(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "millivolt-backup-") && strings.HasSuffix(e.Name(), ".mvb") {
+			t.Fatalf("backup staging file left behind: %s", e.Name())
+		}
+	}
+}
+
+// incompressibleText builds deterministic high-entropy text so a zstd frame
+// keeps a database snapshot over the 1 MiB backup ceiling.
+func incompressibleText(n int) string {
+	var b strings.Builder
+	sum := sha256.Sum256([]byte("backup-handler-cap"))
+	for b.Len() < n {
+		sum = sha256.Sum256(sum[:])
+		b.WriteString(hex.EncodeToString(sum[:]))
+	}
+	return b.String()[:n]
 }
 
 func TestRestoreRejectsCorruptArchive(t *testing.T) {

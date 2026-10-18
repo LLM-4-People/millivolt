@@ -519,9 +519,11 @@ The dashboard Settings Backup category downloads and restores a self-checked
 `.mvb` archive. Choose config, database, or both. The archive is a packed
 SQLite snapshot (`VACUUM INTO`, so free pages are not copied) and/or the
 schema YAML, then zstd-compressed with a content checksum and an outer SHA-256
-of the uncompressed payload. The process refuses to emit bytes that fail
-decode or semantic checks, so a produced file is never a silent corrupt
-backup.
+of the uncompressed payload. Encoding streams each member into the compressor
+while hashing and counting it, writes the archive once into a staging file,
+and self-checks that file before returning it; an archive that fails decode
+or semantic checks is never emitted, so a produced backup is never a silent
+corrupt file.
 
 Restore validates that hash, the zstd frame, config `Validate()`, and
 `PRAGMA integrity_check` before applying anything. Decode refuses an
@@ -540,16 +542,19 @@ restart; Open admits the pending file only after it checks again. Database
 **merge** inserts request ids that are not already in the live store
 immediately (live rows win on conflict) and does not require a restart.
 Truncated or bit-flipped files are rejected. The `backup_max_bytes` setting
-is the buffered archive ceiling.
+is the archive ceiling; encoding enforces it while the stream is written, so
+an over-cap archive is removed instead of partially served.
 
 Both directions stage database-sized transient files (the `VACUUM INTO`
-snapshot, integrity-check of an in-memory upload, and merge/overlap
-attachments) in the live database's own directory, so capacity follows the
-data volume: keep roughly one packed-snapshot size of free space there during
-backup and restore. A packed file already on that volume (VACUUM dest, pending
-`.incoming`) is integrity-checked in place so a second copy is not written
-beside it. A container's `/tmp` is a small tmpfs by design and never caps
-backup size.
+snapshot, the encoded download artifact, integrity-check of an in-memory
+upload, and merge/overlap attachments) in the live database's own directory,
+so capacity follows the data volume: budget roughly one packed-snapshot size,
+plus the staged encoded archive for a download, of free space there during
+backup and restore. A config-only download artifact uses the process temp
+directory because it carries no database-sized member. A packed file already
+on that volume (VACUUM dest, pending `.incoming`) is integrity-checked in
+place so a second copy is not written beside it. A container's `/tmp` is a
+small tmpfs by design and never caps backup size.
 
 ## Versions and images
 

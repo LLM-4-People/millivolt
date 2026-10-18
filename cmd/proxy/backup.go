@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -67,26 +69,41 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 	}
 	// A database member is staged for the self-check: capacity must follow
 	// the database volume, not a generic /tmp sized independently of
-	// backup_max_bytes.
+	// backup_max_bytes. The artifact itself streams into that same staging
+	// directory (the process temp directory for a config-only archive), so
+	// the download never retains a second full archive copy in memory.
 	stageDir, ok := stageDirOr400(w, wantDB)
 	if !ok {
 		return
 	}
-	raw, err := backup.Encode(stageDir, arch)
+	path, size, err := backup.EncodeFile(stageDir, arch, backupCap())
 	if err != nil {
+		if errors.Is(err, backup.ErrTooLarge) {
+			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
+			return
+		}
 		log.Printf("backup: encode failed: %v", err)
 		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if int64(len(raw)) > backupCap() {
-		adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
+	// EncodeFile removed every failure path; the caller owns this file and
+	// removes it after the response, including a client disconnect or a
+	// write failure.
+	defer os.Remove(path)
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("backup: open encoded archive: %v", err)
+		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	defer f.Close()
 	// The one artifact-header owner composes the name (millivolt-backup-<
 	// UTC stamp>.mvb), disposition, content type and no-store.
 	proxy.WriteArtifactHeaders(w, "backup", "mvb", "application/octet-stream", time.Now(), "")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(raw)))
-	_, _ = w.Write(raw)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	if _, err := io.Copy(w, f); err != nil {
+		log.Printf("backup: download failed: %v", err)
+	}
 }
 
 func handleRestore(w http.ResponseWriter, r *http.Request) {

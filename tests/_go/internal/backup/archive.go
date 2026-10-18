@@ -6,10 +6,12 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -257,6 +259,329 @@ func TestEncodeRefusesInvalidMembers(t *testing.T) {
 	if _, err := Encode(t.TempDir(), Archive{Database: []byte("SQLite format 3\x00not-a-db")}); err == nil {
 		t.Fatal("Encode returned bytes for a database CheckDatabase would reject")
 	}
+}
+
+// TestEncodeFileMatchesFormatByteForByte rebuilds the version-1 archive with
+// the pre-streaming layout (one zstd Write over the complete payload) and
+// requires both the file path and the byte-buffered wrapper to emit exactly
+// those bytes for config-only, database-only, and both members.
+func TestEncodeFileMatchesFormatByteForByte(t *testing.T) {
+	cfg := defaultConfigYAML(t)
+	db := packedRequestsDB(t)
+	created := time.Unix(1_700_000_123, 0).UTC()
+	cases := []struct {
+		name string
+		a    Archive
+	}{
+		{"config-only", Archive{Created: created, Config: cfg}},
+		{"database-only", Archive{Created: created, Database: db}},
+		{"both", Archive{Created: created, Config: cfg, Database: db}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := referenceArchive(t, tc.a)
+			stage := t.TempDir()
+			path, size, err := EncodeFile(stage, tc.a, int64(config.BackupMaxBytesMax))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path == "" {
+				t.Fatal("EncodeFile returned an empty path")
+			}
+			if size != int64(len(want)) {
+				t.Fatalf("EncodeFile size = %d, want %d", size, len(want))
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(raw, want) {
+				t.Fatalf("EncodeFile bytes differ from the version-1 layout at byte %d", firstDiff(raw, want))
+			}
+			buffered, err := Encode(stage, tc.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(buffered, want) {
+				t.Fatalf("Encode bytes differ from the version-1 layout at byte %d", firstDiff(buffered, want))
+			}
+			assertNoArchiveStaging(t, stage)
+		})
+	}
+}
+
+// TestEncodeFileSelfCheckRejectsCorruption pins the streaming self-check: a
+// byte change in the body or in the outer hash must fail before the file can
+// be returned.
+func TestEncodeFileSelfCheckRejectsCorruption(t *testing.T) {
+	a := Archive{Created: time.Unix(1_700_000_123, 0).UTC(), Config: defaultConfigYAML(t)}
+	dir := t.TempDir()
+	path, _, err := EncodeFile(dir, a, int64(config.BackupMaxBytesMax))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hashFlipped := append([]byte(nil), raw...)
+	hashFlipped[16] ^= 0xff
+	if err := os.WriteFile(path, hashFlipped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = selfCheckFile(path, "", a)
+	if err == nil || !strings.Contains(err.Error(), "payload hash mismatch") {
+		t.Fatalf("outer hash corruption self-check = %v, want payload hash mismatch", err)
+	}
+
+	bodyFlipped := append([]byte(nil), raw...)
+	bodyFlipped[len(bodyFlipped)-1] ^= 0xff
+	if err := os.WriteFile(path, bodyFlipped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := selfCheckFile(path, "", a); err == nil {
+		t.Fatal("body corruption passed the streaming self-check")
+	}
+}
+
+// TestEncodeFileCleansStagingOnFailure pins both failure cleanup owners: the
+// archive temp file written before Validate and the staging directory used by
+// the database inspector.
+func TestEncodeFileCleansStagingOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, err := EncodeFile(dir, Archive{Config: []byte("listen: 8080\n")}, int64(config.BackupMaxBytesMax)); err == nil {
+		t.Fatal("invalid config encoded")
+	}
+	assertNoArchiveStaging(t, dir)
+	if _, _, err := EncodeFile(dir, Archive{Database: []byte("SQLite format 3\x00not-a-db")}, int64(config.BackupMaxBytesMax)); err == nil {
+		t.Fatal("invalid database encoded")
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 0 {
+		t.Fatalf("failed encode left staging entries: %v", ents)
+	}
+}
+
+// TestEncodeFileEnforcesCapBeforeArtifact proves the configured archive
+// ceiling stops the stream, removes the partial file, and returns no path.
+func TestEncodeFileEnforcesCapBeforeArtifact(t *testing.T) {
+	dir := t.TempDir()
+	// ~2 MiB of high-entropy rows makes the encoded archive exceed the
+	// Schema minimum 1 MiB ceiling even after zstd.
+	db := packedRequestsDBBlob(t, 2<<20)
+	path, size, err := EncodeFile(dir, Archive{Created: time.Unix(1_700_000_123, 0).UTC(), Database: db}, int64(config.BackupMaxBytesMin))
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("cap enforcement error = %v, want ErrTooLarge", err)
+	}
+	if path != "" || size != 0 {
+		t.Fatalf("cap enforcement returned path=%q size=%d", path, size)
+	}
+	assertNoArchiveStaging(t, dir)
+}
+
+// TestEncodeFileConcurrentStagingUniqueAndClean runs bounded concurrent
+// encodes into one staging directory: every file name is distinct and every
+// successful and failed path is removed by its owner.
+func TestEncodeFileConcurrentStagingUniqueAndClean(t *testing.T) {
+	stage := t.TempDir()
+	a := Archive{Created: time.Unix(1_700_000_123, 0).UTC(), Config: defaultConfigYAML(t)}
+	const workers = 8
+	paths := make([]string, workers)
+	errs := make([]error, workers)
+	sizes := make([]int64, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			paths[i], sizes[i], errs[i] = EncodeFile(stage, a, int64(config.BackupMaxBytesMax))
+		}(i)
+	}
+	wg.Wait()
+	seen := map[string]bool{}
+	for i := 0; i < workers; i++ {
+		if errs[i] != nil {
+			t.Fatalf("encode %d: %v", i, errs[i])
+		}
+		if paths[i] == "" || sizes[i] <= 0 {
+			t.Fatalf("encode %d returned path=%q size=%d", i, paths[i], sizes[i])
+		}
+		if seen[paths[i]] {
+			t.Fatalf("concurrent encodes shared staging path %q", paths[i])
+		}
+		seen[paths[i]] = true
+		if _, err := os.Stat(paths[i]); err != nil {
+			t.Fatalf("encode %d artifact missing: %v", i, err)
+		}
+	}
+	for path := range seen {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertNoArchiveStaging(t, stage)
+	// A failing concurrent-class encode must also leave no artifact.
+	if _, _, err := EncodeFile(stage, Archive{Config: []byte("listen: 8080\n")}, int64(config.BackupMaxBytesMax)); err == nil {
+		t.Fatal("invalid config encoded")
+	}
+	assertNoArchiveStaging(t, stage)
+}
+
+// BenchmarkEncodeFile measures the streaming owner without a retained final
+// archive. BenchmarkEncode measures the legacy byte-buffered wrapper, whose
+// ReadFile adds one full archive copy; the -benchmem difference is the copy
+// the handler no longer takes.
+func BenchmarkEncodeFile(b *testing.B) {
+	benchEncode(b, false)
+}
+
+func BenchmarkEncode(b *testing.B) {
+	benchEncode(b, true)
+}
+
+func benchEncode(b *testing.B, buffered bool) {
+	b.Helper()
+	cfg := largeValidConfig(b, 2<<20)
+	a := Archive{Created: time.Unix(1_700_000_123, 0).UTC(), Config: cfg}
+	b.SetBytes(int64(len(cfg)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if buffered {
+			if _, err := Encode(b.TempDir(), a); err != nil {
+				b.Fatal(err)
+			}
+			continue
+		}
+		path, _, err := EncodeFile(b.TempDir(), a, int64(config.BackupMaxBytesMax))
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func defaultConfigYAML(t testing.TB) []byte {
+	t.Helper()
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	return yaml.Bytes()
+}
+
+// referenceArchive is the frozen version-1 layout: member framing, outer
+// SHA-256, one zstd Write over the whole payload, and the fixed header.
+func referenceArchive(t *testing.T, a Archive) []byte {
+	t.Helper()
+	var payload bytes.Buffer
+	write := func(kind uint8, data []byte) {
+		payload.WriteByte(kind)
+		payload.Write(binary.BigEndian.AppendUint64(nil, uint64(len(data))))
+		payload.Write(data)
+	}
+	if len(a.Config) > 0 {
+		write(memberConfig, a.Config)
+	}
+	if len(a.Database) > 0 {
+		write(memberDatabase, a.Database)
+	}
+	sum := sha256.Sum256(payload.Bytes())
+	var body bytes.Buffer
+	enc, err := zstd.NewWriter(&body,
+		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
+		zstd.WithEncoderCRC(true),
+		zstd.WithEncoderConcurrency(1),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Write(payload.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte(magic), archiveVersion, a.flags(), 0, 0)
+	raw = binary.BigEndian.AppendUint64(raw, uint64(a.Created.Unix()))
+	raw = append(raw, sum[:]...)
+	return append(raw, body.Bytes()...)
+}
+
+func firstDiff(got, want []byte) int {
+	n := len(got)
+	if len(want) < n {
+		n = len(want)
+	}
+	for i := 0; i < n; i++ {
+		if got[i] != want[i] {
+			return i
+		}
+	}
+	return n
+}
+
+func assertNoArchiveStaging(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), "millivolt-backup-") && strings.HasSuffix(e.Name(), ".mvb") {
+			t.Fatalf("staging file left behind: %s", e.Name())
+		}
+	}
+}
+
+// largeValidConfig builds a YAML document whose comments carry enough
+// entropy that zstd cannot shrink the archive under the test's ceiling.
+func largeValidConfig(t testing.TB, minBytes int) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	b.WriteString("# generated backup fixture\n")
+	sum := sha256.Sum256([]byte("backup-cap"))
+	for b.Len() < minBytes {
+		sum = sha256.Sum256(sum[:])
+		fmt.Fprintf(&b, "# %x\n", sum[:16])
+	}
+	return b.Bytes()
+}
+
+func packedRequestsDBBlob(t *testing.T, blobBytes int) []byte {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "src.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE requests (id TEXT PRIMARY KEY, payload BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+	blob := largeValidConfig(t, blobBytes)
+	if _, err := db.Exec(`INSERT INTO requests(id, payload) VALUES ('big', ?)`, blob); err != nil {
+		t.Fatal(err)
+	}
+	snap := filepath.Join(t.TempDir(), "snap.db")
+	if _, err := db.Exec("VACUUM INTO ?", snap); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	data, err := os.ReadFile(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func packedRequestsDB(t *testing.T) []byte {
