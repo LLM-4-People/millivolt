@@ -420,6 +420,38 @@ func TestHandleStreamRecordEventsCarryID(t *testing.T) {
 	}
 }
 
+// TestHandleStreamClosesOnUnmarshalableEvent pins fail-closed replay: an
+// event that cannot encode must end the stream, never be skipped while the
+// next id advances Last-Event-ID past it.
+func TestHandleStreamClosesOnUnmarshalableEvent(t *testing.T) {
+	b := NewBuffer(8)
+	b.SetModelObserver(func(full bool, _ ...[]*Record) any {
+		if full {
+			return map[string]string{"revision": "test"}
+		}
+		return func() {} // json.Marshal cannot encode a function value
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil).WithContext(ctx)
+	w := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		b.HandleStream(w, req)
+		close(done)
+	}()
+	waitFor(t, func() bool { return w.n.Load() >= 1 }, "snapshot write")
+	b.Record(record("a"))
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream kept running after an unmarshalable record event")
+	}
+	if strings.Contains(w.Body.String(), "event: record") {
+		t.Fatal("unmarshalable record frame was emitted")
+	}
+}
+
 // SetStreamHeaders is the one owner of the SSE response header triple shared
 // by every server-sent stream the process serves. This pins the full triple
 // on the dashboard feed surface (the direct SetStreamHeaders consumer), so

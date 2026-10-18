@@ -190,12 +190,16 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	defer b.UnsubscribeLive(live)
 
 	snapshot := b.SnapshotRequest(q, r.Header)
+	feedID := snapshot.FeedID
 	snap, err := json.Marshal(ObserveSnapshot(snapshot, b.observerModels(true, snapshot.Records, snapshot.InFlightRecords)))
 	if err != nil {
 		log.Printf("metrics: encode snapshot: %v", err)
 		adminjson.WriteError(w, http.StatusInternalServerError, "serialize")
 		return
 	}
+	// The snapshot's record slices are not needed after this marshal. Clearing
+	// them releases every pointer they pin for the life of the connection.
+	snapshot = Snapshot{}
 	if err := writeSSEFrame(w, "snapshot", 0, false, snap); err != nil {
 		return
 	}
@@ -205,7 +209,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	// A purge sends an immediate invalidation before closing, avoiding the
 	// browser's reconnect delay. A restart's unchanged epoch simply closes.
 	defer func() {
-		if feed := b.FeedID(); feed != snapshot.FeedID && ctx.Err() == nil {
+		if feed := b.FeedID(); feed != feedID && ctx.Err() == nil {
 			data, _ := json.Marshal(map[string]string{"feed_id": feed})
 			if _, err := w.Write([]byte("event: reset\ndata: " + string(data) + "\n\n")); err == nil {
 				flusher.Flush()
@@ -226,16 +230,17 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return // overflow: reconnect before accepting any later cursor
 			}
-			if ev.feedID != snapshot.FeedID {
+			if ev.feedID != feedID {
 				continue // a pre-purge publication delayed until after subscribe
 			}
-			// A *Record marshals cleanly (scalar fields); on the unreachable
-			// failure, skip this event rather than kill the stream. The id:
-			// field is the feed cursor - the browser echos it back as
-			// Last-Event-ID on reconnect.
+			// A *Record marshals cleanly (scalar fields). If a custom observer
+			// ever returns an unmarshalable value, close the stream rather than
+			// skipping this seq: the next id would advance Last-Event-ID past
+			// a record that can no longer be replayed. Closing forces a resync.
 			data, err := json.Marshal(b.observeRecord(ev.Record))
 			if err != nil {
-				continue
+				log.Printf("metrics: encode record event: %v", err)
+				return
 			}
 			if err := writeSSEFrame(w, "record", ev.Seq, true, data); err != nil {
 				return
@@ -245,13 +250,15 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return // overflow: the next snapshot restores pending state
 			}
-			if liveEv.feedID != snapshot.FeedID {
+			if liveEv.feedID != feedID {
 				continue
 			}
-			// Lifecycle event (begin/end). The Record marshals cleanly.
+			// Lifecycle event (begin/end). A marshal failure is a stream
+			// contract failure, not a skippable event; resync instead.
 			data, err := json.Marshal(b.observeLive(liveEv))
 			if err != nil {
-				continue
+				log.Printf("metrics: encode live event: %v", err)
+				return
 			}
 			if err := writeSSEFrame(w, liveEv.Phase, 0, false, data); err != nil {
 				return
