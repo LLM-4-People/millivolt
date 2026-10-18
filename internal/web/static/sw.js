@@ -6,6 +6,9 @@
 // Cached shell keys share CACHE_PREFIX; the stamped version completes it.
 const CACHE_PREFIX = 'millivolt-shell-';
 const CACHE = CACHE_PREFIX + '__DASHBOARD_VERSION__';
+// The shell stamps every local /dash/ URL with the same version. Derive it
+// from CACHE, the single owner, instead of repeating the literal.
+const CACHE_VERSION = CACHE.slice(CACHE_PREFIX.length);
 // One list of the exact shell assets: the install-time precache array and
 // shellPath's exact-name check both derive from it, so the two cannot drift.
 // The prefix rules stay separate (shellPath accepts /dash/ paths and any
@@ -35,6 +38,16 @@ function shellPath(pathname) {
   return pathname.startsWith('/dash/') ||
     SHELL_ASSETS.includes(pathname) ||
     pathname.startsWith('/icon-');
+}
+
+// A /dash/ URL carrying exactly the stamped version names immutable bytes:
+// the server serves it private/immutable, and a rebuild changes the version
+// before it can change the bytes under that URL. Any missing, stale or
+// duplicate v stays network-first.
+function exactVersionedDash(url) {
+  if (!url.pathname.startsWith('/dash/')) return false;
+  const versions = url.searchParams.getAll('v');
+  return versions.length === 1 && versions[0] === CACHE_VERSION;
 }
 
 function offlinePage() {
@@ -74,6 +87,26 @@ self.addEventListener('fetch', (event) => {
     return;
   }
   if (livePath(url.pathname)) return;
+  // Exact-version /dash/ assets are content-addressed by the stamped v, so
+  // answer from the stamped cache first and store the first successful fetch.
+  // Unversioned shell and brand paths remain network-first with cache fallback.
+  if (exactVersionedDash(url)) {
+    event.respondWith((async () => {
+      const cache = await caches.open(CACHE);
+      const hit = await cache.match(req);
+      if (hit) return hit;
+      const fresh = await fetch(req);
+      if (fresh.ok) {
+        try {
+          await cache.put(req, fresh.clone());
+        } catch {
+          // A full or unavailable CacheStorage must not fail the response.
+        }
+      }
+      return fresh;
+    })());
+    return;
+  }
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
     try {

@@ -36,7 +36,7 @@ PUBLIC_PATHS = (
     "tests/go.py", "tests/python/go.py", "tests/python/repository.py", "tests/python/browser.py",
     "tests/python/backup_db.py", "tests/python/release.py", "tests/support.py", "tests/README.md",
     "tests/_go/version.go", "tests/_go/internal/config/config.go",
-    "tests/ui_check.js", "tests/browser_check.py", "tests/explorer_check.py",
+    "tests/ui_check.js", "tests/sw_check.js", "tests/browser_check.py", "tests/explorer_check.py",
     "scripts/licenses/main.go", "deploy/nginx.conf", "docs/reverse-proxy.md",
     "docs/dashboard.md", "docs/images/overview/dashboard.png", "docs/images/explorer/providers.png",
     "docs/images/explorer/models.png", "docs/images/charts/tokens.png", "docs/images/charts/speed-latency.png",

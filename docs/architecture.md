@@ -352,13 +352,21 @@ the same versioned URL and single-flighted across concurrent opens. Saved
 hash/chart choices apply before rendering; invalid/missing seed falls back to
 the endpoint.
 Dynamic HTML/state is private/no-store. Every local `/dash/` CSS/JS URL in the
-shell carries the content version as `?v=`: a request with the exact current
-version is served `private, max-age=31536000, immutable`, while a missing or
-stale version revalidates with `no-cache`, so an old index cannot pin new bytes
-under an old URL. A Bearer-authenticated response that also mints a session
-cookie keeps the gate's stricter `no-store`. Immutable asset representations and
-revalidation identities are precomputed. Content version changes use the same
-winning bootstrap gate to reload once.
+shell carries the content version as `?v=`. On a hit, the service worker
+answers a `/dash/` request carrying exactly that version from its stamped
+CacheStorage before the network; on a miss it fetches once, stores a successful
+response, and returns it. This is the one cache-first path. A request with no
+`v`, a stale value, or more than one `v` stays network-first with cache
+fallback, as does every brand/PWA path, so an old index cannot pin new bytes
+under an old URL. The server serves the exact-version response
+`private, max-age=31536000, immutable`, while a missing or stale version
+revalidates with `no-cache`. A Bearer-authenticated response that also mints a
+session cookie keeps the gate's stricter `no-store`. Immutable asset
+representations and revalidation identities are precomputed. Content version
+changes use the same winning bootstrap gate to reload once. The cache-first
+path is asset caching only, never an offline app shell: navigation to `/` stays
+live with the static offline fallback, and live/operator routes are never
+cached.
 
 Vanilla modules under [static/js](../internal/web/static/js) have distinct owners:
 `core` formatters/shared state, `entities` identities/record labels, `explorer`

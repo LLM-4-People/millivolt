@@ -660,7 +660,7 @@ the credential gates both.
 | `GET /favicon.ico` | Unauthenticated ICO brand mark. Browsers fetch this without Authorization; it is registered on the mux so it never reaches the inference catch-all. |
 | `GET /favicon.svg`, `/apple-touch-icon.png`, `/icon-*.png` | Ungated SVG/PNG icons for tabs, home screens and the web app manifest. |
 | `GET /manifest.webmanifest` | Ungated web app manifest (name, standalone display, 192/512 icons). |
-| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; network-first for `/dash/*`. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*`, `/session/*` or `/v1`. |
+| `GET /sw.js` | Ungated service worker. Precaches brand icons/manifest; cache-first only for a `/dash/` URL carrying exactly the stamped version, network-first with cache fallback for unversioned or stale `/dash/` URLs and brand paths. Navigations to `/` are fetched live (never cached: login vs bootstrap) with a static offline fallback. Never intercepts `/metrics/*`, `/admin/*`, `/session/*` or `/v1`. |
 | `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
