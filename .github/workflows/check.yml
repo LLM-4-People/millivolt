@@ -47,6 +47,18 @@ jobs:
           python-version-file: .python-version
           cache: pip
           cache-dependency-path: requirements-dev.txt
+      - name: Cache Playwright browsers
+        # Only the browser download is reusable. The install step below still
+        # runs on every job, so OS dependencies are always refreshed and no
+        # check can be skipped. requirements-dev.txt owns the Python Playwright
+        # pin that installs Chromium; package-lock.json covers Node tooling, so
+        # both dependency files participate in the key.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}-${{ hashFiles('requirements-dev.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
       - name: Install development dependencies
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
@@ -86,8 +98,10 @@ jobs:
         include:
           - runner: ubuntu-24.04
             platform: linux/amd64
+            cache_scope: millivolt-container-linux-amd64
           - runner: ubuntu-24.04-arm
             platform: linux/arm64
+            cache_scope: millivolt-container-linux-arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     env:
@@ -111,6 +125,13 @@ jobs:
           push: false
           tags: millivolt:check
           build-args: REVISION=${{ github.sha }}
+          # Each native matrix leg owns one scope: the amd64 and arm64 layer
+          # graphs never share or overwrite a cache object. mode=max exports
+          # the Go module and build layers, where the time is actually spent.
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          # Cache export is an accelerator, never a gate: a throttled or
+          # read-only cache must not fail the build or its checks.
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }},ignore-error=true
       - name: Check isolated container
         env:
           IMAGE_ID: ${{ steps.build.outputs.imageid }}
@@ -240,6 +261,14 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: REVISION=${{ steps.cut.outputs.revision }}
+          # Reuse both native check scopes, which already hold the expensive
+          # Go layers for each platform. Export only the final image layers
+          # under a publish-only scope: a max export here would duplicate both
+          # platform graphs into the repository's shared 10 GB cache budget.
+          cache-from: |
+            type=gha,scope=millivolt-container-linux-amd64
+            type=gha,scope=millivolt-container-linux-arm64
+          cache-to: type=gha,mode=min,scope=millivolt-publish-multiarch,ignore-error=true
 
   publish-testing:
     needs: [checks, container]
@@ -274,3 +303,9 @@ jobs:
             org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
             org.opencontainers.image.licenses=MIT
           build-args: REVISION=${{ github.sha }}
+          # Same reuse and bounded-export policy as publish, with a separate
+          # scope so testing never overwrites or evicts the release cache.
+          cache-from: |
+            type=gha,scope=millivolt-container-linux-amd64
+            type=gha,scope=millivolt-container-linux-arm64
+          cache-to: type=gha,mode=min,scope=millivolt-publish-testing-multiarch,ignore-error=true

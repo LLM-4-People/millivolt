@@ -24,6 +24,13 @@ services:
     security_opt:
       - no-new-privileges:true
     restart: unless-stopped
+    # Same bounded json-file policy as the deployment Compose: repeated
+    # development rebuilds and runs must not grow host logs without limit.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     stop_grace_period: ${MILLIVOLT_STOP_GRACE_PERIOD:-30s}
 
 volumes:
