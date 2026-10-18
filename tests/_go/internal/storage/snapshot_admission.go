@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/backup"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -86,6 +87,71 @@ func TestAdmissionRejectsUnwritableWriterSchema(t *testing.T) {
 	}
 	if n := countRows(t, reopened); n != 2 {
 		t.Fatalf("live rows after new write = %d, want 2", n)
+	}
+}
+
+// TestValidatePendingSnapshotRunsAdmissionPreflight pins the restore-time
+// validation owner: it validates the staged pending file with the same
+// schema/migrate and writer-insert preflight boot runs, rejects a file that
+// passes integrity but cannot accept the writer INSERT, and never installs or
+// removes the pending file itself.
+func TestValidatePendingSnapshotRunsAdmissionPreflight(t *testing.T) {
+	dir := t.TempDir()
+	dstPath := filepath.Join(dir, "dst.db")
+	if err := StageSnapshot(dstPath, packedSnapshot(t, "valid-row")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidatePendingSnapshot(dstPath); err != nil {
+		t.Fatalf("valid pending snapshot rejected: %v", err)
+	}
+	if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
+		t.Fatalf("validation consumed the pending snapshot: %v", err)
+	}
+	if _, err := os.Stat(dstPath); !os.IsNotExist(err) {
+		t.Fatalf("validation installed the pending snapshot: %v", err)
+	}
+
+	// Build the same extra-required-column shape admission rejects: integrity
+	// passes, but the writer's exact INSERT omits the new NOT NULL column.
+	mutable := filepath.Join(dir, "mutable.db")
+	data, err := os.ReadFile(PendingSnapshotPath(dstPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mutable, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", mutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM requests`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN audit_extra TEXT NOT NULL`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.CheckDatabaseFile(mutable); err != nil {
+		t.Fatalf("invalid fixture must still pass the integrity check: %v", err)
+	}
+	bad, err := os.ReadFile(mutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := StageSnapshot(dstPath, bad); err != nil {
+		t.Fatal(err)
+	}
+	err = ValidatePendingSnapshot(dstPath)
+	if err == nil || !strings.Contains(err.Error(), "writer insert probe") {
+		t.Fatalf("ValidatePendingSnapshot = %v, want a writer insert probe rejection", err)
+	}
+	if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
+		t.Fatalf("validation removed the rejected pending snapshot: %v", err)
 	}
 }
 

@@ -282,6 +282,21 @@ func StageSnapshotFile(path, source string) error {
 	})
 }
 
+// ValidatePendingSnapshot runs the shared admission preflight against the
+// pending snapshot staged for path, without installing it. A restore calls it
+// immediately after StageSnapshotFile so a replacement the next boot would
+// reject (an extra required column, a missing id key, a trigger that aborts
+// the writer INSERT) fails while the config member is still unwritten and the
+// pending guard can roll back. The live database is untouched. The staged file
+// may be migrated in place and its stale sidecars removed, exactly as a boot
+// admission would do; the caller owns removing or quarantining it on failure.
+func ValidatePendingSnapshot(path string) error {
+	if path == "" {
+		return fmt.Errorf("database path is empty")
+	}
+	return preflightPendingSnapshot(PendingSnapshotPath(path))
+}
+
 // publishSnapshot is the one atomic publish owner for both snapshot wrappers:
 // a private temporary file in the destination directory, 0600 permissions, a
 // sync before the rename, and the PendingSnapshotPath name Open admits. The
@@ -513,7 +528,7 @@ func recoverInterruptedSnapshot(path string) error {
 	if _, err := os.Stat(path); err == nil {
 		// The live main file exists, so a leftover rollback entry cannot be the
 		// authoritative copy. Remove it instead of reverting committed rows.
-		if err := removeSnapshotDebris(previous); err != nil {
+		if err := removeMarkerlessSnapshotDebris(previous); err != nil {
 			return err
 		}
 		return syncSnapshotDir(filepath.Dir(path))
@@ -525,10 +540,30 @@ func recoverInterruptedSnapshot(path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := removeSnapshotDebris(previous); err != nil {
+	if err := removeMarkerlessSnapshotDebris(previous); err != nil {
 		return err
 	}
 	return syncSnapshotDir(filepath.Dir(path))
+}
+
+// removeMarkerlessSnapshotDebris removes a rollback set when no durable
+// admission marker exists, warning before it discards a non-empty
+// `.previous-wal`. Markerless state is the pre-marker admission layout: a live
+// main plus `.previous-wal` can be an interrupted recovery that restored the
+// main before its WAL, so those frames may be committed. Without a marker they
+// cannot be classified, and the conservative no-marker policy keeps the live
+// main; the warning makes the possible data loss visible instead of silent.
+// Marked pending and committed recovery never uses this helper.
+func removeMarkerlessSnapshotDebris(previous string) error {
+	wal := previous + "-wal"
+	if info, err := os.Stat(wal); err == nil {
+		if info.Size() > 0 {
+			log.Printf("storage: markerless snapshot recovery: discarding non-empty rollback WAL %s (%d bytes); without a state marker its committed frames cannot be distinguished from debris and may be lost", wal, info.Size())
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return removeSnapshotDebris(previous)
 }
 
 // restorePendingSnapshot restores the previous database set.

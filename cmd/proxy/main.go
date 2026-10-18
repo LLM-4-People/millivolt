@@ -37,7 +37,7 @@ import (
 // the -config flag value.
 var (
 	liveMu             sync.Mutex
-	reloadMu           sync.Mutex // serializes reload transactions; never held by readers
+	reloadMu           sync.Mutex // serializes reload transactions; Settings takes Handler.mu first; never held by readers
 	liveCfg            *config.Config
 	bootCfg            *config.Config // immutable process-bound settings
 	liveProxy          *proxy.Server
@@ -666,8 +666,16 @@ func adminConfigHandler() *config.Handler {
 			defer liveMu.Unlock()
 			return liveCfg.Clone()
 		},
-		Overrides:    ov,
-		Persist:      reloadConfig,
+		Overrides: ov,
+		// Settings POST holds Handler.mu then reloadMu (Serialize), so its
+		// read/validate/write/reload cannot interleave with a backup restore
+		// (which holds reloadMu alone) or another reload trigger. Persist is
+		// the locked variant because this handler already holds reloadMu.
+		Serialize: func() func() {
+			reloadMu.Lock()
+			return reloadMu.Unlock
+		},
+		Persist:      reloadConfigLocked,
 		Backup:       backupStatus,
 		ReloadStatus: lastReloadDoc,
 	}

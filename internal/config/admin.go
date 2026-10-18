@@ -40,6 +40,15 @@ type Handler struct {
 	// uses LoadFileRepair + CLI overrides + Server.Reload (a clean WriteFile
 	// is a no-op repair). Nil is write-only (tests).
 	Persist func() (restartRequired []string, err error)
+	// Serialize brackets the POST file read/validate/write/reload transaction
+	// with the process-wide config-application serializer. Production wires it
+	// to reloadMu, the same lock SIGHUP, /admin/reload and backup restore hold,
+	// so a Settings save cannot interleave with a restore's read/write/reload.
+	// It returns the release function; nil is a no-op (tests). It runs after
+	// Handler.mu is acquired, so the lock order is Handler.mu -> serializer.
+	// Persist must then be the locked variant and must not acquire the
+	// serializer again.
+	Serialize func() (release func())
 	// Backup reports whether Settings can download/restore config and
 	// database. Nil omits the object (tests).
 	Backup func() map[string]any
@@ -127,6 +136,10 @@ func (h *Handler) servePost(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.Serialize != nil {
+		release := h.Serialize()
+		defer release()
+	}
 	cur, err := h.fileConfig()
 	if err != nil {
 		adminjson.WriteError(w, http.StatusInternalServerError, err.Error())

@@ -283,6 +283,13 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			liveMu.Lock()
 			store = liveStore
 			liveMu.Unlock()
+			// A combined merge writes into the running store, but the restored
+			// config would make the next boot open a different file and strand
+			// those rows. Reject it before a config byte or row changes.
+			if err := validateRestoreMergePath(configPlan, store); err != nil {
+				adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		needRestart, guard, err := applyRestoreDatabase(r.Context(), dbPath, arch.DatabasePath, dbMode, store)
 		if err != nil {
@@ -302,18 +309,37 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		restart = append(restart, skipped...)
+		restart = appendRestartRequired(restart, skipped...)
 	}
 	if dbGuard != nil {
 		dbGuard.discard()
 	}
 	if dbRestart {
-		restart = append(restart, "db_path")
+		restart = appendRestartRequired(restart, "db_path")
 	}
 	// ok is the operator action plane's shared success marker (the dashboard
 	// trusts the HTTP status; the restore tests pin it, tests/_go/cmd/proxy/backup.go).
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "restart_required": restart})
+}
+
+// appendRestartRequired merges restart-required keys without duplicates. A
+// restore's config reload already reports db_path when it changed, while the
+// database phase appends its own db_path; the operator must see each restart
+// requirement exactly once.
+func appendRestartRequired(list []string, keys ...string) []string {
+	seen := make(map[string]struct{}, len(list)+len(keys))
+	for _, key := range list {
+		seen[key] = struct{}{}
+	}
+	for _, key := range keys {
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		list = append(list, key)
+	}
+	return list
 }
 
 func parseBackupParts(q url.Values) (wantConfig, wantDB bool, err error) {
@@ -811,11 +837,42 @@ func (g *restorePendingGuard) discard() {
 	g.backup = ""
 }
 
+// validateRestoreMergePath is the single gate for a combined config+database
+// merge. Merge writes into the running store, but the restored config's
+// effective db_path is what the next boot opens; when they differ, the merge
+// would be stranded in the old file while the process reopens the new one.
+// Rejecting before the config write and the merge leaves config, live state,
+// and the pending slot unchanged. A database-only merge (plan nil) keeps its
+// documented behavior: it merges into the running store regardless of the
+// current config's startup-bound db_path.
+func validateRestoreMergePath(plan *restoreConfigPlan, store *storage.Store) error {
+	if store == nil {
+		return storage.ErrStorageDisabled
+	}
+	if plan == nil {
+		return nil
+	}
+	if filepath.Clean(plan.dbPath) == filepath.Clean(store.DBPath()) {
+		return nil
+	}
+	return fmt.Errorf("config and database merge cannot change db_path: the restored config selects %q but the running store is %q; merge the database separately or use database_mode=replace", plan.dbPath, store.DBPath())
+}
+
+// rollbackRestorePending restores the admission slot owned by guard and joins
+// a rollback failure onto the cause. It is the one rollback owner for the
+// replace stage and its preflight.
+func rollbackRestorePending(guard *restorePendingGuard, cause error) error {
+	if rbErr := guard.rollback(); rbErr != nil {
+		return fmt.Errorf("%w; %v", cause, rbErr)
+	}
+	return cause
+}
+
 // applyRestoreDatabase applies the database member at dbPath. Replace stages
-// the validated snapshot at PendingSnapshotPath and returns the guard that owns
-// the admission slot; the caller must discard it after a later config phase
-// succeeds or roll it back on failure. Merge writes through the live store and
-// cannot be rolled back.
+// and preflights the validated snapshot at PendingSnapshotPath and returns the
+// guard that owns the admission slot; the caller must discard it after a later
+// config phase succeeds or roll it back on failure. Merge writes through the
+// live store and cannot be rolled back.
 func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, store *storage.Store) (restart bool, guard *restorePendingGuard, err error) {
 	if dbPath == "" {
 		return false, nil, storage.ErrStorageDisabled
@@ -832,10 +889,13 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 		return false, nil, err
 	}
 	if err := storage.StageSnapshotFile(dbPath, source); err != nil {
-		if rbErr := guard.rollback(); rbErr != nil {
-			return false, nil, fmt.Errorf("%w; %v", err, rbErr)
-		}
-		return false, nil, err
+		return false, nil, rollbackRestorePending(guard, err)
+	}
+	// Boot preflights the pending file before admitting it; a restore that
+	// stops at integrity staging would return 200 for a database the next
+	// boot rejects. Run the same preflight now, before the config is written.
+	if err := storage.ValidatePendingSnapshot(dbPath); err != nil {
+		return false, nil, rollbackRestorePending(guard, err)
 	}
 	return true, guard, nil
 }

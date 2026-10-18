@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -161,6 +162,40 @@ func TestSettingsConcurrentRevisionAndReadIsolation(t *testing.T) {
 	rr := <-got
 	if rr.Code != 200 || rr.Header().Get("Cache-Control") != "no-store" || !strings.Contains(rr.Body.String(), `"max_retries":4`) {
 		t.Fatalf("GET after save: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// TestSettingsTransactionHookBracketsSave pins the POST transaction hook:
+// Serialize is entered before the file read/validate/write/reload and released
+// after Persist (including the stale-revision rejection, which never persists).
+// Production wires it to reloadMu so a Settings save cannot interleave with a
+// backup restore.
+func TestSettingsTransactionHookBracketsSave(t *testing.T) {
+	h := &Handler{Path: filepath.Join(t.TempDir(), "config.yaml")}
+	var events []string
+	h.Serialize = func() func() {
+		events = append(events, "enter")
+		return func() { events = append(events, "exit") }
+	}
+	h.Persist = func() ([]string, error) {
+		events = append(events, "persist")
+		return nil, nil
+	}
+	rr := settingsPost(h, configRevision(Default()), `{"max_retries":2}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if want := []string{"enter", "persist", "exit"}; !slices.Equal(events, want) {
+		t.Fatalf("transaction events = %v, want %v", events, want)
+	}
+
+	events = nil
+	rr = settingsPost(h, configRevision(Default()), `{"max_retries":3}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("stale save status=%d body=%s, want 409", rr.Code, rr.Body.String())
+	}
+	if want := []string{"enter", "exit"}; !slices.Equal(events, want) {
+		t.Fatalf("stale-save events = %v, want %v", events, want)
 	}
 }
 

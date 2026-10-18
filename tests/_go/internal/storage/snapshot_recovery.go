@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -351,6 +353,48 @@ func TestRestorePreviousFailureKeepsPendingFence(t *testing.T) {
 				t.Fatalf("retried restore left a rollback sibling: %v", err)
 			}
 		})
+	}
+}
+
+// TestMarkerlessRecoveryWarnsBeforeDiscardingPreviousWAL pins the documented
+// markerless carve-out: a live main plus a non-empty `.previous-wal` is the
+// pre-marker recovery layout, and without a durable state marker those frames
+// cannot be classified. Recovery keeps the live main and removes the rollback
+// set, but must warn before discarding the WAL because committed frames may be
+// lost. Marked recovery is unaffected.
+func TestMarkerlessRecoveryWarnsBeforeDiscardingPreviousWAL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.db")
+	writeFileBytes(t, path, packedSnapshot(t, "live-row"))
+	previousWAL := filepath.Join(dir, "live.db"+pendingSnapshotPreviousSuffix+"-wal")
+	writeFileBytes(t, previousWAL, []byte("committed-wal-frames"))
+	if _, err := os.Stat(path + pendingSnapshotStateSuffix); !os.IsNotExist(err) {
+		t.Fatalf("fixture must be markerless: %v", err)
+	}
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousOutput) })
+
+	s, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rows, err := s.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != "live-row" {
+		t.Fatalf("rows after markerless recovery = %#v, want the live main's row", rows)
+	}
+	if _, err := os.Stat(previousWAL); !os.IsNotExist(err) {
+		t.Fatalf("markerless recovery kept the rollback WAL: %v", err)
+	}
+	got := logs.String()
+	if !strings.Contains(got, "markerless snapshot recovery") || !strings.Contains(got, previousWAL) {
+		t.Fatalf("markerless recovery did not warn before discarding %s:\n%s", previousWAL, got)
 	}
 }
 
