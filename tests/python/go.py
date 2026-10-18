@@ -120,7 +120,9 @@ func TestPrivate(t *testing.T) {
         self.assertTrue(all(not path.parent.exists() for path in paths))
 
     def test_conflicting_flags_rejected_before_commands(self):
-        for flag in ("-overlay=elsewhere.json", "--overlay=elsewhere.json", "-C", "--C", "-modfile=elsewhere.mod", "--modfile=elsewhere.mod"):
+        for flag in ("-overlay=elsewhere.json", "--overlay=elsewhere.json", "-C", "--C",
+                     "-modfile=elsewhere.mod", "--modfile=elsewhere.mod",
+                     "-trimpath", "--trimpath", "-trimpath=true", "--trimpath=true"):
             with self.subTest(flag=flag), patch.object(runner, "go_command") as command:
                 with self.assertRaisesRegex(RuntimeError, "owned by"):
                     runner.run(["test", flag], self.root)

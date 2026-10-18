@@ -98,9 +98,12 @@ def run(arguments, root=ROOT):
     env = git_environment()
     # Test execution owns its source view and module. Do not allow caller flags
     # to replace the overlay or redirect package/dependency discovery elsewhere.
+    # -trimpath strips the source paths the self-locating JS contract tests
+    # need, so it is rejected rather than letting those contracts miss.
     for argument in [*arguments[offset:], *shlex.split(env.get("GOFLAGS", ""))]:
-        require(argument.split("=", 1)[0].lstrip("-") not in ("overlay", "C", "modfile"),
-                "overlay, working directory and module file are owned by the test runner")
+        require(argument.split("=", 1)[0].lstrip("-") not in ("overlay", "C", "modfile", "trimpath"),
+                "overlay, working directory and module file are owned by the test runner; "
+                "trimpath is rejected because source contracts cannot self-locate their source")
     env["GOWORK"] = "off"
     root = Path(root).resolve(strict=True)
     with overlay(root) as (path, replacements):

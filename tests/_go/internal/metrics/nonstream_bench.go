@@ -54,6 +54,14 @@ func benchmarkChatBody(contentBytes int) []byte {
 	return []byte(fmt.Sprintf(`{"id":"chatcmpl-bench","object":"chat.completion","model":"bench-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"%s"}}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`, content))
 }
 
+// benchmarkCostChatBody keeps the same shape as benchmarkChatBody but carries
+// a reported USD cost, so ExtractCost's key gate opens and both decoders pay
+// the cost-bearing full-body path instead of returning immediately.
+func benchmarkCostChatBody(contentBytes int) []byte {
+	content := strings.Repeat("a", contentBytes)
+	return []byte(fmt.Sprintf(`{"id":"chatcmpl-bench","object":"chat.completion","model":"bench-model","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"%s"}}],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"cost":0.42}}`, content))
+}
+
 func benchmarkLegacyNonStream(body []byte, preview bool) (string, Usage, float64, string) {
 	var classify legacyNonStreamClassify
 	_ = json.Unmarshal(body, &classify)
@@ -81,6 +89,27 @@ func benchmarkLegacyNonStream(body []byte, preview bool) (string, Usage, float64
 	return outcome, usage, cost, previewText
 }
 
+// benchmarkNonStreamBodyPair measures the legacy two-decode relay path beside
+// the single-decode analysis owner for one body shape.
+func benchmarkNonStreamBodyPair(b *testing.B, name string, body []byte) {
+	b.Run(name+"/legacy-two-decode", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(body)))
+		for b.Loop() {
+			outcome, usage, cost, preview := benchmarkLegacyNonStream(body, false)
+			benchmarkOutcome, benchmarkUsage, benchmarkCost, benchmarkPreview = outcome, usage, cost, preview
+		}
+	})
+	b.Run(name+"/analysis-one-decode", func(b *testing.B) {
+		b.ReportAllocs()
+		b.SetBytes(int64(len(body)))
+		for b.Loop() {
+			analysis := AnalyzeNonStreamBody(body, nil, nil, false)
+			benchmarkOutcome, benchmarkUsage, benchmarkCost, benchmarkPreview = analysis.Outcome, analysis.Usage, analysis.Cost, analysis.Preview
+		}
+	})
+}
+
 func BenchmarkNonStreamAnalysis(b *testing.B) {
 	for _, size := range []struct {
 		name  string
@@ -89,22 +118,11 @@ func BenchmarkNonStreamAnalysis(b *testing.B) {
 		{"64KiB", 64 << 10},
 		{"1MiB", 1 << 20},
 	} {
-		body := benchmarkChatBody(size.bytes)
-		b.Run(size.name+"/legacy-two-decode", func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for b.Loop() {
-				outcome, usage, cost, preview := benchmarkLegacyNonStream(body, false)
-				benchmarkOutcome, benchmarkUsage, benchmarkCost, benchmarkPreview = outcome, usage, cost, preview
-			}
-		})
-		b.Run(size.name+"/analysis-one-decode", func(b *testing.B) {
-			b.ReportAllocs()
-			b.SetBytes(int64(len(body)))
-			for b.Loop() {
-				analysis := AnalyzeNonStreamBody(body, nil, nil, false)
-				benchmarkOutcome, benchmarkUsage, benchmarkCost, benchmarkPreview = analysis.Outcome, analysis.Usage, analysis.Cost, analysis.Preview
-			}
-		})
+		benchmarkNonStreamBodyPair(b, size.name, benchmarkChatBody(size.bytes))
+		costBody := benchmarkCostChatBody(size.bytes)
+		if cost, ok := ExtractCost(costBody, nil); !ok || cost != 0.42 {
+			b.Fatalf("cost fixture does not carry a reported cost: cost=%v ok=%v", cost, ok)
+		}
+		benchmarkNonStreamBodyPair(b, size.name+"-cost", costBody)
 	}
 }

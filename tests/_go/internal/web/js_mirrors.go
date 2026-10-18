@@ -171,7 +171,8 @@ func TestModelRuleModesMatchGoVocabulary(t *testing.T) {
 // contract uses). Config's forbidden-override-header set is package-private,
 // so its source text is this pin's only enumerable view: the exported
 // ForbiddenOverrideHeader oracle can confirm members but cannot list them.
-// A trimpath build skips with the reason instead of guessing a path.
+// A stripped source view (for example -trimpath) fails through moduleRoot with
+// the reason instead of guessing a path.
 func configOverrideSource(t *testing.T) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join(moduleRoot(t), "internal", "config", "config.go"))

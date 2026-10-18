@@ -34,12 +34,14 @@ import (
 // chromeMenuSource locates the repository root from this file's
 // compile-time source path (the same self-location rule the web test suite
 // applies; test overlays keep the physical path, so the walk finds the
-// root's go.mod) and reads the dashboard's chrome.js from it.
+// root's go.mod) and reads the dashboard's chrome.js from it. A stripped
+// source view (for example a -trimpath build) cannot verify the menu tokens
+// and fails here instead of skipping green.
 func chromeMenuSource(t *testing.T) []byte {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Skip("cannot locate own source path (trimpath build) - chrome.js menu tokens unchecked")
+		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): chrome.js menu tokens cannot be verified")
 	}
 	dir := filepath.Dir(file)
 	for {
@@ -52,7 +54,7 @@ func chromeMenuSource(t *testing.T) []byte {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Skip("no go.mod above " + file + " - chrome.js menu tokens unchecked")
+			t.Fatalf("no go.mod above %s: chrome.js menu tokens cannot be verified without the repository source view", file)
 		}
 		dir = parent
 	}

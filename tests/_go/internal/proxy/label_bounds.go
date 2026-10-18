@@ -21,6 +21,75 @@ const hostileLabelBytes = 1 << 20
 // rune, so a bound that cuts at a byte offset would leave invalid UTF-8.
 func hostileUTF8Label() string { return strings.Repeat("é", hostileLabelBytes/2) }
 
+// Documented label, identifier and retained-header bounds. These literals
+// mirror docs/protocol.md and docs/operations.md instead of deriving from the
+// production constants: a one-sided production change must fail this contract
+// and force the documentation to move with it.
+const (
+	documentedClientLabelMax       = 256
+	documentedClientLanguageMax    = 256
+	documentedUserAgentMax         = 1024
+	documentedClientIPMax          = 128
+	documentedProviderModelMetaMax = 512
+	documentedDeclaredSessionMax   = 512
+	documentedConversationIDMax    = 514
+	documentedHeaderNameMax        = 512
+	documentedHeaderValueMax       = 4096
+	documentedHeaderValuesMax      = 16
+	documentedHeaderMapBytesMax    = 16384
+)
+
+// TestDocumentedLabelBoundsMatchConstants pins the documented client-label,
+// identifier and retained-header bounds to their single production owners. The
+// provider/model record metadata and conversation identifier are checked
+// through the real record boundary because metrics owns those package-private
+// constants.
+func TestDocumentedLabelBoundsMatchConstants(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"client", retainedClientMax, documentedClientLabelMax},
+		{"client language", retainedClientLangMax, documentedClientLanguageMax},
+		{"user agent", retainedUserAgentMax, documentedUserAgentMax},
+		{"client IP", retainedClientIPMax, documentedClientIPMax},
+		{"model label", retainedLabelMax, documentedProviderModelMetaMax},
+		{"declared session", maxDeclaredSessionBytes, documentedDeclaredSessionMax},
+		{"header name", retainedHeaderNameMax, documentedHeaderNameMax},
+		{"header value", retainedHeaderValueMax, documentedHeaderValueMax},
+		{"header values per name", retainedHeaderValuesMax, documentedHeaderValuesMax},
+		{"header map budget", retainedHeadersMaxBytes, documentedHeaderMapBytesMax},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s bound = %d, want the documented %d", tc.name, tc.got, tc.want)
+		}
+	}
+
+	// The declared-session bound plus the s: namespace is the retained
+	// conversation identifier the docs describe.
+	if got := len(explicitConversationID(strings.Repeat("a", maxDeclaredSessionBytes))); got != documentedConversationIDMax {
+		t.Errorf("retained conversation identifier = %d bytes, want the documented %d (512-byte session plus the s: prefix)", got, documentedConversationIDMax)
+	}
+
+	hostile := strings.Repeat("m", documentedProviderModelMetaMax+1)
+	b := metrics.NewBuffer(1)
+	b.Record(&metrics.Record{ID: "metadata-bounds", Provider: hostile, Model: hostile, ProviderModel: hostile})
+	rec := b.Snapshot()[0]
+	for _, field := range []struct {
+		name string
+		got  string
+	}{
+		{"provider", rec.Provider},
+		{"model", rec.Model},
+		{"provider model", rec.ProviderModel},
+	} {
+		if len(field.got) != documentedProviderModelMetaMax {
+			t.Errorf("%s metadata retained %d bytes, want the documented %d", field.name, len(field.got), documentedProviderModelMetaMax)
+		}
+	}
+}
+
 func assertBoundedLabel(t *testing.T, field, got string, max int) {
 	t.Helper()
 	if len(got) > max {

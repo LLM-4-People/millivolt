@@ -54,6 +54,24 @@ func clipMetricOrdersBefore(order metricOrders, to int) metricOrders {
 	}
 }
 
+// TestProjectionRetentionDocumentedBounds pins the documented projection
+// retention sizes independently of the implementation constants: the retained
+// chart tail is the last 65,536 rows, and each uncompacted pending delta is
+// bounded at 16,384 samples. Changing either constant must move the
+// architecture contract with it instead of leaving the docs behind.
+func TestProjectionRetentionDocumentedBounds(t *testing.T) {
+	const (
+		documentedRecentMetricRows          = 65_536
+		documentedMetricOrderPendingSamples = 16_384
+	)
+	if recentMetricRows != documentedRecentMetricRows {
+		t.Errorf("recentMetricRows = %d, want the documented %d-row tail", recentMetricRows, documentedRecentMetricRows)
+	}
+	if metricOrderPendingSamples != documentedMetricOrderPendingSamples {
+		t.Errorf("metricOrderPendingSamples = %d, want the documented %d-sample pending delta", metricOrderPendingSamples, documentedMetricOrderPendingSamples)
+	}
+}
+
 // TestProjectionRecentOrderMatchesFullRebuild feeds randomized append batches
 // through the incremental recent base+pending path and compares its exact tail
 // selection, chart buckets and explorer ranks with a fresh full rebuild for the

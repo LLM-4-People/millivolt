@@ -70,11 +70,13 @@ func benchmarkQueryBeforeStore(b *testing.B) *Store {
 	return s
 }
 
-// BenchmarkQueryBeforeEquality measures page 200 for an exact provider and
-// raw-model equality, with and without the exclusive cursor. The fixture has
-// 10 providers and 10 models, so each equality matches 10,000 rows. The old
-// single-column index sorted that whole match set for uncursored pages; cursor
-// pages could instead scan the log index and filter.
+// BenchmarkQueryBeforeEquality is an end-to-end page benchmark: it measures
+// the exact 200-row page the dashboard serves, including scanRecord decode, for
+// an exact provider and raw-model equality, with and without the exclusive
+// cursor. It is not an index-only path and it is not an A/B against the old
+// single-column index. The fixture has 10 providers and 10 models, so each
+// equality matches 10,000 rows; BenchmarkQueryBeforeCount isolates the same
+// predicates without row decode.
 func BenchmarkQueryBeforeEquality(b *testing.B) {
 	s := benchmarkQueryBeforeStore(b)
 	provider := &LogFilter{All: []LogPredicate{{Field: LogProvider, Value: "provider-03"}}}
@@ -100,6 +102,38 @@ func BenchmarkQueryBeforeEquality(b *testing.B) {
 				}
 				if len(records) != benchQueryBeforePage {
 					b.Fatalf("rows = %d, want %d", len(records), benchQueryBeforePage)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkQueryBeforeCount measures the same provider/model equality
+// predicates as a COUNT(*), so the scan/index path is visible without the
+// 200-row decode and heap allocation QueryBefore performs. The predicate
+// clause comes from LogFilter.where, the same owner QueryBefore uses.
+func BenchmarkQueryBeforeCount(b *testing.B) {
+	s := benchmarkQueryBeforeStore(b)
+	for _, tc := range []struct {
+		name   string
+		filter *LogFilter
+		want   int
+	}{
+		{"provider", &LogFilter{All: []LogPredicate{{Field: LogProvider, Value: "provider-03"}}}, benchQueryBeforeRows / benchQueryBeforeProviders},
+		{"model", &LogFilter{All: []LogPredicate{{Field: LogModel, Value: "model-03"}}}, benchQueryBeforeRows / benchQueryBeforeModels},
+	} {
+		where, args := tc.filter.where()
+		query := `SELECT COUNT(*) FROM requests WHERE 1=1` + where
+		b.Run(tc.name, func(b *testing.B) {
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				var got int
+				if err := s.rdb.QueryRowContext(b.Context(), query, args...).Scan(&got); err != nil {
+					b.Fatal(err)
+				}
+				if got != tc.want {
+					b.Fatalf("count = %d, want %d", got, tc.want)
 				}
 			}
 		})

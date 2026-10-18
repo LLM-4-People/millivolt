@@ -539,6 +539,19 @@ func TestDecodeRejectsOversizePayload(t *testing.T) {
 	}
 }
 
+// TestConfigMemberCapIsDocumented16MiB pins the documented config-member bound
+// independently of config.ConfigDocumentMaxBytes, so a one-sided constant
+// change cannot keep the contract green while the documented 16 MiB drifts.
+func TestConfigMemberCapIsDocumented16MiB(t *testing.T) {
+	const documentedConfigMemberMax = 16 << 20
+	if configMemberMax != documentedConfigMemberMax {
+		t.Fatalf("configMemberMax = %d, want the documented 16 MiB (%d)", configMemberMax, documentedConfigMemberMax)
+	}
+	if config.ConfigDocumentMaxBytes != documentedConfigMemberMax {
+		t.Fatalf("config.ConfigDocumentMaxBytes = %d, want the documented 16 MiB (%d)", config.ConfigDocumentMaxBytes, documentedConfigMemberMax)
+	}
+}
+
 // TestEncodeConfigMemberCap pins the config retention guardrail on the encode
 // side: exactly the cap is accepted and round-trips, while one byte more is
 // refused before any staging artifact exists. The cap applies only to the

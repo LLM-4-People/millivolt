@@ -1,6 +1,9 @@
 // jsdom functional test for the dashboard's incremental live-update pipeline.
-// Drives the page ONLY through its own external interfaces: the stubbed
-// fetch() and the EventSource event listeners the page registers itself.
+// Most checks drive the page through its external interfaces: the stubbed
+// fetch() and the EventSource listeners the page registers itself. Focused
+// helper sections call production render/merge helpers directly to pin
+// optimizer contracts that the external paths cannot isolate; they supplement,
+// not replace, the end-to-end coverage.
 const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
@@ -2167,6 +2170,14 @@ async function main() {
     check('log keyset sends both timestamp zero and its tie-break ID', urls[1].includes('before_ms=0') && urls[1].includes('before_id=tie-z'));
     check('same-timestamp archive records retain the server tie order',
       w.logVisible().filter(r => r.id.startsWith('tie-')).map(r => r.id).join(',') === 'tie-b,tie-a');
+    // The fetch above went through the page's real fetchOlderLog path; the
+    // visible DOM must carry both the live ring window and the durable page in
+    // one newest-first order.
+    const archiveWindow = rows().map(tr => tr.dataset.id);
+    const liveEdge = archiveWindow.indexOf('big000');
+    check('a live ring row and a durable archive row share one visible log order',
+      archiveWindow[0] === 'big079' && liveEdge >= 0 &&
+      archiveWindow[liveEdge + 1] === 'tie-b' && archiveWindow[liveEdge + 2] === 'tie-a');
     const snapshot = w.eval('lastData');
     w.eval('lastData = {records: [], counters: {}}');
     w.resetLogWindow();

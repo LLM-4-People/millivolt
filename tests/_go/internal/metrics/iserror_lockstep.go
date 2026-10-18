@@ -77,13 +77,14 @@ func jsIsErrorCorpusRows(t *testing.T, src []byte) []jsCorpusRow {
 
 // moduleRoot locates the repo root from this file's compile-time source path
 // (the same self-location rule the web suite's ui_check.js contract
-// applies). A -trimpath build cannot self-locate its source - the lockstep
-// pin then skips with the reason instead of guessing a path.
+// applies). A stripped source view (for example a -trimpath build) cannot
+// self-locate its source, so the lockstep pin fails with that reason instead
+// of skipping or guessing a path.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
 	_, file, _, ok := runtime.Caller(0)
 	if !ok || file == "" {
-		t.Skip("cannot locate own source path (trimpath build) - ui_check.js contract unchecked")
+		t.Fatalf("cannot locate own source path (source paths stripped, e.g. -trimpath): ui_check.js contract cannot be verified")
 	}
 	dir := filepath.Dir(file)
 	for {
@@ -92,7 +93,7 @@ func moduleRoot(t *testing.T) string {
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Skip("no go.mod above " + dir + " - ui_check.js contract unchecked")
+			t.Fatalf("no go.mod above %s: ui_check.js contract cannot be verified without the repository source view", dir)
 		}
 		dir = parent
 	}
