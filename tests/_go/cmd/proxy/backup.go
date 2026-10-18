@@ -150,6 +150,90 @@ func TestBackupHandlerStreamsFileWithContentLength(t *testing.T) {
 	assertNoBackupStaging(t, stage)
 }
 
+// TestBuildBackupDatabaseUsesSnapshotFile pins the handler's database member
+// source: buildBackup stages a private packed file on the live database's
+// volume and returns it by path rather than as heap bytes, and its cleanup
+// removes the whole snapshot directory.
+func TestBuildBackupDatabaseUsesSnapshotFile(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{ID: "file-backed", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+
+	arch, cleanup, err := buildBackup(t.Context(), false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if arch.DatabasePath == "" || len(arch.Database) != 0 {
+		t.Fatalf("buildBackup source path=%q bytes=%d, want the file-backed source", arch.DatabasePath, len(arch.Database))
+	}
+	if got := filepath.Dir(filepath.Dir(arch.DatabasePath)); got != dir {
+		t.Fatalf("snapshot staged under %q, want the live database volume %q", got, dir)
+	}
+	if err := backup.CheckDatabaseFile(arch.DatabasePath); err != nil {
+		t.Fatalf("buildBackup did not return a valid packed database: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(filepath.Dir(arch.DatabasePath)); !os.IsNotExist(err) {
+		t.Fatal("buildBackup cleanup left the snapshot directory")
+	}
+	assertNoBackupStaging(t, dir)
+}
+
+// TestBackupHandlerDatabaseUsesSnapshotFile pins the file-backed database
+// download end to end: ?database=1 emits the same archive bytes as
+// backup.Encode for the same members and Created time, Content-Length is the
+// exact artifact size, and both the snapshot directory and the encoded
+// archive staging file are removed after a normal response and after a client
+// disconnect during the body.
+func TestBackupHandlerDatabaseUsesSnapshotFile(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{ID: "http-file-backed", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/admin/backup?database=1", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("backup status %d body %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.Bytes()
+	if cl := rr.Header().Get("Content-Length"); cl != strconv.Itoa(len(body)) {
+		t.Fatalf("Content-Length = %q, want %d", cl, len(body))
+	}
+	arch, err := backup.Decode(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arch.Config) != 0 || len(arch.Database) == 0 {
+		t.Fatal("database-only archive had the wrong members")
+	}
+	if err := backup.Validate(dir, arch); err != nil {
+		t.Fatal(err)
+	}
+	want, err := backup.Encode(dir, backup.Archive{Created: arch.Created, Database: arch.Database})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, want) {
+		t.Fatal("path-backed handler bytes differ from byte-backed backup.Encode for the same members")
+	}
+	assertNoBackupStaging(t, dir)
+
+	mux.ServeHTTP(&failingWriter{}, httptest.NewRequest(http.MethodGet, "/admin/backup?database=1", nil))
+	assertNoBackupStaging(t, dir)
+}
+
 // TestBackupHandlerCapFailsClosed proves a snapshot over backup_max_bytes is
 // rejected during encode, before a partial artifact or success response can
 // be served, and the staging file is removed.
@@ -221,6 +305,9 @@ func assertNoBackupStaging(t *testing.T, dir string) {
 	for _, e := range ents {
 		if strings.HasPrefix(e.Name(), "millivolt-backup-") && strings.HasSuffix(e.Name(), ".mvb") {
 			t.Fatalf("backup staging file left behind: %s", e.Name())
+		}
+		if strings.HasPrefix(e.Name(), "millivolt-snapshot-") {
+			t.Fatalf("temporary snapshot directory left behind: %s", e.Name())
 		}
 	}
 }
@@ -1069,7 +1156,7 @@ func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
 	if _, err := dbStageDir(); !errors.Is(err, storage.ErrStorageDisabled) {
 		t.Errorf("dbStageDir: %v, want ErrStorageDisabled", err)
 	}
-	if _, err := buildBackup(t.Context(), false, true); !errors.Is(err, storage.ErrStorageDisabled) {
+	if _, _, err := buildBackup(t.Context(), false, true); !errors.Is(err, storage.ErrStorageDisabled) {
 		t.Errorf("buildBackup database member: %v, want ErrStorageDisabled", err)
 	}
 	if _, err := restoreDatabase(t.Context(), nil, "replace"); !errors.Is(err, storage.ErrStorageDisabled) {

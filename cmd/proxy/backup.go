@@ -62,11 +62,15 @@ func handleBackup(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	arch, err := buildBackup(r.Context(), wantConfig, wantDB)
+	arch, cleanup, err := buildBackup(r.Context(), wantConfig, wantDB)
 	if err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// The database member is a private packed snapshot file. Remove it after
+	// encoding, on every path: an encode error, an open/stream failure, or a
+	// client disconnect. The encoded archive is independent of the source.
+	defer cleanup()
 	// A database member is staged for the self-check: capacity must follow
 	// the database volume, not a generic /tmp sized independently of
 	// backup_max_bytes. The artifact itself streams into that same staging
@@ -306,22 +310,29 @@ func stageDirOr400(w http.ResponseWriter, stage bool) (string, bool) {
 	return dir, true
 }
 
-func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, error) {
+// buildBackup assembles the requested members. A database member is staged as
+// a private packed snapshot file (store.SnapshotFile) and returned by path, so
+// backup.EncodeFile streams it in bounded chunks instead of the handler
+// retaining a whole-database copy. The returned cleanup removes that snapshot
+// directory and must run after encoding on every handler path; config-only
+// returns a no-op. On error the snapshot owner has already cleaned up.
+func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, func(), error) {
+	cleanup := func() {}
 	var a backup.Archive
 	if wantConfig {
 		liveMu.Lock()
 		path := liveConfigPath
 		liveMu.Unlock()
 		if path == "" {
-			return backup.Archive{}, fmt.Errorf("no config file; start with -config to back up settings")
+			return backup.Archive{}, cleanup, fmt.Errorf("no config file; start with -config to back up settings")
 		}
 		cfg, err := config.LoadFile(path)
 		if err != nil {
-			return backup.Archive{}, err
+			return backup.Archive{}, cleanup, err
 		}
 		var buf bytes.Buffer
 		if err := config.WriteYAML(&buf, cfg); err != nil {
-			return backup.Archive{}, err
+			return backup.Archive{}, cleanup, err
 		}
 		a.Config = buf.Bytes()
 	}
@@ -330,15 +341,16 @@ func buildBackup(ctx context.Context, wantConfig, wantDB bool) (backup.Archive, 
 		store := liveStore
 		liveMu.Unlock()
 		if store == nil {
-			return backup.Archive{}, storage.ErrStorageDisabled
+			return backup.Archive{}, cleanup, storage.ErrStorageDisabled
 		}
-		data, err := store.Snapshot(ctx)
+		path, remove, err := store.SnapshotFile(ctx)
 		if err != nil {
-			return backup.Archive{}, err
+			return backup.Archive{}, cleanup, err
 		}
-		a.Database = data
+		cleanup = remove
+		a.DatabasePath = path
 	}
-	return a, nil
+	return a, cleanup, nil
 }
 
 func restoreConfig(raw []byte, mode string) ([]string, error) {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"os"
 	"path/filepath"
@@ -28,6 +29,64 @@ func TestSnapshotIncludesFlushedRows(t *testing.T) {
 	}
 	if _, err := backup.Encode(s.stageDir(), backup.Archive{Database: data}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSnapshotFileContentsAndCleanup pins the file-backed snapshot owner: the
+// returned packed file is a valid database in its own private directory,
+// cleanup removes that directory, and a failed snapshot returns no path and
+// leaves no directory behind.
+func TestSnapshotFileContentsAndCleanup(t *testing.T) {
+	s := openTestStore(t)
+	s.Record(&metrics.Record{ID: "file-snap", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	path, cleanup, err := s.SnapshotFile(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path == "" || cleanup == nil {
+		t.Fatalf("SnapshotFile returned path=%q cleanup=%v", path, cleanup != nil)
+	}
+	dir := filepath.Dir(path)
+	if err := backup.CheckDatabaseFile(path); err != nil {
+		t.Fatalf("SnapshotFile path is not an admitted packed database: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
+		t.Fatalf("SnapshotFile content is not an admitted packed database: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("cleanup left the snapshot directory %s: %v", dir, err)
+	}
+	assertNoSnapshotStaging(t, s.stageDir())
+
+	// A canceled context fails VACUUM after the staging directory exists; the
+	// owner must remove it and return no path or cleanup.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	path, cleanup, err = s.SnapshotFile(ctx)
+	if err == nil {
+		t.Fatal("SnapshotFile succeeded with a canceled context")
+	}
+	if path != "" || cleanup != nil {
+		t.Fatalf("failed SnapshotFile returned path=%q cleanup=%v", path, cleanup != nil)
+	}
+	assertNoSnapshotStaging(t, s.stageDir())
+}
+
+func assertNoSnapshotStaging(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "millivolt-snapshot-") {
+			t.Fatalf("snapshot staging directory left behind: %s", e.Name())
+		}
 	}
 }
 

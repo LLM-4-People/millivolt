@@ -42,35 +42,62 @@ func (s *Store) stageDir() string {
 	return filepath.Dir(s.path)
 }
 
-// Snapshot returns a packed, integrity-checked copy of the live database,
-// including committed WAL pages. VACUUM INTO is the compact consistent
-// snapshot (no free pages); it is not a file copy of an open DB.
-func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
+// SnapshotFile returns the path of a packed, integrity-checked copy of the
+// live database and the cleanup that removes its private staging directory.
+// VACUUM INTO is the compact consistent snapshot (no free pages); it is not a
+// file copy of an open DB.
+//
+// SnapshotFile is the one owner of the temporary snapshot directory. Backup
+// encoding streams this file in bounded chunks, so the caller chooses file
+// backing instead of a whole-database heap copy. The caller must call cleanup
+// after its last read of path, on every path, including errors from the work
+// that consumes the file. On error SnapshotFile removes the directory itself
+// and returns an empty path and no cleanup.
+func (s *Store) SnapshotFile(ctx context.Context) (path string, cleanup func(), err error) {
 	if s == nil {
-		return nil, ErrStorageDisabled
+		return "", nil, ErrStorageDisabled
 	}
 	if err := s.Flush(); err != nil {
-		return nil, fmt.Errorf("flush before backup: %w", err)
+		return "", nil, fmt.Errorf("flush before backup: %w", err)
 	}
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-snapshot-*")
 	if err != nil {
-		return nil, backup.StageSnapshotError(s.stageDir(), err)
+		return "", nil, backup.StageSnapshotError(s.stageDir(), err)
 	}
-	defer os.RemoveAll(dir)
+	cleanup = func() {
+		if err := os.RemoveAll(dir); err != nil {
+			log.Printf("storage: remove snapshot staging %s: %v", dir, err)
+		}
+	}
 	dest := filepath.Join(dir, "snapshot.db")
 	// VACUUM INTO is a read-only operation on the source (SQLite opens the
 	// destination separately), so run it on the read pool: the single writer
 	// connection stays free for request accounting during the copy. Flush above
 	// already committed every accepted record.
 	if _, err := s.rdb.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
-		return nil, fmt.Errorf("vacuum snapshot: %w", err)
+		cleanup()
+		return "", nil, fmt.Errorf("vacuum snapshot: %w", err)
 	}
 	// Integrity-check the VACUUM dest in place. CheckDatabase would
 	// WriteFile a second packed copy while dest still exists.
 	if err := backup.CheckDatabaseFile(dest); err != nil {
-		return nil, fmt.Errorf("snapshot: %w", err)
+		cleanup()
+		return "", nil, fmt.Errorf("snapshot: %w", err)
 	}
-	return os.ReadFile(dest)
+	return dest, cleanup, nil
+}
+
+// Snapshot returns a packed, integrity-checked copy of the live database as
+// bytes. It is the byte-returning wrapper over SnapshotFile for callers that
+// need the whole copy; backup encoding uses SnapshotFile so it never retains
+// the database on the heap.
+func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
+	path, cleanup, err := s.SnapshotFile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	return os.ReadFile(path)
 }
 
 // StageSnapshot writes an integrity-checked SQLite snapshot that Open will

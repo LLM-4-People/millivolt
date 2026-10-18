@@ -523,7 +523,10 @@ of the uncompressed payload. Encoding streams each member into the compressor
 while hashing and counting it, writes the archive once into a staging file,
 and self-checks that file before returning it; an archive that fails decode
 or semantic checks is never emitted, so a produced backup is never a silent
-corrupt file.
+corrupt file. The database member is read from the packed snapshot file in
+bounded chunks instead of being copied whole into memory, so the download cost
+does not grow with a heap copy of the database. A source file that changes
+size or cannot be read fails the encode before an archive is emitted.
 
 Restore validates that hash, the zstd frame, config `Validate()`, and
 `PRAGMA integrity_check` before applying anything. Decode refuses an
@@ -552,11 +555,13 @@ snapshot, the encoded download artifact, integrity-check of an in-memory
 upload, and merge/overlap attachments) in the live database's own directory,
 so capacity follows the data volume: budget roughly one packed-snapshot size,
 plus the staged encoded archive for a download, of free space there during
-backup and restore. A config-only download artifact uses the process temp
-directory because it carries no database-sized member. A packed file already
-on that volume (VACUUM dest, pending `.incoming`) is integrity-checked in
-place so a second copy is not written beside it. A container's `/tmp` is a
-small tmpfs by design and never caps backup size.
+backup and restore. The download's snapshot directory is removed after the
+archive is encoded, including on failure or a client disconnect. A config-only
+download artifact uses the process temp directory because it carries no
+database-sized member. A packed file already on that volume (VACUUM dest,
+pending `.incoming`) is integrity-checked in place so a second copy is not
+written beside it. A container's `/tmp` is a small tmpfs by design and never
+caps backup size.
 
 ## Versions and images
 

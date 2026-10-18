@@ -313,6 +313,199 @@ func TestEncodeFileMatchesFormatByteForByte(t *testing.T) {
 	}
 }
 
+// TestEncodeFilePathSourceMatchesBytes pins the file-backed database source:
+// for the same packed SQLite member and Created time, the path-backed archive
+// is byte-for-byte identical to the byte-backed archive and to the frozen
+// version-1 layout, for config-only, database-only and both-member archives.
+// Validate also accepts the path without a staging directory because it
+// integrity-checks the private file in place.
+func TestEncodeFilePathSourceMatchesBytes(t *testing.T) {
+	cfg := defaultConfigYAML(t)
+	db := packedRequestsDB(t)
+	created := time.Unix(1_700_000_123, 0).UTC()
+	dbPath := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := os.WriteFile(dbPath, db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name             string
+		config, database bool
+	}{
+		{"config-only", true, false},
+		{"database-only", false, true},
+		{"both", true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			byteA := Archive{Created: created}
+			pathA := Archive{Created: created}
+			if tc.config {
+				byteA.Config = cfg
+				pathA.Config = cfg
+			}
+			if tc.database {
+				byteA.Database = db
+				pathA.DatabasePath = dbPath
+			}
+			want := referenceArchive(t, byteA)
+			stage := t.TempDir()
+
+			byteRaw, err := Encode(stage, byteA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(byteRaw, want) {
+				t.Fatalf("byte-backed encode differs from the version-1 layout at byte %d", firstDiff(byteRaw, want))
+			}
+
+			path, size, err := EncodeFile(stage, pathA, int64(config.BackupMaxBytesMax))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if path == "" || size != int64(len(want)) {
+				t.Fatalf("EncodeFile returned path=%q size=%d, want size %d", path, size, len(want))
+			}
+			pathRaw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(pathRaw, want) {
+				t.Fatalf("path-backed archive differs from the version-1 layout at byte %d", firstDiff(pathRaw, want))
+			}
+			if !bytes.Equal(pathRaw, byteRaw) {
+				t.Fatalf("path-backed and byte-backed archives differ at byte %d", firstDiff(pathRaw, byteRaw))
+			}
+
+			bufferedPath, err := Encode(stage, pathA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(bufferedPath, want) {
+				t.Fatalf("path-backed Encode differs from the version-1 layout at byte %d", firstDiff(bufferedPath, want))
+			}
+			if err := Validate("", pathA); err != nil {
+				t.Fatalf("path-backed Validate without a staging directory: %v", err)
+			}
+			assertNoArchiveStaging(t, stage)
+		})
+	}
+
+	if _, err := Encode(t.TempDir(), Archive{Database: db, DatabasePath: dbPath}); err == nil {
+		t.Fatal("archive with both database sources was encoded")
+	}
+	if err := Validate(t.TempDir(), Archive{Database: db, DatabasePath: dbPath}); err == nil {
+		t.Fatal("archive with both database sources was validated")
+	}
+	bad := filepath.Join(t.TempDir(), "bad.db")
+	if err := os.WriteFile(bad, []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate("", Archive{DatabasePath: bad}); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("invalid path-backed database = %v, want ErrInvalidSnapshot", err)
+	}
+}
+
+// TestEncodeFilePathSourceSelfCheckRejectsCorruption pins the streaming
+// self-check for a file-backed database member: a byte change, truncation, or
+// growth in the source after encoding fails before Validate, and no archive
+// is mistaken for the changed snapshot.
+func TestEncodeFilePathSourceSelfCheckRejectsCorruption(t *testing.T) {
+	db := packedRequestsDB(t)
+	src := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := os.WriteFile(src, db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := Archive{Created: time.Unix(1_700_000_123, 0).UTC(), DatabasePath: src}
+	stage := t.TempDir()
+	path, _, err := EncodeFile(stage, a, int64(config.BackupMaxBytesMax))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+
+	flipped := append([]byte(nil), db...)
+	flipped[len(flipped)/2] ^= 0xff
+	if err := os.WriteFile(src, flipped, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := selfCheckFile(path, stage, a); err == nil || !strings.Contains(err.Error(), "payload changed") {
+		t.Fatalf("source byte corruption self-check = %v, want payload changed", err)
+	}
+
+	if err := os.WriteFile(src, db[:len(db)-1], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := selfCheckFile(path, stage, a); err == nil || !strings.Contains(err.Error(), "payload changed") {
+		t.Fatalf("source truncation self-check = %v, want payload changed", err)
+	}
+
+	if err := os.WriteFile(src, append(append([]byte(nil), db...), 0), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := selfCheckFile(path, stage, a); err == nil || !strings.Contains(err.Error(), "payload changed") {
+		t.Fatalf("source growth self-check = %v, want payload changed", err)
+	}
+}
+
+// TestEncodeFileFailsClosedOnDatabaseSizeChange proves the streaming encoder
+// never frames a file that changed after it was sized: a deterministic shrink
+// or growth during the member write fails closed, returns no artifact, and
+// leaves no staging file. A missing source also fails before encoding.
+func TestEncodeFileFailsClosedOnDatabaseSizeChange(t *testing.T) {
+	base := packedRequestsDB(t)
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, path string)
+	}{
+		{"shrank", func(t *testing.T, path string) {
+			if err := os.Truncate(path, int64(len(base))-1); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"grew", func(t *testing.T, path string) {
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+			if _, err := f.Write([]byte{0}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := filepath.Join(t.TempDir(), "snapshot.db")
+			if err := os.WriteFile(src, base, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			old := databaseStreamHook
+			databaseStreamHook = func(path string) {
+				databaseStreamHook = old
+				tc.mutate(t, path)
+			}
+			t.Cleanup(func() { databaseStreamHook = old })
+
+			stage := t.TempDir()
+			path, size, err := EncodeFile(stage, Archive{Created: time.Unix(1_700_000_123, 0).UTC(), DatabasePath: src}, int64(config.BackupMaxBytesMax))
+			if err == nil || !strings.Contains(err.Error(), "changed size") {
+				t.Fatalf("source %s during encode = %v, want a changed-size failure", tc.name, err)
+			}
+			if path != "" || size != 0 {
+				t.Fatalf("failed encode returned path=%q size=%d", path, size)
+			}
+			assertNoArchiveStaging(t, stage)
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "missing.db")
+	if _, _, err := EncodeFile(t.TempDir(), Archive{DatabasePath: missing}, int64(config.BackupMaxBytesMax)); err == nil {
+		t.Fatal("encode accepted a missing database source")
+	}
+}
+
 // TestEncodeFileSelfCheckRejectsCorruption pins the streaming self-check: a
 // byte change in the body or in the outer hash must fail before the file can
 // be returned.
@@ -368,6 +561,30 @@ func TestEncodeFileCleansStagingOnFailure(t *testing.T) {
 	if len(ents) != 0 {
 		t.Fatalf("failed encode left staging entries: %v", ents)
 	}
+}
+
+// TestEncodeFilePayloadCapPathSource pins the uncompressed payload ceiling for
+// a file-backed member: an oversized packed database is rejected before an
+// archive staging file exists, and no partial artifact is returned.
+func TestEncodeFilePayloadCapPathSource(t *testing.T) {
+	db := packedRequestsDBBlob(t, 2<<10)
+	src := filepath.Join(t.TempDir(), "snapshot.db")
+	if err := os.WriteFile(src, db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := payloadMax
+	payloadMax = 1024
+	t.Cleanup(func() { payloadMax = old })
+
+	stage := t.TempDir()
+	path, size, err := EncodeFile(stage, Archive{Created: time.Unix(1_700_000_123, 0).UTC(), DatabasePath: src}, int64(config.BackupMaxBytesMax))
+	if err == nil || !strings.Contains(err.Error(), "backup_max_bytes maximum") {
+		t.Fatalf("path source over the payload cap = %v, want the payload cap error", err)
+	}
+	if path != "" || size != 0 {
+		t.Fatalf("over-cap encode returned path=%q size=%d", path, size)
+	}
+	assertNoArchiveStaging(t, stage)
 }
 
 // TestEncodeFileEnforcesCapBeforeArtifact proves the configured archive
@@ -471,6 +688,57 @@ func benchEncode(b *testing.B, buffered bool) {
 	}
 }
 
+// BenchmarkEncodeFileDatabaseSource compares the file-backed database member
+// with the byte-backed source. The bytes sub-benchmark performs the legacy
+// whole-database os.ReadFile before each encode, so its B/op includes the
+// packed-database heap copy this change removes; the path sub-benchmark never
+// materializes it. Both write and self-check the same archive, so what remains
+// allocated in either case is zstd's encoder/decoder state (SpeedBestCompression
+// dominates the absolute B/op) plus the 32 KiB streaming chunks, not the
+// database member.
+func BenchmarkEncodeFileDatabaseSource(b *testing.B) {
+	dbPath, size := packedRequestsDBFile(b, 4<<20)
+	created := time.Unix(1_700_000_123, 0).UTC()
+	limit := int64(config.BackupMaxBytesMax)
+
+	b.Run("bytes", func(b *testing.B) {
+		stage := b.TempDir()
+		b.SetBytes(size)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			data, err := os.ReadFile(dbPath)
+			if err != nil {
+				b.Fatal(err)
+			}
+			path, _, err := EncodeFile(stage, Archive{Created: created, Database: data}, limit)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("path", func(b *testing.B) {
+		stage := b.TempDir()
+		a := Archive{Created: created, DatabasePath: dbPath}
+		b.SetBytes(size)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			path, _, err := EncodeFile(stage, a, limit)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func defaultConfigYAML(t testing.TB) []byte {
 	t.Helper()
 	var yaml bytes.Buffer
@@ -560,28 +828,46 @@ func largeValidConfig(t testing.TB, minBytes int) []byte {
 
 func packedRequestsDBBlob(t *testing.T, blobBytes int) []byte {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "src.db")
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`CREATE TABLE requests (id TEXT PRIMARY KEY, payload BLOB)`); err != nil {
-		t.Fatal(err)
-	}
-	blob := largeValidConfig(t, blobBytes)
-	if _, err := db.Exec(`INSERT INTO requests(id, payload) VALUES ('big', ?)`, blob); err != nil {
-		t.Fatal(err)
-	}
-	snap := filepath.Join(t.TempDir(), "snap.db")
-	if _, err := db.Exec("VACUUM INTO ?", snap); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	data, err := os.ReadFile(snap)
+	path, _ := packedRequestsDBFile(t, blobBytes)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// packedRequestsDBFile leaves the packed fixture on disk and returns its path
+// and exact size, which the file-backed source benchmark needs without holding
+// the database in heap.
+func packedRequestsDBFile(tb testing.TB, blobBytes int) (string, int64) {
+	tb.Helper()
+	dir := tb.TempDir()
+	path := filepath.Join(dir, "src.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE requests (id TEXT PRIMARY KEY, payload BLOB)`); err != nil {
+		tb.Fatal(err)
+	}
+	if blobBytes > 0 {
+		blob := largeValidConfig(tb, blobBytes)
+		if _, err := db.Exec(`INSERT INTO requests(id, payload) VALUES ('big', ?)`, blob); err != nil {
+			tb.Fatal(err)
+		}
+	} else if _, err := db.Exec(`INSERT INTO requests(id) VALUES ('rec-1')`); err != nil {
+		tb.Fatal(err)
+	}
+	snap := filepath.Join(dir, "snap.db")
+	if _, err := db.Exec("VACUUM INTO ?", snap); err != nil {
+		tb.Fatal(err)
+	}
+	db.Close()
+	info, err := os.Stat(snap)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return snap, info.Size()
 }
 
 func packedRequestsDB(t *testing.T) []byte {

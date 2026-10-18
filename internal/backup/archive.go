@@ -2,11 +2,14 @@
 //
 // A backup is a packed SQLite snapshot (VACUUM INTO) and/or the schema YAML,
 // wrapped in a zstd frame with a content checksum and an outer SHA-256 of the
-// uncompressed payload. EncodeFile is the streaming encode owner: it writes
-// one archive into a unique staging file, verifies it, and only then returns
-// it. Encode is the byte-buffered wrapper for callers that need the bytes.
-// Neither returns an archive that Decode+Validate would reject, so a produced
-// archive is never a silent corrupt file.
+// uncompressed payload. The database member may be held as bytes or named by
+// an already-staged private file. EncodeFile is the streaming encode owner: it
+// writes one archive into a unique staging file, verifies it, and only then
+// returns it. A file-backed database member streams in bounded chunks, so
+// encoding never materializes the whole database on the heap. Encode is the
+// byte-buffered wrapper for callers that need the bytes. Neither returns an
+// archive that Decode+Validate would reject, so a produced archive is never a
+// silent corrupt file.
 package backup
 
 import (
@@ -76,9 +79,16 @@ var payloadMax = int64(config.BackupMaxBytesMax)
 
 // Archive is one operator backup. At least one member must be present.
 type Archive struct {
-	Created  time.Time
-	Config   []byte
+	Created time.Time
+	Config  []byte
+	// Database is the in-memory packed SQLite member. It is mutually
+	// exclusive with DatabasePath.
 	Database []byte
+	// DatabasePath names an already-staged packed SQLite member, normally
+	// Store.SnapshotFile. It is mutually exclusive with Database. Encoding
+	// streams the file and Validate inspects it in place, so neither copies
+	// the database onto the heap. The caller owns the file and its cleanup.
+	DatabasePath string
 }
 
 func (a Archive) flags() byte {
@@ -86,10 +96,24 @@ func (a Archive) flags() byte {
 	if len(a.Config) > 0 {
 		f |= flagConfig
 	}
-	if len(a.Database) > 0 {
+	if a.hasDatabase() {
 		f |= flagDatabase
 	}
 	return f
+}
+
+func (a Archive) hasDatabase() bool {
+	return len(a.Database) > 0 || a.DatabasePath != ""
+}
+
+// checkMemberSources rejects the one ambiguous archive shape: a database
+// member named both as bytes and as a file. Every source-order walk and
+// Validate call this one owner before touching a member.
+func (a Archive) checkMemberSources() error {
+	if len(a.Database) > 0 && a.DatabasePath != "" {
+		return fmt.Errorf("backup database member has both bytes and a path")
+	}
+	return nil
 }
 
 // archiveHeader is the parsed version-1 header. createdAt has second
@@ -103,6 +127,8 @@ type archiveHeader struct {
 // Encode returns the encoded archive bytes. It is the byte-buffered wrapper
 // around EncodeFile for callers that need the bytes; the HTTP download path
 // uses EncodeFile directly so it never retains a second full archive copy.
+// A path-backed database member is encoded from its file before this wrapper
+// reads the final archive, so the source database is never copied into heap.
 // The returned bytes have already round-tripped through the streaming
 // self-check.
 func Encode(stageDir string, a Archive) ([]byte, error) {
@@ -136,21 +162,33 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 	if maxArchiveBytes <= 0 {
 		return "", 0, fmt.Errorf("backup size limit is invalid")
 	}
+	if err := a.checkMemberSources(); err != nil {
+		return "", 0, err
+	}
 	if a.flags() == 0 {
 		return "", 0, ErrEmptyArchive
 	}
-	if len(a.Database) > 0 && stageDir == "" {
+	if a.hasDatabase() && stageDir == "" {
 		return "", 0, fmt.Errorf("snapshot staging directory is required")
 	}
 	if a.Created.IsZero() {
 		a.Created = time.Now().UTC()
 	}
+	// The member walk owns source order, framing overhead and a file-backed
+	// member's length (from its stat), so the early payload cap and the encoded
+	// stream can never disagree about which members exist. The addition is
+	// checked: an implausibly large sparse source saturates the count instead
+	// of wrapping negative and slipping past the cap.
 	payloadSize := int64(0)
-	if len(a.Config) > 0 {
-		payloadSize += int64(len(a.Config)) + 9
-	}
-	if len(a.Database) > 0 {
-		payloadSize += int64(len(a.Database)) + 9
+	if err := forEachMember(a, func(m memberSource) error {
+		if m.size > payloadMax-9-payloadSize {
+			payloadSize = payloadMax + 1
+			return nil
+		}
+		payloadSize += m.size + 9
+		return nil
+	}); err != nil {
+		return "", 0, err
 	}
 	if payloadSize > payloadMax {
 		return "", 0, fmt.Errorf("backup payload exceeds backup_max_bytes maximum")
@@ -229,37 +267,107 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 	return stagedPath, size, nil
 }
 
+// memberSource is one framed member in the version-1 source order. Exactly
+// one of data (in-memory) and path (file-backed) is set; size is the member's
+// byte length, from the slice for bytes or from the file's stat for a path.
+type memberSource struct {
+	kind uint8
+	size int64
+	data []byte
+	path string
+}
+
+// databaseStreamHook is a test seam (production leaves it nil). It runs after
+// a file-backed member's header is written and the file is opened, so a test
+// can change the file's size and prove the stream fails closed.
+var databaseStreamHook func(path string)
+
 // forEachMember walks the version-1 member framing in its one canonical
-// order: config first, then database. Both the streaming encoder and the
-// self-check comparison consume this order, so they cannot drift.
-func forEachMember(a Archive, fn func(kind uint8, data []byte) error) error {
+// order: config first, then database. The encoder, the payload-size precheck
+// and the self-check comparison all consume this order, so they cannot drift.
+// A file-backed database member is sized once per walk; its bytes stay on
+// disk until a consumer opens it.
+func forEachMember(a Archive, fn func(m memberSource) error) error {
+	if err := a.checkMemberSources(); err != nil {
+		return err
+	}
 	if len(a.Config) > 0 {
-		if err := fn(memberConfig, a.Config); err != nil {
+		if err := fn(memberSource{kind: memberConfig, size: int64(len(a.Config)), data: a.Config}); err != nil {
 			return err
 		}
 	}
-	if len(a.Database) > 0 {
-		if err := fn(memberDatabase, a.Database); err != nil {
-			return err
+	switch {
+	case len(a.Database) > 0:
+		return fn(memberSource{kind: memberDatabase, size: int64(len(a.Database)), data: a.Database})
+	case a.DatabasePath != "":
+		info, err := os.Stat(a.DatabasePath)
+		if err != nil {
+			return fmt.Errorf("inspect database member %s: %w", a.DatabasePath, err)
 		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("database member %s is not a regular file", a.DatabasePath)
+		}
+		if info.Size() <= 0 {
+			return fmt.Errorf("database member %s is empty", a.DatabasePath)
+		}
+		return fn(memberSource{kind: memberDatabase, size: info.Size(), path: a.DatabasePath})
 	}
 	return nil
 }
 
 func writeMembers(w io.Writer, a Archive) error {
-	return forEachMember(a, func(kind uint8, data []byte) error {
-		return writeMember(w, kind, data)
+	return forEachMember(a, func(m memberSource) error {
+		return writeMember(w, m)
 	})
 }
 
-func writeMember(w io.Writer, kind uint8, data []byte) error {
+func writeMember(w io.Writer, m memberSource) error {
 	var hdr [9]byte
-	hdr[0] = kind
-	binary.BigEndian.PutUint64(hdr[1:], uint64(len(data)))
+	hdr[0] = m.kind
+	binary.BigEndian.PutUint64(hdr[1:], uint64(m.size))
 	if err := writeAll(w, hdr[:]); err != nil {
 		return err
 	}
-	return writeAll(w, data)
+	if m.path == "" {
+		return writeAll(w, m.data)
+	}
+	return streamDatabaseMember(w, m)
+}
+
+// streamDatabaseMember copies exactly the length captured for a file-backed
+// database member, in bounded chunks. A file that shrank, grew, or cannot be
+// read fails the write: the framed length and the bytes actually written must
+// agree, so a changed snapshot is never silently truncated.
+func streamDatabaseMember(w io.Writer, m memberSource) error {
+	f, err := os.Open(m.path)
+	if err != nil {
+		return fmt.Errorf("open database member %s: %w", m.path, err)
+	}
+	defer f.Close()
+	if databaseStreamHook != nil {
+		databaseStreamHook(m.path)
+	}
+	buf := make([]byte, selfCheckBuffer)
+	for off := int64(0); off < m.size; {
+		n := m.size - off
+		if n > int64(len(buf)) {
+			n = int64(len(buf))
+		}
+		if _, err := io.ReadFull(f, buf[:n]); err != nil {
+			return fmt.Errorf("database member %s changed size while encoding: %w", m.path, err)
+		}
+		if err := writeAll(w, buf[:n]); err != nil {
+			return err
+		}
+		off += n
+	}
+	var extra [1]byte
+	if n, err := f.Read(extra[:]); n != 0 {
+		return fmt.Errorf("database member %s changed size while encoding: file grew", m.path)
+	} else if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read database member %s: %w", m.path, err)
+	}
+	return nil
 }
 
 func writeAll(w io.Writer, b []byte) error {
@@ -384,29 +492,51 @@ func selfCheckFile(path, stageDir string, a Archive) error {
 // compareMembers consumes the decoder stream in the encoder's canonical
 // member order and compares every framed byte with the source member. A
 // truncated, reordered, duplicated or altered payload fails here before
-// Validate runs.
+// Validate runs. A file-backed member is compared in bounded chunks and is
+// never loaded whole.
 func compareMembers(r io.Reader, a Archive) error {
-	buf := make([]byte, selfCheckBuffer)
-	return forEachMember(a, func(kind uint8, want []byte) error {
+	decoded := make([]byte, selfCheckBuffer)
+	source := make([]byte, selfCheckBuffer)
+	return forEachMember(a, func(m memberSource) error {
 		var hdr [9]byte
 		if _, err := io.ReadFull(r, hdr[:]); err != nil {
 			return truncated(err)
 		}
-		if hdr[0] != kind || binary.BigEndian.Uint64(hdr[1:]) != uint64(len(want)) {
+		if hdr[0] != m.kind || binary.BigEndian.Uint64(hdr[1:]) != uint64(m.size) {
 			return fmt.Errorf("payload changed")
 		}
-		for off := 0; off < len(want); {
-			n := len(want) - off
-			if n > len(buf) {
-				n = len(buf)
+		var src io.Reader
+		if m.path == "" {
+			src = bytes.NewReader(m.data)
+		} else {
+			f, err := os.Open(m.path)
+			if err != nil {
+				return fmt.Errorf("open database member %s: %w", m.path, err)
 			}
-			if _, err := io.ReadFull(r, buf[:n]); err != nil {
+			defer f.Close()
+			src = f
+		}
+		for off := int64(0); off < m.size; {
+			n := m.size - off
+			if n > int64(len(decoded)) {
+				n = int64(len(decoded))
+			}
+			if _, err := io.ReadFull(src, source[:n]); err != nil {
+				return fmt.Errorf("source member changed size: %w", err)
+			}
+			if _, err := io.ReadFull(r, decoded[:n]); err != nil {
 				return truncated(err)
 			}
-			if !bytes.Equal(buf[:n], want[off:off+n]) {
+			if !bytes.Equal(decoded[:n], source[:n]) {
 				return fmt.Errorf("payload changed")
 			}
 			off += n
+		}
+		var extra [1]byte
+		if n, err := src.Read(extra[:]); n != 0 {
+			return fmt.Errorf("source member changed size: file grew")
+		} else if err != nil && !errors.Is(err, io.EOF) {
+			return err
 		}
 		return nil
 	})
@@ -518,10 +648,14 @@ func readCapped(r io.Reader, max int64) ([]byte, error) {
 
 // Validate runs semantic checks: config YAML must load without dropped keys,
 // and a database member must be a packed SQLite snapshot with a requests
-// table. stageDir is the directory used to stage a database member for
-// inspection (the live database's volume); it is required when the archive
-// carries a database member and ignored otherwise.
+// table. stageDir is the directory used to stage an in-memory database member
+// for inspection (the live database's volume) and is ignored for a
+// file-backed member, which is integrity-checked in place without a second
+// copy.
 func Validate(stageDir string, a Archive) error {
+	if err := a.checkMemberSources(); err != nil {
+		return err
+	}
 	if a.flags() == 0 {
 		return ErrEmptyArchive
 	}
@@ -537,8 +671,13 @@ func Validate(stageDir string, a Archive) error {
 			return fmt.Errorf("backup config: %w", err)
 		}
 	}
-	if len(a.Database) > 0 {
+	switch {
+	case len(a.Database) > 0:
 		if err := CheckDatabase(stageDir, a.Database); err != nil {
+			return fmt.Errorf("backup database: %w", err)
+		}
+	case a.DatabasePath != "":
+		if err := CheckDatabaseFile(a.DatabasePath); err != nil {
 			return fmt.Errorf("backup database: %w", err)
 		}
 	}
