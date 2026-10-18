@@ -264,7 +264,7 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		// A directory where the config file should be: the load fails at
 		// the read, the endpoint keeps the running config and answers with
 		// the flat operator error body. The failure transport is
-		// adminjson.WriteError (http.Error), whose Go 1.26 contract resets
+		// adminjson.WriteError (http.Error), whose current net/http contract resets
 		// Content-Type to text/plain even though the handler declared
 		// application/json first - the body stays the flat JSON error
 		// either way. This declare-JSON-then-WriteError reset is the whole

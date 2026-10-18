@@ -72,7 +72,7 @@ func TestRestartStatusDocWireKeysStrict(t *testing.T) {
 // TestRestartBudgetMirrorsPinned pins the three choreography bounds the
 // dashboard's poll fallback mirrors as literals (chrome.js
 // RESTART_BUILD_BUDGET_MS / RESTART_READY_BUDGET_MS / RESTART_DRAIN_FALLBACK_
-// MS = 300000 / 30000 / 600000): the build bound, the child-ready bound, and
+// MS = 300000 / 300000 / 600000): the build bound, the child-ready bound, and
 // the config default the fallback renders for documents that omit or zero
 // the drain bound.
 func TestRestartBudgetMirrorsPinned(t *testing.T) {

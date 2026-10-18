@@ -39,9 +39,10 @@ func cgroupMemoryMax() (int64, bool) {
 
 // effectiveMemoryLimit is the startup memory policy owner. Explicit config
 // wins (documented); otherwise an operator GOMEMLIMIT environment value is
-// left untouched; otherwise a finite cgroup ceiling becomes a soft Go limit at
-// 80% of the container's memory, leaving headroom for SQLite's page caches and
-// non-Go process memory. 0 means leave the runtime unbounded.
+// left untouched; otherwise a finite cgroup ceiling of at least 80MiB becomes
+// a soft Go limit at 80% of the container's memory, leaving headroom for
+// SQLite's page caches and non-Go process memory. GOGC is independent and is
+// never inspected here. 0 means leave the runtime unbounded.
 func effectiveMemoryLimit(configured int64, env string, cgroup int64, hasCgroup bool) int64 {
 	if configured > 0 {
 		return configured

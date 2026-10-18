@@ -74,11 +74,11 @@ read_header_timeout: 10s
 idle_timeout: 2m
 
 # Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup.
-# 0 auto-detects a finite cgroup memory ceiling at 80% and otherwise leaves the runtime
-# unbounded; GOMEMLIMIT/GOGC environment control wins when set, and a set value overrides
-# the environment. Exceeding it turns the collector more aggressive (capped near 50% CPU),
-# never fails requests. Does not bound SQLite's page cache or OS overhead. Restart
-# required.
+# 0 auto-detects a finite cgroup memory ceiling at 80% (ceilings below 80MiB are ignored)
+# and otherwise leaves the runtime unbounded. GOMEMLIMIT wins when set; GOGC is
+# independent. A set value overrides GOMEMLIMIT, not GOGC. Exceeding it turns the
+# collector more aggressive (capped near 50% CPU), never fails requests. Does not bound
+# SQLite's page cache or OS overhead. Restart required.
 # Hot-reload: NO (restart required).
 #   type: bytes · range 32MiB..1024GiB (0B = auto cgroup, else unbounded) · default 0B
 go_memory_limit: 0B

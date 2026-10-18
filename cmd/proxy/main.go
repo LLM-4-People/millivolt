@@ -207,14 +207,15 @@ func main() {
 	recordReloadStatus(true, "", skipped, nil)
 	applyCLIOverrides(cfg)
 	// The soft runtime memory limit is startup-only by design: it must be
-	// active before the startup projection preload allocates its burst, and
-	// an unset value never calls the API so operator GOMEMLIMIT/GOGC
-	// environment variables keep control (config.go owns the semantics).
+	// active before the startup projection preload allocates its burst. A
+	// zero config value leaves an operator GOMEMLIMIT untouched and otherwise
+	// applies a detected cgroup ceiling when GOMEMLIMIT is unset; GOGC is
+	// independent (config.go and memory.go own the semantics).
 	cgroupLimit, hasCgroup := cgroupMemoryMax()
 	if limit := effectiveMemoryLimit(int64(cfg.MemoryLimit), os.Getenv("GOMEMLIMIT"), cgroupLimit, hasCgroup); limit > 0 {
 		debug.SetMemoryLimit(limit)
 		if cfg.MemoryLimit == 0 {
-			log.Printf("runtime: soft memory limit %d MiB from cgroup v2 ceiling %d MiB", limit>>20, cgroupLimit>>20)
+			log.Printf("runtime: soft memory limit %d MiB from cgroup memory ceiling %d MiB", limit>>20, cgroupLimit>>20)
 		}
 	}
 

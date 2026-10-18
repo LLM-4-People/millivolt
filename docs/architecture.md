@@ -176,9 +176,10 @@ validated view/scope, canonical model rules, finalized/database revisions and,
 for explorer, pending revisions. Clock-aligned geometry also gates chart reuse.
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
-provider/client/key/conversation/model/status equalities into SQLite before
-decoding, while the Go scope matcher remains authoritative for canonical
-models, status classes, errors, tools, time buckets and live-only classes.
+provider/client/key/conversation/status equalities into SQLite before
+decoding, plus raw model equality when no canonical rules rewrite names. The
+Go scope matcher remains authoritative for canonical models, status classes,
+errors, tools, time buckets and live-only classes.
 
 Explorer uses dictionary IDs, scoped predicates and bitsets. Projected metric
 samples stay in shared sorted orders: single-valued dimensions retain one group
@@ -187,7 +188,10 @@ occurrences. Selected groups use the same exact rank reader as chart buckets,
 and only top cards derive percentile payloads. Pending dedupe retains only
 relevant pending IDs, not another history-sized seen set. Chart's rank reader
 also produces the occurrence-weighted avg/min/max in the same traversal, so a
-metric order is no longer walked separately for stats.
+metric order is no longer walked separately for stats. A retained
+last-65,536-row order serves bounded chart windows whose earliest in-window
+durable row is inside that tail; older or unscoped windows fall back to the
+all-history order, so the fast path never changes rank or stat results.
 
 Both consumers share R7 rank/interpolation and the minimum-sample gate. Period
 speed/TTFT percentiles use period samples, never means of bucket percentiles.

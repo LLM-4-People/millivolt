@@ -104,7 +104,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Keep-alive idle connections. No write timeout (it would kill SSE). Restart required.",
 			Kind: KindDuration, HotReload: false, Min: num(0), ZeroMeans: "no timeout"},
 		{Key: "go_memory_limit", Category: "server", Label: "Go memory limit",
-			Help: "Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup. 0 auto-detects a finite cgroup memory ceiling at 80% and otherwise leaves the runtime unbounded; GOMEMLIMIT/GOGC environment control wins when set, and a set value overrides the environment. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails requests. Does not bound SQLite's page cache or OS overhead. Restart required.",
+			Help: "Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup. 0 auto-detects a finite cgroup memory ceiling at 80% (ceilings below 80MiB are ignored) and otherwise leaves the runtime unbounded. GOMEMLIMIT wins when set; GOGC is independent. A set value overrides GOMEMLIMIT, not GOGC. Exceeding it turns the collector more aggressive (capped near 50% CPU), never fails requests. Does not bound SQLite's page cache or OS overhead. Restart required.",
 			Kind: KindBytes, HotReload: false, Min: num(float64(MemoryLimitMin)), Max: num(float64(MemoryLimitMax)), ZeroMeans: "auto cgroup, else unbounded"},
 
 		// ---- request ----

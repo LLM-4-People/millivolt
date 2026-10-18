@@ -4822,7 +4822,7 @@ const RESTART_STEPS = [
 // The poll fallback's budget and cadence. The deadline must cover the whole
 // remaining choreography or the fallback gives up while the server is still
 // draining: the server bounds the build (restartBuildTimeout, 5 minutes) and
-// the child's ready wait (restartReadyTimeout, 30 seconds) on its side, and
+// the child's ready wait (restartReadyTimeout, 5 minutes) on its side, and
 // the status document carries the drain bound as drain_timeout_ms (the
 // configured restart_drain_timeout; 0 = the server waits indefinitely).
 // RESTART_DRAIN_FALLBACK_MS mirrors the server-side default drain timeout
