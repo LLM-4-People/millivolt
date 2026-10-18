@@ -53,6 +53,11 @@ Routing validation and request construction live in
 | `X-Proxy-Limit-Tokens` | Sticky provider-wide token rate as `COUNT/WINDOW`. |
 | `X-Proxy-Refresh-Token` | Opt-in stateless expired-token refresh for supported mechanisms. See [refresh](adapters.md#token-refresh). |
 
+Client identity labels are retention-bounded before the record enters the live
+ring, analytics or durable store: classified client and language 256 bytes,
+user agent 1024 bytes, and the first forwarded address 128 bytes. Longer values
+are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
+
 One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
 Absent headers preserve limits; `0`, `off`, `none` or `unlimited` clear them.
 Windows accept Go durations from 1 second through 24 hours, plus `1d`.

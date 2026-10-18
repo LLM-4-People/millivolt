@@ -170,9 +170,9 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 // client-controlled megabytes while leaving every real identifier intact.
 const (
 	retainedLabelMax         = 512   // model id
-	retainedClientMax        = 256   // classified client label
+	retainedClientMax        = 256   // classified client label or language
 	retainedUserAgentMax     = 1024  // user agent
-	retainedClientIPMax      = 128   // forwarded address list
+	retainedClientIPMax      = 128   // client IP (first forwarded value)
 	retainedHeaderValueMax   = 4096  // one retained header value
 	retainedHeaderValuesMax  = 16    // values retained per header name
 	retainedHeadersMaxBytes  = 16384 // total retained bytes across one header map

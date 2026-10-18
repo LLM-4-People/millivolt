@@ -141,7 +141,7 @@ dimensions, such as tools and errors, can overlap rather than partition requests
 | --- | --- |
 | Providers | Server-derived upstream identities after configured aliases. |
 | Models | Model groups produced by the configured canonicalization rules. |
-| Clients | Explicit client labels or inferred SDK/User-Agent identities. |
+| Clients | Explicit client labels or inferred SDK/User-Agent identities, retention-bounded before the ring and store. |
 | Conversations | Conversation IDs from explicit sessions, tracked body params (`k:` identities) or automatic grouping, with declared ancestry when resolvable. Selecting a conversation selects that leaf, not its descendants. |
 | Tools | Observed tool names; one request can belong to several tools. |
 | Time | Request start in the server's local timezone: weekday night 00:00-08:00, work 08:00-16:00, evening 16:00-24:00, or a single weekend group. This is separate from chart history range. |

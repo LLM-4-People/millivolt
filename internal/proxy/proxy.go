@@ -651,7 +651,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rec.Provider = t.provider
 	rec.Model = recModel
 	rec.KeyHash = hashKey(key)
-	rec.UserAgent = r.UserAgent()
+	rec.UserAgent = retainedText(r.UserAgent(), retainedUserAgentMax)
 	rec.Client = client
 	rec.ClientIP = remoteIP(r)
 	rec.Path = r.URL.Path

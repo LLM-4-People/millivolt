@@ -754,80 +754,87 @@ func isValidAuthHeader(h string) bool {
 	return true
 }
 
+// remoteIP returns the client's IP (host part of RemoteAddr), honoring
+// X-Forwarded-For when the proxy sits behind another proxy. The returned value
+// is bounded at this owner so every caller and consumer shares the same cap.
+func remoteIP(r *http.Request) string {
+	ip := ""
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		ip = strings.TrimSpace(xff)
+		if i := strings.Index(xff, ","); i > 0 {
+			ip = strings.TrimSpace(xff[:i])
+		}
+	} else if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip = host
+	} else {
+		ip = r.RemoteAddr
+	}
+	return retainedText(ip, retainedClientIPMax)
+}
+
+// clientLang extracts the SDK language/runtime from x-stainless-* headers or
+// the user agent. No hardcoded list of known languages: it derives from
+// whatever headers are present. The returned value is bounded at this owner so
+// every caller and consumer shares the same cap.
+func clientLang(r *http.Request) string {
+	lang := ""
+	if v := strings.TrimSpace(r.Header.Get("X-Stainless-Lang")); v != "" {
+		lang = v
+	} else if v := strings.TrimSpace(r.Header.Get("X-Stainless-Runtime")); v != "" {
+		lang = v
+	} else {
+		// Fall back to the user-agent's product token (e.g.
+		// "openai-python/1.55" → "openai-python").
+		ua := r.UserAgent()
+		if i := strings.Index(ua, "/"); i > 0 {
+			lang = ua[:i]
+		} else if i := strings.Index(ua, " "); i > 0 {
+			lang = ua[:i]
+		} else {
+			lang = ua
+		}
+	}
+	return retainedText(lang, retainedClientMax)
+}
+
 // classifyClient derives the recorded client identity from the request
 // headers. An explicit X-Proxy-Client label wins, except when it merely
 // repeats the user agent's product name while the agent reports more detail
 // ("opencode" beside "opencode/latest/2.0.26/cli"): the fuller user-agent
 // identity is then the true one. Without a label the order is x-stainless-lang
-// (OpenAI SDKs), then the user agent's product token, else "unknown".
-
-// remoteIP returns the client's IP (host part of RemoteAddr), honoring
-// X-Forwarded-For when the proxy sits behind another proxy.
-func remoteIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.Index(xff, ","); i > 0 {
-			return strings.TrimSpace(xff[:i])
-		}
-		return strings.TrimSpace(xff)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
-	}
-	return r.RemoteAddr
-}
-
-// clientLang extracts the SDK language/runtime from x-stainless-* headers or
-// the user agent. No hardcoded list of known languages: it derives from
-// whatever headers are present.
-func clientLang(r *http.Request) string {
-	if v := strings.TrimSpace(r.Header.Get("X-Stainless-Lang")); v != "" {
-		return v
-	}
-	if v := strings.TrimSpace(r.Header.Get("X-Stainless-Runtime")); v != "" {
-		return v
-	}
-	// Fall back to the user-agent's product token (e.g. "openai-python/1.55" →
-	// "openai-python").
-	ua := r.UserAgent()
-	if i := strings.Index(ua, "/"); i > 0 {
-		return ua[:i]
-	}
-	if i := strings.Index(ua, " "); i > 0 {
-		return ua[:i]
-	}
-	return ua
-}
-
+// (OpenAI SDKs), then the user agent's product token, else "unknown". The
+// returned value is bounded at this owner so every caller and consumer shares
+// the same cap.
 func classifyClient(r *http.Request) string {
 	ua := strings.TrimSpace(r.UserAgent())
 	if i := strings.Index(ua, " "); i > 0 {
 		ua = ua[:i]
 	}
+	client := ""
 	// Explicit override from the app.
 	if v := strings.TrimSpace(r.Header.Get(hdrClient)); v != "" {
+		client = v
 		if ua != "" && ua != v {
 			name := ua
 			if i := strings.Index(name, "/"); i > 0 {
 				name = name[:i]
 			}
 			if v == name {
-				return ua
+				client = ua
 			}
 		}
-		return v
-	}
-	// OpenAI-compatible SDKs set x-stainless-lang (e.g. "python", "js", "go").
-	if v := strings.TrimSpace(r.Header.Get("X-Stainless-Lang")); v != "" {
+	} else if v := strings.TrimSpace(r.Header.Get("X-Stainless-Lang")); v != "" {
+		// OpenAI-compatible SDKs set x-stainless-lang (e.g. "python", "js", "go").
+		client = v
 		if pkg := strings.TrimSpace(r.Header.Get("X-Stainless-Package-Version")); pkg != "" {
-			return v + " " + pkg
+			client = v + " " + pkg
 		}
-		return v
+	} else if ua != "" {
+		client = ua
+	} else {
+		client = "unknown"
 	}
-	if ua == "" {
-		return "unknown"
-	}
-	return ua
+	return retainedText(client, retainedClientMax)
 }
 
 // clientMetaMaxLen caps a captured client-meta token. Safety guardrail: these
