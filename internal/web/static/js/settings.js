@@ -7,6 +7,11 @@
 // not an ES module and the existing tests drive these names directly.
 
 let settingsDoc = null;
+// The rendered form's document identity. settingsDoc can advance on a
+// background refresh while the sheet is closed; the retained rows still
+// belong to these values, so a no-op refill must compare against them.
+let settingsFormRevision = '';
+let settingsFormWritable = null;
 
 let settingsCat = '';
 let settingsSnap = '';
@@ -54,7 +59,12 @@ function settingsCatVisual(id) {
 }
 
 function settingsIsDirty() {
-  return !!(settingsDoc && settingsDoc.writable && settingsSnap && settingsFingerprint() !== settingsSnap);
+  if (!(settingsDoc && settingsDoc.writable && settingsSnap)) return false;
+  // The dirty path maintains the changed-key set beside the per-key
+  // baseline, so the hot predicate reads just that set. Only a form without
+  // the per-key baseline needs the original full fingerprint comparison.
+  if (settingsSnapByKey) return settingsChangedKeys.size > 0;
+  return settingsFingerprint() !== settingsSnap;
 }
 
 function settingsDirtyCount(values) {
@@ -78,6 +88,12 @@ function settingsDirtyCount(values) {
 function settingsRestartNotice(doc) {
   const keys = doc?.restart_required || [];
   return keys.length ? 'restart needed for: ' + keys.join(', ') : '';
+}
+
+// settingsBaseStatus is the idle status line shared by a full refill and the
+// unchanged-document no-op refill.
+function settingsBaseStatus(doc) {
+  return doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist';
 }
 
 // openSettings is the sheet's open owner, called by the chrome.js trigger
@@ -130,9 +146,20 @@ function settingsClose(force) {
   }
 }
 
+// settingsCanSkipFill reports whether an accepted document can leave the
+// retained form untouched: the sheet is open over a baseline with rendered
+// rows, and the document identity matches the one the form was built from.
+function settingsCanSkipFill(doc) {
+  return !!(settingsIsOpen() && settingsDoc && settingsSnap && settingsKeyEls.size &&
+    doc.revision === settingsFormRevision && doc.writable === settingsFormWritable);
+}
+
 function fetchSettings(discard = false) {
   const req = ++settingsReq;
-  const draft = settingsFingerprint();
+  // Only an explicit Revert needs the draft identity it is allowed to
+  // discard; an ordinary refresh checks the incremental dirty predicate at
+  // response time instead of collecting the whole form up front.
+  const draft = discard ? settingsFingerprint() : '';
   return operatorJsonBody('/admin/config', {}, SETTINGS_LOAD_FAIL)
     .then(doc => {
       if (!Array.isArray(doc.fields) || !doc.values || !doc.revision) throw new Error(doc.error || SETTINGS_LOAD_FAIL);
@@ -144,9 +171,22 @@ function fetchSettings(discard = false) {
       const saving = $('btn-settings-apply')?.dataset.busy;
       // Restart/background refreshes never replace a draft. Explicit Revert
       // may discard only the draft it started with, not subsequent typing.
-      if (!saving && (!settingsIsDirty() || (discard && draft === settingsFingerprint()))) {
-        settingsDoc = doc;
-        if (settingsIsOpen()) fillSettingsForm(doc);
+      if (saving) return doc;
+      if (settingsIsDirty() && !(discard && draft === settingsFingerprint())) return doc;
+      // A clean draft over the exact document identity the form was built
+      // from is a no-op refill: adopt the fresh server state and repaint the
+      // shared status/actions and search/category view without rebuilding
+      // rows, revalidating editors or replacing the accepted baseline.
+      const skip = !discard && settingsCanSkipFill(doc);
+      settingsDoc = doc;
+      if (settingsIsOpen()) {
+        if (skip) {
+          settingsStatus(settingsBaseStatus(doc));
+          showSettingsCat();
+          updateSettingsActions();
+        } else {
+          fillSettingsForm(doc);
+        }
       }
       return doc;
     })
@@ -172,11 +212,15 @@ function fillSettingsForm(doc) {
     settingsSnapByKey = null;
     settingsChangedKeys = new Set();
     settingsKeyEls = new Map();
+    settingsFormRevision = '';
+    settingsFormWritable = null;
     settingsStatus(SETTINGS_LOAD_FAIL);
     updateSettingsActions();
     return;
   }
   settingsDoc = doc;
+  settingsFormRevision = doc.revision;
+  settingsFormWritable = doc.writable;
   const values = doc.values || {};
   const defaults = doc.defaults || {};
   const overrides = doc.overrides || {};
@@ -223,7 +267,7 @@ function fillSettingsForm(doc) {
   box.querySelectorAll('.ro-wrap').forEach(wrap => { validateRequestOverridesDraft(wrap); roSyncCount(wrap); });
   box.querySelectorAll('.sc-wrap').forEach(wrap => { validateSubConversationsDraft(wrap); scSyncCount(wrap); });
   fillSettingsLive(doc);
-  settingsStatus(doc.writable ? settingsRestartNotice(doc) : 'in-memory only - start with -config to persist');
+  settingsStatus(settingsBaseStatus(doc));
   // Cache each rendered row's search haystack beside the value snapshot: the
   // per-keystroke filter and every rail badge read this copy instead of the
   // row dataset text.
@@ -2854,9 +2898,7 @@ function markSettingsDirty(key) {
 }
 
 function updateSettingsActions(dirtyOverride) {
-  const dirty = dirtyOverride !== undefined
-    ? !!dirtyOverride
-    : !!(settingsSnap && settingsFingerprint() !== settingsSnap);
+  const dirty = dirtyOverride !== undefined ? !!dirtyOverride : settingsIsDirty();
   const apply = $('btn-settings-apply');
   const revert = $('btn-settings-revert');
   const busy = !!(apply?.dataset.busy || revert?.dataset.busy);

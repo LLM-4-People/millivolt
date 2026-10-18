@@ -6244,6 +6244,164 @@ async function main() {
     delete w.__searchCacheRestore;
   }
 
+  // ---- settings open no-op: a clean, unchanged reopen still fetches for
+  // freshness, but the accepted document must leave the retained form in
+  // place - same nodes, same values, same baseline, no full fingerprint -
+  // while the category/search presentation is re-applied. Revision or
+  // writable changes, dirty drafts and Revert still refill.
+  {
+    const originalFetch = w.fetch;
+    const pending = [];
+    w.fetch = (url, init) => {
+      if (!String(url).includes('/admin/config')) return originalFetch(url, init);
+      return new Promise(resolve => pending.push(resolve));
+    };
+    const reply = doc => ({ ok: true, statusText: 'OK', json: async () => JSON.parse(JSON.stringify(doc)) });
+    const doc = {
+      revision: 'noop-r1',
+      fields: [
+        { key: 'noop_count', category: 'alpha', label: 'Noop count', help: 'alpha row', kind: 'int', min: 0, max: 10, hot_reload: true },
+        { key: 'noop_flag', category: 'beta', label: 'Noop flag', help: 'beta row', kind: 'bool', hot_reload: true },
+      ],
+      categories: [
+        { id: 'alpha', label: 'Alpha', help: 'alpha controls' },
+        { id: 'beta', label: 'Beta', help: 'beta controls' },
+      ],
+      values: { noop_count: 2, noop_flag: true },
+      defaults: {}, effective: {}, overrides: {}, writable: true, usage_fields: [],
+    };
+    const box = d.getElementById('settings-fields');
+    const q = d.getElementById('settings-q');
+    const apply = d.getElementById('btn-settings-apply');
+    const revert = d.getElementById('btn-settings-revert');
+    const status = () => d.getElementById('settings-count').textContent;
+    let fillCalls = 0, fingerprintCalls = 0;
+    const realFill = w.fillSettingsForm;
+    const realFingerprint = w.settingsFingerprint;
+    w.fillSettingsForm = function () { fillCalls++; return realFill.apply(this, arguments); };
+    w.settingsFingerprint = function () { fingerprintCalls++; return realFingerprint.apply(this, arguments); };
+    const valueInput = () => box.querySelector('input[data-key="noop_count"]');
+    const openWith = async next => {
+      w.toggleSettings({ stopPropagation() {} });
+      await settleUntil(() => pending.length === 1);
+      pending.shift()(reply(next));
+      await sleep(20);
+    };
+    // A first open has no baseline and no rendered rows: it must fill.
+    w.closeSettings(true);
+    w.eval('settingsDoc = null; settingsSnap = ""; settingsSnapByKey = null; settingsChangedKeys = new Set(); settingsKeyEls = new Map(); settingsCat = ""; settingsQ = "";');
+    box.innerHTML = '';
+    d.getElementById('settings-rail').innerHTML = '';
+    q.value = '';
+    await openWith(doc);
+    const firstInput = valueInput();
+    check('settings first open still fills the accepted document',
+      fillCalls === 1 && !!firstInput && firstInput.value === '2' &&
+      w.eval('settingsDoc.revision') === 'noop-r1');
+    // Leave the next open a search and a non-default active category to
+    // restore. Closing keeps the populated DOM.
+    w.eval("settingsCat = 'beta'");
+    q.value = 'noop';
+    w.filterSettings();
+    w.closeSettings(true);
+    fillCalls = 0;
+    fingerprintCalls = 0;
+    await openWith(doc);
+    check('a clean, unchanged reopen performs no fill and no full fingerprint collection',
+      fillCalls === 0 && fingerprintCalls === 0 &&
+      valueInput() === firstInput && firstInput.value === '2');
+    check('the skipped reopen resets search and re-applies the active category',
+      q.value === '' && w.eval('settingsQ') === '' &&
+      !box.querySelector('.st-row[data-key="noop_flag"]').hidden &&
+      box.querySelector('.st-row[data-key="noop_count"]').hidden &&
+      d.querySelector('#settings-pane-hd h4').textContent === 'Beta' &&
+      d.querySelector('[data-st-cat="beta"]').classList.contains('active'));
+    check('the skipped reopen keeps a clean draft with both actions disabled',
+      !w.settingsIsDirty() && apply.disabled && revert.disabled && status() === '');
+    fingerprintCalls = 0;
+    const cleanDirty = w.settingsIsDirty();
+    w.updateSettingsActions();
+    check('the clean dirty predicate and action refresh stay on the incremental baseline',
+      !cleanDirty && fingerprintCalls === 0 && apply.disabled && revert.disabled);
+    // An out-of-band revision change is fresh state and must refill.
+    const revisionDoc = JSON.parse(JSON.stringify(doc));
+    revisionDoc.revision = 'noop-r2';
+    revisionDoc.values.noop_count = 7;
+    w.closeSettings(true);
+    fillCalls = 0;
+    fingerprintCalls = 0;
+    await openWith(revisionDoc);
+    check('an out-of-band revision change refills and reflects the new document',
+      fillCalls === 1 && valueInput() !== firstInput && valueInput().value === '7' &&
+      w.eval('settingsDoc.revision') === 'noop-r2');
+    // A writable flip on the same revision is a different document too.
+    const readOnlyDoc = JSON.parse(JSON.stringify(revisionDoc));
+    readOnlyDoc.writable = false;
+    readOnlyDoc.values.noop_count = 8;
+    w.closeSettings(true);
+    fillCalls = 0;
+    fingerprintCalls = 0;
+    await openWith(readOnlyDoc);
+    check('a writable flip refills and reflects the read-only document',
+      fillCalls === 1 && valueInput().value === '8' &&
+      status() === 'in-memory only - start with -config to persist' &&
+      apply.disabled && revert.disabled);
+    // A dirty draft always wins over a clean server refresh.
+    const cleanDoc = JSON.parse(JSON.stringify(doc));
+    cleanDoc.revision = 'noop-r3';
+    w.closeSettings(true);
+    fillCalls = 0;
+    fingerprintCalls = 0;
+    await openWith(cleanDoc);
+    const dirtyInput = valueInput();
+    dirtyInput.value = '5';
+    dirtyInput.dispatchEvent(new w.Event('input', { bubbles: true }));
+    check('the reopen fixture drafts an edit with both actions armed',
+      dirtyInput.value === '5' && w.settingsIsDirty() && !apply.disabled && !revert.disabled);
+    fingerprintCalls = 0;
+    const draftDirty = w.settingsIsDirty();
+    w.updateSettingsActions();
+    check('the dirty predicate and action refresh stay on the incremental baseline',
+      draftDirty && fingerprintCalls === 0 && !apply.disabled && !revert.disabled);
+    w.closeSettings(true);
+    fillCalls = 0;
+    fingerprintCalls = 0;
+    await openWith(cleanDoc);
+    check('a clean refresh never replaces a dirty draft',
+      fillCalls === 0 && fingerprintCalls === 0 && valueInput() === dirtyInput &&
+      dirtyInput.value === '5' && w.settingsIsDirty() && !apply.disabled && !revert.disabled);
+    // Revert discards only the draft it started with: typing while its GET
+    // is in flight wins, a later quiet Revert refills from the server.
+    fillCalls = 0;
+    const reverting = w.revertSettings();
+    await settleUntil(() => pending.length === 1);
+    dirtyInput.value = '6';
+    dirtyInput.dispatchEvent(new w.Event('input', { bubbles: true }));
+    pending.shift()(reply(cleanDoc));
+    await reverting;
+    check('typing after Revert starts survives its response',
+      valueInput() === dirtyInput && dirtyInput.value === '6' && w.settingsIsDirty() &&
+      !apply.disabled && !revert.disabled);
+    fillCalls = 0;
+    const revertingClean = w.revertSettings();
+    await settleUntil(() => pending.length === 1);
+    check('Revert keeps both actions disabled while its request is in flight',
+      apply.disabled && revert.disabled && revert.dataset.busy === '1');
+    pending.shift()(reply(cleanDoc));
+    await revertingClean;
+    check('Revert discards its own draft and refills from the accepted document',
+      fillCalls === 1 && valueInput() !== dirtyInput && valueInput().value === '2' &&
+      !w.settingsIsDirty() && apply.disabled && revert.disabled);
+    w.fillSettingsForm = realFill;
+    w.settingsFingerprint = realFingerprint;
+    w.fetch = originalFetch;
+    w.__settingsNoopRestore = JSON.parse(JSON.stringify(cfgDoc));
+    w.eval('settingsDoc = window.__settingsNoopRestore; fillSettingsForm(settingsDoc)');
+    w.eval("settingsCat = 'providers'");
+    w.closeSettings(true);
+    delete w.__settingsNoopRestore;
+  }
+
   // ---- test 12d: a stale tick's pending snapshot must never regress an
   // in-flight row's retry progress (attempts are append-only - an older
   // snapshot carries fewer absorbed attempts than a just-arrived SSE update).

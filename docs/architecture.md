@@ -360,7 +360,9 @@ routing/cards, `chart` uPlot plans, `log` window/drawer, `chrome` operator shell
 `settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
 state. `chrome.js` owns the Settings trigger, loader, open-state probe, shared
 status line and the single close entry point; the module owns the sheet's state,
-editors and apply/revert/backup/purge behavior.
+editors and apply/revert/backup/purge behavior. A clean open at the same
+document revision and writable state still fetches freshness but keeps the
+retained rows and baseline; revision/writable changes, drafts and Revert refill.
 
 One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
 pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.
