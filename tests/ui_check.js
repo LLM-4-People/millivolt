@@ -5514,6 +5514,55 @@ async function main() {
     w.fetch = origF;
   }
 
+  // ---- test 12b-bis: the unfiltered derivation aliases the ring instead
+  // of copying it on every live revision, while filtered scopes still build
+  // their own array and an abnormal nil-bearing ring still yields nil-free
+  // ordered rows. The 10k case proves the common path makes zero copies.
+  {
+    check('unfiltered derive aliases the live ring without a copy',
+      w.eval('derive(lastData).scopedRecs === lastData.records'));
+
+    const fstatus = d.getElementById('f-status');
+    fstatus.value = '500';
+    fstatus.dispatchEvent(new w.Event('change'));
+    await sleep(20);
+    const filtered = w.eval('derive(lastData).scopedRecs');
+    check('a filtered derive returns its own array with exactly the matching records',
+      w.eval('derive(lastData).scopedRecs !== lastData.records') &&
+      filtered.length === 1 && filtered[0].id === 'mix2' &&
+      filtered.every(r => r.status_code === 500));
+    fstatus.value = '';
+    fstatus.dispatchEvent(new w.Event('change'));
+    await sleep(20);
+
+    // The incremental painter consumes the alias directly (it slices before
+    // reversing); the unfiltered window keeps the ring's arrival order.
+    w.eval('renderRequestsIncremental(derive(lastData).scopedRecs)');
+    check('incremental rendering accepts the aliased ring and keeps row order',
+      rows().map(tr => tr.dataset.id).join() === 'mix3,mix2,mix1');
+
+    // A nil entry is abnormal but must never leak into the scoped rows; the
+    // fallback copy preserves order. A local fixture keeps lastData intact.
+    const nilRecs = [mkRec('nil0'), null, mkRec('nil1'), undefined, mkRec('nil2')];
+    w.__aliasNilFixture = { records: nilRecs, counters: {}, _rev: 1 };
+    try {
+      const nilScoped = w.eval('derive(window.__aliasNilFixture).scopedRecs');
+      check('a nil-bearing ring falls back to a nil-free ordered copy',
+        nilScoped !== nilRecs && nilScoped.length === 3 &&
+        nilScoped.map(r => r.id).join() === 'nil0,nil1,nil2');
+    } finally { delete w.__aliasNilFixture; }
+
+    // Identity at the 10k ring cap: no N-record copy and no push loop.
+    const bigRecs = Array.from({ length: 10000 }, (_, i) => mkRec('big' + i));
+    w.__aliasBigFixture = { records: bigRecs, counters: {}, _rev: 1 };
+    try {
+      check('the 10k unfiltered derivation is the ring array itself',
+        w.eval('derive(window.__aliasBigFixture).scopedRecs === window.__aliasBigFixture.records') &&
+        w.eval('derive(window.__aliasBigFixture).scopedRecs.length') === 10000 &&
+        w.eval('derive(window.__aliasBigFixture).scopedRecs[9999] === window.__aliasBigFixture.records[9999]'));
+    } finally { delete w.__aliasBigFixture; }
+  }
+
   // An idle SSE connection sends cursor/counter metadata after the HTML seed.
   // It must not invalidate the shared derivation or schedule another render.
   {

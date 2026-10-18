@@ -200,20 +200,30 @@ function derive(data) {
   for (const name of Object.keys(LIVE_STATUS_FILTERS)) liveBuckets[name] = 0;
   const liveSeen = new Set();
   const codeSeen = new Set();
-  const scopedRecs = [];
-  // The unfiltered case is the common one: assign the ring directly instead
-  // of running the status/label matcher per record. Live/code inventories
-  // still walk once because the status dropdown derives from them.
+  // The unfiltered case is the common one: hand back the ring array itself
+  // instead of copying and re-pushing every record on each live revision.
+  // Live/code inventories still walk once because the status dropdown derives
+  // from them. The alias is read-only (log.js only slices/concatenates it); an
+  // abnormal nil entry falls back at the first nil to a copy of the already
+  // seen prefix, then keeps pushing, so nils are omitted exactly as before.
   const matchAll = !filters.status && fs.length === 0;
-  for (const r of recs) {
-    if (!r) continue;
+  let scopedRecs = matchAll ? recs : [];
+  let ringClean = matchAll;
+  for (let i = 0; i < recs.length; i++) {
+    const r = recs[i];
+    if (!r) {
+      if (ringClean) { scopedRecs = recs.slice(0, i); ringClean = false; }
+      continue;
+    }
     if (r.live) {
       const k = statusClass(r);
       if (k in liveBuckets) liveBuckets[k]++;
       liveSeen.add(k);
     }
     if (Number(r.status_code) > 0) codeSeen.add(r.status_code);
-    if (matchAll || (recordMatchesStatusFilter(r, filters.status) && fs.every(f => recordMatchesDim(r, f.dim, f.id)))) {
+    if (!matchAll) {
+      if (recordMatchesStatusFilter(r, filters.status) && fs.every(f => recordMatchesDim(r, f.dim, f.id))) scopedRecs.push(r);
+    } else if (!ringClean) {
       scopedRecs.push(r);
     }
   }
@@ -502,19 +512,21 @@ function _evict(recs) {
 // already a finalized row (a replayed/duplicate delivery). Callers that fold
 // records into live aggregates must gate on the result - replay-tolerant
 // delivery is by design, and a naive per-event fold double-counts replays.
-// A pure-replay of a finalized row is a no-op: no bumpData, no render.
+// A pure-replay of a finalized row is a true no-op: no replacement, no
+// bumpData, no render.
 function upsertRec(rec) {
   const recs = lastData?.records || [];
   if (!rec || !rec.id) return false; // nothing arrived - never a foldable arrival
   let i = _recIdx.get(rec.id);
   if (i !== undefined && recs[i]?.id === rec.id) {
-    const pendingBefore = !!recs[i].live;
+    // A replay of an already-finalized row: same content, no visual change.
+    // Return before replacing the ring object: the unfiltered derivation
+    // aliases that ring, so a bump-less replacement would repaint a row the
+    // derivation still considers current (and update the drawer silently).
+    if (!recs[i].live) return false;
     recs[i] = rec;
     _recIdx.set(rec.id, i);
     if (recs.length > dashCfg.history_size) { _evict(recs); }
-    // A replay of an already-finalized row: same content, no visual change -
-    // skip bumpData to avoid re-running the O(N) derive pass.
-    if (!pendingBefore) return false;
     bumpData();
     return true; // pending → finalized: a real transition
   }
