@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"math"
 	"strconv"
@@ -89,6 +90,13 @@ func asFloat(v any) (float64, bool) {
 // built-in candidates. Returns (cost, true) when a usable non-negative number
 // is found.
 func ExtractCost(body []byte, overrideKeys []string) (float64, bool) {
+	// Most completions report no cost at all. A generic any-decode would
+	// materialize the whole document just to prove the key is absent, so
+	// require a plausible cost key before decoding. Escaped keys (\u....)
+	// fall back to the decode; the gate is an optimization, not a parser.
+	if !hasCostKey(body, overrideKeys) {
+		return 0, false
+	}
 	var root any
 	// Best-effort: an unparseable body just means "no cost reported" - the
 	// proxy never invents a number and never fails the request over metrics.
@@ -96,6 +104,55 @@ func ExtractCost(body []byte, overrideKeys []string) (float64, bool) {
 		return 0, false
 	}
 	return ExtractCostFromValue(root, overrideKeys)
+}
+
+// hasCostKey reports whether body contains any candidate leaf key as an
+// object key. It is deliberately conservative: a false positive only costs
+// the decode that used to happen unconditionally; a false negative would lose
+// a cost, so any escape sequence in the body falls back to decoding.
+func hasCostKey(body []byte, overrideKeys []string) bool {
+	for _, path := range overrideKeys {
+		if hasJSONLeafKey(body, path) {
+			return true
+		}
+	}
+	for _, path := range CostKeys {
+		if hasJSONLeafKey(body, path) {
+			return true
+		}
+	}
+	for path := range costKeyScales {
+		if hasJSONLeafKey(body, path) {
+			return true
+		}
+	}
+	return bytes.Contains(body, []byte(`\u`))
+}
+
+func hasJSONLeafKey(body []byte, path string) bool {
+	leaf := path
+	if i := strings.LastIndexByte(leaf, '.'); i >= 0 {
+		leaf = leaf[i+1:]
+	}
+	if leaf == "" {
+		return false
+	}
+	needle := []byte(`"` + leaf + `"`)
+	for start := 0; start < len(body); {
+		at := bytes.Index(body[start:], needle)
+		if at < 0 {
+			return false
+		}
+		i := start + at + len(needle)
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' || body[i] == '\n') {
+			i++
+		}
+		if i < len(body) && body[i] == ':' {
+			return true
+		}
+		start += at + len(needle)
+	}
+	return false
 }
 
 // CanonicalUsageFields lists the Usage field names allowed as usage_keys keys

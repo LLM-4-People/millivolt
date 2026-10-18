@@ -103,6 +103,39 @@ func TestParseUsage(t *testing.T) {
 	}
 }
 
+// TestExtractCostSkipsDecodeWithoutCostKey pins the no-cost fast path: an
+// ordinary completion must not generic-decode merely to find nothing. A
+// cost-looking string value is not an object key and must not trigger it.
+func TestExtractCostSkipsDecodeWithoutCostKey(t *testing.T) {
+	body := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5},"choices":[{"message":{"content":"a \"cost\": 1 string"}}]}`)
+	if cost, ok := ExtractCost(body, nil); ok || cost != 0 {
+		t.Fatalf("no-cost body returned cost=%v ok=%v", cost, ok)
+	}
+	if allocs := testing.AllocsPerRun(100, func() { _, _ = ExtractCost(body, nil) }); allocs != 0 {
+		t.Fatalf("no-cost ExtractCost allocates %v per call, want 0 (generic decode still runs)", allocs)
+	}
+}
+
+// TestExtractCostEscapedAndSpacedKeys keeps the gate conservative: escaped
+// keys fall back to the full decode, and whitespace before the colon is still
+// recognized.
+func TestExtractCostEscapedAndSpacedKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want float64
+	}{
+		{"escaped key", `{"usage":{"\u0063ost":0.5}}`, 0.5},
+		{"spaced key", `{"usage":{"cost" : 0.25}}`, 0.25},
+	}
+	for _, c := range cases {
+		got, ok := ExtractCost([]byte(c.body), nil)
+		if !ok || got != c.want {
+			t.Errorf("%s: cost=%v ok=%v, want %v true", c.name, got, ok, c.want)
+		}
+	}
+}
+
 // ExtractCostFromValue must also work on a bare "usage" object (the SSE
 // analyzer captures just the usage fragment, not the whole body).
 func TestExtractCostFromBareUsage(t *testing.T) {
