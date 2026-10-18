@@ -36,6 +36,7 @@ func TestDashFileAllowlist(t *testing.T) {
 		DashPrefix + "css/dashboard.css",
 		DashPrefix + "vendor/uplot.js",
 		DashPrefix + "js/core.js",
+		DashPrefix + "js/settings.js",
 	}
 	for _, p := range ok {
 		rel, ct, good := dashFile(p)
@@ -472,25 +473,25 @@ func TestDashCfgSeedsMatchDefault(t *testing.T) {
 	}
 }
 
-// TestCanonicalFieldFallbacksMatchOwners locks the dashboard's first-paint
+// TestCanonicalFieldFallbacksMatchOwners locks the dashboard's settings
 // fallback lists and the ui_check fixture to their single Go owners, so a
 // field added or removed on either side fails the build:
-//   - chrome.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields (the
+//   - settings.js USAGE_FIELDS_FALLBACK == metrics.CanonicalUsageFields (the
 //     canonical token fields, served by GET /admin/config as usage_fields)
-//   - chrome.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields (the
+//   - settings.js MODEL_FIELDS_FALLBACK == format.CanonicalModelFields (the
 //     /v1/models enrichment vocabulary, served as model_fields)
 //   - ui_check.js cfgDoc.usage_fields == metrics.CanonicalUsageFields (the
 //     harness stubs the /admin/config payload and asserts its dropdown)
 func TestCanonicalFieldFallbacksMatchOwners(t *testing.T) {
-	js, err := staticFS.ReadFile("static/js/chrome.js")
+	js, err := staticFS.ReadFile("static/js/settings.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := jsStringList(t, js, "USAGE_FIELDS_FALLBACK = "), metrics.CanonicalUsageFields; !slices.Equal(got, want) {
-		t.Errorf("chrome.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
+		t.Errorf("settings.js USAGE_FIELDS_FALLBACK = %v, want metrics.CanonicalUsageFields %v", got, want)
 	}
 	if got, want := jsStringList(t, js, "MODEL_FIELDS_FALLBACK = "), format.CanonicalModelFields; !slices.Equal(got, want) {
-		t.Errorf("chrome.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
+		t.Errorf("settings.js MODEL_FIELDS_FALLBACK = %v, want format.CanonicalModelFields %v", got, want)
 	}
 	root := moduleRoot(t)
 	ui, err := os.ReadFile(filepath.Join(root, "tests", "ui_check.js"))
@@ -616,7 +617,24 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		t.Fatal("served index must carry exactly one stamped dashboard version meta and no unstamped marker")
 	}
 
-	err := fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
+	// settings.js is the one lazy shell asset: the Settings trigger injects
+	// it with the meta version on first open, so the first-paint index must
+	// not carry it and the loader must name the versioned URL.
+	if referenced["js/settings.js"] {
+		t.Error("index.html must not load settings.js on first paint")
+	}
+	chrome, err := staticFS.ReadFile("static/js/chrome.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(chrome, []byte(`'/dash/js/settings.js?v='`)) {
+		t.Error("chrome.js does not name the versioned settings.js trigger URL")
+	}
+	if !dashExists("js/settings.js") {
+		t.Error("embedded static/js/settings.js missing")
+	}
+
+	err = fs.WalkDir(staticFS, "static", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -629,6 +647,9 @@ func TestIndexReferencesDashAssets(t *testing.T) {
 		rel := strings.TrimPrefix(p, "static/")
 		if _, brand := brandByURL["/"+rel]; brand {
 			return nil
+		}
+		if rel == "js/settings.js" {
+			return nil // lazy: injected by the Settings trigger, never first paint
 		}
 		if !referenced[rel] {
 			t.Errorf("embedded static/%s is not referenced from index.html", rel)
@@ -704,7 +725,7 @@ func TestStaticETagRevalidation(t *testing.T) {
 func TestStaticFreshnessContract(t *testing.T) {
 	const immutable = dashImmutableCacheControl
 	version := dashboardContentVersion()
-	for _, rel := range []string{"js/chart.js", "css/dashboard.css", "vendor/uplot.js"} {
+	for _, rel := range []string{"js/chart.js", "js/settings.js", "css/dashboard.css", "vendor/uplot.js"} {
 		assetPath := DashPrefix + rel
 
 		rec := httptest.NewRecorder()

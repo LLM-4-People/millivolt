@@ -267,12 +267,12 @@ class RepositoryChecks(unittest.TestCase):
     def test_template_spans_scan_the_real_shadowed_regions(self):
         """Corpus canaries: the regions the regex-blind lexer lost to quote
         desync must be scanned. fillSettingsLive is the first region the
-        chrome.js backup-download regex shadows; renderDrawer and
+        settings.js backup-download regex shadows; renderDrawer and
         fillDrawerDebug sit behind the escapeHtml regex in log.js."""
-        chrome = (check.ROOT / "internal/web/static/js/chrome.js").read_text(encoding="utf-8")
-        spans = _template_comment_spans(chrome)
+        settings = (check.ROOT / "internal/web/static/js/settings.js").read_text(encoding="utf-8")
+        spans = _template_comment_spans(settings)
         needle = '<div class="st-live-row"><span class="k">listen</span>'
-        start = chrome.index(needle)
+        start = settings.index(needle)
         self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
                         "fillSettingsLive template body is not scanned")
         log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")

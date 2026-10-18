@@ -24,7 +24,11 @@ let logCursor = null; // exact durable (started_at, id) keyset, independent of r
 let logFetchGen = 0;
 const logNearPx = 96; // load-more slack (a few row heights), not a tunable
 const logNearSlackPx = 8; // fill-test tolerance: sub-pixel rounding never reads as scrollable room
-let settingsDoc = null;
+
+// The provider-card collapse chevron is shared by the chart metrics picker
+// and the lazily loaded settings sheet, so it belongs to the always-loaded
+// core rather than either surface.
+const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5 8 10.5 12 6.5"/></svg>';
 
 // One focus/visibility owner for the two modal surfaces. Closed dialogs are
 // hidden and inert; active dialogs contain keyboard focus and restore it.

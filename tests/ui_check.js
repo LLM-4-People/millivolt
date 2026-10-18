@@ -48,7 +48,7 @@ function dashboardDOM(html, options) {
 // every allowlisted asset referenced from index.html.
 const STATIC = path.join(__dirname, '..', 'internal/web/static');
 const TEST_DASHBOARD_VERSION = '0000000000000001';
-function assembleHTML(bootstrap) {
+function assembleHTML(bootstrap, options = {}) {
   let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
   html = html.replaceAll('__DASHBOARD_VERSION__', TEST_DASHBOARD_VERSION);
   if (bootstrap !== undefined) {
@@ -65,6 +65,13 @@ function assembleHTML(bootstrap) {
     scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</script>`);
     return '';
   });
+  // settings.js is lazy in production (the trigger injects it with the shell's
+  // version), so the shell has no script tag to collect. Inline it for the
+  // functional suite so every moved settings surface is exercised; the
+  // lazy-loader tests assemble without it to drive the real trigger path.
+  if (options.includeSettings !== false) {
+    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, 'js/settings.js'), 'utf8')}\n</script>`);
+  }
   // Inline scripts cannot defer. Put the same ordered scripts after the DOM
   // and data block to mirror the external defer scripts' browser execution.
   return html.replace('</body>', () => scripts.join('\n') + '\n</body>');
@@ -8152,6 +8159,117 @@ async function main() {
           tape[2] === 'revoke:blob:w16-fixture');
       }
     } finally { sw.close(); }
+  }
+
+  // ---- lazy Settings module ----
+  // Production keeps settings.js out of the first-paint shell; the trigger
+  // injects exactly one versioned request and the sheet opens only after that
+  // module has initialized. These checks assemble without settings.js so the
+  // real chrome.js trigger/loader path runs, then simulate the script element's
+  // load/error events (jsdom does not fetch external scripts).
+  {
+    const shell = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
+    check('production index.html has no settings.js script reference',
+      !/<script\b[^>]*\bsrc=["'][^"']*\/dash\/js\/settings\.js/.test(shell));
+
+    const lazyShell = () => {
+      const appended = [];
+      const errors = [];
+      const dom = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), {
+        ...pageOptions,
+        beforeParse(win) {
+          pageOptions.beforeParse(win);
+          win.console.error = (...args) => errors.push(args.join(' '));
+          const append = win.HTMLHeadElement.prototype.appendChild;
+          win.HTMLHeadElement.prototype.appendChild = function (node) {
+            if (node && node.tagName === 'SCRIPT' &&
+                String(node.getAttribute('src') || '').includes('/dash/js/settings.js')) {
+              appended.push(node);
+              return node;
+            }
+            return append.call(this, node);
+          };
+        },
+      });
+      return { dom, sw: dom.window, sd: dom.window.document, appended, errors };
+    };
+
+    const ok = lazyShell();
+    try {
+      check('first paint issues no settings.js request', ok.appended.length === 0);
+      check('the settings sheet starts closed before the module loads',
+        ok.sd.getElementById('settings-sheet').hidden);
+      // Escape and the header close path must be safe before the module exists.
+      ok.sd.dispatchEvent(new ok.sw.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      ok.sw.closeHeaderMenus(undefined, true);
+      ok.sw.closeSettings(true);
+      check('close and Escape are safe no-ops before settings.js loads',
+        ok.sd.getElementById('settings-sheet').hidden);
+
+      ok.sw.toggleSettings({ stopPropagation() {} });
+      ok.sw.toggleSettings({ stopPropagation() {} });
+      ok.sw.toggleSettings({ stopPropagation() {} });
+      const script = ok.appended[0];
+      check('repeated and concurrent settings opens issue exactly one versioned request',
+        ok.appended.length === 1 && script &&
+        script.getAttribute('src') === '/dash/js/settings.js?v=' + TEST_DASHBOARD_VERSION);
+
+      let opened = 0;
+      ok.sw.settingsModule = { open() { opened++; }, close() {} };
+      check('the sheet stays closed while the settings module is loading',
+        ok.sd.getElementById('settings-sheet').hidden);
+      script.onload();
+      await sleep(0);
+      check('the loaded settings module opens the sheet exactly once', opened === 1);
+    } finally { ok.dom.window.close(); }
+
+    // A close while the module is still downloading must cancel the pending
+    // open; the loader resolving later must not pop the sheet back up.
+    const cancelled = lazyShell();
+    try {
+      let opened = 0;
+      cancelled.sw.toggleSettings({ stopPropagation() {} });
+      cancelled.sw.closeSettings(true);
+      cancelled.sw.settingsModule = { open() { opened++; }, close() {} };
+      cancelled.appended[0].onload();
+      await sleep(0);
+      check('closing during the settings load cancels the pending open', opened === 0);
+      cancelled.sw.toggleSettings({ stopPropagation() {} });
+      check('a later settings open uses the loaded module exactly once', opened === 1);
+    } finally { cancelled.dom.window.close(); }
+
+    // The chart metrics picker renders at first paint and shares its chevron
+    // with the settings provider cards. It must not depend on settings.js.
+    {
+      const noSettings = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), pageOptions);
+      try {
+        const sd = noSettings.window.document;
+        noSettings.window.eval("chartView.preset = 'overview'");
+        noSettings.window.summaryPickerSync();
+        const btn = sd.getElementById('chart-metrics-btn');
+        check('the chart metrics picker renders before settings.js loads',
+          !!btn && btn.innerHTML.includes('<svg') &&
+          sd.getElementById('chart-metrics-count').textContent === '5/5');
+      } finally { noSettings.window.close(); }
+    }
+
+    const failed = lazyShell();
+    try {
+      failed.sw.toggleSettings({ stopPropagation() {} });
+      check('a settings load attempt starts with the sheet closed',
+        failed.appended.length === 1 && failed.sd.getElementById('settings-sheet').hidden);
+      failed.appended[0].onerror();
+      await sleep(0);
+      check('a settings load failure stays closed and surfaces the shared status',
+        failed.sd.getElementById('settings-sheet').hidden &&
+        failed.sd.getElementById('settings-count').textContent === 'could not load config');
+      check('a settings load failure reports a console error',
+        failed.errors.some(line => line.includes('settings module failed to load')));
+      failed.sw.toggleSettings({ stopPropagation() {} });
+      await sleep(0);
+      check('a failed settings load is not retried on the next open',
+        failed.appended.length === 1);
+    } finally { failed.dom.window.close(); }
   }
 
   reportFailures(false);

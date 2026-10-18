@@ -327,8 +327,11 @@ when the same read fails. See the [MCP server guide](mcp.md).
 ## Dashboard render owners
 
 HTML embeds the canonical bootstrap builder's JSON, safely escaped in an inert
-data block. Deferred external assets download alongside HTML. Saved hash/chart
-choices apply before rendering; invalid/missing seed falls back to the endpoint.
+data block. Deferred external assets download alongside HTML; `settings.js` is
+the one exception, injected once by the Settings trigger on first open under
+the same versioned URL and single-flighted across concurrent opens. Saved
+hash/chart choices apply before rendering; invalid/missing seed falls back to
+the endpoint.
 Dynamic HTML/state is private/no-store. Every local `/dash/` CSS/JS URL in the
 shell carries the content version as `?v=`: a request with the exact current
 version is served `private, max-age=31536000, immutable`, while a missing or
@@ -340,8 +343,11 @@ winning bootstrap gate to reload once.
 
 Vanilla modules under [static/js](../internal/web/static/js) have distinct owners:
 `core` formatters/shared state, `entities` identities/record labels, `explorer`
-routing/cards, `chart` uPlot plans, `log` window/drawer, `chrome` operator UI,
-and `live` bootstrap/SSE/derived state.
+routing/cards, `chart` uPlot plans, `log` window/drawer, `chrome` operator shell,
+`settings` the lazily loaded Settings sheet, and `live` bootstrap/SSE/derived
+state. `chrome.js` owns the Settings trigger, loader, open-state probe, shared
+status line and the single close entry point; the module owns the sheet's state,
+editors and apply/revert/backup/purge behavior.
 
 One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
 pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.
