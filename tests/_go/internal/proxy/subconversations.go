@@ -223,6 +223,34 @@ func TestSubConversationsFirstPresentWins(t *testing.T) {
 	}
 }
 
+// TestSubConversationsDuplicateTopLevelKeyFallsBackToAuto pins deny-by-default
+// identity for an ambiguous duplicate: the record stays on automatic grouping
+// while the body relays byte-identical (JSON's last-wins value is the
+// upstream's business, never the proxy's identity guess).
+func TestSubConversationsDuplicateTopLevelKeyFallsBackToAuto(t *testing.T) {
+	upstream, capt := scriptedUpstream(t, overrideReply{200, overrideGoodCompletion})
+	defer upstream.Close()
+	cfg := scCfg(t, false, "promptCacheKey")
+	buf := metrics.NewBuffer(2)
+	srv := httptest.NewServer(New(cfg, buf))
+	defer srv.Close()
+
+	body := `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"promptCacheKey":"first","promptCacheKey":"second"}`
+	status, respBody := postOverrideChat(t, srv.URL, upstream.URL, body,
+		func(r *http.Request) { r.Header.Set("X-Proxy-Client", "sc-client") })
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", status, respBody)
+	}
+	bodies, _ := capt.snapshot()
+	if len(bodies) != 1 || bodies[0] != body {
+		t.Fatalf("duplicate-key body mutated:\n got %q\nwant %q", bodies, body)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if got := recs[0].ConversationID; !strings.HasPrefix(got, "c-") {
+		t.Errorf("conversation id = %q, want a c- auto id (the duplicate key dropped the identity)", got)
+	}
+}
+
 // TestSubConversationsValueBoundsDropAndStrip pins the drop-not-reject
 // contract: an invalid tracked value (control bytes, over-length, invalid
 // UTF-8, empty after trim) never rejects the request - the identity is
@@ -922,7 +950,9 @@ func TestSubConversationExtractionUnits(t *testing.T) {
 		// the second param.
 		{"a whitespace-only first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"   ","secondaryKey":"second"}`, true, ""},
 		{"an over-bound first param drops the identity without consulting the second", entries, "sc-two", `{"primaryKey":"` + strings.Repeat("a", maxDeclaredSessionBytes+1) + `","secondaryKey":"second"}`, true, ""},
-		{"a duplicate top-level key resolves by its first occurrence", entries, "sc-client", `{"promptCacheKey":123,"promptCacheKey":"v"}`, true, ""},
+		{"a duplicate top-level key is ambiguous even when the first is non-string", entries, "sc-client", `{"promptCacheKey":123,"promptCacheKey":"v"}`, true, ""},
+		{"a duplicate top-level string key drops the identity", entries, "sc-client", `{"promptCacheKey":"first","promptCacheKey":"second"}`, true, ""},
+		{"a duplicate key spelled with an escape drops the identity", entries, "sc-client", `{"promptCacheKey":"first","promptC\u0061cheKey":"second"}`, true, ""},
 		{"the first present param wins", entries, "sc-two", `{"primaryKey":"first","secondaryKey":"second"}`, true, "first"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -25,6 +25,38 @@ func TestRetainedTextBounds(t *testing.T) {
 	}
 }
 
+// TestClipClientMetaRetainsValidUTF8 pins the client-meta owner's use of the
+// shared rune-safe truncator: every cut stays valid UTF-8 and within the
+// 64-byte bound, invalid input bytes are coerced first, and short/normal values
+// remain byte-identical.
+func TestClipClientMetaRetainsValidUTF8(t *testing.T) {
+	for _, want := range []string{"Linux", "x64", "CPython", "3.12.8", strings.Repeat("a", clientMetaMaxLen)} {
+		if got := clipClientMeta(want); got != want {
+			t.Fatalf("clipClientMeta(%q) = %q, want it unchanged", want, got)
+		}
+	}
+	if got := clipClientMeta("  Linux  "); got != "Linux" {
+		t.Fatalf("trimmed meta = %q, want Linux", got)
+	}
+	for _, in := range []string{
+		"a" + strings.Repeat("é", 40), // 81 bytes: byte 64 splits a rune
+		strings.Repeat("\xffa", 100),  // invalid runs expand when coerced
+		"a" + strings.Repeat("é", 40) + "\xff",
+	} {
+		got := clipClientMeta(in)
+		if len(got) > clientMetaMaxLen {
+			t.Fatalf("in=%d bytes: retained %d bytes, want <= %d", len(in), len(got), clientMetaMaxLen)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatalf("in=%d bytes: retained invalid UTF-8 % x", len(in), []byte(got[len(got)-4:]))
+		}
+		coerced := strings.ToValidUTF8(strings.TrimSpace(in), "\uFFFD")
+		if len(coerced) > clientMetaMaxLen && !strings.HasSuffix(got, retainedTruncationSuffix) {
+			t.Fatalf("in=%d bytes: retained value does not end with the truncation marker", len(in))
+		}
+	}
+}
+
 // TestCaptureHeadersBoundsHostileValues pins the per-record header bound: a
 // hostile megabyte header cannot be retained whole, the per-name value count
 // is bounded, and credential redaction still wins.

@@ -112,3 +112,92 @@ func TestInvalidRoutingHeaderRejectionWording(t *testing.T) {
 		t.Fatalf("body = %s, want %s", got, want)
 	}
 }
+
+// TestRoutingHeaderErrorEchoBounded pins the bounded echo on every
+// client-controlled value that reaches a routing rejection. A header-sized
+// value (or the HTML escaping of one) must not turn a 400 into a multi-megabyte
+// JSON body, while normal malformed values keep their exact wording.
+func TestRoutingHeaderErrorEchoBounded(t *testing.T) {
+	hostile := strings.Repeat("<", hostileLabelBytes)
+	hostileASCII := strings.Repeat("a", hostileLabelBytes)
+	// adminjson's own body cap is 1 MiB, so the duplicate-key echo fixture stays
+	// under it while still being far larger than the error echo bound.
+	hostileHalf := strings.Repeat("<", 400<<10)
+	allowed := func() *config.Config {
+		cfg := config.Default()
+		cfg.AllowedBaseURLs = []string{"https://allowed.example"}
+		return cfg
+	}
+	for _, tc := range []struct {
+		name      string
+		configure func(*http.Request)
+		cfg       *config.Config
+	}{
+		{"timeout", func(r *http.Request) { r.Header.Set(hdrTimeout, hostile) }, config.Default()},
+		{"base userinfo", func(r *http.Request) { r.Header.Set(hdrBaseURL, "https://u:p@"+hostileASCII) }, config.Default()},
+		{"base scheme", func(r *http.Request) { r.Header.Set(hdrBaseURL, hostileASCII+"://fixture.example") }, config.Default()},
+		{"base allowed list", func(r *http.Request) { r.Header.Set(hdrBaseURL, "http://fixture.example/"+hostileASCII) }, allowed()},
+		{"auth header name", func(r *http.Request) { r.Header.Set(hdrAuthHeader, hostile) }, config.Default()},
+		{"format", func(r *http.Request) { r.Header.Set(hdrFormat, hostile) }, config.Default()},
+		{"injected header name", func(r *http.Request) { r.Header.Set(hdrHeaders, `{"`+hostileHalf+`":["v"]}`) }, config.Default()},
+		{"injected duplicate header name", func(r *http.Request) {
+			r.Header.Set(hdrHeaders, `{"`+hostileHalf+`":["v"],"`+hostileHalf+`":["v2"]}`)
+		}, config.Default()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", nil)
+			r.Header.Set(hdrBaseURL, "http://fixture.example")
+			tc.configure(r)
+			_, err := resolveTarget(r, tc.cfg)
+			if err == nil {
+				t.Fatal("expected a routing rejection")
+			}
+			msg := err.Error()
+			if len(msg) > 1024 {
+				t.Fatalf("error message retained %d bytes, want a bounded echo", len(msg))
+			}
+			if body := errJSON(typeInvalidRequestError, msg); len(body) > 8<<10 {
+				t.Fatalf("error body = %d bytes, want <= 8 KiB", len(body))
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name, header, value, want string
+		cfg                       *config.Config
+	}{
+		{"timeout", hdrTimeout, "nope", `invalid X-Proxy-Timeout-Ms "nope"`, config.Default()},
+		{"base parse", hdrBaseURL, "://", `invalid X-Proxy-Base-URL "://"`, config.Default()},
+		{"base userinfo", hdrBaseURL, "https://u:p@fixture.example/v1",
+			`invalid X-Proxy-Base-URL "https://u:p@fixture.example/v1": userinfo, query, and fragment are not allowed in a base URL`, config.Default()},
+		{"scheme", hdrBaseURL, "ftp://fixture.example/v1", `unsupported X-Proxy-Base-URL scheme "ftp"`, config.Default()},
+		{"auth header", hdrAuthHeader, "bad header", `invalid X-Proxy-Auth-Header header "bad header"`, config.Default()},
+		{"format", hdrFormat, "xml", `unsupported X-Proxy-Format "xml"`, config.Default()},
+		{"allowed list", hdrBaseURL, "https://other.example/v1", `base URL "https://other.example/v1" not in allowed list`, allowed()},
+		{"injected header name", hdrHeaders, `{"bad name":["v"]}`,
+			`invalid X-Proxy-Headers header: "bad name" is not a valid header name (RFC 7230 token)`, config.Default()},
+	} {
+		t.Run("normal "+tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", nil)
+			r.Header.Set(hdrBaseURL, "http://fixture.example")
+			r.Header.Set(tc.header, tc.value)
+			_, err := resolveTarget(r, tc.cfg)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	// The full wire response stays bounded too, including JSON HTML escaping
+	// and http.Error's trailing newline.
+	s := New(config.Default(), metrics.Noop{})
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions",
+		strings.NewReader(`{"model":"m"}`))
+	r.Header.Set(hdrBaseURL, "http://127.0.0.1:9")
+	r.Header.Set(hdrTimeout, hostile)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, r)
+	if rec.Code != http.StatusBadRequest || rec.Body.Len() > 8<<10 {
+		t.Fatalf("hostile timeout response = %d/%d bytes, want 400 with a bounded body", rec.Code, rec.Body.Len())
+	}
+}

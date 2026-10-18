@@ -151,7 +151,9 @@ func resolveSubConversation(entries []config.SubConversation, client string, bod
 // be decoded or fails the identity rules drops the identity for the
 // request - the value comes back empty with present true, never a
 // fall-through to a later param, so the configured order stays
-// presence-ordered, never value-quality-ordered.
+// presence-ordered, never value-quality-ordered. More than one top-level
+// occurrence of the same param is ambiguous and drops the identity the same
+// way: present, empty, automatic grouping.
 func subConversationParam(body []byte, name string) (value string, present bool) {
 	// Keep param-free regions on the vectorized negative path (the
 	// HasErrorKey pre-gate class): a body without the literal quoted spelling
@@ -161,8 +163,19 @@ func subConversationParam(body []byte, name string) (value string, present bool)
 	if !containsQuotedName(body, name) && !bytes.ContainsRune(body, '\\') {
 		return "", false
 	}
-	tail := topLevelJSONKey(body, name)
-	if len(tail) == 0 || tail[0] != '"' {
+	tail, duplicate := topLevelJSONKey(body, name)
+	if len(tail) == 0 {
+		return "", false
+	}
+	if duplicate {
+		// Two top-level occurrences are ambiguous: JSON consumers take the
+		// last value while a first-match scan sees the earlier one. Deny by
+		// default for identity - present with no value drops the tracked
+		// identity and leaves the request on automatic grouping rather than
+		// guessing which occurrence the upstream will honor.
+		return "", true
+	}
+	if tail[0] != '"' {
 		return "", false
 	}
 	window := tail
@@ -221,25 +234,27 @@ func containsQuotedName(body []byte, name string) bool {
 }
 
 // topLevelJSONKey locates the named key among the members of the body's
-// top-level JSON object and returns the input tail beginning at its value;
-// nil when the body is not a JSON object or the key is not a top-level
-// member. This is the depth-aware sibling of metrics.JSONKey's any-depth
-// walk (which stays with the SSE and error-class consumers): keys inside
-// nested objects or arrays never match. A lexical scan of the buffered
-// bytes, never a second document decode - string escapes are honored, and a
-// body too malformed to finish the scan simply locates nothing.
-func topLevelJSONKey(data []byte, key string) []byte {
+// top-level JSON object and returns the input tail beginning at its first
+// value; nil when the body is not a JSON object or the key is not a top-level
+// member. duplicate reports a second top-level occurrence of the same key, the
+// ambiguous shape identity extraction refuses to guess at. This is the
+// depth-aware sibling of metrics.JSONKey's any-depth walk (which stays with the
+// SSE and error-class consumers): keys inside nested objects or arrays never
+// match. A lexical scan of the buffered bytes, never a second document decode -
+// string escapes are honored, and a body too malformed to finish the scan
+// returns the first match it already found (or nothing before one).
+func topLevelJSONKey(data []byte, key string) (tail []byte, duplicate bool) {
 	i := metrics.SkipSpace(data, 0)
 	if i >= len(data) || data[i] != '{' {
-		return nil
+		return nil, false
 	}
 	i = metrics.SkipSpace(data, i+1)
 	for {
 		if i >= len(data) || data[i] == '}' {
-			return nil
+			return tail, duplicate
 		}
 		if data[i] != '"' {
-			return nil // a member must open with a key string
+			return tail, duplicate // a member must open with a key string
 		}
 		start := i
 		i++
@@ -252,16 +267,16 @@ func topLevelJSONKey(data []byte, key string) []byte {
 			i++
 		}
 		if i >= len(data) {
-			return nil
+			return tail, duplicate
 		}
 		end := i // the key's closing quote
 		i = metrics.SkipSpace(data, i+1)
 		if i >= len(data) || data[i] != ':' {
-			return nil
+			return tail, duplicate
 		}
 		i = metrics.SkipSpace(data, i+1)
 		if i >= len(data) {
-			return nil
+			return tail, duplicate
 		}
 		match := string(data[start+1:end]) == key
 		if escaped {
@@ -269,15 +284,18 @@ func topLevelJSONKey(data []byte, key string) []byte {
 			match = json.Unmarshal(data[start:end+1], &name) == nil && name == key
 		}
 		if match {
-			return data[i:]
+			if tail != nil {
+				return tail, true
+			}
+			tail = data[i:]
 		}
 		i = skipJSONValue(data, i)
 		if i < 0 {
-			return nil
+			return tail, duplicate
 		}
 		i = metrics.SkipSpace(data, i)
 		if i >= len(data) || data[i] != ',' {
-			return nil // not a member separator: the scan is over
+			return tail, duplicate // not a member separator: the scan is over
 		}
 		i = metrics.SkipSpace(data, i+1)
 	}
@@ -548,9 +566,16 @@ func (t *ConversationTracker) newSession(p *convoPartition, pk string, now time.
 	return s
 }
 
+// convoIDHexChars is the retained hash width: 16 hexadecimal characters, 64
+// bits. The former 40-bit suffix reached about a 1% birthday-collision
+// probability near 150k generated ids, merging unrelated histories in the
+// dashboard; 64 bits keeps accidental collisions negligible at the tracker's
+// supported scale. The c- prefix keeps the id namespaced and opaque.
+const convoIDHexChars = 16
+
 // convoID derives a short, stable, opaque conversation id from the partition
 // key and a process-lifetime sequence number.
 func convoID(pk string, seq uint64) string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("%s|%d", pk, seq)))
-	return "c-" + hex.EncodeToString(h[:])[:10]
+	return "c-" + hex.EncodeToString(h[:])[:convoIDHexChars]
 }

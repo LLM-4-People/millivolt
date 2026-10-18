@@ -65,7 +65,7 @@ func (s *Server) buildUpstreamRequest(ctx context.Context, r *http.Request, t *t
 	targetURL := joinUpstreamURL(t.baseURL, path)
 	u, err := url.Parse(targetURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid base URL %q: %w", t.baseURL, err)
+		return nil, fmt.Errorf("invalid base URL %q: %w", clientEcho(t.baseURL), err)
 	}
 	// Query override takes precedence; otherwise pass the client's query along.
 	if t.query != "" {
@@ -425,15 +425,37 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 	return out, true, ""
 }
 
+// chatMessagesPresence records whether the top-level messages member is a JSON
+// array without copying it. The enclosing document decode validates syntax, so
+// the one shared predicate can inspect the first token: null, an object, a
+// string or a scalar is not the documented chat-completions messages array.
+type chatMessagesPresence struct {
+	array bool
+}
+
+func (m *chatMessagesPresence) UnmarshalJSON(raw []byte) error {
+	m.array = chatMessagesArray(raw)
+	return nil
+}
+
+// chatMessagesArray is the single chat-body predicate shared by the no-copy
+// fast path and the general rewrite path. Only a top-level JSON array is the
+// documented messages member; every other shape leaves the body unrewritten,
+// so the two paths can never disagree about whether a body is chat-shaped.
+func chatMessagesArray(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) > 0 && raw[0] == '['
+}
+
 // ensureToolsSatisfied reports whether the ensured-tools actor would leave the
-// body unchanged: no top-level messages member (the actor skips non-chat
+// body unchanged: no top-level messages array (the actor skips non-chat
 // bodies) or every configured name already present in the tools array. One
 // struct decode replaces the general path's raw-value map plus per-entry
 // decode; any shape it cannot prove satisfied falls back to that path, so the
 // skip semantics stay exactly ensureToolsInBody's.
 func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
 	var doc struct {
-		Messages *discardedJSON `json:"messages"`
+		Messages chatMessagesPresence `json:"messages"`
 		Tools    []struct {
 			Function struct {
 				Name string `json:"name"`
@@ -443,7 +465,7 @@ func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
 	if json.Unmarshal(body, &doc) != nil {
 		return false
 	}
-	if doc.Messages == nil {
+	if !doc.Messages.array {
 		return true
 	}
 	for _, want := range ensureTools {
@@ -486,7 +508,8 @@ type ensureToolStub struct {
 // back. A body that already carries every name is returned unchanged - the
 // passthrough invariant survives satisfied signatures.
 func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (changed bool, why string) {
-	if _, ok := doc["messages"]; !ok {
+	rawMessages, ok := doc["messages"]
+	if !ok || !chatMessagesArray(rawMessages) {
 		return false, ""
 	}
 	have := make(map[string]bool, len(ensureTools))
@@ -618,6 +641,19 @@ func validBaseURLPort(port string) bool {
 	return err == nil && n >= 1 && n <= 65535
 }
 
+// clientEchoMax bounds a client-supplied value echoed inside a rejection
+// message. Safety guardrail: a header-sized value must never turn a 400 into a
+// multi-megabyte JSON body through quoting and HTML escaping. Normal routing
+// values stay byte-identical.
+const clientEchoMax = 256
+
+// clientEcho prepares a client-supplied value for %q in a rejection message.
+// The shared retained-text truncator cuts on a UTF-8 boundary and marks the
+// cut with retainedTruncationSuffix.
+func clientEcho(value string) string {
+	return retainedText(value, clientEchoMax)
+}
+
 // resolveTarget parses routing headers into an upstream target. Only
 // X-Proxy-Base-URL is mandatory.
 func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
@@ -630,13 +666,13 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return nil, fmt.Errorf("unsupported %s scheme %q", hdrBaseURL, parsed.Scheme)
+		return nil, fmt.Errorf("unsupported %s scheme %q", hdrBaseURL, clientEcho(parsed.Scheme))
 	}
 	// The base must be exactly scheme://host[:port][/path] - no userinfo
 	// (credentials would ride to the upstream and leak into error echoes), no
 	// query or fragment (they collide with the path/query join). Deny by default.
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return nil, fmt.Errorf("invalid %s %q: userinfo, query, and fragment are not allowed in a base URL", hdrBaseURL, baseURL)
+		return nil, fmt.Errorf("invalid %s %q: userinfo, query, and fragment are not allowed in a base URL", hdrBaseURL, clientEcho(baseURL))
 	}
 	// A client controls this authority, and providerFromURL falls back to the
 	// raw hostname for single-label and unknown-suffix hosts. Reject a
@@ -659,7 +695,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	}
 	if h := strings.TrimSpace(r.Header.Get(hdrAuthHeader)); h != "" {
 		if !isValidAuthHeader(h) {
-			return nil, fmt.Errorf("invalid %s header %q", hdrAuthHeader, h)
+			return nil, fmt.Errorf("invalid %s header %q", hdrAuthHeader, clientEcho(h))
 		}
 		t.authHeader = h
 	}
@@ -683,7 +719,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 		// Validate at the boundary so an unsupported format is rejected
 		// consistently (400), not only when a translation happens to run.
 		if f != "openai" && f != "anthropic" && f != "cursor" {
-			return nil, fmt.Errorf("unsupported %s %q", hdrFormat, f)
+			return nil, fmt.Errorf("unsupported %s %q", hdrFormat, clientEcho(f))
 		}
 		t.format = f
 	}
@@ -697,24 +733,29 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	if raw := r.Header.Get(hdrHeaders); raw != "" {
 		var m map[string][]string
 		if err := adminjson.Unmarshal([]byte(raw), &m); err != nil {
-			return nil, fmt.Errorf("invalid %s header: %v", hdrHeaders, err)
+			// The strict decoder owns its diagnostics; this boundary bounds the
+			// echo so a header-sized duplicate/invalid key cannot amplify the 400.
+			return nil, fmt.Errorf("invalid %s header: %s", hdrHeaders, clientEcho(err.Error()))
 		}
 		names := make([]string, 0, len(m))
 		for name := range m {
 			names = append(names, name)
 		}
 		if err := config.ValidateHeaderNames(names); err != nil {
-			return nil, fmt.Errorf("invalid %s header: %w", hdrHeaders, err)
+			// The shared validator owns the grammar and its diagnostic wording;
+			// this boundary owns the echo bound, so a header-sized invalid name
+			// cannot amplify the 400 body. Normal names keep the exact wording.
+			return nil, fmt.Errorf("invalid %s header: %s", hdrHeaders, clientEcho(err.Error()))
 		}
 		// Validate names/values at the boundary so a malformed header is a
 		// clean 400 here, not a late transport write failure surfaced as a 502.
 		for k, vs := range m {
 			if !isValidAuthHeader(k) {
-				return nil, fmt.Errorf("invalid %s header name %q", hdrHeaders, k)
+				return nil, fmt.Errorf("invalid %s header name %q", hdrHeaders, clientEcho(k))
 			}
 			for _, v := range vs {
 				if !config.ValidHeaderValue(v) {
-					return nil, fmt.Errorf("invalid %s value for header %q", hdrHeaders, k)
+					return nil, fmt.Errorf("invalid %s value for header %q", hdrHeaders, clientEcho(k))
 				}
 			}
 		}
@@ -722,7 +763,7 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	}
 
 	if len(cfg.AllowedBaseURLs) > 0 && !allowed(t.baseURL, cfg.AllowedBaseURLs) {
-		return nil, fmt.Errorf("base URL %q not in allowed list", t.baseURL)
+		return nil, fmt.Errorf("base URL %q not in allowed list", clientEcho(t.baseURL))
 	}
 	// provider_aliases re-key a derived label the operator has merged into a
 	// canonical one. Applied here - the single choke point every
@@ -869,15 +910,15 @@ func classifyClient(r *http.Request) string {
 // are short SDK identity strings, never payloads.
 const clientMetaMaxLen = 64
 
+// clipClientMeta bounds one captured client-meta token through the shared
+// rune-safe truncator. Invalid UTF-8 is coerced first so the retained identity
+// is always valid text; normal short values pass through byte-identically.
 func clipClientMeta(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	if len(s) > clientMetaMaxLen {
-		return s[:clientMetaMaxLen]
-	}
-	return s
+	return retainedText(strings.ToValidUTF8(s, "\uFFFD"), clientMetaMaxLen)
 }
 
 // fillClientMeta copies allowlisted client identity (X-Stainless-*) and
@@ -1169,10 +1210,10 @@ func upstreamErrorFields(rec *metrics.Record, status int) (typ, msg string) {
 
 // errInvalidHeader is the shared rejection error for a client-supplied
 // routing or limit header whose value failed its parse: "invalid <header>
-// <value>". One owner of the wording across the routing-header and
-// X-Proxy-Limit-* trust boundaries.
+// <value>". One owner of the wording and of the bounded echo across the
+// routing-header and X-Proxy-Limit-* trust boundaries.
 func errInvalidHeader(name, value string) error {
-	return fmt.Errorf("invalid %s %q", name, value)
+	return fmt.Errorf("invalid %s %q", name, clientEcho(value))
 }
 
 func errJSON(typ, msg string) string {
@@ -1410,18 +1451,18 @@ type requestMessage[C any] struct {
 }
 
 type requestParameters struct {
-	MaxTokens      *int            `json:"max_tokens"`
-	MaxCompTokens  *int            `json:"max_completion_tokens"`
-	Temperature    *float64        `json:"temperature"`
-	TopP           *float64        `json:"top_p"`
-	Tools          []discardedJSON `json:"tools"`
-	ToolChoice     json.RawMessage `json:"tool_choice"`
-	StreamOptions  *struct{}       `json:"stream_options"`
-	N              *int            `json:"n"`
-	Stop           json.RawMessage `json:"stop"`
-	Logprobs       bool            `json:"logprobs"`
-	PresencePen    *float64        `json:"presence_penalty"`
-	FrequencyPen   *float64        `json:"frequency_penalty"`
+	MaxTokens      *int              `json:"max_tokens"`
+	MaxCompTokens  *int              `json:"max_completion_tokens"`
+	Temperature    *float64          `json:"temperature"`
+	TopP           *float64          `json:"top_p"`
+	Tools          []discardedJSON   `json:"tools"`
+	ToolChoice     requestToolChoice `json:"tool_choice"`
+	StreamOptions  *struct{}         `json:"stream_options"`
+	N              *int              `json:"n"`
+	Stop           json.RawMessage   `json:"stop"`
+	Logprobs       bool              `json:"logprobs"`
+	PresencePen    *float64          `json:"presence_penalty"`
+	FrequencyPen   *float64          `json:"frequency_penalty"`
 	ResponseFormat *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
@@ -1431,7 +1472,7 @@ type requestParameters struct {
 	TopLogprobs     *int                     `json:"top_logprobs"`
 	ServiceTier     string                   `json:"service_tier"`
 	Thinking        json.RawMessage          `json:"thinking"`
-	Metadata        map[string]discardedJSON `json:"metadata"`
+	Metadata        requestMetadataKeys      `json:"metadata"`
 	ReasoningEffort string                   `json:"reasoning_effort"`
 	Verbosity       string                   `json:"verbosity"`
 	Reasoning       json.RawMessage          `json:"reasoning"`
@@ -1440,6 +1481,123 @@ type requestParameters struct {
 	System   requestContent                   `json:"system"`
 	Messages []requestMessage[requestContent] `json:"messages"`
 }
+
+// requestToolChoice captures only the recorded shape of a tool_choice value
+// during the single document decode. The string shorthand is kept verbatim; an
+// object contributes only function.name with the "tool:" prefix; every other
+// or malformed shape records nothing. A typed decode visits only the function
+// member and skips unknown or deeply nested members instead of materializing
+// the whole value as a map[string]any per node. Each top-level occurrence
+// resets the field, so a duplicate tool_choice key keeps JSON's last-wins
+// semantics.
+type requestToolChoice string
+
+func (t *requestToolChoice) UnmarshalJSON(raw []byte) error {
+	*t = ""
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if json.Unmarshal(trimmed, &s) == nil {
+			*t = requestToolChoice(s)
+		}
+		return nil
+	}
+	var choice struct {
+		Function json.RawMessage `json:"function"`
+	}
+	if json.Unmarshal(trimmed, &choice) != nil || len(choice.Function) == 0 {
+		return nil
+	}
+	var function struct {
+		Name *string `json:"name"`
+	}
+	if json.Unmarshal(choice.Function, &function) != nil || function.Name == nil {
+		return nil
+	}
+	*t = requestToolChoice("tool:" + *function.Name)
+	return nil
+}
+
+// requestMetadataKeysMax bounds the distinct top-level metadata keys counted
+// per request. Metadata is a small client note map; counts below the cap are
+// exact, and a count at the cap means the map held at least that many keys.
+// Internal safety guardrail, not user-tunable.
+const requestMetadataKeysMax = 1024
+
+// requestMetadataKeys counts a metadata object's distinct top-level keys
+// without materializing a per-key value map. The enclosing document decode
+// validates JSON syntax before this runs, so the scan is lexical; each value
+// still passes the shared discardedJSON numeric check to keep the established
+// overflow behavior. Duplicate metadata members merge like the previous map
+// field, and null clears the accumulated keys. The recorded count saturates at
+// requestMetadataKeysMax: a value at the cap means "at least this many keys",
+// never that a larger map was fully counted.
+type requestMetadataKeys struct {
+	keys map[string]struct{}
+}
+
+func (m *requestMetadataKeys) UnmarshalJSON(raw []byte) error {
+	i := metrics.SkipSpace(raw, 0)
+	if i >= len(raw) {
+		return nil
+	}
+	if raw[i] == 'n' {
+		// JSON null replaces the previous map value, as map decoding did.
+		m.keys = nil
+		return nil
+	}
+	if raw[i] != '{' {
+		// Preserve the standard decoder's type error for a non-object value so
+		// the split-decode boundary is unchanged.
+		var discarded map[string]discardedJSON
+		return json.Unmarshal(raw, &discarded)
+	}
+	if m.keys == nil {
+		m.keys = make(map[string]struct{}, 8)
+	}
+	i = metrics.SkipSpace(raw, i+1)
+	for i < len(raw) && raw[i] != '}' {
+		keyEnd := skipJSONString(raw, i)
+		if keyEnd < 0 {
+			return fmt.Errorf("metadata key is not a JSON string")
+		}
+		if len(m.keys) < requestMetadataKeysMax {
+			var key string
+			if err := json.Unmarshal(raw[i:keyEnd], &key); err != nil {
+				return err
+			}
+			m.keys[key] = struct{}{}
+		}
+		i = metrics.SkipSpace(raw, keyEnd)
+		if i >= len(raw) || raw[i] != ':' {
+			return fmt.Errorf("metadata member has no value")
+		}
+		i = metrics.SkipSpace(raw, i+1)
+		if i >= len(raw) {
+			return fmt.Errorf("metadata member has no value")
+		}
+		valueEnd := skipJSONValue(raw, i)
+		if valueEnd < 0 {
+			return fmt.Errorf("metadata value is unterminated")
+		}
+		var discarded discardedJSON
+		if err := discarded.UnmarshalJSON(raw[i:valueEnd]); err != nil {
+			return err
+		}
+		i = metrics.SkipSpace(raw, valueEnd)
+		if i < len(raw) && raw[i] == ',' {
+			i = metrics.SkipSpace(raw, i+1)
+			continue
+		}
+		break
+	}
+	return nil
+}
+
+func (m *requestMetadataKeys) count() int { return len(m.keys) }
 
 // parseLLMRequest is the single document decode for routing and metadata.
 // Keep the two independent trust boundaries on type errors: a malformed
@@ -1492,19 +1650,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 		rec.ReqStreamOpts = true
 	}
 	if len(req.ToolChoice) > 0 {
-		var tcStr string
-		if json.Unmarshal(req.ToolChoice, &tcStr) == nil {
-			rec.ReqToolChoice = tcStr
-		} else {
-			var tcObj map[string]any
-			if json.Unmarshal(req.ToolChoice, &tcObj) == nil {
-				if fn, ok := tcObj["function"].(map[string]any); ok {
-					if name, ok := fn["name"].(string); ok {
-						rec.ReqToolChoice = "tool:" + name
-					}
-				}
-			}
-		}
+		rec.ReqToolChoice = string(req.ToolChoice)
 	}
 	if len(req.Stop) > 0 {
 		var s string
@@ -1526,7 +1672,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 	rec.ReqTopLogprobs = req.TopLogprobs
 	rec.ReqServiceTier = req.ServiceTier
 	rec.ReqLogitBias = len(req.LogitBias)
-	rec.ReqMetadataKeys = len(req.Metadata)
+	rec.ReqMetadataKeys = req.Metadata.count()
 	if len(req.Thinking) > 0 {
 		// Any non-null "thinking" object means extended thinking was requested.
 		rec.ReqThinking = string(req.Thinking) != "null"

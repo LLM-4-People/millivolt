@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -143,5 +144,38 @@ func TestConversationNamespaceOwnersBoundInvalidIDs(t *testing.T) {
 	}
 	if got := ct.Assign("cli", "k", "", "tracked", 0, now); got != "k:tracked" {
 		t.Fatalf("valid tracked id = %q, want k:tracked", got)
+	}
+}
+
+// TestConversationAutoID64BitFormat pins the widened auto identity: the c-
+// namespace stays opaque, the suffix is 16 hex characters (64 bits), and a
+// fixture pair that collided under the former 10-character (40-bit) suffix now
+// stays distinct. The fixture is deterministic, so a regression to the narrow
+// width fails here without a probabilistic collision search.
+func TestConversationAutoID64BitFormat(t *testing.T) {
+	ct := NewConversationTracker(30*time.Minute, 64)
+	now := time.Now()
+	id := ct.Assign("cli", "k", "", "", 1, now)
+	if !strings.HasPrefix(id, "c-") || len(id) != len("c-")+convoIDHexChars {
+		t.Fatalf("auto conversation id = %q, want c- plus %d hex characters", id, convoIDHexChars)
+	}
+	if _, err := strconv.ParseUint(id[len("c-"):], 16, 64); err != nil {
+		t.Fatalf("auto conversation suffix %q is not a 64-bit hexadecimal value: %v", id[len("c-"):], err)
+	}
+	if got := convoID("pk", 7); got != convoID("pk", 7) {
+		t.Fatalf("convoID is not stable for one input: %q vs %q", got, convoID("pk", 7))
+	}
+	if convoID("pk", 7) == convoID("pk", 8) {
+		t.Fatal("distinct sequence numbers share an auto conversation id")
+	}
+
+	const formerHexChars = 10
+	a := convoID("collision-fixture", 886210)
+	b := convoID("collision-fixture", 1063374)
+	if a == b {
+		t.Fatalf("fixture pair still collides at the retained width: %q", a)
+	}
+	if a[:len("c-")+formerHexChars] != b[:len("c-")+formerHexChars] {
+		t.Fatalf("fixture pair no longer exercises the former 40-bit suffix: %q vs %q", a, b)
 	}
 }

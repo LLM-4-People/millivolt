@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -145,6 +146,187 @@ func TestRequestMetadataDiscardedShapesAndDuplicates(t *testing.T) {
 		"system":"old","system":null,"messages":[{"role":"user","content":"old","content":null}]}`), &nulled, false)
 	if nulled.ReqToolsCount != 0 || nulled.ReqMetadataKeys != 0 || nulled.CharsSystem != 0 || nulled.CharsUser != 0 {
 		t.Fatalf("null replacement retained old metadata: %+v", nulled)
+	}
+}
+
+// TestRequestToolChoiceRecordsOnlyFunctionName pins the recorded shape of
+// tool_choice: the string shorthand is kept verbatim, an object contributes
+// only function.name with the "tool:" prefix, and malformed or unrelated
+// shapes record nothing. The typed decoder never materializes nested members,
+// so these semantics are the whole contract.
+func TestRequestToolChoiceRecordsOnlyFunctionName(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"string shorthand", `{"tool_choice":"auto"}`, "auto"},
+		{"required shorthand", `{"tool_choice":"required"}`, "required"},
+		{"empty shorthand", `{"tool_choice":""}`, ""},
+		{"null", `{"tool_choice":null}`, ""},
+		{"function object", `{"tool_choice":{"type":"function","function":{"name":"weather"}}}`, "tool:weather"},
+		{"empty function name", `{"tool_choice":{"function":{"name":""}}}`, "tool:"},
+		{"non-string function name", `{"tool_choice":{"function":{"name":7}}}`, ""},
+		{"function is not an object", `{"tool_choice":{"function":"weather"}}`, ""},
+		{"function without a name", `{"tool_choice":{"type":"function","function":{}}}`, ""},
+		{"null function", `{"tool_choice":{"function":null}}`, ""},
+		{"array", `{"tool_choice":[1,2]}`, ""},
+		{"number", `{"tool_choice":1}`, ""},
+		{"boolean", `{"tool_choice":true}`, ""},
+		{"unknown nested members are skipped", `{"tool_choice":{"type":"function","function":{"name":"f","parameters":{"type":"object","properties":{"x":{"type":"array","items":{"enum":[1,2,3]}}}}}}}`, "tool:f"},
+		{"duplicate function last wins", `{"tool_choice":{"function":{"name":"first"},"function":{"name":"second"}}}`, "tool:second"},
+		{"duplicate function last valid after malformed", `{"tool_choice":{"function":"bad","function":{"name":"second"}}}`, "tool:second"},
+		{"duplicate function last malformed", `{"tool_choice":{"function":{"name":"first"},"function":"bad"}}`, ""},
+		{"duplicate tool_choice last wins", `{"tool_choice":"auto","tool_choice":{"function":{"name":"f"}}}`, "tool:f"},
+		{"duplicate tool_choice last null", `{"tool_choice":{"function":{"name":"f"}},"tool_choice":null}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			parseLLMRequest([]byte(tc.body), &rec, false)
+			if rec.ReqToolChoice != tc.want {
+				t.Fatalf("ReqToolChoice = %q, want %q", rec.ReqToolChoice, tc.want)
+			}
+		})
+	}
+}
+
+// hostileToolChoiceBody builds one MiB of tool_choice payload beside a valid
+// function name: the nested shape floods an unknown array, the wide shape
+// floods the top-level object, and the function shape floods a member of the
+// function object itself. All three are amplification the map decode paid for
+// even though only function.name is retained.
+func hostileToolChoiceBody(shape string) []byte {
+	var body strings.Builder
+	body.WriteString(`{"model":"m","tool_choice":{"function":`)
+	switch shape {
+	case "function":
+		body.WriteString(`{"name":"f","x":[`)
+	case "nested":
+		body.WriteString(`{"name":"f"},"x":[`)
+	case "wide":
+		body.WriteString(`{"name":"f"},"x":{`)
+	}
+	for i := 0; body.Len() < 1<<20; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		if shape == "wide" {
+			fmt.Fprintf(&body, `"k%06d":0`, i)
+		} else {
+			body.WriteString(`{}`)
+		}
+	}
+	switch shape {
+	case "function":
+		body.WriteString(`]}`) // close the x array and the function object
+	case "nested":
+		body.WriteString(`]`) // close the x array
+	case "wide":
+		body.WriteString(`}`) // close the x object
+	}
+	body.WriteString(`}}`) // close tool_choice and the root object
+	return []byte(body.String())
+}
+
+// TestRequestToolChoiceDecodeAllocationBounded is the P10 regression: a one
+// MiB nested, wide, or function-local tool_choice must cost a small constant
+// beyond the request bytes, not a per-node materialization. The former
+// map[string]any decode allocated about 60 MiB for the nested fixture.
+func TestRequestToolChoiceDecodeAllocationBounded(t *testing.T) {
+	for _, name := range []string{"nested", "wide", "function"} {
+		t.Run(name, func(t *testing.T) {
+			body := hostileToolChoiceBody(name)
+			var warm metrics.Record
+			parseLLMRequest(body, &warm, false)
+			if warm.ReqToolChoice != "tool:f" {
+				t.Fatalf("warm decode = %q, want tool:f", warm.ReqToolChoice)
+			}
+			res := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					var rec metrics.Record
+					parseLLMRequest(body, &rec, false)
+					if rec.ReqToolChoice != "tool:f" {
+						b.Fatalf("ReqToolChoice = %q, want tool:f", rec.ReqToolChoice)
+					}
+				}
+			})
+			if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+				t.Fatalf("%d-byte tool_choice allocated %d bytes/op, want <= 4 MiB", len(body), alloc)
+			} else {
+				t.Logf("%s tool_choice: %d bytes, %d bytes/op", name, len(body), alloc)
+			}
+		})
+	}
+}
+
+// TestRequestMetadataKeyCountBounded pins the metadata key-count contract:
+// counts below the cap are exact and preserve map-merge/null semantics, while
+// a key flood saturates at requestMetadataKeysMax without materializing a
+// per-key value map.
+func TestRequestMetadataKeyCountBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"normal keys", `{"metadata":{"a":1,"b":2,"c":3}}`, 3},
+		{"empty object", `{"metadata":{}}`, 0},
+		{"duplicate metadata objects merge", `{"metadata":{"a":1},"metadata":{"a":2,"b":3}}`, 2},
+		{"null clears the accumulated keys", `{"metadata":{"a":1},"metadata":null}`, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			parseLLMRequest([]byte(tc.body), &rec, false)
+			if rec.ReqMetadataKeys != tc.want {
+				t.Fatalf("ReqMetadataKeys = %d, want %d", rec.ReqMetadataKeys, tc.want)
+			}
+		})
+	}
+
+	var body strings.Builder
+	body.WriteString(`{"model":"m","metadata":{`)
+	for i := 0; body.Len() < 1<<20; i++ {
+		if i > 0 {
+			body.WriteByte(',')
+		}
+		fmt.Fprintf(&body, `"k%06d":0`, i)
+	}
+	body.WriteString(`}}`)
+	raw := []byte(body.String())
+	var rec metrics.Record
+	parseLLMRequest(raw, &rec, false)
+	if rec.ReqMetadataKeys != requestMetadataKeysMax {
+		t.Fatalf("hostile metadata count = %d, want the %d-key cap", rec.ReqMetadataKeys, requestMetadataKeysMax)
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		for b.Loop() {
+			var rec metrics.Record
+			parseLLMRequest(raw, &rec, false)
+			if rec.ReqMetadataKeys != requestMetadataKeysMax {
+				b.Fatalf("ReqMetadataKeys = %d, want the cap", rec.ReqMetadataKeys)
+			}
+		}
+	})
+	if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+		t.Fatalf("%d-byte metadata map allocated %d bytes/op, want <= 4 MiB", len(raw), alloc)
+	} else {
+		t.Logf("metadata flood: %d bytes, %d bytes/op, %d allocs/op", len(raw), alloc, res.AllocsPerOp())
+	}
+	// The former map decode made one allocation per key (about 87k for this
+	// fixture); a counting scan with a bounded key set stays far below that.
+	if allocs := res.AllocsPerOp(); allocs > 10_000 {
+		t.Fatalf("%d-byte metadata map made %d allocs/op, want a bounded key scan", len(raw), allocs)
+	}
+}
+
+// TestRequestMetadataTypeErrorKeepsCapOnly pins the split-decode boundary for
+// a non-object metadata value: the routing fields and the token cap survive,
+// while the rest of the parameters block stays dropped.
+func TestRequestMetadataTypeErrorKeepsCapOnly(t *testing.T) {
+	var rec metrics.Record
+	parseLLMRequest([]byte(`{"model":"m","stream":true,"max_tokens":7,"temperature":0.5,"metadata":"x"}`), &rec, false)
+	if rec.Model != "m" || !rec.Stream || rec.ReqMaxTokens == nil || *rec.ReqMaxTokens != 7 {
+		t.Fatalf("routing/cap lost on a metadata type error: %+v", rec)
+	}
+	if rec.ReqTemperature != nil {
+		t.Fatalf("temperature = %v, want it dropped with the failed parameters decode", *rec.ReqTemperature)
 	}
 }
 

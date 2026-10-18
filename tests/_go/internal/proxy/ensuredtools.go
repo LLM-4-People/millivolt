@@ -179,21 +179,109 @@ func TestProviderEnsureToolsSatisfiedBodyIsByteIdentical(t *testing.T) {
 	}
 }
 
-// TestProviderEnsureToolsSkipNonChatBody covers the wire guard: a body
-// without a top-level messages array (responses-style, embeddings, garbage)
-// is never rewritten, so the chat-shaped stubs cannot corrupt other request
-// shapes.
+// TestProviderEnsureToolsSkipNonChatBody covers the wire guard: a body without
+// a top-level messages array (responses-style, embeddings, null/object/string
+// messages, garbage) is never rewritten, so the chat-shaped stubs cannot
+// corrupt other request shapes.
 func TestProviderEnsureToolsSkipNonChatBody(t *testing.T) {
-	upstream, cap := captureBodies(t)
-	defer upstream.Close()
-	srv := httptest.NewServer(New(ensuredCfg(upstreamLabel(upstream.URL)), metrics.Noop{}))
-	defer srv.Close()
+	for _, tc := range []struct{ name, body string }{
+		{"responses style", `{"model":"m","input":"hi","stream":false}`},
+		{"null messages", `{"model":"m","messages":null}`},
+		{"object messages", `{"model":"m","messages":{}}`},
+		{"string messages", `{"model":"m","messages":"hi"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream, cap := captureBodies(t)
+			defer upstream.Close()
+			srv := httptest.NewServer(New(ensuredCfg(upstreamLabel(upstream.URL)), metrics.Noop{}))
+			defer srv.Close()
 
-	body := `{"model":"m","input":"hi","stream":false}`
-	postChatBody(t, srv.URL, upstream.URL, body)
-	got := cap.snapshot()[0]
-	if !bytes.Equal(got, []byte(body)) {
-		t.Fatalf("non-chat body must relay byte-identical:\n got: %s\nwant: %s", got, body)
+			postChatBody(t, srv.URL, upstream.URL, tc.body)
+			got := cap.snapshot()[0]
+			if !bytes.Equal(got, []byte(tc.body)) {
+				t.Fatalf("non-chat body must relay byte-identical:\n got: %s\nwant: %s", got, tc.body)
+			}
+		})
+	}
+}
+
+// TestEnsureToolsChatShapeParity pins the single chat-body predicate: the
+// no-copy fast path and the general rewrite path agree for every top-level
+// messages shape. Only a JSON array is rewritten; absent, null, object and
+// string values relay byte-identical.
+func TestEnsureToolsChatShapeParity(t *testing.T) {
+	const maxBytes = 1 << 20
+	names := []string{"wanted"}
+	for _, tc := range []struct {
+		name string
+		body string
+		chat bool
+	}{
+		{"absent", `{"model":"m"}`, false},
+		{"null", `{"model":"m","messages":null}`, false},
+		{"empty array", `{"model":"m","messages":[]}`, true},
+		{"non-empty array", `{"model":"m","messages":[{"role":"user","content":"hi"}]}`, true},
+		{"object", `{"model":"m","messages":{}}`, false},
+		{"string", `{"model":"m","messages":"hi"}`, false},
+		{"number", `{"model":"m","messages":1}`, false},
+		{"duplicate messages last array", `{"model":"m","messages":null,"messages":[]}`, true},
+		{"duplicate messages last null", `{"model":"m","messages":[],"messages":null}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(tc.body)
+			satisfied := ensureToolsSatisfied(body, names)
+			var doc map[string]json.RawMessage
+			if err := json.Unmarshal(body, &doc); err != nil {
+				t.Fatal(err)
+			}
+			changed, why := ensureToolsInBody(doc, names)
+			if why != "" {
+				t.Fatal(why)
+			}
+			if satisfied == changed {
+				t.Fatalf("fast path satisfied=%v and general path changed=%v disagree", satisfied, changed)
+			}
+			out, rewrote, why := overrideRequestBody(body, nil, nil, names, maxBytes)
+			if why != "" {
+				t.Fatal(why)
+			}
+			if !tc.chat {
+				if rewrote || !bytes.Equal(out, body) {
+					t.Fatalf("non-chat body rewritten:\n got %s\nwant %s", out, body)
+				}
+				return
+			}
+			if !rewrote || bytes.Equal(out, body) {
+				t.Fatalf("chat body must gain the configured stub: %s", out)
+			}
+			var got struct {
+				Tools []struct {
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tools"`
+				ToolChoice json.RawMessage `json:"tool_choice"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Tools) != 1 || got.Tools[0].Function.Name != "wanted" {
+				t.Fatalf("injected tools = %+v", got.Tools)
+			}
+			if string(got.ToolChoice) != `"none"` {
+				t.Fatalf("tool_choice = %s, want \"none\" for a client that sent no tools", got.ToolChoice)
+			}
+		})
+	}
+
+	// Invalid JSON never parses, so the fast path cannot claim satisfaction and
+	// the general path fails closed; the caller relays the original bytes.
+	invalid := []byte(`{"model":"m","messages":`)
+	if ensureToolsSatisfied(invalid, names) {
+		t.Fatal("invalid JSON must not report a satisfied ensure-tools body")
+	}
+	if out, rewrote, why := overrideRequestBody(invalid, nil, nil, names, maxBytes); rewrote || why == "" || out != nil {
+		t.Fatalf("invalid JSON rewrite = %q/%v/%q, want the fail-closed outcome", out, rewrote, why)
 	}
 }
 
