@@ -528,40 +528,50 @@ bounded chunks instead of being copied whole into memory, so the download cost
 does not grow with a heap copy of the database. A source file that changes
 size or cannot be read fails the encode before an archive is emitted.
 
-Restore validates that hash, the zstd frame, config `Validate()`, and
-`PRAGMA integrity_check` before applying anything. Decode refuses an
-uncompressed payload larger than the Schema maximum for `backup_max_bytes`,
-so a small compressed file cannot expand without bound. Download lists how
-many live settings differ from default and how many stored requests would be
-packed. Picking a file first inspects the archive: created time, size,
-request span, and each config key as default vs modified vs the live file.
+Restore streams the upload through the `backup_max_bytes` ceiling into one
+private staging file and decodes it with the same header, zstd, SHA-256 and
+member-framing checks. The database member is written straight into a private
+file on the live database's volume instead of being materialized on the heap;
+only config bytes stay buffered. It validates that hash, the zstd frame, config
+`Validate()`, and `PRAGMA integrity_check` before applying anything. Decode
+refuses an uncompressed payload larger than the Schema maximum for
+`backup_max_bytes`, so a small compressed file cannot expand without bound.
+Download lists how many live settings differ from default and how many stored
+requests would be packed. Picking a file first inspects the archive: created
+time, size, request span, and each config key as default vs modified vs the
+live file. Inspect validates and counts the decoded database file in place and
+computes its overlap with the live store without writing another copy.
 Config **replace** writes the backup document. Config **merge** overlays only
 keys that differ from `Default()` onto the live file, so live custom values
 stay unless the backup also customized them. Either way the restored config
 hot-applies through the same owner as a Settings save, is reflected in
 `last_reload`, and reports restart-required keys. Database
-**replace** stages a pending snapshot next to `db_path` and waits for process
-restart; Open admits the pending file only after it checks again. Database
-**merge** inserts request ids that are not already in the live store
-immediately (live rows win on conflict) and does not require a restart. Its
-request rows, debug sidecars and since-inception totals commit as one
-transaction, so a failed totals write leaves no partial merge behind.
-Truncated or bit-flipped files are rejected. The `backup_max_bytes` setting
-is the archive ceiling; encoding enforces it while the stream is written, so
-an over-cap archive is removed instead of partially served.
+**replace** streams the decoded file into a pending snapshot next to `db_path`,
+syncs it, and atomically renames it into place; Open admits the pending file
+only after it checks again, and the restore waits for process restart.
+Database **merge** attaches the decoded file read-only and inserts request ids
+that are not already in the live store immediately (live rows win on conflict);
+it does not require a restart. Its request rows, debug sidecars and
+since-inception totals commit as one transaction, so a failed totals write
+leaves no partial merge behind. Truncated or bit-flipped files are rejected.
+The `backup_max_bytes` setting is the archive ceiling; encoding enforces it
+while the stream is written, so an over-cap archive is removed instead of
+partially served, and an over-cap upload answers 413 before decoding.
 
-Both directions stage database-sized transient files (the `VACUUM INTO`
-snapshot, the encoded download artifact, integrity-check of an in-memory
-upload, and merge/overlap attachments) in the live database's own directory,
-so capacity follows the data volume: budget roughly one packed-snapshot size,
-plus the staged encoded archive for a download, of free space there during
-backup and restore. The download's snapshot directory is removed after the
-archive is encoded, including on failure or a client disconnect. A config-only
-download artifact uses the process temp directory because it carries no
-database-sized member. A packed file already on that volume (VACUUM dest,
-pending `.incoming`) is integrity-checked in place so a second copy is not
-written beside it. A container's `/tmp` is a small tmpfs by design and never
-caps backup size.
+Both directions stage database-sized transient files in the live database's own
+directory, so capacity follows the data volume rather than a hardened
+deployment's small `/tmp` tmpfs. Budget roughly one compressed upload plus one
+packed database copy during a restore, and for a replace also the pending copy
+at `db_path`. The download's `VACUUM INTO` snapshot directory is removed after
+the archive is encoded, including on failure or a client disconnect. A restore
+removes its private upload file and decoded database directory after inspect or
+apply on every path: a normal response, an invalid or over-cap archive, a
+validation or apply failure, or a client disconnect. A config-only upload may
+use the process temp directory because it carries no database-sized member. A
+packed file already on the staging volume (VACUUM dest, decoded member, pending
+`.incoming`) is integrity-checked in place, and inspect, overlap, replace and
+merge consume it by path, so none writes a second database-sized copy. A
+container's `/tmp` is a small tmpfs by design and never caps backup size.
 
 ## Versions and images
 

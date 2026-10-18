@@ -10,6 +10,12 @@
 // byte-buffered wrapper for callers that need the bytes. Neither returns an
 // archive that Decode+Validate would reject, so a produced archive is never a
 // silent corrupt file.
+//
+// Decode and DecodeFile share one framing, zstd, SHA-256 and member-order
+// owner. Decode materializes the members for byte callers; DecodeFile writes a
+// database member into a private staging directory instead, so a restore never
+// holds the database on the heap. The file-backed decoder removes its staging
+// directory on every error and the caller owns it after success.
 package backup
 
 import (
@@ -21,6 +27,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -33,9 +40,15 @@ import (
 // both require at least one of config or database.
 var ErrEmptyArchive = errors.New("backup must include config, database, or both")
 
-// ErrTooLarge reports an encoded archive that would exceed the caller's
-// backup_max_bytes ceiling. EncodeFile enforces the ceiling while streaming,
-// so a partial artifact is never returned or served.
+// ErrSnapshotStaging reports that a database member needs the live database
+// volume for its private staging file. Callers that know storage is disabled
+// map it to their own sentinel; the wording stays in one place.
+var ErrSnapshotStaging = errors.New("snapshot staging directory is required")
+
+// ErrTooLarge reports an encoded archive or restore upload that would exceed
+// the caller's backup_max_bytes ceiling. EncodeFile and the restore upload
+// stager enforce the ceiling while streaming, so a partial artifact is never
+// returned or served.
 var ErrTooLarge = errors.New("backup exceeds backup_max_bytes")
 
 const (
@@ -60,6 +73,16 @@ const (
 	// before returning an error and the caller removes it after serving.
 	archiveTempPattern = "millivolt-backup-*.mvb"
 
+	// restoreTempPattern names the one private directory that holds a decoded
+	// database member. The wildcard keeps concurrent restores distinct; the
+	// decoder removes it on every error and the caller removes it after
+	// inspect or apply.
+	restoreTempPattern = "millivolt-restore-db-*"
+
+	// restoreDatabaseName is the decoded member's file inside that directory.
+	// The directory is unique, so the name needs no further wildcard.
+	restoreDatabaseName = "snapshot.db"
+
 	// selfCheckBuffer bounds the comparison buffer of the streaming
 	// self-check; it is reused for every member chunk.
 	selfCheckBuffer = 32 << 10
@@ -71,6 +94,16 @@ const (
 type zstdStream struct{ r io.Reader }
 
 func (s zstdStream) Read(p []byte) (int, error) { return s.r.Read(p) }
+
+// newPayloadDecoder is the one zstd reader configuration for both decode
+// paths. The decoder memory ceiling is the payload cap plus klauspost's
+// default window, so a small frame cannot request unbounded decoder state.
+func newPayloadDecoder(src io.Reader, maxPayload int64) (*zstd.Decoder, error) {
+	return zstd.NewReader(zstdStream{src},
+		zstd.WithDecoderConcurrency(1),
+		zstd.WithDecoderMaxMemory(uint64(maxPayload)+decoderWindow),
+	)
+}
 
 // payloadMax is the uncompressed decode ceiling: the Schema maximum for
 // backup_max_bytes. Tests lower it to lock LimitReader without allocating
@@ -114,6 +147,21 @@ func (a Archive) checkMemberSources() error {
 		return fmt.Errorf("backup database member has both bytes and a path")
 	}
 	return nil
+}
+
+// DatabaseMemberSize returns the database member's exact byte length without
+// materializing it: the slice length for bytes or the file's stat for a path.
+// It is zero when the archive has no database member. Callers that report a
+// member size use this one walk so it cannot disagree with the encoder.
+func (a Archive) DatabaseMemberSize() (int64, error) {
+	var size int64
+	err := forEachMember(a, func(m memberSource) error {
+		if m.kind == memberDatabase {
+			size = m.size
+		}
+		return nil
+	})
+	return size, err
 }
 
 // archiveHeader is the parsed version-1 header. createdAt has second
@@ -169,7 +217,7 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 		return "", 0, ErrEmptyArchive
 	}
 	if a.hasDatabase() && stageDir == "" {
-		return "", 0, fmt.Errorf("snapshot staging directory is required")
+		return "", 0, ErrSnapshotStaging
 	}
 	if a.Created.IsZero() {
 		a.Created = time.Now().UTC()
@@ -461,10 +509,7 @@ func selfCheckFile(path, stageDir string, a Archive) error {
 	if h.flags != a.flags() || h.created.Unix() != a.Created.Unix() {
 		return fmt.Errorf("payload changed")
 	}
-	dec, err := zstd.NewReader(zstdStream{f},
-		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderMaxMemory(uint64(payloadMax)+decoderWindow),
-	)
+	dec, err := newPayloadDecoder(f, payloadMax)
 	if err != nil {
 		return fmt.Errorf("decompress backup: %w", err)
 	}
@@ -483,8 +528,8 @@ func selfCheckFile(path, stageDir string, a Archive) error {
 	if stream.n > payloadMax {
 		return fmt.Errorf("backup payload exceeds maximum size")
 	}
-	if !bytes.Equal(stream.h.Sum(nil), h.sum[:]) {
-		return fmt.Errorf("backup payload hash mismatch")
+	if err := checkPayloadHash(stream.h.Sum(nil), h.sum); err != nil {
+		return err
 	}
 	return Validate(stageDir, a)
 }
@@ -566,10 +611,21 @@ func (r *hashReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// checkPayloadHash is the one outer SHA-256 comparison for both decoders, so
+// the byte and file paths cannot disagree about hash admission or the error
+// wording.
+func checkPayloadHash(got []byte, want [sha256.Size]byte) error {
+	if !bytes.Equal(got, want[:]) {
+		return fmt.Errorf("backup payload hash mismatch")
+	}
+	return nil
+}
+
 // Decode admits an archive only when magic, version, zstd checksum, and the
 // outer SHA-256 all match. Uncompressed members cannot exceed the Schema
 // maximum for backup_max_bytes, so a small frame cannot expand without bound.
-// It does not apply config or open SQLite.
+// It does not apply config or open SQLite. It is the byte-buffered wrapper over
+// the shared decoder; DecodeFile is the file-backed owner for restore.
 func Decode(raw []byte) (Archive, error) {
 	return decodeLimited(raw, payloadMax)
 }
@@ -582,11 +638,7 @@ func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
 	if err != nil {
 		return Archive{}, err
 	}
-	maxMem := uint64(maxPayload) + decoderWindow
-	dec, err := zstd.NewReader(zstdStream{bytes.NewReader(raw[headerSize:])},
-		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderMaxMemory(maxMem),
-	)
+	dec, err := newPayloadDecoder(bytes.NewReader(raw[headerSize:]), maxPayload)
 	if err != nil {
 		return Archive{}, fmt.Errorf("decompress backup: %w", err)
 	}
@@ -595,15 +647,240 @@ func decodeLimited(raw []byte, maxPayload int64) (Archive, error) {
 	if err != nil {
 		return Archive{}, fmt.Errorf("decompress backup: %w", err)
 	}
-	if sha256.Sum256(payload) != h.sum {
-		return Archive{}, fmt.Errorf("backup payload hash mismatch")
+	sum := sha256.Sum256(payload)
+	if err := checkPayloadHash(sum[:], h.sum); err != nil {
+		return Archive{}, err
 	}
-	a, err := unmarshalMembers(payload, h.flags)
+	var a Archive
+	err = decodeMembers(bytes.NewReader(payload), h.flags, maxPayload, func(kind uint8, size int64, r io.Reader) error {
+		data, err := readMemberBytes(r, size)
+		if err != nil {
+			return err
+		}
+		switch kind {
+		case memberConfig:
+			a.Config = data
+		case memberDatabase:
+			a.Database = data
+		}
+		return nil
+	})
 	if err != nil {
 		return Archive{}, err
 	}
 	a.Created = h.created
 	return a, nil
+}
+
+// DecodeFile is the file-backed decoder for restore. It validates the archive
+// at path with the same header, zstd, SHA-256, framing and member rules as
+// Decode, but writes a database member into a unique private directory under
+// stageDir instead of holding it on the heap. stageDir must name the live
+// database's volume when the archive declares a database member and may be
+// empty for a config-only archive. On success the returned DatabasePath names
+// the decoded packed database and the caller owns its directory
+// (filepath.Dir(a.DatabasePath)); only config bytes stay buffered. On every
+// error the decoder removes the decoded file and its staging directory and
+// returns no Archive.
+func DecodeFile(stageDir, path string) (Archive, error) {
+	if path == "" {
+		return Archive{}, fmt.Errorf("backup path is required")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return Archive{}, fmt.Errorf("open backup: %w", err)
+	}
+	defer f.Close()
+	return decodeFile(stageDir, f, payloadMax)
+}
+
+// decodeFile is the one file-backed decode owner. Its member sink writes the
+// database body straight to a private file while the shared framing owner
+// keeps the payload hash, cap and admission checks in one place.
+func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, error) {
+	if maxPayload <= 0 {
+		return Archive{}, fmt.Errorf("backup payload limit is invalid")
+	}
+	hdr := make([]byte, headerSize)
+	if _, err := io.ReadFull(src, hdr); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return Archive{}, fmt.Errorf("backup is truncated")
+		}
+		return Archive{}, fmt.Errorf("read backup header: %w", err)
+	}
+	h, err := parseHeader(hdr)
+	if err != nil {
+		return Archive{}, err
+	}
+	if h.flags&flagDatabase != 0 && stageDir == "" {
+		return Archive{}, ErrSnapshotStaging
+	}
+	dec, err := newPayloadDecoder(src, maxPayload)
+	if err != nil {
+		return Archive{}, fmt.Errorf("decompress backup: %w", err)
+	}
+	defer dec.Close()
+	// The hash reader sees every decompressed payload byte, including member
+	// framing, and the limit reader stops an expansion bomb one byte past the
+	// cap so the over-cap owner can answer before any staging file is kept.
+	stream := &hashReader{
+		r: &decompressReader{r: io.LimitReader(dec, maxPayload+1)},
+		h: sha256.New(),
+	}
+	var a Archive
+	var dbDir, dbPath string
+	var db *os.File
+	cleanup := func() {
+		if db != nil {
+			_ = db.Close()
+			db = nil
+		}
+		if dbDir != "" {
+			_ = os.RemoveAll(dbDir)
+			dbDir = ""
+		}
+	}
+	err = decodeMembers(stream, h.flags, maxPayload, func(kind uint8, size int64, r io.Reader) error {
+		switch kind {
+		case memberConfig:
+			data, err := readMemberBytes(r, size)
+			if err != nil {
+				return err
+			}
+			a.Config = data
+			return nil
+		case memberDatabase:
+			if db == nil {
+				dir, err := os.MkdirTemp(stageDir, restoreTempPattern)
+				if err != nil {
+					return StageSnapshotError(stageDir, err)
+				}
+				dbDir = dir
+				dbPath = filepath.Join(dir, restoreDatabaseName)
+				f, err := os.OpenFile(dbPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return err
+				}
+				db = f
+			}
+			n, err := io.CopyBuffer(db, r, make([]byte, selfCheckBuffer))
+			if err != nil {
+				return err
+			}
+			if n != size {
+				return fmt.Errorf("backup member is truncated")
+			}
+			return nil
+		}
+		return nil
+	})
+	if stream.n > maxPayload {
+		cleanup()
+		return Archive{}, fmt.Errorf("decompress backup: backup payload exceeds maximum size")
+	}
+	if err != nil {
+		cleanup()
+		return Archive{}, err
+	}
+	if err := checkPayloadHash(stream.h.Sum(nil), h.sum); err != nil {
+		cleanup()
+		return Archive{}, err
+	}
+	if db != nil {
+		if err := db.Close(); err != nil {
+			cleanup()
+			return Archive{}, fmt.Errorf("close decoded database: %w", err)
+		}
+		db = nil
+		a.DatabasePath = dbPath
+	}
+	a.Created = h.created
+	return a, nil
+}
+
+// memberConsumer consumes one member's exact body. The shared framing owner
+// has already accepted the member's kind, flag and uniqueness when it runs.
+type memberConsumer func(kind uint8, size int64, r io.Reader) error
+
+// decodeMembers is the single version-1 member framing owner. Both decoders
+// consume their payload through it, so member order, duplicate/unknown/missing
+// rejection, truncation and the flag rules cannot drift between the byte and
+// file paths. A consumer must read exactly size bytes; a short body is
+// rejected here even when the consumer reports no error.
+func decodeMembers(r io.Reader, flags byte, limit int64, consume memberConsumer) error {
+	seen := map[uint8]bool{}
+	sizes := map[uint8]int64{}
+	for {
+		var hdr [9]byte
+		n, err := io.ReadFull(r, hdr[:])
+		if errors.Is(err, io.EOF) && n == 0 {
+			break
+		}
+		if err != nil {
+			return truncated(err)
+		}
+		kind := hdr[0]
+		size := binary.BigEndian.Uint64(hdr[1:])
+		if size > uint64(limit) {
+			return fmt.Errorf("backup payload exceeds maximum size")
+		}
+		if seen[kind] {
+			return fmt.Errorf("backup has a duplicate member")
+		}
+		seen[kind] = true
+		switch kind {
+		case memberConfig:
+			if flags&flagConfig == 0 {
+				return fmt.Errorf("backup config member is not flagged")
+			}
+		case memberDatabase:
+			if flags&flagDatabase == 0 {
+				return fmt.Errorf("backup database member is not flagged")
+			}
+		default:
+			return fmt.Errorf("unknown backup member %d", kind)
+		}
+		lr := &io.LimitedReader{R: r, N: int64(size)}
+		if err := consume(kind, int64(size), lr); err != nil {
+			return err
+		}
+		if lr.N != 0 {
+			return fmt.Errorf("backup member is truncated")
+		}
+		sizes[kind] = int64(size)
+	}
+	if flags&flagConfig != 0 && sizes[memberConfig] == 0 {
+		return fmt.Errorf("backup is missing its config member")
+	}
+	if flags&flagDatabase != 0 && sizes[memberDatabase] == 0 {
+		return fmt.Errorf("backup is missing its database member")
+	}
+	return nil
+}
+
+// readMemberBytes reads one exact-size member into heap. A zero-size member
+// stays nil, matching the byte decoder's empty-member meaning.
+func readMemberBytes(r io.Reader, size int64) ([]byte, error) {
+	if size == 0 {
+		return nil, nil
+	}
+	data := make([]byte, size)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return nil, truncated(err)
+	}
+	return data, nil
+}
+
+// decompressReader names the zstd frame as the cause of a streaming read
+// failure, matching the byte decoder's "decompress backup" wrapping.
+type decompressReader struct{ r io.Reader }
+
+func (d decompressReader) Read(p []byte) (int, error) {
+	n, err := d.r.Read(p)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return n, fmt.Errorf("decompress backup: %w", err)
+	}
+	return n, err
 }
 
 // parseHeader validates the fixed version-1 header and returns its fields.
@@ -682,47 +959,4 @@ func Validate(stageDir string, a Archive) error {
 		}
 	}
 	return nil
-}
-
-func unmarshalMembers(payload []byte, flags byte) (Archive, error) {
-	var a Archive
-	seen := map[uint8]bool{}
-	for len(payload) > 0 {
-		if len(payload) < 9 {
-			return Archive{}, fmt.Errorf("backup member is truncated")
-		}
-		kind := payload[0]
-		n := binary.BigEndian.Uint64(payload[1:9])
-		payload = payload[9:]
-		if uint64(len(payload)) < n {
-			return Archive{}, fmt.Errorf("backup member is truncated")
-		}
-		data := payload[:n]
-		payload = payload[n:]
-		if seen[kind] {
-			return Archive{}, fmt.Errorf("backup has a duplicate member")
-		}
-		seen[kind] = true
-		switch kind {
-		case memberConfig:
-			if flags&flagConfig == 0 {
-				return Archive{}, fmt.Errorf("backup config member is not flagged")
-			}
-			a.Config = append([]byte(nil), data...)
-		case memberDatabase:
-			if flags&flagDatabase == 0 {
-				return Archive{}, fmt.Errorf("backup database member is not flagged")
-			}
-			a.Database = append([]byte(nil), data...)
-		default:
-			return Archive{}, fmt.Errorf("unknown backup member %d", kind)
-		}
-	}
-	if flags&flagConfig != 0 && len(a.Config) == 0 {
-		return Archive{}, fmt.Errorf("backup is missing its config member")
-	}
-	if flags&flagDatabase != 0 && len(a.Database) == 0 {
-		return Archive{}, fmt.Errorf("backup is missing its database member")
-	}
-	return a, nil
 }

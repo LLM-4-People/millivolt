@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -101,7 +102,9 @@ func (s *Store) Snapshot(ctx context.Context) ([]byte, error) {
 }
 
 // StageSnapshot writes an integrity-checked SQLite snapshot that Open will
-// admit in place of path. The live database is not touched.
+// admit in place of path. The live database is not touched. It is the
+// byte-buffered wrapper over the shared publish owner; restore uses
+// StageSnapshotFile so the validated database member is never copied into heap.
 func StageSnapshot(path string, data []byte) error {
 	if path == "" {
 		return fmt.Errorf("database path is empty")
@@ -109,23 +112,89 @@ func StageSnapshot(path string, data []byte) error {
 	if err := backup.CheckDatabase(filepath.Dir(path), data); err != nil {
 		return err
 	}
+	return publishSnapshot(path, func(w io.Writer) error {
+		n, err := w.Write(data)
+		if err == nil && n != len(data) {
+			return io.ErrShortWrite
+		}
+		return err
+	})
+}
+
+// StageSnapshotFile stages an already-validated private packed snapshot at
+// path by streaming it into the destination directory's temporary file and
+// atomically renaming it to PendingSnapshotPath. Admission runs in place on
+// source, so the file-backed restore never writes a database-sized heap copy.
+// The source file is left to its owner.
+func StageSnapshotFile(path, source string) error {
+	if path == "" {
+		return fmt.Errorf("database path is empty")
+	}
+	if source == "" {
+		return fmt.Errorf("snapshot source path is empty")
+	}
+	if err := backup.CheckDatabaseFile(source); err != nil {
+		return err
+	}
+	return publishSnapshot(path, func(w io.Writer) error {
+		f, err := os.Open(source)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if _, err := io.CopyN(w, f, info.Size()); err != nil {
+			return err
+		}
+		var extra [1]byte
+		if n, err := f.Read(extra[:]); n != 0 {
+			return fmt.Errorf("snapshot source changed size while staging")
+		} else if err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		return nil
+	})
+}
+
+// publishSnapshot is the one atomic publish owner for both snapshot wrappers:
+// a private temporary file in the destination directory, 0600 permissions, a
+// sync before the rename, and the PendingSnapshotPath name Open admits. The
+// destination directory is the staging volume, so the rename stays atomic.
+func publishSnapshot(path string, write func(io.Writer) error) error {
+	dir := filepath.Dir(path)
 	incoming := path + pendingSnapshotSuffix
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-incoming-*")
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-incoming-*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
-	defer tmp.Close()
+	staged := tmp.Name()
+	committed := false
+	defer func() {
+		_ = tmp.Close()
+		if !committed {
+			_ = os.Remove(staged)
+		}
+	}()
 	if err := tmp.Chmod(0o600); err != nil {
 		return err
 	}
-	if _, err := tmp.Write(data); err != nil {
+	if err := write(tmp); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), incoming)
+	if err := os.Rename(staged, incoming); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // admitPendingSnapshot installs a staged replacement database before Open.
@@ -163,13 +232,11 @@ func removeIfExists(path string) error {
 }
 
 // SnapshotOverlap is how many request ids in a packed snapshot already exist
-// in the live store. Used by restore inspect.
+// in the live store. Used by restore inspect. It is the byte-buffered wrapper
+// over SnapshotOverlapFile for callers that hold the members in heap.
 func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error) {
 	if s == nil {
 		return 0, ErrStorageDisabled
-	}
-	if err := backup.CheckDatabase(s.stageDir(), data); err != nil {
-		return 0, err
 	}
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-overlap-*")
 	if err != nil {
@@ -180,6 +247,20 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 	if err := os.WriteFile(src, data, 0o600); err != nil {
 		return 0, err
 	}
+	return s.SnapshotOverlapFile(ctx, src)
+}
+
+// SnapshotOverlapFile inspects an already-staged private packed snapshot in
+// place and counts the request ids it shares with the live store. It performs
+// the same admission as CheckDatabaseFile without writing a second copy, and
+// attaches the caller's file read-only.
+func (s *Store) SnapshotOverlapFile(ctx context.Context, path string) (int64, error) {
+	if s == nil {
+		return 0, ErrStorageDisabled
+	}
+	if err := backup.CheckDatabaseFile(path); err != nil {
+		return 0, err
+	}
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
 	conn, err := s.rdb.Conn(ctx)
@@ -187,7 +268,7 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 		return 0, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_inspect", src); err != nil {
+	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_inspect", path); err != nil {
 		return 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_inspect") }()
@@ -198,22 +279,16 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 
 // MergeSnapshot inserts snapshot rows whose ids are not already in the live
 // store (INSERT OR IGNORE). Existing live rows win. The live file is not
-// replaced; no restart is required.
+// replaced; no restart is required. It is the byte-buffered wrapper over
+// MergeSnapshotFile for callers that hold the members in heap.
 func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipped int64, err error) {
 	if s == nil {
 		return 0, 0, ErrStorageDisabled
 	}
-	// Admin mutations serialize: purge holds the same mutex, so a merge can
-	// never queue behind (or race) a delete and starve the writer twice.
-	s.purgeMu.Lock()
-	defer s.purgeMu.Unlock()
-	info, err := backup.InspectDatabase(s.stageDir(), data)
-	if err != nil {
-		return 0, 0, err
-	}
-	if err := s.Flush(); err != nil {
-		return 0, 0, fmt.Errorf("flush before merge: %w", err)
-	}
+	// Admin mutations serialize in MergeSnapshotFile, the one merge owner:
+	// purge holds the same mutex, so a merge can never queue behind (or race) a
+	// delete and starve the writer twice. Staging the caller's bytes does not
+	// need the lock.
 	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-merge-*")
 	if err != nil {
 		return 0, 0, backup.StageSnapshotError(s.stageDir(), err)
@@ -222,6 +297,29 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	src := filepath.Join(dir, "snap.db")
 	if err := os.WriteFile(src, data, 0o600); err != nil {
 		return 0, 0, err
+	}
+	return s.MergeSnapshotFile(ctx, src)
+}
+
+// MergeSnapshotFile inserts the rows of an already-staged private packed
+// snapshot whose ids are not already in the live store. The caller's file is
+// attached in place and is not copied, removed, or otherwise owned by the
+// store. The transaction, live-row-wins rule, debug cap, totals and rollback
+// semantics are the merge owner's; the byte wrapper only stages a file.
+func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, skipped int64, err error) {
+	if s == nil {
+		return 0, 0, ErrStorageDisabled
+	}
+	// Admin mutations serialize: purge holds the same mutex, so a merge can
+	// never queue behind (or race) a delete and starve the writer twice.
+	s.purgeMu.Lock()
+	defer s.purgeMu.Unlock()
+	info, err := backup.InspectDatabaseFile(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := s.Flush(); err != nil {
+		return 0, 0, fmt.Errorf("flush before merge: %w", err)
 	}
 	// Hold the single writer connection for ATTACH through the merge
 	// transaction and installTotals so insertBatch cannot account() a
@@ -233,7 +331,7 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 		return 0, 0, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_merge", src); err != nil {
+	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_merge", path); err != nil {
 		return 0, 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_merge") }()

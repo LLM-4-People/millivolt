@@ -36,6 +36,17 @@ var (
 	restoreQueryKeys = []string{"inspect", "config", "database", "config_mode", "database_mode"}
 )
 
+const (
+	// restoreUploadPattern names one private upload staging file. The wildcard
+	// keeps concurrent restores distinct; the handler removes it on every
+	// path, including an upload read failure and a client disconnect.
+	restoreUploadPattern = "millivolt-restore-upload-*.mvb"
+
+	// restoreUploadBuffer bounds the streaming upload copy, so the request body
+	// never becomes one heap-sized slice.
+	restoreUploadBuffer = 32 << 10
+)
+
 func handleBackup(w http.ResponseWriter, r *http.Request) {
 	if !rejectUnless(w, r, http.MethodGet) {
 		return
@@ -153,37 +164,76 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cap := backupCap()
+	// The upload is streamed into one private file, never read whole into heap.
+	// A database archive stages that file on the live database's volume so the
+	// compressed upload follows the same capacity contract as the decoded
+	// member; a config-only restore without a live store may use the process
+	// temp directory. The decoder owns the decoded database's staging
+	// directory and removes it on every error.
+	uploadDir := os.TempDir()
+	decodeDir := ""
+	if dir, err := dbStageDir(); err == nil {
+		uploadDir, decodeDir = dir, dir
+	}
 	body := http.MaxBytesReader(w, r.Body, cap)
 	defer body.Close()
-	raw, err := io.ReadAll(body)
+	uploadPath, err := stageRestoreUpload(uploadDir, body, cap)
 	if err != nil {
-		adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
+		// The endpoint's existing upload contract answers 413 for an over-cap
+		// body and for a client that disappears mid-upload; local staging
+		// failures stay server errors instead of being misreported as a cap.
+		var readErr *restoreUploadReadError
+		if errors.Is(err, backup.ErrTooLarge) || errors.As(err, &readErr) {
+			adminjson.WriteErrorJSON(w, http.StatusRequestEntityTooLarge, "backup exceeds backup_max_bytes")
+			return
+		}
+		log.Printf("restore: stage upload: %v", err)
+		adminjson.WriteErrorJSON(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	arch, err := backup.Decode(raw)
+	defer func() {
+		if err := os.Remove(uploadPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("restore: remove staged upload %s: %v", uploadPath, err)
+		}
+	}()
+	arch, err := backup.DecodeFile(decodeDir, uploadPath)
 	if err != nil {
+		// Without a live store there is no volume for a decoded database
+		// member; keep the endpoint's existing storage-disabled answer while a
+		// config-only archive above still decodes and applies.
+		if errors.Is(err, backup.ErrSnapshotStaging) {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, storage.ErrStorageDisabled.Error())
+			return
+		}
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Inspect and validation stage a database member next to the live
-	// database; a config-only archive never touches the database volume.
-	stageDir, ok := stageDirOr400(w, len(arch.Database) > 0)
-	if !ok {
-		return
+	// The decoded database member is one private staging directory. Remove it
+	// after inspect or apply on every path, including a validation failure, an
+	// apply failure, or a client disconnect while the response is written.
+	if arch.DatabasePath != "" {
+		defer func() {
+			dir := filepath.Dir(arch.DatabasePath)
+			if err := os.RemoveAll(dir); err != nil {
+				log.Printf("restore: remove decoded database staging %s: %v", dir, err)
+			}
+		}()
 	}
-	if err := backup.Validate(stageDir, arch); err != nil {
+	// A file-backed database member is integrity-checked in place, so the
+	// legacy staging-directory argument is empty.
+	if err := backup.Validate("", arch); err != nil {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if inspect {
-		writeRestoreInspect(w, r, arch, stageDir)
+		writeRestoreInspect(w, r, arch)
 		return
 	}
 	if wantConfig && len(arch.Config) == 0 {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no config member")
 		return
 	}
-	if wantDB && len(arch.Database) == 0 {
+	if wantDB && len(arch.Database) == 0 && arch.DatabasePath == "" {
 		adminjson.WriteErrorJSON(w, http.StatusBadRequest, "archive has no database member")
 		return
 	}
@@ -197,7 +247,7 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 		restart = append(restart, skipped...)
 	}
 	if wantDB {
-		needRestart, err := restoreDatabase(r.Context(), arch.Database, dbMode)
+		needRestart, err := restoreDatabase(r.Context(), arch.DatabasePath, dbMode)
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
@@ -310,6 +360,85 @@ func stageDirOr400(w http.ResponseWriter, stage bool) (string, bool) {
 	return dir, true
 }
 
+// restoreUploadReadError marks a failure while reading the request body, so
+// the handler keeps the endpoint's existing 413 contract for a client that
+// disconnects mid-upload while local staging write failures stay 500.
+type restoreUploadReadError struct{ err error }
+
+func (e *restoreUploadReadError) Error() string { return e.err.Error() }
+func (e *restoreUploadReadError) Unwrap() error { return e.err }
+
+// stageRestoreUpload copies the bounded request body into one private file and
+// returns its path. The handler owns the file and removes it on every path. On
+// error this owner removes its staging file and returns no path.
+func stageRestoreUpload(dir string, body io.Reader, limit int64) (string, error) {
+	if limit <= 0 {
+		return "", fmt.Errorf("backup size limit is invalid")
+	}
+	f, err := os.CreateTemp(dir, restoreUploadPattern)
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	committed := false
+	defer func() {
+		_ = f.Close()
+		if !committed {
+			_ = os.Remove(path)
+		}
+	}()
+	if err := f.Chmod(0o600); err != nil {
+		return "", err
+	}
+	if err := copyRestoreUpload(f, body, limit); err != nil {
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	committed = true
+	return path, nil
+}
+
+// copyRestoreUpload streams the body in bounded chunks and refuses the chunk
+// that would cross the archive ceiling. http.MaxBytesReader owns the same cap
+// at the transport; this count keeps a non-HTTP reader (tests and future
+// callers) equally bounded.
+func copyRestoreUpload(dst io.Writer, src io.Reader, limit int64) error {
+	buf := make([]byte, restoreUploadBuffer)
+	var n int64
+	for {
+		nr, readErr := src.Read(buf)
+		if nr > 0 {
+			if n+int64(nr) > limit {
+				return backup.ErrTooLarge
+			}
+			if err := writeRestoreChunk(dst, buf[:nr]); err != nil {
+				return err
+			}
+			n += int64(nr)
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(readErr, &maxErr) {
+				return backup.ErrTooLarge
+			}
+			return &restoreUploadReadError{err: readErr}
+		}
+	}
+}
+
+func writeRestoreChunk(dst io.Writer, b []byte) error {
+	n, err := dst.Write(b)
+	if err == nil && n != len(b) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
 // buildBackup assembles the requested members. A database member is staged as
 // a private packed snapshot file (store.SnapshotFile) and returned by path, so
 // backup.EncodeFile streams it in bounded chunks instead of the handler
@@ -412,7 +541,7 @@ func restoreConfig(raw []byte, mode string) ([]string, error) {
 	return reloadConfig()
 }
 
-func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool, err error) {
+func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err error) {
 	liveMu.Lock()
 	dbPath := ""
 	if liveCfg != nil {
@@ -427,18 +556,20 @@ func restoreDatabase(ctx context.Context, raw []byte, mode string) (restart bool
 		if store == nil {
 			return false, storage.ErrStorageDisabled
 		}
-		_, _, err := store.MergeSnapshot(ctx, raw)
+		_, _, err := store.MergeSnapshotFile(ctx, path)
 		return false, err
 	}
 	// Replace stages next to the live CONFIG's db_path, not the running
 	// store's boot file: the staged snapshot applies at the next restart,
 	// which opens the persisted db_path (startup-bound), so the restore
 	// targets the path that boot will actually open - a reload that changed
-	// db_path stages the new volume while the store keeps the old one.
-	return true, storage.StageSnapshot(dbPath, raw)
+	// db_path stages the new volume while the store keeps the old one. The
+	// decoded member streams into a destination-side temporary file, so the
+	// database never returns to the heap.
+	return true, storage.StageSnapshotFile(dbPath, path)
 }
 
-func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive, stageDir string) {
+func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Archive) {
 	// ok is the operator action plane's shared success marker (the dashboard
 	// trusts the HTTP status; the inspect tests pin it, tests/_go/cmd/proxy/backup.go).
 	out := map[string]any{
@@ -470,15 +601,20 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 	} else {
 		out["config"] = map[string]any{"present": false}
 	}
-	if len(arch.Database) > 0 {
-		info, err := backup.InspectDatabase(stageDir, arch.Database)
+	if arch.DatabasePath != "" {
+		size, err := arch.DatabaseMemberSize()
+		if err != nil {
+			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		info, err := backup.InspectDatabaseFile(arch.DatabasePath)
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		db := map[string]any{
 			"present":   true,
-			"bytes":     len(arch.Database),
+			"bytes":     size,
 			"requests":  info.Requests,
 			"debug":     info.Debug,
 			"oldest_ms": info.OldestMs,
@@ -488,7 +624,7 @@ func writeRestoreInspect(w http.ResponseWriter, r *http.Request, arch backup.Arc
 		store := liveStore
 		liveMu.Unlock()
 		if store != nil {
-			n, err := store.SnapshotOverlap(r.Context(), arch.Database)
+			n, err := store.SnapshotOverlapFile(r.Context(), arch.DatabasePath)
 			if err != nil {
 				adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
 				return

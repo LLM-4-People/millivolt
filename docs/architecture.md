@@ -13,7 +13,7 @@ defines their supported combinations.
 | --- | --- |
 | [cmd/proxy](../cmd/proxy/main.go) | Config/CLI, dependency wiring, routes, process lifecycle. Restart, log, backup and operator-gate handlers have separate existing files. |
 | [internal/config](../internal/config/config.go) | Config/defaults/validation; schema, YAML generation, revision-checked Settings, model-rule execution. |
-| [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. |
+| [internal/backup](../internal/backup/archive.go) | Streamed self-checked operator archive format (VACUUM INTO snapshot + zstd + SHA-256), with byte- and file-backed database members. One decoder core serves byte and file callers; restore stages its upload and decoded database as private files instead of heap copies. |
 | [internal/proxy](../internal/proxy/proxy.go) | Routing, admission integration, retry/relay, request metadata, scoped request overrides, native-run ownership, operator state/capture; the quota-pause reaction owner [quotapause.go](../internal/proxy/quotapause.go) (settleQuotaFailure/addQuotaHold) and GET/POST /admin/quota. |
 | [internal/scheduler](../internal/scheduler/scheduler.go) | Provider/key admission, retry pacing, scoped holds and provider-wide budgets; the provider-wide durable quota/billing recovery gate (quota facet, probe-paced recovery). |
 | [internal/metrics](../internal/metrics/metrics.go) | Records, numeric/usage/outcome semantics, pending/ring lifecycle, observers and Prometheus. |
@@ -147,6 +147,19 @@ matching ring rows through that boundary. New completions survive. Failed SQL
 does not mutate the ring; postcommit memory effects finish even after caller
 cancellation. The atomic command check must not acquire the producer lock for
 every ordinary consumed record.
+
+Operator backup and restore stage database-sized work as private files.
+`backup.EncodeFile` streams the packed snapshot, encoded archive and self-check
+in bounded chunks. On restore, the handler streams the capped upload into one
+private file, and `backup.DecodeFile` shares the byte decoder's header, zstd,
+SHA-256 and member-framing owner while writing the database member into a
+unique staging directory on the live database's volume. Config bytes remain
+buffered; the database member does not. Inspect and overlap integrity-check or
+attach that file in place, replace streams it into the pending snapshot and
+atomically renames it, and merge attaches it to the held writer transaction.
+Decode and validation finish before an apply path takes the writer connection.
+The upload and decoded database files are removed on every handler path,
+including over-cap, invalid archive, apply failure and client disconnect.
 
 Relevant coverage: storage writer/purge/request-parameter tests,
 `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`. The latter

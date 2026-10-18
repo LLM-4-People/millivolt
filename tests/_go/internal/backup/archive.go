@@ -96,6 +96,306 @@ func TestDecodeRejectsCorruption(t *testing.T) {
 	}
 }
 
+// TestDecodeFileMatchesDecode pins the one decoder core: for config-only,
+// database-only and both-member archives with a fixed Created time, the
+// file-backed decoder yields the same Created, config bytes and database
+// bytes as the byte-backed decoder. The decoded database stays in a private
+// directory the caller removes.
+func TestDecodeFileMatchesDecode(t *testing.T) {
+	cfg := defaultConfigYAML(t)
+	db := packedRequestsDB(t)
+	created := time.Unix(1_700_000_123, 0).UTC()
+	cases := []struct {
+		name string
+		a    Archive
+	}{
+		{"config-only", Archive{Created: created, Config: cfg}},
+		{"database-only", Archive{Created: created, Database: db}},
+		{"both", Archive{Created: created, Config: cfg, Database: db}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			source := t.TempDir()
+			path, _, err := EncodeFile(source, tc.a, int64(config.BackupMaxBytesMax))
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := Decode(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stage := t.TempDir()
+			got, err := DecodeFile(stage, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Created.Unix() != want.Created.Unix() {
+				t.Fatalf("created = %s, want %s", got.Created, want.Created)
+			}
+			if !bytes.Equal(got.Config, want.Config) {
+				t.Fatal("file-backed decode changed the config member")
+			}
+			if len(want.Database) == 0 {
+				if got.DatabasePath != "" {
+					t.Fatalf("config-only archive decoded a database file %q", got.DatabasePath)
+				}
+			} else {
+				if got.DatabasePath == "" {
+					t.Fatal("database member was not decoded to a file")
+				}
+				data, err := os.ReadFile(got.DatabasePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(data, want.Database) {
+					t.Fatal("file-backed decode changed the database member")
+				}
+				size, err := got.DatabaseMemberSize()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if size != int64(len(want.Database)) {
+					t.Fatalf("database member size = %d, want %d", size, len(want.Database))
+				}
+			}
+			if err := Validate("", got); err != nil {
+				t.Fatalf("file-backed archive failed Validate: %v", err)
+			}
+			if got.DatabasePath != "" {
+				if err := os.RemoveAll(filepath.Dir(got.DatabasePath)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertNoRestoreStaging(t, stage)
+		})
+	}
+}
+
+// TestDecodeFileCleansStagingOnRejection pins fail-closed file decoding: a
+// truncated, corrupted, trailing-payload, missing-member or malformed archive
+// returns no Archive and leaves none of its decoded database staging behind.
+func TestDecodeFileCleansStagingOnRejection(t *testing.T) {
+	cfg := defaultConfigYAML(t)
+	created := time.Unix(1_700_000_123, 0).UTC()
+	valid, err := Encode(t.TempDir(), Archive{Created: created, Config: cfg, Database: packedRequestsDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPayload := framedMember(memberConfig, cfg)
+	cases := []struct {
+		name string
+		raw  []byte
+	}{
+		{"truncated", append([]byte(nil), valid[:len(valid)-8]...)},
+		{"corrupted", func() []byte {
+			raw := append([]byte(nil), valid...)
+			raw[len(raw)/2] ^= 0xff
+			return raw
+		}()},
+		{"outer-hash", func() []byte {
+			raw := append([]byte(nil), valid...)
+			raw[16] ^= 0xff
+			return raw
+		}()},
+		{"garbage", []byte("not a backup")},
+		{"trailing-payload", framedArchive(t, flagConfig, created, append(append([]byte(nil), configPayload...), 1, 2, 3))},
+		{"missing-database", framedArchive(t, flagDatabase, created, nil)},
+		{"missing-config", framedArchive(t, flagConfig, created, nil)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "backup.mvb")
+			if err := os.WriteFile(path, tc.raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			stage := t.TempDir()
+			got, err := DecodeFile(stage, path)
+			if err == nil {
+				t.Fatal("invalid archive decoded")
+			}
+			if got.Config != nil || got.Database != nil || got.DatabasePath != "" {
+				t.Fatalf("failed decode returned a partial archive: %+v", got)
+			}
+			if _, err := Decode(tc.raw); err == nil {
+				t.Fatal("byte-backed decoder admitted an archive the file-backed decoder rejected")
+			}
+			assertNoRestoreStaging(t, stage)
+		})
+	}
+}
+
+// TestDecodeFileOverCapCleansStaging pins the uncompressed payload ceiling for
+// the file-backed decoder: an archive over the cap is rejected and its
+// database staging directory is removed.
+func TestDecodeFileOverCapCleansStaging(t *testing.T) {
+	raw, err := Encode(t.TempDir(), Archive{
+		Created:  time.Unix(1_700_000_123, 0).UTC(),
+		Database: packedRequestsDBBlob(t, 2<<10),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "backup.mvb")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := payloadMax
+	payloadMax = 1024
+	t.Cleanup(func() { payloadMax = old })
+	stage := t.TempDir()
+	if _, err := DecodeFile(stage, path); err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("over-cap archive = %v, want the payload cap error", err)
+	}
+	assertNoRestoreStaging(t, stage)
+}
+
+// TestDecodeFileRequiresDatabaseStaging pins the file decoder's capacity
+// owner: a database member cannot be decoded without the live database's
+// staging volume, while a config-only archive needs none.
+func TestDecodeFileRequiresDatabaseStaging(t *testing.T) {
+	created := time.Unix(1_700_000_123, 0).UTC()
+	dbRaw, err := Encode(t.TempDir(), Archive{Created: created, Database: packedRequestsDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(t.TempDir(), "db.mvb")
+	if err := os.WriteFile(dbPath, dbRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeFile("", dbPath); err == nil {
+		t.Fatal("database archive decoded without a staging directory")
+	}
+	cfgRaw, err := Encode("", Archive{Created: created, Config: defaultConfigYAML(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(t.TempDir(), "config.mvb")
+	if err := os.WriteFile(cfgPath, cfgRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := DecodeFile("", cfgPath)
+	if err != nil {
+		t.Fatalf("config-only archive without a staging directory: %v", err)
+	}
+	if got.DatabasePath != "" || len(got.Config) == 0 {
+		t.Fatalf("config-only archive members = %+v", got)
+	}
+}
+
+// TestDecodeFileConcurrentStagingUniqueAndClean pins the wildcard staging name
+// under concurrent decodes: every decoded database has a distinct directory
+// and the caller-owned cleanup removes each one.
+func TestDecodeFileConcurrentStagingUniqueAndClean(t *testing.T) {
+	raw, err := Encode(t.TempDir(), Archive{
+		Created:  time.Unix(1_700_000_123, 0).UTC(),
+		Config:   defaultConfigYAML(t),
+		Database: packedRequestsDB(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "backup.mvb")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stage := t.TempDir()
+	const workers = 8
+	paths := make([]string, workers)
+	errs := make([]error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			a, err := DecodeFile(stage, path)
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			paths[i] = a.DatabasePath
+		}(i)
+	}
+	wg.Wait()
+	seen := map[string]bool{}
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("decode %d: %v", i, err)
+		}
+		dir := filepath.Dir(paths[i])
+		if seen[dir] {
+			t.Fatalf("concurrent decodes shared staging directory %q", dir)
+		}
+		seen[dir] = true
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertNoRestoreStaging(t, stage)
+}
+
+// BenchmarkDecodeFileDatabaseSource compares the legacy byte-backed restore
+// path (upload into heap + Decode's full payload + a database member copy)
+// with the file-backed decoder across two packed-database sizes. The file path
+// never materializes the database member on the heap, so its B/op stays
+// bounded by zstd decoder state and the fixed streaming buffer instead of
+// tracking the member size.
+func BenchmarkDecodeFileDatabaseSource(b *testing.B) {
+	for _, blobBytes := range []int{2 << 20, 8 << 20} {
+		b.Run(fmt.Sprintf("%dMiB", blobBytes>>20), func(b *testing.B) {
+			benchDecodeFileDatabaseSource(b, blobBytes)
+		})
+	}
+}
+
+func benchDecodeFileDatabaseSource(b *testing.B, blobBytes int) {
+	dbPath, size := packedRequestsDBFile(b, blobBytes)
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		b.Fatal(err)
+	}
+	archivePath, _, err := EncodeFile(b.TempDir(), Archive{
+		Created:  time.Unix(1_700_000_123, 0).UTC(),
+		Database: data,
+	}, int64(config.BackupMaxBytesMax))
+	if err != nil {
+		b.Fatal(err)
+	}
+
+	b.Run("bytes", func(b *testing.B) {
+		b.SetBytes(size)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			upload, err := os.ReadFile(archivePath)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if _, err := Decode(upload); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("file", func(b *testing.B) {
+		stage := b.TempDir()
+		b.SetBytes(size)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			a, err := DecodeFile(stage, archivePath)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if err := os.RemoveAll(filepath.Dir(a.DatabasePath)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 func TestValidateRejectsInvalidMembers(t *testing.T) {
 	if err := Validate("", Archive{Config: []byte("listen: 8080\n")}); err == nil {
 		t.Fatal("invalid config admitted")
@@ -177,6 +477,13 @@ func TestCheckDatabaseFileInspectsInPlace(t *testing.T) {
 	}
 	if err := CheckDatabaseFile(bad); !errors.Is(err, ErrInvalidSnapshot) {
 		t.Fatalf("garbage file: %v", err)
+	}
+	empty := filepath.Join(dir, "empty.db")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDatabaseFile(empty); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("empty file: %v, want ErrInvalidSnapshot", err)
 	}
 }
 
@@ -754,9 +1061,7 @@ func referenceArchive(t *testing.T, a Archive) []byte {
 	t.Helper()
 	var payload bytes.Buffer
 	write := func(kind uint8, data []byte) {
-		payload.WriteByte(kind)
-		payload.Write(binary.BigEndian.AppendUint64(nil, uint64(len(data))))
-		payload.Write(data)
+		payload.Write(framedMember(kind, data))
 	}
 	if len(a.Config) > 0 {
 		write(memberConfig, a.Config)
@@ -764,7 +1069,22 @@ func referenceArchive(t *testing.T, a Archive) []byte {
 	if len(a.Database) > 0 {
 		write(memberDatabase, a.Database)
 	}
-	sum := sha256.Sum256(payload.Bytes())
+	return framedArchive(t, a.flags(), a.Created, payload.Bytes())
+}
+
+// framedMember is one version-1 member: kind, big-endian length, body.
+func framedMember(kind uint8, data []byte) []byte {
+	out := []byte{kind}
+	out = binary.BigEndian.AppendUint64(out, uint64(len(data)))
+	return append(out, data...)
+}
+
+// framedArchive wraps an already-framed payload in the fixed header, its outer
+// SHA-256 and one zstd frame. Tests use it for payloads the encoder never
+// produces, such as trailing bytes and missing members.
+func framedArchive(t *testing.T, flags byte, created time.Time, payload []byte) []byte {
+	t.Helper()
+	sum := sha256.Sum256(payload)
 	var body bytes.Buffer
 	enc, err := zstd.NewWriter(&body,
 		zstd.WithEncoderLevel(zstd.SpeedBestCompression),
@@ -774,16 +1094,29 @@ func referenceArchive(t *testing.T, a Archive) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := enc.Write(payload.Bytes()); err != nil {
+	if _, err := enc.Write(payload); err != nil {
 		t.Fatal(err)
 	}
 	if err := enc.Close(); err != nil {
 		t.Fatal(err)
 	}
-	raw := append([]byte(magic), archiveVersion, a.flags(), 0, 0)
-	raw = binary.BigEndian.AppendUint64(raw, uint64(a.Created.Unix()))
+	raw := append([]byte(magic), archiveVersion, flags, 0, 0)
+	raw = binary.BigEndian.AppendUint64(raw, uint64(created.Unix()))
 	raw = append(raw, sum[:]...)
 	return append(raw, body.Bytes()...)
+}
+
+func assertNoRestoreStaging(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "millivolt-restore-") {
+			t.Fatalf("restore staging left behind: %s", e.Name())
+		}
+	}
 }
 
 func firstDiff(got, want []byte) int {

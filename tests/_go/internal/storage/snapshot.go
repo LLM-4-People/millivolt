@@ -84,8 +84,10 @@ func assertNoSnapshotStaging(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "millivolt-snapshot-") {
-			t.Fatalf("snapshot staging directory left behind: %s", e.Name())
+		for _, prefix := range []string{"millivolt-snapshot-", "millivolt-merge-", "millivolt-overlap-"} {
+			if strings.HasPrefix(e.Name(), prefix) {
+				t.Fatalf("snapshot staging directory left behind: %s", e.Name())
+			}
 		}
 	}
 }
@@ -280,6 +282,153 @@ func TestMergeSnapshotKeepsLiveRows(t *testing.T) {
 	if live.Totals().Requests != 3 {
 		t.Fatalf("totals after merge = %d, want 3", live.Totals().Requests)
 	}
+}
+
+// TestMergeSnapshotFileKeepsLiveRows pins the file-backed merge owner: the
+// caller's packed file is attached in place, live rows still win, the counts
+// and totals match the byte wrapper, and neither the source file nor a merge
+// staging copy is left behind.
+func TestMergeSnapshotFileKeepsLiveRows(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	live.Record(&metrics.Record{ID: "live-only", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	src := openTestStore(t)
+	src.Record(&metrics.Record{ID: "shared", Provider: "backup.example", Model: "n", StatusCode: 200})
+	src.Record(&metrics.Record{ID: "backup-only", Provider: "backup.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	path, cleanup, err := src.SnapshotFile(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	inserted, skipped, err := live.MergeSnapshotFile(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted != 1 || skipped != 1 {
+		t.Fatalf("inserted=%d skipped=%d", inserted, skipped)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file-backed merge did not leave the caller's file to its owner: %v", err)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_merge"); n != 0 {
+		t.Fatal("backup_merge still attached after MergeSnapshotFile")
+	}
+	got, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]*metrics.Record{}
+	for _, r := range got {
+		byID[r.ID] = r
+	}
+	if byID["shared"] == nil || byID["shared"].Provider != "live.example" {
+		t.Fatalf("live row lost on conflict: %#v", byID["shared"])
+	}
+	if byID["live-only"] == nil || byID["backup-only"] == nil {
+		t.Fatalf("merged rows = %#v", got)
+	}
+	if live.Totals().Requests != 3 {
+		t.Fatalf("totals after merge = %d, want 3", live.Totals().Requests)
+	}
+	assertNoSnapshotStaging(t, live.stageDir())
+}
+
+// TestStageSnapshotFileStagesAndAdmits pins the file-backed replace owner: the
+// validated source is streamed into the pending name with 0600 permissions,
+// the source stays with its owner, and Open admits the staged snapshot.
+func TestStageSnapshotFileStagesAndAdmits(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "src.db")
+	src, err := Open(srcPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "file-stage", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	source, cleanup, err := src.SnapshotFile(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	src.Close()
+	want, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dstPath := filepath.Join(dir, "dst.db")
+	if err := StageSnapshotFile(dstPath, source); err != nil {
+		t.Fatal(err)
+	}
+	incoming := PendingSnapshotPath(dstPath)
+	got, err := os.ReadFile(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("file-backed stage changed the snapshot bytes")
+	}
+	info, err := os.Stat(incoming)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("pending snapshot permissions = %v, want 0600", info.Mode().Perm())
+	}
+	if _, err := os.Stat(source); err != nil {
+		t.Fatalf("file-backed stage consumed its source: %v", err)
+	}
+	dst, err := Open(dstPath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if _, err := os.Stat(incoming); !os.IsNotExist(err) {
+		t.Fatal("pending snapshot was not consumed")
+	}
+	recent, err := dst.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recent) != 1 || recent[0].ID != "file-stage" {
+		t.Fatalf("restored rows = %#v", recent)
+	}
+}
+
+// TestSnapshotOverlapFileInspectsInPlace pins the path-backed inspect owner:
+// it counts the id intersection without writing a copy and leaves the caller's
+// file untouched.
+func TestSnapshotOverlapFileInspectsInPlace(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "packed.db")
+	if err := os.WriteFile(path, packedSnapshot(t, "shared"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := live.SnapshotOverlapFile(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("overlap = %d, want 1", n)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("path-backed overlap removed its caller's file: %v", err)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_inspect"); n != 0 {
+		t.Fatal("backup_inspect still attached after SnapshotOverlapFile")
+	}
+	assertNoSnapshotStaging(t, live.stageDir())
 }
 
 func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {

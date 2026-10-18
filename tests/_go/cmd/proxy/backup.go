@@ -312,6 +312,22 @@ func assertNoBackupStaging(t *testing.T, dir string) {
 	}
 }
 
+// assertNoRestoreStaging pins the restore cleanup owner: the private upload
+// file and the decoded database directory must not outlive the handler on any
+// success or failure path.
+func assertNoRestoreStaging(t *testing.T, dir string) {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "millivolt-restore-") {
+			t.Fatalf("restore staging left behind: %s", e.Name())
+		}
+	}
+}
+
 // incompressibleText builds deterministic high-entropy text so a zstd frame
 // keeps a database snapshot over the 1 MiB backup ceiling.
 func incompressibleText(n int) string {
@@ -436,6 +452,7 @@ func TestRestoreValidatesWholeArchiveBeforeDatabaseApply(t *testing.T) {
 	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); !os.IsNotExist(err) {
 		t.Fatal("invalid archive staged a database snapshot")
 	}
+	assertNoRestoreStaging(t, dir)
 }
 
 func TestRestoreStagesDatabaseFromEncodedArchive(t *testing.T) {
@@ -476,6 +493,180 @@ func TestRestoreStagesDatabaseFromEncodedArchive(t *testing.T) {
 	if _, err := os.Stat(storage.PendingSnapshotPath(dbPath)); err != nil {
 		t.Fatalf("handleRestore did not stage the snapshot: %v", err)
 	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreOverCapUploadLeavesNoStaging pins the upload ceiling end to end:
+// an over-cap body answers the existing 413 message and the private upload
+// file is removed.
+func TestRestoreOverCapUploadLeavesNoStaging(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveCfg.BackupMaxBytes = config.BackupMaxBytesMin
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	body := bytes.Repeat([]byte{0x41}, int(config.BackupMaxBytesMin)+1)
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s, want 413", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "backup exceeds backup_max_bytes") {
+		t.Fatalf("body %q does not name the cap", rr.Body.String())
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreUploadReadFailureLeavesNoStaging pins the client-disconnect path:
+// a body that fails mid-read answers the endpoint's upload error and leaves no
+// private upload file behind.
+func TestRestoreUploadReadFailureLeavesNoStaging(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	req := httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1",
+		io.MultiReader(bytes.NewReader([]byte("MVB1")), failingReader{}))
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status %d body %s, want the upload 413", rr.Code, rr.Body.String())
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("client disconnected") }
+
+// TestStageRestoreUploadEnforcesCap pins the staging owner directly: the
+// bounded copy refuses an over-cap reader, returns no path, and removes its
+// private file.
+func TestStageRestoreUploadEnforcesCap(t *testing.T) {
+	dir := t.TempDir()
+	path, err := stageRestoreUpload(dir, bytes.NewReader(bytes.Repeat([]byte("x"), 1025)), 1024)
+	if !errors.Is(err, backup.ErrTooLarge) {
+		t.Fatalf("over-cap staging = %v, want ErrTooLarge", err)
+	}
+	if path != "" {
+		t.Fatalf("over-cap staging returned path %q", path)
+	}
+	assertNoRestoreStaging(t, dir)
+
+	path, err = stageRestoreUpload(dir, bytes.NewReader([]byte("MVB1")), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreResponseWriteFailureLeavesNoStaging pins the client-disconnect
+// path after a successful decode and inspect: the response write fails, and
+// the upload file plus decoded database directory are still removed.
+func TestRestoreResponseWriteFailureLeavesNoStaging(t *testing.T) {
+	store, _, dbPath, dir := openLiveStoreFixture(t)
+	store.Record(&metrics.Record{ID: "write-failure", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := store.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = config.Default()
+	liveCfg.DBPath = dbPath
+	liveStore = store
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	mux.ServeHTTP(&failingWriter{}, httptest.NewRequest(http.MethodPost, "/admin/restore?inspect=1", bytes.NewReader(raw)))
+	assertNoRestoreStaging(t, dir)
+}
+
+// TestRestoreConfigOnlyWithoutStoreUsesTempAndCleans pins a config-only
+// restore without a live database: it stages the upload in the process temp
+// directory and removes it after the config applies.
+func TestRestoreConfigOnlyWithoutStoreUsesTempAndCleans(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	raw, err := backup.Encode("", backup.Archive{Config: defaultConfigYAMLForRestore(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restore status %d body %s", rr.Code, rr.Body.String())
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
+// TestRestoreDatabaseWithoutStoreFailsBeforeStaging pins the missing-volume
+// refusal for a database archive and its cleanup: no live database means no
+// decoding volume, and the temp upload is removed.
+func TestRestoreDatabaseWithoutStoreFailsBeforeStaging(t *testing.T) {
+	liveReloadFixture(t)
+	temp := t.TempDir()
+	t.Setenv("TMPDIR", temp)
+	dir := t.TempDir()
+	src, err := storage.Open(filepath.Join(dir, "src.db"), storage.Options{
+		WriteChanCap:  8,
+		BatchCap:      4,
+		FlushInterval: config.Default().StorageFlushInterval,
+		QueryTimeout:  config.Default().StorageQueryTimeout,
+		QueryMaxBytes: int(config.Default().StorageQueryMaxBytes),
+		QueryMaxRows:  config.Default().StorageQueryMaxRows,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.Record(&metrics.Record{ID: "no-volume", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	src.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := backup.Encode(dir, backup.Archive{Database: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(raw)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status %d body %s, want 400", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), storage.ErrStorageDisabled.Error()) {
+		t.Fatalf("body %q does not report the missing storage volume", rr.Body.String())
+	}
+	assertNoRestoreStaging(t, temp)
+}
+
+func defaultConfigYAMLForRestore(t *testing.T) []byte {
+	t.Helper()
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, config.Default()); err != nil {
+		t.Fatal(err)
+	}
+	return yaml.Bytes()
 }
 
 func decodeableArchive(t *testing.T, flags byte, kinds []byte, members ...[]byte) []byte {
@@ -991,6 +1182,7 @@ func TestRestoreInspectDatabase(t *testing.T) {
 	if ins.Database.OldestMs != oldAt.UnixMilli() || ins.Database.NewestMs != newAt.UnixMilli() {
 		t.Fatalf("span oldest=%d newest=%d", ins.Database.OldestMs, ins.Database.NewestMs)
 	}
+	assertNoRestoreStaging(t, dir)
 }
 
 func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
@@ -1057,6 +1249,7 @@ func TestRestoreDatabaseMergeKeepsLiveRows(t *testing.T) {
 	if byID["live-row"] == nil || byID["backup-row"] == nil {
 		t.Fatalf("merged rows = %#v", got)
 	}
+	assertNoRestoreStaging(t, dir)
 }
 
 func TestBackupStatusJSON(t *testing.T) {
@@ -1159,7 +1352,7 @@ func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
 	if _, _, err := buildBackup(t.Context(), false, true); !errors.Is(err, storage.ErrStorageDisabled) {
 		t.Errorf("buildBackup database member: %v, want ErrStorageDisabled", err)
 	}
-	if _, err := restoreDatabase(t.Context(), nil, "replace"); !errors.Is(err, storage.ErrStorageDisabled) {
+	if _, err := restoreDatabase(t.Context(), "", "replace"); !errors.Is(err, storage.ErrStorageDisabled) {
 		t.Errorf("restoreDatabase without db_path: %v, want ErrStorageDisabled", err)
 	}
 
@@ -1167,7 +1360,7 @@ func TestBackupSurfacesReportStorageDisabledSentinel(t *testing.T) {
 	// the same identity.
 	liveCfg = config.Default()
 	liveCfg.DBPath = filepath.Join(t.TempDir(), "live.db")
-	if _, err := restoreDatabase(t.Context(), nil, "merge"); !errors.Is(err, storage.ErrStorageDisabled) {
+	if _, err := restoreDatabase(t.Context(), "", "merge"); !errors.Is(err, storage.ErrStorageDisabled) {
 		t.Errorf("restoreDatabase merge without store: %v, want ErrStorageDisabled", err)
 	}
 
@@ -1209,7 +1402,11 @@ func TestDBStageDirNamesLiveStoreVolumeAfterReloadPathChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restart, err := restoreDatabase(t.Context(), data, "replace")
+	decoded := filepath.Join(t.TempDir(), "decoded.db")
+	if err := os.WriteFile(decoded, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restart, err := restoreDatabase(t.Context(), decoded, "replace")
 	if err != nil {
 		t.Fatal(err)
 	}
