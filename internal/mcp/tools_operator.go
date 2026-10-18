@@ -783,7 +783,7 @@ type PurgeOutput struct {
 	Deleted      bool   `json:"deleted" jsonschema:"true when the proxy accepted the deletion"`
 	Filter       string `json:"filter" jsonschema:"the predicate that was applied"`
 	Reviewed     int64  `json:"reviewed_count" jsonschema:"the count carried by the preview token this call was authorized against"`
-	Recount      int64  `json:"remaining_count" jsonschema:"rows still matching right after the deletion"`
+	Recount      *int64 `json:"remaining_count,omitempty" jsonschema:"rows still matching right after the deletion; omitted when the post-delete recount failed"`
 	Irreversible string `json:"irreversible" jsonschema:"what cannot be undone"`
 	Captures     string `json:"captures" jsonschema:"what this deletion did to stored capture documents"`
 	Note         string `json:"note" jsonschema:"what the deletion does not touch"`
@@ -855,7 +855,7 @@ func (s *Service) purge(ctx context.Context, in PurgeInput) (*PurgeOutput, error
 		Count int64 `json:"count"`
 	}
 	if err := s.client.postJSON(ctx, routePurgeCount, in.Filter.document(), &remaining); err == nil {
-		out.Recount = remaining.Count
+		out.Recount = &remaining.Count
 	}
 	return out, nil
 }

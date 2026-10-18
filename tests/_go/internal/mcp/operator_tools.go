@@ -1159,7 +1159,7 @@ func TestPurgeSendsTheExactReviewedFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.Deleted || out.Recount != 4 || out.Reviewed != 4 {
+	if !out.Deleted || out.Recount == nil || *out.Recount != 4 || out.Reviewed != 4 {
 		t.Fatalf("purge output = %+v", out)
 	}
 	if !strings.Contains(out.Irreversible, "cannot be recovered") {
