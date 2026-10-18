@@ -150,25 +150,25 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 			if len(r.ResponseHeaders) == 0 {
 				hdrJSON = jsonEmptyObject
 			} else if b, err := json.Marshal(r.ResponseHeaders); err == nil {
-				hdrJSON = b
+				hdrJSON = string(b)
 			} else {
 				log.Printf("storage: marshal response headers for %s: %v", r.ID, err)
-				hdrJSON = nil
+				hdrJSON = ""
 			}
 		}
 		toolNamesJSON := jsonNull
 		if len(r.ToolNames) > 0 {
 			if b, err := json.Marshal(r.ToolNames); err == nil {
-				toolNamesJSON = b
+				toolNamesJSON = string(b)
 			} else {
 				log.Printf("storage: marshal tool names for %s: %v", r.ID, err)
-				toolNamesJSON = nil
+				toolNamesJSON = ""
 			}
 		}
 		attemptsJSON := jsonNull
 		if len(r.Attempts) > 0 {
 			if b, err := json.Marshal(r.Attempts); err == nil {
-				attemptsJSON = b
+				attemptsJSON = string(b)
 			} else {
 				log.Printf("storage: marshal attempts for %s: %v", r.ID, err)
 				// 'null', never '': the attempts column must hold valid JSON -
@@ -196,13 +196,15 @@ func (s *Store) insertBatch(records []*metrics.Record) error {
 }
 
 var (
-	jsonNull        = []byte("null")
-	jsonEmptyObject = []byte("{}")
+	// Stored TEXT constants; package-level strings avoid one conversion per
+	// row for the common no-headers/no-tools/no-attempts case.
+	jsonNull        = "null"
+	jsonEmptyObject = "{}"
 )
 
 // appendRecordValues appends one record's column values in insertColumns
 // order to dst. The caller reuses dst across rows.
-func appendRecordValues(dst []any, r *metrics.Record, hdrJSON, toolNamesJSON, attemptsJSON []byte) []any {
+func appendRecordValues(dst []any, r *metrics.Record, hdrJSON, toolNamesJSON, attemptsJSON string) []any {
 	return append(dst,
 		r.ID, r.Provider, r.Model, r.KeyHash, r.UserAgent, r.Client, r.ClientIP,
 		r.ClientLang, boolToInt(r.Stream),
@@ -215,12 +217,12 @@ func appendRecordValues(dst []any, r *metrics.Record, hdrJSON, toolNamesJSON, at
 		r.Usage.CacheReadTokens, r.Usage.CacheWrite, r.Usage.ReasoningTokens,
 		boolToInt(r.ClientDisconnected),
 		r.RateLimitRemaining, r.RateLimitLimit, r.Cost,
-		r.TurnsUser, r.TurnsAssistant, r.TurnsTool, string(hdrJSON),
+		r.TurnsUser, r.TurnsAssistant, r.TurnsTool, hdrJSON,
 		r.AnswerTokens, timeToMilli(r.FirstAnswerAt), r.FirstReasoningAt, r.GenTokens, boolToInt(r.HadAnswerContent), r.DecodeTPS, r.OverallTPS,
 		r.Method, r.Path, r.ProcessingMs, r.PromptPreview, r.ResponsePreview,
 		r.ProviderModel, r.ProviderRequestID, r.ProviderServer,
 		r.QueueWaitMs, boolToInt(r.RateLimited), r.Retries, r.RetryAfterMs,
-		string(toolNamesJSON),
+		toolNamesJSON,
 		intPtrVal(r.ReqMaxTokens), floatPtrVal(r.ReqTemperature), floatPtrVal(r.ReqTopP),
 		r.ReqToolsCount, r.ReqToolChoice,
 		intPtrVal(r.ReqN), r.ReqStop, boolToInt(r.ReqLogprobs),
@@ -228,7 +230,7 @@ func appendRecordValues(dst []any, r *metrics.Record, hdrJSON, toolNamesJSON, at
 		r.ReqResponseFormat, int64PtrVal(r.ReqSeed), boolPtrVal(r.ReqParallelTools),
 		r.ReqLogitBias, intPtrVal(r.ReqTopLogprobs), r.ReqServiceTier,
 		boolToInt(r.ReqThinking), r.ReqMetadataKeys, boolToInt(r.ReqStreamOpts),
-		string(attemptsJSON), timeToMilli(r.FinalAttemptAt), r.ConversationID, r.ParentConversationID,
+		attemptsJSON, timeToMilli(r.FinalAttemptAt), r.ConversationID, r.ParentConversationID,
 		r.CharsSystem, r.CharsUser, r.CharsAssistant, r.CharsTool,
 		r.Images, r.Attachments, r.LastTurnRole,
 		marshalClientMeta(r.ClientMeta), r.ReqReasoningEffort, r.ReqVerbosity,
