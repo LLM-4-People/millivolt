@@ -111,6 +111,11 @@ type RingEvent struct {
 	Record *Record
 	Seq    int64
 	feedID string // mutation epoch, not a separate wire field
+	// cache is nil unless this publication had more than one ring subscriber.
+	// Then it is one event-owned lazy observed-JSON cache shared by every
+	// channel copy, so the first consuming stream encodes the observer payload
+	// once for all of them (see encodeRingEvent).
+	cache *eventCache
 }
 
 // LiveEvent is a per-request lifecycle event: Phase is "begin" (the request was
@@ -131,6 +136,10 @@ type LiveEvent struct {
 	InFlight        int64   `json:"in_flight"`
 	PendingRevision uint64  `json:"pending_revision"`
 	feedID          string  // mutation epoch, not a separate wire field
+	// cache is nil unless this publication had more than one lifecycle
+	// subscriber; it is one event-owned lazy observed-JSON cache shared by every
+	// subscriber of this event (see encodeLiveEvent).
+	cache *eventCache
 }
 
 // NewBuffer creates a ring buffer that holds at most maxSize records.
@@ -235,14 +244,20 @@ func (b *Buffer) Record(r *Record) {
 		}
 		b.pendingRevision++
 		b.inFlight.Store(int64(len(b.pending)))
-		if len(b.liveSubs) > 0 {
-			ended = &LiveEvent{Phase: "end", Record: r, InFlight: b.inFlight.Load(), PendingRevision: b.pendingRevision, feedID: feed}
+		if n := len(b.liveSubs); n > 0 {
+			ended = &LiveEvent{
+				Phase: "end", Record: r, InFlight: b.inFlight.Load(),
+				PendingRevision: b.pendingRevision, feedID: feed,
+				cache: sharedEventCache(n),
+			}
 		}
 	}
 	b.mu.Unlock()
 
-	// Push to any live subscribers (dashboard) non-blockingly.
-	fanout(b.subs, RingEvent{Record: r, Seq: seq, feedID: feed})
+	// Push to any live subscribers (dashboard) non-blockingly. A shared
+	// publication carries one event-owned cache; a single subscriber keeps the
+	// direct encode path.
+	fanout(b.subs, RingEvent{Record: r, Seq: seq, feedID: feed, cache: sharedEventCache(len(b.subs))})
 	if ended != nil {
 		fanout(b.liveSubs, ended)
 	}
@@ -378,9 +393,14 @@ func (b *Buffer) PublishLive(phase string, r *Record) {
 	b.subsMu.Lock()
 	// Allocate and fan out only when a dashboard is attached; a fresh
 	// subscriber always receives the pending registry in its snapshot, so the
-	// skipped event cannot be missed.
-	if len(b.liveSubs) > 0 {
-		fanout(b.liveSubs, &LiveEvent{Phase: phase, Record: &snap, InFlight: gauge, PendingRevision: revision, feedID: feed})
+	// skipped event cannot be missed. More than one subscriber shares one
+	// event-owned encode cache.
+	if n := len(b.liveSubs); n > 0 {
+		fanout(b.liveSubs, &LiveEvent{
+			Phase: phase, Record: &snap, InFlight: gauge,
+			PendingRevision: revision, feedID: feed,
+			cache: sharedEventCache(n),
+		})
 	}
 	b.subsMu.Unlock()
 }

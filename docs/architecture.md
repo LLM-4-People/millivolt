@@ -117,6 +117,14 @@ Existing lock order keeps sequence assignment and finalized publication ordered.
 A feed epoch changes on restart/deletion; queued fanout retains its mutation
 epoch. Subscribers attach before snapshot capture and overflow retires that
 subscriber so reconnect can replay, rather than silently dropping permanent rows.
+When more than one dashboard subscriber is attached, `Record` and `PublishLive`
+attach one lazy observed-JSON cache to that published event
+([internal/metrics/event_cache.go](../internal/metrics/event_cache.go)). The
+first consuming stream encodes the observer result and every subscriber of that
+same event reuses the retained bytes; an encode error is retained too, so all of
+them close and resync. Zero or one subscriber keeps the direct `json.Marshal`
+path with no cache allocation, and no cache outlives its event or crosses a
+feed epoch.
 
 `SnapshotRequest` is the shared atomic cursor/feed gate for bootstrap and SSE.
 A foreign/stale cursor requires a full snapshot; deltas are never truncated.

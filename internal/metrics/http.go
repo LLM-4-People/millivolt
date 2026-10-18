@@ -254,7 +254,9 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 			// ever returns an unmarshalable value, close the stream rather than
 			// skipping this seq: the next id would advance Last-Event-ID past
 			// a record that can no longer be replayed. Closing forces a resync.
-			data, err := json.Marshal(b.observeRecord(ev.Record))
+			// Already-encoded record frames are shared across subscribers of the
+			// same event when one cache is attached.
+			data, err := b.encodeRingEvent(ev)
 			if err != nil {
 				log.Printf("metrics: encode record event: %v", err)
 				return
@@ -271,8 +273,10 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Lifecycle event (begin/end). A marshal failure is a stream
-			// contract failure, not a skippable event; resync instead.
-			data, err := json.Marshal(b.observeLive(liveEv))
+			// contract failure, not a skippable event; resync instead. The one
+			// encode owner shares already-encoded frames across subscribers of
+			// this event.
+			data, err := b.encodeLiveEvent(liveEv)
 			if err != nil {
 				log.Printf("metrics: encode live event: %v", err)
 				return
@@ -310,7 +314,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				if ev.feedID != feedID {
 					continue
 				}
-				data, err := json.Marshal(b.observeRecord(ev.Record))
+				data, err := b.encodeRingEvent(ev)
 				if err != nil {
 					log.Printf("metrics: encode record event: %v", err)
 					return
@@ -326,7 +330,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				if liveEv.feedID != feedID {
 					continue
 				}
-				data, err := json.Marshal(b.observeLive(liveEv))
+				data, err := b.encodeLiveEvent(liveEv)
 				if err != nil {
 					log.Printf("metrics: encode live event: %v", err)
 					return
