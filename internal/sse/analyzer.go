@@ -218,12 +218,18 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// We only inspect content-bearing data: lines. We look for key patterns
 	// within the JSON payload without fully decoding.
 
+	// One escape-aware pass records every key this frame classifies; the
+	// predicates below read that result instead of rescanning the payload per
+	// key. Results are per-frame only - nothing is cached across frames.
+	var keys frameKeys
+	keys.scan(payload)
+
 	// Track first/last token of any kind (content, reasoning, or tool call).
 	// The first content-bearing chunk marks TTFT.
-	eventType := responseEventType(payload)
-	hasContent := a.tokenStart(payload) || responsesContentEvent(eventType, payload)
-	hasReasoning := a.reasoningStart(payload) || responsesReasoningEvent(eventType, payload)
-	toolBlock := extractContainer(jsonKey(payload, "tool_calls"), '[', ']')
+	eventType := keys.responseEventType(payload)
+	hasContent := keys.contentStart() || responsesContentEvent(eventType, &keys)
+	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
+	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
 
 	// Set TTFT on the first chunk that carries real data (content, reasoning,
@@ -251,7 +257,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		// Capture a short preview of the first content chunk (only when the
 		// operator enabled capture_body_preview).
 		if a.CapturePreview && a.preview == nil {
-			a.preview = extractPreview(payload)
+			a.preview = extractPreview(keys.content)
 		}
 	}
 
@@ -295,7 +301,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Capture finish_reason: "finish_reason":"stop" etc. A non-null value is a
 	// documented end-of-stream marker in itself (every provider sends it only
 	// on the final chunk), so it also counts as the terminator being seen.
-	if fr := a.extractFinishReason(payload); fr != "" {
+	if fr := jsonValueString(keys.finishReason); fr != "" {
 		a.finishReason = fr
 		a.terminatorSeen = true
 		// The terminal chunk is the stream's response document tail: cost /
@@ -309,7 +315,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// (response.completed / response.failed / response.incomplete): the
 	// Responses API has no [DONE], so those events terminate the stream.
 	if !a.chatlike {
-		if jsonKey(payload, "choices") != nil || strings.HasPrefix(eventType, "response.") {
+		if keys.choices != nil || strings.HasPrefix(eventType, "response.") {
 			a.chatlike = true
 		}
 	}
@@ -323,17 +329,17 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
 	// output-shaped text, so they disqualify the thinking rescue.
-	if tokenHasNonEmpty(payload, "refusal") || tokenHasNonEmpty(payload, "function_call") {
+	if keys.refusalNonEmpty || keys.functionCallNonEmpty {
 		a.answerishSeen = true
 	}
 
 	// Capture the model + request id from the first chunk (they're in every
 	// chunk, so we only need the first).
 	if a.model == "" {
-		a.model = jsonStringValue(payload, "model")
+		a.model = jsonValueString(keys.model)
 	}
 	if a.reqID == "" {
-		a.reqID = jsonStringValue(payload, "id")
+		a.reqID = jsonValueString(keys.requestID)
 	}
 
 	// Capture the usage blob from the final chunk. Usage appears as
@@ -341,7 +347,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// The enclosing chunk is kept too (copied - payload aliases the reused
 	// line buffer): cost_keys paths are relative to the response root, and
 	// the cost / token counts may live in a sibling of usage.
-	if raw := extractObject(jsonKey(payload, "usage")); raw != nil {
+	if raw := extractObject(keys.usage); raw != nil {
 		a.usage = append(a.usage[:0], raw...)
 		a.usageChunk = append(a.usageChunk[:0], payload...)
 	}
@@ -357,7 +363,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// The byte-scan gate keeps the hot path allocation-free; the JSON decode
 	// only runs on the rare error frame. The gate tolerates whitespace before
 	// the colon ("error" :) - a re-serializing gateway may emit it.
-	if metrics.HasErrorKey(payload) {
+	if keys.hasError {
 		// A single-line error frame registers here, on its event's first data
 		// line, while nothing of the event is on the wire yet: mark it for
 		// RetryableUpstreamError so the relay may drop the frame and re-send.
@@ -393,8 +399,12 @@ func (a *Analyzer) extractCost(raw []byte) (float64, bool) {
 // Feed already caught the common case, so this is the safety net for events
 // whose error JSON spans multiple data: lines.
 func (a *Analyzer) flushEvent() {
-	if len(a.eventData) > 0 && a.errType == "" && metrics.HasErrorKey(a.eventData) {
-		a.captureStreamError(a.eventData)
+	if len(a.eventData) > 0 && a.errType == "" {
+		var keys frameKeys
+		keys.scan(a.eventData)
+		if keys.hasError {
+			a.captureStreamError(a.eventData)
+		}
 	}
 	a.eventData = a.eventData[:0]
 	a.eventDataSeen = false
@@ -458,19 +468,12 @@ func responsesTerminalEvent(eventType string) bool {
 }
 
 // Responses event types are top-level, unlike the nested type fields in
-// content/tool objects. Decode only candidate Responses frames, once in Feed;
-// ordinary Chat Completions content takes the cheap negative gate.
+// content/tool objects. The frame key probe records that top-level value once;
+// ordinary chat frames return on the raw-prefix check without decoding.
 func responseEventType(payload []byte) string {
-	if !bytes.Contains(payload, []byte("response.")) && !bytes.Contains(payload, []byte(`\u`)) {
-		return ""
-	}
-	var event struct {
-		Type string `json:"type"`
-	}
-	if json.Unmarshal(payload, &event) != nil {
-		return ""
-	}
-	return event.Type
+	var keys frameKeys
+	keys.scan(payload)
+	return keys.responseEventType(payload)
 }
 
 // TerminalLine is the shared terminal-marker gate for analysis and relay
@@ -698,10 +701,11 @@ func (a *Analyzer) RetryableUpstreamError() (typ, code, msg string, reasoning bo
 }
 
 // extractPreview extracts a bounded prefix (metrics.PreviewMaxBytes) of the
-// first content delta's text, decoding just the content field with a
-// lightweight parse. Called only when CapturePreview is enabled.
-func extractPreview(payload []byte) []byte {
-	text := jsonStringValue(payload, "content")
+// first content delta's text from the probe's first content value, decoding
+// just that value with a lightweight parse. Called only when CapturePreview is
+// enabled.
+func extractPreview(value []byte) []byte {
+	text := jsonValueString(value)
 	if text == "" {
 		return nil
 	}
@@ -757,50 +761,14 @@ func mergeChunkUsage(raw []byte, rec *metrics.Record, usageKeys map[string]strin
 	return merged
 }
 
-// tokenStart reports whether the payload (a JSON line from "data: {...}")
-// contains a content-bearing delta. This is a fast byte-scan; we look for the
-// "content" key followed by a non-empty string value (not ""), tolerating
-// optional whitespace after the colon (re-serialized payloads).
-func (a *Analyzer) tokenStart(payload []byte) bool {
-	value := jsonKey(payload, "content")
-	return len(value) > 1 && value[0] == '"' && value[1] != '"'
-}
-
-// reasoningStart reports whether the payload carries reasoning ("thinking")
-// content. Providers surface reasoning under many field names, so we match a
-// family of key prefixes rather than a single hardcoded one (provider-agnostic,
-// per the project rule). These are NOT answer tokens.
-//
-// Matched (non-empty value required):
-//   - "reasoning_content"  DeepSeek R1, Qwen QwQ/Qwen3, Z.AI/GLM, Kimi, xAI legacy, LiteLLM, older vLLM
-//   - "reasoning"          OpenRouter normalized, current vLLM (renamed from reasoning_content)
-//   - "reasoning_details"  OpenRouter structured array, MiniMax
-//   - "reasoning_text"     OpenAI/xAI Responses API (response.reasoning_text.delta)
-//   - "thinking" / "thinking_delta" / "thinking_blocks"  Anthropic + LiteLLM passthrough
-//   - "thought":true       Gemini generateContent part marker
-//
-// Deliberately NOT matched: "reasoning_effort" (a request-config echo, not a
-// token) and null/empty values (Qwen/DeepSeek send "reasoning_content":"" on
-// the initial role chunk - that must not mark TTFT).
-func (a *Analyzer) reasoningStart(payload []byte) bool {
-	return tokenHasNonEmpty(payload, "reasoning_content") ||
-		tokenHasNonEmpty(payload, "reasoning_details") ||
-		tokenHasNonEmpty(payload, "reasoning_text") ||
-		tokenHasNonEmpty(payload, "reasoning") || // bare "reasoning" (exact key; reasoning_content etc. matched above)
-		tokenHasNonEmpty(payload, "thinking") ||
-		tokenHasNonEmpty(payload, "thinking_delta") ||
-		tokenHasNonEmpty(payload, "thinking_blocks") ||
-		geminiThoughtMarker(payload)
-}
-
 // responsesReasoningEvent matches OpenAI/xAI Responses-API reasoning stream
 // events ("type":"response.reasoning_text.delta" / "...reasoning_summary_text.delta"),
 // whose reasoning text rides in a generic "delta" field rather than a named
 // reasoning key.
-func responsesReasoningEvent(eventType string, payload []byte) bool {
+func responsesReasoningEvent(eventType string, keys *frameKeys) bool {
 	switch eventType {
 	case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
-		return tokenHasNonEmpty(payload, "delta")
+		return keys.deltaNonEmpty
 	}
 	return false
 }
@@ -811,56 +779,19 @@ func responsesReasoningEvent(eventType string, payload []byte) bool {
 // so their presence marks the stream as content-bearing - this keeps the
 // degenerate-outcome classifier from ever flagging a healthy Responses stream
 // as a void (its terminal events carry no finish_reason at all).
-func responsesContentEvent(eventType string, payload []byte) bool {
+func responsesContentEvent(eventType string, keys *frameKeys) bool {
 	switch eventType {
 	case "response.output_text.delta", "response.output_item.delta", "response.web_search_call.delta", "response.function_call_arguments.delta":
-		return tokenHasNonEmpty(payload, "delta")
+		return keys.deltaNonEmpty
 	}
 	return false
 }
 
-// tokenHasNonEmpty reports whether the payload carries `"key"` (exact key, not
-// `"key_suffix"`) with a non-empty, non-null value. The value may be a string
-// ("reasoning_content":"…"), an array ("reasoning_details":[…]), or an object -
-// any present, non-empty value counts as a reasoning token. The key is matched
-// with its closing quote, so "reasoning" does NOT also match "reasoning_content"
-// / "reasoning_details" / "reasoning_effort".
-func tokenHasNonEmpty(payload []byte, key string) bool {
-	for value := jsonKey(payload, key); len(value) > 0; value = jsonKey(value, key) {
-		switch value[0] {
-		case '"':
-			if len(value) > 1 && value[1] != '"' {
-				return true
-			}
-		case '[', '{':
-			i := metrics.SkipSpace(value, 1)
-			if i < len(value) && value[i] != ']' && value[i] != '}' {
-				return true
-			}
-		case 'n', 'f':
-		default:
-			return true
-		}
-	}
-	return false
-}
-
-// geminiThoughtMarker matches Gemini's `"thought":true` part flag (tolerating
-// optional whitespace after the colon).
-func geminiThoughtMarker(payload []byte) bool {
-	return bytes.HasPrefix(jsonKey(payload, "thought"), []byte("true"))
-}
-
-// extractFinishReason returns the finish_reason value if present.
-func (a *Analyzer) extractFinishReason(payload []byte) string {
-	return jsonStringValue(payload, "finish_reason")
-}
-
-// jsonStringValue extracts the string value of `"key"` from a JSON payload via
-// byte-scan, tolerating optional whitespace after the colon. Returns "" when
-// the key is absent or its value is not a string.
-func jsonStringValue(payload []byte, key string) string {
-	value := jsonKey(payload, key)
+// jsonValueString extracts the string text from a raw JSON value (the probe's
+// value slice, already positioned after the colon and any whitespace). Returns
+// "" when the value is not a string. Unescaped values are copied once; escaped
+// values are decoded by encoding/json so every legal escape survives.
+func jsonValueString(value []byte) string {
 	if len(value) < 2 || value[0] != '"' {
 		return ""
 	}
@@ -882,16 +813,6 @@ func jsonStringValue(payload []byte, key string) string {
 		}
 	}
 	return ""
-}
-
-// All analyzer field names are ASCII identifiers. The cheap negative gate
-// avoids repeated lexical walks for absent fields on ordinary token chunks;
-// an escaped key always reaches the shared, escape-aware lookup owner.
-func jsonKey(payload []byte, key string) []byte {
-	if !bytes.Contains(payload, []byte(key)) && !bytes.Contains(payload, []byte(`\u`)) {
-		return nil
-	}
-	return metrics.JSONKey(payload, key)
 }
 
 // extractObject returns the {...} portion of raw starting at the opening

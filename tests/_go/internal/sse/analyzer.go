@@ -600,8 +600,7 @@ func TestExtractPreviewEscapedBackslash(t *testing.T) {
 	// JSON "foo\\" - value is foo\. The closing quote is preceded by two
 	// backslashes (even), so it terminates the string; the preview must not
 	// swallow the bytes after it.
-	payload := []byte(`{"content":"foo\\","x":1}`)
-	got := extractPreview(payload)
+	got := extractPreview([]byte(`"foo\\"`))
 	if string(got) != `foo\` {
 		t.Errorf("extractPreview = %q, want %q", got, `foo\`)
 	}
@@ -610,8 +609,7 @@ func TestExtractPreviewEscapedBackslash(t *testing.T) {
 func TestExtractPreviewEscapedQuote(t *testing.T) {
 	// JSON "a\"b" - the quote after one backslash (odd) is escaped, so the
 	// string continues to the real closing quote.
-	payload := []byte(`{"content":"a\"b","x":1}`)
-	got := extractPreview(payload)
+	got := extractPreview([]byte(`"a\"b"`))
 	if string(got) != `a"b` {
 		t.Errorf("extractPreview = %q, want %q", got, `a"b`)
 	}
@@ -621,9 +619,9 @@ func TestExtractPreviewUTF8Boundary(t *testing.T) {
 	// A multi-byte rune straddling the 120-byte cut must not be split: back
 	// off to the last rune boundary, then append the ellipsis.
 	val := append(bytes.Repeat([]byte("x"), 119), []byte("é ZZZ")...) // é starts at byte 119
-	payload := append([]byte(`{"content":"`), val...)
-	payload = append(payload, []byte(`"}`)...)
-	got := extractPreview(payload)
+	quoted := append([]byte(`"`), val...)
+	quoted = append(quoted, '"')
+	got := extractPreview(quoted)
 	if !utf8.Valid(got) {
 		t.Errorf("extractPreview = invalid UTF-8: %q", got)
 	}
