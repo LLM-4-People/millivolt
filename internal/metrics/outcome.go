@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 // Degenerate-outcome detection: a "successful" upstream response that carried
@@ -120,36 +121,12 @@ func ClassifyOutcome(finish string, terminatorSeen bool, hadAnswer, hadReasoning
 // reasoning-only body classifies reasoning_only, never empty_completion, so
 // the two surfaces can never disagree about the same outcome. A non-streaming
 // body is never "truncated" (it is complete by transport definition) - only
-// the void, tool-mismatch and reasoning-only classes apply.
+// the void, tool-mismatch and reasoning-only classes apply. The relay uses
+// AnalyzeNonStreamBody directly so the quality gate and commit share one
+// decode; this function is the compatibility wrapper returning that analysis
+// outcome for focused classifier tests.
 func ClassifyNonStreamBody(body []byte) string {
-	var raw struct {
-		Choices []struct {
-			FinishReason string `json:"finish_reason"`
-			Message      struct {
-				Content       json.RawMessage `json:"content"`
-				Reasoning     json.RawMessage `json:"reasoning_content"`
-				ReasoningBare json.RawMessage `json:"reasoning"`
-				ReasoningDet  json.RawMessage `json:"reasoning_details"`
-				ReasoningText json.RawMessage `json:"reasoning_text"`
-				ToolCalls     []struct{}      `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return ""
-	}
-	if len(raw.Choices) == 0 {
-		// Responses-API / usage-only / unknown shapes: not chat-completions -
-		// nothing to classify.
-		return ""
-	}
-	ch := raw.Choices[0]
-	hadAnswer := contentPresent(ch.Message.Content)
-	hadReasoning := contentPresent(ch.Message.Reasoning) ||
-		contentPresent(ch.Message.ReasoningBare) ||
-		contentPresent(ch.Message.ReasoningDet) ||
-		contentPresent(ch.Message.ReasoningText)
-	return ClassifyOutcome(ch.FinishReason, true, hadAnswer, hadReasoning, len(ch.Message.ToolCalls), true)
+	return AnalyzeNonStreamBody(body, nil, nil, false).Outcome
 }
 
 // contentPresent reports whether the raw value is a present, non-empty
@@ -178,4 +155,28 @@ func contentPresent(content json.RawMessage) bool {
 		return true // an object part is content
 	}
 	return false
+}
+
+// FlattenContent renders one OpenAI message content field as plain text:
+// a bare string stays itself, an array of parts joins the string text field of
+// every part (a part that is not an object, or whose text is not a string,
+// fails the whole array), a JSON null decodes as the empty string, and any
+// other shape reports false. The tool-result reader, the input-token estimate
+// and the non-stream analysis share it so the content walks cannot drift.
+func FlattenContent(raw json.RawMessage) (string, bool) {
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s, true
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) == nil {
+		var sb strings.Builder
+		for _, p := range parts {
+			sb.WriteString(p.Text)
+		}
+		return sb.String(), true
+	}
+	return "", false
 }

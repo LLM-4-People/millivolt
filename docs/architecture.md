@@ -173,6 +173,12 @@ Relevant coverage: storage writer/purge/request-parameter tests,
 `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`. The latter
 deliberately overloads storage and separates durable throughput from drops.
 
+Non-stream responses decode once into one analysis: quality outcome, usage,
+model/id, finish reason, tool names, bounded preview and the top-level error
+envelope share that pass, and the relay applies the same value at commit.
+Cost-bearing bodies add the existing provider-keyed cost pass; streaming
+analyzer semantics are unchanged.
+
 ## History projection and aggregate math
 
 One durable analytical projection retains compact contributions, request IDs,

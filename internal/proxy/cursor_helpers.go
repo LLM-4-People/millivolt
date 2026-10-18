@@ -56,29 +56,11 @@ func extractToolResults(body []byte) []cursorToolResult {
 	return out
 }
 
-// flattenContent renders one OpenAI message content field as plain text:
-// a bare string stays itself, an array of parts joins the string text
-// field of every part (a part whose text is not a string fails the whole
-// array), a JSON null decodes as the empty string, and any other shape
-// reports false. The tool-result reader, the input-token estimate and the
-// relay's non-streaming answer-content walk share it so the content walks
-// cannot drift.
+// flattenContent is the proxy-side name for the shared metrics content walk,
+// kept so the tool-result reader, input-token estimate and non-stream relay
+// all consume one implementation.
 func flattenContent(raw json.RawMessage) (string, bool) {
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s, true
-	}
-	var parts []struct {
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &parts) == nil {
-		var sb strings.Builder
-		for _, p := range parts {
-			sb.WriteString(p.Text)
-		}
-		return sb.String(), true
-	}
-	return "", false
+	return metrics.FlattenContent(raw)
 }
 
 // toolResultIDs returns the tool_call_ids of a request's role:"tool" messages.

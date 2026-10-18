@@ -533,7 +533,15 @@ func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 	if err := json.Unmarshal(trimmed, &probe); err != nil {
 		return "", "", ""
 	}
-	raw := bytes.TrimSpace(probe.Error)
+	return parseErrorValue(probe.Error)
+}
+
+// parseErrorValue applies the canonical envelope rules to an already-captured
+// top-level "error" value. ParseErrorEnvelope and the one-pass non-stream
+// analysis share it so both surfaces read the same decoys, string/numeric
+// codes, fallback type and bounded message.
+func parseErrorValue(raw json.RawMessage) (typ, code, msg string) {
+	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return "", "", ""
 	}

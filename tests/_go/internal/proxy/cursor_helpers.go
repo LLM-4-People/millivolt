@@ -105,7 +105,7 @@ func TestRelayAnswerContentWalksPartsThroughFlattenContent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"choices":[{"message":{"role":"assistant","content":` + tc.content + `}}]}`)
 			rec := &metrics.Record{StatusCode: 200}
-			extractUsageBytes(body, rec, nil, true)
+			analyzeNonStreamBytes(body, rec, nil, nil, true)
 			if rec.HadAnswerContent != tc.answer {
 				t.Fatalf("HadAnswerContent = %v, want %v", rec.HadAnswerContent, tc.answer)
 			}

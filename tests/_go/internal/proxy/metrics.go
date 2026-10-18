@@ -683,7 +683,7 @@ func TestNonStreamClientAbortMidSpooledWriteKeepsInBandError(t *testing.T) {
 	rec := &metrics.Record{ID: "spool-abort", StatusCode: http.StatusOK, Provider: "provider.example"}
 	spooled := []byte(`{"error":{"message":"Coral Bricks rejected this request.","type":"invalid_request_error","code":"bad_request"}}`)
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}}
-	s.commitSpooledBody(&abortedClientWriter{hdr: http.Header{}}, resp, spooled, rec)
+	s.commitSpooledBody(&abortedClientWriter{hdr: http.Header{}}, resp, spooled, rec, metrics.AnalyzeNonStreamBody(spooled, nil, nil, false))
 	if rec.StatusCode != metrics.StatusClientClosedRequest {
 		t.Errorf("StatusCode = %d, want %d (client closed request)", rec.StatusCode, metrics.StatusClientClosedRequest)
 	}

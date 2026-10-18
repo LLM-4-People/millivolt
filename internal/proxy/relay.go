@@ -165,32 +165,64 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 	}
 }
 
-// analyzeNonStreamBytes runs the non-streaming metrics extraction (usage,
-// finish_reason, tool calls, cost, in-band error envelope) over the captured
-// body bytes. Shared by the teeing relay (nonStreamBody) and the spooled
-// quality path (serveNonStreaming) so the two can never drift.
+// nonStreamAnalysis is the proxy's single call point for the metrics body
+// analysis. Production always uses metrics.AnalyzeNonStreamBody; the variable
+// is a test seam so the request-path regression can count analyses (one per
+// spooled body) and prove the quality gate and commit share it.
+var nonStreamAnalysis = metrics.AnalyzeNonStreamBody
+
+// analyzeNonStreamBytes runs the non-streaming metrics extraction over a
+// captured body: one analysis decode, then the shared record apply owner.
+// Used by the teeing relay (nonStreamBody), the translated-body path, and
+// tests that exercise a raw body directly.
 func analyzeNonStreamBytes(buf []byte, rec *metrics.Record, usageKeys map[string]string, costKeys []string, preview bool) {
 	if len(buf) == 0 {
 		return
 	}
-	if rec.Usage.OutputTokens == 0 {
-		extractUsageBytes(buf, rec, usageKeys, preview)
+	applyNonStreamAnalysis(rec, nonStreamAnalysis(buf, usageKeys, costKeys, preview))
+}
+
+// applyNonStreamAnalysis is the single owner that writes one non-stream
+// analysis onto a record. The quality-exhausted and commit paths both call it,
+// so their field assignment order and gates cannot drift.
+func applyNonStreamAnalysis(rec *metrics.Record, a metrics.NonStreamAnalysis) {
+	// The historical extractor skipped every record-facing assignment when
+	// the body's usage/model/id/tool detail did not type-decode, and it only
+	// ran at all while the record had no output tokens yet.
+	if a.RecordFieldsOK && rec.Usage.OutputTokens == 0 {
+		if a.HasUsage {
+			rec.Usage = a.Usage
+		}
+		if a.Model != "" && rec.ProviderModel == "" {
+			rec.ProviderModel = a.Model
+		}
+		if a.ID != "" && rec.ProviderRequestID == "" {
+			rec.ProviderRequestID = a.ID
+		}
+		if a.FinishReason != "" {
+			rec.FinishReason = a.FinishReason
+		}
+		if a.HadAnswerContent {
+			rec.HadAnswerContent = true
+			if a.Preview != "" && rec.ResponsePreview == "" {
+				rec.ResponsePreview = a.Preview
+			}
+		}
+		if a.ToolCalls > 0 {
+			rec.ToolCalls = a.ToolCalls
+			rec.ToolNames = a.ToolNames
+		}
 	}
 	// Cost is read straight from the provider's response (dynamic), so it
 	// reflects what the provider actually charged for this request.
-	if cost, ok := metrics.ExtractCost(buf, costKeys); ok {
-		rec.Cost = cost
+	if a.HasCost {
+		rec.Cost = a.Cost
 	}
-	// A 200 response can still carry a top-level {"error":{...}} envelope
-	// (the in-band failure shape; streaming's counterpart is captured by
-	// the SSE analyzer). Null/empty error values are decoys, not failures
-	// - the envelope decoder returns "" for those, and normal completion
-	// bodies have no top-level error key at all, so success paths are
-	// never mislabeled. The client received a failure - record it.
-	if rec.ErrorType == "" && metrics.HasErrorKey(buf) {
-		if typ, code, msg := metrics.ParseErrorEnvelope(buf); typ != "" {
-			rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = typ, code, msg
-		}
+	// A 200 response can still carry a top-level {"error":{...}} envelope.
+	// The analysis owns the decoy/null rules; an already-decided error is
+	// never overwritten.
+	if rec.ErrorType == "" && a.ErrorType != "" {
+		rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = a.ErrorType, a.ErrorCode, a.ErrorMsg
 	}
 }
 
@@ -229,9 +261,11 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 // headers, the status line, the bytes, then the shared non-stream analysis.
 // A failed client write marks the disconnect but does not skip the analysis:
 // the upstream delivered and charged the body, so the record keeps its
-// payload. The gates that choose this epilogue (the in-band error envelope
-// passthrough and the healthy commit) stay at their call sites.
-func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record) {
+// payload. The analysis is the caller's one decode of the spooled body, reused
+// here instead of decoding again. The gates that choose this epilogue (the
+// in-band error envelope passthrough and the healthy commit) stay at their
+// call sites.
+func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record, analysis metrics.NonStreamAnalysis) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	if _, werr := w.Write(spooled); werr != nil {
@@ -239,7 +273,7 @@ func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, s
 	} else {
 		rec.ResponseBytes += int64(len(spooled))
 	}
-	analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+	applyNonStreamAnalysis(rec, analysis)
 }
 
 // absorbResend books ONE absorbed attempt on the record (Attempts, Retries,
@@ -293,8 +327,9 @@ func (s *Server) absorbResend(ctx context.Context, w http.ResponseWriter, r *htt
 }
 
 // serveNonStreaming relays a non-streaming response with quality handling. A
-// 200 whose body classifies degenerate (metrics.ClassifyNonStreamBody -
-// same predicate as the streaming paths) triggers a transparent retry BEFORE
+// 200 whose body classifies degenerate (metrics.AnalyzeNonStreamBody's
+// outcome - the same predicate as the streaming paths) triggers a transparent
+// retry BEFORE
 // the status line is written; past the budget the body is surfaced as an
 // HTTP 502 with an OpenAI error envelope - a failure, never a silently empty
 // success (the cursor empty_turn precedent, and 502/5xx is retryable in
@@ -429,50 +464,50 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 
-		if metrics.HasErrorKey(spooled) {
+		analysis := nonStreamAnalysis(spooled, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+
+		if analysis.ErrorType != "" {
 			// The provider failed in-band on a 200: its own statement. The
-			// cheap byte-scan gate is followed by the canonical decode: a
-			// decoy key (null/empty/numeric error value - ParseErrorEnvelope
-			// returns "" for those, the exact semantics the SSE analyzer uses)
-			// is NOT a failure, so the body falls through to degenerate
-			// classification instead of riding this verbatim path as a
-			// silently-empty success. A retryable server-availability class
+			// canonical decode (analysis.ErrorType) treats a decoy key
+			// (null/empty/numeric error value - ParseErrorEnvelope returns ""
+			// for those, the exact semantics the SSE analyzer uses) as NOT a
+			// failure, so the body falls through to degenerate classification
+			// instead of riding this verbatim path as a silently-empty
+			// success. A retryable server-availability class
 			// (retryableUpstreamErrorClass, the OpenAI retry semantics) with
 			// quality budget left is absorbed and re-sent before any byte
 			// reaches the client - nothing is written yet on this path, so
 			// the re-send is always wire-safe; every other class, and an
 			// exhausted budget, relays verbatim and lets the record carry it.
-			if typ, code, msg := metrics.ParseErrorEnvelope(spooled); typ != "" {
-				if s.retryableUpstreamErrorClass(typ, code) && qualityLeft > 0 {
-					qualityLeft--
-					// The attempt log carries the provider's own envelope
-					// (the explorer groups it under the provider's type).
-					at := metrics.RetryAttempt{
-						StatusCode: resp.StatusCode,
-						ErrorType:  typ,
-						ErrorCode:  code,
-						ErrorMsg:   msg,
-						At:         time.Now(),
-					}
-					captureUpstreamMeta(&at, resp, t.authHeader)
-					next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
-					if !ok {
-						return
-					}
-					// ServeHTTP's defer still binds the FIRST body (and its
-					// per-send cancel). Own this attempt's body + cancel; LIFO
-					// closes the body, then cancels the send deadline.
-					resp = next
-					defer nextCancel()
-					defer next.Body.Close()
-					continue
+			if s.retryableUpstreamErrorClass(analysis.ErrorType, analysis.ErrorCode) && qualityLeft > 0 {
+				qualityLeft--
+				// The attempt log carries the provider's own envelope
+				// (the explorer groups it under the provider's type).
+				at := metrics.RetryAttempt{
+					StatusCode: resp.StatusCode,
+					ErrorType:  analysis.ErrorType,
+					ErrorCode:  analysis.ErrorCode,
+					ErrorMsg:   analysis.ErrorMsg,
+					At:         time.Now(),
 				}
-				s.commitSpooledBody(w, resp, spooled, rec)
-				return
+				captureUpstreamMeta(&at, resp, t.authHeader)
+				next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
+				if !ok {
+					return
+				}
+				// ServeHTTP's defer still binds the FIRST body (and its
+				// per-send cancel). Own this attempt's body + cancel; LIFO
+				// closes the body, then cancels the send deadline.
+				resp = next
+				defer nextCancel()
+				defer next.Body.Close()
+				continue
 			}
+			s.commitSpooledBody(w, resp, spooled, rec, analysis)
+			return
 		}
 
-		if code := metrics.ClassifyNonStreamBody(spooled); code != "" || (len(bytes.TrimSpace(spooled)) == 0 && chatRequestBody(body)) {
+		if code := analysis.Outcome; code != "" || (len(bytes.TrimSpace(spooled)) == 0 && chatRequestBody(body)) {
 			if code == "" {
 				// An entirely empty 200 body classifies as the same void the
 				// structured forms do - gated on the REQUEST being chat-shaped
@@ -526,7 +561,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			// carries the same pair), so the explorer groups it with provider
 			// errors on both surfaces; the void classes keep their
 			// class-typed stamp.
-			analyzeNonStreamBytes(spooled, rec, s.usageKeysFor(rec.Provider), s.costKeysFor(rec.Provider), s.cfg().CaptureBodyPreview)
+			applyNonStreamAnalysis(rec, analysis)
 			if thinkingClass {
 				rec.ErrorType = sse.TypeUpstreamError
 			} else {
@@ -540,7 +575,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 
 		// Healthy: commit the spooled body verbatim.
-		s.commitSpooledBody(w, resp, spooled, rec)
+		s.commitSpooledBody(w, resp, spooled, rec, analysis)
 		return
 	}
 }
@@ -671,74 +706,6 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 				markClientGone(rec)
 			}
 			return
-		}
-	}
-}
-
-// extractUsageBytes parses the response body: token usage (auto-detecting
-// OpenAI/Anthropic key names, with per-provider overrides), model, request id,
-// tool calls, finish_reason, and - only when preview is enabled - a bounded
-// response preview. Best-effort: silently ignores parse failures.
-func extractUsageBytes(body []byte, rec *metrics.Record, usageKeys map[string]string, preview bool) {
-	// Decode the usage object generically so we can walk provider-specific key
-	// names; the rest of the body uses typed fields.
-	var raw struct {
-		Usage   map[string]any `json:"usage"`
-		Model   string         `json:"model"`
-		ID      string         `json:"id"`
-		Choices []struct {
-			FinishReason string `json:"finish_reason"`
-			Message      struct {
-				Role string `json:"role"`
-				// Content can be a string OR an array of parts (OpenAI multimodal
-				// shape); keep it raw so either form registers as content presence.
-				Content   json.RawMessage `json:"content"`
-				ToolCalls []struct {
-					ID       string `json:"id"`
-					Function struct {
-						Name string `json:"name"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return
-	}
-	if raw.Usage != nil {
-		rec.Usage = metrics.ParseUsage(raw.Usage, usageKeys)
-	}
-	if raw.Model != "" && rec.ProviderModel == "" {
-		rec.ProviderModel = raw.Model
-	}
-	if raw.ID != "" && rec.ProviderRequestID == "" {
-		rec.ProviderRequestID = raw.ID
-	}
-	if len(raw.Choices) > 0 {
-		if raw.Choices[0].FinishReason != "" {
-			rec.FinishReason = raw.Choices[0].FinishReason
-		}
-		// Content presence drives the tool-call-only detection in FinalizeRecord
-		// (a content:null tool_calls response bills only tool args). Non-streaming
-		// never sets FirstAnswerAt, so flag content directly through the shared
-		// flattenContent walk: any non-empty string or parts text counts.
-		if s, ok := flattenContent(raw.Choices[0].Message.Content); ok && s != "" {
-			rec.HadAnswerContent = true
-			// Response preview: a bounded rune-safe prefix of the text content,
-			// stored only when capture_body_preview is enabled (off by default).
-			if preview && rec.ResponsePreview == "" {
-				rec.ResponsePreview = metrics.TruncatePreview(s)
-			}
-		}
-		if n := len(raw.Choices[0].Message.ToolCalls); n > 0 {
-			rec.ToolCalls = n
-			names := make([]string, 0, n)
-			for _, tc := range raw.Choices[0].Message.ToolCalls {
-				if tc.Function.Name != "" {
-					names = append(names, tc.Function.Name)
-				}
-			}
-			rec.ToolNames = names
 		}
 	}
 }
