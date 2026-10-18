@@ -350,8 +350,8 @@ func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutp
 	if limit <= 0 {
 		limit = s.limits.PageSize
 	}
-	var payload bootstrapSnapshot
-	if err := s.client.getJSON(ctx, routeBootstrap, nil, &payload); err != nil {
+	payload, err := s.client.bootstrapFields(ctx, "live")
+	if err != nil {
 		return nil, err
 	}
 	kept, truncation := clamp(payload.Records, limit, "records", snapshotAdvice)

@@ -415,7 +415,7 @@ func (c *Client) postDebug(ctx context.Context, body map[string]any) (*debugStat
 
 // storageSignal reads durable-storage availability from the bootstrap payload.
 func (c *Client) storageSignal(ctx context.Context) (StorageInfo, error) {
-	snapshot, err := c.bootstrap(ctx)
+	snapshot, err := c.bootstrapFields(ctx, "storage")
 	if err != nil {
 		return StorageInfo{}, err
 	}

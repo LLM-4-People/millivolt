@@ -163,9 +163,11 @@ func TestValuesModelFoldsThroughTheProxysCanonicalization(t *testing.T) {
 	}
 	// The rules travel on the bootstrap form, and the model probe is not
 	// raw-level bounded: its cap applies after the fold.
-	if len(proxy.requestsFor(http.MethodGet, bootstrapPath)) != 1 {
-		t.Fatalf("the rule set must come from the full bootstrap form: %v", proxy.requests())
+	ruleProbes := proxy.requestsFor(http.MethodGet, bootstrapPath)
+	if len(ruleProbes) != 1 {
+		t.Fatalf("the rule set must come from the bootstrap form: %v", proxy.requests())
 	}
+	assertQuery(t, ruleProbes[0], "fields", "model_canon")
 	statement := proxy.requestsFor(http.MethodGet, schemaPath)[0].Query.Get("q")
 	if !strings.Contains(statement, "model AS value") || strings.Contains(statement, "LIMIT") {
 		t.Fatalf("the model probe must enumerate every raw spelling before folding: %q", statement)

@@ -150,8 +150,18 @@ type bootstrapSnapshot struct {
 // bootstrap reads the live snapshot for the storage signal and the headline
 // counters.
 func (c *Client) bootstrap(ctx context.Context) (*bootstrapSnapshot, error) {
+	return c.bootstrapFields(ctx, "")
+}
+
+// bootstrapFields asks for one of the proxy's closed bootstrap views. storage
+// and model_canon avoid decoding the dashboard's records/KPI/state document.
+func (c *Client) bootstrapFields(ctx context.Context, fields string) (*bootstrapSnapshot, error) {
+	var query url.Values
+	if fields != "" {
+		query = url.Values{"fields": {fields}}
+	}
 	var snapshot bootstrapSnapshot
-	if err := c.getJSON(ctx, routeBootstrap, nil, &snapshot); err != nil {
+	if err := c.getJSON(ctx, routeBootstrap, query, &snapshot); err != nil {
 		return nil, err
 	}
 	return &snapshot, nil
@@ -162,7 +172,7 @@ func (c *Client) bootstrap(ctx context.Context) (*bootstrapSnapshot, error) {
 // proxy's own semantic owner. An absent rules block is the identity pipeline,
 // which is what the proxy itself folds an empty rule list with.
 func (c *Client) modelRules(ctx context.Context) ([]config.ModelRuleExec, error) {
-	snapshot, err := c.bootstrap(ctx)
+	snapshot, err := c.bootstrapFields(ctx, "model_canon")
 	if err != nil {
 		return nil, err
 	}

@@ -1888,6 +1888,56 @@ var kpiWireKeys = []string{
 // mirrored by live.js DASHBOARD_VERSION_RE) and the model_canon revision
 // is 64 lowercase hex (aggregate_observer.go sha256, mirrored by
 // explorer.js MODEL_REVISION_RE).
+// TestBootstrapFieldsViews pins the closed probe views used by in-process MCP
+// tools: each returns only its named section, while the default bootstrap
+// remains the complete dashboard document.
+func TestBootstrapFieldsViews(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	buf.Record(mkRec("b1", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.5))
+	agg := NewAggAPI(buf, nil, time.Second)
+	get := func(query string) map[string]any {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		http.HandlerFunc(agg.HandleBootstrap).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics/bootstrap"+query, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("bootstrap%s status = %d body=%s", query, rec.Code, rec.Body.String())
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode bootstrap%s: %v", query, err)
+		}
+		return out
+	}
+	storage := get("?fields=storage")
+	if len(storage) != 1 || storage["storage"] == nil {
+		t.Fatalf("fields=storage keys = %v", storage)
+	}
+	live := get("?fields=live")
+	if live["records"] == nil || live["storage"] == nil {
+		t.Fatalf("fields=live missing records/storage: %v", live)
+	}
+	for _, absent := range []string{"kpi", "dashboard_version", "dash", "pause", "debug", "storm", "restart"} {
+		if _, ok := live[absent]; ok {
+			t.Fatalf("fields=live unexpectedly carries %q", absent)
+		}
+	}
+	canon := get("?fields=model_canon")
+	if len(canon) != 1 || canon["model_canon"] == nil {
+		t.Fatalf("fields=model_canon keys = %v", canon)
+	}
+	full := get("")
+	if full["kpi"] == nil || full["dashboard_version"] == nil || full["records"] == nil {
+		t.Fatalf("default bootstrap lost a dashboard section: %v", full)
+	}
+	for _, query := range []string{"?fields=bogus", "?fields=storage&fields=live"} {
+		rec := httptest.NewRecorder()
+		http.HandlerFunc(agg.HandleBootstrap).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics/bootstrap"+query, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("bootstrap%s status = %d, want 400", query, rec.Code)
+		}
+	}
+}
+
 func TestBootstrapWireKeysStrict(t *testing.T) {
 	buf := metrics.NewBuffer(8)
 	now := time.Now()

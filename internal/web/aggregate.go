@@ -1030,6 +1030,32 @@ type storageSignal struct {
 	TotalsDegraded bool `json:"totals_degraded"`
 }
 
+// bootstrapLivePayload is the fields=live view: the ring snapshot and storage
+// signal without KPI/operator state. Snapshot and describe need the records.
+type bootstrapLivePayload struct {
+	metrics.ObservedSnapshot
+	Storage storageSignal `json:"storage"`
+}
+
+// bootstrapStoragePayload is the fields=storage view: three booleans, no ring
+// snapshot or dashboard state.
+type bootstrapStoragePayload struct {
+	Storage storageSignal `json:"storage"`
+}
+
+// bootstrapModelPayload is the fields=model_canon view: the effective rules
+// without records or dashboard state.
+type bootstrapModelPayload struct {
+	ModelCanon any `json:"model_canon"`
+}
+
+func (a *AggAPI) storageSignal() storageSignal {
+	if a.store == nil {
+		return storageSignal{}
+	}
+	return storageSignal{Enabled: true, Dropped: a.store.Dropped(), TotalsDegraded: a.store.TotalsDegraded()}
+}
+
 // HandleBootstrap is THE dashboard's live endpoint - one round trip carrying
 // everything the page renders outside the slow chart/explorer scans: the
 // ring snapshot (full and capped on a fresh boot via SnapshotRequest;
@@ -1051,13 +1077,33 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 		adminjson.WriteError(w, http.StatusBadRequest, "invalid query")
 		return
 	}
-	if err := adminjson.DuplicateQueryKey(q, "feed", "since"); err != nil {
+	if err := adminjson.DuplicateQueryKey(q, "feed", "since", "fields"); err != nil {
 		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// State and the running asset version must come from the current process.
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, a.bootstrap(a.buf.SnapshotRequest(q, r.Header)))
+	// fields is a closed, additive view used by in-process probes. The default
+	// remains the complete dashboard document.
+	fields := q.Get("fields")
+	switch fields {
+	case "":
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, a.bootstrap(a.buf.SnapshotRequest(q, r.Header)))
+	case "storage":
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, bootstrapStoragePayload{Storage: a.storageSignal()})
+	case "model_canon":
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, bootstrapModelPayload{ModelCanon: a.ObserveModels(true, nil)})
+	case "live":
+		w.Header().Set("Cache-Control", "no-store")
+		snapshot := a.buf.SnapshotRequest(q, r.Header)
+		writeJSON(w, bootstrapLivePayload{
+			ObservedSnapshot: metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords)),
+			Storage:          a.storageSignal(),
+		})
+	default:
+		adminjson.WriteError(w, http.StatusBadRequest, "fields must be storage, live, or model_canon")
+	}
 }
 
 // bootstrap owns the initial HTML and live endpoint payload alike. A new
@@ -1066,9 +1112,7 @@ func (a *AggAPI) HandleBootstrap(w http.ResponseWriter, r *http.Request) {
 func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 	observed := metrics.ObserveSnapshot(snapshot, a.ObserveModels(true, snapshot.Records, snapshot.InFlightRecords))
 	payload := bootstrapPayload{ObservedSnapshot: observed, KPI: a.kpi(), DashboardVersion: dashboardContentVersion()}
-	if a.store != nil {
-		payload.Storage = storageSignal{Enabled: true, Dropped: a.store.Dropped(), TotalsDegraded: a.store.TotalsDegraded()}
-	}
+	payload.Storage = a.storageSignal()
 	if a.Dash != nil {
 		payload.Dash = a.Dash()
 	}

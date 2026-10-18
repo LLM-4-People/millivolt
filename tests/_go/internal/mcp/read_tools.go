@@ -97,12 +97,17 @@ func TestReadToolsRequestShape(t *testing.T) {
 	assertQuery(t, request, "before_ms", "1500")
 	assertQuery(t, request, "before_id", "r1")
 	assertQuery(t, request, "limit", "10")
+	// records needs only the storage probe, not the dashboard document.
+	request = proxy.requestsFor(http.MethodGet, bootstrapPath)[0]
+	assertAuth(t, request)
+	assertQuery(t, request, "fields", "storage")
 
 	if _, err := service.snapshot(ctx, SnapshotInput{MaxRecords: 3}); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	request = proxy.requestsFor(http.MethodGet, bootstrapPath)[0]
+	request = proxy.requestsFor(http.MethodGet, bootstrapPath)[1]
 	assertAuth(t, request)
+	assertQuery(t, request, "fields", "live")
 	assertNoQuery(t, request, "since")
 
 	if _, err := service.prometheus(ctx, PrometheusInput{}); err != nil {
@@ -140,6 +145,9 @@ func TestDescribeRequestShapeAndOutput(t *testing.T) {
 	probe := proxy.requestsFor(http.MethodGet, schemaPath)[0]
 	assertAuth(t, probe)
 	assertQuery(t, probe, "q", schemaStatement)
+	boot := proxy.requestsFor(http.MethodGet, bootstrapPath)[0]
+	assertAuth(t, boot)
+	assertQuery(t, boot, "fields", "live")
 	if len(out.Schema) != 2 || out.Schema[0].Name != "requests" || out.Schema[1].Type != "index" {
 		t.Fatalf("schema mapping = %+v", out.Schema)
 	}

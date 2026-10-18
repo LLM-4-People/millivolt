@@ -166,7 +166,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 		},
 	}
 
-	snapshot, err := s.client.bootstrap(ctx)
+	snapshot, err := s.client.bootstrapFields(ctx, "live")
 	if err != nil {
 		return nil, err
 	}
