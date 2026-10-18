@@ -287,12 +287,9 @@ const auditListNote = "the proxy has no capture listing endpoint: this list is a
 
 // AuditCapturesList pages captured requests through a bounded SQL probe.
 func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInput) (*AuditCapturesListOutput, error) {
-	limit := in.Limit
-	if limit <= 0 {
-		limit = s.limits.PageSize
-	}
-	if limit > logPageMax {
-		return nil, fmt.Errorf("limit must be at most %d", logPageMax)
+	limit, err := resolveLimit("limit", in.Limit, s.limits.PageSize, 1, logPageMax)
+	if err != nil {
+		return nil, err
 	}
 	if (in.BeforeMs == 0) != (in.BeforeID == "") {
 		return nil, fmt.Errorf("before_ms and before_id must be sent together, exactly once each")
@@ -376,6 +373,10 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 	if strings.TrimSpace(in.RecordID) == "" {
 		return nil, fmt.Errorf("record_id is required: it is a request record id from audit_captures_list, not a session id")
 	}
+	limit, err := resolveLimit("max_bytes", in.MaxBytes, s.limits.CaptureBytes, 1, 0)
+	if err != nil {
+		return nil, err
+	}
 	values := url.Values{}
 	values.Set("id", in.RecordID)
 	raw, err := s.client.getRaw(ctx, http.MethodGet, routeDebugCapture, values)
@@ -383,10 +384,6 @@ func (s *Service) auditCaptureGet(ctx context.Context, in AuditCaptureGetInput) 
 		return nil, err
 	}
 	out := &AuditCaptureGetOutput{RecordID: in.RecordID, StoredBytes: len(raw), Sensitive: captureSensitivity}
-	limit := in.MaxBytes
-	if limit <= 0 {
-		limit = s.limits.CaptureBytes
-	}
 	if len(raw) > limit {
 		out.Truncation = Truncation{
 			Shown: 0, Total: len(raw), Truncated: true,

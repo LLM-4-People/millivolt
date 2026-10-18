@@ -107,12 +107,9 @@ func (s *Service) values(ctx context.Context, in ValuesInput) (*ValuesOutput, er
 	if !known {
 		return nil, fmt.Errorf("dim %q is not probeable; use one of %s", in.Dim, probeableDimensions())
 	}
-	limit := in.Limit
-	if limit <= 0 {
-		limit = s.limits.PageSize
-	}
-	if limit > logPageMax {
-		return nil, fmt.Errorf("limit must be at most %d", logPageMax)
+	limit, err := resolveLimit("limit", in.Limit, s.limits.PageSize, 1, logPageMax)
+	if err != nil {
+		return nil, err
 	}
 	if in.Dim == "model" {
 		return s.modelValues(ctx, limit)

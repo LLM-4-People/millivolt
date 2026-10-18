@@ -127,8 +127,12 @@ type LimitDoc struct {
 // rest of the reference is still true.
 func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutput, error) {
 	out := &DescribeOutput{
-		Vocabularies: vocabularies,
-		KnownTools:   []string{},
+		Schema:         []SchemaObject{},
+		Vocabularies:   vocabularies,
+		KnownClients:   []string{},
+		KnownProviders: []string{},
+		KnownModels:    []string{},
+		KnownTools:     []string{},
 		Limits: LimitDoc{
 			QueryMaxRows:        s.limits.QueryMaxRows,
 			QueryMaxRowsCeiling: config.MCPQueryMaxRowsMax,
@@ -294,29 +298,35 @@ var vocabularies = []VocabularyDoc{
 	},
 	{
 		Dimension: "tool",
+		Values:    []string{},
 		Note: "the tool names carried by the request's tool_names array; free text. known_tools lists what the most recent live records carried, " +
 			"and the values tool on dim 'tool' enumerates them across durable history",
 	},
 	{
 		Dimension: "client",
+		Values:    []string{},
 		Note:      "free text: the proxy's client classification. Use the values tool on dim 'client'. An unknown value is an EMPTY result, not an error",
 	},
 	{
 		Dimension: "provider",
+		Values:    []string{},
 		Note:      "free text: the upstream provider label. Use the values tool on dim 'provider'. An unknown value is an EMPTY result, not an error",
 	},
 	{
 		Dimension: "model",
+		Values:    []string{},
 		Note: "the CANONICAL spelling the explore, chart and records filters match, folded through the proxy's configured model_rules; " +
 			"the values tool on dim 'model' enumerates those canonical names. A raw stored spelling matches nothing. An unknown value is an EMPTY result, not an error",
 	},
 	{
 		Dimension: "conversation",
+		Values:    []string{},
 		Note: "the conversation_id grouping key. The values tool lists the most frequent ones, but this dimension is not enumerable exhaustively " +
 			"because history holds many conversations",
 	},
 	{
 		Dimension: "key",
+		Values:    []string{},
 		Note:      "the key_hash (a SHA-256 prefix digest of the upstream key, never the key). The values tool enumerates the digests in use",
 	},
 }

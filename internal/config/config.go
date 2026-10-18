@@ -382,15 +382,19 @@ type Config struct {
 	// Providers, keyed by an X-Proxy-* base-URL-derived provider label, hold
 	// optional per-provider overrides for how to read usage/cost/cache fields
 	// from that provider's responses (they mostly all report usage+cost back,
-	// but under different key names). See ProviderOverride.
+	// but under different key names). See ProviderOverride. Keys are the
+	// canonical lowercase host-derived provider labels; a padded or mixed-case
+	// key can never match a request and is rejected at load.
 	Providers map[string]ProviderOverride `yaml:"providers" json:"providers"`
 
 	// ProviderAliases merges provider labels: an old label recorded under a
 	// previous naming scheme is rewritten to its canonical label at capture
-	// time and in existing stored history (boot + reload). Already-buffered
-	// records keep their prior label until age-out/restart; removing a mapping
-	// cannot recover rewritten spellings. This is separate from model display
-	// grouping and never infers provider aliases from hardcoded names.
+	// time and in existing stored history (boot + reload). Both sides are
+	// canonicalized to the lowercase host-derived label at the config boundary.
+	// Already-buffered records keep their prior label until age-out/restart;
+	// removing a mapping cannot recover rewritten spellings. This is separate
+	// from model display grouping and never infers provider aliases from
+	// hardcoded names.
 	ProviderAliases map[string]string `yaml:"provider_aliases" json:"provider_aliases"`
 
 	// Model canonicalization merges spelling variants of the same model in
@@ -468,6 +472,63 @@ func checkProvPath(label, slot, name, path string) error {
 // Validate that can return an error iterates through this.
 func sortedKeys[V any](m map[string]V) []string {
 	return slices.Sorted(maps.Keys(m))
+}
+
+// canonicalProviderLabel is the one provider-label policy shared by the
+// providers map and provider_aliases: the runtime derives a label from the
+// upstream host (lowercase, no surrounding whitespace), so a configured label
+// only ever matches in that canonical form. Anything else is rejected by
+// validateProviderLabel rather than kept as a silent no-op.
+func canonicalProviderLabel(label string) string {
+	return strings.ToLower(strings.TrimSpace(label))
+}
+
+// validateProviderLabel checks a configured provider label against the one
+// canonical form. A label containing whitespace cannot be the host-derived
+// value the request path records, so it is denied just like a mixed-case
+// spelling. normalizeProviderAliases calls it after canonicalization;
+// Validate calls it directly because provider labels are rejected, not
+// rewritten.
+func validateProviderLabel(label string) error {
+	if label == "" {
+		return errors.New("must be non-empty")
+	}
+	if strings.ContainsAny(label, " \t\r\n") {
+		return fmt.Errorf("%q must not contain whitespace", label)
+	}
+	if label != strings.ToLower(label) {
+		return fmt.Errorf("%q must be lowercase", label)
+	}
+	return nil
+}
+
+// normalizeProviderAliases is the one normalizer for provider_aliases. Both
+// sides are canonicalized before the self/chain checks, and a collision created
+// by that canonicalization is rejected instead of letting map iteration choose
+// a winner. It is idempotent, so Apply and the shared Validate boundary may
+// both call it without changing a valid map.
+func normalizeProviderAliases(aliases map[string]string) (map[string]string, error) {
+	if aliases == nil {
+		return nil, nil
+	}
+	out := make(map[string]string, len(aliases))
+	seen := make(map[string]string, len(aliases))
+	for _, rawFrom := range sortedKeys(aliases) {
+		from := canonicalProviderLabel(rawFrom)
+		to := canonicalProviderLabel(aliases[rawFrom])
+		if err := validateProviderLabel(from); err != nil {
+			return nil, fmt.Errorf("alias label %q: %w", from, err)
+		}
+		if err := validateProviderLabel(to); err != nil {
+			return nil, fmt.Errorf("%s: target label: %w", from, err)
+		}
+		if first, duplicate := seen[from]; duplicate {
+			return nil, fmt.Errorf("%q and %q: labels collide after normalization to %q", first, rawFrom, from)
+		}
+		seen[from] = rawFrom
+		out[from] = to
+	}
+	return out, nil
 }
 
 // ProviderOverride customizes how the proxy reads usage/cost/cache fields from
@@ -810,11 +871,12 @@ const (
 	// Settings backup archive band (Validate, overlay, Schema).
 	BackupMaxBytesMin = 1 << 20 // 1 MiB
 	BackupMaxBytesMax = 4 << 30 // 4 GiB
-	// ConfigDocumentMaxBytes is the one bound on the rendered configuration
-	// document. Validate enforces it against the same WriteYAML output the
-	// backup encoder retains, and internal/backup reuses it as the config
-	// member cap, so a valid config can never produce an archive member the
-	// decoder refuses. It is a retention guardrail, not a tunable.
+	// ConfigDocumentMaxBytes is the one bound on a configuration document:
+	// LoadFile refuses a source file larger than this before parsing, and
+	// Validate enforces it against the same WriteYAML output the backup encoder
+	// retains. internal/backup reuses it as the config member cap, so a valid
+	// config can never produce an archive member the decoder refuses. It is a
+	// retention guardrail, not a tunable.
 	ConfigDocumentMaxBytes = 16 << 20 // 16 MiB
 	// MCP endpoint result-size bands (Validate, Schema, and internal/mcp's
 	// Limits.Validate). The same single-owner constants are what the endpoint
@@ -1296,18 +1358,18 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("base_backoff (%s) cannot exceed max_backoff (%s)", FormatDuration(c.BaseBackoff), FormatDuration(c.MaxBackoff))
 	}
 	// provider_aliases must be a well-formed one-hop rename map: both sides
-	// non-empty, no self-mapping, no chains. The map is applied in a single
-	// pass (capture-time + one UPDATE per pair), so a chain could never
-	// resolve and would silently split the label again - rejected, not
-	// resolved.
+	// are canonicalized (trimmed + lowercase) before these checks, so a padded
+	// pair cannot pass validation and then split history. Both sides must be
+	// non-empty, no self-mapping, no chains. The map is applied in a single pass
+	// (capture-time + one UPDATE per pair), so a chain could never resolve and
+	// would silently split the label again - rejected, not resolved.
+	aliases, err := normalizeProviderAliases(c.ProviderAliases)
+	if err != nil {
+		return fmt.Errorf("provider_aliases: %w", err)
+	}
+	c.ProviderAliases = aliases
 	for _, from := range sortedKeys(c.ProviderAliases) {
 		to := c.ProviderAliases[from]
-		if strings.TrimSpace(from) == "" {
-			return fmt.Errorf("provider_aliases: alias label must be non-empty")
-		}
-		if strings.TrimSpace(to) == "" {
-			return fmt.Errorf("provider_aliases: %s: target label must be non-empty", from)
-		}
 		if from == to {
 			return fmt.Errorf("provider_aliases: %s: cannot alias a label to itself", from)
 		}
@@ -1345,14 +1407,15 @@ func (c *Config) Validate() error {
 	for _, label := range sortedKeys(c.Providers) {
 		p := c.Providers[label]
 		// The label is the runtime join key - the provider name derived
-		// from the request's base URL, never empty. An empty or
-		// whitespace-only label can never match one, so its whole section
-		// would be a silent no-op. Same rule as the Settings POST path
-		// (asProviders in values.go), enforced here because Validate is
-		// the one choke point every load path (YAML and Settings POST)
-		// passes through.
-		if strings.TrimSpace(label) == "" {
-			return fmt.Errorf("providers: label must be non-empty")
+		// from the request's base URL, never empty and always lowercase
+		// with no surrounding whitespace. A padded or mixed-case label can
+		// never match one, so its whole section would be a silent no-op.
+		// Same canonical-label rule as provider_aliases, enforced here
+		// because Validate is the one choke point every load path (YAML and
+		// Settings POST) passes through; asProviders only checks the JSON
+		// shape.
+		if err := validateProviderLabel(label); err != nil {
+			return fmt.Errorf("providers: label %w", err)
 		}
 		if p.ModelsPath != "" {
 			if !strings.HasPrefix(p.ModelsPath, "/") {
@@ -1483,7 +1546,9 @@ const (
 )
 
 // configParseError is a YAML syntax/shape failure. LoadFileRepair moves the
-// original aside and writes Default(); other load errors fail closed.
+// original aside and writes Default(), except for an ambiguous duplicate key,
+// which fails closed without rewriting the source. Other load errors fail
+// closed too.
 type configParseError struct {
 	Path string
 	Err  error
@@ -1495,6 +1560,20 @@ func (e *configParseError) Error() string {
 
 func (e *configParseError) Unwrap() error { return e.Err }
 
+// duplicateYAMLKeyError marks an ambiguous mapping: the same top-level key is
+// defined twice. It is deliberately distinguishable from generic YAML syntax
+// errors so LoadFileRepair refuses to rewrite the document instead of replacing
+// it with defaults.
+type duplicateYAMLKeyError struct {
+	Key       string
+	Line      int
+	FirstLine int
+}
+
+func (e *duplicateYAMLKeyError) Error() string {
+	return fmt.Sprintf("duplicate key %q at line %d (first defined at line %d)", e.Key, e.Line, e.FirstLine)
+}
+
 func parseConfig(path string, err error) error {
 	return &configParseError{Path: path, Err: err}
 }
@@ -1502,8 +1581,9 @@ func parseConfig(path string, err error) error {
 // LoadFile reads the YAML config at path (may be empty) and merges recognized,
 // valid keys over the built-in defaults. A missing file yields the defaults.
 // Unknown keys, invalid types/ranges, and extra YAML documents are omitted so
-// a typo cannot block boot; Settings POST still rejects those inputs. This
-// read path does not rewrite the file.
+// a typo cannot block boot; a duplicate top-level key is ambiguous and returns
+// a parse error naming the key and line. Settings POST still rejects those
+// inputs. This read path does not rewrite the file.
 func LoadFile(path string) (*Config, error) {
 	cfg, _, err := loadYAMLFile(path)
 	return cfg, err
@@ -1518,12 +1598,20 @@ func LoadBytes(b []byte) (*Config, []string, error) {
 
 // LoadFileRepair is LoadFile, then persists a cleaned document when anything
 // was dropped. Unparseable files are moved aside to path+invalidConfigSuffix
-// and replaced with Default(). Healthcheck and print-only paths must not call this.
+// and replaced with Default(). A duplicate top-level key is ambiguous instead
+// of debris: it is returned as a parse error and the source is left untouched.
+// Healthcheck and print-only paths must not call this.
 func LoadFileRepair(path string) (*Config, []string, error) {
 	cfg, skipped, err := loadYAMLFile(path)
 	if err != nil {
 		var parseErr *configParseError
 		if path == "" || !errors.As(err, &parseErr) {
+			return nil, nil, err
+		}
+		// A duplicate key is ambiguous, not debris: leave the document
+		// untouched so the first value is never replaced by a default.
+		var duplicate *duplicateYAMLKeyError
+		if errors.As(err, &duplicate) {
 			return nil, nil, err
 		}
 		invalidPath := path + invalidConfigSuffix
@@ -1545,12 +1633,46 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 	return cfg, skipped, nil
 }
 
+// readConfigFile is LoadFile's one input reader. The configuration document
+// is intentionally allowed the same envelope as the rendered document Validate
+// enforces, so the size check happens before parsing or proportional
+// allocation. Stat catches an oversized regular file immediately; the bounded
+// read keeps the guarantee if the file grows between stat and read (or if the
+// path is a special file).
+func readConfigFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > int64(ConfigDocumentMaxBytes) {
+		return nil, configFileTooLarge(path, info.Size())
+	}
+	b, err := io.ReadAll(io.LimitReader(f, int64(ConfigDocumentMaxBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > ConfigDocumentMaxBytes {
+		return nil, configFileTooLarge(path, int64(len(b)))
+	}
+	return b, nil
+}
+
+func configFileTooLarge(path string, size int64) error {
+	return fmt.Errorf("%s: file is %d bytes, above the %s (%d byte) config document limit",
+		path, size, FormatByteSize(ConfigDocumentMaxBytes), ConfigDocumentMaxBytes)
+}
+
 func loadYAMLFile(path string) (*Config, []string, error) {
 	def := Default()
 	if path == "" {
 		return def, nil, def.Validate()
 	}
-	b, err := os.ReadFile(path)
+	b, err := readConfigFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return def, nil, nil
@@ -1638,6 +1760,7 @@ func yamlMappingValues(n *yaml.Node) (map[string]any, map[string]*yaml.Node, err
 	if n == nil {
 		return present, nodes, nil
 	}
+	seen := make(map[string]int, len(n.Content)/2)
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		keyNode := yamlResolved(n.Content[i])
 		valNode := yamlResolved(n.Content[i+1])
@@ -1645,6 +1768,10 @@ func yamlMappingValues(n *yaml.Node) (map[string]any, map[string]*yaml.Node, err
 			return nil, nil, fmt.Errorf("document must be a YAML mapping")
 		}
 		key := keyNode.Value
+		if firstLine, duplicate := seen[key]; duplicate {
+			return nil, nil, &duplicateYAMLKeyError{Key: key, Line: keyNode.Line, FirstLine: firstLine}
+		}
+		seen[key] = keyNode.Line
 		var v any
 		if valNode == nil {
 			present[key] = nil

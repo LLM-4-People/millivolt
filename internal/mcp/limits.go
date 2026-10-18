@@ -134,6 +134,31 @@ type Truncation struct {
 // owner, because a model that pages one listing pages the other the same way.
 const cursorAdvice = "page with the next_before_ms and next_before_id pair this tool returned"
 
+// resolveLimit is the one policy for every caller-supplied limit in this
+// package. Zero means "use the configured default"; a negative value is not a
+// synonym for unset and is rejected; a positive value must stay inside the
+// tool's inclusive band. max == 0 means the argument has no additional ceiling
+// because the proxy already bounds that payload (snapshot records and capture
+// bytes). Centralizing it keeps the negative policy from drifting per handler.
+func resolveLimit(field string, value, def, min, max int) (int, error) {
+	if value < 0 {
+		if max > 0 {
+			return 0, fmt.Errorf("%s must be 0 (default) or %d..%d, got %d", field, min, max, value)
+		}
+		return 0, fmt.Errorf("%s must be 0 (default) or at least %d, got %d", field, min, value)
+	}
+	if value == 0 {
+		return def, nil
+	}
+	if value < min || (max > 0 && value > max) {
+		if max > 0 {
+			return 0, fmt.Errorf("%s must be %d..%d, got %d", field, min, max, value)
+		}
+		return 0, fmt.Errorf("%s must be at least %d, got %d", field, min, value)
+	}
+	return value, nil
+}
+
 // clamp truncates a slice to limit and returns the marker describing what was
 // withheld. marker names the shape being truncated ("rows", "records") and
 // advice is the ONE way to continue for that shape, so the model acts on it

@@ -492,8 +492,9 @@ func asSubConversations(v any) ([]SubConversation, error) {
 }
 
 // asAliases coerces the JSON shape of provider_aliases (map of old label →
-// canonical label). Both sides are trimmed; empty strings are rejected here so
-// a malformed pair fails the Apply with a clear error instead of silently
+// canonical label). It delegates to the shared normalizer, so both sides are
+// trimmed and lowercased before the Settings POST reaches WriteFile; an empty
+// or colliding pair fails the Apply with a clear error instead of silently
 // splitting the label again.
 func asAliases(v any) (map[string]string, error) {
 	m, err := strictCoerce(v, map[string]string{}, "{}", "want object",
@@ -501,13 +502,5 @@ func asAliases(v any) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	for from, to := range m {
-		if strings.TrimSpace(from) == "" {
-			return nil, fmt.Errorf("alias label must be non-empty")
-		}
-		if strings.TrimSpace(to) == "" {
-			return nil, fmt.Errorf("%s: target label must be non-empty", from)
-		}
-	}
-	return m, nil
+	return normalizeProviderAliases(m)
 }

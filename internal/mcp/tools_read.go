@@ -35,12 +35,9 @@ const queryAdvice = "narrow the SELECT (fewer columns, a WHERE range, or a GROUP
 // the volume a model can read. An explicit max_rows wins over the configured
 // default, up to config.MCPQueryMaxRowsMax.
 func (s *Service) query(ctx context.Context, in QueryInput) (*QueryOutput, error) {
-	limit := in.MaxRows
-	if limit <= 0 {
-		limit = s.limits.QueryMaxRows
-	}
-	if limit > config.MCPQueryMaxRowsMax {
-		return nil, fmt.Errorf("max_rows must be at most %d", config.MCPQueryMaxRowsMax)
+	limit, err := resolveLimit("max_rows", in.MaxRows, s.limits.QueryMaxRows, 1, config.MCPQueryMaxRowsMax)
+	if err != nil {
+		return nil, err
 	}
 	// The row cap is not a volume bound: a short wide row can be larger than a
 	// long narrow one, so the encoded-size cap runs after it and is reported
@@ -138,6 +135,20 @@ const chartAdvice = "request a shorter window, or read the series from query gro
 // snapshotAdvice points at the durable log page, because the snapshot's recent
 // records have no cursor of their own.
 const snapshotAdvice = "older records come from the records tool, paging with before_ms and before_id"
+
+// ringSnapshotAdvice is the storage-off branch: the records tool scans nothing
+// without durable storage, so the in-memory ring is the entire history and the
+// only lever is the snapshot's own record cap.
+const ringSnapshotAdvice = "durable storage is disabled, so the in-memory ring is the only history; raise max_records to read more of it"
+
+// snapshotGuidance is the one storage branch shared by the snapshot's
+// truncation marker and its older_history field; both must tell the same story.
+func snapshotGuidance(storageEnabled bool) (advice, olderHistory string) {
+	if storageEnabled {
+		return snapshotAdvice, "records older than this window come from the records tool, paging with before_ms and before_id"
+	}
+	return ringSnapshotAdvice, ringSnapshotAdvice
+}
 
 // prometheusAdvice points at the source of the metric, because a dropped
 // exposition line cannot be resumed.
@@ -257,12 +268,9 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	if err := in.Scope.Validate(); err != nil {
 		return nil, err
 	}
-	limit := in.Limit
-	if limit == 0 {
-		limit = s.limits.PageSize
-	}
-	if limit < logPageMin || limit > logPageMax {
-		return nil, fmt.Errorf("limit must be %d..%d", logPageMin, logPageMax)
+	limit, err := resolveLimit("limit", in.Limit, s.limits.PageSize, logPageMin, logPageMax)
+	if err != nil {
+		return nil, err
 	}
 	if (in.BeforeMs == 0) != (in.BeforeID == "") {
 		return nil, fmt.Errorf("before_ms and before_id must be sent together, exactly once each")
@@ -348,15 +356,16 @@ type SnapshotOutput struct {
 // history needs the durable log page. With storage off the ring is the only
 // history and the snapshot is not capped.
 func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutput, error) {
-	limit := in.MaxRecords
-	if limit <= 0 {
-		limit = s.limits.PageSize
+	limit, err := resolveLimit("max_records", in.MaxRecords, s.limits.PageSize, 1, 0)
+	if err != nil {
+		return nil, err
 	}
 	payload, err := s.client.bootstrapFields(ctx, "live")
 	if err != nil {
 		return nil, err
 	}
-	kept, truncation := clamp(payload.Records, limit, "records", snapshotAdvice)
+	advice, olderHistory := snapshotGuidance(payload.Storage.Enabled)
+	kept, truncation := clamp(payload.Records, limit, "records", advice)
 	return &SnapshotOutput{
 		Seq:           payload.Seq,
 		FeedID:        payload.Feed,
@@ -370,7 +379,7 @@ func (s *Service) snapshot(ctx context.Context, in SnapshotInput) (*SnapshotOutp
 		},
 		Records:      kept,
 		Truncation:   truncation,
-		OlderHistory: "records older than this window come from the records tool, paging with before_ms and before_id",
+		OlderHistory: olderHistory,
 	}, nil
 }
 
