@@ -240,14 +240,22 @@ func TestBackupHandlerDatabaseUsesSnapshotFile(t *testing.T) {
 // be served, and the staging file is removed.
 func TestBackupHandlerCapFailsClosed(t *testing.T) {
 	store, _, dbPath, dir := openLiveStoreFixture(t)
+	// Store.Record owns the record-retention boundary, so a single 2 MiB user
+	// agent is now correctly capped. Use the debug sidecar instead: it is a
+	// legitimate durable payload with its own store cap, and the backup handler
+	// snapshots the whole database including request_debug rows.
 	store.Record(&metrics.Record{
 		ID:         "oversize-backup",
 		Provider:   "neutral.example",
 		Model:      "n",
 		StatusCode: 200,
-		UserAgent:  incompressibleText(2 << 20),
+		Debug:      true,
 	})
 	if err := store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := store.SaveDebugCapture(t.Context(), "oversize-backup", "cap-test", now.UnixMilli(), now.Add(time.Hour).UnixMilli(), incompressibleBytes("backup-handler-cap", 2<<20)); err != nil {
 		t.Fatal(err)
 	}
 	liveCfg = config.Default()
@@ -339,6 +347,16 @@ func incompressibleText(n int) string {
 		b.WriteString(hex.EncodeToString(sum[:]))
 	}
 	return b.String()[:n]
+}
+
+func incompressibleBytes(seed string, n int) []byte {
+	out := make([]byte, 0, n)
+	sum := sha256.Sum256([]byte(seed))
+	for len(out) < n {
+		sum = sha256.Sum256(sum[:])
+		out = append(out, sum[:]...)
+	}
+	return out[:n]
 }
 
 func TestRestoreRejectsCorruptArchive(t *testing.T) {
