@@ -433,7 +433,7 @@ func overrideRequestBody(body []byte, ob *config.OverrideBody, strip []string, e
 // skip semantics stay exactly ensureToolsInBody's.
 func ensureToolsSatisfied(body []byte, ensureTools []string) bool {
 	var doc struct {
-		Messages *json.RawMessage `json:"messages"`
+		Messages *discardedJSON `json:"messages"`
 		Tools    []struct {
 			Function struct {
 				Name string `json:"name"`
