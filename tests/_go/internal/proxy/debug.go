@@ -98,7 +98,7 @@ func TestScopedOperatorIDsNeverWidenToStopAll(t *testing.T) {
 		{"debug", "enabled", "sessions", func(s *Server) http.HandlerFunc { return s.HandleDebug }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := tc.handler(New(config.Default(), metrics.Noop{}))
+			h := tc.handler(newStoredTestProxy(t, metrics.Noop{}))
 			post := func(body string) *httptest.ResponseRecorder {
 				rr := httptest.NewRecorder()
 				h(rr, httptest.NewRequest(http.MethodPost, "/admin/"+tc.name, strings.NewReader(body)))
@@ -142,7 +142,7 @@ func TestScopedOperatorIDsNeverWidenToStopAll(t *testing.T) {
 }
 
 func TestHandleDebugGetAndPost(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 
 	get := httptest.NewRecorder()
 	p.HandleDebug(get, httptest.NewRequest(http.MethodGet, "/admin/debug", nil))
@@ -179,7 +179,7 @@ func TestHandleDebugGetAndPost(t *testing.T) {
 }
 
 func TestHandleDebugEmptyScope400(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 	rr := httptest.NewRecorder()
 	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 		strings.NewReader(`{"enabled":true,"clients":[]}`)))
@@ -219,7 +219,7 @@ func debugSessionOf(t *testing.T, p *Server, body string) map[string]any {
 // renders RFC 3339 at second precision, which would hide a sub-second
 // re-anchor from a string comparison.
 func TestHandleDebugReplaceMergesUntil(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 
 	// Same duration restated: until must not move.
 	seed := debugSessionOf(t, p, `{"enabled":true,"clients":["client-a"],"duration":"1h"}`)
@@ -252,7 +252,7 @@ func TestHandleDebugReplaceMergesUntil(t *testing.T) {
 }
 
 func TestHandleDebugOverlap409(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 	rr := httptest.NewRecorder()
 	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 		strings.NewReader(`{"enabled":true,"clients":["client-a"]}`)))
@@ -268,7 +268,7 @@ func TestHandleDebugOverlap409(t *testing.T) {
 }
 
 func TestHandleDebugTwoNonOverlapping(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 	for _, body := range []string{
 		`{"enabled":true,"clients":["client-a"],"providers":["alpha.example"]}`,
 		`{"enabled":true,"clients":["client-a"],"providers":["beta.example"]}`,
@@ -285,7 +285,7 @@ func TestHandleDebugTwoNonOverlapping(t *testing.T) {
 }
 
 func TestDebugMatchAND(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 	rr := httptest.NewRecorder()
 	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 		strings.NewReader(`{"enabled":true,"clients":["client-a"],"providers":["alpha.example"],"models":["m1"]}`)))
@@ -322,7 +322,7 @@ func TestKnownModelsCanonicalizesFusedIds(t *testing.T) {
 }
 
 func TestDebugMatchCanonicalModel(t *testing.T) {
-	p := New(config.Default(), metrics.Noop{})
+	p := newStoredTestProxy(t, metrics.Noop{})
 	rr := httptest.NewRecorder()
 	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 		strings.NewReader(`{"enabled":true,"models":["claude-4.5-sonnet-thinking"]}`)))
@@ -454,14 +454,8 @@ func TestDebugPersistsAndRestores(t *testing.T) {
 }
 
 func TestDebugRequestPublishedAndCaptured(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "debug-cap.db")
-	d := config.Default()
-	store, _ := openProxyTestStore(t, path)
-	defer store.Close()
-
 	spy := &liveSpy{}
-	p := New(d, spy)
-	p.AttachPausePersist(store)
+	p := newStoredTestProxy(t, spy)
 	rr := httptest.NewRecorder()
 	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
 		strings.NewReader(`{"enabled":true,"clients":["client-a"]}`)))

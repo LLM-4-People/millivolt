@@ -641,7 +641,7 @@ the credential gates both.
 | `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
-| `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; optional ID targets one session. |
+| `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
 | `GET/POST /admin/throttle` | Inspect/provider-limit updates; POST requires provider. Supplied limits merge; `clear:true` removes policy. |
 | `GET /admin/debug/capture?id=` | Load an unexpired durable debug sidecar; absent/no-store returns 404. `&download=1` serves the same document as a gzip artifact named `millivolt-debug-<captured_at>.json.gz`, falling back to the record id when `captured_at` does not decode. |
 | `POST /admin/purge/count` | Preview the same deletion/export predicate; traffic can change the count afterward. |
@@ -659,7 +659,10 @@ the credential gates both.
 
 Pause/Debug/Limits successes may include a persistence warning: runtime state
 was applied, but saving it failed. Do not retry as though the mutation rolled
-back. With storage disabled, their memory-only state is intentional.
+back. With storage disabled, Pause and Limits keep their memory-only state
+intentionally. Debug is the exception: starting a session answers 503 because
+with no store every matched request would retain bodies for a sidecar that
+could never be fetched.
 
 The profiling subtree is operator-gated like every `/metrics` route: an
 unarmed plane answers 403, a wrong credential 401, and a reserved-namespace
@@ -921,6 +924,25 @@ exceed it, new captures are skipped and TTL expiry frees capacity again.
 Capture writes are counted in bytes, not characters. The request drawer loads an
 available sidecar only for a captured request; expired/absent captures are not
 recreated from ordinary metrics.
+
+Starting a capture requires durable storage. With `db_path` empty,
+`enabled:true` without an ID answers 503 `durable storage is disabled` and
+creates no session. A store-less process
+also has no persisted session document to restore, so it never starts with an
+enabled session; if one were present in memory, the request path still refuses
+to build a capture tap, so no headers or bodies are retained for an unfetchable
+sidecar. Editing or stopping a named existing session remains available.
+
+Retained request headers use the same policy as recorded response headers:
+names are visited in sorted order for the budget, each value is capped at 4 KiB
+and marked with `…` when cut, at most 16 values are kept per name, and ordinary
+headers share a 16 KiB total budget per header map. Credential headers (the
+configured auth header, `Authorization`, cookies, and token-, API-key- or
+secret-bearing names) become `[REDACTED]` before any truncation, so a cut
+value is never a credential prefix. Headers or values beyond the budget are
+omitted without a marker; the capture schema has no header-truncation field.
+The capture JSON is encoded without HTML escaping, so `<`, `>` and `&` appear
+literally while JSON control escapes remain.
 
 The drawer's Debug section also carries a Download button. It fetches the same
 capture with `download=1` and saves a gzip artifact named

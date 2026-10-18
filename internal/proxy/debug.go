@@ -446,6 +446,17 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Starting a capture requires durable storage: without a store every
+	// matched request would copy headers and bodies only for finishDebugTap to
+	// discard them, while the record still reported debug=true. A process with
+	// no store also has no persisted session document to restore, so refusing
+	// creation here means it never runs an enabled capture session. Editing a
+	// named session stays available because it can only update an existing
+	// session, never create one.
+	if id == "" && s.pause.persist == nil {
+		adminjson.WriteError(w, http.StatusServiceUnavailable, storage.ErrStorageDisabled.Error())
+		return
+	}
 	hasPrev := id != ""
 	var snap persistedDebug
 	err = s.editDebug(id, func(prev persistedDebug) (persistedDebug, error) {

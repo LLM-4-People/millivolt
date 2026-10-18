@@ -418,7 +418,7 @@ func TestPauseDebugMenuDurationsAreServerAccepted(t *testing.T) {
 		t.Fatalf("DEBUG_DURS no longer derives from PAUSE_DURS; give any own token its own acceptance rows: %s", debugStmt)
 	}
 	for _, tok := range toks {
-		p := New(config.Default(), metrics.Noop{})
+		p := newStoredTestProxy(t, metrics.Noop{})
 		body := `{"paused":true,"clients":["client-a"],"duration":` + quoteJSON(tok) + `}`
 		rec := httptest.NewRecorder()
 		p.HandlePause(rec, httptest.NewRequest(http.MethodPost, "/admin/pause", strings.NewReader(body)))

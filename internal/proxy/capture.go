@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -117,12 +118,13 @@ func redactHeaderName(name, authHeader string) bool {
 // forwarding. Neither ordinary metrics nor debug captures retain credentials.
 // Values are capped at a generous header-sized bound: the inbound server cap
 // (1 MiB) lets a hostile peer put a megabyte into one header that would then be
-// retained by the ring, every absorbed attempt and the database row.
+// retained by the ring, every absorbed attempt, the database row and the debug
+// capture sidecar.
 func captureHeaders(h http.Header, authHeader string) http.Header {
 	out := make(http.Header, len(h))
 	// Deterministic total budget: names are visited in sorted order so which
 	// oversized headers survive does not depend on map iteration order. A
-	// response otherwise bounded only per value could retain 64 KiB per name
+	// header map otherwise bounded only per value could retain 64 KiB per name
 	// across hundreds of names, multiplied by every absorbed attempt.
 	names := make([]string, 0, len(h))
 	for name := range h {
@@ -133,6 +135,10 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 	for _, name := range names {
 		values := h[name]
 		if redactHeaderName(name, authHeader) {
+			// The fixed marker is small, and retaining it keeps the fact that a
+			// credential header was present visible to the operator. Its name
+			// is not charged to the ordinary-value budget; the inbound server
+			// header limit still bounds how many such names can arrive.
 			out[name] = []string{"[REDACTED]"}
 			continue
 		}
@@ -167,7 +173,7 @@ const (
 	retainedClientMax        = 256   // classified client label
 	retainedUserAgentMax     = 1024  // user agent
 	retainedClientIPMax      = 128   // forwarded address list
-	retainedHeaderValueMax   = 4096  // one retained response-header value
+	retainedHeaderValueMax   = 4096  // one retained header value
 	retainedHeaderValuesMax  = 16    // values retained per header name
 	retainedHeadersMaxBytes  = 16384 // total retained bytes across one header map
 	retainedTruncationSuffix = "…"
@@ -208,6 +214,14 @@ type debugTap struct {
 }
 
 func (s *Server) beginDebugTap(r *http.Request, t *target, rec *metrics.Record, reqBody []byte) *debugTap {
+	// A capture only exists in durable storage, so a process without a store
+	// must not copy headers or bodies onto the request path: the record would
+	// claim debug=true while no fetchable sidecar could ever exist. HandleDebug
+	// refuses to create that state; this guard keeps the retention boundary
+	// closed even for an in-memory session.
+	if s.pause.persist == nil {
+		return nil
+	}
 	d := s.matchDebug(rec.Client, rec.Provider, rec.Model)
 	if d == nil {
 		return nil
@@ -223,7 +237,11 @@ func (s *Server) beginDebugTap(r *http.Request, t *target, rec *metrics.Record, 
 		half = limit / 2
 	}
 	return &debugTap{
-		reqHdr:   headersToHAR(r.Header, t.authHeader),
+		// Redact and bound first, through the same retention owner as the
+		// recorded response headers, then convert the bounded map to the HAR
+		// list the drawer consumes. The values are already redacted, so the
+		// conversion cannot re-expand or re-expose a credential.
+		reqHdr:   headersToHAR(captureHeaders(r.Header, t.authHeader), ""),
 		reqBody:  capBytes(reqBody, int64(half)),
 		respBody: &cappedWriter{limit: half},
 		upstream: t.baseURL + rec.Path,
@@ -256,6 +274,13 @@ func (d *debugRW) Flush() {
 func (d *debugRW) Unwrap() http.ResponseWriter { return d.ResponseWriter }
 
 var _ http.Flusher = (*debugRW)(nil)
+
+// debugCaptureBufPool reuses the capture encoder's scratch buffer. JSON
+// encoding runs on the response path after the client-facing write, so the
+// allocation is worth keeping out of that path; the buffer is reset before it
+// returns to the pool and its bytes are only used until SaveDebugCapture
+// copies them into the store.
+var debugCaptureBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
 func (s *Server) finishDebugTap(tap *debugTap, rec *metrics.Record) {
 	if tap == nil || rec == nil || !rec.Debug {
@@ -318,11 +343,27 @@ func (s *Server) finishDebugTap(tap *debugTap, rec *metrics.Record) {
 		},
 		"attempts": rec.Attempts,
 	}
-	raw, err := json.Marshal(doc)
-	if err != nil {
-		log.Printf("debug: marshal capture %s: %v", rec.ID, err)
+	// Encode without HTML escaping: the default turns <, > and & into six-byte
+	// \u00XX sequences, which inflates code and HTML prompts far beyond the
+	// body cap's apparent budget without changing what a JSON decoder sees.
+	// Control bytes keep their JSON escapes and sanitizeDebugBody still owns
+	// invalid-UTF-8 replacement, so this changes bytes, not semantics.
+	buf := debugCaptureBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		buf.Reset()
+		debugCaptureBufPool.Put(buf)
+	}()
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(doc); err != nil {
+		log.Printf("debug: encode capture %s: %v", rec.ID, err)
 		return
 	}
+	// Encoder.Encode terminates the document with a newline; drop it so the
+	// stored document stays the one-line JSON shape callers already parse.
+	buf.Truncate(buf.Len() - 1)
+	raw := buf.Bytes()
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	if err := s.pause.persist.SaveDebugCapture(ctx, rec.ID, rec.DebugSessionID, now.UnixMilli(), expires.UnixMilli(), raw); err != nil {

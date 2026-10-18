@@ -74,6 +74,11 @@ func TestOperatorPersistenceFailureReturnsAppliedStateWarning(t *testing.T) {
 				if durable {
 					store := testOperatorPersist{save: func([]byte) error { return errors.New("disk unavailable") }}
 					p.pause.persist, p.throttle.persist = store, store
+				} else if tc.flag == "enabled" {
+					// A capture session requires durable storage to start, so
+					// its no-warning branch still needs a persist that succeeds;
+					// this test is about persistence warnings, not the store gate.
+					p.pause.persist = testOperatorPersist{save: func([]byte) error { return nil }}
 				}
 				for i, body := range []string{tc.enable, tc.disable} {
 					state := operatorPost(t, tc.handler(p), body)

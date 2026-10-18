@@ -191,7 +191,7 @@ func TestResponseSecretsExcludedFromRetainedMetricsOnly(t *testing.T) {
 }
 
 func TestCustomAuthIsRedactedFromDebugCapture(t *testing.T) {
-	p := New(config.Default(), nil)
+	p := newStoredTestProxy(t, nil)
 	p.applyDebug([]persistedDebug{{ID: "session-neutral", Clients: []string{"client-neutral"}}})
 	defer p.applyDebug(nil)
 	r := httptest.NewRequest("POST", "http://proxy/", nil)
