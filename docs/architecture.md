@@ -194,7 +194,13 @@ occurrences. Selected groups use the same exact rank reader as chart buckets,
 and only top cards derive percentile payloads. Pending dedupe retains only
 relevant pending IDs, not another history-sized seen set. Chart's rank reader
 also produces the occurrence-weighted avg/min/max in the same traversal, so a
-metric order is no longer walked separately for stats. A retained
+metric order is no longer walked separately for stats. The all-history order is
+a compacted immutable base plus a bounded value-sorted pending delta (16,384
+samples): a catch-up append folds only its new samples, so it stays
+O(delta log delta) regardless of history, and reaching the bound folds
+base+pending once. Chart and explorer read the exact merged order through one
+view owner, which caches the merge per published snapshot and never mutates
+either input. A full rebuild replaces the base and clears pending. A retained
 last-65,536-row order serves bounded chart windows whose earliest in-window
 durable row is inside that tail; older or unscoped windows fall back to the
 all-history order, so the fast path never changes rank or stat results.

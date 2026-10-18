@@ -126,7 +126,8 @@ func (a *AggAPI) chart(ctx context.Context, winMin int, fs []scopeFilter, status
 		}
 	}
 	fold := newChartFold(from, step, count, status, fs)
-	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, nil); err != nil {
+	freeze := func() error { fold.freezeOrder(); return nil }
+	if err := a.streamWindow(ctx, from, mcz, func(p *projectionData) { fold.prepare(p, mcz) }, fold.fold, freeze); err != nil {
 		return chartPayload{}, err
 	}
 	return a.storeChartResult(ctx, key, cacheable, winMin, rawFrom, now, fold.payload(now))

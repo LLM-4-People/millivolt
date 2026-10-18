@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -68,6 +69,7 @@ func BenchmarkAggregateFold(b *testing.B) {
 			for i := range rows {
 				_ = f.fold(&rows[i])
 			}
+			f.freezeOrder()
 			_ = f.payload(now)
 		}
 	})
@@ -94,9 +96,71 @@ func BenchmarkAggregateFold(b *testing.B) {
 			if err := p.visitSince(since, func(c *contrib) error { return f.fold(c) }); err != nil {
 				b.Fatal(err)
 			}
+			f.freezeOrder()
 			_ = f.payload(now)
 		}
 	})
+}
+
+// benchmarkMetricRows builds oldest-first projection rows with valid metrics
+// so a delta append exercises every retained order.
+func benchmarkMetricRows(n int) []contrib {
+	rows := make([]contrib, n)
+	for i := range rows {
+		v := int64((i*7919)%n + 1)
+		rows[i] = contrib{ttft: v, tps: float64(v), dec: v}
+	}
+	return rows
+}
+
+var benchmarkProjectionMetrics projectionMetrics
+
+// BenchmarkProjectionMetricAppend measures one small catch-up append against a
+// retained history. The base is built before the timer; each iteration starts
+// from that same base so repeated deltas never cross a compaction boundary.
+func BenchmarkProjectionMetricAppend(b *testing.B) {
+	for _, history := range []int{100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("history_%d", history), func(b *testing.B) {
+			rows := benchmarkMetricRows(history + 16)
+			var base projectionMetrics
+			base.append(rows[:history], 0)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				m := base
+				m.append(rows, history)
+				benchmarkProjectionMetrics = m
+			}
+		})
+	}
+	for _, history := range []int{100_000, 1_000_000} {
+		b.Run(fmt.Sprintf("compact_%d", history), func(b *testing.B) {
+			benchmarkProjectionCompaction(b, history)
+		})
+	}
+}
+
+// benchmarkProjectionCompaction times one threshold-triggered base+pending
+// fold. Setup leaves pending at threshold-1 samples and the measured append
+// adds the sample that crosses the bound.
+func benchmarkProjectionCompaction(b *testing.B, history int) {
+	// 5461 fully populated rows hold 16383 pending samples; the measured row
+	// adds three more and folds all three base orders at once.
+	pendingRows := (metricOrderPendingSamples - 1) / 3
+	rows := benchmarkMetricRows(history + pendingRows + 1)
+	var base projectionMetrics
+	base.append(rows[:history], 0)
+	base.append(rows[:len(rows)-1], history)
+	if got := base.pending.sampleCount(); got != 3*pendingRows {
+		b.Fatalf("pending samples = %d, want %d", got, 3*pendingRows)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		m := base
+		m.append(rows, len(rows)-1)
+		benchmarkProjectionMetrics = m
+	}
 }
 
 // Unlike the fold kernel, this includes revision checks, query preparation,

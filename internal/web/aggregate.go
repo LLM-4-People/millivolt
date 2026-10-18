@@ -745,6 +745,10 @@ type chartFold struct {
 	decBucket  []uint8
 	membership []uint8
 	order      metricOrders
+	// orderSource is the projection's all-history view, retained only while
+	// the read lease is held. freezeOrder materializes it after the fold only
+	// when the recent tail cannot answer the window.
+	orderSource *projectionMetrics
 	// recent is the tail order for bounded windows; recentFrom is its first
 	// covered projection row (0-based). minMemberRow is the earliest in-window
 	// durable row, so the tail is safe only when it covers that row.
@@ -780,9 +784,24 @@ func (f *chartFold) prepareBound(p *projectionData) {
 		return
 	}
 	f.membership = make([]uint8, len(p.rows))
-	f.order = p.metrics.all
+	f.orderSource = &p.metrics
 	f.recent = p.metrics.recent
 	f.recentFrom = p.metrics.recentFrom
+}
+
+// freezeOrder resolves the all-history order once the fold knows whether the
+// retained tail covers every member. It must run under the projection lease;
+// the fast path skips the O(history) merge entirely.
+func (f *chartFold) freezeOrder() {
+	source := f.orderSource
+	f.orderSource = nil
+	if source == nil {
+		return
+	}
+	if !f.hasMember || (f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom) {
+		return
+	}
+	f.order = source.allOrder()
 }
 
 func (f *chartFold) fold(c *contrib) error {
@@ -1066,6 +1085,7 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 				return err
 			}
 		}
+		fold.freezeOrder()
 		ready(min, from, step, count, fold)
 		return ctx.Err()
 	})
@@ -1506,7 +1526,7 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	e.allFS = bindScope(e.allFS, p, mcz)
 	e.grpFS = bindScope(e.grpFS, p, mcz)
 	if p != nil {
-		e.order = p.metrics.all
+		e.order = p.metrics.allOrder()
 		// The unfiltered rail is exactly the shared dictionary's occupied
 		// memberships. Only unprojected ring/pending names can add anything;
 		// scoped rails continue to follow the canonical per-row predicate.

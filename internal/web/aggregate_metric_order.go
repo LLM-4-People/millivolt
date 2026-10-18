@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"math"
 	"slices"
+	"sync"
 )
 
 // metricSample pins a positive finite metric value to its immutable projection
@@ -21,6 +22,12 @@ type metricSample[T ~int64 | ~float64] struct {
 const (
 	recentMetricRows        = 65536
 	recentMetricRebuildRows = 16384
+	// metricOrderPendingSamples bounds the uncompacted all-history delta. A
+	// sub-threshold append copies at most this many samples however long the
+	// retained history is; reaching the bound folds base+pending into one new
+	// immutable base. 16384 samples cap the extra pending memory at roughly
+	// 256 KiB, while making the O(history) fold rare instead of per append.
+	metricOrderPendingSamples = 16384
 )
 
 // metricOrders is one immutable set of value-sorted samples. Rows are
@@ -31,12 +38,17 @@ type metricOrders struct {
 	dec  []metricSample[int64]
 }
 
-// merge folds new samples into fresh immutable slices. The input slices are
-// never mutated after publication.
-func (o *metricOrders) merge(added metricOrders) {
-	o.ttft = mergeMetricOrder(o.ttft, added.ttft)
-	o.tps = mergeMetricOrder(o.tps, added.tps)
-	o.dec = mergeMetricOrder(o.dec, added.dec)
+func (o metricOrders) sampleCount() int {
+	return len(o.ttft) + len(o.tps) + len(o.dec)
+}
+
+// mergeSorted folds already sorted added samples into fresh immutable slices
+// and never mutates its inputs. Ties keep the old samples first, exactly like
+// the batch-by-batch merge it replaces.
+func (o *metricOrders) mergeSorted(added metricOrders) {
+	o.ttft = mergeSortedMetricOrder(o.ttft, added.ttft)
+	o.tps = mergeSortedMetricOrder(o.tps, added.tps)
+	o.dec = mergeSortedMetricOrder(o.dec, added.dec)
 }
 
 func (o *metricOrders) sort() {
@@ -45,14 +57,52 @@ func (o *metricOrders) sort() {
 	slices.SortFunc(o.dec, func(a, b metricSample[int64]) int { return cmp.Compare(a.value, b.value) })
 }
 
+// metricOrderView memoizes the exact base+pending merge for one published
+// projection snapshot. The holder is shared by snapshot copies; a new append
+// installs a fresh holder, so no reader can observe later mutation.
+type metricOrderView struct {
+	once  sync.Once
+	order metricOrders
+}
+
 type projectionMetrics struct {
-	all metricOrders
+	// base is the immutable compacted all-history order. pending is a value
+	// sorted delta since base; it is copy-on-write, so published slices never
+	// change. Readers see both as one order through allOrder.
+	base    metricOrders
+	pending metricOrders
+	view    *metricOrderView
 	// recent is a value-sorted order over the last recentMetricRows rows. It
 	// may retain already-out-of-tail samples between rebuilds; consumers only
 	// use it when their earliest required row is >= recentFrom.
 	recent        metricOrders
 	recentFrom    int
 	recentBuiltAt int
+}
+
+// allOrder returns the exact ascending all-history order of base+pending.
+// Chart and explorer share this one reader path. The merge runs once per
+// published snapshot and is cached; it never mutates base or pending.
+func (m *projectionMetrics) allOrder() metricOrders {
+	if m.pending.sampleCount() == 0 {
+		return m.base
+	}
+	if m.view == nil {
+		// A zero projectionMetrics has no published snapshot to cache on.
+		return mergeMetricOrderSets(m.base, m.pending)
+	}
+	m.view.once.Do(func() {
+		m.view.order = mergeMetricOrderSets(m.base, m.pending)
+	})
+	return m.view.order
+}
+
+func mergeMetricOrderSets(base, pending metricOrders) metricOrders {
+	return metricOrders{
+		ttft: mergeSortedMetricOrder(base.ttft, pending.ttft),
+		tps:  mergeSortedMetricOrder(base.tps, pending.tps),
+		dec:  mergeSortedMetricOrder(base.dec, pending.dec),
+	}
 }
 
 func validMetricSample[T ~int64 | ~float64](value T) bool {
@@ -88,15 +138,32 @@ func collectMetricOrders(rows []contrib, from int) metricOrders {
 	return out
 }
 
-// append sorts only new rows and merges into fresh immutable metric orders.
-// Previously published slices are never changed, including their spare capacity.
-// A full rebuild starts with an empty projectionMetrics and from == 0.
+// append sorts only new rows and folds them into the bounded pending delta.
+// Previously published slices are never changed, including their spare
+// capacity. from == 0 is a full rebuild: it replaces the base with every
+// sample and clears pending.
 func (m *projectionMetrics) append(rows []contrib, from int) {
 	if from >= len(rows) {
 		return
 	}
 	added := collectMetricOrders(rows, from)
-	m.all.merge(added)
+	added.sort()
+	if from == 0 {
+		m.base = added
+		m.pending = metricOrders{}
+		m.recent = metricOrders{}
+		m.recentFrom = 0
+		m.recentBuiltAt = 0
+	} else {
+		m.pending.mergeSorted(added)
+		if m.pending.sampleCount() >= metricOrderPendingSamples {
+			m.base.mergeSorted(m.pending)
+			m.pending = metricOrders{}
+		}
+	}
+	// Any base or pending change retires the cached merge. Snapshot copies
+	// keep the old holder and its immutable slices.
+	m.view = &metricOrderView{}
 	if len(rows) <= recentMetricRows {
 		// No tail is read until the history exceeds recentMetricRows; leave
 		// the recent order empty instead of aliasing the all-history slices.
@@ -112,7 +179,7 @@ func (m *projectionMetrics) append(rows []contrib, from int) {
 	// passes an earlier from (not the incremental append contract) must not
 	// merge those rows again or its samples would be double-counted.
 	if from >= m.recentFrom {
-		m.recent.merge(added)
+		m.recent.mergeSorted(added)
 	}
 	if next := len(rows) - recentMetricRows; next > m.recentFrom {
 		m.recentFrom = next
@@ -133,11 +200,12 @@ func (m *projectionMetrics) rebuildRecent(rows []contrib) {
 	m.recentBuiltAt = len(rows)
 }
 
-func mergeMetricOrder[T ~int64 | ~float64](old, added []metricSample[T]) []metricSample[T] {
+// mergeSortedMetricOrder merges two ascending orders without touching either
+// input. Ties keep old samples first, preserving the incremental batch order.
+func mergeSortedMetricOrder[T ~int64 | ~float64](old, added []metricSample[T]) []metricSample[T] {
 	if len(added) == 0 {
 		return old
 	}
-	slices.SortFunc(added, func(a, b metricSample[T]) int { return cmp.Compare(a.value, b.value) })
 	if len(old) == 0 {
 		return added
 	}
