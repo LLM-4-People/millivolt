@@ -260,6 +260,47 @@ func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {
 	}
 }
 
+// TestMergeSnapshotSkipsDebugOverCap pins the sidecar cap across a restore:
+// when the incoming fetchable captures do not fit the remaining budget, the
+// whole debug set is skipped while request rows still merge.
+func TestMergeSnapshotSkipsDebugOverCap(t *testing.T) {
+	opts := testOpts
+	opts.DebugMaxBytes = 64 << 10
+	live, err := Open(filepath.Join(t.TempDir(), "live-debug-cap.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	now := time.Now()
+	if err := live.SaveDebugCapture(t.Context(), "live-cap", "sess", now.UnixMilli(), 0, make([]byte, 32<<10)); err != nil {
+		t.Fatal(err)
+	}
+	src := openTestStore(t)
+	if err := src.SaveDebugCapture(t.Context(), "backup-cap", "sess", now.UnixMilli(), 0, make([]byte, 100<<10)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := live.MergeSnapshot(t.Context(), data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := live.CountDebugSession(t.Context(), "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 1 {
+		t.Fatalf("debug captures after capped merge = %d, want only the live row", got)
+	}
+	live.debugMu.Lock()
+	bytes := live.debugBytes
+	live.debugMu.Unlock()
+	if bytes != 32<<10 {
+		t.Fatalf("debug byte counter = %d, want %d", bytes, 32<<10)
+	}
+}
+
 func TestSnapshotOverlapDetaches(t *testing.T) {
 	live := openTestStore(t)
 	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})

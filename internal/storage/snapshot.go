@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
 )
@@ -217,10 +218,12 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 		skipped = 0
 	}
 	var debugErr error
-	if _, err := mergeAttachedTable(ctx, conn, "request_debug"); err != nil {
+	if _, err := s.mergeDebugTable(ctx, conn); err != nil {
 		debugErr = err
-	} else if err := s.resetDebugBytes(ctx, conn); err != nil {
-		debugErr = err
+	} else if s.debugMaxBytes > 0 {
+		if err := s.resetDebugBytes(ctx, conn); err != nil {
+			debugErr = err
+		}
 	}
 	if inserted == 0 {
 		if debugErr != nil {
@@ -261,7 +264,60 @@ type mergeConn interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
 }
 
+// mergeDebugTable enforces the sidecar byte cap during a restore merge. With
+// an active cap it counts only fetchable incoming rows and skips the whole
+// debug set (logging the amount) when it cannot fit; request rows still merge.
+func (s *Store) mergeDebugTable(ctx context.Context, db mergeConn) (int64, error) {
+	if s.debugMaxBytes <= 0 {
+		return mergeAttachedTable(ctx, db, "request_debug")
+	}
+	var name string
+	err := db.QueryRowContext(ctx, `SELECT name FROM backup_merge.sqlite_master WHERE type='table' AND name='request_debug'`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	incoming, err := pragmaTableInfo(ctx, db, "backup_merge", "request_debug")
+	if err != nil {
+		return 0, err
+	}
+	if _, ok := incoming["payload"]; !ok {
+		return mergeAttachedTable(ctx, db, "request_debug")
+	}
+	where := ""
+	var args []any
+	if _, ok := incoming["expires_at"]; ok {
+		where = `(incoming."expires_at" = 0 OR incoming."expires_at" > ?)`
+		args = append(args, time.Now().UnixMilli())
+	}
+	var current int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&current); err != nil {
+		return 0, err
+	}
+	statsQuery := `SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM backup_merge.request_debug AS incoming`
+	if where != "" {
+		statsQuery += " WHERE " + where
+	}
+	var incomingRows, incomingBytes int64
+	if err := db.QueryRowContext(ctx, statsQuery, args...).Scan(&incomingRows, &incomingBytes); err != nil {
+		return 0, err
+	}
+	if remaining := s.debugMaxBytes - current; incomingBytes > remaining {
+		log.Printf("storage: backup merge skipped %d debug captures (%d bytes) over the %d-byte store cap",
+			incomingRows, incomingBytes, s.debugMaxBytes)
+		return 0, nil
+	}
+	return mergeAttachedTableWhere(ctx, db, "request_debug", where, args...)
+}
+
 func mergeAttachedTable(ctx context.Context, db mergeConn, table string) (int64, error) {
+	return mergeAttachedTableWhere(ctx, db, table, "", nil)
+}
+
+func mergeAttachedTableWhere(ctx context.Context, db mergeConn, table, where string, whereArgs ...any) (int64, error) {
 	if table != "requests" && table != "request_debug" {
 		return 0, fmt.Errorf("unknown merge table")
 	}
@@ -289,7 +345,10 @@ func mergeAttachedTable(ctx context.Context, db mergeConn, table string) (int64,
 	q := "INSERT OR IGNORE INTO " + table + " (" + list + ") SELECT " + list +
 		" FROM backup_merge." + table + " AS incoming" +
 		" WHERE NOT EXISTS (SELECT 1 FROM main." + table + " AS live WHERE live.id = incoming.id)"
-	res, err := db.ExecContext(ctx, q)
+	if where != "" {
+		q += " AND (" + where + ")"
+	}
+	res, err := db.ExecContext(ctx, q, whereArgs...)
 	if err != nil {
 		return 0, err
 	}
