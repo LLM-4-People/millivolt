@@ -321,6 +321,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 		scheduler:  scheduler.New(schedulerOptions(cfg)),
 	}
 	s.initPause()
+	s.throttle.init()
 	s.cfgSnap.Store(cfg)
 	s.client.Store(newUpstreamClient(cfg))
 	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))

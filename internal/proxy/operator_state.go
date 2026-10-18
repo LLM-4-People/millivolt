@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
@@ -39,12 +40,27 @@ func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr 
 // "<feature>: persist" failure log. The callback and its lock ownership stay
 // at the call site.
 func (s *Server) persistOperatorDoc(prefix string, doc any, save func(context.Context, []byte) error) error {
+	ctx, cancel := s.storeQueryCtx()
+	defer cancel()
+	return s.persistOperatorDocCtx(ctx, prefix, doc, 0, save)
+}
+
+// persistOperatorDocCtx is the context-aware half shared by synchronous
+// operator edits and the coalescing throttle writer. maxBytes <= 0 means no
+// document bound. The caller's context is always narrowed by the configured
+// storage query timeout so no save can outlive the store's stated bound.
+func (s *Server) persistOperatorDocCtx(ctx context.Context, prefix string, doc any, maxBytes int, save func(context.Context, []byte) error) error {
 	raw, err := json.Marshal(doc)
 	if err != nil {
 		log.Printf("%s: persist: %v", prefix, err)
 		return err
 	}
-	ctx, cancel := s.storeQueryCtx()
+	if maxBytes > 0 && len(raw) > maxBytes {
+		err := fmt.Errorf("document exceeds %d bytes", maxBytes)
+		log.Printf("%s: persist: %v", prefix, err)
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, s.cfg().StorageQueryTimeout)
 	defer cancel()
 	if err := save(ctx, raw); err != nil {
 		log.Printf("%s: persist: %v", prefix, err)

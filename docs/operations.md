@@ -823,6 +823,17 @@ available budget and in-flight/queued state. Header semantics are in
 [protocol](protocol.md#routing-headers). Persisted policy does not mean the live
 scheduler's counters and in-flight requests survive a restart.
 
+Operator limit edits persist synchronously and report a warning when the store
+rejects the write. Header-driven limit changes apply in memory immediately and
+are persisted by one coalescing background writer: a burst of changes becomes
+the latest whole-policy document, with bounded retry and backoff after a store
+failure. A crash can therefore lose the most recent header-driven changes, and
+a failed save never rejects inference. Graceful shutdown and restart flush the
+latest policy before storage closes or the restarted process opens the
+database. Provider labels are capped at 255 bytes and the persisted throttle
+document at 8 MiB; normal provider labels derived from base URLs remain below
+both bounds.
+
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
 inference ceiling (default 10000) and `max_inflight_body_bytes` its buffered
 body budget (default 256 MiB); requests above either bound are refused with

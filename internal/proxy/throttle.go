@@ -39,6 +39,28 @@ const (
 	maxLimitWindow      = 24 * time.Hour
 )
 
+// Durable throttle-policy bounds and background-writer cadence. These are
+// internal safety/implementation constants, not user tunables.
+//
+// throttleProviderLabelMaxBytes covers the routing boundary's DNS hostname
+// bound (253 bytes) plus an IP authority's brackets and port. The scheduler
+// already refuses a new header-created gate past 4096 entries; combined with
+// this label bound it also bounds the persisted document.
+//
+// throttlePersistDocMaxBytes is a final safety net. With 4096 labels of 255
+// bytes at JSON's worst-case six-byte escape per byte, plus per-entry fields,
+// the document stays below 8 MiB. A document at the cap is a bug, not normal
+// operator state, so refusing it keeps the dirty generation retrying rather
+// than writing an unbounded blob.
+const (
+	throttleProviderLabelMaxBytes = 255
+	throttlePersistDocMaxBytes    = 8 << 20
+
+	throttlePersistDebounce = 250 * time.Millisecond
+	throttlePersistRetryMin = 100 * time.Millisecond
+	throttlePersistRetryMax = 30 * time.Second
+)
+
 type throttlePersist interface {
 	SaveThrottle(ctx context.Context, raw []byte) error
 	LoadThrottle(ctx context.Context) ([]byte, error)
@@ -61,13 +83,73 @@ type persistedThrottleDoc struct {
 }
 
 type throttleRuntime struct {
-	persist    throttlePersist
-	mu         sync.Mutex
-	persistGen uint64
+	persist throttlePersist
+
+	// mu owns the generation counters and the writer lifecycle flags. The
+	// scheduler owns policy; this lock never wraps a scheduler call.
+	mu           sync.Mutex
+	persistGen   uint64
+	persistedGen uint64
+	started      bool
+	closed       bool
+
+	// persistMu lets concurrent persistence loops (operator edits and the one
+	// background writer) overlap, while a flush takes the exclusive side so no
+	// stale write can land after it. Every write is bounded by the store query
+	// timeout, which also bounds the flush's wait for in-flight loops.
+	persistMu sync.RWMutex
+	// wake is the bounded dirty signal. At most one pending notification is
+	// retained; the writer reads the latest generation rather than a queue of
+	// changes, so a burst collapses into the newest policy.
+	wake chan struct{}
+	stop chan struct{}
+	done chan struct{}
+
+	// debounce coalesces a burst before the writer snapshots. retryMin and
+	// retryMax bound the backoff after a failed write.
+	debounce time.Duration
+	retryMin time.Duration
+	retryMax time.Duration
+}
+
+// init sizes the lifecycle channels and cadence. Called once from New; tests
+// may override debounce/retryMin/retryMax before the first dirty signal.
+func (t *throttleRuntime) init() {
+	t.wake = make(chan struct{}, 1)
+	t.stop = make(chan struct{})
+	t.done = make(chan struct{})
+	t.debounce = throttlePersistDebounce
+	t.retryMin = throttlePersistRetryMin
+	t.retryMax = throttlePersistRetryMax
 }
 
 func (s *Server) attachThrottlePersist(p throttlePersist) {
+	s.throttle.mu.Lock()
 	s.throttle.persist = p
+	s.throttle.mu.Unlock()
+	s.restoreThrottlePolicies(p)
+	s.startThrottleWriterIfDirty()
+}
+
+// startThrottleWriterIfDirty launches the one background writer when a policy
+// generation predates the attach (for example a test attaches after changes).
+// Normal startup has no dirty generation and starts the writer on the first
+// header change instead.
+func (s *Server) startThrottleWriterIfDirty() {
+	s.throttle.mu.Lock()
+	start := !s.throttle.closed && !s.throttle.started &&
+		s.throttle.persist != nil && s.throttle.persistGen != s.throttle.persistedGen
+	if start {
+		s.throttle.started = true
+	}
+	s.throttle.mu.Unlock()
+	if start {
+		go s.runThrottlePersister()
+		s.throttle.signal()
+	}
+}
+
+func (s *Server) restoreThrottlePolicies(p throttlePersist) {
 	ctx, cancel := s.storeQueryCtx()
 	defer cancel()
 	raw, err := p.LoadThrottle(ctx)
@@ -110,6 +192,9 @@ func decodeThrottles(raw []byte) []persistedThrottle {
 func persistedToThrottle(it persistedThrottle) (scheduler.Throttle, error) {
 	if strings.TrimSpace(it.Provider) == "" {
 		return scheduler.Throttle{}, fmt.Errorf("provider required")
+	}
+	if err := validateThrottleProvider(it.Provider); err != nil {
+		return scheduler.Throttle{}, err
 	}
 	lim := scheduler.Limit{Concurrency: it.Concurrency, Requests: it.Requests, Tokens: it.Tokens}
 	if it.Requests > 0 {
@@ -157,22 +242,49 @@ func throttleToPersisted(t scheduler.Throttle) persistedThrottle {
 	return it
 }
 
+func validateThrottleProvider(provider string) error {
+	if len(provider) > throttleProviderLabelMaxBytes {
+		return fmt.Errorf("provider label must be at most %d bytes", throttleProviderLabelMaxBytes)
+	}
+	return nil
+}
+
 func (s *Server) applyThrottle(t scheduler.Throttle) error {
 	return s.updateThrottle(t.Provider, func(scheduler.Throttle) scheduler.Throttle { return t })
 }
 
+// updateThrottle is the synchronous operator edit path. It applies the policy,
+// then waits for the write that covers that policy generation so the endpoint
+// can report a persistence warning against live state.
 func (s *Server) updateThrottle(provider string, update func(scheduler.Throttle) scheduler.Throttle) error {
+	if err := validateThrottleProvider(provider); err != nil {
+		return err
+	}
 	if !s.scheduler.UpdateThrottle(provider, update) {
 		return nil
 	}
 	s.pause.providers.add(provider)
-	return s.persistThrottles()
+	return s.persistThrottleSync()
+}
+
+// updateThrottleFromHeaders applies a validated client header patch without
+// durable I/O. The coalescing writer owns persistence, so inference latency is
+// independent of the number of gates and of the store.
+func (s *Server) updateThrottleFromHeaders(provider string, update func(scheduler.Throttle) scheduler.Throttle) error {
+	if err := validateThrottleProvider(provider); err != nil {
+		return err
+	}
+	if !s.scheduler.UpdateThrottle(provider, update) {
+		return nil
+	}
+	s.pause.providers.add(provider)
+	s.markThrottleDirty()
+	return nil
 }
 
 // latestThrottleSnap captures the scheduler's provider caps in the persisted
 // shape. Occupancy is ephemeral and never stored, so this uses the policy-only
-// listing rather than the dashboard's live-occupancy scan. Called outside the
-// generation lock for the first write and under it on retry.
+// listing rather than the dashboard's live-occupancy scan.
 func (s *Server) latestThrottleSnap() []persistedThrottle {
 	items := s.scheduler.ThrottlePolicies()
 	snap := make([]persistedThrottle, 0, len(items))
@@ -182,30 +294,228 @@ func (s *Server) latestThrottleSnap() []persistedThrottle {
 	return snap
 }
 
-func (s *Server) persistThrottles() error {
+// persistThrottleSync advances the policy generation and writes the latest
+// snapshot. The generation guard means a concurrent header change is either
+// included in this write or written by the next iteration; only the latest
+// generation can finish successfully.
+func (s *Server) persistThrottleSync() error {
 	s.throttle.mu.Lock()
 	s.throttle.persistGen++
-	gen := s.throttle.persistGen
 	s.throttle.mu.Unlock()
-	return persistStableGen(s.latestThrottleSnap(), gen, &s.throttle.mu,
-		func() uint64 { return s.throttle.persistGen },
-		s.writeThrottleSnap,
-		func() ([]persistedThrottle, uint64) {
-			return s.latestThrottleSnap(), s.throttle.persistGen
-		})
+	if err := s.persistThrottleLatest(context.Background()); err != nil {
+		return &operatorPersistenceError{err}
+	}
+	return nil
 }
 
-func (s *Server) writeThrottleSnap(items []persistedThrottle) error {
-	if s.throttle.persist == nil {
-		return nil
+// markThrottleDirty advances the generation and wakes the one lifecycle-owned
+// writer. It never waits for durable I/O and never starts a goroutine per
+// request: the writer is started at most once and the wake channel holds one
+// pending signal, however many changes arrive.
+func (s *Server) markThrottleDirty() {
+	t := &s.throttle
+	t.mu.Lock()
+	t.persistGen++
+	start := false
+	if !t.closed && !t.started && t.persist != nil {
+		t.started = true
+		start = true
 	}
-	return s.persistOperatorDoc("throttle", persistedThrottleDoc{Throttles: items}, s.throttle.persist.SaveThrottle)
+	t.mu.Unlock()
+	if start {
+		go s.runThrottlePersister()
+	}
+	t.signal()
+}
+
+func (t *throttleRuntime) signal() {
+	select {
+	case t.wake <- struct{}{}:
+	default:
+	}
+}
+
+// persistThrottleLatest writes the newest policy generation. Concurrent
+// loops may overlap; the generation check after each write means a stale
+// snapshot is always followed by the latest policy before that loop returns.
+// A flush takes the exclusive side of persistMu, so it runs only after every
+// in-flight loop has converged.
+func (s *Server) persistThrottleLatest(ctx context.Context) error {
+	s.throttle.persistMu.RLock()
+	defer s.throttle.persistMu.RUnlock()
+	return s.persistThrottleLatestLocked(ctx)
+}
+
+func (s *Server) persistThrottleLatestLocked(ctx context.Context) error {
+	t := &s.throttle
+	// A loop that writes a snapshot superseded by a newer generation must
+	// write the latest policy again before returning. Without this, two
+	// overlapping writers could leave the older snapshot as the last durable
+	// value even though persistedGen already named the newer generation.
+	rewrite := false
+	for {
+		t.mu.Lock()
+		gen := t.persistGen
+		if gen == t.persistedGen && !rewrite {
+			t.mu.Unlock()
+			return nil
+		}
+		target := t.persist
+		t.mu.Unlock()
+		if target == nil {
+			// Memory-only policy: leave the generation dirty so a later attach
+			// can persist it, and report success to callers.
+			return nil
+		}
+		snap := s.latestThrottleSnap()
+		err := s.writeThrottleSnap(ctx, target, snap)
+		t.mu.Lock()
+		if t.persistGen == gen {
+			if err == nil {
+				t.persistedGen = gen
+			}
+			t.mu.Unlock()
+			return err
+		}
+		// The generation moved while this write was in flight: the snapshot
+		// (and any error) is superseded. Refetch and write the latest policy.
+		rewrite = true
+		t.mu.Unlock()
+	}
+}
+
+// runThrottlePersister is the single background writer. It waits for a dirty
+// signal, coalesces a burst for the debounce window, then persists until the
+// latest generation is durable. A failed write is retried with exponential
+// backoff; the dirty generation is never cleared by a failure. The stop
+// channel is the only exit path, so Close can join it without a busy loop.
+func (s *Server) runThrottlePersister() {
+	t := &s.throttle
+	defer close(t.done)
+	for {
+		select {
+		case <-t.stop:
+			return
+		case <-t.wake:
+		}
+		if !s.waitThrottleQuiet() {
+			return
+		}
+		backoff := t.retryMin
+		for {
+			err := s.persistThrottleLatest(context.Background())
+			if err == nil {
+				break
+			}
+			// persistOperatorDocCtx already logged the store failure. Wait the
+			// full backoff even when new changes wake us, so a failing store
+			// cannot be hit once per request.
+			if !s.waitThrottleRetry(&backoff) {
+				return
+			}
+		}
+	}
+}
+
+// waitThrottleQuiet restarts the debounce window on every dirty signal and
+// returns true once the burst has been quiet for the configured window.
+func (s *Server) waitThrottleQuiet() bool {
+	t := &s.throttle
+	timer := time.NewTimer(t.debounce)
+	defer timer.Stop()
+	for {
+		select {
+		case <-t.stop:
+			return false
+		case <-t.wake:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(t.debounce)
+		case <-timer.C:
+			return true
+		}
+	}
+}
+
+// waitThrottleRetry waits one backoff step and doubles it up to retryMax. A
+// new dirty wake is left pending; the next persist attempt reads the latest
+// generation, and the backoff keeps a failing sink from being hammered.
+func (s *Server) waitThrottleRetry(backoff *time.Duration) bool {
+	t := &s.throttle
+	timer := time.NewTimer(*backoff)
+	defer timer.Stop()
+	select {
+	case <-t.stop:
+		return false
+	case <-timer.C:
+		*backoff *= 2
+		if *backoff > t.retryMax {
+			*backoff = t.retryMax
+		}
+		return true
+	}
+}
+
+func (s *Server) writeThrottleSnap(ctx context.Context, p throttlePersist, items []persistedThrottle) error {
+	return s.persistOperatorDocCtx(ctx, "throttle",
+		persistedThrottleDoc{Throttles: items}, throttlePersistDocMaxBytes, p.SaveThrottle)
+}
+
+// FlushThrottles persists the latest policy within the bounded storage
+// timeout. Restart handoff calls it before the child opens the database; it
+// leaves the background writer running so a failed handoff can resume.
+func (s *Server) FlushThrottles(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, s.cfg().StorageQueryTimeout)
+	defer cancel()
+	s.throttle.persistMu.Lock()
+	defer s.throttle.persistMu.Unlock()
+	return s.persistThrottleLatestLocked(ctx)
+}
+
+// CloseThrottlePersist stops the writer and flushes the last generation before
+// storage closes. It is idempotent and safe to call concurrently: the stop
+// channel is closed once, every caller joins the same done channel, and the
+// final write takes the exclusive flush side. Both the join and the write are
+// bounded by StorageQueryTimeout, so a wedged store delays shutdown by at most
+// two configured query timeouts instead of forever.
+func (s *Server) CloseThrottlePersist(ctx context.Context) error {
+	t := &s.throttle
+	t.mu.Lock()
+	if !t.closed {
+		t.closed = true
+		close(t.stop)
+	}
+	started := t.started
+	t.mu.Unlock()
+
+	if started {
+		waitCtx, cancel := context.WithTimeout(ctx, s.cfg().StorageQueryTimeout)
+		defer cancel()
+		select {
+		case <-t.done:
+		case <-waitCtx.Done():
+			return fmt.Errorf("throttle persister stop: %w", waitCtx.Err())
+		}
+	}
+	flushCtx, cancel := context.WithTimeout(ctx, s.cfg().StorageQueryTimeout)
+	defer cancel()
+	s.throttle.persistMu.Lock()
+	defer s.throttle.persistMu.Unlock()
+	if err := s.persistThrottleLatestLocked(flushCtx); err != nil {
+		return fmt.Errorf("throttle persist flush: %w", err)
+	}
+	return nil
 }
 
 // applyThrottleHeaders parses X-Proxy-Limit-* on this request. Absent
 // headers leave the current cap alone. Any present header that is
 // malformed rejects the request WITHOUT applying the others (atomic).
-// A well-formed set merges into the provider cap and persists.
+// A well-formed set merges into the provider cap immediately; the
+// coalescing writer owns durable persistence.
 func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) error {
 	if provider == "" {
 		return nil
@@ -246,9 +556,10 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 	if err := validateLimit(next); err != nil {
 		return err
 	}
-	// Persistence failures are logged by the writer. The validated cap is
-	// already active; a save failure must not reject the inference request.
-	_ = s.updateThrottle(provider, func(t scheduler.Throttle) scheduler.Throttle {
+	// The validated cap is active immediately. Durable persistence is the
+	// coalescing writer's job, so a store failure cannot reject inference or
+	// add a write to this request path.
+	return s.updateThrottleFromHeaders(provider, func(t scheduler.Throttle) scheduler.Throttle {
 		if hasC {
 			t.Limit.Concurrency = next.Concurrency
 		}
@@ -263,7 +574,6 @@ func (s *Server) applyThrottleHeaders(r *http.Request, provider, client string) 
 		t.UpdatedAt = time.Time{}
 		return t
 	})
-	return nil
 }
 
 // applyRateLimit parses one rate-dimension header (X-Proxy-Limit-Requests or
@@ -457,6 +767,10 @@ func (s *Server) HandleThrottle(w http.ResponseWriter, r *http.Request) {
 	provider := strings.TrimSpace(body.Provider)
 	if provider == "" {
 		adminjson.WriteError(w, http.StatusBadRequest, "provider required")
+		return
+	}
+	if err := validateThrottleProvider(provider); err != nil {
+		adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if body.Clear {

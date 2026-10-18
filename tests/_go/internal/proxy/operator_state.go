@@ -155,11 +155,13 @@ func TestOperatorPersistenceWarningTracksLatestGeneration(t *testing.T) {
 
 func TestThrottleHeaderPersistenceFailureDoesNotRejectOrRewrite(t *testing.T) {
 	p := New(config.Default(), metrics.Noop{})
-	var calls int
+	var calls atomic.Int32
 	p.throttle.persist = testOperatorPersist{save: func([]byte) error {
-		calls++
+		calls.Add(1)
 		return errors.New("disk unavailable")
 	}}
+	deferThrottleWriter(p)
+	t.Cleanup(func() { _ = p.CloseThrottlePersist(context.Background()) })
 	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	r.Header.Set(hdrLimitConcurrency, "2")
 	for i := 0; i < 2; i++ {
@@ -167,8 +169,11 @@ func TestThrottleHeaderPersistenceFailureDoesNotRejectOrRewrite(t *testing.T) {
 			t.Fatalf("save failure rejected validated inference headers: %v", err)
 		}
 	}
-	if calls != 1 || schedThrottleFor(p.scheduler, "provider.example").Limit.Concurrency != 2 {
-		t.Fatalf("save failure rolled back runtime cap or repeated no-op persistence: calls=%d", calls)
+	if err := p.FlushThrottles(context.Background()); err == nil {
+		t.Fatal("flush against a failing sink returned success")
+	}
+	if calls.Load() != 1 || schedThrottleFor(p.scheduler, "provider.example").Limit.Concurrency != 2 {
+		t.Fatalf("save failure rolled back runtime cap or repeated no-op persistence: calls=%d", calls.Load())
 	}
 }
 

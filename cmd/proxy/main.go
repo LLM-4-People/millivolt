@@ -452,6 +452,11 @@ func main() {
 		},
 		closeFeeds: buf.CloseFeeds,
 		flushStore: func() error {
+			if proxySrv != nil {
+				if err := proxySrv.FlushThrottles(context.Background()); err != nil {
+					return fmt.Errorf("throttle flush: %w", err)
+				}
+			}
 			if store == nil {
 				return nil
 			}
@@ -490,10 +495,15 @@ func main() {
 	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 
 	// drainStore is the shared close before every loop exit (serve failure,
-	// clean return, signal shutdown): write-channel drain plus final flush,
-	// log.Printf - never Fatalf - so a close failure still lets the exit
-	// path run.
+	// clean return, signal shutdown): stop the throttle writer and flush its
+	// latest policy, then drain the write channel and final flush. log.Printf -
+	// never Fatalf - so a close failure still lets the exit path run.
 	drainStore := func() {
+		if proxySrv != nil {
+			if err := proxySrv.CloseThrottlePersist(context.Background()); err != nil {
+				log.Printf("throttle persist close: %v", err)
+			}
+		}
 		if store != nil {
 			if err := store.Close(); err != nil {
 				log.Printf("storage close: %v", err)
