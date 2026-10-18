@@ -621,6 +621,20 @@ func (r *CursorRun) resumeTurn(results map[string]ToolResult, steerText string, 
 	return r.runTurn(emitDelta)
 }
 
+// BlobBytes returns the exact retained bytes of this run's KV blob store. The
+// parked-run store uses it to enforce its aggregate blob budget without
+// scanning or copying blob values; NewCursorRun always supplies a store.
+func (r *CursorRun) BlobBytes() int64 {
+	return r.blobs.RetainedBytes()
+}
+
+// BlobEntries returns the number of retained blobs in this run's KV store. The
+// parked-run store uses it to enforce its aggregate entry budget without
+// scanning the map.
+func (r *CursorRun) BlobEntries() int {
+	return r.blobs.RetainedEntries()
+}
+
 // PendingToolCallIDs returns the set of tool_call_ids awaiting results.
 func (r *CursorRun) PendingToolCallIDs() map[string]bool {
 	r.mu.Lock()

@@ -19,6 +19,7 @@ package format
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -93,19 +94,68 @@ const (
 	fValueList   = 6 // ListValue
 )
 
+// cursorBlobStoreBytesMax bounds the retained blob bytes of one run's KV blob
+// store. History is one JSON blob per conversation turn plus server-pushed
+// blobs; 64 MiB comfortably covers a long text/tool conversation while keeping
+// a single parked run's blob retention bounded. Internal safety guardrail, not
+// user-tunable.
+const cursorBlobStoreBytesMax = 64 << 20 // 64 MiB
+
+// cursorBlobStoreEntriesMax bounds the number of blobs retained in one run's
+// KV blob store. The byte cap does not charge zero-length values, so an
+// upstream sending unique empty set_blob ids could otherwise grow the map
+// without bound; 65,536 entries cover a long conversation plus pushes while
+// keeping the map bounded. Internal safety guardrail, not user-tunable.
+const cursorBlobStoreEntriesMax = 65_536
+
+var (
+	// errCursorBlobBytes is the stable fail-closed reason for exceeding the
+	// per-run KV blob byte cap. Callers propagate it: a history set that cannot
+	// fit rejects the request, and a server push that cannot fit tears the run
+	// down.
+	errCursorBlobBytes = errors.New("cursor: kv blob byte limit exceeded")
+	// errCursorBlobEntries is the stable fail-closed reason for exceeding the
+	// per-run KV blob entry cap. A replacement of an existing id is always
+	// allowed; only a new id can hit this bound.
+	errCursorBlobEntries = errors.New("cursor: kv blob entry limit exceeded")
+)
+
 // KVBlobStore holds the history blobs the server may pull mid-stream. Blobs
 // are keyed by their raw sha256 digest bytes (what GetBlobArgs.blob_id carries).
 type KVBlobStore struct {
-	mu sync.Mutex
-	m  map[string][]byte
+	mu    sync.Mutex
+	m     map[string][]byte
+	bytes int64 // exact sum of retained blob lengths, guarded by mu
 }
 
 func newKVBlobStore() *KVBlobStore { return &KVBlobStore{m: map[string][]byte{}} }
 
-func (s *KVBlobStore) put(id, data []byte) {
+// put stores data under id. It is the store's single insertion owner: a new id
+// is rejected when the map is already at cursorBlobStoreEntriesMax, and a new
+// or replacement value that would exceed cursorBlobStoreBytesMax is rejected.
+// Both checks leave the map and byte accounting unchanged. A replacement of an
+// existing id is always admitted by the entry cap and subtracts the old value
+// before the byte check, so same-size replacement always fits.
+func (s *KVBlobStore) put(id, data []byte) error {
+	key := string(id)
+	size := int64(len(data))
 	s.mu.Lock()
-	s.m[string(id)] = data
-	s.mu.Unlock()
+	defer s.mu.Unlock()
+	old, exists := s.m[key]
+	if !exists && len(s.m) >= cursorBlobStoreEntriesMax {
+		return fmt.Errorf("%w (limit %d)", errCursorBlobEntries, cursorBlobStoreEntriesMax)
+	}
+	base := s.bytes
+	if exists {
+		base -= int64(len(old))
+	}
+	if size > cursorBlobStoreBytesMax-base {
+		return fmt.Errorf("%w (blob %d bytes, retained %d, limit %d)",
+			errCursorBlobBytes, size, base, cursorBlobStoreBytesMax)
+	}
+	s.m[key] = data
+	s.bytes = base + size
+	return nil
 }
 
 func (s *KVBlobStore) get(id []byte) ([]byte, bool) {
@@ -115,12 +165,24 @@ func (s *KVBlobStore) get(id []byte) ([]byte, bool) {
 	return b, ok
 }
 
-// len returns the number of cached blobs (for testing).
-func (s *KVBlobStore) len() int {
+// RetainedBytes returns the exact sum of stored blob lengths. The parked-run
+// store uses it to enforce its aggregate budget without scanning blob values.
+func (s *KVBlobStore) RetainedBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.bytes
+}
+
+// RetainedEntries returns the number of stored blobs in O(1). The parked-run
+// store uses it to enforce its aggregate entry budget without scanning the map.
+func (s *KVBlobStore) RetainedEntries() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.m)
 }
+
+// len returns the number of cached blobs (for testing).
+func (s *KVBlobStore) len() int { return s.RetainedEntries() }
 
 // streamWriter serializes envelope writes onto the request body so the
 // read-loop's callback replies and the heartbeat ticker never interleave bytes.
@@ -264,7 +326,9 @@ func handleKvServerMessage(sw *streamWriter, kvField *protoField, blobs *KVBlobS
 		bid := firstField(args, fSetBlobArgsBlobID)
 		bdata := firstField(args, fSetBlobArgsBlobData)
 		if bid != nil && bdata != nil {
-			blobs.put(bid.raw, bdata.raw)
+			if err := blobs.put(bid.raw, bdata.raw); err != nil {
+				return fmt.Errorf("cursor: cache SetBlobArgs blob: %w", err)
+			}
 		}
 		return sw.writeFramed(encodeKvSetBlobAck(id))
 	}
@@ -361,13 +425,19 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 
 // cursorBlobsForHistory builds the kv blob store for a translated request.
 // The history blobs are sha256-keyed; the server pulls them by digest.
-// sha256Digest in cursor.go is the single owner of the digest.
-func cursorBlobsForHistory(digests, blobs [][]byte) *KVBlobStore {
+// sha256Digest in cursor.go is the single owner of the digest. Digest/blob
+// pairing and order are preserved; an over-cap set returns an error instead of
+// silently dropping history, so the caller fails the request rather than
+// starting a run with incomplete context.
+func cursorBlobsForHistory(digests, blobs [][]byte) (*KVBlobStore, error) {
 	s := newKVBlobStore()
 	for i := range blobs {
-		if i < len(digests) {
-			s.put(digests[i], blobs[i])
+		if i >= len(digests) {
+			continue
+		}
+		if err := s.put(digests[i], blobs[i]); err != nil {
+			return nil, fmt.Errorf("cursor: history blob %d: %w", i, err)
 		}
 	}
-	return s
+	return s, nil
 }

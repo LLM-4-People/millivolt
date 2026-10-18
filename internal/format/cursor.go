@@ -351,7 +351,11 @@ func translateCursorRunRequest(openaiBody []byte, conversationID string, forceUs
 		contents = append(contents, blob)
 		convState = appendBytes(convState, fConversationStateRootPromptMessagesJSON, d)
 	}
-	blobs = cursorBlobsForHistory(digests, contents)
+	blobStore, err := cursorBlobsForHistory(digests, contents)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	blobs = blobStore
 
 	// UserMessage: text + a UUID message_id + empty selected_context + mode=1
 	// (matches the captured real client shape).

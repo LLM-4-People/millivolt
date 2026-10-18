@@ -36,6 +36,19 @@ import (
 // it: the count is bounded by live sub-agent tool batches, not time).
 const cursorRunMax = 256
 
+// cursorParkedBlobBytesMax bounds the aggregate retained KV blob bytes of all
+// parked runs in one store. cursorRunMax runs can each retain up to the 64 MiB
+// per-run cap, so without an aggregate bound a full store could pin 16 GiB;
+// 512 MiB admits eight maximal histories (or many normal ones) while failing
+// later parks closed. Internal safety guardrail, not user-tunable.
+const cursorParkedBlobBytesMax = 512 << 20 // 512 MiB
+
+// cursorParkedBlobEntriesMax bounds the aggregate number of KV blobs retained
+// by all parked runs in one store. The per-run entry cap alone would allow
+// cursorRunMax * 65,536 entries; one million admits many normal conversations
+// while failing later parks closed. Internal safety guardrail, not user-tunable.
+const cursorParkedBlobEntriesMax = 1_000_000
+
 // Only an immutable fingerprint is retained; no routing credential is stored.
 type cursorScope [sha256.Size]byte
 
@@ -71,13 +84,21 @@ type cursorRunStore struct {
 	entries       map[*providerformat.CursorRun]*cursorRunEntry
 	timer         *time.Timer
 	timerRevision uint64
+	// blobBytesMax and blobEntriesMax are the aggregate retained-blob budgets
+	// applied at park time. newCursorRunStore seeds them from the production
+	// caps; they are store state (not configuration) so tests can exercise the
+	// boundaries without allocating the production budget.
+	blobBytesMax   int64
+	blobEntriesMax int
 }
 
 func newCursorRunStore(ttl time.Duration) *cursorRunStore {
 	return &cursorRunStore{
-		ttl:     ttl,
-		byCall:  map[cursorCallKey]*cursorRunEntry{},
-		entries: map[*providerformat.CursorRun]*cursorRunEntry{},
+		ttl:            ttl,
+		byCall:         map[cursorCallKey]*cursorRunEntry{},
+		entries:        map[*providerformat.CursorRun]*cursorRunEntry{},
+		blobBytesMax:   cursorParkedBlobBytesMax,
+		blobEntriesMax: cursorParkedBlobEntriesMax,
 	}
 }
 
@@ -92,8 +113,8 @@ func (s *cursorRunStore) UpdateTTL(ttl time.Duration) {
 }
 
 // park registers a run as parked on the given pending tool_call_ids. Returns
-// false (and does not park) if at capacity - the caller then closes the run
-// and the client cold-starts on the next request.
+// false (and does not park) if at capacity or over the aggregate blob budgets -
+// the caller then closes the run and the client cold-starts on the next request.
 func (s *cursorRunStore) park(scope cursorScope, run *providerformat.CursorRun) bool {
 	ids := run.PendingToolCallIDs()
 	list := make([]string, 0, len(ids))
@@ -116,6 +137,9 @@ func (s *cursorRunStore) parkWith(scope cursorScope, run *providerformat.CursorR
 	if len(s.entries) >= cursorRunMax || run.Closed() || s.entries[run] != nil {
 		return false
 	}
+	if !s.blobBudgetAllowsLocked(run) {
+		return false
+	}
 	e := &cursorRunEntry{run: run, scope: scope, pending: map[string]bool{}, at: time.Now()}
 	for _, id := range ids {
 		if id == "" || e.pending[id] || s.byCall[cursorCallKey{scope, id}] != nil {
@@ -126,6 +150,35 @@ func (s *cursorRunStore) parkWith(scope cursorScope, run *providerformat.CursorR
 	s.entries[run] = e
 	for id := range e.pending {
 		s.byCall[cursorCallKey{scope, id}] = e
+	}
+	return true
+}
+
+// blobBudgetAllowsLocked reports whether admitting run would keep the parked
+// store's aggregate retained blob bytes and entries within blobBytesMax and
+// blobEntriesMax. It reads O(1) accessors under s.mu; no blob contents are
+// scanned or copied, and existing parked entries are never evicted or mutated
+// to make room. Caller holds s.mu.
+func (s *cursorRunStore) blobBudgetAllowsLocked(run *providerformat.CursorRun) bool {
+	totalBytes := run.BlobBytes()
+	if totalBytes < 0 || totalBytes > s.blobBytesMax {
+		return false
+	}
+	totalEntries := run.BlobEntries()
+	if totalEntries < 0 || totalEntries > s.blobEntriesMax {
+		return false
+	}
+	for _, e := range s.entries {
+		n := e.run.BlobBytes()
+		if n < 0 || n > s.blobBytesMax-totalBytes {
+			return false
+		}
+		totalBytes += n
+		entries := e.run.BlobEntries()
+		if entries < 0 || entries > s.blobEntriesMax-totalEntries {
+			return false
+		}
+		totalEntries += entries
 	}
 	return true
 }
