@@ -98,6 +98,11 @@ AUXILIARY_TYPES = {
     'request_debug': {'id': 'TEXT', 'session_id': 'TEXT', 'captured_at': 'INTEGER',
                       'expires_at': 'INTEGER', 'payload': 'TEXT'},
     'request_projection_state': dict.fromkeys(('singleton', 'epoch', 'high_rowid'), 'INTEGER'),
+    # SQLite's planner-statistics tables are created by ANALYZE on the first
+    # Go Open of a documentation copy; they carry no request data. Their
+    # columns are SQLite-owned and untyped, so verify names only.
+    'sqlite_stat1': dict.fromkeys(('tbl', 'idx', 'stat'), 'TEXT'),
+    'sqlite_stat4': dict.fromkeys(('tbl', 'idx', 'neq', 'nlt', 'ndlt', 'sample'), 'TEXT'),
 }
 INDEX_TABLES = {
     **dict.fromkeys(('idx_requests_log', 'idx_requests_provider', 'idx_requests_model',
@@ -384,11 +389,17 @@ def verify_docs_copy(path):
         require({'requests', 'meta'} <= tables <= {'requests', *AUXILIARY_TYPES},
                 'unrecognized documentation tables')
         for kind, name, table in objects:
-            require(kind == 'table' or kind == 'index' and INDEX_TABLES.get(name) == table
+            require(kind == 'table' or kind == 'index' and (
+                        INDEX_TABLES.get(name) == table or table.startswith('sqlite_stat'))
                     or kind == 'trigger' and name in TRIGGER_NAMES and table == 'requests',
                     'unrecognized documentation schema object')
         for table in tables - {'requests'}:
             types = AUXILIARY_TYPES[table]
+            if table.startswith('sqlite_stat'):
+                stat_columns = [row[1] for row in connection.execute(
+                    'PRAGMA table_info(' + table + ')')]
+                require(stat_columns == list(types), 'unrecognized statistics table columns')
+                continue
             _table_columns(connection, table, types, next(iter(types)))
         if 'request_debug' in tables:
             require(connection.execute('SELECT COUNT(*) FROM request_debug').fetchone()[0] == 0,

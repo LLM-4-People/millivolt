@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -557,6 +558,12 @@ func Open(path string, opts Options) (*Store, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	db.SetMaxOpenConns(sqliteWriterConns)
+	// Planner statistics are a read-path guardrail, not request data. Without
+	// them SQLite may choose a provider/model equality index and sort the
+	// whole match set before LIMIT; with statistics it keeps the ordered log
+	// index. Refresh only when absent or materially stale so ordinary boots
+	// pay no write.
+	ensureRequestStatistics(db)
 
 	// Read pool: with WAL, readers don't block the single writer. Dashboard
 	// queries run here so a slow SELECT can't starve insertBatch. The pool is
@@ -624,6 +631,72 @@ func Open(path string, opts Options) (*Store, error) {
 	s.wg.Add(1)
 	go s.writer()
 	return s, nil
+}
+
+// requestStatisticsTimeout bounds the one-time planner-statistics build so a
+// stuck disk cannot hold boot indefinitely. It is an internal startup
+// guardrail, not an operator tunable.
+const requestStatisticsTimeout = 2 * time.Minute
+
+// requestStatisticsDrift is how far the analyzed row count may lag the live
+// count before a refresh. A small floor avoids re-analyzing on every append.
+const requestStatisticsDrift = 10_000
+
+// ensureRequestStatistics builds sqlite_stat1/sqlite_stat4 for requests when
+// no statistics exist or the analyzed row count drifted materially. ANALYZE
+// writes only SQLite's stat tables; request rows, triggers and totals are
+// untouched. A failure is logged and leaves the database usable, with the
+// planner's existing cost guesses.
+func ensureRequestStatistics(db *sql.DB) {
+	ctx, cancel := context.WithTimeout(context.Background(), requestStatisticsTimeout)
+	defer cancel()
+	stale, err := requestStatisticsStale(ctx, db)
+	if err != nil {
+		log.Printf("storage: inspect planner statistics: %v", err)
+		return
+	}
+	if !stale {
+		return
+	}
+	if _, err := db.ExecContext(ctx, "ANALYZE requests"); err != nil {
+		log.Printf("storage: refresh planner statistics: %v", err)
+	}
+}
+
+func requestStatisticsStale(ctx context.Context, db *sql.DB) (bool, error) {
+	var stat string
+	err := db.QueryRowContext(ctx,
+		`SELECT stat FROM sqlite_stat1 WHERE tbl = 'requests' LIMIT 1`).Scan(&stat)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "no such table") {
+			return true, nil
+		}
+		return false, err
+	}
+	fields := strings.Fields(stat)
+	if len(fields) == 0 {
+		return true, nil
+	}
+	analyzed, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil {
+		return true, nil
+	}
+	var live int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests`).Scan(&live); err != nil {
+		return false, err
+	}
+	if live == 0 {
+		return false, nil
+	}
+	drift := live - analyzed
+	if drift < 0 {
+		drift = -drift
+	}
+	threshold := live / 10
+	if threshold < requestStatisticsDrift {
+		threshold = requestStatisticsDrift
+	}
+	return drift > threshold, nil
 }
 
 // Record implements metrics.Recorder. It never blocks: if the channel is
