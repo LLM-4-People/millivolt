@@ -196,9 +196,11 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	if err := os.WriteFile(src, data, 0o600); err != nil {
 		return 0, 0, err
 	}
-	// Hold the single writer connection for ATTACH through installTotals so
-	// insertBatch cannot account() a concurrent commit against pre-merge
-	// aggregates the way purge installs totals on the writer goroutine.
+	// Hold the single writer connection for ATTACH through the merge
+	// transaction and installTotals so insertBatch cannot account() a
+	// concurrent commit against pre-merge aggregates. ATTACH stays outside
+	// the transaction; the merge writes only the main database, and the
+	// transaction's own view includes its uncommitted rows for the totals scan.
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return 0, 0, err
@@ -208,9 +210,17 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 		return 0, 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_merge") }()
-	n, err := mergeAttachedTable(ctx, conn, "requests")
+	// Request rows, debug sidecars and the totals document commit as one
+	// transaction: a failure in any later phase rolls the earlier merges back
+	// instead of publishing rows whose totals were never persisted.
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
+	}
+	defer tx.Rollback()
+	n, err := mergeAttachedTable(ctx, tx, "requests")
+	if err != nil {
+		return 0, 0, fmt.Errorf("merge request rows from backup: %w", err)
 	}
 	inserted = n
 	skipped = int64(info.Requests) - inserted
@@ -218,47 +228,64 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 		skipped = 0
 	}
 	var debugErr error
-	if _, err := s.mergeDebugTable(ctx, conn); err != nil {
+	var debugBytes int64
+	debugBytesKnown := false
+	if _, err := s.mergeDebugTable(ctx, tx); err != nil {
 		debugErr = err
 	} else if s.debugMaxBytes > 0 {
-		if err := s.resetDebugBytes(ctx, conn); err != nil {
-			debugErr = err
+		// The held writer connection makes this transaction's sidecar sum the
+		// exact committed state. Read it now, publish it only after commit.
+		debugBytes, err = debugByteTotal(ctx, tx)
+		if err != nil {
+			debugErr = fmt.Errorf("debug byte counter after backup merge: %w", err)
+		} else {
+			debugBytesKnown = true
 		}
 	}
-	if inserted == 0 {
-		if debugErr != nil {
-			return inserted, skipped, debugErr
+	var totals Totals
+	if inserted > 0 {
+		// The post-merge totals scan is maintenance work on the held writer
+		// connection: it legitimately reads all history and must not inherit the
+		// interactive dashboard query timeout.
+		tctx, cancel := s.withMaintenanceTimeout(context.Background())
+		defer cancel()
+		// The transaction sees its own merged rows, so this scan is exact.
+		totals, err = readTotals(tctx, tx)
+		if err != nil {
+			return inserted, skipped, mergePhaseError(debugErr, "totals after backup merge", err)
 		}
-		return inserted, skipped, nil
-	}
-	// The post-merge totals scan is maintenance work on the held writer
-	// connection: it legitimately reads all history and must not inherit the
-	// interactive dashboard query timeout.
-	tctx, cancel := s.withMaintenanceTimeout(context.Background())
-	defer cancel()
-	// No other writer can commit while conn is held, so the scan is exact.
-	totals, err := readTotals(tctx, s.rdb)
-	if err != nil {
-		if debugErr != nil {
-			return inserted, skipped, fmt.Errorf("%w; totals after backup merge: %v", debugErr, err)
+		epoch, err := projectionEpoch(tctx, tx)
+		if err != nil {
+			return inserted, skipped, mergePhaseError(debugErr, "projection epoch after backup merge", err)
 		}
-		return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
-	}
-	epoch, err := projectionEpoch(tctx, conn)
-	if err != nil {
-		return inserted, skipped, fmt.Errorf("projection epoch after backup merge: %w", err)
-	}
-	if err := saveTotals(tctx, conn, totals, false, epoch); err != nil {
-		if debugErr != nil {
-			return inserted, skipped, fmt.Errorf("%w; persist totals after backup merge: %v", debugErr, err)
+		if err := saveTotals(tctx, tx, totals, false, epoch); err != nil {
+			return inserted, skipped, mergePhaseError(debugErr, "persist totals after backup merge", err)
 		}
-		return inserted, skipped, fmt.Errorf("persist totals after backup merge: %w", err)
 	}
-	s.installTotals(totals)
+	if err := tx.Commit(); err != nil {
+		return inserted, skipped, mergePhaseError(debugErr, "commit backup merge", err)
+	}
+	// Committed: these in-memory publications are mandatory and never consult
+	// the caller's context.
+	if debugBytesKnown {
+		s.installDebugBytes(debugBytes)
+	}
+	if inserted > 0 {
+		s.installTotals(totals)
+	}
 	if debugErr != nil {
 		return inserted, skipped, debugErr
 	}
 	return inserted, skipped, nil
+}
+
+// mergePhaseError attaches a non-fatal debug merge error to the fatal phase
+// error, preserving both for errors.Is.
+func mergePhaseError(debugErr error, phase string, fatal error) error {
+	if debugErr != nil {
+		return fmt.Errorf("%w; %s: %w", debugErr, phase, fatal)
+	}
+	return fmt.Errorf("%s: %w", phase, fatal)
 }
 
 type mergeConn interface {

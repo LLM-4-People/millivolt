@@ -778,33 +778,48 @@ func (s *Store) record(r *metrics.Record, buffer *metrics.Buffer) {
 	}
 }
 
+// rowQuerier is the one-row read surface shared by sidecar byte accounting on
+// a raw pool, a transaction or a held connection.
+type rowQuerier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// debugByteTotal reads the sidecar byte sum on the caller's transaction/connection.
+func debugByteTotal(ctx context.Context, q rowQuerier) (int64, error) {
+	var n int64
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n)
+	return n, err
+}
+
+// installDebugBytes publishes a sidecar byte total; callers own whether the
+// backing transaction has committed yet.
+func (s *Store) installDebugBytes(n int64) {
+	s.debugMu.Lock()
+	s.debugBytes, s.debugSeeded = n, true
+	s.debugMu.Unlock()
+}
+
 // seedDebugBytes initializes the sidecar byte counter from durable rows. The
 // writer connection is free at Open; a failure leaves it unseeded so
 // SaveDebugCapture retries before enforcing the cap.
 func (s *Store) seedDebugBytes(ctx context.Context) error {
-	var n int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
+	n, err := debugByteTotal(ctx, s.db)
+	if err != nil {
 		return err
 	}
-	s.debugMu.Lock()
-	s.debugBytes, s.debugSeeded = n, true
-	s.debugMu.Unlock()
+	s.installDebugBytes(n)
 	return nil
 }
 
-// resetDebugBytes recomputes the counter after a bulk mutation (purge/merge)
-// or an expiry batch whose freed-byte subtraction could not be proven exact,
-// on the caller's transaction/connection.
-func (s *Store) resetDebugBytes(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) error {
-	var n int64
-	if err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(CAST(payload AS BLOB))), 0) FROM request_debug`).Scan(&n); err != nil {
+// resetDebugBytes recomputes the counter after a bulk mutation (purge) or an
+// expiry batch whose freed-byte subtraction could not be proven exact, on the
+// caller's transaction/connection.
+func (s *Store) resetDebugBytes(ctx context.Context, q rowQuerier) error {
+	n, err := debugByteTotal(ctx, q)
+	if err != nil {
 		return err
 	}
-	s.debugMu.Lock()
-	s.debugBytes, s.debugSeeded = n, true
-	s.debugMu.Unlock()
+	s.installDebugBytes(n)
 	return nil
 }
 

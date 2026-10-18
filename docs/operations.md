@@ -540,7 +540,9 @@ hot-applies through the same owner as a Settings save, is reflected in
 **replace** stages a pending snapshot next to `db_path` and waits for process
 restart; Open admits the pending file only after it checks again. Database
 **merge** inserts request ids that are not already in the live store
-immediately (live rows win on conflict) and does not require a restart.
+immediately (live rows win on conflict) and does not require a restart. Its
+request rows, debug sidecars and since-inception totals commit as one
+transaction, so a failed totals write leaves no partial merge behind.
 Truncated or bit-flipped files are rejected. The `backup_max_bytes` setting
 is the archive ceiling; encoding enforces it while the stream is written, so
 an over-cap archive is removed instead of partially served.

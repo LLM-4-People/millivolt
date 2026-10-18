@@ -166,10 +166,13 @@ concurrent readers keep serving the previous complete snapshot and wait for
 that builder instead of repeating its scan. A destructive change builds a
 complete replacement off-lock and swaps it under a short write lock. The
 durable since-inception totals are one meta row written in the same
-transaction as every insert and purge and on the held writer connection during
-a merge; its recorded projection epoch is the mutation witness. A merge whose
-document write fails leaves the epoch advanced, so the next boot rebuilds
-rather than trusting the pair. A boot with a changed epoch rebuilds once from the rows
+transaction as every insert, purge and merge on the held writer connection;
+its recorded projection epoch is the mutation witness. A merge writes its
+request rows, debug sidecars and totals document in one transaction, so a
+failed totals write rolls the whole merge back instead of advancing the epoch
+over partial rows. An unsupported external writer that advances the epoch
+leaves the pair mismatched, so the next boot rebuilds rather than trusting it.
+A boot with a changed epoch rebuilds once from the rows
 instead of trusting a stale cache, and a full purge has no surviving rows to
 scan. Restart readiness therefore no longer scales with the sum of a totals
 scan plus a separate preload scan.

@@ -258,6 +258,9 @@ func TestMergeSnapshotTotalsAfterDebugError(t *testing.T) {
 	if live.Totals().Requests != 2 {
 		t.Fatalf("totals after failed debug merge = %d, want 2 (requests already inserted)", live.Totals().Requests)
 	}
+	if n := countRows(t, live); n != 2 {
+		t.Fatalf("rows after failed debug merge = %d, want the merged request committed", n)
+	}
 }
 
 // TestMergeSnapshotSkipsDebugOverCap pins the sidecar cap across a restore:
@@ -298,6 +301,249 @@ func TestMergeSnapshotSkipsDebugOverCap(t *testing.T) {
 	live.debugMu.Unlock()
 	if bytes != 32<<10 {
 		t.Fatalf("debug byte counter = %d, want %d", bytes, 32<<10)
+	}
+}
+
+func debugByteCounter(s *Store) int64 {
+	s.debugMu.Lock()
+	defer s.debugMu.Unlock()
+	return s.debugBytes
+}
+
+func metaValue(t *testing.T, s *Store, key string) string {
+	t.Helper()
+	var value string
+	if err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func projectionStateEpoch(t *testing.T, s *Store) int64 {
+	t.Helper()
+	var epoch int64
+	if err := s.db.QueryRow(`SELECT epoch FROM request_projection_state WHERE singleton = 1`).Scan(&epoch); err != nil {
+		t.Fatal(err)
+	}
+	return epoch
+}
+
+func attachedDatabaseCount(t *testing.T, s *Store, name string) int {
+	t.Helper()
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_database_list WHERE name = ?`, name).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// TestMergeSnapshotTotalsFailureRollsBack pins merge atomicity: when the
+// totals document cannot be persisted, the request rows and debug sidecars
+// merged earlier in the same transaction disappear with it, in-memory totals
+// and the sidecar byte counter stay untouched, ATTACH is cleaned up, and a
+// healthy retry merges the archive exactly once.
+func TestMergeSnapshotTotalsFailureRollsBack(t *testing.T) {
+	opts := testOpts
+	opts.DebugMaxBytes = 1 << 20
+	live, err := Open(filepath.Join(t.TempDir(), "merge-rollback.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	const livePayload = "live-debug"
+	if err := live.SaveDebugCapture(t.Context(), "live-debug", "sess", time.Now().UnixMilli(), 0, []byte(livePayload)); err != nil {
+		t.Fatal(err)
+	}
+
+	src := openTestStore(t)
+	src.Record(&metrics.Record{ID: "backup-row", Provider: "backup.example", Model: "n", StatusCode: 200})
+	const backupPayload = "backup-debug"
+	if err := src.SaveDebugCapture(t.Context(), "backup-debug", "sess", time.Now().UnixMilli(), 0, []byte(backupPayload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTotals := live.Totals()
+	beforeDoc := metaValue(t, live, totalsMetaKey)
+	beforeEpoch := projectionStateEpoch(t, live)
+	beforeBytes := debugByteCounter(live)
+	if beforeTotals.Requests != 1 || beforeBytes != int64(len(livePayload)) {
+		t.Fatalf("test setup: totals=%+v debug bytes=%d", beforeTotals, beforeBytes)
+	}
+	if _, err := live.db.Exec(`CREATE TRIGGER test_merge_totals_abort BEFORE INSERT ON meta
+		WHEN NEW.key = 'totals' BEGIN SELECT RAISE(ABORT, 'injected totals persist failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
+	if err == nil {
+		t.Fatal("merge succeeded while the totals document was rejected")
+	}
+	if !strings.Contains(err.Error(), "totals") {
+		t.Fatalf("merge error %q does not name the totals failure", err)
+	}
+	if inserted != 1 || skipped != 0 {
+		t.Fatalf("failed merge counts inserted=%d skipped=%d, want 1/0", inserted, skipped)
+	}
+	if n := countRows(t, live); n != 1 {
+		t.Fatalf("request rows after failed merge = %d, want only the live row", n)
+	}
+	recent, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range recent {
+		if r.ID == "backup-row" {
+			t.Fatal("backup request row survived the rolled-back merge")
+		}
+	}
+	if raw, err := live.LoadDebugCapture(t.Context(), "backup-debug"); err != nil || raw != nil {
+		t.Fatalf("backup debug sidecar after failed merge = %q, %v", raw, err)
+	}
+	if raw, err := live.LoadDebugCapture(t.Context(), "live-debug"); err != nil || string(raw) != livePayload {
+		t.Fatalf("live debug sidecar after failed merge = %q, %v", raw, err)
+	}
+	if got := live.Totals(); got != beforeTotals {
+		t.Fatalf("in-memory totals after failed merge = %+v, want %+v", got, beforeTotals)
+	}
+	if got := metaValue(t, live, totalsMetaKey); got != beforeDoc {
+		t.Fatalf("persisted totals after failed merge changed: %s", got)
+	}
+	if got := projectionStateEpoch(t, live); got != beforeEpoch {
+		t.Fatalf("projection epoch after failed merge = %d, want %d", got, beforeEpoch)
+	}
+	if got := debugByteCounter(live); got != beforeBytes {
+		t.Fatalf("debug byte counter after failed merge = %d, want %d", got, beforeBytes)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_merge"); n != 0 {
+		t.Fatal("backup_merge still attached after failed merge")
+	}
+
+	if _, err := live.db.Exec(`DROP TRIGGER test_merge_totals_abort`); err != nil {
+		t.Fatal(err)
+	}
+	inserted, skipped, err = live.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatalf("healthy retry: %v", err)
+	}
+	if inserted != 1 || skipped != 0 {
+		t.Fatalf("retry counts inserted=%d skipped=%d, want 1/0", inserted, skipped)
+	}
+	if n := countRows(t, live); n != 2 {
+		t.Fatalf("request rows after retry = %d, want 2", n)
+	}
+	if got := live.Totals().Requests; got != 2 {
+		t.Fatalf("totals after retry = %d, want 2", got)
+	}
+	if raw, err := live.LoadDebugCapture(t.Context(), "backup-debug"); err != nil || string(raw) != backupPayload {
+		t.Fatalf("backup debug sidecar after retry = %q, %v", raw, err)
+	}
+	if got, want := debugByteCounter(live), int64(len(livePayload)+len(backupPayload)); got != want {
+		t.Fatalf("debug byte counter after retry = %d, want %d", got, want)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_merge"); n != 0 {
+		t.Fatal("backup_merge still attached after retry")
+	}
+}
+
+// TestMergeSnapshotDebugCapDisabledMergesSidecars covers the inserted==0
+// branch with the sidecar cap disabled: debug-only backup rows commit without
+// recomputing request totals.
+func TestMergeSnapshotDebugCapDisabledMergesSidecars(t *testing.T) {
+	live := openTestStore(t)
+	src := openTestStore(t)
+	payload := []byte(`{"body":"neutral"}`)
+	if err := src.SaveDebugCapture(t.Context(), "backup-debug", "sess", time.Now().UnixMilli(), 0, payload); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := live.Totals()
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inserted != 0 || skipped != 0 {
+		t.Fatalf("debug-only merge counts inserted=%d skipped=%d, want 0/0", inserted, skipped)
+	}
+	if got := live.Totals(); got != before {
+		t.Fatalf("debug-only merge recomputed totals: %+v -> %+v", before, got)
+	}
+	raw, err := live.LoadDebugCapture(t.Context(), "backup-debug")
+	if err != nil || string(raw) != string(payload) {
+		t.Fatalf("backup debug sidecar = %q, %v", raw, err)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_merge"); n != 0 {
+		t.Fatal("backup_merge still attached after debug-only merge")
+	}
+}
+
+// TestMergeSnapshotExpiredMaintenanceDeadlineRollsBack pins fail-closed totals
+// scanning: an already expired maintenance budget fails the totals phase and
+// rolls the earlier request and debug merges back instead of publishing rows
+// with stale totals.
+func TestMergeSnapshotExpiredMaintenanceDeadlineRollsBack(t *testing.T) {
+	opts := testOpts
+	opts.DebugMaxBytes = 1 << 20
+	opts.MaintenanceTimeout = time.Nanosecond
+	live, err := Open(filepath.Join(t.TempDir(), "merge-deadline.db"), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = live.Close() })
+	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	const livePayload = "live-debug"
+	if err := live.SaveDebugCapture(t.Context(), "live-debug", "sess", time.Now().UnixMilli(), 0, []byte(livePayload)); err != nil {
+		t.Fatal(err)
+	}
+
+	src := openTestStore(t)
+	src.Record(&metrics.Record{ID: "backup-row", Provider: "backup.example", Model: "n", StatusCode: 200})
+	if err := src.SaveDebugCapture(t.Context(), "backup-debug", "sess", time.Now().UnixMilli(), 0, []byte("backup-debug")); err != nil {
+		t.Fatal(err)
+	}
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	beforeTotals := live.Totals()
+	beforeBytes := debugByteCounter(live)
+	if _, _, err := live.MergeSnapshot(t.Context(), data); err == nil {
+		t.Fatal("merge succeeded with an expired maintenance budget")
+	}
+	if n := countRows(t, live); n != 1 {
+		t.Fatalf("request rows after expired-deadline merge = %d, want only the live row", n)
+	}
+	if raw, err := live.LoadDebugCapture(t.Context(), "backup-debug"); err != nil || raw != nil {
+		t.Fatalf("backup debug sidecar after expired-deadline merge = %q, %v", raw, err)
+	}
+	if got := live.Totals(); got != beforeTotals {
+		t.Fatalf("totals after expired-deadline merge = %+v, want %+v", got, beforeTotals)
+	}
+	if got := debugByteCounter(live); got != beforeBytes {
+		t.Fatalf("debug byte counter after expired-deadline merge = %d, want %d", got, beforeBytes)
+	}
+	if n := attachedDatabaseCount(t, live, "backup_merge"); n != 0 {
+		t.Fatal("backup_merge still attached after expired-deadline merge")
 	}
 }
 
