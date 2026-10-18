@@ -92,44 +92,34 @@ func (b *Buffer) SnapshotRequest(q url.Values, header http.Header) Snapshot {
 	return snap
 }
 
-// writeSSEFrame streams one event as its parts: the JSON payload is already
-// allocated, so concatenating prefix+payload+suffix and converting the result
-// to a byte slice only adds two full-size copies (multi-megabyte for a full
-// snapshot). net/http's response buffer coalesces the writes.
+// appendSSEFrame appends one event frame to dst. The snapshot writer uses it
+// on an empty destination; the live loop batches many frames into one write so
+// a burst costs one syscall, one flush, and one deadline arm instead of one
+// per event.
+func appendSSEFrame(dst []byte, event string, id int64, hasID bool, data []byte) []byte {
+	if hasID {
+		dst = append(dst, "id: "...)
+		dst = strconv.AppendInt(dst, id, 10)
+		dst = append(dst, '\n')
+	}
+	if event != "" {
+		dst = append(dst, "event: "...)
+		dst = append(dst, event...)
+		dst = append(dst, '\n')
+	}
+	dst = append(dst, "data: "...)
+	dst = append(dst, data...)
+	return append(dst, '\n', '\n')
+}
+
+// writeSSEFrame streams one event as one write. The JSON payload is already
+// allocated, so concatenating prefix+payload+suffix avoids the per-part writes
+// (and their deadline re-arms) for the snapshot and the tests.
 func writeSSEFrame(w io.Writer, event string, id int64, hasID bool, data []byte) error {
 	if rw, ok := w.(http.ResponseWriter); ok {
 		armSSEWriteDeadline(rw)
 	}
-	if hasID {
-		var idbuf [20]byte
-		if _, err := io.WriteString(w, "id: "); err != nil {
-			return err
-		}
-		if _, err := w.Write(strconv.AppendInt(idbuf[:0], id, 10)); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, "\n"); err != nil {
-			return err
-		}
-	}
-	if event != "" {
-		if _, err := io.WriteString(w, "event: "); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, event); err != nil {
-			return err
-		}
-		if _, err := io.WriteString(w, "\n"); err != nil {
-			return err
-		}
-	}
-	if _, err := io.WriteString(w, "data: "); err != nil {
-		return err
-	}
-	if _, err := w.Write(data); err != nil {
-		return err
-	}
-	_, err := io.WriteString(w, "\n\n")
+	_, err := w.Write(appendSSEFrame(nil, event, id, hasID, data))
 	return err
 }
 
@@ -219,6 +209,32 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 	ticker := time.NewTicker(sseHeartbeat)
 	defer ticker.Stop()
 
+	const sseBatchBytes = 32 << 10
+	batch := make([]byte, 0, sseBatchBytes)
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		armSSEWriteDeadline(w)
+		if _, err := w.Write(batch); err != nil {
+			return err
+		}
+		flusher.Flush()
+		batch = batch[:0]
+		return nil
+	}
+	appendEvent := func(event string, id int64, hasID bool, data []byte) error {
+		if len(batch) > 0 && len(batch)+len(data)+64 > sseBatchBytes {
+			if err := flush(); err != nil {
+				return err
+			}
+		}
+		batch = appendSSEFrame(batch, event, id, hasID, data)
+		if len(batch) >= sseBatchBytes {
+			return flush()
+		}
+		return nil
+	}
 	for {
 		select {
 		case <-feedDone:
@@ -228,6 +244,7 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case ev, ok := <-sub:
 			if !ok {
+				_ = flush()
 				return // overflow: reconnect before accepting any later cursor
 			}
 			if ev.feedID != feedID {
@@ -242,12 +259,12 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				log.Printf("metrics: encode record event: %v", err)
 				return
 			}
-			if err := writeSSEFrame(w, "record", ev.Seq, true, data); err != nil {
+			if err := appendEvent("record", ev.Seq, true, data); err != nil {
 				return
 			}
-			flusher.Flush()
 		case liveEv, ok := <-live:
 			if !ok {
+				_ = flush()
 				return // overflow: the next snapshot restores pending state
 			}
 			if liveEv.feedID != feedID {
@@ -260,19 +277,74 @@ func (b *Buffer) HandleStream(w http.ResponseWriter, r *http.Request) {
 				log.Printf("metrics: encode live event: %v", err)
 				return
 			}
-			if err := writeSSEFrame(w, liveEv.Phase, 0, false, data); err != nil {
+			if err := appendEvent(liveEv.Phase, 0, false, data); err != nil {
 				return
 			}
-			flusher.Flush()
 		case <-ticker.C:
+			if err := flush(); err != nil {
+				return
+			}
 			armSSEWriteDeadline(w)
 			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
 				return
 			}
 			flusher.Flush()
 		case <-feedDone:
+			_ = flush()
 			return
 		case <-ctx.Done():
+			_ = flush()
+			return
+		}
+		// Drain everything already queued into the same write. Bounded by the
+		// batch cap, so a burst cannot starve shutdown or unboundedly delay a
+		// flush.
+	drain:
+		for {
+			select {
+			case ev, ok := <-sub:
+				if !ok {
+					_ = flush()
+					return
+				}
+				if ev.feedID != feedID {
+					continue
+				}
+				data, err := json.Marshal(b.observeRecord(ev.Record))
+				if err != nil {
+					log.Printf("metrics: encode record event: %v", err)
+					return
+				}
+				if err := appendEvent("record", ev.Seq, true, data); err != nil {
+					return
+				}
+			case liveEv, ok := <-live:
+				if !ok {
+					_ = flush()
+					return
+				}
+				if liveEv.feedID != feedID {
+					continue
+				}
+				data, err := json.Marshal(b.observeLive(liveEv))
+				if err != nil {
+					log.Printf("metrics: encode live event: %v", err)
+					return
+				}
+				if err := appendEvent(liveEv.Phase, 0, false, data); err != nil {
+					return
+				}
+			case <-feedDone:
+				_ = flush()
+				return
+			case <-ctx.Done():
+				_ = flush()
+				return
+			default:
+				break drain
+			}
+		}
+		if err := flush(); err != nil {
 			return
 		}
 	}

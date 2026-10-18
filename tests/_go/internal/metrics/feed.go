@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -374,7 +375,9 @@ func TestHandleStreamRecordEventsCarryID(t *testing.T) {
 	b.Record(record("c"))               // seq 3 → record event (id: 3)
 	b.PublishLive("begin", record("d")) // → begin event (no id)
 	b.Record(record("d"))               // → end event (no id), plus finalized record
-	waitFor(t, func() bool { return w.n.Load() >= 4 }, "record + lifecycle event writes")
+	// Ready events are batched into one write; the snapshot plus one batch is
+	// the normal count. Cancellation flushes any remaining partial batch.
+	waitFor(t, func() bool { return w.n.Load() >= 2 }, "record + lifecycle event batch")
 
 	cancel()
 	<-done
@@ -417,6 +420,36 @@ func TestHandleStreamRecordEventsCarryID(t *testing.T) {
 	}
 	if !sawLifecycle {
 		t.Errorf("test never drove a lifecycle event; the no-id guard scanned nothing:\n%s", out)
+	}
+}
+
+// TestHandleStreamBatchesReadyEvents pins the many-subscriber write path: a
+// burst of ready events is coalesced into a handful of writes/flushes, not one
+// per event, while every record frame still reaches the client in order.
+func TestHandleStreamBatchesReadyEvents(t *testing.T) {
+	b := NewBuffer(256)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil).WithContext(ctx)
+	w := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+	done := make(chan struct{})
+	go func() {
+		b.HandleStream(w, req)
+		close(done)
+	}()
+	waitFor(t, func() bool { return w.n.Load() >= 1 }, "snapshot write")
+	for i := 0; i < 50; i++ {
+		b.Record(record(fmt.Sprintf("batch-%02d", i)))
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+	out := w.Body.String()
+	if got := strings.Count(out, "event: record"); got != 50 {
+		t.Fatalf("record frames = %d, want 50", got)
+	}
+	if writes := w.n.Load(); writes > 10 {
+		t.Fatalf("50 batched events used %d writes, want a handful (per-event writes regressed)", writes)
 	}
 }
 
