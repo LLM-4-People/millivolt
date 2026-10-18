@@ -63,8 +63,11 @@ type Buffer struct {
 	// (a fresh page missed the original "begin" event, which is never
 	// replayed). Ephemeral like the lifecycle events themselves: never the
 	// ring, never the store. Guarded by mu; PublishLive maintains it.
-	pending       map[string]*Record
-	modelObserver func(bool, ...[]*Record) any // full snapshot vs event metadata; guarded by mu
+	pending map[string]*Record
+	// modelObserver is the startup-wired immutable observer provider. An
+	// atomic holder keeps SSE record/end serialization off the ring lock: the
+	// observer is replaced only at startup/hot reload, never per event.
+	modelObserver atomic.Pointer[modelObserverFunc]
 
 	// feedDone is selected on by every HandleStream so a graceful restart can
 	// end the dashboard SSE feeds without touching proxied LLM streams (the

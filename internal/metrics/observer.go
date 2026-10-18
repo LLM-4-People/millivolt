@@ -41,22 +41,30 @@ func ObserveRecords(records []*Record) []ObservedRecord {
 	return out
 }
 
+// modelObserverFunc is the installed canonical-name provider. It is immutable
+// per installed value; SetModelObserver swaps the whole holder atomically.
+type modelObserverFunc func(bool, ...[]*Record) any
+
 // SetModelObserver installs the startup-wired canonical-name provider. The
 // metrics package deliberately knows no configuration or regex implementation.
+// The holder is lock-free: SSE record/end serialization must never contend with
+// Record's ring lock, and the provider is installed once at startup (or on an
+// explicit reload), not per event.
 func (b *Buffer) SetModelObserver(fn func(bool, ...[]*Record) any) {
-	b.mu.Lock()
-	b.modelObserver = fn
-	b.mu.Unlock()
+	if fn == nil {
+		b.modelObserver.Store(nil)
+		return
+	}
+	installed := modelObserverFunc(fn)
+	b.modelObserver.Store(&installed)
 }
 
 func (b *Buffer) observerModels(full bool, records ...[]*Record) any {
-	b.mu.RLock()
-	fn := b.modelObserver
-	b.mu.RUnlock()
+	fn := b.modelObserver.Load()
 	if fn == nil {
 		return nil
 	}
-	return fn(full, records...)
+	return (*fn)(full, records...)
 }
 
 type ObservedSnapshot struct {
