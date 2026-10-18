@@ -539,3 +539,51 @@ func TestCursorWaitsWhenGroupTripped(t *testing.T) {
 		t.Fatalf("upstream hits = %d, want 1", got)
 	}
 }
+
+// TestCursorTurnErrorTextBoundsRecordAndWire pins both TurnErrored renderers:
+// a body-sized upstream error is truncated at the canonical preview bound
+// before it reaches Record.ErrorMsg and the 502/SSE body, while a normal error
+// stays byte-identical on both surfaces.
+func TestCursorTurnErrorTextBoundsRecordAndWire(t *testing.T) {
+	const maxWireBody = 4096
+	hostile := strings.Repeat("z", 1<<20)
+	normal := fmt.Errorf("connect upstream error (unavailable): try later")
+	hostileErr := fmt.Errorf("connect upstream error (unavailable): %s", hostile)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"hostile", hostileErr, metrics.TruncatePreview(hostileErr.Error())},
+		{"normal", normal, normal.Error()},
+	} {
+		for _, surface := range []string{"json", "sse"} {
+			t.Run(tc.name+"/"+surface, func(t *testing.T) {
+				s := &Server{cursorRuns: newCursorRunStore(time.Hour)}
+				rec := &metrics.Record{StatusCode: http.StatusOK}
+				pr, pw := io.Pipe()
+				run := providerformat.NewCursorRun(pw, pr, nil, func() {}, 5*time.Second)
+				result := providerformat.TurnResult{Outcome: providerformat.TurnErrored, Err: tc.err}
+				w := httptest.NewRecorder()
+				if surface == "json" {
+					s.writeRunJSON(w, run, result, "", nil, rec, "cursor-id", cursorTurnRender{}, false)
+				} else {
+					s.finishRunTurn(w, run, result, func(map[string]any, any) error { return nil }, rec, "cursor-id", cursorTurnRender{}, false)
+				}
+				if rec.ErrorMsg != tc.want {
+					t.Fatalf("record error = %q, want %q", rec.ErrorMsg, tc.want)
+				}
+				body := w.Body.String()
+				if strings.Contains(body, hostile) {
+					t.Fatal("wire body retained the hostile upstream message")
+				}
+				if len(body) > maxWireBody {
+					t.Fatalf("wire body = %d bytes, want <= %d", len(body), maxWireBody)
+				}
+				if !strings.Contains(body, tc.want) {
+					t.Fatalf("wire body lost the bounded message: %q", body)
+				}
+			})
+		}
+	}
+}

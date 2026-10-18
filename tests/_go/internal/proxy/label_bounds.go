@@ -9,6 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -56,12 +57,12 @@ func TestRequestLabelOwnersBoundHostileValues(t *testing.T) {
 	t.Run("x-stainless-lang", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Header.Set("X-Stainless-Lang", long)
-		assertBoundedLabel(t, "client language", clientLang(r), retainedClientMax)
+		assertBoundedLabel(t, "client language", clientLang(r), retainedClientLangMax)
 	})
 	t.Run("language from user agent", func(t *testing.T) {
 		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 		r.Header.Set("User-Agent", long+"/1.0")
-		assertBoundedLabel(t, "client language", clientLang(r), retainedClientMax)
+		assertBoundedLabel(t, "client language", clientLang(r), retainedClientLangMax)
 	})
 }
 
@@ -101,7 +102,7 @@ func TestRequestLabelOwnersPreserveShortLabels(t *testing.T) {
 
 	atClient := strings.Repeat("c", retainedClientMax)
 	atIP := strings.Repeat("1", retainedClientIPMax)
-	atLang := strings.Repeat("l", retainedClientMax)
+	atLang := strings.Repeat("l", retainedClientLangMax)
 	bounded := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	bounded.Header.Set(hdrClient, atClient)
 	bounded.Header.Set("X-Forwarded-For", atIP)
@@ -174,11 +175,72 @@ func TestHostileRequestLabelsBoundedInRingAndDurableRow(t *testing.T) {
 		assertBoundedLabel(t, target.name+" user agent", target.rec.UserAgent, retainedUserAgentMax)
 		assertBoundedLabel(t, target.name+" client", target.rec.Client, retainedClientMax)
 		assertBoundedLabel(t, target.name+" client IP", target.rec.ClientIP, retainedClientIPMax)
-		assertBoundedLabel(t, target.name+" client language", target.rec.ClientLang, retainedClientMax)
+		assertBoundedLabel(t, target.name+" client language", target.rec.ClientLang, retainedClientLangMax)
 	}
 	if ring.UserAgent != durable[0].UserAgent || ring.Client != durable[0].Client ||
 		ring.ClientIP != durable[0].ClientIP || ring.ClientLang != durable[0].ClientLang {
 		t.Fatalf("ring and durable labels diverged:\nring=%+v\ndurable=%+v", ring, durable[0])
+	}
+}
+
+// TestProviderLabelBoundary pins the base-URL authority boundary: a normal
+// domain still derives its registrable label, IP authorities keep their
+// host:port form, and a header-sized hostname or an implausible port is
+// rejected before any record exists.
+func TestProviderLabelBoundary(t *testing.T) {
+	const dnsHostMax = 253
+	cfg := config.Default()
+	for _, tc := range []struct {
+		base string
+		want string
+	}{
+		{"https://api.fixture.example/v1", "fixture.example"},
+		{"http://10.0.0.5:8000/v1", "10.0.0.5:8000"},
+		{"http://[::1]:11434/v1", "[::1]:11434"},
+		{"http://localhost:11434/v1", "localhost"},
+		{"https://api.fixture.example:65535/v1", "fixture.example"},
+		{"https://" + strings.Repeat("a", dnsHostMax), strings.Repeat("a", dnsHostMax)},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", nil)
+		r.Header.Set(hdrBaseURL, tc.base)
+		tgt, err := resolveTarget(r, cfg)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", tc.base, err)
+		}
+		if tgt.provider != tc.want {
+			t.Fatalf("provider for %q = %q, want %q", tc.base, tgt.provider, tc.want)
+		}
+	}
+	for _, base := range []string{
+		"https://" + strings.Repeat("a", dnsHostMax+1),
+		"https://api.fixture.example:65536",
+		"https://api.fixture.example:999999",
+		"https://api.fixture.example:0",
+	} {
+		r := httptest.NewRequest(http.MethodPost, "http://proxy/v1/chat/completions", nil)
+		r.Header.Set(hdrBaseURL, base)
+		if _, err := resolveTarget(r, cfg); err == nil {
+			t.Fatalf("resolveTarget(%q) accepted an implausible authority", base)
+		}
+	}
+
+	// The real request boundary rejects a 900 KiB hostname and never records it.
+	buf := metrics.NewBuffer(1)
+	p := New(cfg, buf)
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("hostile base URL reached the upstream transport")
+		return nil, nil
+	})})
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[]}`))
+	r.Header.Set(hdrBaseURL, "http://"+strings.Repeat("a", 900<<10)+"/v1")
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("hostile base URL status = %d, want 400", w.Code)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("hostile base URL produced %d records, want none", buf.Len())
 	}
 }
 

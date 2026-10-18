@@ -60,15 +60,17 @@ are cut on a UTF-8 boundary and end with `…`; normal labels are unchanged.
 
 Finalized and pending record text is retention-bounded at the record boundary
 before it enters the live ring, pending view or durable store: path 1024 bytes,
-method 32 bytes, model, provider model, provider request id, provider server,
-finish reason, error type and error code 512 bytes each, each tool name 128
-bytes with at most 64 retained in order, and debug session id 128 bytes.
-Absorbed-attempt provider model, provider request id, provider server, error
-type and error code use the same 512-byte bound. Longer values are cut on a
-UTF-8 boundary and end with `…`; normal values are unchanged. Attempt error
-messages keep their existing owner's bound. These record bounds do not alter
-debug capture bodies, retained headers, content previews, request-parameter
-JSON or operator-configured provider names.
+method 32 bytes; provider label, model, provider model, provider request id,
+provider server, finish reason, error type, error code, error message, request
+tool choice, response format, service tier and last turn role 512 bytes each;
+each tool name 128 bytes with at most 64 retained in order; debug session id
+128 bytes; and conversation identifiers 512 bytes before the namespace prefix
+(retained identifier 514 bytes). Absorbed-attempt provider model, provider
+request id, provider server, error type, error code and error message use the
+same 512-byte bound; provider labels and attempt error messages are bounded at
+the same record boundary. Longer values are cut on a UTF-8 boundary and end
+with `…`; normal values are unchanged. These record bounds do not alter debug
+capture bodies, retained headers, content previews or request-parameter JSON.
 
 One caller setting `X-Proxy-Limit-*` affects every key/client of that provider.
 Absent headers preserve limits; `0`, `off`, `none` or `unlimited` clear them.

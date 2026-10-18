@@ -19,6 +19,13 @@ const (
 	retentionContractPathMax          = 1024
 	retentionContractMethodMax        = 32
 	retentionContractProviderTextMax  = 512
+	retentionContractErrorMsgMax      = 512
+	retentionContractRequestMetaMax   = 512
+	retentionContractConversationMax  = 514
+	retentionContractClientMax        = 256
+	retentionContractUserAgentMax     = 1024
+	retentionContractClientIPMax      = 128
+	retentionContractClientLangMax    = 256
 	retentionContractToolNameMax      = 128
 	retentionContractToolNamesMax     = 64
 	retentionContractDebugSessionMax  = 128
@@ -36,6 +43,7 @@ func retentionTextFields() []retentionTextField {
 	return []retentionTextField{
 		{"path", retentionContractPathMax, func(r *Record, v string) { r.Path = v }, func(r *Record) string { return r.Path }},
 		{"method", retentionContractMethodMax, func(r *Record, v string) { r.Method = v }, func(r *Record) string { return r.Method }},
+		{"provider label", retentionContractProviderTextMax, func(r *Record, v string) { r.Provider = v }, func(r *Record) string { return r.Provider }},
 		{"model", retentionContractProviderTextMax, func(r *Record, v string) { r.Model = v }, func(r *Record) string { return r.Model }},
 		{"provider model", retentionContractProviderTextMax, func(r *Record, v string) { r.ProviderModel = v }, func(r *Record) string { return r.ProviderModel }},
 		{"provider request id", retentionContractProviderTextMax, func(r *Record, v string) { r.ProviderRequestID = v }, func(r *Record) string { return r.ProviderRequestID }},
@@ -43,6 +51,17 @@ func retentionTextFields() []retentionTextField {
 		{"finish reason", retentionContractProviderTextMax, func(r *Record, v string) { r.FinishReason = v }, func(r *Record) string { return r.FinishReason }},
 		{"error type", retentionContractProviderTextMax, func(r *Record, v string) { r.ErrorType = v }, func(r *Record) string { return r.ErrorType }},
 		{"error code", retentionContractProviderTextMax, func(r *Record, v string) { r.ErrorCode = v }, func(r *Record) string { return r.ErrorCode }},
+		{"error message", retentionContractErrorMsgMax, func(r *Record, v string) { r.ErrorMsg = v }, func(r *Record) string { return r.ErrorMsg }},
+		{"client", retentionContractClientMax, func(r *Record, v string) { r.Client = v }, func(r *Record) string { return r.Client }},
+		{"user agent", retentionContractUserAgentMax, func(r *Record, v string) { r.UserAgent = v }, func(r *Record) string { return r.UserAgent }},
+		{"client IP", retentionContractClientIPMax, func(r *Record, v string) { r.ClientIP = v }, func(r *Record) string { return r.ClientIP }},
+		{"client language", retentionContractClientLangMax, func(r *Record, v string) { r.ClientLang = v }, func(r *Record) string { return r.ClientLang }},
+		{"conversation id", retentionContractConversationMax, func(r *Record, v string) { r.ConversationID = v }, func(r *Record) string { return r.ConversationID }},
+		{"parent conversation id", retentionContractConversationMax, func(r *Record, v string) { r.ParentConversationID = v }, func(r *Record) string { return r.ParentConversationID }},
+		{"request tool choice", retentionContractRequestMetaMax, func(r *Record, v string) { r.ReqToolChoice = v }, func(r *Record) string { return r.ReqToolChoice }},
+		{"request response format", retentionContractRequestMetaMax, func(r *Record, v string) { r.ReqResponseFormat = v }, func(r *Record) string { return r.ReqResponseFormat }},
+		{"request service tier", retentionContractRequestMetaMax, func(r *Record, v string) { r.ReqServiceTier = v }, func(r *Record) string { return r.ReqServiceTier }},
+		{"last turn role", retentionContractRequestMetaMax, func(r *Record, v string) { r.LastTurnRole = v }, func(r *Record) string { return r.LastTurnRole }},
 		{"debug session id", retentionContractDebugSessionMax, func(r *Record, v string) { r.DebugSessionID = v }, func(r *Record) string { return r.DebugSessionID }},
 	}
 }
@@ -213,6 +232,7 @@ func attemptRetentionFields() []attemptRetentionField {
 		{"provider server", retentionContractProviderTextMax, func(a *RetryAttempt, v string) { a.ProviderServer = v }, func(a *RetryAttempt) string { return a.ProviderServer }},
 		{"error type", retentionContractProviderTextMax, func(a *RetryAttempt, v string) { a.ErrorType = v }, func(a *RetryAttempt) string { return a.ErrorType }},
 		{"error code", retentionContractProviderTextMax, func(a *RetryAttempt, v string) { a.ErrorCode = v }, func(a *RetryAttempt) string { return a.ErrorCode }},
+		{"error message", retentionContractErrorMsgMax, func(a *RetryAttempt, v string) { a.ErrorMsg = v }, func(a *RetryAttempt) string { return a.ErrorMsg }},
 	}
 }
 
@@ -245,16 +265,16 @@ func TestRecordRetentionAttemptFields(t *testing.T) {
 	}
 }
 
-// TestRecordRetentionAttemptOrderAndMessage pins attempt order and the
-// already-bounded message semantics: the record pass never reorders attempts
-// and leaves TruncatePreview's output alone.
+// TestRecordRetentionAttemptOrderAndMessage pins attempt order and the message
+// semantics: the record pass never reorders attempts, leaves an already-bounded
+// message alone and applies the shared error-message bound to a hostile one.
 func TestRecordRetentionAttemptOrderAndMessage(t *testing.T) {
 	hostile := strings.Repeat("x", 1<<20)
 	message := TruncatePreview(strings.Repeat("m", PreviewMaxBytes+50))
 	rec := &Record{ID: "attempt-order", Attempts: []RetryAttempt{
 		{StatusCode: 429, ErrorType: "rate_limit_error", ErrorMsg: message, ProviderRequestID: "first"},
 		{
-			StatusCode: 503, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "upstream unavailable",
+			StatusCode: 503, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: hostile,
 			ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
 		},
 	}}
@@ -267,9 +287,7 @@ func TestRecordRetentionAttemptOrderAndMessage(t *testing.T) {
 	if attempts[0].ErrorMsg != message {
 		t.Fatalf("bounded attempt message changed: %d bytes", len(attempts[0].ErrorMsg))
 	}
-	if attempts[1].ErrorMsg != "upstream unavailable" {
-		t.Fatalf("attempt message = %q", attempts[1].ErrorMsg)
-	}
+	assertRetentionBound(t, "attempt error message", attempts[1].ErrorMsg, retentionContractErrorMsgMax)
 	if attempts[0].ProviderRequestID != "first" {
 		t.Fatalf("short attempt metadata changed: %q", attempts[0].ProviderRequestID)
 	}
@@ -289,10 +307,13 @@ func TestPublishLiveRecordRetentionBoundsSnapshot(t *testing.T) {
 	}
 	toolNames[0] = hostile
 	live := &Record{
-		ID: "pending", Path: hostile, Method: hostile, Model: hostile,
+		ID: "pending", Path: hostile, Method: hostile, Provider: hostile, Model: hostile,
 		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
-		FinishReason: hostile, ErrorType: hostile, ErrorCode: hostile,
-		DebugSessionID: hostile, ToolNames: toolNames,
+		FinishReason: hostile, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: hostile,
+		Client: hostile, UserAgent: hostile, ClientIP: hostile, ClientLang: hostile,
+		ConversationID: hostile, ParentConversationID: hostile,
+		ReqToolChoice: hostile, ReqResponseFormat: hostile, ReqServiceTier: hostile,
+		LastTurnRole: hostile, DebugSessionID: hostile, ToolNames: toolNames,
 	}
 	b := NewBuffer(2)
 	b.PublishLive("begin", live)
@@ -313,11 +334,16 @@ func TestPublishLiveRecordRetentionBoundsSnapshot(t *testing.T) {
 			}
 		}
 	}
-	if live.Path != hostile || live.Method != hostile || live.Model != hostile ||
-		live.ProviderModel != hostile || live.ProviderRequestID != hostile ||
-		live.ProviderServer != hostile || live.FinishReason != hostile ||
-		live.ErrorType != hostile || live.ErrorCode != hostile ||
-		live.DebugSessionID != hostile {
+	if live.Path != hostile || live.Method != hostile || live.Provider != hostile ||
+		live.Model != hostile || live.ProviderModel != hostile ||
+		live.ProviderRequestID != hostile || live.ProviderServer != hostile ||
+		live.FinishReason != hostile || live.ErrorType != hostile ||
+		live.ErrorCode != hostile || live.ErrorMsg != hostile ||
+		live.Client != hostile || live.UserAgent != hostile || live.ClientIP != hostile ||
+		live.ClientLang != hostile || live.ConversationID != hostile ||
+		live.ParentConversationID != hostile || live.ReqToolChoice != hostile ||
+		live.ReqResponseFormat != hostile || live.ReqServiceTier != hostile ||
+		live.LastTurnRole != hostile || live.DebugSessionID != hostile {
 		t.Fatal("begin snapshot mutated the live record")
 	}
 	if len(live.ToolNames) != retentionContractToolNamesMax+1 || live.ToolNames[0] != hostile {
@@ -325,7 +351,7 @@ func TestPublishLiveRecordRetentionBoundsSnapshot(t *testing.T) {
 	}
 
 	live.Attempts = []RetryAttempt{{
-		StatusCode: 500, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "attempt failed",
+		StatusCode: 500, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: hostile,
 		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
 	}}
 	b.PublishLive("update", live)
@@ -336,12 +362,9 @@ func TestPublishLiveRecordRetentionBoundsSnapshot(t *testing.T) {
 	for _, field := range attemptRetentionFields() {
 		assertRetentionBound(t, field.name, field.get(&pending[0].Attempts[0]), field.max)
 	}
-	if pending[0].Attempts[0].ErrorMsg != "attempt failed" {
-		t.Fatal("attempt message changed in the pending snapshot")
-	}
 	if live.Attempts[0].ErrorType != hostile || live.Attempts[0].ProviderModel != hostile ||
 		live.Attempts[0].ProviderRequestID != hostile || live.Attempts[0].ProviderServer != hostile ||
-		live.Attempts[0].ErrorCode != hostile {
+		live.Attempts[0].ErrorCode != hostile || live.Attempts[0].ErrorMsg != hostile {
 		t.Fatal("update snapshot mutated the live attempt slice")
 	}
 
@@ -368,11 +391,15 @@ func TestBackfillRecordRetentionBoundsRestoredRecord(t *testing.T) {
 	}
 	hostile := strings.Repeat("o", 1<<20)
 	old := &Record{
-		ID: "old", Path: hostile, Method: hostile, Model: hostile, ProviderModel: hostile,
-		ProviderRequestID: hostile, ProviderServer: hostile, FinishReason: hostile,
-		ErrorType: hostile, ErrorCode: hostile, DebugSessionID: hostile,
+		ID: "old", Path: hostile, Method: hostile, Provider: hostile, Model: hostile,
+		ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
+		FinishReason: hostile, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: hostile,
+		Client: hostile, UserAgent: hostile, ClientIP: hostile, ClientLang: hostile,
+		ConversationID: hostile, ParentConversationID: hostile,
+		ReqToolChoice: hostile, ReqResponseFormat: hostile, ReqServiceTier: hostile,
+		LastTurnRole: hostile, DebugSessionID: hostile,
 		Attempts: []RetryAttempt{{
-			StatusCode: 500, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: "old failure",
+			StatusCode: 500, ErrorType: hostile, ErrorCode: hostile, ErrorMsg: hostile,
 			ProviderModel: hostile, ProviderRequestID: hostile, ProviderServer: hostile,
 		}},
 	}
@@ -389,8 +416,8 @@ func TestBackfillRecordRetentionBoundsRestoredRecord(t *testing.T) {
 	for _, field := range retentionTextFields() {
 		assertRetentionBound(t, field.name, field.get(ring[1]), field.max)
 	}
-	if len(ring[1].Attempts) != 1 || ring[1].Attempts[0].ErrorMsg != "old failure" {
-		t.Fatalf("restored attempts = %+v, want the original message", ring[1].Attempts)
+	if len(ring[1].Attempts) != 1 {
+		t.Fatalf("restored attempts = %+v, want one", ring[1].Attempts)
 	}
 	for _, field := range attemptRetentionFields() {
 		assertRetentionBound(t, field.name, field.get(&ring[1].Attempts[0]), field.max)
@@ -402,7 +429,11 @@ func TestBackfillRecordRetentionBoundsRestoredRecord(t *testing.T) {
 func TestRecordRetentionPreservesNormalRecordBytes(t *testing.T) {
 	rec := &Record{
 		ID: "normal", Provider: "fixture", Model: "model-a", Path: "/v1/chat/completions",
-		Method: "POST", Client: "fixture-client", ClientIP: "127.0.0.1",
+		Method: "POST", Client: "fixture-client", UserAgent: "fixture-client/1.0",
+		ClientIP: "127.0.0.1", ClientLang: "go",
+		ConversationID: "s:fixture-session", ParentConversationID: "s:fixture-parent",
+		ReqToolChoice: "auto", ReqResponseFormat: "json_object", ReqServiceTier: "flex",
+		LastTurnRole: "assistant", ErrorMsg: "upstream said no",
 		StatusCode: 200, Start: time.Unix(1700000000, 0).UTC(), End: time.Unix(1700000001, 0).UTC(),
 		FinishReason: "stop", ToolNames: []string{"read", "write"}, DebugSessionID: "debug-1",
 		Attempts: []RetryAttempt{{

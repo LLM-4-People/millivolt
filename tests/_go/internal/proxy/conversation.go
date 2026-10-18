@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -109,5 +110,38 @@ func TestConversationDifferentKeysSeparate(t *testing.T) {
 	b := ct.Assign("cli", "keyB", "", "", 6, now.Add(time.Second)) // different key
 	if a == b {
 		t.Errorf("different API keys share a conversation %q, want separate", a)
+	}
+}
+
+// TestConversationNamespaceOwnersBoundInvalidIDs pins the defensive namespace
+// owners: a valid id keeps its exact s:/k: form, while a direct Assign with an
+// invalid or overlong id hashes the whole value, so distinct values cannot
+// collide through truncation and the retained identifier stays bounded.
+func TestConversationNamespaceOwnersBoundInvalidIDs(t *testing.T) {
+	ct := NewConversationTracker(30*time.Minute, 64)
+	now := time.Now()
+	prefix := strings.Repeat("x", maxDeclaredSessionBytes+10)
+	explicitA := ct.Assign("cli", "k", prefix+"-a", "", 0, now)
+	explicitB := ct.Assign("cli", "k", prefix+"-b", "", 0, now)
+	trackedA := ct.Assign("cli", "k", "", prefix+"-a", 0, now)
+	trackedB := ct.Assign("cli", "k", "", prefix+"-b", 0, now)
+	if explicitA == explicitB || trackedA == trackedB {
+		t.Fatalf("hashed identifiers collided: %q/%q and %q/%q", explicitA, explicitB, trackedA, trackedB)
+	}
+	for _, got := range []string{explicitA, explicitB} {
+		if !strings.HasPrefix(got, "s:h:") || len(got) > maxDeclaredSessionBytes+2 {
+			t.Fatalf("explicit hashed id = %q (len %d)", got, len(got))
+		}
+	}
+	for _, got := range []string{trackedA, trackedB} {
+		if !strings.HasPrefix(got, "k:h:") || len(got) > maxDeclaredSessionBytes+2 {
+			t.Fatalf("tracked hashed id = %q (len %d)", got, len(got))
+		}
+	}
+	if got := ct.Assign("cli", "k", "task", "", 0, now); got != "s:task" {
+		t.Fatalf("valid explicit id = %q, want s:task", got)
+	}
+	if got := ct.Assign("cli", "k", "", "tracked", 0, now); got != "k:tracked" {
+		t.Fatalf("valid tracked id = %q, want k:tracked", got)
 	}
 }

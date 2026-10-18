@@ -2,15 +2,33 @@ package metrics
 
 import "unicode/utf8"
 
+// Exported client-label bounds are the single runtime owner shared with the
+// proxy capture producers (classifyClient, remoteIP, clientLang and the user
+// agent assignment). The producer and the record boundary must never diverge.
+const (
+	RetainedClientMax    = 256
+	RetainedUserAgentMax = 1024
+	RetainedClientIPMax  = 128
+	// RetainedClientLangMax shares the classified client-label bound; language
+	// is a client label with the same real-world size.
+	RetainedClientLangMax = RetainedClientMax
+)
+
 // Record-retention bounds. These are internal guardrails, not configuration:
-// they keep client-controlled paths/methods and provider-controlled metadata
-// from carrying HTTP/body-sized text into the ring, the pending snapshots and
-// the durable row. Real identifiers are far below every bound, so normal
-// records pass through unchanged.
+// they keep client-controlled paths/methods/labels/conversation identities,
+// request metadata and provider-controlled metadata from carrying
+// HTTP/body-sized text into the ring, the pending snapshots and the durable
+// row. Real identifiers are far below every bound, so normal records pass
+// through unchanged.
 const (
 	retainedRecordPathMax         = 1024
 	retainedRecordMethodMax       = 32
 	retainedRecordProviderTextMax = 512
+	retainedRecordErrorMsgMax     = 512
+	retainedRecordRequestMetaMax  = 512
+	// retainedRecordConversationMax is the proxy's 512-byte declared-session
+	// bound plus the two-byte s:/k: namespace prefix.
+	retainedRecordConversationMax = 514
 	retainedRecordToolNameMax     = 128
 	retainedRecordToolNamesMax    = 64
 	retainedRecordDebugSessionMax = 128
@@ -46,6 +64,7 @@ func retainRecordSnapshot(r *Record) {
 func retainRecordTextFields(r *Record) {
 	retainTextField(&r.Path, retainedRecordPathMax)
 	retainTextField(&r.Method, retainedRecordMethodMax)
+	retainTextField(&r.Provider, retainedRecordProviderTextMax)
 	retainTextField(&r.Model, retainedRecordProviderTextMax)
 	retainTextField(&r.ProviderModel, retainedRecordProviderTextMax)
 	retainTextField(&r.ProviderRequestID, retainedRecordProviderTextMax)
@@ -53,6 +72,17 @@ func retainRecordTextFields(r *Record) {
 	retainTextField(&r.FinishReason, retainedRecordProviderTextMax)
 	retainTextField(&r.ErrorType, retainedRecordProviderTextMax)
 	retainTextField(&r.ErrorCode, retainedRecordProviderTextMax)
+	retainTextField(&r.ErrorMsg, retainedRecordErrorMsgMax)
+	retainTextField(&r.Client, RetainedClientMax)
+	retainTextField(&r.UserAgent, RetainedUserAgentMax)
+	retainTextField(&r.ClientIP, RetainedClientIPMax)
+	retainTextField(&r.ClientLang, RetainedClientLangMax)
+	retainTextField(&r.ConversationID, retainedRecordConversationMax)
+	retainTextField(&r.ParentConversationID, retainedRecordConversationMax)
+	retainTextField(&r.ReqToolChoice, retainedRecordRequestMetaMax)
+	retainTextField(&r.ReqResponseFormat, retainedRecordRequestMetaMax)
+	retainTextField(&r.ReqServiceTier, retainedRecordRequestMetaMax)
+	retainTextField(&r.LastTurnRole, retainedRecordRequestMetaMax)
 	retainTextField(&r.DebugSessionID, retainedRecordDebugSessionMax)
 	r.ToolNames = retainedToolNames(r.ToolNames)
 }
@@ -116,10 +146,12 @@ func retainedToolNames(in []string) []string {
 }
 
 // retainAttemptText bounds one attempt's provider/error metadata in place and
-// reports whether a field changed. Attempt order and the already-bounded
-// message are untouched.
+// reports whether a field changed. Attempt order is untouched.
 func retainAttemptText(a *RetryAttempt) bool {
-	changed := retainTextField(&a.ErrorType, retainedRecordProviderTextMax)
+	changed := retainTextField(&a.ErrorMsg, retainedRecordErrorMsgMax)
+	if retainTextField(&a.ErrorType, retainedRecordProviderTextMax) {
+		changed = true
+	}
 	if retainTextField(&a.ErrorCode, retainedRecordProviderTextMax) {
 		changed = true
 	}

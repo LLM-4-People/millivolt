@@ -864,6 +864,15 @@ func markPostCommitGone(rec *metrics.Record, err error) {
 	}
 }
 
+// cursorTurnErrorText is the single renderer for a TurnErrored error on both
+// the record and the client wire body. The canonical preview bound keeps an
+// upstream-derived error (connect EndStreamResponse, transport detail) from
+// carrying header/body-sized text onto either surface; normal errors are
+// unchanged.
+func cursorTurnErrorText(err error) string {
+	return metrics.TruncatePreview(fmt.Sprint(err))
+}
+
 // finishRunTurn renders the outcome (finish chunk + usage + [DONE], or an
 // in-band error) and parks or closes the run accordingly. When Cursor's exact
 // usage summary hasn't arrived yet (a parked turn ends before the summary
@@ -903,8 +912,9 @@ func (s *Server) finishRunTurn(w http.ResponseWriter, run *providerformat.Cursor
 			return
 		}
 		rec.ErrorType = errStreamRead
-		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markPostCommitGone(rec, emitErrorSSE(w, id, errStreamRead, fmt.Sprint(result.Err)))
+		msg := cursorTurnErrorText(result.Err)
+		rec.ErrorMsg = msg
+		markPostCommitGone(rec, emitErrorSSE(w, id, errStreamRead, msg))
 		return
 
 	case providerformat.TurnParked:
@@ -1051,8 +1061,9 @@ func (s *Server) writeRunJSON(w http.ResponseWriter, run *providerformat.CursorR
 			return
 		}
 		rec.ErrorType = "transform_error"
-		rec.ErrorMsg = fmt.Sprint(result.Err)
-		markPostCommitGone(rec, emitHTTPError(w, errJSON(typeAPIError, fmt.Sprint(result.Err)), http.StatusBadGateway))
+		msg := cursorTurnErrorText(result.Err)
+		rec.ErrorMsg = msg
+		markPostCommitGone(rec, emitHTTPError(w, errJSON(typeAPIError, msg), http.StatusBadGateway))
 		return
 	}
 	if result.Outcome == providerformat.TurnParked && !s.cursorRuns.park(rr.scope, run) {

@@ -599,6 +599,25 @@ func joinUpstreamURL(baseURL, path string) string {
 	return base + path
 }
 
+// maxBaseURLHostBytes is the DNS presentation limit for one hostname (RFC
+// 1035, without a trailing dot). It bounds the authority a client can claim
+// through X-Proxy-Base-URL before providerFromURL derives a retained label.
+const maxBaseURLHostBytes = 253
+
+// validBaseURLPort accepts an absent port or a decimal TCP port 1-65535 with
+// at most five digits. net/url validates the syntax but not the range or
+// length; a header-sized or out-of-range port is hostile input, not a target.
+func validBaseURLPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	if len(port) > 5 {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
 // resolveTarget parses routing headers into an upstream target. Only
 // X-Proxy-Base-URL is mandatory.
 func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
@@ -618,6 +637,15 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	// query or fragment (they collide with the path/query join). Deny by default.
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, fmt.Errorf("invalid %s %q: userinfo, query, and fragment are not allowed in a base URL", hdrBaseURL, baseURL)
+	}
+	// A client controls this authority, and providerFromURL falls back to the
+	// raw hostname for single-label and unknown-suffix hosts. Reject a
+	// non-DNS-length hostname or an implausible port at the routing boundary so
+	// neither the retained provider label nor an upstream dial ever carries
+	// header-sized data. Normal domains, IPs, ports and operator aliases pass
+	// unchanged.
+	if len(parsed.Hostname()) > maxBaseURLHostBytes || !validBaseURLPort(parsed.Port()) {
+		return nil, errInvalidHeader(hdrBaseURL, baseURL)
 	}
 
 	t := &target{
@@ -794,7 +822,7 @@ func clientLang(r *http.Request) string {
 			lang = ua
 		}
 	}
-	return retainedText(lang, retainedClientMax)
+	return retainedText(lang, retainedClientLangMax)
 }
 
 // classifyClient derives the recorded client identity from the request

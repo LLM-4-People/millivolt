@@ -131,6 +131,11 @@ func TestAnalyzeNonStreamBodyOutcome(t *testing.T) {
 			`{"choices":[{"finish_reason":"stop","message":{"content":"hi"}}],"usage":"bad"}`,
 			"", false,
 		},
+		{
+			"malformed role type keeps classification",
+			`{"choices":[{"finish_reason":"stop","message":{"role":123,"content":"hi"}}]}`,
+			"", false,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -267,6 +272,28 @@ func TestAnalyzeNonStreamBodyFields(t *testing.T) {
 			finish:   "tool_calls",
 			tools:    1,
 			fieldsOK: false,
+		},
+		{
+			name:      "non-string role suppresses every record field",
+			body:      `{"id":"chat-1","model":"m","choices":[{"finish_reason":"stop","message":{"role":123,"content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			wantUsage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+			hasUsage:  true,
+			model:     "m",
+			id:        "chat-1",
+			finish:    "stop",
+			answer:    true,
+			fieldsOK:  false,
+		},
+		{
+			name:      "normal role keeps record fields",
+			body:      `{"id":"chat-1","model":"m","choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+			wantUsage: Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+			hasUsage:  true,
+			model:     "m",
+			id:        "chat-1",
+			finish:    "stop",
+			answer:    true,
+			fieldsOK:  true,
 		},
 	}
 	for _, c := range cases {

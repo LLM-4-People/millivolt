@@ -31,7 +31,11 @@ func TestRequestConversationDeclaration(t *testing.T) {
 		{name: "long child", sessions: []string{strings.Repeat("c", maxDeclaredSessionBytes+1)}, parents: []string{"parent"}, wantErr: true},
 		{name: "control", sessions: []string{"child"}, parents: []string{"par\x00ent"}, wantErr: true},
 		{name: "invalid utf8", sessions: []string{"child"}, parents: []string{"\xff"}, wantErr: true},
-		{name: "legacy session unchanged", sessions: []string{strings.Repeat("c", maxDeclaredSessionBytes+1)}},
+		{name: "session-only at bound", sessions: []string{strings.Repeat("c", maxDeclaredSessionBytes)}},
+		{name: "session-only over bound", sessions: []string{strings.Repeat("c", maxDeclaredSessionBytes+1)}, wantErr: true},
+		{name: "session-only control", sessions: []string{"legacy\x00session"}, wantErr: true},
+		{name: "session-only invalid utf8", sessions: []string{"\xff"}, wantErr: true},
+		{name: "blank session-only unchanged", sessions: []string{" "}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := make(http.Header)
@@ -108,6 +112,14 @@ func TestParentConversationCaptureAndTransparency(t *testing.T) {
 	s.ServeHTTP(w, bad)
 	if w.Code != http.StatusBadRequest || calls != 2 || len(buf.Snapshot()) != 2 {
 		t.Fatalf("invalid declaration dispatched: status=%d calls=%d", w.Code, calls)
+	}
+	badSession := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	badSession.Header.Set(hdrBaseURL, upstream.URL)
+	badSession.Header.Set(hdrSession, strings.Repeat("s", maxDeclaredSessionBytes+1))
+	w = httptest.NewRecorder()
+	s.ServeHTTP(w, badSession)
+	if w.Code != http.StatusBadRequest || calls != 2 || len(buf.Snapshot()) != 2 {
+		t.Fatalf("overlong session-only header dispatched: status=%d calls=%d", w.Code, calls)
 	}
 }
 

@@ -18,6 +18,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 const (
@@ -93,6 +95,10 @@ func (c *connectReader) next() (connectEnvelope, error) {
 // EndStreamResponse is a single JSON object regardless of message encoding.
 // Unknown extension fields are ignored; malformed JSON, wrong
 // types, and explicit upstream errors must never become a successful EOF.
+// The provider code and message are bounded here with the canonical preview
+// truncator, so the resulting error (which becomes the record's ErrorMsg and
+// the client-facing 502/SSE body) can never carry header/body-sized upstream
+// text. Normal short values are unchanged.
 func endStreamError(payload []byte) error {
 	var end *struct {
 		Error json.RawMessage `json:"error"`
@@ -114,7 +120,8 @@ func endStreamError(payload []byte) error {
 		if upstream == nil || upstream.Code == "" {
 			return fmt.Errorf("connect: EndStreamResponse error requires a code")
 		}
-		return fmt.Errorf("connect upstream error (%s): %s", upstream.Code, upstream.Message)
+		return fmt.Errorf("connect upstream error (%s): %s",
+			metrics.TruncatePreview(upstream.Code), metrics.TruncatePreview(upstream.Message))
 	}
 	return nil
 }

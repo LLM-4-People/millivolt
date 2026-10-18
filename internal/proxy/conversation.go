@@ -16,29 +16,39 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// maxDeclaredSessionBytes bounds retained relationship identifiers. This is
-// an internal safety guardrail for the opt-in parent declaration, not a
-// truncation policy or a new limit on legacy session-only requests.
+// maxDeclaredSessionBytes bounds retained relationship identifiers. It applies
+// to the opt-in parent declaration and to a session-only header; both are
+// client claims that become record fields.
 const maxDeclaredSessionBytes = 512
 
 // validDeclaredSession is the single owner of the retained-identifier bound:
 // non-empty, at most maxDeclaredSessionBytes, valid UTF-8, no control bytes.
-// requestConversation rejects a violating header declaration at the request
-// boundary; the sub-conversation extraction drops a violating tracked value
-// (never a 400 - the body is passthrough payload).
+// requestConversation rejects a violating header declaration (parent or
+// session-only) at the request boundary; the sub-conversation extraction drops
+// a violating tracked value (never a 400 - the body is passthrough payload).
 func validDeclaredSession(id string) bool {
 	return id != "" && len(id) <= maxDeclaredSessionBytes && utf8.ValidString(id) &&
 		!strings.ContainsFunc(id, func(r rune) bool { return r < ' ' || r == 0x7f })
 }
 
+// invalidDeclaredSessionError is the one wording for both request-boundary
+// rejections (session-only and parent declaration).
+func invalidDeclaredSessionError() error {
+	return fmt.Errorf("declared session identifiers must be nonempty printable text of at most %d bytes", maxDeclaredSessionBytes)
+}
+
 // requestConversation owns the optional parent declaration boundary. A parent
-// requires the child's explicit identity; ordinary session-only requests keep
-// their existing semantics. These identifiers are client claims, not proof of
-// agent spawning, and must never be inferred from messages or response IDs.
+// requires the child's explicit identity. A session-only header shares the
+// same identifier rules, while an absent or blank session keeps the existing
+// automatic-grouping semantics. These identifiers are client claims, not proof
+// of agent spawning, and must never be inferred from messages or response IDs.
 func requestConversation(h http.Header) (session, parent string, err error) {
 	session = strings.TrimSpace(h.Get(hdrSession))
 	parents, declared := h[http.CanonicalHeaderKey(hdrParentSession)]
 	if !declared {
+		if session != "" && !validDeclaredSession(session) {
+			return "", "", invalidDeclaredSessionError()
+		}
 		return session, "", nil
 	}
 	if len(parents) != 1 || len(h.Values(hdrSession)) != 1 {
@@ -47,7 +57,7 @@ func requestConversation(h http.Header) (session, parent string, err error) {
 	parent = strings.TrimSpace(parents[0])
 	for _, id := range []string{session, parent} {
 		if !validDeclaredSession(id) {
-			return "", "", fmt.Errorf("declared session identifiers must be nonempty printable text of at most %d bytes", maxDeclaredSessionBytes)
+			return "", "", invalidDeclaredSessionError()
 		}
 	}
 	if session == parent {
@@ -56,12 +66,27 @@ func requestConversation(h http.Header) (session, parent string, err error) {
 	return session, parent, nil
 }
 
-func explicitConversationID(id string) string { return "s:" + id }
+// explicitConversationID namespaces one declared session. A valid id keeps the
+// original byte-identical s:<id> form; a direct Assign with an invalid or
+// overlong id hashes the whole value so distinct inputs cannot collide through
+// truncation.
+func explicitConversationID(id string) string { return namespacedConversationID("s:", id) }
 
 // trackedConversationID namespaces a sub-conversation param identity beside
 // explicitConversationID's s: sessions: a k: id can never collide with an
 // explicit session or a c- auto grouping.
-func trackedConversationID(id string) string { return "k:" + id }
+func trackedConversationID(id string) string { return namespacedConversationID("k:", id) }
+
+// namespacedConversationID is the single defensive owner for both identifier
+// namespaces. The hashed form is bounded at 68 bytes (prefix + h: + sha256
+// hex); an empty id also hashes rather than producing a bare namespace.
+func namespacedConversationID(prefix, id string) string {
+	if validDeclaredSession(id) {
+		return prefix + id
+	}
+	sum := sha256.Sum256([]byte(id))
+	return prefix + "h:" + hex.EncodeToString(sum[:])
+}
 
 // subConversationScanMax bounds the raw byte scan of one tracked param's
 // string value. The bound is judged on raw bytes, before the decoded value is

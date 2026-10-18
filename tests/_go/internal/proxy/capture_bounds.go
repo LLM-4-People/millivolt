@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -32,10 +33,14 @@ func TestCaptureHeadersBoundsHostileValues(t *testing.T) {
 	for i := range many {
 		many[i] = "v"
 	}
+	tokenName := "X-" + strings.Repeat("t", 1<<20) + "-token"
+	ordinaryName := "X-" + strings.Repeat("n", 1<<20)
 	h := http.Header{
 		"X-Oversized":   {strings.Repeat("a", 1<<20)},
 		"X-Many":        many,
 		"Authorization": {"Bearer secret"},
+		tokenName:       {"hostile credential name"},
+		ordinaryName:    {"hostile ordinary name"},
 	}
 	out := captureHeaders(h, "Authorization")
 	if got := len(out["X-Oversized"][0]); got > retainedHeaderValueMax {
@@ -47,15 +52,51 @@ func TestCaptureHeadersBoundsHostileValues(t *testing.T) {
 	if got := out["Authorization"]; len(got) != 1 || got[0] != "[REDACTED]" {
 		t.Fatalf("credential redaction lost: %v", got)
 	}
+	// An overlong name is skipped, never truncated into a colliding map key.
+	for _, name := range []string{tokenName, ordinaryName} {
+		if _, ok := out[name]; ok {
+			t.Fatalf("overlong header name of %d bytes was retained", len(name))
+		}
+	}
 	// The whole retained map stays under one total budget, so many oversized
-	// names cannot multiply the per-value cap.
+	// names cannot multiply the per-value cap. Names and the fixed redaction
+	// marker are charged like ordinary values.
 	total := 0
 	for name, values := range out {
+		if len(name) > retainedHeaderNameMax {
+			t.Fatalf("retained header name of %d bytes, want <= %d", len(name), retainedHeaderNameMax)
+		}
 		for _, v := range values {
 			total += len(name) + len(v)
 		}
 	}
 	if total > retainedHeadersMaxBytes {
 		t.Fatalf("retained header bytes = %d, want <= %d", total, retainedHeadersMaxBytes)
+	}
+}
+
+// TestCaptureHeadersRedactedNamesShareBudget pins the redacted branch's budget:
+// a flood of credential-bearing names keeps the presence marker for a bounded
+// subset, and the name plus marker cost never exceeds the map total.
+func TestCaptureHeadersRedactedNamesShareBudget(t *testing.T) {
+	const count = 40
+	h := make(http.Header, count)
+	for i := range count {
+		name := fmt.Sprintf("X-%s-token-%02d", strings.Repeat("a", 480), i)
+		h[name] = []string{"credential"}
+	}
+	out := captureHeaders(h, "Authorization")
+	if len(out) == 0 || len(out) == count {
+		t.Fatalf("redacted headers retained = %d, want a bounded subset of %d", len(out), count)
+	}
+	total := 0
+	for name, values := range out {
+		if len(values) != 1 || values[0] != "[REDACTED]" {
+			t.Fatalf("%s = %v, want the redaction marker", name, values)
+		}
+		total += len(name) + len(values[0])
+	}
+	if total > retainedHeadersMaxBytes {
+		t.Fatalf("retained redacted header bytes = %d, want <= %d", total, retainedHeadersMaxBytes)
 	}
 }

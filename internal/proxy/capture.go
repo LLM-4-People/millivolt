@@ -119,7 +119,10 @@ func redactHeaderName(name, authHeader string) bool {
 // Values are capped at a generous header-sized bound: the inbound server cap
 // (1 MiB) lets a hostile peer put a megabyte into one header that would then be
 // retained by the ring, every absorbed attempt, the database row and the debug
-// capture sidecar.
+// capture sidecar. Names are capped too and charged with their value in every
+// branch, including redacted credential headers: an overlong name is skipped
+// rather than truncated into a colliding map key, and the fixed redaction
+// marker still spends the shared budget.
 func captureHeaders(h http.Header, authHeader string) http.Header {
 	out := make(http.Header, len(h))
 	// Deterministic total budget: names are visited in sorted order so which
@@ -133,16 +136,23 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 	slices.Sort(names)
 	used := 0
 	for _, name := range names {
+		// Judge the name before redaction: an overlong credential-bearing name
+		// must not allocate a lowercase copy or reach the retained map.
+		if len(name) > retainedHeaderNameMax {
+			continue
+		}
 		values := h[name]
 		if redactHeaderName(name, authHeader) {
 			// The fixed marker is small, and retaining it keeps the fact that a
 			// credential header was present visible to the operator. Its name
-			// is not charged to the ordinary-value budget; the inbound server
-			// header limit still bounds how many such names can arrive.
-			out[name] = []string{"[REDACTED]"}
-			continue
-		}
-		if used >= retainedHeadersMaxBytes {
+			// and marker share the ordinary-value budget like every other entry,
+			// so a flood of redacted names cannot exceed the map total.
+			const marker = "[REDACTED]"
+			if used+len(name)+len(marker) > retainedHeadersMaxBytes {
+				continue
+			}
+			used += len(name) + len(marker)
+			out[name] = []string{marker}
 			continue
 		}
 		capped := make([]string, 0, min(len(values), retainedHeaderValuesMax))
@@ -169,10 +179,12 @@ func captureHeaders(h http.Header, authHeader string) http.Header {
 // user-tunable: they protect the ring, retry attempts and durable rows from
 // client-controlled megabytes while leaving every real identifier intact.
 const (
-	retainedLabelMax         = 512   // model id
-	retainedClientMax        = 256   // classified client label or language
-	retainedUserAgentMax     = 1024  // user agent
-	retainedClientIPMax      = 128   // client IP (first forwarded value)
+	retainedLabelMax         = 512 // model id
+	retainedClientMax        = metrics.RetainedClientMax
+	retainedClientLangMax    = metrics.RetainedClientLangMax
+	retainedUserAgentMax     = metrics.RetainedUserAgentMax
+	retainedClientIPMax      = metrics.RetainedClientIPMax
+	retainedHeaderNameMax    = 512   // one retained header name; a longer name is skipped
 	retainedHeaderValueMax   = 4096  // one retained header value
 	retainedHeaderValuesMax  = 16    // values retained per header name
 	retainedHeadersMaxBytes  = 16384 // total retained bytes across one header map

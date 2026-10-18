@@ -68,6 +68,64 @@ func TestRequestMetadataRoutingAndTypeBoundaries(t *testing.T) {
 	}
 }
 
+// TestRequestMetadataScalarsBoundedBeforeRing drives the production metadata
+// decode with body-sized tool_choice, response_format.type, service_tier and
+// message role values, then records through the real retention boundary. The
+// full request JSON is never retained; only these scalar metadata fields are
+// bounded, and normal values stay byte-identical.
+func TestRequestMetadataScalarsBoundedBeforeRing(t *testing.T) {
+	const bound = 512
+	huge := strings.Repeat("m", 900<<10)
+	body, err := json.Marshal(map[string]any{
+		"model":           "fixture",
+		"tool_choice":     huge,
+		"response_format": map[string]any{"type": huge},
+		"service_tier":    huge,
+		"messages":        []map[string]any{{"role": huge, "content": "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec metrics.Record
+	parseLLMRequest(body, &rec, false)
+	if rec.ReqToolChoice != huge || rec.ReqResponseFormat != huge ||
+		rec.ReqServiceTier != huge || rec.LastTurnRole != huge {
+		t.Fatalf("production decode did not capture the hostile scalars: %+v", rec)
+	}
+	b := metrics.NewBuffer(2)
+	b.Record(&rec)
+	got := b.Snapshot()[0]
+	for _, field := range []struct {
+		name string
+		got  string
+	}{
+		{"request tool choice", got.ReqToolChoice},
+		{"request response format", got.ReqResponseFormat},
+		{"request service tier", got.ReqServiceTier},
+		{"last turn role", got.LastTurnRole},
+	} {
+		if len(field.got) != bound {
+			t.Fatalf("%s retained %d bytes, want the exact %d-byte bound", field.name, len(field.got), bound)
+		}
+		if !strings.HasSuffix(field.got, "…") {
+			t.Fatalf("%s does not end with the retention marker", field.name)
+		}
+	}
+
+	var normal metrics.Record
+	parseLLMRequest([]byte(`{"model":"fixture","tool_choice":"auto","response_format":{"type":"json_object"},"service_tier":"flex","messages":[{"role":"assistant","content":"hi"}]}`), &normal, false)
+	if normal.ReqToolChoice != "auto" || normal.ReqResponseFormat != "json_object" ||
+		normal.ReqServiceTier != "flex" || normal.LastTurnRole != "assistant" {
+		t.Fatalf("normal metadata decode changed: %+v", normal)
+	}
+	before := normal
+	b.Record(&normal)
+	gotNormal := b.Snapshot()[1]
+	if !reflect.DeepEqual(*gotNormal, before) {
+		t.Fatalf("normal metadata changed at the retention boundary:\nbefore=%+v\nafter=%+v", before, *gotNormal)
+	}
+}
+
 func TestRequestMetadataDiscardedShapesAndDuplicates(t *testing.T) {
 	var rec metrics.Record
 	parseLLMRequest([]byte(`{"tools":[{},null,42,"schema",[1,2],false],
