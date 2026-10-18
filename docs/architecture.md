@@ -363,6 +363,9 @@ status line and the single close entry point; the module owns the sheet's state,
 editors and apply/revert/backup/purge behavior. A clean open at the same
 document revision and writable state still fetches freshness but keeps the
 retained rows and baseline; revision/writable changes, drafts and Revert refill.
+The model-rule preview reuses one traffic-example cache keyed by the live
+revision, and its test spelling is preview-only: it never revalidates the
+draft or marks the sheet dirty.
 
 One memoized derivation serves scoped rows and shared readouts. O(1) ID upserts,
 pure-replay suppression and rAF-coalesced live rendering avoid repeated scans.

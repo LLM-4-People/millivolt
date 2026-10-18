@@ -1205,14 +1205,26 @@ function collectModelRules(wrap) {
 
 // mrTrafficExamples gathers the top raw model spellings from the request
 // log (live ring data - the real backtest the preview demonstrates on).
+// Keep one last result keyed by the live data object, its revision and the
+// records array identity: preview keystrokes must not rescan the ring, while
+// a live revision bump or a manual fixture replacement (new array without a
+// bump) still invalidates it. The cache is bounded to that single result.
+let _mrTrafficCache = null;
 function mrTrafficExamples() {
   if (typeof lastData !== 'object' || !lastData || !Array.isArray(lastData.records)) return [];
+  const rev = lastData._rev || 0;
+  const cached = _mrTrafficCache;
+  if (cached && cached.data === lastData && cached.rev === rev && cached.records === lastData.records) {
+    return cached.list;
+  }
   const counts = new Map();
   for (const r of lastData.records) {
     const m = String((r && r.model) || '').trim();
     if (m) counts.set(m, (counts.get(m) || 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const list = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  _mrTrafficCache = { data: lastData, rev, records: lastData.records, list };
+  return list;
 }
 
 // mrDraftSteps builds the preview's compiled pipeline from the current
@@ -2570,15 +2582,22 @@ function wireSettingsDelegation() {
   box.dataset.provWired = '1';
   const dirty = e => {
     if (e.target.closest && (e.target.closest('.st-backup') || e.target.closest('[data-backup]') || e.target.closest('[data-purge]'))) return;
+    // The model-rules test spelling is preview-only: it cannot change the
+    // collected draft, so it must never collect a key or arm Apply/Revert.
+    if (e.target.closest && e.target.closest('.mr-test')) return;
     if (e.target.closest && e.target.closest('.st-row')) markSettingsDirty(settingsKeyFor(e.target));
   };
   box.addEventListener('input', e => {
     validateSettingsScalar(e.target);
     if (e.target.closest && e.target.closest('.mr-wrap')) {
       const wrap = e.target.closest('.mr-wrap');
-      // live per-keystroke validation (regex101/NN(g)-style: inline, at
+      // Live per-keystroke validation (regex101/NN(g)-style: inline, at
       // the field, the moment it goes wrong) + the preview bench refresh.
-      validateModelRulesDraft(wrap);
+      // The test spelling only drives the bench: skip the draft-wide
+      // revalidation, its regex compiles, and the dirty collection.
+      if (!(e.target.classList && e.target.classList.contains('mr-test'))) {
+        validateModelRulesDraft(wrap);
+      }
       mrPreview(wrap);
     }
     if (e.target.closest && e.target.closest('.ro-wrap')) {

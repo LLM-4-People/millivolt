@@ -5405,6 +5405,74 @@ async function main() {
     check('removing a model-rule row collects only the model_rules key',
       JSON.stringify(keyCalls) === JSON.stringify(['model_rules']) && fullCalls === 0);
     checkClean('removing the added model-rule row restores the clean draft');
+    // The preview-only test spelling drives the bench alone: it must not
+    // revalidate the draft, collect the model_rules key or arm Apply/Revert.
+    // Rule edits keep the live validation and per-key dirty behavior.
+    {
+      const mrTest = mrWrap.querySelector('.mr-test');
+      const baseline = JSON.stringify(w.collectSettingsValues().model_rules);
+      const originalValidate = w.validateModelRulesDraft;
+      const originalMark = w.markSettingsDirty;
+      let validations = 0;
+      let marks = 0;
+      w.validateModelRulesDraft = wrap => { validations++; return originalValidate(wrap); };
+      w.markSettingsDirty = key => { marks++; return originalMark(key); };
+      try {
+        resetCounters();
+        validations = 0;
+        marks = 0;
+        edit(mrTest, 'a');
+        const testKeyCalls = keyCalls.slice();
+        const testFullCalls = fullCalls;
+        const preview = mrWrap.querySelector('.mr-out').textContent;
+        const collected = JSON.stringify(w.collectSettingsValues().model_rules);
+        check('the preview-only test spelling refreshes the bench without revalidating or dirtying the draft',
+          validations === 0 && marks === 0 && preview === 'b');
+        check('the test spelling collects nothing, leaves the model-rules value unchanged and keeps Apply/Revert disabled',
+          testKeyCalls.length === 0 && testFullCalls === 0 && collected === baseline &&
+          !w.settingsIsDirty() && w.settingsDirtyCount() === 0 &&
+          status() === '' && apply.disabled && revert.disabled);
+        resetCounters();
+        validations = 0;
+        marks = 0;
+        edit(mrFrom, 'a2');
+        check('a rule spelling edit still validates once and marks only model_rules dirty',
+          validations === 1 && marks === 1 &&
+          JSON.stringify(keyCalls) === JSON.stringify(['model_rules']) && fullCalls === 0 &&
+          w.settingsDirtyCount() === 1 && status() === '1 unsaved' &&
+          !apply.disabled && !revert.disabled);
+        edit(mrFrom, '');
+        check('an empty rule spelling still renders its error state',
+          mrWrap.querySelector('.mr-row').dataset.mrState === 'error' &&
+          /needs a from spelling/.test(mrWrap.querySelector('.mr-row .mr-err').textContent));
+        resetCounters();
+        validations = 0;
+        marks = 0;
+        edit(mrTest, 'a2');
+        check('the test spelling stays preview-only beside an invalid rule row',
+          validations === 0 && marks === 0 && JSON.stringify(keyCalls) === '[]' && fullCalls === 0 &&
+          mrWrap.querySelector('.mr-row').dataset.mrState === 'error' &&
+          mrWrap.querySelector('.mr-out').textContent === 'a2');
+        edit(mrFrom, 'a');
+        checkClean('reverting the rule spelling restores the clean draft after preview-only typing');
+        mrWrap.querySelector('.mr-row [data-mr-vis]').click();
+        resetCounters();
+        validations = 0;
+        marks = 0;
+        edit(mrTest, 'a');
+        check('a parked rule still shows its state and the test spelling neither revalidates nor collects',
+          mrWrap.querySelector('.mr-row').dataset.mrState === 'off' &&
+          mrWrap.querySelector('.mr-row').dataset.mrOff === '1' &&
+          mrWrap.querySelector('.mr-out').textContent === 'a' &&
+          validations === 0 && marks === 0 && JSON.stringify(keyCalls) === '[]' && fullCalls === 0 &&
+          w.settingsDirtyCount() === 1 && status() === '1 unsaved');
+        mrWrap.querySelector('.mr-row [data-mr-vis]').click();
+        checkClean('un-parking the rule restores the clean draft');
+      } finally {
+        w.validateModelRulesDraft = originalValidate;
+        w.markSettingsDirty = originalMark;
+      }
+    }
     const roWrap = box.querySelector('[data-kind="request_overrides"]');
     resetCounters();
     roWrap.querySelector('[data-ro-add]').click();
@@ -5479,6 +5547,75 @@ async function main() {
     w.closeSettings(true);
     delete w.__settingsTestDoc;
     delete w.__dirtyDoc;
+  }
+
+  // ---- test 11u: the model-rules preview caches its ring-derived traffic
+  // examples per live data revision, so a preview pass never rescans the
+  // 10k ring or re-sorts the model counts. A revision bump or a records
+  // array replacement (a manual fixture swap without a bump) invalidates it.
+  {
+    const wrap = d.createElement('div');
+    wrap.innerHTML = w.modelRulesEditorHTML([{ mode: 'lower' }]);
+    w.__mrCacheWrap = wrap;
+    let cache;
+    try {
+      cache = w.eval(`(() => {
+        const box = window.__mrCacheWrap;
+        const counts = [1500, 1400, 1300, 1200, 1100, 1000, 900, 800, 500, 300];
+        const records = [];
+        counts.forEach((n, i) => { for (let j = 0; j < n; j++) records.push({ model: 'm' + i }); });
+        window.__mrCacheSaved = lastData;
+        lastData = { _rev: 1, records };
+        mrPreview(box);
+        const first = mrTrafficExamples();
+        const origSort = Array.prototype.sort;
+        const origMapSet = Map.prototype.set;
+        let sorts = 0, sets = 0;
+        Array.prototype.sort = function(...args) { sorts++; return origSort.apply(this, args); };
+        Map.prototype.set = function(...args) { sets++; return origMapSet.apply(this, args); };
+        let second;
+        try {
+          mrPreview(box);
+          second = mrTrafficExamples();
+        } finally {
+          Array.prototype.sort = origSort;
+          Map.prototype.set = origMapSet;
+        }
+        const top = first.map(([name, n]) => name + ':' + n);
+        const hit = second === first;
+        lastData._rev += 1;
+        const afterRevOnly = mrTrafficExamples();
+        const revOnlyFresh = afterRevOnly !== first;
+        const revOnlySame = JSON.stringify(afterRevOnly) === JSON.stringify(first);
+        lastData.records.forEach(r => { if (r.model === 'm0') r.model = 'zeta'; });
+        lastData._rev += 1;
+        const afterRev = mrTrafficExamples();
+        const replacement = [];
+        for (let i = 0; i < 4000; i++) replacement.push({ model: 'epsilon' });
+        for (let i = 0; i < 2000; i++) replacement.push({ model: 'phi' });
+        lastData.records = replacement;
+        const afterReplace = mrTrafficExamples();
+        return {
+          hit, sorts, sets, ring: records.length, top, revOnlyFresh, revOnlySame,
+          revFresh: afterRev !== afterRevOnly,
+          revTop: afterRev.map(([name, n]) => name + ':' + n),
+          replaceFresh: afterReplace !== afterRev,
+          replaceTop: afterReplace.map(([name, n]) => name + ':' + n),
+        };
+      })()`);
+    } finally {
+      w.eval('lastData = window.__mrCacheSaved; delete window.__mrCacheSaved;');
+      delete w.__mrCacheWrap;
+    }
+    check('the 10k traffic-example scan still returns the top eight spellings in count order',
+      cache.ring === 10000 &&
+      cache.top.join(',') === 'm0:1500,m1:1400,m2:1300,m3:1200,m4:1100,m5:1000,m6:900,m7:800');
+    check('a second preview pass reuses the cached traffic examples without rebuilding the count map or sorting',
+      cache.hit && cache.sorts === 0 && cache.sets === 0);
+    check('a live-revision bump invalidates the cached traffic examples',
+      cache.revOnlyFresh && cache.revOnlySame && cache.revFresh && cache.revTop[0] === 'zeta:1500');
+    check('replacing the records array without a revision bump invalidates the cached traffic examples',
+      cache.replaceFresh && cache.replaceTop.join(',') === 'epsilon:4000,phi:2000');
   }
 
   // ---- test 12: chart preset registry - ids unique, dropdown follows ----
