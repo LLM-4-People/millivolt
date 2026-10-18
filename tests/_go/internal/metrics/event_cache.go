@@ -20,6 +20,13 @@ func sameBacking(a, b []byte) bool {
 	return len(a) > 0 && len(b) > 0 && &a[0] == &b[0]
 }
 
+// eventRecord is a fixed-time record for byte comparisons: time_bucket is
+// derived from Start, so time.Now() could cross a bucket boundary between the
+// shared encode and the direct-marshal comparison.
+func eventRecord(id string) *Record {
+	return &Record{ID: id, Provider: "p", StatusCode: 200, Start: time.UnixMilli(1_800_000_000_000)}
+}
+
 func TestEventCacheEncode(t *testing.T) {
 	t.Run("marshal once and share bytes", func(t *testing.T) {
 		cache := &eventCache{}
@@ -94,7 +101,7 @@ func TestRingEventCachePublication(t *testing.T) {
 		sub := b.Subscribe()
 		defer b.Unsubscribe(sub)
 
-		rec := record("solo")
+		rec := eventRecord("solo")
 		b.Record(rec)
 		ev := <-sub
 		if ev.cache != nil {
@@ -130,7 +137,7 @@ func TestRingEventCachePublication(t *testing.T) {
 		defer b.Unsubscribe(firstSub)
 		defer b.Unsubscribe(secondSub)
 
-		rec := record("shared")
+		rec := eventRecord("shared")
 		b.Record(rec)
 		firstEv, secondEv := <-firstSub, <-secondSub
 		if firstEv.cache == nil || secondEv.cache == nil {
@@ -458,6 +465,59 @@ func TestHandleStreamSharedRecordEncodesOnce(t *testing.T) {
 	}
 	if decoded.ID != "shared" {
 		t.Fatalf("record id = %q, want shared", decoded.ID)
+	}
+}
+
+// TestHandleStreamSharedEncodeFailureClosesBoth drives the same shared event
+// through an unmarshalable observer result: one encode failure is retained in
+// the event cache, so both subscribers close and resync instead of one
+// re-encoding a different snapshot.
+func TestHandleStreamSharedEncodeFailureClosesBoth(t *testing.T) {
+	b := NewBuffer(8)
+	var observes atomic.Int64
+	b.SetModelObserver(func(full bool, _ ...[]*Record) any {
+		if full {
+			return map[string]string{"revision": "test"}
+		}
+		observes.Add(1)
+		return func() {}
+	})
+	type streamTab struct {
+		w      *countingWriter
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
+	open := func() *streamTab {
+		ctx, cancel := context.WithCancel(t.Context())
+		req := httptest.NewRequest(http.MethodGet, "/metrics/live/stream", nil).WithContext(ctx)
+		w := &countingWriter{ResponseRecorder: httptest.NewRecorder()}
+		done := make(chan struct{})
+		go func() {
+			b.HandleStream(w, req)
+			close(done)
+		}()
+		return &streamTab{w: w, cancel: cancel, done: done}
+	}
+	first, second := open(), open()
+	waitFor(t, func() bool { return first.w.n.Load() >= 1 && second.w.n.Load() >= 1 }, "both snapshot writes")
+
+	b.Record(record("unmarshalable"))
+	for _, tab := range []*streamTab{first, second} {
+		select {
+		case <-tab.done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("stream kept running after a shared unmarshalable record event")
+		}
+	}
+	first.cancel()
+	second.cancel()
+	if got := observes.Load(); got != 1 {
+		t.Fatalf("unmarshalable event observed %d times, want 1 retained failure", got)
+	}
+	for _, tab := range []*streamTab{first, second} {
+		if strings.Contains(tab.w.Body.String(), "event: record") {
+			t.Fatal("unmarshalable record frame was emitted")
+		}
 	}
 }
 

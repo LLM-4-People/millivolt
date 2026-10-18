@@ -254,9 +254,9 @@ func (b *Buffer) Record(r *Record) {
 	}
 	b.mu.Unlock()
 
-	// Push to any live subscribers (dashboard) non-blockingly. A shared
-	// publication carries one event-owned cache; a single subscriber keeps the
-	// direct encode path.
+	// Push to any attached SSE subscribers (dashboard) non-blockingly. A
+	// shared publication carries one event-owned cache; a single subscriber
+	// keeps the direct encode path.
 	fanout(b.subs, RingEvent{Record: r, Seq: seq, feedID: feed, cache: sharedEventCache(len(b.subs))})
 	if ended != nil {
 		fanout(b.liveSubs, ended)
