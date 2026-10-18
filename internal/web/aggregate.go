@@ -1468,6 +1468,99 @@ var validDims = func() map[string]bool {
 // occurrences. Spans index one flat membership list without per-row slices.
 type explorerMemberSpan struct{ start, count uint32 }
 
+// explorerSelectedGroup pairs one returned card's dictionary id with its
+// percentile bucket (rank+1). A zero bucket marks an empty open-addressed slot.
+type explorerSelectedGroup struct {
+	id     uint32
+	bucket uint8
+}
+
+// explorerDenseSelection bounds the direct-index selected-group table. Common
+// small-cardinality dimensions (provider, status, client, key) assign ids below
+// it, so their samples keep a single array load per occurrence exactly like the
+// old maxGroupID-sized slice. Low selected ids always populate this table, even
+// when another selected id is history-scale. This is an internal guardrail, not
+// a tunable.
+const explorerDenseSelection = 256
+
+// explorerHighSelection is the fixed slot count for the high-id table. It is a
+// power of two and far above xpNodeCap (24), so at most xpNodeCap inserts can
+// never fill it and linear probing always reaches an empty slot. The bounded
+// probe loops below still guard the invariant instead of looping forever if a
+// future cap outgrows it. Internal implementation constants, not tunables.
+const (
+	explorerHighSelection = 128
+	explorerHighHash      = 2654435761 // Knuth multiplicative hash
+)
+
+// explorerHighSlot is the deterministic initial slot for one high id.
+func explorerHighSlot(id uint32) int {
+	return int((id * explorerHighHash) & (explorerHighSelection - 1))
+}
+
+// explorerSelectedGroups is one payload request's compact selected-group
+// lookup, built from the returned top cards only. Dictionary ids are
+// dimension-wide positions that can sit far above the card count, so the
+// previous dense []uint8 sized by maxGroupID allocated kilobytes to megabytes
+// per request to represent at most xpNodeCap entries. Low ids stay in the fixed
+// dense table; high ids use one fixed-capacity open-addressed table, so both
+// lookups are constant-time probes without allocation or maxGroupID scaling.
+// Selections are never carried across requests.
+type explorerSelectedGroups struct {
+	dense [explorerDenseSelection]uint8
+	high  [explorerHighSelection]explorerSelectedGroup
+}
+
+// newExplorerSelectedGroups ranks no groups of its own: the payload has already
+// capped top at xpNodeCap, and duplicate ids cannot occur because top holds one
+// entry per group map key. Every selected id populates exactly one table.
+func newExplorerSelectedGroups(top []*entAcc) explorerSelectedGroups {
+	var s explorerSelectedGroups
+	for i, g := range top {
+		bucket := uint8(i + 1)
+		if g.id < explorerDenseSelection {
+			s.dense[g.id] = bucket
+			continue
+		}
+		slot := explorerHighSlot(g.id)
+		for probes := 0; probes < explorerHighSelection; probes++ {
+			entry := &s.high[slot]
+			if entry.bucket == 0 {
+				*entry = explorerSelectedGroup{id: g.id, bucket: bucket}
+				break
+			}
+			if entry.id == g.id {
+				entry.bucket = bucket
+				break
+			}
+			slot = (slot + 1) & (explorerHighSelection - 1)
+		}
+	}
+	return s
+}
+
+// bucket returns the group's percentile bucket, or zero when the id is not one
+// of the returned cards. Low ids are one array load; high ids probe the fixed
+// table until their exact id or an empty slot. The loop is bounded, so a missing
+// id can never spin even if the capacity invariant were broken.
+func (s *explorerSelectedGroups) bucket(id uint32) uint8 {
+	if id < explorerDenseSelection {
+		return s.dense[id]
+	}
+	slot := explorerHighSlot(id)
+	for probes := 0; probes < explorerHighSelection; probes++ {
+		entry := &s.high[slot]
+		if entry.bucket == 0 {
+			return 0
+		}
+		if entry.id == id {
+			return entry.bucket
+		}
+		slot = (slot + 1) & (explorerHighSelection - 1)
+	}
+	return 0
+}
+
 // explorerFold accumulates the per-dimension breakdown (groups, rail
 // distinct-value counts, full-scope footer counts, error-affected sets) over
 // one stream of contributions. The footer never needs a second history scan.
@@ -1483,7 +1576,6 @@ type explorerFold struct {
 	railSeen      [dimCount][]uint64
 	railCount     [dimCount]int
 	groups        map[uint32]*entAcc
-	maxGroupID    uint32
 	order         metricOrders
 	rowCount      int
 	// Single-valued dimensions store one group id per projected row (4 bytes).
@@ -1657,9 +1749,6 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	g := e.groups[dimKey]
 	if g == nil {
 		g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
-		if dimKey > e.maxGroupID {
-			e.maxGroupID = dimKey
-		}
 		e.groups[dimKey] = g
 	}
 	// Health counts are affected requests, while tool/error occurrences still
@@ -1747,22 +1836,25 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	return g, nil
 }
 
-func (e *explorerFold) payload() explorerPayload {
-	conversations, conversationGroups := e.lineage.resolve()
-	// Rank before deriving percentiles: discarded groups never allocate
-	// allocate response arrays or perform sample selection. Names break ties
-	// deterministically, independently of dictionary insertion or map order.
-	count := func(g *entAcc) int {
-		if e.dimIndex == dimError {
-			return len(g.affected)
-		}
-		return g.n
+// groupCount is a card's headline count: affected requests for errors,
+// occurrences otherwise. Ranking and the wire N field read the same owner.
+func (e *explorerFold) groupCount(g *entAcc) int {
+	if e.dimIndex == dimError {
+		return len(g.affected)
 	}
+	return g.n
+}
+
+// rankedGroups selects the returned top cards before sample derivation:
+// discarded groups never allocate response arrays or perform sample selection.
+// Counts follow groupCount; names break ties deterministically, independently
+// of dictionary insertion or map order.
+func (e *explorerFold) rankedGroups() []*entAcc {
 	top := make([]*entAcc, 0, min(len(e.groups), xpNodeCap))
 	for _, g := range e.groups {
-		n := count(g)
+		n := e.groupCount(g)
 		at := sort.Search(len(top), func(i int) bool {
-			other := count(top[i])
+			other := e.groupCount(top[i])
 			return n > other || n == other && g.name < top[i].name
 		})
 		if at == xpNodeCap {
@@ -1774,17 +1866,50 @@ func (e *explorerFold) payload() explorerPayload {
 		copy(top[at+1:], top[at:])
 		top[at] = g
 	}
+	return top
+}
+
+// selectedVisitor maps projection rows to compact selected-group buckets for
+// the metric rank visitors. Multi-valued dimensions walk the row's occurrence
+// span and emit one bucket per selected occurrence in source order, preserving
+// duplicate tool/error multiplicity; single-valued dimensions keep one group id
+// per row. Unselected ids emit nothing.
+func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(row uint32, emit func(uint8)) {
+	if e.multiMember {
+		return func(row uint32, emit func(uint8)) {
+			if uint64(row) >= uint64(len(e.memberSpans)) {
+				return
+			}
+			span := e.memberSpans[row]
+			for _, id := range e.members[span.start : span.start+span.count] {
+				if bucket := selected.bucket(id); bucket != 0 {
+					emit(bucket)
+				}
+			}
+		}
+	}
+	return func(row uint32, emit func(uint8)) {
+		if uint64(row) < uint64(len(e.singleMember)) {
+			if bucket := selected.bucket(e.singleMember[row]); bucket != 0 {
+				emit(bucket)
+			}
+		}
+	}
+}
+
+func (e *explorerFold) payload() explorerPayload {
+	conversations, conversationGroups := e.lineage.resolve()
+	top := e.rankedGroups()
 	// Resolve compact selected-group membership once, then both metrics read
 	// the same row spans. Emitting every occurrence preserves duplicate tools
 	// and error events while error-card N remains affected-request based.
-	selected := make([]uint8, int(e.maxGroupID)+1)
+	selected := newExplorerSelectedGroups(top)
 	ttftCounts, tpsCounts := make([]int, len(top)), make([]int, len(top))
 	var extraTTFT []int64
 	var extraTPS []float64
 	var ttftBuckets, tpsBuckets []uint8
 	for i, g := range top {
 		bucket := uint8(i + 1)
-		selected[g.id] = bucket
 		ttftCounts[i], tpsCounts[i] = g.ttftN, g.tpsN
 		extraTTFT = append(extraTTFT, g.ttftS...)
 		extraTPS = append(extraTPS, g.tpsS...)
@@ -1795,38 +1920,13 @@ func (e *explorerFold) payload() explorerPayload {
 			tpsBuckets = append(tpsBuckets, bucket)
 		}
 	}
-	var visit func(row uint32, emit func(uint8))
-	if e.multiMember {
-		membership := make([]uint8, len(e.members))
-		for i, id := range e.members {
-			membership[i] = selected[id]
-		}
-		visit = func(row uint32, emit func(uint8)) {
-			if uint64(row) >= uint64(len(e.memberSpans)) {
-				return
-			}
-			span := e.memberSpans[row]
-			for _, bucket := range membership[span.start : span.start+span.count] {
-				if bucket != 0 {
-					emit(bucket)
-				}
-			}
-		}
-	} else {
-		visit = func(row uint32, emit func(uint8)) {
-			if uint64(row) < uint64(len(e.singleMember)) {
-				if bucket := selected[e.singleMember[row]]; bucket != 0 {
-					emit(bucket)
-				}
-			}
-		}
-	}
+	visit := e.selectedVisitor(&selected)
 	wait, _ := rankPercentilesVisit(e.order.ttft, ttftCounts, extraTTFT, ttftBuckets, visit)
 	speed, _ := rankPercentilesVisit(e.order.tps, tpsCounts, extraTPS, tpsBuckets, visit)
 	ents := make([]jsonEnt, 0, len(top))
 	for i, g := range top {
 		ent := jsonEnt{
-			Name: g.name, N: int64(count(g)), Cost: g.cost, In: g.in, Out: g.out,
+			Name: g.name, N: int64(e.groupCount(g)), Cost: g.cost, In: g.in, Out: g.out,
 			Cache: g.cacheR, ErrFinal: int64(g.errFin),
 			RateLimitRequests: int64(g.rateLimitRequests),
 			Tools:             g.tools, Code: g.code, LastMs: g.lastMs,

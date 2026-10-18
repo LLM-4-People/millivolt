@@ -345,6 +345,315 @@ func TestExplorerFoldTopCardsBeforeSampleDerivation(t *testing.T) {
 	}
 }
 
+// explorerPercentilesFromOccurrences is the independent oracle for the compact
+// selection test: it ranks one group's exact occurrence multiset with the
+// shared R7 position owner, without reading the explorer's selection path.
+func explorerPercentilesFromOccurrences(values []float64) (p50, p95 *float64) {
+	if len(values) < pctMinSamples {
+		return nil, nil
+	}
+	sorted := slices.Clone(values)
+	slices.Sort(sorted)
+	at := func(p float64) *float64 {
+		lo, hi, fraction, _ := percentilePosition(len(sorted), p)
+		v := percentileInterpolate(sorted[lo], sorted[hi], fraction)
+		return &v
+	}
+	return at(50), at(95)
+}
+
+func checkExplorerPercentilePair(t *testing.T, label string, gotP50, gotP95, wantP50, wantP95 *float64) {
+	t.Helper()
+	got, want := [2]*float64{gotP50, gotP95}, [2]*float64{wantP50, wantP95}
+	for i := range got {
+		if (got[i] == nil) != (want[i] == nil) {
+			t.Fatalf("%s percentile %d = %v, want %v", label, i, got[i], want[i])
+		}
+		if got[i] != nil && math.Abs(*got[i]-*want[i]) > 1e-12 {
+			t.Fatalf("%s percentile %d = %v, want %v", label, i, *got[i], *want[i])
+		}
+	}
+}
+
+func explorerGroupNames(groups []jsonEnt) map[string]struct{} {
+	names := make(map[string]struct{}, len(groups))
+	for _, g := range groups {
+		names[g.Name] = struct{}{}
+	}
+	return names
+}
+
+// TestExplorerPayloadCompactSelectionEquivalence pins the compact selected-group
+// lookup to an occurrence-level oracle. It covers a single-valued dimension
+// whose selected ids sit far above xpNodeCap, tool and error dimensions with
+// duplicate occurrences inside one row, and groups outside the returned top
+// that must never contribute a bucket.
+func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
+	t.Run("single-valued/large-id-gap", func(t *testing.T) {
+		const coldRows = 5000
+		rows := make([]contrib, 0, coldRows+120)
+		wantTTFT, wantTPS := make(map[string][]float64), make(map[string][]float64)
+		for i := 0; i < coldRows; i++ {
+			name, ttft, tps := fmt.Sprintf("cold-%05d", i), int64(1000+i), float64(i+1)/2
+			rows = append(rows, contrib{id: fmt.Sprintf("cold-row-%05d", i), start: int64(i+1) * 1000,
+				status: 200, client: name, prov: "p", model: "m", ttft: ttft, tps: tps})
+			wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
+		}
+		for i := 0; i < 120; i++ {
+			name, ttft, tps := fmt.Sprintf("hot-%02d", i%10), int64(100000+i), float64(100+i)
+			rows = append(rows, contrib{id: fmt.Sprintf("hot-row-%03d", i), start: int64(coldRows+i+1) * 1000,
+				status: 200, client: name, prov: "p", model: "m", ttft: ttft, tps: tps})
+			wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
+		}
+		p := explorerProjection(rows)
+		f := newExplorerFold("client", "", nil)
+		f.prepare(p, nil)
+		for i := range p.rows {
+			if err := f.fold(&p.rows[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var hotID uint32
+		for id, g := range f.groups {
+			if g.name == "hot-00" {
+				hotID = id
+			}
+		}
+		if hotID <= coldRows || hotID <= xpNodeCap {
+			t.Fatalf("selected hot id = %d, want a gap above %d cold ids and xpNodeCap %d", hotID, coldRows, xpNodeCap)
+		}
+		got := f.payload()
+		if len(got.Groups) != xpNodeCap || got.Groups[0].Name != "hot-00" {
+			t.Fatalf("selected cards = %+v", got.Groups)
+		}
+		for _, group := range got.Groups {
+			p50, p95 := explorerPercentilesFromOccurrences(wantTTFT[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" ttft", group.TTFTP50, group.TTFTP95, p50, p95)
+			p50, p95 = explorerPercentilesFromOccurrences(wantTPS[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" tps", group.TPSP50, group.TPSP95, p50, p95)
+		}
+		if _, kept := explorerGroupNames(got.Groups)["cold-00014"]; kept {
+			t.Fatal("group outside top produced a card")
+		}
+	})
+
+	t.Run("tool/duplicate-occurrences", func(t *testing.T) {
+		rows := make([]contrib, 40)
+		wantTTFT, wantTPS := make(map[string][]float64), make(map[string][]float64)
+		for i := range rows {
+			ttft, tps := int64(10*i+1), float64(i+1)/4
+			var tools []string
+			if i < 30 {
+				tools = []string{fmt.Sprintf("tool-%02d", i), "hot", "hot"}
+			} else {
+				tools = []string{"hot", "tool-00"}
+			}
+			rows[i] = contrib{id: fmt.Sprint(i), start: int64(i+1) * 1000, status: 200,
+				toolsL: tools, tools: int64(len(tools)), ttft: ttft, tps: tps}
+			for _, name := range tools {
+				wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
+			}
+		}
+		p := explorerProjection(rows)
+		f := newExplorerFold("tool", "", nil)
+		f.prepare(p, nil)
+		for i := range p.rows {
+			if err := f.fold(&p.rows[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := f.payload()
+		if len(got.Groups) != xpNodeCap || got.Groups[0].Name != "hot" || got.Groups[0].N != 70 {
+			t.Fatalf("duplicate tool occurrences = %+v", got.Groups[0])
+		}
+		for _, group := range got.Groups {
+			p50, p95 := explorerPercentilesFromOccurrences(wantTTFT[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" ttft", group.TTFTP50, group.TTFTP95, p50, p95)
+			p50, p95 = explorerPercentilesFromOccurrences(wantTPS[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" tps", group.TPSP50, group.TPSP95, p50, p95)
+		}
+		names := explorerGroupNames(got.Groups)
+		for _, excluded := range []string{"tool-23", "tool-29"} {
+			if _, kept := names[excluded]; kept {
+				t.Fatalf("group %q outside top produced a card", excluded)
+			}
+		}
+		if again := f.payload(); !reflect.DeepEqual(got, again) {
+			t.Fatal("payload differs across calls on one completed fold")
+		}
+	})
+
+	t.Run("error/affected-vs-occurrences", func(t *testing.T) {
+		rows := make([]contrib, 40)
+		wantTTFT, wantTPS := make(map[string][]float64), make(map[string][]float64)
+		for i := range rows {
+			ttft, tps := int64(10*i+1), float64(i+1)/4
+			var ent []errEnt
+			if i < 30 {
+				ent = []errEnt{{typ: "boom", code: "500"}, {typ: "boom", code: "500"},
+					{typ: fmt.Sprintf("kind-%02d", i), code: "500"}}
+			} else {
+				ent = []errEnt{{typ: "boom", code: "500"}, {typ: "kind-00", code: "500"}}
+			}
+			rows[i] = contrib{id: fmt.Sprint(i), start: int64(i+1) * 1000, status: 500, isErr: true,
+				ent: ent, ttft: ttft, tps: tps}
+			for _, e := range ent {
+				key := errorKey(e)
+				wantTTFT[key], wantTPS[key] = append(wantTTFT[key], float64(ttft)), append(wantTPS[key], tps)
+			}
+		}
+		p := explorerProjection(rows)
+		f := newExplorerFold("error", "", nil)
+		f.prepare(p, nil)
+		for i := range p.rows {
+			if err := f.fold(&p.rows[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := f.payload()
+		boom := got.Groups[0]
+		if len(got.Groups) != xpNodeCap || boom.Name != "boom|500|" || boom.N != 40 || boom.ErrEvents != 70 {
+			t.Fatalf("error affected/event counts = %+v", boom)
+		}
+		for _, group := range got.Groups {
+			p50, p95 := explorerPercentilesFromOccurrences(wantTTFT[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" ttft", group.TTFTP50, group.TTFTP95, p50, p95)
+			p50, p95 = explorerPercentilesFromOccurrences(wantTPS[group.Name])
+			checkExplorerPercentilePair(t, group.Name+" tps", group.TPSP50, group.TPSP95, p50, p95)
+		}
+		names := explorerGroupNames(got.Groups)
+		for _, excluded := range []string{"kind-23|500|", "kind-29|500|"} {
+			if _, kept := names[excluded]; kept {
+				t.Fatalf("group %q outside top produced a card", excluded)
+			}
+		}
+	})
+}
+
+// TestExplorerSelectedGroupsLookupPaths pins low, boundary and high selection
+// to one bucket mapping, with unselected ids always resolving to zero.
+func TestExplorerSelectedGroupsLookupPaths(t *testing.T) {
+	for _, base := range []uint32{0, explorerDenseSelection - 2, 1 << 20} {
+		top := []*entAcc{{id: base + 1, name: "a"}, {id: base + 2, name: "b"}, {id: base + 3, name: "c"}}
+		selected := newExplorerSelectedGroups(top)
+		for id, want := range map[uint32]uint8{base: 0, base + 1: 1, base + 2: 2, base + 3: 3, base + 4: 0, base + 99: 0} {
+			if got := selected.bucket(id); got != want {
+				t.Fatalf("base %d id %d bucket = %d, want %d", base, id, got, want)
+			}
+		}
+	}
+}
+
+// explorerCollidingHighIDs returns two distinct high ids with the same initial
+// open-addressed slot, so the mixed test exercises linear probing.
+func explorerCollidingHighIDs() (uint32, uint32) {
+	first := make(map[int]uint32, explorerHighSelection)
+	for id := uint32(explorerDenseSelection); id < explorerDenseSelection+1_000_000; id++ {
+		slot := explorerHighSlot(id)
+		if other, ok := first[slot]; ok && other != id {
+			return other, id
+		}
+		first[slot] = id
+	}
+	return 0, 0
+}
+
+// TestExplorerSelectedGroupsMixedAndCollision pins a table holding both low and
+// history-scale selected ids: low ids stay direct-indexed, colliding high ids
+// probe to their exact buckets, and missing ids stay zero.
+func TestExplorerSelectedGroupsMixedAndCollision(t *testing.T) {
+	if xpNodeCap >= explorerHighSelection || explorerHighSelection&(explorerHighSelection-1) != 0 {
+		t.Fatalf("high table slots = %d, xpNodeCap = %d: capacity must be a power of two above the cap",
+			explorerHighSelection, xpNodeCap)
+	}
+	first, second := explorerCollidingHighIDs()
+	if first == 0 || second == 0 || explorerHighSlot(first) != explorerHighSlot(second) {
+		t.Fatalf("collision fixture = %d/%d, slots %d/%d", first, second,
+			explorerHighSlot(first), explorerHighSlot(second))
+	}
+	top := []*entAcc{
+		{id: 2, name: "low-a"},
+		{id: first, name: "high-a"},
+		{id: 255, name: "low-b"},
+		{id: second, name: "high-b"},
+		{id: 1 << 20, name: "high-c"},
+	}
+	selected := newExplorerSelectedGroups(top)
+	want := []struct {
+		id     uint32
+		bucket uint8
+	}{
+		{1, 0}, {2, 1}, {255, 3}, {first, 2}, {second, 4}, {1 << 20, 5}, {257, 0}, {1 << 21, 0},
+	}
+	for _, probe := range want {
+		if got := selected.bucket(probe.id); got != probe.bucket {
+			t.Fatalf("id %d bucket = %d, want %d (high slots %d/%d)", probe.id, got, probe.bucket,
+				explorerHighSlot(first), explorerHighSlot(second))
+		}
+	}
+	if selected.dense[2] != 1 || selected.dense[255] != 3 {
+		t.Fatalf("low ids left the dense table: %d/%d", selected.dense[2], selected.dense[255])
+	}
+}
+
+// TestExplorerSelectedVisitorOccurrenceOrder pins multi-valued emission: every
+// selected occurrence emits in source order, duplicates repeat, unselected ids
+// emit nothing, and missing rows are skipped. Both selection storage paths must
+// agree.
+func TestExplorerSelectedVisitorOccurrenceOrder(t *testing.T) {
+	for _, base := range []uint32{1, 1 << 20} {
+		f := newExplorerFold("tool", "", nil)
+		f.multiMember = true
+		f.memberSpans = []explorerMemberSpan{{start: 0, count: 5}, {start: 5, count: 1}}
+		f.members = []uint32{base + 2, base + 3, base, base + 2, base + 1, base + 3}
+		f.groups = map[uint32]*entAcc{
+			base:     {id: base, name: "one", n: 1},
+			base + 1: {id: base + 1, name: "two", n: 1},
+			base + 2: {id: base + 2, name: "three", n: 3},
+		}
+		top := f.rankedGroups()
+		if len(top) != 3 || top[0].id != base+2 || top[1].id != base || top[2].id != base+1 {
+			t.Fatalf("base %d ranking = %+v", base, top)
+		}
+		selected := newExplorerSelectedGroups(top)
+		visit := f.selectedVisitor(&selected)
+		emitted := func(row uint32) []uint8 {
+			var buckets []uint8
+			visit(row, func(bucket uint8) { buckets = append(buckets, bucket) })
+			return buckets
+		}
+		if got, want := emitted(0), []uint8{1, 2, 1, 3}; !slices.Equal(got, want) {
+			t.Fatalf("base %d row 0 buckets = %v, want %v", base, got, want)
+		}
+		if got := emitted(1); len(got) != 0 {
+			t.Fatalf("base %d unselected occurrence emitted %v", base, got)
+		}
+		if got := emitted(2); len(got) != 0 {
+			t.Fatalf("base %d out-of-range row emitted %v", base, got)
+		}
+	}
+}
+
+// TestExplorerSelectedVisitorSingleValued pins one group per row through the
+// compact lookup, including zero and unselected ids.
+func TestExplorerSelectedVisitorSingleValued(t *testing.T) {
+	f := newExplorerFold("client", "", nil)
+	f.singleMember = []uint32{2, 0, 1, 999}
+	f.groups = map[uint32]*entAcc{
+		1: {id: 1, name: "one", n: 1},
+		2: {id: 2, name: "two", n: 1},
+	}
+	selected := newExplorerSelectedGroups(f.rankedGroups())
+	visit := f.selectedVisitor(&selected)
+	for row, want := range [][]uint8{{2}, nil, {1}, nil, nil} {
+		var got []uint8
+		visit(uint32(row), func(bucket uint8) { got = append(got, bucket) })
+		if !slices.Equal(got, want) {
+			t.Fatalf("row %d buckets = %v, want %v", row, got, want)
+		}
+	}
+}
+
 func BenchmarkExplorerEncodedFold(b *testing.B) {
 	rows := explorerFoldFixtures()
 	rows = slices.Repeat(rows, 724) // approximately 100k neutral contributions
@@ -362,6 +671,78 @@ func BenchmarkExplorerEncodedFold(b *testing.B) {
 				for i := range input {
 					_ = f.fold(&input[i])
 				}
+				_ = f.payload()
+			}
+		})
+	}
+}
+
+// explorerPayloadBenchFold builds one payload-ready fold for a synthetic
+// history: every row carries a valid ttft/tps sample and one selected-group
+// membership. baseID shifts the selected dictionary ids without changing row
+// or occurrence counts, so payload allocations must not follow it.
+func explorerPayloadBenchFold(history int, multi bool, baseID uint32) *explorerFold {
+	f := newExplorerFold("client", "", nil)
+	f.rowCount = history
+	if multi {
+		f.dim, f.dimIndex = "tool", dimTool
+	}
+	f.multiMember = multi
+	f.groups = make(map[uint32]*entAcc, xpNodeCap)
+	rows := make([]int, xpNodeCap)
+	f.order.ttft = make([]metricSample[int64], history)
+	f.order.tps = make([]metricSample[float64], history)
+	if multi {
+		f.memberSpans = make([]explorerMemberSpan, history)
+		f.members = make([]uint32, history)
+	} else {
+		f.singleMember = make([]uint32, history)
+	}
+	for row := range history {
+		group := row % xpNodeCap
+		rows[group]++
+		id := baseID + uint32(group)
+		f.order.ttft[row] = metricSample[int64]{row: uint32(row), value: int64(row + 1)}
+		f.order.tps[row] = metricSample[float64]{row: uint32(row), value: float64(row + 1)}
+		if multi {
+			f.memberSpans[row] = explorerMemberSpan{start: uint32(row), count: 1}
+			f.members[row] = id
+		} else {
+			f.singleMember[row] = id
+		}
+	}
+	for group := range xpNodeCap {
+		id := baseID + uint32(group)
+		f.groups[id] = &entAcc{id: id, name: fmt.Sprintf("group-%02d", group),
+			n: rows[group], ttftN: rows[group], tpsN: rows[group]}
+	}
+	return f
+}
+
+// BenchmarkExplorerPayloadSelectedLookup isolates the payload's selected-group
+// lookup at a million-row history. Selected ids move from the low cards to an
+// 8M-high sparse range, and the multi-valued cases retain 100k to 1M tool
+// occurrences; B/op and allocs/op must stay bounded by xpNodeCap instead of
+// maxGroupID or occurrence count.
+func BenchmarkExplorerPayloadSelectedLookup(b *testing.B) {
+	cases := []struct {
+		name    string
+		history int
+		multi   bool
+		baseID  uint32
+	}{
+		{"single/id=24", 1_000_000, false, 1},
+		{"single/id=8m", 1_000_000, false, 8_000_000},
+		{"multi/occurrences=100k", 100_000, true, 1},
+		{"multi/occurrences=1m", 1_000_000, true, 1},
+		{"multi/occurrences=1m-id=8m", 1_000_000, true, 8_000_000},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			f := explorerPayloadBenchFold(tc.history, tc.multi, tc.baseID)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
 				_ = f.payload()
 			}
 		})
