@@ -1063,22 +1063,101 @@ func (s *Store) MarkWritten(ids []string) {
 
 // computeTotals rebuilds the aggregate from the durable rows (startup +
 // post-merge). One full scan; runs synchronously at Open or while the caller
-// holds the sole writer connection. The rebuilt document is persisted before
-// it is published.
+// holds the sole writer connection.
 func (s *Store) computeTotals(ctx context.Context) error {
-	t, err := readTotals(ctx, s.rdb)
-	if err != nil {
-		return err
+	return s.computeTotalsWith(ctx, nil)
+}
+
+// computeTotalsWith is computeTotals with a test seam between the consistent
+// read snapshot and the writer-side epoch check. Production passes nil.
+func (s *Store) computeTotalsWith(ctx context.Context, afterRead func() error) error {
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		t, epoch, err := s.readTotalsSnapshot(ctx)
+		if err != nil {
+			return err
+		}
+		if afterRead != nil {
+			if err := afterRead(); err != nil {
+				return err
+			}
+		}
+		ok, err := s.persistTotalsIfCurrent(ctx, t, epoch)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
-	epoch, err := projectionEpoch(ctx, s.rdb)
+	return fmt.Errorf("totals snapshot changed while rebuilding")
+}
+
+// readTotalsSnapshot reads the rows and their mutation witness from one
+// consistent read transaction. The epoch is the same one the writer-side
+// recheck compares against.
+func (s *Store) readTotalsSnapshot(ctx context.Context) (Totals, int64, error) {
+	tx, err := s.rdb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return err
+		return Totals{}, 0, err
 	}
-	if err := saveTotals(ctx, s.db, t, false, epoch); err != nil {
-		return fmt.Errorf("persist totals: %w", err)
+	defer tx.Rollback()
+	t, err := readTotals(ctx, tx)
+	if err != nil {
+		return Totals{}, 0, err
+	}
+	epoch, err := projectionEpoch(ctx, tx)
+	if err != nil {
+		return Totals{}, 0, err
+	}
+	return t, epoch, nil
+}
+
+// persistTotalsIfCurrent commits the document only when the mutation epoch
+// still matches the read snapshot. Holding the sole writer connection through
+// installTotals prevents an in-process commit from landing between the check
+// and publication; the next boot rebuilds if an unsupported external writer
+// commits after the check.
+func (s *Store) persistTotalsIfCurrent(ctx context.Context, t Totals, epoch int64) (bool, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	current, err := projectionEpoch(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	if current != epoch {
+		return false, nil
+	}
+	// The projection epoch advances on destructive and out-of-order changes,
+	// not on ordinary appends (which are the projection's fast path). A row
+	// count proves no append landed between the read snapshot and this check;
+	// updates are already covered by the epoch.
+	var rows int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests`).Scan(&rows); err != nil {
+		return false, err
+	}
+	if rows != t.Requests {
+		return false, nil
+	}
+	if err := saveTotals(ctx, tx, t, false, epoch); err != nil {
+		return false, fmt.Errorf("persist totals: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
 	}
 	s.installTotals(t)
-	return nil
+	return true, nil
 }
 
 func (s *Store) installTotals(t Totals) {
