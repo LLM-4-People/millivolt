@@ -58,6 +58,15 @@ const queryMaxColumns = 128
 // counted in Dropped). Internal guardrail, not user-tunable.
 const sqliteBusyTimeout = 5 * time.Second
 
+// maintenanceTimeout bounds long, non-interactive storage materialization and
+// maintenance work: the startup projection preload, the boot totals rebuild,
+// an administrative purge, and a backup merge's totals scan. These operations
+// legitimately read or rewrite full history, so the interactive
+// storage_query_timeout must not abort them. A caller's earlier deadline still
+// wins (context.WithTimeout keeps the shorter one). Internal guardrail, not a
+// user-tunable config value.
+const maintenanceTimeout = 10 * time.Minute
+
 // Options holds the storage pipeline tunables. All values come from config
 // (single source of truth); nothing is defaulted here.
 type Options struct {
@@ -89,6 +98,11 @@ type Options struct {
 	// time per phase). Zero keeps the production constant; config has no
 	// knob because the guardrail is deliberately not user-tunable.
 	BusyTimeout time.Duration
+	// MaintenanceTimeout shortens the maintenanceTimeout guardrail for tests
+	// that assert the boot/maintenance failure path quickly (a 10m window is
+	// not testable). Zero keeps the production constant; config has no knob
+	// because the budget is an internal guardrail, not user-tunable.
+	MaintenanceTimeout time.Duration
 }
 
 // errNotSelect rejects any dashboard query that is not a single SELECT.
@@ -109,6 +123,18 @@ var ErrStorageDisabled = errors.New("durable storage is disabled")
 // (deadline already expired) rather than running unbounded.
 func (s *Store) withQueryTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, s.opts.QueryTimeout)
+}
+
+// withMaintenanceTimeout is the explicit budget for non-interactive
+// materialization and maintenance work. Interactive dashboard queries stay on
+// withQueryTimeout; callers select this path by method, never by widening the
+// interactive timeout. A shorter parent deadline is preserved.
+func (s *Store) withMaintenanceTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.opts.MaintenanceTimeout
+	if timeout <= 0 {
+		timeout = maintenanceTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // requestDebugDDL is the single owner of the request_debug schema: the
@@ -484,8 +510,12 @@ type Store struct {
 	// the pipeline the way Close does.
 	flushCh chan chan error
 	// lastDebugExpire is writer-goroutine state for the opportunistic expired
-	// sidecar sweep.
-	lastDebugExpire time.Time
+	// sidecar sweep. debugExpirePending means a sweep (the writer tick or an
+	// explicit startup call) stopped at its bounded increment and the writer's
+	// near-term tick must continue it; it is atomic because the startup call
+	// can publish it off the writer goroutine.
+	lastDebugExpire    time.Time
+	debugExpirePending atomic.Bool
 }
 
 // cantOpenContext explains SQLITE_CANTOPEN startup failures. The bare SQLite
@@ -617,10 +647,10 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 	// Since-inception totals are a durable meta row maintained in the same
 	// transaction as every mutation. A current document is O(1) at boot; an
-	// absent/stale one rebuilds once from the rows (bounded by the query
-	// timeout). A failure logs and leaves totals degraded - never silently
-	// pretend they're right.
-	tctx, cancel := s.withQueryTimeout(context.Background())
+	// absent/stale one rebuilds once from the rows (bounded by the maintenance
+	// budget, not the interactive query timeout). A failure logs and leaves
+	// totals degraded - never silently pretend they're right.
+	tctx, cancel := s.withMaintenanceTimeout(context.Background())
 	if persisted, ok, err := loadTotals(tctx, s.rdb); err == nil && ok {
 		s.installTotals(persisted)
 	} else {
@@ -763,6 +793,7 @@ func (s *Store) seedDebugBytes(ctx context.Context) error {
 }
 
 // resetDebugBytes recomputes the counter after a bulk mutation (purge/merge)
+// or an expiry batch whose freed-byte subtraction could not be proven exact,
 // on the caller's transaction/connection.
 func (s *Store) resetDebugBytes(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -871,6 +902,11 @@ func (s *Store) writer() {
 	}
 	ticker := time.NewTicker(s.opts.FlushInterval)
 	defer ticker.Stop()
+	// The continuation cadence is independent of the configured flush interval
+	// so a large expired sidecar set still drains promptly when that interval
+	// is long.
+	debugTicker := time.NewTicker(debugExpireRetryInterval)
+	defer debugTicker.Stop()
 	for {
 		select {
 		case r, ok := <-s.ch:
@@ -913,6 +949,8 @@ func (s *Store) writer() {
 		case <-ticker.C:
 			flush()
 			s.expireDebugCapturesIfDue()
+		case <-debugTicker.C:
+			s.continueDebugExpire()
 		case <-s.done:
 			// Shutdown: Close closes s.ch right after s.done, so range drains
 			// every buffered record - including any a producer raced in after
@@ -929,16 +967,36 @@ func (s *Store) writer() {
 
 // expireDebugCapturesIfDue runs the expired-sidecar sweep from the writer
 // goroutine at a bounded cadence. Expired rows are already invisible to reads;
-// without the sweep their bytes stay on disk until the next restart.
+// without the sweep their bytes stay on disk until the next restart. A sweep
+// stopped at its per-tick bound keeps the pending flag set so the next tick
+// continues immediately instead of waiting a full interval.
 func (s *Store) expireDebugCapturesIfDue() {
 	now := time.Now()
-	if !s.lastDebugExpire.IsZero() && now.Sub(s.lastDebugExpire) < debugExpireInterval {
+	if !s.debugExpirePending.Load() && !s.lastDebugExpire.IsZero() && now.Sub(s.lastDebugExpire) < debugExpireInterval {
 		return
 	}
+	s.sweepDebugCaptures(now)
+}
+
+// continueDebugExpire drains the next bounded increment when the previous
+// sweep stopped at its per-tick limit. The writer's dedicated ticker calls it
+// even when the configured flush cadence is long.
+func (s *Store) continueDebugExpire() {
+	if !s.debugExpirePending.Load() {
+		return
+	}
+	s.sweepDebugCaptures(time.Now())
+}
+
+// sweepDebugCaptures runs exactly one bounded sweep on the writer goroutine and
+// records whether another increment remains.
+func (s *Store) sweepDebugCaptures(now time.Time) {
 	s.lastDebugExpire = now
 	ctx, cancel := s.withQueryTimeout(context.Background())
 	defer cancel()
-	if _, err := s.ExpireDebugCaptures(ctx, now.UnixMilli()); err != nil && ctx.Err() == nil {
+	_, more, err := s.expireDebugCaptures(ctx, now.UnixMilli(), debugExpireBatchesPerSweep)
+	s.debugExpirePending.Store(err == nil && more)
+	if err != nil && ctx.Err() == nil {
 		log.Printf("storage: expire debug captures: %v", err)
 	}
 }
@@ -2118,14 +2176,29 @@ type ProjectionCursor struct {
 }
 
 // StreamProjection materializes either all analytical rows or only append
-// deltas. The epoch, high-water mark, and rows share one read transaction, so
-// another process committing during a scan cannot make its cursor outrun its
-// rows. Rewrites/removals/schema changes require a replacement snapshot.
-// columns is code-owned (the same list consumed by scanContrib), never input
-// from an HTTP request. No prompts, responses, or full records are retained.
+// deltas under the interactive query budget. The epoch, high-water mark, and
+// rows share one read transaction, so another process committing during a scan
+// cannot make its cursor outrun its rows. Rewrites/removals/schema changes
+// require a replacement snapshot. columns is code-owned (the same list consumed
+// by scanContrib), never input from an HTTP request. No prompts, responses, or
+// full records are retained.
 func (s *Store) StreamProjection(ctx context.Context, columns string, cursor ProjectionCursor, fn func(*sql.Rows) error) (ProjectionCursor, bool, error) {
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
+	return s.streamProjection(ctx, columns, cursor, fn)
+}
+
+// StreamProjectionMaintenance is StreamProjection under the explicit
+// maintenance budget. The startup preload uses it so a short interactive query
+// timeout cannot abort a full-history materialization; an interactive catch-up
+// must keep using StreamProjection.
+func (s *Store) StreamProjectionMaintenance(ctx context.Context, columns string, cursor ProjectionCursor, fn func(*sql.Rows) error) (ProjectionCursor, bool, error) {
+	ctx, cancel := s.withMaintenanceTimeout(ctx)
+	defer cancel()
+	return s.streamProjection(ctx, columns, cursor, fn)
+}
+
+func (s *Store) streamProjection(ctx context.Context, columns string, cursor ProjectionCursor, fn func(*sql.Rows) error) (ProjectionCursor, bool, error) {
 	tx, err := s.rdb.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return ProjectionCursor{}, false, err
@@ -2188,6 +2261,19 @@ func (s *Store) StreamProjection(ctx context.Context, columns string, cursor Pro
 func (s *Store) DataVersion(ctx context.Context) (int64, error) {
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
+	return s.dataVersion(ctx)
+}
+
+// DataVersionMaintenance is DataVersion under the explicit maintenance
+// budget: the startup preload's freshness witness belongs to the same
+// full-history materialization and must not inherit the interactive timeout.
+func (s *Store) DataVersionMaintenance(ctx context.Context) (int64, error) {
+	ctx, cancel := s.withMaintenanceTimeout(ctx)
+	defer cancel()
+	return s.dataVersion(ctx)
+}
+
+func (s *Store) dataVersion(ctx context.Context) (int64, error) {
 	s.versionMu.Lock()
 	defer s.versionMu.Unlock()
 	if s.versionClosed {

@@ -231,7 +231,10 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 		}
 		return inserted, skipped, nil
 	}
-	tctx, cancel := s.withQueryTimeout(context.Background())
+	// The post-merge totals scan is maintenance work on the held writer
+	// connection: it legitimately reads all history and must not inherit the
+	// interactive dashboard query timeout.
+	tctx, cancel := s.withMaintenanceTimeout(context.Background())
 	defer cancel()
 	// No other writer can commit while conn is held, so the scan is exact.
 	totals, err := readTotals(tctx, s.rdb)

@@ -94,14 +94,15 @@ func TestExplorerAbsorbsCorruptAttemptsColumn(t *testing.T) {
 // and tooltip), and a healthy store reports false.
 func TestBootstrapSignalsTotalsDegraded(t *testing.T) {
 	d := config.Default()
-	bootSignal := func(queryTimeout time.Duration) map[string]any {
+	bootSignal := func(maintenanceTimeout time.Duration) map[string]any {
 		t.Helper()
 		s, err := storage.Open(filepath.Join(t.TempDir(), "boot.db"), storage.Options{
-			WriteChanCap:  d.StorageWriteChanCap,
-			BatchCap:      d.StorageBatchCap,
-			FlushInterval: time.Millisecond,
-			QueryTimeout:  queryTimeout,
-			WriteTrackCap: 64,
+			WriteChanCap:       d.StorageWriteChanCap,
+			BatchCap:           d.StorageBatchCap,
+			FlushInterval:      time.Millisecond,
+			QueryTimeout:       time.Second,
+			MaintenanceTimeout: maintenanceTimeout,
+			WriteTrackCap:      64,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -126,7 +127,7 @@ func TestBootstrapSignalsTotalsDegraded(t *testing.T) {
 	if got := bootSignal(time.Nanosecond)["totals_degraded"]; got != true {
 		t.Fatalf("degraded boot: storage.totals_degraded = %v, want true", got)
 	}
-	if got := bootSignal(time.Second)["totals_degraded"]; got != false {
+	if got := bootSignal(0)["totals_degraded"]; got != false {
 		t.Fatalf("healthy boot: storage.totals_degraded = %v, want false", got)
 	}
 }

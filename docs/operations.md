@@ -1324,11 +1324,27 @@ successful responses, exact durable accounting and process-local drops are
 separate acceptance criteria. A short successful burst does not establish
 sustainable writer throughput or an absolute request-capacity ceiling.
 
+`storage_query_timeout` bounds interactive dashboard reads (chart, explorer,
+log/bootstrap, capture reads) and the ad-hoc query route. Startup projection
+preload, the boot totals rebuild, an administrative purge, and a backup merge's
+totals scan run under a separate internal ten-minute maintenance budget: they
+legitimately read or rewrite full history and must not inherit the interactive
+bound. The
+maintenance budget still honors an earlier caller cancellation or deadline, and
+its expiry fails the operation closed (a purge transaction rolls back). It is a
+fixed implementation guardrail, not a configuration field.
+
 One shared analytical projection retains compact data and sorted metric orders
 proportional to stored history. Initial preload costs startup CPU/RAM; fast
 dashboard reuse is not free startup or bounded total-history memory.
 Concurrent independent proxy writers sharing a database are not a supported
 coherent-KPI deployment.
+
+Expired debug sidecars are hidden from reads immediately by their TTL. Physical
+reclamation deletes bounded batches per writer tick and continues on a
+near-term tick, so a large expired set drains without holding the sole writer
+connection; the sidecar byte cap accounting is updated exactly for the rows
+removed.
 
 Scheduler groups and some observed-identity sets also retain historical labels.
 Bounded request queues do not bound all process memory; long-running workloads

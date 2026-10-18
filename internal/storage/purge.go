@@ -71,7 +71,10 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	}
 	s.purgeMu.Lock()
 	defer s.purgeMu.Unlock()
-	ctx, cancel := s.withQueryTimeout(ctx)
+	// An administrative purge rewrites all (or all matching) history and its
+	// totals in one transaction; it runs on the maintenance budget, never the
+	// interactive dashboard query timeout. A shorter caller deadline wins.
+	ctx, cancel := s.withMaintenanceTimeout(ctx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return PurgeResult{}, err

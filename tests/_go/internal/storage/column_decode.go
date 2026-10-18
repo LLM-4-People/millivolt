@@ -128,12 +128,13 @@ func TestDecodeJSONColumnContract(t *testing.T) {
 // scan: the flag is set when the initial totals scan cannot run, the
 // aggregate then counts only rows committed since (a truthful subset, never
 // a silent since-inception claim), and a healthy boot clears the flag. The
-// deterministic failure injection is the query timeout: an already-expired
-// deadline fails the scan's SELECT without touching the data.
+// deterministic failure injection is an already-expired maintenance budget:
+// it fails the scan's SELECT without touching the data, while the interactive
+// query timeout stays healthy.
 func TestTotalsDegradedFlag(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "degraded.db")
 	degradedOpts := testOpts
-	degradedOpts.QueryTimeout = time.Nanosecond
+	degradedOpts.MaintenanceTimeout = time.Nanosecond
 	s, err := Open(path, degradedOpts)
 	if err != nil {
 		t.Fatal(err)

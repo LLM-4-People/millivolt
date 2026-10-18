@@ -76,61 +76,102 @@ func (s *Store) LoadDebugCapture(ctx context.Context, id string) ([]byte, error)
 	return []byte(payload), nil
 }
 
-// debugExpireBatch bounds rows deleted per statement; a sweep repeats until a
-// short batch, so a large expired set never holds the writer connection for
-// one unbounded DELETE.
+// debugExpireBatch bounds rows deleted per statement; each batch is one
+// select plus one DELETE, so a large expired set never holds the writer
+// connection for one unbounded statement.
 const debugExpireBatch = 256
+
+// debugExpireBatchesPerSweep bounds one sweep invocation (an explicit call or
+// one writer tick). A large expired set continues on the writer's near-term
+// debugExpireRetryInterval tick instead of monopolizing the writer.
+const debugExpireBatchesPerSweep = 4
+
+// debugExpireRetryInterval is the writer's near-term continuation cadence when
+// a sweep stopped at debugExpireBatchesPerSweep. It is deliberately independent
+// of storage_flush_interval, which may be configured much longer.
+const debugExpireRetryInterval = 250 * time.Millisecond
 
 // debugExpireInterval is how often the writer opportunistically sweeps expired
 // sidecars. The TTL hides expired rows from reads immediately; this bounds the
 // disk they can otherwise retain until the next restart.
 const debugExpireInterval = 10 * time.Minute
 
-// ExpireDebugCaptures deletes sidecar rows whose expires_at is before beforeMs.
-// The delete runs in bounded batches so one sweep can never hold the single
-// writer connection for an unbounded time; it stops when the batch is short or
-// the context is done.
+// debugExpireQuery owns the expired-row selection for both byte-accounting
+// modes. The cap-active form carries each payload length so a sweep can
+// subtract freed bytes exactly; with the cap disabled lengths are never read.
+// Neither form orders rows: batch order is not semantic, and ORDER BY would add
+// a temp B-tree to every batch.
+func debugExpireQuery(withBytes bool) string {
+	if withBytes {
+		return `SELECT rowid, LENGTH(CAST(payload AS BLOB)) FROM request_debug
+			WHERE expires_at > 0 AND expires_at < ? LIMIT ?`
+	}
+	return `SELECT rowid FROM request_debug
+		WHERE expires_at > 0 AND expires_at < ? LIMIT ?`
+}
+
+// ExpireDebugCaptures deletes expired sidecar rows in one bounded sweep.
+// Expired rows are already invisible to reads; when another increment remains,
+// the writer continues it on its near-term tick. beforeMs is the caller's
+// clock.
 func (s *Store) ExpireDebugCaptures(ctx context.Context, beforeMs int64) (int64, error) {
+	total, more, err := s.expireDebugCaptures(ctx, beforeMs, debugExpireBatchesPerSweep)
+	if more {
+		s.debugExpirePending.Store(true)
+	}
+	return total, err
+}
+
+// expireDebugCaptures deletes at most maxBatches batches and reports whether a
+// full final batch may leave more expired rows. Holding debugMu across each
+// select+delete keeps a concurrent capture from replacing a row between the two
+// statements and makes the cap-active counter subtraction exact.
+func (s *Store) expireDebugCaptures(ctx context.Context, beforeMs int64, maxBatches int) (int64, bool, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	defer conn.Close()
+	withBytes := s.debugMaxBytes > 0
 	var total int64
-	for {
-		// Select bounded rowids and their byte sizes first. Holding debugMu
-		// across select+delete keeps a concurrent capture from replacing a row
-		// between the two statements, and makes the counter subtraction exact.
+	for batch := 0; batch < maxBatches; batch++ {
+		if err := ctx.Err(); err != nil {
+			return total, false, err
+		}
 		s.debugMu.Lock()
-		rows, err := conn.QueryContext(ctx,
-			`SELECT rowid, LENGTH(CAST(payload AS BLOB)) FROM request_debug
-			WHERE expires_at > 0 AND expires_at < ? ORDER BY rowid LIMIT ?`,
-			beforeMs, debugExpireBatch)
+		rows, err := conn.QueryContext(ctx, debugExpireQuery(withBytes), beforeMs, debugExpireBatch)
 		if err != nil {
 			s.debugMu.Unlock()
-			return total, err
+			return total, false, err
 		}
 		var ids []int64
 		var freed int64
 		for rows.Next() {
-			var id, n int64
-			if err := rows.Scan(&id, &n); err != nil {
+			var id int64
+			if withBytes {
+				var n int64
+				if err := rows.Scan(&id, &n); err != nil {
+					rows.Close()
+					s.debugMu.Unlock()
+					return total, false, err
+				}
+				freed += n
+			} else if err := rows.Scan(&id); err != nil {
 				rows.Close()
 				s.debugMu.Unlock()
-				return total, err
+				return total, false, err
 			}
 			ids = append(ids, id)
-			freed += n
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			s.debugMu.Unlock()
-			return total, err
+			return total, false, err
 		}
 		rows.Close()
 		if len(ids) == 0 {
 			s.debugMu.Unlock()
-			break
+			return total, false, nil
 		}
 		placeholders := make([]byte, 0, len(ids)*2)
 		args := make([]any, 0, len(ids))
@@ -144,23 +185,37 @@ func (s *Store) ExpireDebugCaptures(ctx context.Context, beforeMs int64) (int64,
 		res, err := conn.ExecContext(ctx, `DELETE FROM request_debug WHERE rowid IN (`+string(placeholders)+`)`, args...)
 		if err != nil {
 			s.debugMu.Unlock()
-			return total, err
+			return total, false, err
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
 			s.debugMu.Unlock()
-			return total, err
+			return total, false, err
 		}
 		total += n
-		if s.debugSeeded {
-			s.debugBytes = max(0, s.debugBytes-freed)
+		exact := n == int64(len(ids))
+		needsReseed := false
+		if withBytes && s.debugSeeded {
+			// Under debugMu no in-process save can replace a selected row, so
+			// the subtraction is exact. A mismatched row count means an
+			// unsupported external writer changed rows; recompute once.
+			if exact {
+				s.debugBytes = max(0, s.debugBytes-freed)
+			} else {
+				needsReseed = true
+			}
 		}
 		s.debugMu.Unlock()
-		if n < debugExpireBatch || ctx.Err() != nil {
-			break
+		if needsReseed {
+			if err := s.resetDebugBytes(ctx, conn); err != nil {
+				return total, false, err
+			}
+		}
+		if len(ids) < debugExpireBatch {
+			return total, false, nil
 		}
 	}
-	return total, nil
+	return total, true, nil
 }
 
 // CountDebugSession returns how many sidecar rows belong to sessionID.

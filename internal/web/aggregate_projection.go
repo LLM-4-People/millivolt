@@ -77,26 +77,38 @@ func growRows(dst, add []contrib) []contrib {
 // they run on the query path, where a forced GC would add a stop-the-world
 // pause to a live request.
 func (a *AggAPI) PreloadHistory(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, a.timeout)
-	defer cancel()
-	if err := a.withProjection(ctx, func(*projectionData) error { return nil }); err != nil {
+	if err := a.withProjectionBudget(ctx, projectionMaintenance, func(*projectionData) error { return nil }); err != nil {
 		return err
 	}
 	debug.FreeOSMemory()
 	return nil
 }
 
+// projectionBudget selects which storage budget bounds one materialization.
+// The startup preload is maintenance work; every dashboard read stays on the
+// interactive query timeout.
+type projectionBudget int
+
+const (
+	projectionInteractive projectionBudget = iota
+	projectionMaintenance
+)
+
 // withProjection holds one read lease for metadata preparation AND iteration.
 // Borrowed maps/slices must not escape this callback. Catch-up never takes the
 // ring/writer hot-path locks; concurrent views share one materialization.
 func (a *AggAPI) withProjection(ctx context.Context, fn func(*projectionData) error) error {
+	return a.withProjectionBudget(ctx, projectionInteractive, fn)
+}
+
+func (a *AggAPI) withProjectionBudget(ctx context.Context, budget projectionBudget, fn func(*projectionData) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if a.store == nil {
 		return fn(nil)
 	}
-	if err := a.projection.refresh(ctx, a.store); err != nil {
+	if err := a.projection.refresh(ctx, a.store, budget); err != nil {
 		return err
 	}
 	a.projection.mu.RLock()
@@ -149,12 +161,31 @@ func (d *projectionData) visitSince(since int64, fn func(*contrib) error) error 
 	return nil
 }
 
-func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) error {
+// projectionDataVersion reads the freshness witness under the selected budget.
+// An interactive read must keep the storage query timeout; only the startup
+// preload selects maintenance.
+func projectionDataVersion(ctx context.Context, store *storage.Store, budget projectionBudget) (int64, error) {
+	if budget == projectionMaintenance {
+		return store.DataVersionMaintenance(ctx)
+	}
+	return store.DataVersion(ctx)
+}
+
+// projectionStream streams the projection under the selected budget, keeping
+// the interactive timeout on every dashboard read path.
+func projectionStream(ctx context.Context, store *storage.Store, budget projectionBudget, cursor storage.ProjectionCursor, fn func(*sql.Rows) error) (storage.ProjectionCursor, bool, error) {
+	if budget == projectionMaintenance {
+		return store.StreamProjectionMaintenance(ctx, rowColumns, cursor, fn)
+	}
+	return store.StreamProjection(ctx, rowColumns, cursor, fn)
+}
+
+func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, budget projectionBudget) error {
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		version, err := store.DataVersion(ctx)
+		version, err := projectionDataVersion(ctx, store, budget)
 		if err != nil {
 			return err // never serve an old projection when freshness is unknowable
 		}
@@ -190,7 +221,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) e
 		// Re-read the version after acquiring the build token: an older caller
 		// cannot roll the projection's version back, and a commit that landed
 		// while we waited is included in this scan.
-		version, err = store.DataVersion(ctx)
+		version, err = projectionDataVersion(ctx, store, budget)
 		if err != nil {
 			p.mu.Unlock()
 			return err
@@ -209,7 +240,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store) e
 		// next read catches up instead of falsely declaring the rows fresh.
 		var incoming []contrib
 		scanned := 0
-		next, full, err := store.StreamProjection(ctx, rowColumns, base.cursor, func(rows *sql.Rows) error {
+		next, full, err := projectionStream(ctx, store, budget, base.cursor, func(rows *sql.Rows) error {
 			c, err := scanContrib(rows, nil) // raw spelling; query rules apply later
 			if err != nil {
 				return err
