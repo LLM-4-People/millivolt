@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -40,14 +41,64 @@ type persistedDebugDoc struct {
 }
 
 type debugRuntime struct {
-	mu         sync.Mutex
-	sessions   []persistedDebug
-	timers     map[string]*time.Timer
-	persistGen uint64
+	mu       sync.Mutex
+	sessions []persistedDebug
+	timers   map[string]*time.Timer
+	// pendingCaptures holds one completion marker per in-flight sidecar save,
+	// keyed by capture (record) id. The marker is registered before the
+	// completed record is published and closed after the save resolves, so a
+	// drawer fetch that follows the live end waits instead of observing a
+	// transient 404. Entries exist only for the duration of a save.
+	pendingCaptures map[string]chan struct{}
+	persistGen      uint64
 }
 
 func (s *Server) initDebug() {
 	s.debug.timers = make(map[string]*time.Timer)
+	s.debug.pendingCaptures = make(map[string]chan struct{})
+}
+
+// registerPendingCapture records the in-flight sidecar save for id and returns
+// its idempotent release. The marker must be registered before the completion
+// publish: once the live end is visible, every fetch for that id either waits
+// on this marker or observes the completed save.
+func (s *Server) registerPendingCapture(id string) func() {
+	done := make(chan struct{})
+	s.debug.mu.Lock()
+	if s.debug.pendingCaptures == nil {
+		s.debug.pendingCaptures = make(map[string]chan struct{})
+	}
+	s.debug.pendingCaptures[id] = done
+	s.debug.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.debug.mu.Lock()
+			if s.debug.pendingCaptures[id] == done {
+				delete(s.debug.pendingCaptures, id)
+			}
+			s.debug.mu.Unlock()
+			close(done)
+		})
+	}
+}
+
+// waitPendingCapture blocks while id has an in-flight sidecar save. It reports
+// false when ctx ends first, so a disconnected drawer client stops waiting; a
+// caller with no pending marker reads storage immediately.
+func (s *Server) waitPendingCapture(ctx context.Context, id string) bool {
+	s.debug.mu.Lock()
+	done := s.debug.pendingCaptures[id]
+	s.debug.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func decodeDebug(raw []byte) []persistedDebug {
@@ -447,7 +498,7 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Starting a capture requires durable storage: without a store every
-	// matched request would copy headers and bodies only for finishDebugTap to
+	// matched request would copy headers and bodies only for the save path to
 	// discard them, while the record still reported debug=true. A process with
 	// no store also has no persisted session document to restore, so refusing
 	// creation here means it never runs an enabled capture session. Editing a
@@ -617,6 +668,14 @@ func (s *Server) HandleDebugCapture(w http.ResponseWriter, r *http.Request) {
 		// The message is the one storage-disabled sentinel's canonical text
 		// (constant-only import; the persist seam itself stays an interface).
 		adminjson.WriteError(w, http.StatusNotFound, storage.ErrStorageDisabled.Error())
+		return
+	}
+	// A fetch that follows the live end can arrive while the sidecar save is
+	// still running. Wait for that request's marker instead of exposing a
+	// transient 404; the request context stops the wait when the drawer client
+	// disconnects. No pending marker means the save already resolved (or never
+	// existed), so the ordinary storage read below is authoritative.
+	if !s.waitPendingCapture(r.Context(), id) {
 		return
 	}
 	ctx, cancel := s.storeQueryCtx()

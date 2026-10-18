@@ -453,62 +453,84 @@ func TestDebugPersistsAndRestores(t *testing.T) {
 	}
 }
 
-func TestDebugRequestPublishedAndCaptured(t *testing.T) {
-	spy := &liveSpy{}
-	p := newStoredTestProxy(t, spy)
-	rr := httptest.NewRecorder()
-	p.HandleDebug(rr, httptest.NewRequest(http.MethodPost, "/admin/debug",
-		strings.NewReader(`{"enabled":true,"clients":["client-a"]}`)))
-	if rr.Code != 200 {
-		t.Fatalf("status = %d %s", rr.Code, rr.Body.Bytes())
-	}
+// TestDebugCapturePublishesCompletionBeforeSidecarSave pins the completion
+// ordering: the finalized record and its live end event are published while
+// SaveDebugCapture is still blocked, and a drawer fetch that follows the end
+// waits for the sidecar instead of observing a transient 404. The blocking
+// persist seam makes the ordering deterministic. The test keeps the capture
+// content, redaction and UTC timestamp coverage of its predecessor.
+func TestDebugCapturePublishesCompletionBeforeSidecarSave(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-order.db"))
+	gate := newCaptureSaveGate(store)
+	// A deferred release runs before the httptest cleanup waits for the
+	// handler; t.Cleanup would run it after srv.Close and deadlock the seam.
+	defer gate.unblock()
+	buf := metrics.NewBuffer(8)
+	p := New(config.Default(), buf)
+	p.AttachPausePersist(gate)
+	startDebugSession(t, p)
+	live := buf.SubscribeLive()
 
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got == "" {
 			t.Error("upstream missing Authorization")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"hello debug"}}]}`))
-	}))
-	defer upstream.Close()
+		_, _ = w.Write([]byte(`{"id":"1","choices":[{"message":{"role":"assistant","content":"hello debug"}}]}`))
+	})
+	request := startDebugCaptureRequest(t, p, upstream,
+		`{"model":"m","messages":[{"role":"user","content":"secret prompt"}]}`)
 
-	srv := httptest.NewServer(p)
-	defer srv.Close()
-
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"secret prompt"}]}`))
-	req.Header.Set("Authorization", "Bearer sk-secret")
-	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
-	req.Header.Set("X-Proxy-Client", "client-a")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
+	begin := waitLiveEvent(t, live)
+	if begin.Phase != "begin" || begin.Record == nil || !begin.Record.Debug {
+		t.Fatalf("first live event = %+v, want a debug begin", begin)
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	// Poll the finalized record: live publishes fire at acceptance with
-	// StatusCode still 0, so the old poll of the live view for a 200 could
-	// never match and only burned the deadline without verifying anything.
-	// finishDebugTap saves the capture before Record runs, so observing the
-	// finalized record also proves the capture is durable.
-	deadline := time.Now().Add(2 * time.Second)
-	var rec *metrics.Record
-	for time.Now().Before(deadline) {
-		if rec = spy.final.Load(); rec != nil && rec.Debug && rec.StatusCode == 200 {
-			break
+	id := begin.Record.ID
+	select {
+	case got := <-gate.entered:
+		if got != id {
+			t.Fatalf("SaveDebugCapture id = %q, want %q", got, id)
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if rec == nil || !rec.Debug || rec.StatusCode != 200 {
-		t.Fatal("finalized record never observed with debug=true and status 200")
-	}
-	if live := spy.last.Load(); live == nil || !live.Debug {
-		t.Fatal("live record never published with debug=true")
+	case <-time.After(2 * time.Second):
+		t.Fatal("SaveDebugCapture never entered")
 	}
 
-	got := httptest.NewRecorder()
-	p.HandleDebugCapture(got, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+rec.ID, nil))
-	if got.Code != 200 {
+	// The completed record and its live end must already be published: the
+	// sidecar encode/save may delay neither.
+	end := waitLiveEvent(t, live)
+	if end.Phase != "end" || end.Record == nil || end.Record.ID != id {
+		t.Fatalf("live event while save blocked = %+v, want end for %s", end, id)
+	}
+	records := buf.Snapshot()
+	if len(records) != 1 || records[0].ID != id || records[0].StatusCode != http.StatusOK {
+		t.Fatalf("finalized records while save blocked = %+v, want the completed %s", records, id)
+	}
+
+	// A fetch following the live end must wait for the sidecar save rather
+	// than answer the transient 404.
+	fetched := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+id, nil))
+		fetched <- w
+	}()
+	select {
+	case w := <-fetched:
+		t.Fatalf("capture fetch answered %d before the sidecar save resolved: %s", w.Code, w.Body)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	gate.unblock()
+	if err := <-request; err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	var got *httptest.ResponseRecorder
+	select {
+	case got = <-fetched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("capture fetch did not resume after the sidecar save resolved")
+	}
+	if got.Code != http.StatusOK {
 		t.Fatalf("capture status = %d body %s", got.Code, got.Body.Bytes())
 	}
 	raw := got.Body.String()

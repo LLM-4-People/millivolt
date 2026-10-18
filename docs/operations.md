@@ -945,7 +945,11 @@ bytes. Oversized captures are marked truncated. `debug_store_max_bytes`
 exceed it, new captures are skipped and TTL expiry frees capacity again.
 Capture writes are counted in bytes, not characters. The request drawer loads an
 available sidecar only for a captured request; expired/absent captures are not
-recreated from ordinary metrics.
+recreated from ordinary metrics. Completion is published before the sidecar is
+encoded and saved, so a slow sidecar write delays neither the live end nor
+durable accounting. A drawer fetch that follows the live end waits for that
+request's in-flight save instead of answering a transient 404; a disconnected
+client stops waiting.
 
 Starting a capture requires durable storage. With `db_path` empty,
 `enabled:true` without an ID answers 503 `durable storage is disabled` and

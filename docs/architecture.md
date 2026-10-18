@@ -107,6 +107,11 @@ SQLite accounting.
 `Buffer.Record` atomically finalizes the row, retires pending state, updates its
 gauge/revision and emits end. Exactly one finalized record per request is the
 accounting unit; proxy-owned IDs cannot collide with reused client request IDs.
+A debug capture registers its pending sidecar marker in `debugRuntime` before
+that publish and encodes/saves after it, so the sidecar write delays neither
+the live end nor durable accounting. A drawer fetch for the id waits on the
+marker, then reads the authoritative store; a resolved marker without a row
+keeps the normal 404.
 
 Existing lock order keeps sequence assignment and finalized publication ordered.
 A feed epoch changes on restart/deletion; queued fanout retains its mutation

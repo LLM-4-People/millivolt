@@ -688,10 +688,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		rec.End = time.Now()
 		metrics.FinalizeRecord(rec)
-		s.finishDebugTap(debugTap, rec)
+		// Register the sidecar's pending marker first, then publish completion:
+		// once the live end is visible, a drawer fetch for this record either
+		// waits on the marker or finds the finished capture. The synchronous
+		// save below runs after both, so it can delay neither.
+		saveCapture := s.prepareDebugCapture(debugTap, rec)
 		// The live recorder finalizes pending state and emits end atomically
 		// with this record, under the same boundary used by log deletion.
 		s.rec.Record(rec)
+		if saveCapture != nil {
+			saveCapture()
+		}
 	}()
 
 	state := &stormRequestState{rec: rec, format: t.format}

@@ -2,13 +2,17 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,9 +48,9 @@ func startDebugSession(t *testing.T, p *Server) {
 
 // runDebugCaptureRequest serves upstream behind p and sends one chat request
 // scoped to client-a with Authorization plus extra headers. It drains the
-// client response and returns the finalized record once spy has observed it;
-// the capture write precedes Record, so the returned record's sidecar is
-// durable.
+// client response and returns the finalized record once spy has observed it.
+// Record runs before the sidecar write, so a subsequent drawer fetch waits on
+// the pending marker and still sees the stored capture.
 func runDebugCaptureRequest(t *testing.T, p *Server, spy *liveSpy, upstream http.Handler, body string, extra http.Header) *metrics.Record {
 	t.Helper()
 	up := httptest.NewServer(upstream)
@@ -95,6 +99,118 @@ func fetchDebugCapture(t *testing.T, p *Server, id string) []byte {
 		t.Fatalf("capture %s: status %d body %s", id, w.Code, w.Body.String())
 	}
 	return w.Body.Bytes()
+}
+
+// captureSaveGate wraps a real store and parks SaveDebugCapture until release
+// closes. entered fires while the save is blocked, so an ordering test can
+// observe exactly what the request path published before the sidecar write.
+type captureSaveGate struct {
+	pausePersist
+	entered chan string
+	release chan struct{}
+	err     error
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func newCaptureSaveGate(store pausePersist) *captureSaveGate {
+	return &captureSaveGate{
+		pausePersist: store,
+		entered:      make(chan string, 1),
+		release:      make(chan struct{}),
+	}
+}
+
+func (g *captureSaveGate) SaveDebugCapture(ctx context.Context, id, sessionID string, capturedAt, expiresAt int64, payload []byte) error {
+	g.calls.Add(1)
+	select {
+	case g.entered <- id:
+	default:
+	}
+	<-g.release
+	if g.err != nil {
+		return g.err
+	}
+	return g.pausePersist.SaveDebugCapture(ctx, id, sessionID, capturedAt, expiresAt, payload)
+}
+
+func (g *captureSaveGate) unblock() { g.once.Do(func() { close(g.release) }) }
+
+func (g *captureSaveGate) saveCalls() int { return int(g.calls.Load()) }
+
+// captureLoadErrorPersist keeps the real store's writes but fails the drawer
+// read, pinning the unchanged 500 branch after a marker resolves.
+type captureLoadErrorPersist struct{ pausePersist }
+
+func (captureLoadErrorPersist) LoadDebugCapture(context.Context, string) ([]byte, error) {
+	return nil, errors.New("capture store unavailable")
+}
+
+// startDebugCaptureRequest issues one client-a chat request against p in the
+// background and reports the client-side result. The handler can still be in
+// its completion defer after the response body arrives, so callers that need
+// the deferred work wait on the capture seam or the pending owner instead.
+func startDebugCaptureRequest(t *testing.T, p *Server, upstream http.Handler, body string) <-chan error {
+	t.Helper()
+	up := httptest.NewServer(upstream)
+	t.Cleanup(up.Close)
+	srv := httptest.NewServer(p)
+	t.Cleanup(srv.Close)
+	done := make(chan error, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(body))
+		if err != nil {
+			done <- err
+			return
+		}
+		req.Header.Set("Authorization", "Bearer sk-secret")
+		req.Header.Set("X-Proxy-Base-URL", up.URL)
+		req.Header.Set("X-Proxy-Client", "client-a")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = io.Copy(io.Discard, resp.Body)
+		if closeErr := resp.Body.Close(); err == nil {
+			err = closeErr
+		}
+		done <- err
+	}()
+	return done
+}
+
+// waitLiveEvent reads one lifecycle event, failing the test on timeout.
+func waitLiveEvent(t *testing.T, live <-chan *metrics.LiveEvent) *metrics.LiveEvent {
+	t.Helper()
+	select {
+	case ev := <-live:
+		return ev
+	case <-time.After(2 * time.Second):
+		t.Fatal("live lifecycle event not observed")
+		return nil
+	}
+}
+
+// pendingCaptureCount reports the registered in-flight sidecar markers.
+func pendingCaptureCount(p *Server) int {
+	p.debug.mu.Lock()
+	defer p.debug.mu.Unlock()
+	return len(p.debug.pendingCaptures)
+}
+
+// waitPendingCapturesEmpty waits for every in-flight marker to resolve. A
+// marker left behind would hang the next drawer fetch for that id.
+func waitPendingCapturesEmpty(t *testing.T, p *Server) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if pendingCaptureCount(p) == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("pending capture markers did not resolve: %d left", pendingCaptureCount(p))
 }
 
 // TestDebugNoStoreRefusesSessionAndRetainsNothing pins the fail-closed storage
@@ -286,5 +402,255 @@ func TestDebugCaptureDoesNotHTMLEscape(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("X-Html header missing from the request capture")
+	}
+}
+
+// TestDebugCaptureSaveFailureResolvesPendingMarker pins the failure path: the
+// completed record and live end still publish before the sidecar write fails,
+// the pending marker resolves on the error, and a later fetch falls through to
+// the existing 404 because nothing was stored. A marker left registered would
+// hang that fetch indefinitely.
+func TestDebugCaptureSaveFailureResolvesPendingMarker(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-save-failure.db"))
+	gate := newCaptureSaveGate(store)
+	gate.err = errors.New("sidecar unavailable")
+	defer gate.unblock()
+	buf := metrics.NewBuffer(8)
+	p := New(config.Default(), buf)
+	p.AttachPausePersist(gate)
+	startDebugSession(t, p)
+	live := buf.SubscribeLive()
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[]}`))
+	})
+	request := startDebugCaptureRequest(t, p, upstream, `{"model":"m"}`)
+
+	begin := waitLiveEvent(t, live)
+	if begin.Phase != "begin" || begin.Record == nil {
+		t.Fatalf("first live event = %+v, want begin", begin)
+	}
+	id := begin.Record.ID
+	select {
+	case got := <-gate.entered:
+		if got != id {
+			t.Fatalf("SaveDebugCapture id = %q, want %q", got, id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SaveDebugCapture never entered")
+	}
+
+	end := waitLiveEvent(t, live)
+	if end.Phase != "end" || end.Record == nil || end.Record.ID != id {
+		t.Fatalf("live event while failing save is blocked = %+v, want end for %s", end, id)
+	}
+
+	gate.unblock()
+	if err := <-request; err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+	waitPendingCapturesEmpty(t, p)
+	if calls := gate.saveCalls(); calls != 1 {
+		t.Fatalf("SaveDebugCapture calls = %d, want exactly 1", calls)
+	}
+
+	w := httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+id, nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("failed save fetch = %d %s, want the existing 404", w.Code, w.Body.String())
+	}
+	if n := pendingCaptureCount(p); n != 0 {
+		t.Fatalf("pending capture markers = %d after the failed save, want 0", n)
+	}
+
+	// The other half of the existing contract: once no marker is pending, a
+	// storage read error still answers 500 rather than being masked as 404.
+	p.pause.persist = captureLoadErrorPersist{pausePersist: store}
+	w = httptest.NewRecorder()
+	p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+id, nil))
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("load-error fetch = %d %s, want the existing 500", w.Code, w.Body.String())
+	}
+}
+
+// TestDebugCaptureWaitStopsWithRequestContext pins the disconnect contract:
+// a drawer fetch waiting on an in-flight sidecar save stops when its request
+// context ends instead of outliving the client.
+func TestDebugCaptureWaitStopsWithRequestContext(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	release := p.registerPendingCapture("ctx-capture")
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waited := make(chan bool, 1)
+	go func() { waited <- p.waitPendingCapture(ctx, "ctx-capture") }()
+	cancel()
+	select {
+	case resolved := <-waited:
+		if resolved {
+			t.Fatal("wait reported the capture resolved on context cancellation")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wait ignored request context cancellation")
+	}
+}
+
+// TestDebugPendingCaptureOnlyExistsForRealCaptures pins the cheap paths: an
+// ordinary (non-debug) request never registers a marker or reaches
+// SaveDebugCapture, and a debug record without a store cannot register either.
+// The blocking gate stays closed for the whole test, so a stray save would
+// stall the request instead of passing silently.
+func TestDebugPendingCaptureOnlyExistsForRealCaptures(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-none.db"))
+	gate := newCaptureSaveGate(store)
+	defer gate.unblock()
+	buf := metrics.NewBuffer(8)
+	p := New(config.Default(), buf)
+	p.AttachPausePersist(gate)
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[]}`))
+	})
+	request := startDebugCaptureRequest(t, p, upstream, `{"model":"m"}`)
+	select {
+	case err := <-request:
+		if err != nil {
+			t.Fatalf("client request: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("non-debug request blocked in the capture save path")
+	}
+	records := waitForRecord(t, buf, 1)
+	if len(records) != 1 || records[0].Debug {
+		t.Fatalf("finalized records = %+v, want one non-debug record", records)
+	}
+	if calls := gate.saveCalls(); calls != 0 {
+		t.Fatalf("SaveDebugCapture calls = %d for a non-debug request, want 0", calls)
+	}
+	if n := pendingCaptureCount(p); n != 0 {
+		t.Fatalf("pending capture markers = %d for a non-debug request, want 0", n)
+	}
+
+	if save := p.prepareDebugCapture(&debugTap{}, &metrics.Record{ID: "no-debug"}); save != nil {
+		t.Fatal("a non-debug record returned a save closure")
+	}
+	if save := p.prepareDebugCapture(nil, &metrics.Record{ID: "no-tap", Debug: true}); save != nil {
+		t.Fatal("a missing tap returned a save closure")
+	}
+
+	bare := New(config.Default(), metrics.Noop{})
+	if save := bare.prepareDebugCapture(&debugTap{}, &metrics.Record{ID: "no-store", Debug: true}); save != nil {
+		t.Fatal("a store-less proxy returned a save closure")
+	}
+	if n := pendingCaptureCount(bare); n != 0 {
+		t.Fatalf("store-less pending capture markers = %d, want 0", n)
+	}
+}
+
+// TestDebugCaptureFastPathAddsNoAllocation pins the cheap request path: the
+// preparation seam allocates nothing when there is no tap, the record is not a
+// debug capture, or no durable store is wired.
+func TestDebugCaptureFastPathAddsNoAllocation(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-fast-path.db"))
+	p := New(config.Default(), metrics.Noop{})
+	p.AttachPausePersist(store)
+	bare := New(config.Default(), metrics.Noop{})
+	tap := &debugTap{}
+	plain := &metrics.Record{ID: "plain"}
+	debugRec := &metrics.Record{ID: "debug", Debug: true}
+
+	for _, tc := range []struct {
+		name    string
+		prepare func() func()
+	}{
+		{"no tap", func() func() { return p.prepareDebugCapture(nil, plain) }},
+		{"not a debug record", func() func() { return p.prepareDebugCapture(tap, plain) }},
+		{"no durable store", func() func() { return bare.prepareDebugCapture(tap, debugRec) }},
+	} {
+		var save func()
+		allocs := testing.AllocsPerRun(100, func() { save = tc.prepare() })
+		if allocs != 0 || save != nil {
+			t.Errorf("%s: allocations = %v, closure returned = %t, want 0 and false", tc.name, allocs, save != nil)
+		}
+	}
+	if n := pendingCaptureCount(p); n != 0 {
+		t.Fatalf("pending capture markers = %d on the fast path, want 0", n)
+	}
+}
+
+// TestDebugCaptureFetchesBeforeAndAfterMarkerResolve proves both drawer paths:
+// fetches that arrive while the sidecar save is blocked wait for the same
+// stored document instead of observing a transient 404, and a fetch after the
+// marker is removed loads that document normally.
+func TestDebugCaptureFetchesBeforeAndAfterMarkerResolve(t *testing.T) {
+	store, _ := openProxyTestStore(t, filepath.Join(t.TempDir(), "capture-waiters.db"))
+	gate := newCaptureSaveGate(store)
+	defer gate.unblock()
+	spy := &liveSpy{}
+	p := New(config.Default(), spy)
+	p.AttachPausePersist(gate)
+	startDebugSession(t, p)
+
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"1","choices":[]}`))
+	})
+	request := startDebugCaptureRequest(t, p, upstream, `{"model":"m"}`)
+	var id string
+	select {
+	case id = <-gate.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SaveDebugCapture never entered")
+	}
+	if n := pendingCaptureCount(p); n != 1 {
+		t.Fatalf("pending capture markers = %d while the save is blocked, want 1", n)
+	}
+
+	const waiters = 4
+	results := make(chan *httptest.ResponseRecorder, waiters)
+	for i := 0; i < waiters; i++ {
+		go func() {
+			w := httptest.NewRecorder()
+			p.HandleDebugCapture(w, httptest.NewRequest(http.MethodGet, "/admin/debug/capture?id="+id, nil))
+			results <- w
+		}()
+	}
+	select {
+	case w := <-results:
+		t.Fatalf("waiter answered %d before the sidecar save resolved: %s", w.Code, w.Body.String())
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	gate.unblock()
+	if err := <-request; err != nil {
+		t.Fatalf("client request: %v", err)
+	}
+
+	var stored []byte
+	for i := 0; i < waiters; i++ {
+		var w *httptest.ResponseRecorder
+		select {
+		case w = <-results:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d of %d waiters resumed after the save resolved", i, waiters)
+		}
+		if w.Code != http.StatusOK {
+			t.Fatalf("waiter %d status = %d body %s, want the stored capture", i, w.Code, w.Body.String())
+		}
+		if i == 0 {
+			stored = append([]byte(nil), w.Body.Bytes()...)
+			continue
+		}
+		if !bytes.Equal(stored, w.Body.Bytes()) {
+			t.Fatalf("waiter %d body differs from the first waiter", i)
+		}
+	}
+
+	waitPendingCapturesEmpty(t, p)
+	after := fetchDebugCapture(t, p, id)
+	if !bytes.Equal(stored, after) {
+		t.Fatal("fetch after marker removal differs from the waiting fetches")
 	}
 }

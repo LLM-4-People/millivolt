@@ -282,16 +282,32 @@ var _ http.Flusher = (*debugRW)(nil)
 // copies them into the store.
 var debugCaptureBufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
 
-func (s *Server) finishDebugTap(tap *debugTap, rec *metrics.Record) {
-	if tap == nil || rec == nil || !rec.Debug {
-		return
+// prepareDebugCapture owns the completion/sidecar seam. It registers the
+// pending capture marker and returns the save closure; callers must publish the
+// completed record (s.rec.Record) immediately after registration and then run
+// the closure synchronously in the same goroutine. The TTL and captured-at
+// instant are fixed here, at completion time, so the later sidecar write cannot
+// move them. A request with no debug tap, an unmatched record, or no durable
+// store returns nil without touching the pending owner or allocating a closure.
+func (s *Server) prepareDebugCapture(tap *debugTap, rec *metrics.Record) func() {
+	if tap == nil || rec == nil || !rec.Debug || s.pause.persist == nil {
+		return nil
 	}
-	if s.pause.persist == nil {
-		return
-	}
-	ttl := s.cfg().DebugCaptureTTL
+	release := s.registerPendingCapture(rec.ID)
 	now := time.Now()
-	expires := now.Add(ttl)
+	expires := now.Add(s.cfg().DebugCaptureTTL)
+	return func() {
+		// Resolve on every path, including encode and save failures: waiters
+		// then proceed to the ordinary 404/500 storage result.
+		defer release()
+		s.saveDebugCapture(tap, rec, now, expires)
+	}
+}
+
+// saveDebugCapture encodes and stores one prepared capture. It runs after the
+// completed record is published, so its cost delays neither the live end nor
+// durable accounting; the pending marker stays registered until it returns.
+func (s *Server) saveDebugCapture(tap *debugTap, rec *metrics.Record, now, expires time.Time) {
 	doc := map[string]any{
 		"schema":           debugSchema,
 		"id":               rec.ID,
