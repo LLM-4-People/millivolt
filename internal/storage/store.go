@@ -1818,9 +1818,10 @@ const recordColumns = `
 
 // recordScanColumns parses recordColumns into its ordered column names. Every
 // column it returns is scanned by scanRecord into a non-null Go string,
-// integer, float or bool, so admission preflight must reject NULL in any of
-// them. debug_capture is deliberately not part of recordColumns: callers add
-// it separately and it is nullable.
+// integer, float or bool, so admission preflight must reject NULL and values
+// whose SQLite storage class or range cannot reach that destination.
+// debug_capture is deliberately not part of recordColumns: callers add it
+// separately and it is nullable.
 func recordScanColumns() []string {
 	parts := strings.Split(recordColumns, ",")
 	out := make([]string, 0, len(parts))
@@ -1832,6 +1833,57 @@ func recordScanColumns() []string {
 	return out
 }
 
+// recordScanScratch holds the scan destinations that are not fields on
+// metrics.Record: derived timestamps, JSON columns decoded after the scan,
+// and values restored into named fields.
+type recordScanScratch struct {
+	startMs, durMs, ttftMs, firstMs, lastMs, firstAnswerMs int64
+	respHdr, toolNames, attemptsJSON                       string
+	finalAttemptMs                                         int64
+	rateLimited                                            bool
+	hadAnswer                                              int
+	reqMaxTokens, reqN, reqTopLogprobs                     int
+	reqTemp, reqTopP, reqPresencePen, reqFrequencyPen      float64
+	reqSeed                                                int64
+	reqParallelTools                                       bool
+	clientMetaJSON                                         string
+	debugFlag                                              int
+	reqPresence                                            int64
+}
+
+// recordScanTargets returns the ordered scan destinations for recordColumns.
+// scanRecord scans through this list, and the snapshot admission preflight
+// derives each column's accepted SQLite value class from the same
+// destinations. Changing a destination type therefore changes validation with
+// it instead of leaving a second, hand-maintained type list behind.
+func recordScanTargets(r *metrics.Record, s *recordScanScratch) []any {
+	return []any{
+		&r.ID, &r.Provider, &r.Model, &r.KeyHash, &r.UserAgent, &r.Client,
+		&r.ClientIP, &r.ClientLang, &r.Stream,
+		&r.StatusCode, &s.startMs, &s.durMs, &s.ttftMs, &s.firstMs, &s.lastMs, &r.Chunks,
+		&r.RequestBytes, &r.ResponseBytes, &r.UpstreamGzip,
+		&r.UpstreamConnectMs, &r.UpstreamTLSMs, &r.UpstreamTTFBMs, &r.UpstreamConnReused,
+		&r.FinishReason, &r.ErrorType, &r.ErrorMsg, &r.ErrorCode, &r.ToolCalls,
+		&r.Usage.InputTokens, &r.Usage.OutputTokens, &r.Usage.TotalTokens,
+		&r.Usage.CacheReadTokens, &r.Usage.CacheWrite, &r.Usage.ReasoningTokens,
+		&r.ClientDisconnected, &r.RateLimitRemaining, &r.RateLimitLimit,
+		&r.Cost, &r.TurnsUser, &r.TurnsAssistant, &r.TurnsTool, &s.respHdr,
+		&r.AnswerTokens, &s.firstAnswerMs, &r.FirstReasoningAt, &r.GenTokens, &s.hadAnswer, &r.DecodeTPS, &r.OverallTPS,
+		&r.Method, &r.Path, &r.ProcessingMs, &r.PromptPreview, &r.ResponsePreview,
+		&r.ProviderModel, &r.ProviderRequestID, &r.ProviderServer,
+		&r.QueueWaitMs, &s.rateLimited, &r.Retries, &r.RetryAfterMs, &s.toolNames,
+		&s.reqMaxTokens, &s.reqTemp, &s.reqTopP, &r.ReqToolsCount, &r.ReqToolChoice,
+		&s.reqN, &r.ReqStop, &r.ReqLogprobs, &s.reqPresencePen, &s.reqFrequencyPen,
+		&r.ReqResponseFormat, &s.reqSeed, &s.reqParallelTools, &r.ReqLogitBias,
+		&s.reqTopLogprobs, &r.ReqServiceTier, &r.ReqThinking, &r.ReqMetadataKeys,
+		&r.ReqStreamOpts, &s.attemptsJSON, &s.finalAttemptMs, &r.ConversationID, &r.ParentConversationID,
+		&r.CharsSystem, &r.CharsUser, &r.CharsAssistant, &r.CharsTool,
+		&r.Images, &r.Attachments, &r.LastTurnRole,
+		&s.clientMetaJSON, &r.ReqReasoningEffort, &r.ReqVerbosity,
+		&s.debugFlag, &r.DebugSessionID, &s.reqPresence,
+	}
+}
+
 // scanRecord scans one row (in the canonical recordColumns order plus the
 // caller's debug_capture column) into a metrics.Record, restoring the exact
 // dashboard JSON shape (pointer request params including explicit zero/false,
@@ -1840,88 +1892,52 @@ func recordScanColumns() []string {
 // for the same row.
 func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 	var r metrics.Record
-	var startMs, durMs, ttftMs, firstMs, lastMs, firstAnswerMs int64
-	var respHdr, toolNames, attemptsJSON string
-	var finalAttemptMs int64
-	var rateLimited bool
-	var hadAnswer int
-	var reqMaxTokens, reqN, reqTopLogprobs int
-	var reqTemp, reqTopP, reqPresencePen, reqFrequencyPen float64
-	var reqSeed int64
-	var reqParallelTools bool
-	var clientMetaJSON string
-	var debugFlag int
-	var reqPresence int64
+	var s recordScanScratch
 	var debugCapture []byte
-	err := rows.Scan(
-		&r.ID, &r.Provider, &r.Model, &r.KeyHash, &r.UserAgent, &r.Client,
-		&r.ClientIP, &r.ClientLang, &r.Stream,
-		&r.StatusCode, &startMs, &durMs, &ttftMs, &firstMs, &lastMs, &r.Chunks,
-		&r.RequestBytes, &r.ResponseBytes, &r.UpstreamGzip,
-		&r.UpstreamConnectMs, &r.UpstreamTLSMs, &r.UpstreamTTFBMs, &r.UpstreamConnReused,
-		&r.FinishReason, &r.ErrorType, &r.ErrorMsg, &r.ErrorCode, &r.ToolCalls,
-		&r.Usage.InputTokens, &r.Usage.OutputTokens, &r.Usage.TotalTokens,
-		&r.Usage.CacheReadTokens, &r.Usage.CacheWrite, &r.Usage.ReasoningTokens,
-		&r.ClientDisconnected, &r.RateLimitRemaining, &r.RateLimitLimit,
-		&r.Cost, &r.TurnsUser, &r.TurnsAssistant, &r.TurnsTool, &respHdr,
-		&r.AnswerTokens, &firstAnswerMs, &r.FirstReasoningAt, &r.GenTokens, &hadAnswer, &r.DecodeTPS, &r.OverallTPS,
-		&r.Method, &r.Path, &r.ProcessingMs, &r.PromptPreview, &r.ResponsePreview,
-		&r.ProviderModel, &r.ProviderRequestID, &r.ProviderServer,
-		&r.QueueWaitMs, &rateLimited, &r.Retries, &r.RetryAfterMs, &toolNames,
-		&reqMaxTokens, &reqTemp, &reqTopP, &r.ReqToolsCount, &r.ReqToolChoice,
-		&reqN, &r.ReqStop, &r.ReqLogprobs, &reqPresencePen, &reqFrequencyPen,
-		&r.ReqResponseFormat, &reqSeed, &reqParallelTools, &r.ReqLogitBias,
-		&reqTopLogprobs, &r.ReqServiceTier, &r.ReqThinking, &r.ReqMetadataKeys,
-		&r.ReqStreamOpts, &attemptsJSON, &finalAttemptMs, &r.ConversationID, &r.ParentConversationID,
-		&r.CharsSystem, &r.CharsUser, &r.CharsAssistant, &r.CharsTool,
-		&r.Images, &r.Attachments, &r.LastTurnRole,
-		&clientMetaJSON, &r.ReqReasoningEffort, &r.ReqVerbosity,
-		&debugFlag, &r.DebugSessionID, &reqPresence,
-		&debugCapture,
-	)
-	if err != nil {
+	targets := append(recordScanTargets(&r, &s), &debugCapture)
+	if err := rows.Scan(targets...); err != nil {
 		return nil, nil, err
 	}
-	r.Start = time.UnixMilli(startMs)
-	r.End = r.Start.Add(time.Duration(durMs) * time.Millisecond)
-	r.DurationMs = durMs // restore the stored duration; End is derived from it
-	r.TTFTMs = ttftMs
-	r.HadAnswerContent = hadAnswer != 0
-	if firstMs > 0 {
-		r.FirstTokenAt = time.UnixMilli(firstMs)
+	r.Start = time.UnixMilli(s.startMs)
+	r.End = r.Start.Add(time.Duration(s.durMs) * time.Millisecond)
+	r.DurationMs = s.durMs // restore the stored duration; End is derived from it
+	r.TTFTMs = s.ttftMs
+	r.HadAnswerContent = s.hadAnswer != 0
+	if s.firstMs > 0 {
+		r.FirstTokenAt = time.UnixMilli(s.firstMs)
 	}
-	if lastMs > 0 {
-		r.LastTokenAt = time.UnixMilli(lastMs)
+	if s.lastMs > 0 {
+		r.LastTokenAt = time.UnixMilli(s.lastMs)
 	}
-	if firstAnswerMs > 0 {
-		r.FirstAnswerAt = time.UnixMilli(firstAnswerMs)
+	if s.firstAnswerMs > 0 {
+		r.FirstAnswerAt = time.UnixMilli(s.firstAnswerMs)
 	}
-	if finalAttemptMs > 0 {
-		r.FinalAttemptAt = time.UnixMilli(finalAttemptMs)
+	if s.finalAttemptMs > 0 {
+		r.FinalAttemptAt = time.UnixMilli(s.finalAttemptMs)
 	}
-	if respHdr != "" {
-		if err := json.Unmarshal([]byte(respHdr), &r.ResponseHeaders); err != nil {
+	if s.respHdr != "" {
+		if err := json.Unmarshal([]byte(s.respHdr), &r.ResponseHeaders); err != nil {
 			log.Printf("storage: parse response headers for %s: %v", r.ID, err)
 		}
 	}
-	if names, err := DecodeToolNamesColumn([]byte(toolNames)); err != nil {
+	if names, err := DecodeToolNamesColumn([]byte(s.toolNames)); err != nil {
 		log.Printf("storage: parse tool names for %s: %v", r.ID, err)
 	} else {
 		r.ToolNames = names
 	}
-	if attempts, err := DecodeAttemptsColumn([]byte(attemptsJSON)); err != nil {
+	if attempts, err := DecodeAttemptsColumn([]byte(s.attemptsJSON)); err != nil {
 		log.Printf("storage: parse attempts for %s: %v", r.ID, err)
 	} else {
 		r.Attempts = attempts
 	}
-	r.RateLimited = rateLimited
-	r.Debug = debugFlag != 0
-	r.ReqMaxTokens, r.ReqTemperature, r.ReqTopP = &reqMaxTokens, &reqTemp, &reqTopP
-	r.ReqN, r.ReqPresencePen, r.ReqFrequencyPen = &reqN, &reqPresencePen, &reqFrequencyPen
-	r.ReqSeed, r.ReqParallelTools, r.ReqTopLogprobs = &reqSeed, &reqParallelTools, &reqTopLogprobs
-	restoreRequestParams(&r, reqPresence)
-	if clientMetaJSON != "" && clientMetaJSON != "{}" {
-		if err := json.Unmarshal([]byte(clientMetaJSON), &r.ClientMeta); err != nil {
+	r.RateLimited = s.rateLimited
+	r.Debug = s.debugFlag != 0
+	r.ReqMaxTokens, r.ReqTemperature, r.ReqTopP = &s.reqMaxTokens, &s.reqTemp, &s.reqTopP
+	r.ReqN, r.ReqPresencePen, r.ReqFrequencyPen = &s.reqN, &s.reqPresencePen, &s.reqFrequencyPen
+	r.ReqSeed, r.ReqParallelTools, r.ReqTopLogprobs = &s.reqSeed, &s.reqParallelTools, &s.reqTopLogprobs
+	restoreRequestParams(&r, s.reqPresence)
+	if s.clientMetaJSON != "" && s.clientMetaJSON != "{}" {
+		if err := json.Unmarshal([]byte(s.clientMetaJSON), &r.ClientMeta); err != nil {
 			log.Printf("storage: parse client_meta for %s: %v", r.ID, err)
 		}
 	}

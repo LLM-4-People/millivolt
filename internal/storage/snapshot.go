@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -474,11 +477,12 @@ func preflightPendingSnapshot(path string) error {
 		return err
 	}
 	// The initializer proves the writer INSERT executes, but a NULL request id
-	// or another NULL value in a column scanRecord reads into a non-null Go
-	// type would still pass that probe and then make every later history scan
-	// fail. SQLite permits NULL in a TEXT PRIMARY KEY, including tables created
-	// before the fresh schema gained NOT NULL, so check the staged rows before
-	// any live file is touched.
+	// or another stored value scanRecord cannot read into its destination
+	// would still pass that probe and then make every later history scan fail.
+	// SQLite permits NULL in a TEXT PRIMARY KEY, including tables created
+	// before the fresh schema gained NOT NULL, and it stores any value class in
+	// any non-STRICT column (stream='abc', stream=2), so check the staged rows
+	// before any live file is touched.
 	if err := preflightRequestScanValues(context.Background(), db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
@@ -1256,14 +1260,116 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 	return nil
 }
 
-// preflightRequestScanValues rejects a request table whose rows contain NULL
-// in any column scanRecord scans into a non-null Go type. id is the classic
-// case because SQLite permits NULL in a legacy TEXT PRIMARY KEY, but the same
-// failure exists for every other scan column: a crafted or pre-NOT-NULL
-// snapshot can hold NULL tool_names, attempts, status_code or a flag, and one
-// such row makes every history read fail after admission. The check runs
-// before a merge transaction starts or a replacement is installed. Empty
-// strings and zero values remain valid; only NULL is rejected.
+// recordScanValueKind is the SQLite storage-class family one recordScanTargets
+// destination accepts. It is derived from the destination Go type, never from
+// a second hand-maintained column list.
+type recordScanValueKind int
+
+const (
+	recordScanText recordScanValueKind = iota
+	recordScanInteger
+	recordScanReal
+	recordScanBool
+)
+
+// recordScanValueKindOf maps one scan destination pointer to the value class
+// its Go type accepts, plus the type's bit width for range checks. An unknown
+// destination fails closed: a new scan type must teach the preflight its
+// accepted representation instead of silently escaping validation.
+func recordScanValueKindOf(target any) (recordScanValueKind, int, error) {
+	t := reflect.TypeOf(target)
+	if t == nil || t.Kind() != reflect.Pointer {
+		return 0, 0, fmt.Errorf("scan destination %T is not a pointer", target)
+	}
+	switch t.Elem().Kind() {
+	case reflect.String:
+		return recordScanText, 0, nil
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return recordScanInteger, t.Elem().Bits(), nil
+	case reflect.Float32, reflect.Float64:
+		return recordScanReal, t.Elem().Bits(), nil
+	case reflect.Bool:
+		return recordScanBool, 0, nil
+	default:
+		return 0, 0, fmt.Errorf("unsupported scan destination type %s", t.Elem())
+	}
+}
+
+// recordScanCheck is one scan-critical column's rejection predicate and the
+// operator-facing description of the values scanRecord accepts.
+type recordScanCheck struct {
+	column   string
+	reject   string
+	accepted string
+}
+
+// recordScanChecks derives one value check per recordColumns entry from the
+// scan destinations scanRecord itself uses. Every numeric destination accepts
+// the schema's own storage classes only: INTEGER for an integer or bool
+// destination, INTEGER or REAL for a real destination. Text and blob coercions
+// are deliberately rejected even where database/sql would parse them, because
+// the writer never produces them and accepting them would hide a poisoned
+// snapshot. A text destination accepts any non-NULL value, including blob,
+// which database/sql converts to a string without error.
+func recordScanChecks() ([]recordScanCheck, error) {
+	columns := recordScanColumns()
+	var record metrics.Record
+	var scratch recordScanScratch
+	targets := recordScanTargets(&record, &scratch)
+	if len(targets) != len(columns) {
+		return nil, fmt.Errorf("scan destination count %d does not match record column count %d", len(targets), len(columns))
+	}
+	checks := make([]recordScanCheck, len(columns))
+	for i, column := range columns {
+		kind, bits, err := recordScanValueKindOf(targets[i])
+		if err != nil {
+			return nil, fmt.Errorf("record column %s: %w", column, err)
+		}
+		quoted := `"` + column + `"`
+		check := recordScanCheck{column: column, reject: quoted + ` IS NULL`}
+		switch kind {
+		case recordScanText:
+			check.accepted = "a non-NULL value"
+		case recordScanInteger:
+			check.accepted = "an integer"
+			check.reject += ` OR typeof(` + quoted + `) <> 'integer'`
+			if bits < 64 {
+				minValue := -(int64(1) << (bits - 1))
+				maxValue := int64(1)<<(bits-1) - 1
+				check.reject += fmt.Sprintf(` OR %s < %d OR %s > %d`, quoted, minValue, quoted, maxValue)
+			}
+		case recordScanReal:
+			check.accepted = "a number"
+			check.reject += ` OR typeof(` + quoted + `) NOT IN ('integer', 'real')`
+			if bits < 64 {
+				// ParseFloat with the destination width rejects values beyond
+				// the type's finite range; spell the bound exactly so the SQL
+				// comparison matches the conversion.
+				maxValue := strconv.FormatFloat(float64(math.MaxFloat32), 'g', -1, 64)
+				check.reject += fmt.Sprintf(` OR %s > %s OR %s < -%s`, quoted, maxValue, quoted, maxValue)
+			}
+		case recordScanBool:
+			check.accepted = "an integer 0 or 1"
+			check.reject += ` OR typeof(` + quoted + `) <> 'integer' OR ` + quoted + ` NOT IN (0, 1)`
+		default:
+			return nil, fmt.Errorf("record column %s: unsupported scan value kind", column)
+		}
+		checks[i] = check
+	}
+	return checks, nil
+}
+
+// preflightRequestScanValues rejects a request table whose rows contain a
+// value scanRecord cannot scan into its destination: NULL, a non-numeric
+// storage class in a numeric or bool column, an out-of-range integer, or a
+// bool other than 0/1. id is the classic NULL case because
+// SQLite permits NULL in a legacy TEXT PRIMARY KEY, but stored values matter
+// just as much: stream='abc' or stream=2 passes integrity, schema and writer
+// probes and then makes every history read fail after a merge commits or a
+// replacement is installed. The check runs before a merge transaction starts
+// or a replacement is installed, so a rejected source leaves live history
+// untouched. Empty strings, empty JSON columns, 0/1 booleans, and ordinary
+// integers and reals remain valid.
 func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, source string) error {
 	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
 		return fmt.Errorf("unknown backup schema")
@@ -1280,41 +1386,54 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 	for _, col := range details {
 		present[col.name] = struct{}{}
 	}
-	columns := make([]string, 0, len(details))
-	for _, name := range recordScanColumns() {
-		if _, ok := present[name]; ok {
-			columns = append(columns, name)
-		}
-	}
-	if len(columns) == 0 {
-		return fmt.Errorf("%s requests has no scan-required columns", source)
-	}
-	conditions := make([]string, len(columns))
-	for i, name := range columns {
-		conditions[i] = `"` + name + `" IS NULL`
-	}
-	var nulls int64
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM `+table+` WHERE `+strings.Join(conditions, " OR ")).Scan(&nulls); err != nil {
+	all, err := recordScanChecks()
+	if err != nil {
 		return err
 	}
-	if nulls == 0 {
+	checks := make([]recordScanCheck, 0, len(all))
+	for _, check := range all {
+		if _, ok := present[check.column]; ok {
+			checks = append(checks, check)
+		}
+	}
+	if len(checks) == 0 {
+		return fmt.Errorf("%s requests has no scan-required columns", source)
+	}
+	conditions := make([]string, len(checks))
+	for i, check := range checks {
+		conditions[i] = check.reject
+	}
+	var invalid int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE `+strings.Join(conditions, " OR ")).Scan(&invalid); err != nil {
+		return err
+	}
+	if invalid == 0 {
 		return nil
 	}
-	// Only a failing table pays the per-column scan; the error names the first
-	// scan-critical column that is actually NULL so an operator can inspect
+	// Only a failing table pays the per-column scans; the error names the first
+	// scan-critical column that is actually invalid so an operator can inspect
 	// the offending snapshot directly.
-	for _, name := range columns {
+	for _, check := range checks {
 		var count int64
 		if err := db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM `+table+` WHERE "`+name+`" IS NULL`).Scan(&count); err != nil {
+			`SELECT COUNT(*) FROM `+table+` WHERE `+check.reject).Scan(&count); err != nil {
 			return err
 		}
-		if count != 0 {
-			return fmt.Errorf("%s requests contains %d rows with a NULL %s; history rows require non-NULL values for every scanRecord column", source, count, name)
+		if count == 0 {
+			continue
 		}
+		var nulls int64
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM `+table+` WHERE "`+check.column+`" IS NULL`).Scan(&nulls); err != nil {
+			return err
+		}
+		if nulls != 0 {
+			return fmt.Errorf("%s requests contains %d rows with a NULL %s; history rows require non-NULL values for every scanRecord column", source, nulls, check.column)
+		}
+		return fmt.Errorf("%s requests contains %d rows with an invalid %s value; scanRecord requires %s", source, count, check.column, check.accepted)
 	}
-	return fmt.Errorf("%s requests contains NULL values in scan-required columns", source)
+	return fmt.Errorf("%s requests contains values scanRecord cannot read", source)
 }
 
 func preflightMergeTable(ctx context.Context, db mergeConn, table string) error {

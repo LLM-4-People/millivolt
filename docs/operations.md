@@ -570,32 +570,32 @@ while the stream is written, so an over-cap archive is removed instead of
 partially served, and an over-cap upload answers 413 before decoding.
 
 Restore phases are ordered, not atomic. The database member runs first: a
-replace stages the decoded file and preflights it with the same schema and
-writer-INSERT checks boot runs before touching the live database, and a merge
-commits rows into the running store. Only then is the config written and
-hot-applied. A failed stage, preflight, or merge leaves the config file and
-live snapshot unchanged, and a failed config write or reload rolls the config
-back and restores a replace's previous pending slot. A successful live merge
-has no rollback: if the later config phase fails, the merged rows stay
-applied. A crash between the database and config phases is likewise not
-atomic; the pending snapshot or completed merge can be durable while the
-config file still has its previous bytes. Preserved `.incoming`, `.previous`,
-and `.snapshot-state` files next to `db_path` are boot-recovery evidence and
-may need operator inspection after such a crash; do not remove them while a
-restore may have been in flight. A combined config and database merge answers
-400 when the restored config's effective `db_path` differs from the running
-store's file, because the rows would be written to a database the next boot
-does not open; merge the database separately or use database replace.
+replace stages the decoded file and preflights it with the same schema,
+writer-INSERT and request-scan value checks boot runs before touching the live
+database, and a merge commits rows into the running store. Only then is the
+config written and hot-applied. A failed stage, preflight, or merge leaves the
+config file and live snapshot unchanged, and a failed config write or reload
+rolls the config back and restores a replace's previous pending slot. A
+successful live merge has no rollback: if the later config phase fails, the
+merged rows stay applied. A crash between the database and config phases is
+likewise not atomic; the pending snapshot or completed merge can be durable
+while the config file still has its previous bytes. Preserved `.incoming`,
+`.previous`, and `.snapshot-state` files next to `db_path` are boot-recovery
+evidence and may need operator inspection after such a crash; do not remove them
+while a restore may have been in flight. A combined config and database merge
+answers 400 when the restored config's effective `db_path` differs from the
+running store's file, because the rows would be written to a database the next
+boot does not open; merge the database separately or use database replace.
 
 At boot, a pending snapshot is admitted only after the same schema, trigger,
-and writer-insert preflight `Open` runs. Recovery consults the durable
-`.snapshot-state` marker rather than inferring a transition from the files
-present. A markerless rollback set from a pre-marker release cannot be
+writer-insert and request-scan value preflight `Open` runs. Recovery consults
+the durable `.snapshot-state` marker rather than inferring a transition from the
+files present. A markerless rollback set from a pre-marker release cannot be
 classified: when a live main exists, recovery keeps it and removes the
 `.previous` debris. Discarding a non-empty `.previous-wal` in that markerless
 state logs a startup warning, because its committed frames cannot be
-distinguished from debris and may be lost. Marked pending and committed
-recovery behavior is unchanged.
+distinguished from debris and may be lost. Marked pending and committed recovery
+behavior is unchanged.
 
 Both directions stage database-sized transient files in the live database's own
 directory, so capacity follows the data volume rather than a hardened
