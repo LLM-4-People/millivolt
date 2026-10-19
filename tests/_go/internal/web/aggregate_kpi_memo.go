@@ -281,12 +281,13 @@ func TestKPIMemoFoldCoalescesSameKeyColdFolds(t *testing.T) {
 	api := NewAggAPI(buf, nil, time.Second)
 
 	const callers = 8
-	entered := make(chan kpiMemoKey, callers)
+	started := make(chan struct{})
 	release := make(chan struct{})
+	var hold sync.Once
 	var hookCalls atomic.Int32
-	api.kpiMemo.testFold = func(key kpiMemoKey) {
+	api.kpiMemo.testFold = func(kpiMemoKey) {
 		hookCalls.Add(1)
-		entered <- key
+		hold.Do(func() { close(started) })
 		<-release
 	}
 
@@ -305,15 +306,16 @@ func TestKPIMemoFoldCoalescesSameKeyColdFolds(t *testing.T) {
 	close(start)
 
 	select {
-	case got := <-entered:
-		if got != key {
-			t.Fatalf("fold key = %+v, want %+v", got, key)
-		}
+	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("cold fold did not start")
 	}
 	// The leader is held inside the fold, so no other caller may have entered
-	// it: every same-key caller is waiting on the fold owner.
+	// it: every same-key caller is waiting on the fold owner. The observed key
+	// is still the cold key the leader was asked to fold.
+	if got := api.kpiMemoKey(); got != key {
+		t.Fatalf("fold key = %+v, want %+v", got, key)
+	}
 	if got := api.kpiMemo.folds; got != 1 {
 		t.Fatalf("concurrent folds = %d, want 1", got)
 	}
@@ -352,17 +354,18 @@ func TestKPIMemoWaiterBlocksUntilLeaderPublishes(t *testing.T) {
 	buf := metrics.NewBuffer(8)
 	buf.Record(mkRec("waiter", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
 	api := NewAggAPI(buf, nil, time.Second)
-	entered := make(chan struct{}, 1)
+	started := make(chan struct{})
 	release := make(chan struct{})
+	var hold sync.Once
 	api.kpiMemo.testFold = func(kpiMemoKey) {
-		entered <- struct{}{}
+		hold.Do(func() { close(started) })
 		<-release
 	}
 
 	leaderDone := make(chan kpiPayload, 1)
 	go func() { leaderDone <- api.kpi() }()
 	select {
-	case <-entered:
+	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("leader did not enter the fold")
 	}
@@ -437,10 +440,11 @@ func TestKPIMemoMidFoldCommitIsNotPublishedUnderOldKey(t *testing.T) {
 	api := NewAggAPI(buf, nil, time.Second)
 	oldKey := api.kpiMemoKey()
 
-	entered := make(chan struct{}, 1)
+	started := make(chan struct{})
 	release := make(chan struct{})
+	var hold sync.Once
 	api.kpiMemo.testFold = func(kpiMemoKey) {
-		entered <- struct{}{}
+		hold.Do(func() { close(started) })
 		<-release
 	}
 
@@ -458,7 +462,7 @@ func TestKPIMemoMidFoldCommitIsNotPublishedUnderOldKey(t *testing.T) {
 	}
 	close(start)
 	select {
-	case <-entered:
+	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("cold fold did not start")
 	}
