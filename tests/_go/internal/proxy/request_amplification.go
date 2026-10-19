@@ -361,6 +361,103 @@ func TestRequestAggregateContentPartsAllocationBound(t *testing.T) {
 		len(raw), messages, messages*metrics.ContentPartMax, res.AllocedBytesPerOp())
 }
 
+// duplicateContentBody renders one message whose object repeats the content
+// member occurrences times. Duplicate members are legal JSON and encoding/json
+// invokes requestContent.UnmarshalJSON once per occurrence before the last
+// value wins, so the aggregate guardrail must charge every occurrence's part
+// array, not only the retained one.
+func duplicateContentBody(occurrences, parts int) []byte {
+	content := amplificationArray(parts, "{}")
+	var b strings.Builder
+	b.Grow(occurrences * (len(content) + 12))
+	b.WriteString(`{"model":"m","messages":[{"role":"user"`)
+	for i := 0; i < occurrences; i++ {
+		b.WriteString(`,"content":`)
+		b.WriteString(content)
+	}
+	b.WriteString(`}]}`)
+	return []byte(b.String())
+}
+
+// TestRequestDuplicateContentPartsBound pins the duplicate-member bypass of
+// the aggregate content-part budget: five 4,096-part content arrays in one
+// message decode 20,480 parts through five UnmarshalJSON calls while the
+// last-wins counter charged only 4,096.
+func TestRequestDuplicateContentPartsBound(t *testing.T) {
+	raw := duplicateContentBody(5, metrics.ContentPartMax)
+	var rec metrics.Record
+	err := parseLLMRequest(raw, &rec, false)
+	if err == nil || !strings.Contains(err.Error(), "content parts") {
+		t.Fatalf("parseLLMRequest error = %v, want the aggregate content-part overflow for five duplicate content arrays", err)
+	}
+
+	// The counter must not change the decoder's last-wins semantics: two
+	// occurrences inside the aggregate budget are accepted and the final
+	// value is the one measured.
+	lastWins := []byte(`{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"ignored"}],"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,eA=="}}]}]}`)
+	var okRec metrics.Record
+	if err := parseLLMRequest(lastWins, &okRec, false); err != nil {
+		t.Fatalf("duplicate content within the aggregate budget = %v, want accepted", err)
+	}
+	if okRec.Images != 1 || okRec.CharsUser != 0 {
+		t.Fatalf("last-wins composition = images %d chars %d, want the final image part alone", okRec.Images, okRec.CharsUser)
+	}
+}
+
+// TestRequestDuplicateContentPartsAllocationBound proves the rejection costs
+// only one lexical prefix scan: the repeated part arrays are never composed
+// into typed slices after the aggregate budget is crossed.
+func TestRequestDuplicateContentPartsAllocationBound(t *testing.T) {
+	const occurrences = 5
+	raw := duplicateContentBody(occurrences, metrics.ContentPartMax)
+	var parseErr error
+	alloc := proxyContentAllocDelta(func() {
+		var rec metrics.Record
+		parseErr = parseLLMRequest(raw, &rec, false)
+	})
+	t.Logf("duplicate content over-bound: input=%d occurrences=%d parts=%d alloc=%d",
+		len(raw), occurrences, occurrences*metrics.ContentPartMax, alloc)
+	if parseErr == nil || !strings.Contains(parseErr.Error(), "content parts") {
+		t.Fatalf("parseLLMRequest error = %v, want the aggregate content-part overflow", parseErr)
+	}
+	if alloc > 1<<20 {
+		t.Fatalf("%d-byte duplicate-content body allocated %d bytes, want the lexical preflight", len(raw), alloc)
+	}
+}
+
+func TestRequestDuplicateContentPartsReturn400BeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[]}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	defer srv.Close()
+
+	body := duplicateContentBody(5, metrics.ContentPartMax)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte("invalid_request_error")) || !bytes.Contains(raw, []byte("content parts")) {
+		t.Fatalf("body = %q, want the shared bounded invalid_request_error", raw)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream called %d times, want 0", got)
+	}
+}
+
 func TestRequestAggregateContentPartsReturn400BeforeUpstream(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

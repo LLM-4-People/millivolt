@@ -525,9 +525,12 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		}
 		spooled, over, spoolErr := spoolBody(resp.Body)
 		if over {
-			// Past the cap the body streams through; only the bounded prefix
-			// was buffered, so the whole-document reservation ends here.
-			s.respBudget.release(reserve)
+			// Past the cap the body streams through, but the bounded prefix
+			// is still live in nonStreamBody's MultiReader until that write
+			// finishes. Keep the reservation for the prefix, not just the
+			// spool read, or concurrent over-cap bodies would all run with
+			// the response budget at zero.
+			defer s.respBudget.release(reserve)
 			copyResponseHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			s.nonStreamBody(ctx, w, io.MultiReader(bytes.NewReader(spooled), resp.Body), rec)

@@ -1748,8 +1748,8 @@ func boundRequestMetadata(body []byte) error {
 	}
 	// logit_bias is a map field: duplicate top-level objects merge in
 	// encoding/json, so distinct keys accumulate across every occurrence.
-	// Slice fields overwrite, so any single over-cap occurrence is already the
-	// maximum decoded size.
+	// Slice fields overwrite for the final value, but every duplicate
+	// occurrence still reaches its decoder, so each is counted below.
 	var logitSeen map[string]struct{}
 	logitOver := false
 	// memberSeen counts distinct top-level keys because the rewrite engine and
@@ -1977,11 +1977,12 @@ func countDistinctJSONKey(seen map[string]struct{}, raw []byte, max int) (int, b
 }
 
 // countRequestMessagesContentParts counts the aggregate content-part array
-// lengths over the message objects of the messages array at start. budget is
-// the remaining aggregate allowance; a count above it means the aggregate
-// bound is exceeded. Non-object elements and non-array content contribute
-// zero, matching the typed decoder's shape tolerance. ok is false on malformed
-// input so the document keeps its passthrough behavior.
+// lengths over the message objects of the messages array at start, including
+// every duplicate content occurrence in a message. budget is the remaining
+// aggregate allowance; a count above it means the aggregate bound is exceeded.
+// Non-object elements and non-array content contribute zero, matching the
+// typed decoder's shape tolerance. ok is false on malformed input so the
+// document keeps its passthrough behavior.
 func countRequestMessagesContentParts(data []byte, start, budget int) (int, bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) || data[i] != '[' {
@@ -2017,11 +2018,12 @@ func countRequestMessagesContentParts(data []byte, start, budget int) (int, bool
 	return total, true
 }
 
-// countRequestMessageContentParts counts one message object's content array.
-// Duplicate content members follow encoding/json's last-wins struct field
-// semantics: the last occurrence's count replaces earlier ones. Once an array
-// exceeds budget, counting stops and the over-count is returned so the caller
-// rejects before the typed composition decode.
+// countRequestMessageContentParts counts one message object's content arrays.
+// Duplicate content members each reach requestContent.UnmarshalJSON before
+// encoding/json's last-wins field assignment, so every occurrence is charged
+// against the budget; only a non-array occurrence contributes zero. Counting
+// stops at the first occurrence that crosses the remaining budget, so the
+// rejection costs one bounded prefix scan.
 func countRequestMessageContentParts(data []byte, start, budget int) (int, int, bool) {
 	i := metrics.SkipSpace(data, start)
 	if i >= len(data) {
@@ -2048,14 +2050,14 @@ func countRequestMessageContentParts(data []byte, start, budget int) (int, int, 
 			return 0, 0, false
 		}
 		if requestKeyEqual(key, "content") {
-			n, next, ok := metrics.CountJSONArrayBytes(data, i, budget)
+			n, next, ok := metrics.CountJSONArrayBytes(data, i, budget-parts)
 			if !ok {
 				return 0, 0, false
 			}
-			if n > budget {
-				return n, 0, true
+			parts += n
+			if parts > budget {
+				return parts, 0, true
 			}
-			parts = n
 			i = next
 		} else {
 			next := skipJSONValue(data, i)
