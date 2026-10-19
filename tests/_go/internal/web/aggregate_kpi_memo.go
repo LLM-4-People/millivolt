@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -253,6 +254,69 @@ func TestKPIMemoHitKeepsLiveInFlight(t *testing.T) {
 
 // Commits racing the fold must never publish stale totals under a fresh key.
 // The final settled poll always converges on the exact durable+ring count.
+// Concurrent cold callers for one exact key must share one fold. The test
+// owner holds the leader in flight while the other callers arrive; without the
+// fold owner each caller would enter its own compute.
+func TestKPIMemoFoldCoalescesSameKeyColdFolds(t *testing.T) {
+	const callers = 8
+	var m kpiMemo
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	m.testFold = func(kpiMemoKey) {
+		once.Do(func() { close(started) })
+		<-release
+	}
+	var computes atomic.Int32
+	results := make(chan storage.Totals, callers)
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Go(func() {
+			results <- m.foldKPI(kpiMemoKey{}, func() (storage.Totals, bool) {
+				computes.Add(1)
+				return storage.Totals{Requests: 7}, true
+			})
+		})
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	close(results)
+	if got := computes.Load(); got != 1 {
+		t.Fatalf("same-key computes = %d, want 1", got)
+	}
+	if got := m.folds; got != 1 {
+		t.Fatalf("cold folds = %d, want 1", got)
+	}
+	for got := range results {
+		if got.Requests != 7 {
+			t.Fatalf("coalesced totals requests = %d, want 7", got.Requests)
+		}
+	}
+}
+
+// Different exact keys are not coalesced or reused: each performs its own
+// compute even though the fold owner serializes them.
+func TestKPIMemoFoldDoesNotReuseAcrossKeys(t *testing.T) {
+	var m kpiMemo
+	var computes atomic.Int32
+	compute := func() (storage.Totals, bool) {
+		n := computes.Add(1)
+		return storage.Totals{Requests: int64(n)}, true
+	}
+	first := m.foldKPI(kpiMemoKey{finalized: 1}, compute)
+	second := m.foldKPI(kpiMemoKey{finalized: 2}, compute)
+	if first.Requests != 1 || second.Requests != 2 {
+		t.Fatalf("different-key results = %d/%d, want 1/2", first.Requests, second.Requests)
+	}
+	if got := computes.Load(); got != 2 {
+		t.Fatalf("different-key computes = %d, want 2", got)
+	}
+	if got := m.folds; got != 2 {
+		t.Fatalf("different-key folds = %d, want 2", got)
+	}
+}
+
 func TestKPIMemoConcurrentCommitsConverge(t *testing.T) {
 	s := kpiMemoStore(t)
 	buf := metrics.NewBuffer(512)
