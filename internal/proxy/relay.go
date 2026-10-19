@@ -1462,14 +1462,87 @@ func parseRetryAfter(resp *http.Response) time.Duration {
 	return 0
 }
 
+// translationErrorCode is the stable in-band code for a streaming translation
+// failure after HTTP 200 was committed. The client receives the shared
+// upstream_error envelope; the translator's own error text stays in the
+// record, never on the wire.
+const translationErrorCode = "translation_error"
+
+// translationErrorMessage is the non-sensitive client-facing text for a
+// failed streaming translation. It never echoes the translator's error or
+// provider payloads.
+const translationErrorMessage = "stream translation failed"
+
+// translatedStreamWriter observes the translator's writes into the pipe
+// without buffering the stream: it records whether the exact terminal
+// sse.DoneFrame was written and whether an in-band error frame was already
+// forwarded. transformResponse uses that state after the pipe fails so the
+// client receives a terminal signal exactly once.
+type translatedStreamWriter struct {
+	dst        io.Writer
+	done       bool
+	errorFrame bool
+}
+
+func (t *translatedStreamWriter) Write(p []byte) (int, error) {
+	n, err := t.dst.Write(p)
+	if err != nil || n != len(p) {
+		return n, err
+	}
+	// The translator emits each event as one complete Write through
+	// sse.EmitFrame, so these comparisons observe frame boundaries without
+	// retaining any bytes.
+	if bytes.Equal(p, []byte(sse.DoneFrame)) {
+		t.done = true
+		return n, nil
+	}
+	if !t.errorFrame {
+		if payload, ok := sse.DataPayload(bytes.TrimSpace(p)); ok && metrics.HasErrorKey(payload) {
+			t.errorFrame = true
+		}
+	}
+	return n, nil
+}
+
+// closeFailedTranslation appends the terminal frames a failed translation
+// pipe did not deliver. The status line and any translated content are
+// already on the wire, so an in-band error chunk (unless the translator
+// already forwarded a provider error) followed by [DONE] is the only
+// remaining signal. A failed write means the client is gone: markClientGone
+// keeps the cancellation classification and no further writes are attempted.
+func closeFailedTranslation(w http.ResponseWriter, flusher http.Flusher, rec *metrics.Record, forwardedError bool) {
+	if !forwardedError {
+		b, err := json.Marshal(sse.Chunk(rec.ID, time.Now().Unix(), rec.Model, []map[string]any{}, map[string]any{
+			"error": sse.ErrorObject(sse.TypeUpstreamError, translationErrorCode, translationErrorMessage),
+		}))
+		if err != nil {
+			return
+		}
+		frame := sse.DataFrame(b)
+		if _, werr := w.Write(frame); werr != nil {
+			markClientGone(rec)
+			return
+		}
+		rec.ResponseBytes += int64(len(frame))
+	}
+	if _, err := io.WriteString(w, sse.DoneFrame); err != nil {
+		markClientGone(rec)
+		return
+	}
+	rec.ResponseBytes += int64(len(sse.DoneFrame))
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
 // transformResponse relays a format-translated upstream response, translating
 // it back to OpenAI Chat Completions shape on the fly. This handles only the
 // STREAMING branch (the caller routes non-streaming responses through
 // serveNonStreaming, which buffers the translation before the status line -
 // transformation errors there carry a real error status instead of a committed
-// 200). Errors during streaming translation are surfaced as an upstream error;
-// the client has already received the status code by this point, so we
-// best-effort the conversion.
+// 200). A streaming translation failure after the 200 was committed is closed
+// in-band with one upstream_error chunk plus [DONE], so the client never sees
+// an incomplete stream.
 func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record, format string, stream bool) {
 	if stream || isEventStream(resp.Header.Get("Content-Type")) {
 		var flusher http.Flusher
@@ -1480,9 +1553,11 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 		// feeding the transformed stream through the metrics analyzer.
 		if format == "anthropic" {
 			pr, pw := io.Pipe()
+			tracked := &translatedStreamWriter{dst: pw}
 			costKeys := s.costKeysFor(rec.Provider)
 			var sourceCost float64
 			var sourceCostReported bool
+			var translationErr error
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
@@ -1491,13 +1566,15 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				// Close). The goroutine must NOT touch rec - the handler
 				// finalizes the record right here, so the reader side
 				// (streamBodyTranslated) classifies the surfaced error
-				// (translation failure vs client disconnect) itself.
-				err := providerformat.StreamToOpenAI(pw, resp.Body, nil, func(payload []byte) {
+				// (translation failure vs client disconnect) itself. The
+				// tracking writer records the translator's terminal frames so
+				// the handler can close an incomplete stream exactly once.
+				translationErr = providerformat.StreamToOpenAI(tracked, resp.Body, nil, func(payload []byte) {
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
 				})
-				pw.CloseWithError(err)
+				pw.CloseWithError(translationErr)
 			}()
 			// Re-run the SSE analyzer over the transformed stream.
 			resetTurnMetrics(rec)
@@ -1507,6 +1584,15 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			pr.Close()
 			resp.Body.Close()
 			<-done
+			// The pipe delivered every frame the translator produced. A
+			// failure without [DONE] would leave the client waiting forever,
+			// so close the committed stream with the one terminal pair the
+			// client understands. The synthetic frame is not fed back through
+			// the analyzer: the record keeps markStreamErr's translation
+			// classification rather than being relabeled a provider error.
+			if translationErr != nil && !tracked.done && !rec.ClientDisconnected {
+				closeFailedTranslation(w, flusher, rec, tracked.errorFrame)
+			}
 			if sourceCostReported {
 				rec.Cost = sourceCost
 			}
