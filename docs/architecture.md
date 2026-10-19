@@ -170,8 +170,12 @@ field - provider, client, key hash, conversation id, model and status code -
 has an ordered composite index ending in that key, so a filtered log page,
 count, export or purge scans one index range in cursor order instead of sorting
 or scanning its match set. SQLite uses one index per query and rechecks any
-remaining equality predicates against each row. Canonical model rules and
-status classes still match in Go. The page handler classifies active filters:
+remaining equality predicates against each row. The web log page pushes
+provider, client, key hash, conversation id and canonical numeric status into
+SQL. Model filters remain wholly Go-owned: canonical matching trims every
+stored spelling and applies the configured rules, so raw SQL equality would
+silently drop a padded or rewritten stored model that still matches. Status
+classes also stay in Go. The page handler classifies active filters:
 when every predicate is SQL-exact it requests exactly the remaining rows, and
 Go-only predicates grow geometrically from the page size to the 512-row batch
 cap within the 4,096-row scan budget. Both preserve the exclusive
@@ -274,7 +278,9 @@ occurrences. Exact group accumulators are capped at
 `explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
 fold into one synthetic `other` card carrying aggregate count, cost, token,
 tool and health fields; no per-value accumulator or error affected-ID map is
-allocated for them. The card ranking remains exact among tracked values, with
+allocated for them. The card carries an explicit `synthetic` wire marker and
+no filter key, so a real value sharing its display label keeps its own exact,
+selectable card. The card ranking remains exact among tracked values, with
 `other` competing by its aggregate count, and overflow memberships map to the
 reserved other id so their percentile samples still select correctly. Rail
 distinct-value counts, scope totals and conversation summaries remain

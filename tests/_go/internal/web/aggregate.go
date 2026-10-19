@@ -949,6 +949,54 @@ func TestExplorerBreakdown(t *testing.T) {
 	}
 }
 
+// TestExplorerErrorTotalAndCardNShareAffectedRequestUnit pins the error
+// gallery's share denominator and numerator to the same unit: error_total and
+// card N both count affected requests, while ErrEvents keeps counting failure
+// occurrences (final plus absorbed). A request with several absorbed 500s must
+// never make the card's share exceed the gallery total.
+func TestExplorerErrorTotalAndCardNShareAffectedRequestUnit(t *testing.T) {
+	s := testStore(t)
+	base := time.UnixMilli(1_800_000_000_000)
+	s.Record(&metrics.Record{
+		ID: "multi", Provider: "p", Model: "m", Start: base, StatusCode: 200,
+		Attempts: []metrics.RetryAttempt{
+			{StatusCode: 500, ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "multi", At: base.Add(-3 * time.Second)},
+			{StatusCode: 500, ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "multi", At: base.Add(-2 * time.Second)},
+			{StatusCode: 500, ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "multi", At: base.Add(-time.Second)},
+		},
+	})
+	s.Record(&metrics.Record{
+		ID: "single", Provider: "p", Model: "m", Start: base.Add(time.Second), StatusCode: 500,
+		ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "single",
+	})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Second)
+	p := get(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=error")
+	if p["error_total"] != float64(2) {
+		t.Fatalf("error_total = %v, want 2 affected requests", p["error_total"])
+	}
+	groups := p["groups"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("error groups = %d, want 2 error signatures", len(groups))
+	}
+	wantEvents := map[string]float64{"upstream|500|multi": 3, "upstream|500|single": 1}
+	for _, raw := range groups {
+		g := raw.(map[string]any)
+		name := g["name"].(string)
+		if g["n"] != float64(1) {
+			t.Fatalf("%s affected N = %v, want 1", name, g["n"])
+		}
+		if g["err_events"] != wantEvents[name] {
+			t.Fatalf("%s err_events = %v, want %v", name, g["err_events"], wantEvents[name])
+		}
+		if g["n"].(float64) > p["error_total"].(float64) {
+			t.Fatalf("%s affected N %v exceeds error_total %v", name, g["n"], p["error_total"])
+		}
+	}
+}
+
 // The per-entity blended $/Mtok must exclude 0-cost records exactly like the
 // KPI band's blended denominators do - an entity mixing priced and unpriced
 // traffic (a client hitting both a priced provider and runinfra) must not

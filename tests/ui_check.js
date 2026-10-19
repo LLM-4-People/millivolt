@@ -555,6 +555,22 @@ async function main() {
         !zero.querySelector('.xp-node-share') && !zero.textContent.includes('0%') &&
         !zeroErr.querySelector('.xp-node-share') && !zeroErr.textContent.includes('0%');
     })());
+    // Error-dimension shares stay in affected-request units (N/error_total),
+    // never failure-event occurrences: a request with three absorbed 500s is
+    // still one affected request, so its card can never show more than 100%.
+    const errorShare = (n, errEvents, total) => {
+      const host = d.createElement('div');
+      host.innerHTML = w.xpNodeCard({activeDim:'error',filters:[]},
+        {...entity, name:'upstream|500|multi', n, err_events:errEvents},
+        {total:10, error_total:total});
+      return host.querySelector('.xp-node-share');
+    };
+    const multiShare = errorShare(1, 3, 2);
+    check('error gallery share uses affected requests, never failure-event occurrences',
+      multiShare?.title === 'of error requests' &&
+      multiShare.querySelector('.share-pct')?.textContent === '50.0%' &&
+      errorShare(1, 1, 2).querySelector('.share-pct')?.textContent === '50.0%' &&
+      errorShare(2, 4, 2).querySelector('.share-pct')?.textContent === '100.0%');
     const savedAgg=w.eval('explorerAgg');
     const trigger=d.getElementById('xp-dim-trigger'), originalStyle=w.getComputedStyle;
     try {
@@ -643,6 +659,38 @@ async function main() {
       check('a changed group count repaints the cards and runs sizing again',
         sizeCalls === firstCalls + 1 && gallery.innerHTML !== galleryHTML &&
         gallery.querySelector('[data-xp-key="gate-alpha.example"] .xp-node-n')?.textContent.startsWith('9'));
+      // The synthetic overflow card carries an explicit marker and no filter
+      // key: a real value named "other" stays independently selectable.
+      const originalNavigateTo = w.navigateTo;
+      const navCalls = [];
+      try {
+        w.navigateTo = segments => navCalls.push(segments);
+        w.eval('explorerAgg = ' + JSON.stringify({
+          ...galleryAgg,
+          dim: 'provider',
+          total: 3,
+          groups: [
+            {...gateGroup('other', 2), synthetic: true},
+            gateGroup('other', 1),
+          ],
+        }));
+        w.renderGallery({activeDim: 'provider', filters: []});
+        const synthetic = gallery.querySelector('.xp-node[data-xp-synthetic]');
+        const real = gallery.querySelector('.xp-node[data-xp-key="other"]');
+        check('the synthetic overflow card is marked, labelled and not filterable',
+          !!synthetic && !synthetic.hasAttribute('data-xp-key') &&
+          synthetic.getAttribute('aria-disabled') === 'true' &&
+          synthetic.textContent.includes('other (grouped)') && !!real);
+        synthetic?.click();
+        check('clicking the synthetic overflow card never adds a filter', navCalls.length === 0);
+        real?.click();
+        check('a real value named other remains independently selectable',
+          navCalls.length === 1 && navCalls[0].length === 1 &&
+          navCalls[0][0].dim === 'provider' && navCalls[0][0].id === 'other');
+      } finally {
+        w.navigateTo = originalNavigateTo;
+        w.eval('explorerAgg = ' + JSON.stringify(galleryAgg));
+      }
     } finally {
       w.sizeGallery = originalSizeGallery;
       w.eval('explorerAgg=window.__restoreGalleryAgg;delete window.__restoreGalleryAgg');

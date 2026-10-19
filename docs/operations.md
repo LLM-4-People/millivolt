@@ -1190,17 +1190,22 @@ cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
 received and aborted around), and counts as the provider error it is. Zero
-explorer health badges are hidden independently. Error-dimension headline
-counts can count error occurrences, so do not treat every displayed error
-number as the same metric.
+explorer health badges are hidden independently. Error-dimension card
+headlines count failure events (final plus absorbed), while card N and the
+gallery share denominator `error_total` count affected requests. A card's
+share is therefore N / `error_total` and can never exceed 100%. Do not treat
+every displayed error number as the same metric.
 
 The explorer gallery renders at most 24 cards. Its fold tracks exact
 per-value accumulators for at most 8192 distinct values in the active
 dimension; later values are combined into a synthetic `other` card with
 aggregate count, cost, token, tool and health fields, competing for the 24
-cards by that count. `other` is a display bucket, not an exact value to filter
-on. Rail distinct-value counts, footer scope totals and conversation summaries
-still cover the whole filtered history, so card counts need not add up to them.
+cards by that count. The synthetic card carries `synthetic: true` on the wire,
+renders as `other (grouped)`, and is not filterable. A real value named `other`
+keeps its own exact card and filter; `other` is a display bucket only when the
+card is synthetic. Rail distinct-value counts, footer scope totals and
+conversation summaries still cover the whole filtered history, so card counts
+need not add up to them.
 
 ### Snapshots, live feeds and monitoring
 

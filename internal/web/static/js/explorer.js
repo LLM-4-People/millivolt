@@ -604,10 +604,12 @@ function conversationParent(info) {
 function xpNodeCard(st, e, payload) {
   const dim = st.activeDim;
   const key = e.name;
+  const synthetic = e.synthetic === true;
   // Both footer signals count affected requests, never retry occurrences.
   // A request may have received 429 and a genuine failure; 429 alone is not
   // an error. Hide zero counts; separators only join visible signals.
-  // Error-dimension headlines still count failure events.
+  // Error-dimension headlines count failure events (final + absorbed), while
+  // the share below stays in affected-request units so the two can never mix.
   const signals = [
     e.err_final > 0 ? `<span class="xp-node-err" title="Requests with a genuine failure, including recovered failures; 429 is not an error">${fmt(e.err_final)} err</span>` : '',
     e.rate_limit_requests > 0 ? `<span class="xp-node-rate" title="${escapeHtml(X429_COUNTING_RULE)}">${fmt(e.rate_limit_requests)} ×429</span>` : '',
@@ -618,28 +620,39 @@ function xpNodeCard(st, e, payload) {
   // never measured: no share row at all, never a fabricated 0%.
   let shareFrac = null, shareLabel = '';
   if (dim === 'error') {
-    if (payload.error_total) { shareFrac = headN / payload.error_total; shareLabel = 'of errors'; }
+    // error_total counts affected requests exactly like card N; using the
+    // occurrence headline here let retried failures push a share past 100%.
+    if (payload.error_total) { shareFrac = e.n / payload.error_total; shareLabel = 'of error requests'; }
   } else if (payload.total) {
     shareFrac = e.n / payload.total;
     shareLabel = 'of requests';
   }
-  const selected = st.filters.some(f => f.dim === dim && f.id === key);
+  const selected = !synthetic && st.filters.some(f => f.dim === dim && f.id === key);
   const kpis = nodeKpis(dim, e);
-  // Headline number matches the share's units so the two correlate: on the
-  // error dimension both count failure events (final + absorbed).
-  const clientAttr = dim === 'client' ? ` data-client="${escapeHtml(key)}"` : '';
-  const nodeTitle = dim === 'client' ? '' : ` title="${selected ? 'remove' : 'filter to'} ${escapeHtml(entityType(dim).label)}: ${escapeHtml(shortId(dim, key))}"`;
+  // The synthetic overflow card is informational: it carries an explicit
+  // marker instead of a filter key, so a real value sharing its display name
+  // stays independently selectable.
+  const clientAttr = !synthetic && dim === 'client' ? ` data-client="${escapeHtml(key)}"` : '';
+  const nodeTitle = synthetic
+    ? ' title="aggregated remainder beyond the exact group budget; not filterable"'
+    : dim === 'client' ? '' : ` title="${selected ? 'remove' : 'filter to'} ${escapeHtml(entityType(dim).label)}: ${escapeHtml(shortId(dim, key))}"`;
+  const keyAttr = synthetic
+    ? ' data-xp-synthetic="1" role="group" aria-disabled="true"'
+    : ` data-xp-key="${escapeHtml(key)}" aria-pressed="${selected}"`;
+  const tag = synthetic ? 'div' : 'button';
+  const typeAttr = synthetic ? '' : ' type="button"';
+  const label = synthetic ? key + ' (grouped)' : key;
   const info = dim === 'conversation' ? e.conversation : null;
   const role = info?.role === 'main' || info?.role === 'sub' ? info.role : 'unresolved';
   const roleTitle = role === 'main' ? 'No parent declared in observed history' : role === 'sub' ?
     'Client-declared parent conversation' : info?.issue?.replaceAll('_', ' ') || 'Unresolved relationship';
   const roleBadge = dim === 'conversation' ? `<small class="xp-conversation-role" title="${escapeHtml(roleTitle)}">${role}</small>` : '';
-  const card = `<button type="button" class="xp-node${selected ? ' selected' : ''}" style="--ent:${entityType(dim).color}" data-xp-key="${escapeHtml(key)}" aria-pressed="${selected}"${clientAttr}${nodeTitle}>
-    <span class="xp-node-hd">${entityBadge(dim, key)}${roleBadge}<span class="xp-node-n">${fmt(headN)}<small>${headUnit}</small></span></span>
+  const card = `<${tag}${typeAttr} class="xp-node${selected ? ' selected' : ''}${synthetic ? ' xp-node-synthetic' : ''}" style="--ent:${entityType(dim).color}${synthetic ? ';cursor:default' : ''}"${keyAttr}${clientAttr}${nodeTitle}>
+    <span class="xp-node-hd">${entityBadge(dim, synthetic ? '' : key, label)}${roleBadge}<span class="xp-node-n">${fmt(headN)}<small>${headUnit}</small></span></span>
     ${shareFrac != null ? `<span class="xp-node-share" title="${shareLabel}">${shareBar(shareFrac, entityType(dim).color)}</span>` : ''}
     <span class="xp-node-kpis">${kpis}</span>
     ${signals ? `<span class="xp-node-foot"><span class="xp-node-signals">${signals}</span></span>` : ''}
-  </button>`;
+  </${tag}>`;
   // Parent navigation is a sibling link, never nested inside the card button.
   return dim === 'conversation' ? `<div class="xp-conversation-node">${card}${conversationParent(info)}</div>` : card;
 }

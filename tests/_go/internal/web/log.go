@@ -24,37 +24,30 @@ import (
 // dimensions are SQL predicates, while derived predicates must keep the
 // growing Go scan even when some of their rows also narrow SQL.
 func TestLogPageQueryClassification(t *testing.T) {
-	plain := &modelCanonizer{memo: map[string]string{}}
-	withRules := &modelCanonizer{
-		exec: config.CompileModelRules([]config.ModelRule{{Mode: "lower"}}),
-		memo: map[string]string{},
-	}
 	for _, tc := range []struct {
 		name       string
 		fs         []scopeFilter
 		status     string
-		mcz        *modelCanonizer
 		wantPushed bool
 		wantAll    int
 	}{
-		{"empty", nil, "", plain, true, 0},
-		{"client", []scopeFilter{{dim: "client", id: "c"}}, "", plain, true, 1},
-		{"provider", []scopeFilter{{dim: "provider", id: "p"}}, "", plain, true, 1},
-		{"key", []scopeFilter{{dim: "key", id: "k"}}, "", plain, true, 1},
-		{"conversation", []scopeFilter{{dim: "conversation", id: "s:1"}}, "", plain, true, 1},
-		{"model raw", []scopeFilter{{dim: "model", id: "m"}}, "", plain, true, 1},
-		{"model padded", []scopeFilter{{dim: "model", id: " m "}}, "", plain, false, 1},
-		{"model rules", []scopeFilter{{dim: "model", id: "m"}}, "", withRules, false, 0},
-		{"status class", []scopeFilter{{dim: "status", id: "5xx"}}, "", plain, false, 0},
-		{"time", []scopeFilter{{dim: "time", id: "work"}}, "", plain, false, 0},
-		{"tool", []scopeFilter{{dim: "tool", id: "search"}}, "", plain, false, 0},
-		{"error", []scopeFilter{{dim: "error", id: "x|y|z"}}, "", plain, false, 0},
-		{"numeric status", nil, "429", plain, true, 1},
-		{"noncanonical status", nil, "0429", plain, false, 1},
-		{"sql and go", []scopeFilter{{dim: "provider", id: "p"}, {dim: "tool", id: "search"}}, "", plain, false, 1},
+		{"empty", nil, "", true, 0},
+		{"client", []scopeFilter{{dim: "client", id: "c"}}, "", true, 1},
+		{"provider", []scopeFilter{{dim: "provider", id: "p"}}, "", true, 1},
+		{"key", []scopeFilter{{dim: "key", id: "k"}}, "", true, 1},
+		{"conversation", []scopeFilter{{dim: "conversation", id: "s:1"}}, "", true, 1},
+		{"model raw", []scopeFilter{{dim: "model", id: "m"}}, "", false, 0},
+		{"model padded", []scopeFilter{{dim: "model", id: " m "}}, "", false, 0},
+		{"status class", []scopeFilter{{dim: "status", id: "5xx"}}, "", false, 0},
+		{"time", []scopeFilter{{dim: "time", id: "work"}}, "", false, 0},
+		{"tool", []scopeFilter{{dim: "tool", id: "search"}}, "", false, 0},
+		{"error", []scopeFilter{{dim: "error", id: "x|y|z"}}, "", false, 0},
+		{"numeric status", nil, "429", true, 1},
+		{"noncanonical status", nil, "0429", false, 1},
+		{"sql and go", []scopeFilter{{dim: "provider", id: "p"}, {dim: "tool", id: "search"}}, "", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			filter, pushed := logPageQuery(tc.fs, tc.status, tc.mcz)
+			filter, pushed := logPageQuery(tc.fs, tc.status)
 			if pushed != tc.wantPushed || len(filter.All) != tc.wantAll {
 				t.Fatalf("pushed=%v predicates=%d, want pushed=%v predicates=%d", pushed, len(filter.All), tc.wantPushed, tc.wantAll)
 			}
@@ -453,7 +446,7 @@ func logPageRegressionStore(tb testing.TB) *storage.Store {
 // signal for every filter class.
 func referenceLogPage(t *testing.T, s *storage.Store, before *storage.LogCursor, fs []scopeFilter, statusCode string, limit int, mcz *modelCanonizer) ([]metrics.ObservedRecord, bool, int64, string) {
 	t.Helper()
-	filter, allPushed := logPageQuery(fs, statusCode, mcz)
+	filter, allPushed := logPageQuery(fs, statusCode)
 	out := make([]*metrics.Record, 0, limit)
 	cursor := before
 	scanned := 0
@@ -619,6 +612,32 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 	}
 }
 
+// TestLogPageModelFilterMatchesPaddedStoredSpelling: with no canonicalization
+// rules the Go matcher still trims stored and filter spellings, so a raw SQL
+// model equality would silently drop a stored " gpt-4 " row. The page must
+// return every canonical match, not just the exactly-spelled stored row.
+func TestLogPageModelFilterMatchesPaddedStoredSpelling(t *testing.T) {
+	s := testStoreWithQueryTimeout(t, time.Minute)
+	base := logPageRegressionStart()
+	s.Record(&metrics.Record{ID: "padded", Provider: "p", Model: " gpt-4 ", Start: base, StatusCode: 200})
+	s.Record(&metrics.Record{ID: "other", Provider: "p", Model: "gpt-4o", Start: base.Add(time.Millisecond), StatusCode: 200})
+	s.Record(&metrics.Record{ID: "plain", Provider: "p", Model: "gpt-4", Start: base.Add(2 * time.Millisecond), StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Minute)
+	h := http.HandlerFunc(api.HandleLogPage)
+	page := get(t, h, "/metrics/agg/log?limit=10&f=model:gpt-4")
+	rows := page["records"].([]any)
+	got := make([]string, len(rows))
+	for i, row := range rows {
+		got[i] = row.(map[string]any)["id"].(string)
+	}
+	if !reflect.DeepEqual(got, []string{"plain", "padded"}) || page["more"] != false {
+		t.Fatalf("model page = %v more=%v, want [plain padded] and no more", got, page["more"])
+	}
+}
+
 // TestLogPageCanonicalModelRulesUseNarrowMatcher pins the residual matcher for
 // configured canonicalization: SQL must not push the raw model equality, the
 // Go matcher must still apply the rules, and full records must retain their
@@ -645,7 +664,7 @@ func TestLogPageCanonicalModelRulesUseNarrowMatcher(t *testing.T) {
 	h := http.HandlerFunc(api.HandleLogPage)
 	mcz := api.canonizer()
 	fs := []scopeFilter{{dim: "model", id: "target"}}
-	plan := planLogPage(fs, "", mcz)
+	plan := planLogPage(fs, "")
 	if plan.allPushed || len(plan.filter.All) != 0 || len(plan.goFilters) != 1 {
 		t.Fatalf("model rules plan = %+v, want the Go matcher to own the model predicate", plan)
 	}

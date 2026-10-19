@@ -55,7 +55,9 @@ const (
 	explorerGroupBudget = 8192
 	// explorerOtherID reserves a dictionary slot that no real dimension value
 	// can occupy, so overflow memberships can still select the synthetic card
-	// without colliding with an unset (zero) membership. Internal only.
+	// without colliding with an unset (zero) membership. The wire marks that
+	// card with synthetic:true; its display name is not a filter value.
+	// Internal only.
 	explorerOtherID   = ^uint32(0)
 	explorerOtherName = "other"
 	// pctMinSamples suppresses percentile stats below this many samples
@@ -1496,6 +1498,10 @@ type jsonEnt struct {
 	ErrEvents   int64    `json:"err_events"`
 	Code        string   `json:"code"`
 	LastMs      int64    `json:"last_ms"`
+	// Synthetic marks the overflow card. Its Name is a display label, not a
+	// filter value; clients must not select it or confuse it with a real value
+	// that happens to share the label.
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 type explorerPayload struct {
@@ -2066,17 +2072,19 @@ func (e *explorerFold) payload() explorerPayload {
 	speed, _ := rankPercentilesVisitMerge(e.order.base.tps, e.order.pending.tps, tpsCounts, extraTPS, tpsBuckets, visit)
 	ents := make([]jsonEnt, 0, len(top))
 	for i, g := range top {
+		synthetic := g == &e.other
 		ent := jsonEnt{
 			Name: g.name, N: int64(e.groupCount(g)), Cost: g.cost, In: g.in, Out: g.out,
 			Cache: g.cacheR, ErrFinal: int64(g.errFin),
 			RateLimitRequests: int64(g.rateLimitRequests),
 			Tools:             g.tools, Code: g.code, LastMs: g.lastMs,
+			Synthetic: synthetic,
 		}
 		if e.dimIndex == dimConversation {
 			// Resolve lineage for the selected cards only. Materializing every
 			// in-scope conversation group allocated a map proportional to the
 			// distinct-value count just to look up at most xpNodeCap names.
-			if g != &e.other {
+			if !synthetic {
 				ent.Conversation = e.lineage.info(e.lineage.group(g.name))
 			}
 		}
@@ -2218,9 +2226,8 @@ type logPagePlan struct {
 // dimensions become SQL predicates; everything the projection derives (status
 // classes, errors, tools, time buckets, canonical models) stays in the
 // authoritative Go matcher and is matched against the narrow candidate read.
-func planLogPage(fs []scopeFilter, statusCode string, mcz *modelCanonizer) logPagePlan {
+func planLogPage(fs []scopeFilter, statusCode string) logPagePlan {
 	plan := logPagePlan{allPushed: true}
-	modelRules := mcz != nil && len(mcz.exec) > 0
 	for _, f := range fs {
 		pushed := true
 		switch f.dim {
@@ -2233,16 +2240,11 @@ func planLogPage(fs []scopeFilter, statusCode string, mcz *modelCanonizer) logPa
 		case "conversation":
 			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
 		case "model":
-			// Canonical equality is pushable only while no rule rewrites the
-			// stored spelling. SQL matches the raw column exactly; the Go
-			// matcher trims even with no rules, so a padded filter value can
-			// still reject decoded rows and must keep the growing scan.
-			if !modelRules {
-				plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
-				pushed = strings.TrimSpace(f.id) == f.id
-			} else {
-				pushed = false
-			}
+			// The canonical matcher trims the stored spelling even with no
+			// rules, so raw SQL equality would silently drop a stored
+			// " gpt-4 " that canonically equals "gpt-4". Keep every model
+			// filter Go-owned; a growing scan is the correct cost.
+			pushed = false
 		default:
 			pushed = false
 		}
@@ -2271,8 +2273,8 @@ func planLogPage(fs []scopeFilter, statusCode string, mcz *modelCanonizer) logPa
 
 // logPageQuery preserves the original classification contract for callers and
 // tests that only need the SQL filter and the all-pushed verdict.
-func logPageQuery(fs []scopeFilter, statusCode string, mcz *modelCanonizer) (filter storage.LogFilter, allPushed bool) {
-	plan := planLogPage(fs, statusCode, mcz)
+func logPageQuery(fs []scopeFilter, statusCode string) (filter storage.LogFilter, allPushed bool) {
+	plan := planLogPage(fs, statusCode)
 	return plan.filter, plan.allPushed
 }
 
@@ -2359,11 +2361,11 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Push exact, SQL-safe dimensions into the page query. Canonical model
-	// equality is pushable only when no rules rewrite names; class filters,
-	// errors, tools and time buckets stay in the authoritative Go matcher,
-	// which reads the narrow candidate projection instead of full records.
-	plan := planLogPage(fs, statusCode, mcz)
+	// Push exact, SQL-safe dimensions into the page query. Model equality,
+	// status classes, errors, tools and time buckets stay in the authoritative
+	// Go matcher, which reads the narrow candidate projection instead of full
+	// records.
+	plan := planLogPage(fs, statusCode)
 	accepted := make([]storage.LogCursor, 0, limit)
 	scanned := 0
 	hitEnd := a.store == nil

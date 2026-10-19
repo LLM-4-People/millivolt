@@ -726,6 +726,80 @@ func explorerFoldAllocatedBytes(fn func()) uint64 {
 	return after.TotalAlloc - before.TotalAlloc
 }
 
+// TestExplorerSyntheticOtherIsDistinctFromRealOther pins the overflow card's
+// wire identity: an explicit synthetic marker separates it from an exact value
+// named "other", so the real value keeps its own selectable card. The marker is
+// omitted from normal cards.
+func TestExplorerSyntheticOtherIsDistinctFromRealOther(t *testing.T) {
+	const fillers = explorerGroupBudget - 1
+	rows := make([]contrib, 0, fillers+100+50)
+	start := time.Date(2026, 9, 4, 12, 0, 0, 0, time.Local).UnixMilli()
+	add := func(client string) {
+		rows = append(rows, contrib{
+			id: fmt.Sprintf("row-%05d", len(rows)), start: start + int64(len(rows)),
+			status: 200, client: client,
+		})
+	}
+	for i := range fillers {
+		add(fmt.Sprintf("client-%05d", i))
+	}
+	for range 100 {
+		add("other")
+	}
+	for i := range 50 {
+		add(fmt.Sprintf("overflow-%02d", i))
+	}
+	p := explorerProjection(rows)
+	f := newExplorerFold("client", "", nil)
+	f.prepare(p, nil)
+	for i := range p.rows {
+		if err := f.fold(&p.rows[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := f.payload()
+	var realOther, syntheticOther *jsonEnt
+	for i := range payload.Groups {
+		g := &payload.Groups[i]
+		if g.Name != explorerOtherName {
+			continue
+		}
+		if g.Synthetic {
+			syntheticOther = g
+		} else {
+			realOther = g
+		}
+	}
+	if realOther == nil || syntheticOther == nil {
+		t.Fatalf("cards = %+v, want both a real %q and the synthetic overflow card", payload.Groups, explorerOtherName)
+	}
+	if realOther.N != 100 || syntheticOther.N != 50 {
+		t.Fatalf("real/synthetic other N = %d/%d, want 100/50", realOther.N, syntheticOther.N)
+	}
+	rawReal, err := json.Marshal(realOther)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedReal map[string]json.RawMessage
+	if err := json.Unmarshal(rawReal, &decodedReal); err != nil {
+		t.Fatal(err)
+	}
+	if _, marked := decodedReal["synthetic"]; marked {
+		t.Fatalf("real %q card carries a synthetic marker: %s", explorerOtherName, rawReal)
+	}
+	rawSynthetic, err := json.Marshal(syntheticOther)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decodedSynthetic map[string]json.RawMessage
+	if err := json.Unmarshal(rawSynthetic, &decodedSynthetic); err != nil {
+		t.Fatal(err)
+	}
+	if string(decodedSynthetic["synthetic"]) != "true" {
+		t.Fatalf("synthetic card marker = %s, want true in %s", decodedSynthetic["synthetic"], rawSynthetic)
+	}
+}
+
 // TestExplorerDistinctGroupsStayBounded pins the explorer's internal group
 // budget at one million distinct values. Exact per-value accumulators stop at
 // explorerGroupBudget and the remainder folds into the synthetic other card,
