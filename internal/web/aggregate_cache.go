@@ -316,12 +316,19 @@ func (a *AggAPI) explorerCold(ctx context.Context, mcz *modelCanonizer, key aggr
 			e.pendingIDs[r.ID] = struct{}{}
 		}
 	}
+	var p explorerPayload
 	if err := a.streamWindow(ctx, 0, mcz, func(p *projectionData) { e.prepare(p, mcz) }, e.fold, func() error {
-		return eachPending(pending, e.seen, mcz, e.fold)
+		if err := eachPending(pending, e.seen, mcz, e.fold); err != nil {
+			return err
+		}
+		// The payload reads the borrowed conversation topology. Build it while
+		// streamWindow still holds the projection read lease; it must not
+		// escape the callback and read a concurrent append.
+		p = e.payload()
+		return nil
 	}); err != nil {
 		return explorerPayload{}, err
 	}
-	p := e.payload()
 	if cacheable && a.aggregateUnchanged(ctx, key, true) {
 		a.explorerMemo.put(key, p)
 	}
