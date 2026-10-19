@@ -1353,6 +1353,27 @@ func preflightMergeTable(ctx context.Context, db mergeConn, table string) error 
 			return fmt.Errorf("backup %s has unsupported required column %q", table, col.name)
 		}
 	}
+	if table == "requests" {
+		// A nullable live column cannot guarantee a non-NULL value when the
+		// incoming table omits it: its default may itself be NULL or an
+		// expression that yields one, and the intersection INSERT would then
+		// write NULL into every merged row and poison scanRecord. Reject that
+		// shape before the transaction. A required live column with a default
+		// still admits a pre-column backup: SQLite's NOT NULL constraint
+		// guarantees the omitted value cannot be NULL.
+		for _, name := range recordScanColumns() {
+			liveCol, ok := liveSet[name]
+			if !ok {
+				return fmt.Errorf("live requests is missing scan-required column %q", name)
+			}
+			if _, ok := incomingSet[name]; ok {
+				continue
+			}
+			if !liveCol.notNull {
+				return fmt.Errorf("backup requests is missing scan-required column %q; the live column is nullable and omission would insert NULL", name)
+			}
+		}
+	}
 	return nil
 }
 

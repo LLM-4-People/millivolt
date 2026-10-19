@@ -30,6 +30,23 @@ func makeStagingEntry(t *testing.T, path string, dir bool) {
 	}
 }
 
+// makeOldLivePath creates a missing protected fixture file and backdates it
+// beyond the sweep age, so only the path-identity fence can preserve it.
+func makeOldLivePath(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		if err := os.WriteFile(path, []byte("safe"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * stagingSweepMinAge)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestOpenReclaimsOldOrphanedStaging pins the startup sweep's closed registry:
 // every staging shape a crash can orphan (snapshot/overlap/merge directories,
 // archive/upload files, decoded/inspected database directories, preserved
@@ -240,5 +257,140 @@ func TestOpenSweepPreservesLiveDatabaseNamedLikeStaging(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "survivor" {
 		t.Fatalf("live rows after second restart = %#v, want survivor", rows)
+	}
+}
+
+// TestOpenSweepPreservesSymlinkedLiveTarget is the restart regression for a
+// symlinked db_path: the configured name is proxy.db, while the resolved live
+// target is millivolt-snapshot-live.db and therefore matches the snapshot
+// staging pattern. Path protection must cover the resolved target (and the
+// sidecars/admission files derived from it), not only the symlink spelling.
+func TestOpenSweepPreservesSymlinkedLiveTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "millivolt-snapshot-live.db")
+	s, err := Open(target, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Record(&metrics.Record{ID: "survivor", Provider: "neutral.example", Model: "n", StatusCode: 200})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	link := filepath.Join(dir, "proxy.db")
+	if err := os.Symlink(filepath.Base(target), link); err != nil {
+		t.Fatal(err)
+	}
+	protected := []string{
+		target,
+		target + "-wal",
+		target + "-shm",
+		PendingSnapshotPath(target),
+		PendingSnapshotPath(target) + "-wal",
+		PendingSnapshotPath(target) + "-shm",
+		PendingSnapshotPath(target) + "-journal",
+		target + pendingSnapshotPreviousSuffix,
+		target + pendingSnapshotStateSuffix,
+		PendingSnapshotPath(target) + pendingSnapshotInvalidSuffix,
+		PendingSnapshotPath(target) + pendingSnapshotInterruptedSuffix,
+	}
+	for _, protectedPath := range protected {
+		makeOldLivePath(t, protectedPath)
+	}
+	orphan := filepath.Join(dir, "millivolt-snapshot-orphan")
+	makeStagingEntry(t, orphan, true)
+
+	reopened, err := Open(link, testOpts)
+	if err != nil {
+		t.Fatalf("restart through symlinked db_path: %v", err)
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("startup sweep deleted the resolved live target: %v", err)
+	}
+	for _, protectedPath := range protected {
+		if _, err := os.Stat(protectedPath); err != nil {
+			t.Errorf("sweep removed resolved live path %s: %v", protectedPath, err)
+		}
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("sweep left the true staging orphan %s: %v", orphan, err)
+	}
+	rows, err := reopened.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("live history after symlinked restart: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "survivor" {
+		t.Fatalf("live rows after symlinked restart = %#v, want survivor", rows)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	again, err := Open(link, testOpts)
+	if err != nil {
+		t.Fatalf("second restart through symlinked db_path: %v", err)
+	}
+	defer again.Close()
+	rows, err = again.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("history after second symlinked restart: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "survivor" {
+		t.Fatalf("live rows after second symlinked restart = %#v, want survivor", rows)
+	}
+}
+
+// TestStagingSweepProtectsResolvedSymlinkAdmissionPaths pins every path shape
+// derived from the resolved target, including the SQLite sidecars, pending
+// slot, rollback set and durable state marker. The sweep reads names from the
+// configured directory, so only resolving the symlink (here to an absolute
+// target) can recognize them.
+func TestStagingSweepProtectsResolvedSymlinkAdmissionPaths(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "millivolt-snapshot-live.db")
+	if err := os.WriteFile(target, []byte("live"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "proxy.db")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	protected := []string{
+		target,
+		target + "-wal",
+		target + "-shm",
+		target + "-journal",
+		PendingSnapshotPath(target),
+		PendingSnapshotPath(target) + "-wal",
+		PendingSnapshotPath(target) + "-shm",
+		PendingSnapshotPath(target) + "-journal",
+		target + pendingSnapshotPreviousSuffix,
+		target + pendingSnapshotPreviousSuffix + "-wal",
+		target + pendingSnapshotPreviousSuffix + "-shm",
+		target + pendingSnapshotPreviousSuffix + "-journal",
+		target + pendingSnapshotStateSuffix,
+		PendingSnapshotPath(target) + pendingSnapshotInvalidSuffix,
+		PendingSnapshotPath(target) + pendingSnapshotInterruptedSuffix,
+	}
+	for _, protectedPath := range protected {
+		makeOldLivePath(t, protectedPath)
+	}
+	orphan := filepath.Join(dir, "millivolt-snapshot-orphan")
+	makeStagingEntry(t, orphan, true)
+
+	s := &Store{path: link}
+	if removed := s.sweepOrphanedStaging(time.Now()); removed != 1 {
+		t.Fatalf("sweep removed %d entries, want 1", removed)
+	}
+	for _, protectedPath := range protected {
+		if _, err := os.Stat(protectedPath); err != nil {
+			t.Errorf("sweep removed resolved live path %s: %v", protectedPath, err)
+		}
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("sweep left the true staging orphan %s: %v", orphan, err)
 	}
 }

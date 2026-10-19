@@ -274,6 +274,125 @@ func TestMergeAcceptsEmptyToolNames(t *testing.T) {
 	}
 }
 
+// snapshotWithoutRequestColumn builds a packed canonical snapshot whose
+// requests table omits one column, the shape of a backup written before that
+// column existed. VACUUM INTO produces a clean standalone file after the
+// ALTER instead of relying on a checkpointed WAL sibling.
+func snapshotWithoutRequestColumn(t *testing.T, column string) []byte {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "without.db")
+	if err := os.WriteFile(path, packedSnapshot(t, "backup-row"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE requests DROP COLUMN "` + column + `"`); err != nil {
+		db.Close()
+		t.Fatalf("drop %s from backup fixture: %v", column, err)
+	}
+	packedPath := filepath.Join(dir, "packed.db")
+	if _, err := db.Exec(`VACUUM INTO ?`, packedPath); err != nil {
+		db.Close()
+		t.Fatalf("pack reduced backup fixture: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(packedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestMergeRejectsOmittedScanColumnOnNullableLive pins the absent-column half
+// of the scan preflight. A backup created before tool_names existed omits the
+// column; against a legacy live table whose tool_names is nullable, the merge
+// INSERT would leave the live default (NULL) and poison every history scan.
+// The merge must fail closed before inserting anything.
+func TestMergeRejectsOmittedScanColumnOnNullableLive(t *testing.T) {
+	livePath := filepath.Join(t.TempDir(), "live.db")
+	if err := os.WriteFile(livePath, nullableColumnSnapshot(t,
+		"tool_names TEXT NOT NULL DEFAULT ''", "tool_names TEXT", "tool_names", ""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	live, err := Open(livePath, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { live.Close() })
+	cols, err := tableColumnDetails(t.Context(), live.db, "", "requests")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nullableToolNames := false
+	for _, col := range cols {
+		if col.name == "tool_names" {
+			nullableToolNames = !col.notNull
+		}
+	}
+	if !nullableToolNames {
+		t.Fatal("live fixture requests.tool_names was rebuilt as NOT NULL")
+	}
+
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), snapshotWithoutRequestColumn(t, "tool_names"))
+	if err == nil {
+		t.Fatalf("backup omitting tool_names reported success (inserted=%d skipped=%d)", inserted, skipped)
+	}
+	if !strings.Contains(err.Error(), "tool_names") {
+		t.Fatalf("merge error %q does not name the omitted scan column", err)
+	}
+	if inserted != 0 || skipped != 0 {
+		t.Fatalf("failed merge counts inserted=%d skipped=%d, want 0/0", inserted, skipped)
+	}
+	rows, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("live history unreadable after rejected merge: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "legacy-row" {
+		t.Fatalf("live rows after rejected merge = %#v, want legacy-row", rows)
+	}
+	var nulls int64
+	if err := live.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE tool_names IS NULL`).Scan(&nulls); err != nil {
+		t.Fatal(err)
+	}
+	if nulls != 0 {
+		t.Fatalf("rejected merge still inserted %d rows with NULL tool_names", nulls)
+	}
+}
+
+// TestMergeDefaultsOmittedScanColumnOnRequiredLive is the admitted half of the
+// same shape: a normal live schema declares tool_names NOT NULL with an
+// empty-string default, so omitting the column inserts a valid empty value and
+// the merged row stays readable. Failing that shape would reject ordinary
+// pre-column backups.
+func TestMergeDefaultsOmittedScanColumnOnRequiredLive(t *testing.T) {
+	live := mergeTestLive(t)
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), snapshotWithoutRequestColumn(t, "tool_names"))
+	if err != nil {
+		t.Fatalf("omitted tool_names rejected on a defaulted live column: %v", err)
+	}
+	if inserted != 1 || skipped != 0 {
+		t.Fatalf("inserted=%d skipped=%d, want 1/0", inserted, skipped)
+	}
+	rows, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatalf("live history unreadable after defaulted merge: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == "backup-row" && len(row.ToolNames) == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("merged rows = %#v, want the defaulted-tool-names row", rows)
+	}
+}
+
 // TestPreflightRejectsNullInEveryRecordScanColumn proves the preflight is
 // derived from recordColumns rather than a small hand-picked set: every
 // column scanRecord scans into a non-null Go value is rejected when NULL.

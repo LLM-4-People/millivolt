@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -74,23 +75,67 @@ func (s *Store) isBaseStagingName(base string) bool {
 // millivolt-snapshot-* or millivolt-backup-*, including its SQLite sidecars,
 // the pending .incoming slot, the .previous rollback set, the durable state
 // marker and quarantined admission evidence.
-func (s *Store) protectedLivePaths() map[string]struct{} {
-	bases := []string{
-		s.path,
-		PendingSnapshotPath(s.path),
-		s.path + pendingSnapshotPreviousSuffix,
-		s.path + pendingSnapshotStateSuffix,
-		PendingSnapshotPath(s.path) + pendingSnapshotInvalidSuffix,
-		PendingSnapshotPath(s.path) + pendingSnapshotInterruptedSuffix,
+//
+// The configured path is not always the live file's identity: db_path may be a
+// symlink whose resolved target has a staging-shaped basename. Both identities
+// are protected, and the admission-derived names are built from each resolved
+// directory/name, so a sweep can never unlink the file SQLite actually opened.
+// An unresolvable existing path fails the sweep closed instead of guessing.
+func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
+	bases := []string{s.path}
+	resolved, err := filepath.EvalSymlinks(s.path)
+	if err == nil {
+		if resolved != "" {
+			bases = append(bases, resolved)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("resolve live database path %q: %w", s.path, err)
 	}
-	protected := make(map[string]struct{}, len(bases)*(len(snapshotSidecarSuffixes)+1))
+	derived := make([]string, 0, len(bases)*6)
 	for _, base := range bases {
-		protected[filepath.Clean(base)] = struct{}{}
+		derived = append(derived,
+			base,
+			PendingSnapshotPath(base),
+			base+pendingSnapshotPreviousSuffix,
+			base+pendingSnapshotStateSuffix,
+			PendingSnapshotPath(base)+pendingSnapshotInvalidSuffix,
+			PendingSnapshotPath(base)+pendingSnapshotInterruptedSuffix,
+		)
+	}
+	protected := make(map[string]struct{}, len(derived)*(len(snapshotSidecarSuffixes)+1))
+	for _, base := range derived {
+		protected[protectedPathKey(base)] = struct{}{}
 		for _, suffix := range snapshotSidecarSuffixes {
-			protected[filepath.Clean(base+suffix)] = struct{}{}
+			protected[protectedPathKey(base+suffix)] = struct{}{}
 		}
 	}
-	return protected
+	return protected, nil
+}
+
+// protectedPathKey normalizes a path for identity comparison. Absolute keys
+// keep a resolved symlink target comparable with directory entries even when
+// db_path itself is relative and the link target is absolute.
+func protectedPathKey(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// isProtectedLivePath reports whether path is the configured live spelling or
+// resolves to the protected identity. The second check covers a database
+// directory reached through a symlink: the sweep lists lexical entry names,
+// while protectedLivePaths holds the real target path.
+func (s *Store) isProtectedLivePath(protected map[string]struct{}, path string) bool {
+	if _, ok := protected[protectedPathKey(path)]; ok {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	_, ok := protected[protectedPathKey(resolved)]
+	return ok
 }
 
 // sweepOrphanedStaging reclaims known snapshot/archive staging entries left by
@@ -113,13 +158,22 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		return 0
 	}
 	removed := 0
-	protected := s.protectedLivePaths()
+	protected, err := s.protectedLivePaths()
+	if err != nil {
+		// A live database whose identity cannot be resolved must never be
+		// guessed at: skip the destructive sweep and leave boot working.
+		log.Printf("storage: staging sweep skipped: %v", err)
+		return 0
+	}
 	for _, entry := range entries {
 		name := entry.Name()
+		path := filepath.Join(dir, name)
 		// Path identity wins over name shape. A db_path named
 		// millivolt-snapshot-live.db must survive even though its basename
-		// matches snapshotStagingPattern.
-		if _, ok := protected[filepath.Clean(filepath.Join(dir, name))]; ok {
+		// matches snapshotStagingPattern, and so must a symlink target with
+		// that shape. Resolving the entry also matches a lexical directory
+		// alias (a symlinked db_path parent) to the resolved live identity.
+		if s.isProtectedLivePath(protected, path) {
 			continue
 		}
 		if !s.isStagingName(name) {
@@ -128,7 +182,7 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		info, err := entry.Info()
 		if err != nil {
 			if !os.IsNotExist(err) {
-				log.Printf("storage: inspect staging entry %s: %v", filepath.Join(dir, name), err)
+				log.Printf("storage: inspect staging entry %s: %v", path, err)
 			}
 			continue
 		}
@@ -136,7 +190,6 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 			// Recent enough to be an in-progress writer; never guess.
 			continue
 		}
-		path := filepath.Join(dir, name)
 		if info.IsDir() {
 			err = os.RemoveAll(path)
 		} else {
