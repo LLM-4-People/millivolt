@@ -262,11 +262,11 @@ are filled at serve time and the ring snapshot itself is never retained.
 SQLite data_version is read on one retained connection; unsupported external
 writers are not made safe merely by cache invalidation. Log pages push exact
 provider/client/key/conversation/status equalities into SQLite before
-decoding, plus raw model equality when no canonical rules rewrite names. The
-Go scope matcher remains authoritative for canonical models, status classes,
-errors, tools, time buckets and live-only classes. Ad-hoc SELECT results are
-encoded once during the bounded scan and the endpoint writes that array
-directly; row/byte cap failure still precedes every response byte.
+decoding; model filters are always Go-owned. The Go scope matcher remains
+authoritative for canonical models, status classes, errors, tools, time buckets
+and live-only classes. Ad-hoc SELECT results are encoded once during the bounded
+scan and the endpoint writes that array directly; row/byte cap failure still
+precedes every response byte.
 
 Explorer uses dictionary IDs, scoped predicates and bitsets. The projection
 also owns two derived tables keyed by its immutable build: the interned

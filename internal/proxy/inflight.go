@@ -60,9 +60,11 @@ func (l *inflightLimiter) release(bodyBytes int64) {
 }
 
 // responseBufferBudget is the process-wide byte budget for whole-document
-// upstream response buffers (translated non-streaming documents and model
-// discovery bodies). Reservations cover the bytes a bounded read can hold and
-// are released once the buffer has been written or translated. 0 = unlimited.
+// upstream response buffers: translated non-streaming documents, model
+// discovery bodies, and the non-streaming 200 quality spool. Reservations cover
+// the bytes a bounded read can hold and are released once the buffer has been
+// written, translated or decoded, on failure, or when an attempt is abandoned
+// for a retry. 0 = unlimited.
 type responseBufferBudget struct {
 	limit atomic.Int64
 	bytes atomic.Int64
@@ -100,7 +102,8 @@ func (b *responseBufferBudget) release(n int64) {
 var errResponseBufferBudget = errors.New("proxy is at its in-flight response buffer limit")
 
 // writeResponseBufferBudget is the one 503 sink for response-buffer
-// admission, shared by the translated non-streaming relay and model discovery.
+// admission, shared by the translated non-streaming relay, model discovery,
+// and the non-streaming quality spool.
 func writeResponseBufferBudget(w http.ResponseWriter, rec *metrics.Record) {
 	if rec != nil {
 		rec.StatusCode = http.StatusServiceUnavailable

@@ -157,10 +157,13 @@ type Config struct {
 	// this budget, before reading it. 0 = unlimited.
 	MaxInflightBodyBytes ByteSize `yaml:"max_inflight_body_bytes" json:"max_inflight_body_bytes"`
 	// MaxInflightResponseBytes is the process-wide budget for whole-document
-	// upstream response bodies buffered before translation or model discovery.
-	// The reservation is held only while buffering and released after write or
-	// translation; a request above the remaining budget is refused with 503
-	// before reading the upstream body. 0 = unlimited.
+	// upstream response buffers: translated non-streaming documents, model
+	// discovery bodies, and the non-streaming 200 quality spool. The
+	// reservation covers the bytes a bounded read can hold, is held only while
+	// buffering, and is released after the buffer is written, translated or
+	// decoded, on failure, or when an attempt is abandoned for a retry. A
+	// request above the remaining budget is refused with 503 before reading the
+	// upstream body. 0 = unlimited.
 	MaxInflightResponseBytes ByteSize `yaml:"max_inflight_response_bytes" json:"max_inflight_response_bytes"`
 	// QueueRetryAfter is the Retry-After hint sent to clients when the proxy's
 	// own queue is full or the wait is exceeded. HTTP Retry-After is integer

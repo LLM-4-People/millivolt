@@ -1744,18 +1744,18 @@ func TestBootstrapUnscopedShowsEverything(t *testing.T) {
 func TestExplorerModelDimensionCanonicalized(t *testing.T) {
 	buf := metrics.NewBuffer(16)
 	now := time.Now()
-	for _, rec := range []*metrics.Record{
+	// Three raw spellings of the same canonical model: glm-5.3 twice and
+	// glm-5-3 once. Set the model before Record so the ring owns a finalized
+	// record, never a value mutated after enqueue.
+	models := []string{"glm-5.3", "glm-5.3", "glm-5-3"}
+	for i, rec := range []*metrics.Record{
 		mkRec("a", now.Add(-3*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0),
 		mkRec("b", now.Add(-2*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0),
 		mkRec("c", now.Add(-1*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0),
 	} {
+		rec.Model = models[i]
 		buf.Record(rec)
 	}
-	// Three raw spellings of two models: glm-5.3 twice + glm-5-3 once (same
-	// canonical group), moonshotai/kimi-k3:nube once.
-	buf.Snapshot()[0].Model = "glm-5.3"
-	buf.Snapshot()[1].Model = "glm-5.3"
-	buf.Snapshot()[2].Model = "glm-5-3"
 
 	agg := NewAggAPI(buf, nil, time.Second)
 	agg.ModelCanon = func() config.ModelCanon { return config.Default().ModelCanon() }

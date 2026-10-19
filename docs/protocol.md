@@ -134,14 +134,20 @@ are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for either spelling (`max_tokens` or
-`max_completion_tokens`). A valid request above 10,000 messages, tools, or
-distinct `logit_bias` entries is rejected with HTTP 400 before an upstream
-send. A message content array above 4,096 parts still relays unchanged but
-contributes no dashboard composition counts. Invalid JSON is
-passed through on the nontranslated path. The proxy can retry transient
-transport failures, 429 and 5xx before returning the final response, and
-retryable in-band error events on an open stream before any generation
-content was relayed. Durable
+`max_completion_tokens`). A valid request is also rejected with HTTP 400 before
+an upstream send when it carries more than 10,000 entries in a `messages`,
+`tools` or `stop` array, more than 10,000 distinct top-level members, or more
+than 10,000 distinct `logit_bias` keys merged across duplicate top-level
+objects. Content composition has two independent limits. A content array above
+4,096 parts is not rejected for that reason: within the aggregate budget it
+still relays unchanged, but composition skips it, so it contributes no
+dashboard composition counts. Separately, the aggregate content-part count over
+every message content array and a top-level `system` array is capped at 16,384;
+a valid request above that aggregate is rejected with HTTP 400 before an
+upstream send. Invalid JSON is passed through on the nontranslated path. The
+proxy can retry transient transport failures, 429 and 5xx before returning the
+final response, and retryable in-band error events on an open stream before any
+generation content was relayed. Durable
 quota/billing 429s follow `quota_pause_mode` instead of the transient retry
 ladder: `off` (default) surfaces them immediately; `retry` parks the
 triggering request and every new request to the same OpenAI-wire provider

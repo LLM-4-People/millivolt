@@ -313,7 +313,7 @@ func assertNoBackupStaging(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "millivolt-backup-") && strings.HasSuffix(e.Name(), ".mvb") {
+		if backup.IsStagingName(e.Name()) {
 			t.Fatalf("backup staging file left behind: %s", e.Name())
 		}
 		if strings.HasPrefix(e.Name(), "millivolt-snapshot-") {
