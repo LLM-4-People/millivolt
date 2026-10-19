@@ -2,15 +2,22 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 // TestValuesListsADimensionVocabulary pins the discovery surface. The gap it
@@ -104,8 +111,11 @@ func TestValuesToolProbeIsPinned(t *testing.T) {
 	}
 	after := "glm-5-3"
 	paged := modelPageStatement(&after, 11)
-	if !strings.Contains(paged, "WHERE model > 'glm-5-3'") {
-		t.Fatalf("the model page must keyset after the last spelling: %q", paged)
+	if !strings.Contains(paged, "WHERE model > CAST(X'676c6d2d352d33' AS TEXT)") {
+		t.Fatalf("the model page must keyset after the last spelling as a hex text expression: %q", paged)
+	}
+	if strings.Contains(paged, "glm-5-3") {
+		t.Fatalf("the raw cursor must never enter the statement source: %q", paged)
 	}
 	if !strings.Contains(probeableDimensions(), "model") {
 		t.Fatalf("model must stay in the probeable vocabulary: %q", probeableDimensions())
@@ -325,6 +335,90 @@ func TestValuesModelFailsClosedWhenCanonicalVocabularyExceedsTheBound(t *testing
 	}
 }
 
+// TestValuesModelFailsClosedWhenThePageBudgetIsExhausted is the work-bound
+// regression. A proxy row cap of one turns every page into a single row, so a
+// large vocabulary would otherwise issue one authenticated query per spelling,
+// each bounded only by the request timeout. The tool must stop at the total
+// page-query budget with an explicit refusal: not a long loop, and never a
+// partial vocabulary that looks complete.
+func TestValuesModelFailsClosedWhenThePageBudgetIsExhausted(t *testing.T) {
+	total := modelValuesMaxPageQueries + 1
+	spellings := make([]string, total)
+	for i := range spellings {
+		spellings[i] = fmt.Sprintf("model-%05d", i)
+	}
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, modelBootstrap(t, nil))
+	proxy.dynamic(http.MethodGet, schemaPath, modelPageResponder(spellings, 1, 1))
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.values(context.Background(), ValuesInput{Dim: "model"})
+	if err == nil {
+		t.Fatalf("a one-row proxy cap with %d spellings must exceed the page budget, got %+v", total, out)
+	}
+	if out != nil {
+		t.Fatalf("a failed enumeration must not return a partial vocabulary: %+v", out)
+	}
+	if !strings.Contains(err.Error(), "page queries") {
+		t.Fatalf("error = %v, want the total page-query budget", err)
+	}
+	if !strings.Contains(err.Error(), strconv.Itoa(modelValuesMaxPageQueries)) {
+		t.Fatalf("error = %v, want the budget %d named", err, modelValuesMaxPageQueries)
+	}
+	if strings.Contains(err.Error(), "HTTP 413") {
+		t.Fatalf("the page budget must not surface as the generic query cap: %v", err)
+	}
+	queries := proxy.requestsFor(http.MethodGet, schemaPath)
+	if len(queries) != modelValuesMaxPageQueries {
+		t.Fatalf("the probe sent %d page queries, want it to stop at the budget %d", len(queries), modelValuesMaxPageQueries)
+	}
+}
+
+// TestValuesModelEnumeratesWithinThePageBudget pins the other side of the
+// bound: an ordinary multi-page vocabulary and a vocabulary of exactly one
+// full page both finish, and the full page is followed by the empty page that
+// proves it is the end rather than assumed to be complete.
+func TestValuesModelEnumeratesWithinThePageBudget(t *testing.T) {
+	cases := []struct {
+		name        string
+		total       int
+		wantQueries int
+	}{
+		{name: "multi page", total: 2_500, wantQueries: 3},
+		{name: "exactly one full page", total: modelValuesPageSize, wantQueries: 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spellings := make([]string, tc.total)
+			for i := range spellings {
+				spellings[i] = fmt.Sprintf("model-%05d", i)
+			}
+			proxy := newFakeProxy(t)
+			proxy.json(http.MethodGet, bootstrapPath, modelBootstrap(t, nil))
+			proxy.dynamic(http.MethodGet, schemaPath, modelPageResponder(spellings, 1, 0))
+			service := newTestService(t, proxy, Limits{})
+
+			out, err := service.values(context.Background(), ValuesInput{Dim: "model"})
+			if err != nil {
+				t.Fatalf("a vocabulary inside the page budget must enumerate: %v", err)
+			}
+			if out.Truncation.Total != tc.total {
+				t.Fatalf("total = %d, want every one of the %d spellings folded", out.Truncation.Total, tc.total)
+			}
+			if !strings.Contains(out.Note, strconv.Itoa(modelValuesMaxPageQueries)+" page queries") {
+				t.Fatalf("the note must state the page-query bound: %q", out.Note)
+			}
+			queries := proxy.requestsFor(http.MethodGet, schemaPath)
+			if len(queries) != tc.wantQueries {
+				t.Fatalf("page queries = %d, want %d", len(queries), tc.wantQueries)
+			}
+			if len(queries) > modelValuesMaxPageQueries {
+				t.Fatalf("a normal vocabulary must stay inside the page budget: %d > %d", len(queries), modelValuesMaxPageQueries)
+			}
+		})
+	}
+}
+
 // modelBootstrap composes the bootstrap form the model fold reads. nil rules
 // are the identity pipeline, the same as an empty list.
 func modelBootstrap(t *testing.T, rules []config.ModelRule) string {
@@ -379,17 +473,23 @@ func modelPageResponder(spellings []string, count int64, rowCap int) func(*http.
 }
 
 // parseModelPageStatement reads the closed statement modelPageStatement emits
-// in tests. The fixture spellings contain no quotes.
+// in tests. The cursor is a hex-encoded TEXT expression, so this decodes the
+// exact bytes instead of reading a quoted literal.
 func parseModelPageStatement(statement string) (*string, int, error) {
-	const afterMarker = " WHERE model > '"
+	const afterMarker = " WHERE model > CAST(X'"
+	const afterSuffix = "' AS TEXT)"
 	var after *string
 	if start := strings.Index(statement, afterMarker); start >= 0 {
 		rest := statement[start+len(afterMarker):]
-		end := strings.Index(rest, "'")
+		end := strings.Index(rest, afterSuffix)
 		if end < 0 {
 			return nil, 0, fmt.Errorf("unterminated model cursor in %q", statement)
 		}
-		cursor := rest[:end]
+		decoded, err := hex.DecodeString(rest[:end])
+		if err != nil {
+			return nil, 0, fmt.Errorf("invalid model cursor hex in %q: %w", statement, err)
+		}
+		cursor := string(decoded)
 		after = &cursor
 	}
 	const limitMarker = " LIMIT "
@@ -402,4 +502,245 @@ func parseModelPageStatement(statement string) (*string, int, error) {
 		return nil, 0, fmt.Errorf("invalid LIMIT in %q", statement)
 	}
 	return after, limit, nil
+}
+
+// hostileModelSpellings are legal stored model names that also spell SQL
+// structure, denied statement-gate keywords, quoting edge cases or non-ASCII
+// and NUL bytes. A client controls the stored spelling, so the model cursor
+// must carry every one of them as data rather than as SQL source.
+var hostileModelSpellings = []string{
+	"", "O'Brien", "a;b", "attach", "attaché", "back\\slash",
+	"load_extension", "nul\x00byte", "pragma", "日本語",
+}
+
+// fakeStatementGate mirrors the proxy storage gate's observable contract
+// without depending on its unexported implementation: one SELECT-leading
+// statement, no ';', and none of the denied keywords anywhere in the text.
+// It is deliberately stricter than storage's word-boundary check (a plain
+// substring match), so a statement that spells any denied word in any context
+// fails here. The real storage gate is exercised separately against a temp
+// database below.
+func fakeStatementGate(statement string) error {
+	trimmed := strings.TrimSpace(statement)
+	if !strings.HasPrefix(strings.ToUpper(trimmed), "SELECT") {
+		return fmt.Errorf("statement is not a single SELECT")
+	}
+	if strings.Contains(trimmed, ";") {
+		return fmt.Errorf("statement contains a statement terminator")
+	}
+	upper := strings.ToUpper(trimmed)
+	for _, keyword := range []string{"ATTACH", "DETACH", "PRAGMA", "LOAD_EXTENSION"} {
+		if strings.Contains(upper, keyword) {
+			return fmt.Errorf("statement contains the denied keyword %s", keyword)
+		}
+	}
+	return nil
+}
+
+// TestValuesModelHostileCursorsStayOutOfSQL pins the statement source: every
+// legal cursor, including gate keywords and statement terminators, is carried
+// as a hex TEXT expression and never appears in the SQL text. The empty cursor
+// is still expressible as an empty hex literal; nil remains the no-cursor
+// first page.
+func TestValuesModelHostileCursorsStayOutOfSQL(t *testing.T) {
+	if first := modelPageStatement(nil, 11); strings.Contains(first, " WHERE ") {
+		t.Fatalf("the first model page must not carry a cursor: %q", first)
+	}
+	for _, cursor := range hostileModelSpellings {
+		statement := modelPageStatement(&cursor, 11)
+		if err := fakeStatementGate(statement); err != nil {
+			t.Fatalf("cursor %q generated a statement the gate rejects: %v (%q)", cursor, err, statement)
+		}
+		if !strings.Contains(statement, "CAST(X'") || !strings.Contains(statement, "' AS TEXT)") {
+			t.Fatalf("cursor %q must be a cast hex text expression: %q", cursor, statement)
+		}
+		if cursor != "" && strings.Contains(statement, cursor) {
+			t.Fatalf("cursor %q leaked into the statement source: %q", cursor, statement)
+		}
+		decoded, limit, err := parseModelPageStatement(statement)
+		if err != nil {
+			t.Fatalf("cursor %q: %v", cursor, err)
+		}
+		if decoded == nil || *decoded != cursor {
+			t.Fatalf("decoded cursor = %v, want %q from %q", decoded, cursor, statement)
+		}
+		if limit != 11 {
+			t.Fatalf("decoded limit = %d, want 11 from %q", limit, statement)
+		}
+	}
+}
+
+// TestValuesModelHostileSpellingsPageThroughRealStorage drives the whole fold
+// against a temp SQLite database through storage's real HandleQuery gate. Every
+// generated page must pass that gate and the final canonical vocabulary must be
+// complete: a missing page or a duplicated cursor would change the total or
+// shift the returned prefix. The page boundary lands on a spelling ending in
+// "-attach", so the old raw quoted cursor was denied by the real gate.
+func TestValuesModelHostileSpellingsPageThroughRealStorage(t *testing.T) {
+	const generated = modelValuesPageSize + 5
+	spellings := make([]string, 0, generated+len(hostileModelSpellings))
+	for i := 0; i < generated; i++ {
+		spellings = append(spellings, fmt.Sprintf("model-%04d-attach", i))
+	}
+	spellings = append(spellings, hostileModelSpellings...)
+
+	store, path := openModelStorage(t)
+	seedModelSpellings(t, path, spellings)
+	proxy := newStorageModelProxy(t, store)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.values(context.Background(), ValuesInput{Dim: "model", Limit: logPageMax})
+	if err != nil {
+		t.Fatalf("hostile stored spellings must page through the real query gate: %v", err)
+	}
+	if out.Returned != logPageMax || len(out.Values) != logPageMax {
+		t.Fatalf("returned = %d/%d, want the caller's limit %d", out.Returned, len(out.Values), logPageMax)
+	}
+	if !out.Truncation.Truncated || out.Truncation.Total != len(spellings) {
+		t.Fatalf("truncation = %+v, want all %d spellings counted", out.Truncation, len(spellings))
+	}
+	want := append([]string(nil), spellings...)
+	sort.Strings(want)
+	for i, value := range out.Values {
+		if value.Value != want[i] || value.Requests != 1 {
+			t.Fatalf("values[%d] = %+v, want %q with one request", i, value, want[i])
+		}
+	}
+	requests := proxy.requestsFor(http.MethodGet, schemaPath)
+	if len(requests) < 2 {
+		t.Fatalf("the vocabulary must span more than one page, got %d requests", len(requests))
+	}
+	for _, request := range requests {
+		statement := request.Query.Get("q")
+		if err := fakeStatementGate(statement); err != nil {
+			t.Fatalf("a generated page fails the gate: %v (%q)", err, statement)
+		}
+		if strings.Contains(statement, " WHERE model >") && !strings.Contains(statement, "CAST(X'") {
+			t.Fatalf("a paged statement must carry its cursor as hex text: %q", statement)
+		}
+	}
+}
+
+// TestValuesModelExactlyPageSizeEndsOnHostileSpelling is the boundary
+// regression: a full page makes the pager ask for one more page, and the
+// cursor is the last spelling. When that spelling is hostile the extra empty
+// page used to fail with HTTP 400, so a complete vocabulary of exactly one page
+// was unreadable. The follow-up page must pass the real gate and return empty.
+func TestValuesModelExactlyPageSizeEndsOnHostileSpelling(t *testing.T) {
+	spellings := make([]string, 0, modelValuesPageSize)
+	for i := 0; i < modelValuesPageSize-1; i++ {
+		spellings = append(spellings, fmt.Sprintf("model-%04d", i))
+	}
+	spellings = append(spellings, "zz-attach")
+
+	store, path := openModelStorage(t)
+	seedModelSpellings(t, path, spellings)
+	proxy := newStorageModelProxy(t, store)
+	service := newTestService(t, proxy, Limits{})
+
+	out, err := service.values(context.Background(), ValuesInput{Dim: "model", Limit: logPageMax})
+	if err != nil {
+		t.Fatalf("a full page ending on a hostile spelling must not fail the empty follow-up page: %v", err)
+	}
+	if !out.Truncation.Truncated || out.Truncation.Total != modelValuesPageSize {
+		t.Fatalf("truncation = %+v, want all %d spellings counted", out.Truncation, modelValuesPageSize)
+	}
+	requests := proxy.requestsFor(http.MethodGet, schemaPath)
+	if len(requests) != 2 {
+		t.Fatalf("the exactly-full vocabulary must take one full page and one empty page, got %d requests", len(requests))
+	}
+	followUp := requests[1].Query.Get("q")
+	if !strings.Contains(followUp, "CAST(X'7a7a2d617474616368' AS TEXT)") {
+		t.Fatalf("the follow-up page must keyset on zz-attach as hex text: %q", followUp)
+	}
+	if err := fakeStatementGate(followUp); err != nil {
+		t.Fatalf("the follow-up page fails the gate: %v (%q)", err, followUp)
+	}
+}
+
+// openModelStorage opens the real durable store in a temp directory using the
+// canonical config defaults, so the test runs the same query limits production
+// does instead of a locally invented policy.
+func openModelStorage(t *testing.T) (*storage.Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "model-values.db")
+	defaults := config.Default()
+	store, err := storage.Open(path, storage.Options{
+		WriteChanCap:  defaults.StorageWriteChanCap,
+		BatchCap:      defaults.StorageBatchCap,
+		FlushInterval: defaults.StorageFlushInterval,
+		QueryTimeout:  defaults.StorageQueryTimeout,
+		QueryMaxBytes: int(defaults.StorageQueryMaxBytes),
+		QueryMaxRows:  defaults.StorageQueryMaxRows,
+	})
+	if err != nil {
+		t.Fatalf("open temp storage: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close temp storage: %v", err)
+		}
+	})
+	return store, path
+}
+
+// newStorageModelProxy serves the model fold's bootstrap rules and routes the
+// SQL read through storage's real HandleQuery, which owns the production
+// statement gate, execution and result caps.
+func newStorageModelProxy(t *testing.T, store *storage.Store) *fakeProxy {
+	t.Helper()
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, modelBootstrap(t, nil))
+	proxy.dynamic(http.MethodGet, schemaPath, func(r *http.Request) cannedResponse {
+		rec := httptest.NewRecorder()
+		store.HandleQuery(rec, r)
+		return cannedResponse{
+			Status:      rec.Code,
+			ContentType: rec.Header().Get("Content-Type"),
+			Body:        rec.Body.String(),
+		}
+	})
+	return proxy
+}
+
+// seedModelSpellings inserts one requests row per raw model spelling directly
+// into the initialized temp database. Every NOT NULL column without a default
+// is named, following storage's own test fixture.
+func seedModelSpellings(t *testing.T, path string, spellings []string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	insert, err := tx.Prepare(`INSERT INTO requests (
+		id, provider, model, key_hash, user_agent, stream, status_code,
+		started_at, duration_ms, ttft_ms, first_token_at, last_token_at,
+		finish_reason, error_type, error_msg, error_code, tool_calls,
+		input_tokens, output_tokens, total_tokens, cache_read_tokens,
+		cache_write_tokens, reasoning_tokens, client_disconnected,
+		rate_limit_remaining, rate_limit_limit, cost,
+		turns_user, turns_assistant, turns_tool, response_headers
+	) VALUES (?, 'neutral.example', ?, 'k', 'ua', 0, 200, ?, 0, 0, 0, 0,
+		'', '', '', '', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0, 0, 0, '')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, spelling := range spellings {
+		if _, err := insert.Exec(fmt.Sprintf("model-value-%05d", i), spelling, i); err != nil {
+			t.Fatalf("seed spelling %q: %v", spelling, err)
+		}
+	}
+	if err := insert.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
 }

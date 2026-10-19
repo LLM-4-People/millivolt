@@ -41,6 +41,11 @@ const minimalBootstrap = `{"seq":9,"feed_id":"feed-a","counters":{"in_flight":1,
 const emptyDebugStatus = `{"ok":true,"enabled":false,"sessions":[],"known_clients":["dev-traffic"],` +
 	`"known_providers":["local"],"known_models":["demo"],"ttl":"168h","max_bytes":"1MiB"}`
 
+// cursorMs and cursorID build the optional paired cursor. Pointers keep
+// "absent" distinct from an explicitly empty record id in test fixtures.
+func cursorMs(ms int64) *int64   { return &ms }
+func cursorID(id string) *string { return &id }
+
 // TestReadToolsRequestShape pins, for every read tool, the exact method, path,
 // query string and Authorization header that reaches the proxy.
 func TestReadToolsRequestShape(t *testing.T) {
@@ -91,7 +96,7 @@ func TestReadToolsRequestShape(t *testing.T) {
 	assertQuery(t, request, "window", "60")
 	assertQuery(t, request, "s", "streaming")
 
-	if _, err := service.records(ctx, RecordsInput{BeforeMs: 1500, BeforeID: "r1", Limit: 10}); err != nil {
+	if _, err := service.records(ctx, RecordsInput{BeforeMs: cursorMs(1500), BeforeID: cursorID("r1"), Limit: 10}); err != nil {
 		t.Fatalf("records: %v", err)
 	}
 	request = proxy.requestsFor(http.MethodGet, logPath)[0]
@@ -265,7 +270,7 @@ func TestCannedResponsesMapOntoToolOutput(t *testing.T) {
 	if records.Returned != 2 || !records.More || records.Exhausted {
 		t.Fatalf("records output = %+v", records)
 	}
-	if records.NextBeforeID != "r8" || records.NextBeforeMs != 1400 {
+	if records.NextBeforeID == nil || *records.NextBeforeID != "r8" || records.NextBeforeMs == nil || *records.NextBeforeMs != 1400 {
 		t.Fatalf("records cursor = %+v", records)
 	}
 
@@ -375,17 +380,18 @@ func TestBadScopeNeverReachesTheProxy(t *testing.T) {
 	}
 }
 
-// TestRecordsCursorPairing pins the paired cursor rule in both directions.
+// TestRecordsCursorPairing pins the paired cursor rule with explicit presence:
+// one side only is refused, while a paired empty id and a paired zero timestamp
+// are both real cursor values. An empty id cannot be treated as absence.
 func TestRecordsCursorPairing(t *testing.T) {
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, logPath, `{"records":[],"more":false}`)
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 	for _, in := range []RecordsInput{
-		{BeforeMs: 100},
-		{BeforeID: "r1"},
-		{BeforeMs: 100, BeforeID: ""},
-		{BeforeMs: 0, BeforeID: "r1"},
+		{BeforeMs: cursorMs(100)},
+		{BeforeID: cursorID("r1")},
 	} {
 		if _, err := service.records(ctx, in); err == nil {
 			t.Fatalf("an unpaired cursor must be refused: %+v", in)
@@ -394,11 +400,32 @@ func TestRecordsCursorPairing(t *testing.T) {
 	if len(proxy.requests()) != 0 {
 		t.Fatal("an unpaired cursor must not reach the proxy")
 	}
+	for _, tc := range []struct {
+		name string
+		in   RecordsInput
+		ms   string
+		id   string
+	}{
+		{"empty id with timestamp", RecordsInput{BeforeMs: cursorMs(100), BeforeID: cursorID("")}, "100", ""},
+		{"zero timestamp with id", RecordsInput{BeforeMs: cursorMs(0), BeforeID: cursorID("r1")}, "0", "r1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := service.records(ctx, tc.in); err != nil {
+				t.Fatalf("a paired cursor must be accepted: %v", err)
+			}
+			request := proxy.last(t)
+			assertQuery(t, request, "before_ms", tc.ms)
+			values, present := request.Query["before_id"]
+			if !present || len(values) != 1 || values[0] != tc.id {
+				t.Fatalf("query before_id = %v present=%v, want one explicit %q (full query %q)",
+					values, present, tc.id, request.Query.Encode())
+			}
+		})
+	}
 	for _, limit := range []int{0, 9, 501, -1} {
 		in := RecordsInput{Limit: limit}
 		if limit == 0 {
 			in.Limit = 0
-			proxy.json(http.MethodGet, logPath, `{"records":[],"more":false}`)
 			if _, err := service.records(ctx, in); err != nil {
 				t.Fatalf("limit 0 must fall back to the configured page size: %v", err)
 			}
@@ -420,7 +447,7 @@ func TestRecordsStopsOnANonAdvancingCursor(t *testing.T) {
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r1"}],"more":true,"cursor_ms":100,"cursor_id":"r1"}`)
 	service := newTestService(t, proxy, Limits{})
 
-	page, err := service.records(context.Background(), RecordsInput{BeforeMs: 100, BeforeID: "r1", Limit: 10})
+	page, err := service.records(context.Background(), RecordsInput{BeforeMs: cursorMs(100), BeforeID: cursorID("r1"), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +489,7 @@ func TestRecordsContinuesPastAnEmptyPage(t *testing.T) {
 	if first.Exhausted {
 		t.Fatal("an empty page with an advanced cursor is NOT exhaustion: the proxy's own test pins it as a page that must be continued")
 	}
-	if first.NextBeforeID != "row-0007" || first.NextBeforeMs != 1800000000000 {
+	if first.NextBeforeID == nil || *first.NextBeforeID != "row-0007" || first.NextBeforeMs == nil || *first.NextBeforeMs != 1800000000000 {
 		t.Fatalf("the advanced cursor must be handed back for the next page: %+v", first)
 	}
 
@@ -515,14 +542,14 @@ func TestRecordsAdvancesWhileTheCursorMoves(t *testing.T) {
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"r2"}],"more":true,"cursor_ms":90,"cursor_id":"r2"}`)
 	service := newTestService(t, proxy, Limits{})
-	page, err := service.records(context.Background(), RecordsInput{BeforeMs: 100, BeforeID: "r1", Limit: 10})
+	page, err := service.records(context.Background(), RecordsInput{BeforeMs: cursorMs(100), BeforeID: cursorID("r1"), Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.Exhausted {
 		t.Fatal("an advancing cursor must not be reported exhausted")
 	}
-	if page.NextBeforeMs != 90 || page.NextBeforeID != "r2" {
+	if page.NextBeforeMs == nil || *page.NextBeforeMs != 90 || page.NextBeforeID == nil || *page.NextBeforeID != "r2" {
 		t.Fatalf("next cursor = %+v", page)
 	}
 	// And the returned cursor round-trips as the next request's cursor.
@@ -532,6 +559,63 @@ func TestRecordsAdvancesWhileTheCursorMoves(t *testing.T) {
 	second := proxy.requestsFor(http.MethodGet, logPath)[1]
 	assertQuery(t, second, "before_ms", "90")
 	assertQuery(t, second, "before_id", "r2")
+}
+
+// TestRecordsResumesFromEmptyIDCursor pins explicit cursor presence for a
+// stored empty id: the page publishes next_before_id as an empty string, and
+// sending that pair back reaches the proxy as an explicit before_id= rather
+// than looking like "no cursor at all".
+func TestRecordsResumesFromEmptyIDCursor(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"newest"}],"more":true,"cursor_ms":1000,"cursor_id":""}`)
+	service := newTestService(t, proxy, Limits{})
+
+	first, err := service.records(context.Background(), RecordsInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Exhausted {
+		t.Fatal("a cursor that advanced to an empty id must not be reported exhausted")
+	}
+	if first.NextBeforeMs == nil || *first.NextBeforeMs != 1000 || first.NextBeforeID == nil || *first.NextBeforeID != "" {
+		t.Fatalf("empty-id cursor = %+v, want ms 1000 and an explicit empty id", first)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"next_before_id":""`) {
+		t.Fatalf("the empty-id cursor must be published, not omitted: %s", encoded)
+	}
+	requests := proxy.requestsFor(http.MethodGet, logPath)
+	if len(requests) != 1 {
+		t.Fatalf("first page calls = %d, want 1", len(requests))
+	}
+	if _, present := requests[0].Query["before_id"]; present {
+		t.Fatalf("the first page sent a cursor: %q", requests[0].Query.Encode())
+	}
+
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"older"}],"more":false,"cursor_ms":900,"cursor_id":"older"}`)
+	second, err := service.records(context.Background(), RecordsInput{
+		BeforeMs: first.NextBeforeMs, BeforeID: first.NextBeforeID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("the empty-id cursor must be resumable: %v", err)
+	}
+	if second.Returned != 1 {
+		t.Fatalf("continuation = %+v, want the older row", second)
+	}
+	requests = proxy.requestsFor(http.MethodGet, logPath)
+	if len(requests) != 2 {
+		t.Fatalf("page calls = %d, want 2", len(requests))
+	}
+	assertQuery(t, requests[1], "before_ms", "1000")
+	values, present := requests[1].Query["before_id"]
+	if !present || len(values) != 1 || values[0] != "" {
+		t.Fatalf("continuation before_id = %v present=%v, want one explicit empty value (full query %q)",
+			values, present, requests[1].Query.Encode())
+	}
 }
 
 // TestChartCarriesBothPeriodStatBands pins the two period-wide [avg, min, max]

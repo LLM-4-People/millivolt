@@ -2148,7 +2148,9 @@ func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, fi
 // passes at most one page of IDs; a row accepted by the candidate scan but
 // missing or out of order here is an explicit consistency error, never a
 // silently shortened page. The IN list cannot exceed the page limit, so this
-// is a bounded key lookup rather than a second history scan.
+// is a bounded key lookup rather than a second history scan. An empty ID is a
+// valid exact key: the schema allows it, the primary key admits it once, and
+// QueryBeforeCandidates returns it as an ordinary cursor.
 func (s *Store) LogPageRecords(ctx context.Context, cursors []LogCursor) ([]*metrics.Record, error) {
 	if len(cursors) == 0 {
 		return nil, nil
@@ -2160,9 +2162,6 @@ func (s *Store) LogPageRecords(ctx context.Context, cursors []LogCursor) ([]*met
 	args := make([]any, 0, len(cursors))
 	seen := make(map[string]struct{}, len(cursors))
 	for i, c := range cursors {
-		if c.ID == "" {
-			return nil, fmt.Errorf("log page records: empty record id at position %d", i)
-		}
 		if _, dup := seen[c.ID]; dup {
 			return nil, fmt.Errorf("log page records: duplicate record id %q", c.ID)
 		}

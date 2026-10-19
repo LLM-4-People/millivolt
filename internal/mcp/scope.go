@@ -162,10 +162,18 @@ type RecordsPage struct {
 	CursorID   string           `json:"cursor_id"`
 }
 
-// recordsPage fetches one page. beforeMs/beforeID form the paired keyset
-// cursor; both or neither, matching the proxy's rule. limit must already be
-// inside the proxy's page band.
-func (c *Client) recordsPage(ctx context.Context, query url.Values, beforeMs int64, beforeID string, limit int) (*RecordsPage, error) {
+// pageCursor is one paired keyset position. Presence is explicit because a
+// stored record id may be empty: a nil cursor means "start at durable newest",
+// while a non-nil cursor with an empty ID is the exact empty primary key.
+type pageCursor struct {
+	StartMs int64
+	ID      string
+}
+
+// recordsPage fetches one page. A nil before starts at durable newest; a
+// non-nil before is the paired keyset cursor, and its empty ID is still sent
+// explicitly. limit must already be inside the proxy's page band.
+func (c *Client) recordsPage(ctx context.Context, query url.Values, before *pageCursor, limit int) (*RecordsPage, error) {
 	values := url.Values{}
 	for key, list := range query {
 		for _, value := range list {
@@ -173,9 +181,9 @@ func (c *Client) recordsPage(ctx context.Context, query url.Values, beforeMs int
 		}
 	}
 	values.Set("limit", strconv.Itoa(limit))
-	if beforeID != "" {
-		values.Set("before_ms", strconv.FormatInt(beforeMs, 10))
-		values.Set("before_id", beforeID)
+	if before != nil {
+		values.Set("before_ms", strconv.FormatInt(before.StartMs, 10))
+		values.Set("before_id", before.ID)
 	}
 	var page RecordsPage
 	if err := c.getJSON(ctx, routeLog, values, &page); err != nil {

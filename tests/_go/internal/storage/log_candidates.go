@@ -138,6 +138,58 @@ func TestLogPageRecordsPreservesAcceptedOrder(t *testing.T) {
 	}
 }
 
+// TestLogPageRecordsAcceptsEmptyRecordID pins that the schema's empty id is a
+// valid exact key. QueryBeforeCandidates returns an accepted row with id "",
+// and the log page used to reject that same key during materialization, so one
+// accepted empty-id row made every /metrics/agg/log request fail with 500.
+func TestLogPageRecordsAcceptsEmptyRecordID(t *testing.T) {
+	s := openTestStore(t)
+	base := time.UnixMilli(1_800_000_000_000)
+	for _, r := range []*metrics.Record{
+		{ID: "row-0", Provider: "p", Model: "m-row-0", Start: base, StatusCode: 200},
+		{ID: "", Provider: "p", Model: "m-empty", Start: base.Add(time.Millisecond), StatusCode: 200},
+		{ID: "row-2", Provider: "p", Model: "m-row-2", Start: base.Add(2 * time.Millisecond), StatusCode: 200},
+	} {
+		s.Record(r)
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := s.QueryBeforeCandidates(t.Context(), nil, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 3 {
+		t.Fatalf("candidates = %d, want 3", len(candidates))
+	}
+	for i, want := range []string{"row-2", "", "row-0"} {
+		if candidates[i].Cursor.ID != want {
+			t.Fatalf("candidate[%d] id = %q, want %q", i, candidates[i].Cursor.ID, want)
+		}
+	}
+
+	accepted := make([]LogCursor, 0, len(candidates))
+	for _, candidate := range candidates {
+		accepted = append(accepted, candidate.Cursor)
+	}
+	records, err := s.LogPageRecords(t.Context(), accepted)
+	if err != nil {
+		t.Fatalf("LogPageRecords rejected an accepted empty id: %v", err)
+	}
+	if len(records) != len(accepted) {
+		t.Fatalf("materialized %d rows, want %d", len(records), len(accepted))
+	}
+	for i, cursor := range accepted {
+		if records[i].ID != cursor.ID || records[i].Start.UnixMilli() != cursor.StartMs {
+			t.Fatalf("record[%d] = %q/%d, want %q/%d", i, records[i].ID, records[i].Start.UnixMilli(), cursor.ID, cursor.StartMs)
+		}
+	}
+	if records[1].ID != "" || records[1].Model != "m-empty" {
+		t.Fatalf("empty-id row = %+v, want the full stored row", records[1])
+	}
+}
+
 // TestLogPageRecordsFailsClosed pins that an accepted row missing from the
 // materialization query is an explicit consistency error, never a shortened
 // successful page.
@@ -152,10 +204,10 @@ func TestLogPageRecordsFailsClosed(t *testing.T) {
 		t.Fatalf("empty page = %v, %v; want nil, nil", got, err)
 	}
 	cases := map[string][]LogCursor{
-		"missing row":   {{StartMs: base.UnixMilli(), ID: "absent"}},
-		"empty id":      {{StartMs: base.UnixMilli(), ID: ""}},
-		"duplicate id":  {{StartMs: base.UnixMilli(), ID: "present"}, {StartMs: base.UnixMilli(), ID: "present"}},
-		"mixed missing": {{StartMs: base.UnixMilli(), ID: "present"}, {StartMs: base.UnixMilli(), ID: "absent"}},
+		"missing row":     {{StartMs: base.UnixMilli(), ID: "absent"}},
+		"absent empty id": {{StartMs: base.UnixMilli(), ID: ""}},
+		"duplicate id":    {{StartMs: base.UnixMilli(), ID: "present"}, {StartMs: base.UnixMilli(), ID: "present"}},
+		"mixed missing":   {{StartMs: base.UnixMilli(), ID: "present"}, {StartMs: base.UnixMilli(), ID: "absent"}},
 	}
 	for name, cursors := range cases {
 		t.Run(name, func(t *testing.T) {

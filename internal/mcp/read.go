@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -400,4 +401,20 @@ func (c *Client) captureRecords(ctx context.Context, sessionID string, beforeMs 
 // quotes are doubled; the result is always a literal, never an expression.
 func sqlString(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+}
+
+// sqlHexText renders arbitrary client-controlled text as a SQLite TEXT
+// expression built from a hex blob literal, so the statement source contains
+// only [0-9a-f] and fixed SQL words. The proxy's statement gate scans the whole
+// SQL text, including literals, for ';' and for ATTACH/DETACH/PRAGMA/
+// LOAD_EXTENSION as words, so a raw spelling such as "attach" or "a;b" cannot
+// ride a quoted literal through it even though SQLite would parse that
+// literal correctly. Hex encoding is byte-exact, so quotes, semicolons,
+// backslashes, NUL and non-ASCII bytes all survive. CAST(... AS TEXT) is
+// required: a bare blob would compare as a BLOB against the model column's
+// TEXT, which never compares equal and sorts after every text value. Under the
+// column's BINARY collation the cast result compares exactly like the quoted
+// literal it replaces.
+func sqlHexText(value string) string {
+	return "CAST(X'" + hex.EncodeToString([]byte(value)) + "' AS TEXT)"
 }

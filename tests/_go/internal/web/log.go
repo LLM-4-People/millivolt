@@ -83,6 +83,41 @@ func TestLogPageRetainsTimestampTies(t *testing.T) {
 	}
 }
 
+// TestLogPageIncludesEmptyRecordID is the HTTP regression for a stored empty
+// id, which the requests schema accepts. The candidate scan returns it as an
+// exact key; materialization used to reject that key, so any database holding
+// one accepted empty-id row answered /metrics/agg/log with 500 forever.
+func TestLogPageIncludesEmptyRecordID(t *testing.T) {
+	s := testStoreWithQueryTimeout(t, time.Hour)
+	start := time.UnixMilli(1_800_000_000_000)
+	for i := range 12 {
+		id := fmt.Sprintf("row-%02d", i)
+		if i == 2 {
+			id = ""
+		}
+		s.Record(&metrics.Record{ID: id, Provider: "p", Start: start.Add(time.Duration(i) * time.Millisecond), StatusCode: 200})
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
+
+	first := get(t, h, "/metrics/agg/log?limit=10")
+	rows := first["records"].([]any)
+	if len(rows) != 10 || rows[0].(map[string]any)["id"] != "row-11" || rows[9].(map[string]any)["id"] != "" {
+		t.Fatalf("first page = %v, want the empty id at the page boundary", first)
+	}
+	if first["cursor_ms"] != float64(start.Add(2*time.Millisecond).UnixMilli()) || first["cursor_id"] != "" || first["more"] != true {
+		t.Fatalf("first page cursor = %v, want the empty-id boundary and more true", first)
+	}
+
+	second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&before_ms=%d&before_id=", start.Add(2*time.Millisecond).UnixMilli()))
+	rows = second["records"].([]any)
+	if len(rows) != 2 || rows[0].(map[string]any)["id"] != "row-01" || rows[1].(map[string]any)["id"] != "row-00" || second["more"] != false {
+		t.Fatalf("second page = %v, want the rows older than the empty-id cursor", second)
+	}
+}
+
 func TestLogPagePushdownReturnsScopedMatchesDirectly(t *testing.T) {
 	// Exact provider equality is pushed into SQL, so a page returns the
 	// matching rows without decoding the newer unrelated history first.

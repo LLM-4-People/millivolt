@@ -226,10 +226,11 @@ func windowOrAll(window string) string {
 type RecordsInput struct {
 	Scope
 	// BeforeMs and BeforeID are the paired keyset cursor from a previous page.
-	// Send both or neither.
-	BeforeMs int64  `json:"before_ms,omitempty" jsonschema:"cursor timestamp in unix milliseconds; must be sent together with before_id"`
-	BeforeID string `json:"before_id,omitempty" jsonschema:"cursor record id; must be sent together with before_ms"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"page size, 10 to 500; smaller than this server's default is usually better"`
+	// Send both or neither. Pointers make presence explicit: a stored record id
+	// may be empty, so an empty before_id is a real cursor value, not absence.
+	BeforeMs *int64  `json:"before_ms,omitempty" jsonschema:"cursor timestamp in unix milliseconds; must be sent together with before_id"`
+	BeforeID *string `json:"before_id,omitempty" jsonschema:"cursor record id; must be sent together with before_ms"`
+	Limit    int     `json:"limit,omitempty" jsonschema:"page size, 10 to 500; smaller than this server's default is usually better"`
 }
 
 // RecordsOutput is one page plus the pagination state that decides whether the
@@ -245,9 +246,12 @@ type RecordsOutput struct {
 	// exhaustion: an empty page with an advanced cursor is the normal shape of
 	// "the scan budget ran out before a match", and treating it as the end of
 	// history silently drops every match behind it.
-	Exhausted    bool           `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
-	NextBeforeMs int64          `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
-	NextBeforeID string         `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
+	Exhausted bool `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
+	// NextBeforeMs and NextBeforeID are the next cursor pair. They are pointers
+	// so an empty record id is still published: omitting it would make the
+	// returned boundary impossible to send back as before_ms/before_id.
+	NextBeforeMs *int64         `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
+	NextBeforeID *string        `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
 	Truncation   Truncation     `json:"truncation" jsonschema:"whether records were withheld"`
 	ModelCanon   *ModelCanonMap `json:"model_canon,omitempty" jsonschema:"the raw-to-canonical model name mapping the server applied to this page"`
 	Storage      StorageInfo    `json:"storage" jsonschema:"durable storage signal; without it this page is not the whole history"`
@@ -272,26 +276,31 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	if err != nil {
 		return nil, err
 	}
-	if (in.BeforeMs == 0) != (in.BeforeID == "") {
+	if (in.BeforeMs == nil) != (in.BeforeID == nil) {
 		return nil, fmt.Errorf("before_ms and before_id must be sent together, exactly once each")
+	}
+	var cursor *pageCursor
+	if in.BeforeMs != nil {
+		cursor = &pageCursor{StartMs: *in.BeforeMs, ID: *in.BeforeID}
 	}
 	storage, err := s.client.storageSignal(ctx)
 	if err != nil {
 		return nil, err
 	}
-	page, err := s.client.recordsPage(ctx, in.Scope.query(), in.BeforeMs, in.BeforeID, limit)
+	page, err := s.client.recordsPage(ctx, in.Scope.query(), cursor, limit)
 	if err != nil {
 		return nil, err
 	}
 	kept, truncation := clamp(page.Records, limit, "records", cursorAdvice)
-	advanced := cursorAdvanced(in.BeforeMs, in.BeforeID, page.CursorMs, page.CursorID)
+	advanced := cursorAdvancedAt(cursor, page.CursorMs, page.CursorID)
+	nextMs, nextID := page.CursorMs, page.CursorID
 	out := &RecordsOutput{
 		Records:      kept,
 		Returned:     len(kept),
 		More:         page.More,
 		Exhausted:    exhausted(page.More, advanced),
-		NextBeforeMs: page.CursorMs,
-		NextBeforeID: page.CursorID,
+		NextBeforeMs: &nextMs,
+		NextBeforeID: &nextID,
 		Truncation:   truncation,
 		ModelCanon:   page.ModelCanon,
 		Storage:      storage,
@@ -303,14 +312,27 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	return out, nil
 }
 
-// cursorAdvanced reports whether the proxy's returned cursor differs from the
-// one that was sent. Identical cursors mean the next call would repeat this
-// page exactly.
+// cursorAdvancedAt reports whether the proxy's returned cursor differs from
+// the one that was sent. Presence is explicit: a nil sent cursor means no
+// cursor was sent, while a non-nil cursor may carry an empty ID, which is a
+// valid exact key. Identical cursors mean the next call would repeat this page
+// exactly.
+func cursorAdvancedAt(sent *pageCursor, gotMs int64, gotID string) bool {
+	if sent == nil {
+		return gotMs != 0 || gotID != ""
+	}
+	return gotMs != sent.StartMs || gotID != sent.ID
+}
+
+// cursorAdvanced is the value-based form for callers whose cursor presence is
+// already implied by a non-empty id. It keeps the pre-existing behavior for
+// those callers: an empty sent id means no cursor was sent. Records paging
+// uses cursorAdvancedAt directly so an empty record id stays representable.
 func cursorAdvanced(sentMs int64, sentID string, gotMs int64, gotID string) bool {
 	if sentID == "" {
 		return gotID != ""
 	}
-	return gotMs != sentMs || gotID != sentID
+	return cursorAdvancedAt(&pageCursor{StartMs: sentMs, ID: sentID}, gotMs, gotID)
 }
 
 // exhausted is the one owner of the paging-stop rule: a page whose cursor does

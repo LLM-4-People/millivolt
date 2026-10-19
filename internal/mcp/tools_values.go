@@ -59,10 +59,13 @@ func countStatement(value, where string, limit int) string {
 // spellings, ordered by spelling so a keyset cursor can advance without
 // OFFSET. after nil starts at the lowest spelling (including the empty one);
 // otherwise the page starts strictly after the last spelling of the previous
-// page. The raw spelling is only a paging key: values() folds every page
-// through the proxy's canonicalization rules and merges counts before applying
-// the caller's limit, so a spelling that collapses into a returned canonical
-// name is never dropped by the page bound.
+// page. The cursor is client-controlled text carried as a hex-encoded TEXT
+// expression, never as raw SQL source: a legal spelling such as "attach" or
+// "a;b" must not trip the proxy's statement gate. The raw spelling is only a
+// paging key: values() folds every page through the proxy's canonicalization
+// rules and merges counts before applying the caller's limit, so a spelling
+// that collapses into a returned canonical name is never dropped by the page
+// bound.
 //
 // The generic query route caps a result at storage_query_max_rows, which is a
 // deployment setting this client cannot read. A single unpaged SELECT DISTINCT
@@ -73,7 +76,7 @@ func countStatement(value, where string, limit int) string {
 func modelPageStatement(after *string, limit int) string {
 	statement := "SELECT model AS value, COUNT(*) AS requests FROM requests"
 	if after != nil {
-		statement += " WHERE model > " + sqlString(*after)
+		statement += " WHERE model > " + sqlHexText(*after)
 	}
 	return statement + " GROUP BY value ORDER BY value ASC LIMIT " + strconv.Itoa(limit)
 }
@@ -92,6 +95,15 @@ const (
 	// hostile client could keep the pager busy with an unbounded number of
 	// spellings that all merge into a single returned value.
 	modelValuesMaxRawSpellings = 100_000
+	// modelValuesMaxPageQueries bounds the total proxy queries one enumeration
+	// may spend, including the retries that halve a page after a 413. The raw
+	// spelling bound alone is not a work bound: when the proxy's row cap forces
+	// one-row pages, 100,000 spellings would mean 100,000 authenticated queries,
+	// each bounded only by the request timeout. At the normal 1,000-row page a
+	// full raw vocabulary needs 101 queries, and a 500-row proxy cap needs 202,
+	// so both stay inside this budget; a stricter cap or larger vocabulary
+	// fails closed instead of grinding.
+	modelValuesMaxPageQueries = 256
 	// modelValuesMaxCanonical bounds the merged working map and therefore the
 	// tool's memory. A vocabulary past it fails closed instead of returning a
 	// partial list, because a partial model vocabulary would silently turn a
@@ -203,7 +215,17 @@ func (s *Service) modelValues(ctx context.Context, limit int) (*ValuesOutput, er
 	vocabulary := newModelVocabulary()
 	pageSize := modelValuesPageSize
 	var after *string
+	queries := 0
 	for {
+		// Every page, including each 413 retry, is one authenticated proxy
+		// query. Count them all: with a one-row proxy cap the raw-spelling
+		// bound alone would still allow one query per spelling.
+		if queries >= modelValuesMaxPageQueries {
+			return nil, fmt.Errorf("model vocabulary is too large to enumerate safely: it needs more than %d proxy page queries; "+
+				"the proxy's storage_query_max_rows is too small for this vocabulary or the vocabulary is too large - "+
+				"inspect raw spellings with query over a WHERE started_at range and GROUP BY model", modelValuesMaxPageQueries)
+		}
+		queries++
 		page, err := s.client.querySQL(ctx, modelPageStatement(after, pageSize))
 		if err != nil {
 			// The proxy's row or byte cap is a deployment setting this client
@@ -300,10 +322,10 @@ func queryPageTooLarge(err error) bool {
 }
 
 // modelValuesNote appends the model-only working bound to the shared note. The
-// bound is user-visible because a refusal is a contract: the tool must not look
-// like it returned a complete vocabulary when it stopped early.
+// bounds are user-visible because a refusal is a contract: the tool must not
+// look like it returned a complete vocabulary when it stopped early.
 func modelValuesNote() string {
-	return valuesNote + fmt.Sprintf(" Model enumeration reads at most %d distinct raw spellings and folds them into at most %d canonical names (%d bytes); "+
-		"past either bound it fails explicitly instead of returning a partial vocabulary.",
-		modelValuesMaxRawSpellings, modelValuesMaxCanonical, modelValuesMaxCanonicalBytes)
+	return valuesNote + fmt.Sprintf(" Model enumeration reads at most %d distinct raw spellings in at most %d page queries "+
+		"and folds them into at most %d canonical names (%d bytes); past a bound it fails explicitly instead of returning a partial vocabulary.",
+		modelValuesMaxRawSpellings, modelValuesMaxPageQueries, modelValuesMaxCanonical, modelValuesMaxCanonicalBytes)
 }
