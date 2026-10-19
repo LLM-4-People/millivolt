@@ -1735,8 +1735,8 @@ const requestToolCallsMax = 1024
 // or aggregate tool calls exceed their bounds. Invalid JSON returns nil so the
 // existing passthrough behavior is preserved; collection members are skipped
 // with the shared byte scanner. One small distinct-key set per top-level object
-// records only the keys it sees; escaped and non-ASCII keys decode only what
-// their comparison needs.
+// records only the keys it sees; escaped and non-ASCII keys decode once per
+// member and that result feeds both the distinct set and field comparisons.
 func boundRequestMetadata(body []byte) error {
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
@@ -1769,14 +1769,14 @@ func boundRequestMetadata(body []byte) error {
 		if end < 0 {
 			return nil
 		}
-		key := body[keyStart:end]
-		if memberSeen == nil {
-			memberSeen = make(map[string]struct{})
-		}
-		n, ok := countDistinctJSONKey(memberSeen, key, requestMetadataMaxElements)
+		key, ok := decodeRequestKey(body[keyStart:end])
 		if !ok {
 			return nil
 		}
+		if memberSeen == nil {
+			memberSeen = make(map[string]struct{})
+		}
+		n := countDistinctJSONKey(memberSeen, key, requestMetadataMaxElements)
 		if n > requestMetadataMaxElements {
 			return requestMetadataOverflow(body, fmt.Errorf("request top-level members exceed %d", requestMetadataMaxElements))
 		}
@@ -1788,7 +1788,7 @@ func boundRequestMetadata(body []byte) error {
 		if i >= len(body) {
 			return nil
 		}
-		collection := requestCollectionKey(key)
+		collection := key.collection()
 		switch collection {
 		case "messages":
 			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
@@ -1859,7 +1859,7 @@ func boundRequestMetadata(body []byte) error {
 			}
 			i = next
 		default:
-			if requestKeyEqual(key, "system") {
+			if key.equal("system") {
 				// Anthropic bodies carry a top-level system field whose array
 				// shape composes through the same requestContent decoder as a
 				// message. Count it against the aggregate budget; a string or
@@ -1899,81 +1899,109 @@ func boundRequestMetadata(body []byte) error {
 	return nil
 }
 
-// requestKeyEqual reports whether one raw JSON object key names the given
-// struct field. encoding/json matches struct fields case-insensitively, while
-// map keys stay exact. The common unescaped ASCII key allocates nothing;
-// escaped and non-ASCII keys are decoded once and compared with
-// strings.EqualFold.
-func requestKeyEqual(raw []byte, name string) bool {
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return false
-	}
-	inner := raw[1 : len(raw)-1]
-	for _, c := range inner {
-		if c >= 0x80 || c == '\\' {
-			var key string
-			if json.Unmarshal(raw, &key) != nil {
-				return false
-			}
-			return strings.EqualFold(key, name)
-		}
-	}
-	return asciiKeyEqual(inner, name)
+// requestKey is one raw JSON object key decoded at most once per member. The
+// common plain ASCII spelling keeps only the source slice, so its comparisons
+// and duplicate lookups allocate nothing; text holds the canonical string
+// when the source needs JSON unescaping, invalid UTF-8 replacement or Unicode
+// case folding. One top-level member used to decode an escaped key once for
+// the distinct-key set and again for every candidate field name.
+type requestKey struct {
+	raw     []byte
+	text    string
+	textSet bool
 }
 
-// requestCollectionKey returns the canonical bounded collection name for a
-// raw top-level JSON key, or "" when the key is not one of them. encoding/json
-// matches struct fields case-insensitively, so "Messages"/"MESSAGES" reach
-// messages; it does not fold '-' or '_', so "Mes-sages" stays unknown.
-func requestCollectionKey(raw []byte) string {
+// decodeRequestKey validates one raw JSON string key and decodes it at most
+// once. ok is false on an undecodable key, which leaves the document on the
+// existing malformed-JSON passthrough path.
+func decodeRequestKey(raw []byte) (requestKey, bool) {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return requestKey{}, false
+	}
+	inner := raw[1 : len(raw)-1]
+	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		ascii := true
+		for _, c := range inner {
+			if c >= utf8.RuneSelf {
+				ascii = false
+				break
+			}
+		}
+		if ascii {
+			return requestKey{raw: inner}, true
+		}
+		// Valid non-ASCII UTF-8 needs no unescaping, but struct-field
+		// matching still folds Unicode, so retain one canonical string.
+		return requestKey{raw: inner, text: string(inner), textSet: true}, true
+	}
+	var decoded string
+	if json.Unmarshal(raw, &decoded) != nil {
+		return requestKey{}, false
+	}
+	return requestKey{raw: inner, text: decoded, textSet: true}, true
+}
+
+// equal reports whether the key names the given struct field. encoding/json
+// matches struct fields case-insensitively, while map keys stay exact.
+func (k requestKey) equal(name string) bool {
+	if k.textSet {
+		return strings.EqualFold(k.text, name)
+	}
+	return asciiKeyEqual(k.raw, name)
+}
+
+// collection returns the canonical bounded collection name for this top-level
+// key, or "" when the key is not one of them. encoding/json matches struct
+// fields case-insensitively, so "Messages"/"MESSAGES" reach messages; it does
+// not fold '-' or '_', so "Mes-sages" stays unknown.
+func (k requestKey) collection() string {
 	switch {
-	case requestKeyEqual(raw, "messages"):
+	case k.equal("messages"):
 		return "messages"
-	case requestKeyEqual(raw, "tools"):
+	case k.equal("tools"):
 		return "tools"
-	case requestKeyEqual(raw, "logit_bias"):
+	case k.equal("logit_bias"):
 		return "logit_bias"
-	case requestKeyEqual(raw, "stop"):
+	case k.equal("stop"):
 		return "stop"
 	}
 	return ""
 }
 
-// countDistinctJSONKey records one raw top-level object key in seen and
-// returns the distinct count. Escape-free valid UTF-8 keys allocate only when
-// a new key is inserted; duplicate lookups stay allocation-free. Keys with
-// escapes or invalid UTF-8 decode through encoding/json so they compare with
-// the exact string the rewrite map will hold. Once max distinct keys are seen,
-// a new key reports max+1 without recording it, so the caller can reject
-// without growing the set. ok is false on an undecodable key, which leaves the
-// document on the existing malformed-JSON passthrough path.
-func countDistinctJSONKey(seen map[string]struct{}, raw []byte, max int) (int, bool) {
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return 0, false
-	}
-	inner := raw[1 : len(raw)-1]
-	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
-		if _, exists := seen[string(inner)]; exists {
-			return len(seen), true
+// requestKeyEqual reports whether one raw JSON object key names the given
+// struct field. It serves the nested key scans that decode one key per call;
+// the top-level preflight decodes once and reuses the requestKey instead.
+func requestKeyEqual(raw []byte, name string) bool {
+	key, ok := decodeRequestKey(raw)
+	return ok && key.equal(name)
+}
+
+// countDistinctJSONKey records one decoded top-level object key in seen and
+// returns the distinct count. Plain ASCII keys allocate only when a new key
+// is inserted; duplicate lookups stay allocation-free. Escaped, non-ASCII or
+// invalid UTF-8 keys reuse the member's one canonical decode, so they compare
+// with the exact string the rewrite map will hold. Once max distinct keys are
+// seen, a new key reports max+1 without recording it, so the caller can reject
+// without growing the set.
+func countDistinctJSONKey(seen map[string]struct{}, key requestKey, max int) int {
+	if key.textSet {
+		if _, exists := seen[key.text]; exists {
+			return len(seen)
 		}
 		if len(seen) >= max {
-			return max + 1, true
+			return max + 1
 		}
-		seen[string(inner)] = struct{}{}
-		return len(seen), true
+		seen[key.text] = struct{}{}
+		return len(seen)
 	}
-	var key string
-	if json.Unmarshal(raw, &key) != nil {
-		return 0, false
-	}
-	if _, exists := seen[key]; exists {
-		return len(seen), true
+	if _, exists := seen[string(key.raw)]; exists {
+		return len(seen)
 	}
 	if len(seen) >= max {
-		return max + 1, true
+		return max + 1
 	}
-	seen[key] = struct{}{}
-	return len(seen), true
+	seen[string(key.raw)] = struct{}{}
+	return len(seen)
 }
 
 // countRequestMessagesContentParts counts the aggregate content-part array

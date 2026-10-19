@@ -929,14 +929,17 @@ func (a *snapshotAdmission) commit() error {
 // interrupted-admission recovery must not fall through to admitting it again.
 // Sidecars move first: a crash leaves the main at its original name so the next
 // boot classifies the whole set again, and no stale WAL can attach to a later
-// incoming file.
+// incoming file. The quarantine suffix goes on the main name before the SQLite
+// sidecar suffix (incoming.invalid-wal), so the whole quarantined set shares
+// the protected base spelling the startup sweep's path fence knows.
 func quarantinePendingSnapshot(incoming, suffix string) error {
+	quarantined := incoming + suffix
 	for _, sidecar := range snapshotSidecarSuffixes {
-		if err := os.Rename(incoming+sidecar, incoming+sidecar+suffix); err != nil && !os.IsNotExist(err) {
+		if err := os.Rename(incoming+sidecar, quarantined+sidecar); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
-	return os.Rename(incoming, incoming+suffix)
+	return os.Rename(incoming, quarantined)
 }
 
 // removeSnapshotSidecars removes every SQLite sidecar for path. It is the one

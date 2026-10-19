@@ -223,6 +223,55 @@ func TestRequestTopLevelMemberAllocationBound(t *testing.T) {
 	t.Logf("top-level member over-bound: input=%d members=%d alloc=%d", len(raw), members, res.AllocedBytesPerOp())
 }
 
+// TestRequestEscapedTopLevelKeyDecodesOnce pins the single decode per member.
+// An escaped or non-ASCII top-level key used to be decoded once for the
+// distinct-key set and again for every candidate name, so one member paid six
+// decodes. The lexical preflight must decode the key once and reuse the result
+// for the distinct count and every field comparison.
+func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  string
+	}{
+		{"escaped ASCII", `"\u006dodel"`},
+		{"escaped non-ASCII", `"m\u00f6del"`},
+		{"raw non-ASCII", `"mödel"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{` + tc.key + `:"m","messages":[{"role":"user","content":"hi"}],"metadata":{"a":1}}`)
+			var rec metrics.Record
+			if err := parseLLMRequest(body, &rec, false); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "escaped ASCII" && rec.Model != "m" {
+				t.Fatalf("Model = %q, want the escaped key's value m", rec.Model)
+			}
+			var decodeOK bool
+			decodeAllocs := testing.AllocsPerRun(100, func() {
+				_, decodeOK = decodeRequestKey([]byte(tc.key))
+			})
+			if !decodeOK {
+				t.Fatal("decodeRequestKey rejected the fixture key")
+			}
+			var runErr error
+			allocs := testing.AllocsPerRun(100, func() {
+				runErr = boundRequestMetadata(body)
+			})
+			if runErr != nil {
+				t.Fatalf("boundRequestMetadata = %v", runErr)
+			}
+			// The preflight adds only the distinct-key map to the member's one
+			// decode. A second decode per candidate name (the former shape)
+			// adds several more json.Unmarshal allocations per candidate.
+			if allocs > decodeAllocs+3 {
+				t.Fatalf("%s key preflight allocated %.1f objects/op, want one decode (%.1f) plus the bounded key set",
+					tc.name, allocs, decodeAllocs)
+			}
+			t.Logf("%s: %.1f allocs/op (one decode %.1f)", tc.name, allocs, decodeAllocs)
+		})
+	}
+}
+
 // amplificationOverrideProxy starts a proxy with one body-rewriting override,
 // the example-config shape that reaches overrideRequestBody.
 func amplificationOverrideProxy(t *testing.T) *httptest.Server {

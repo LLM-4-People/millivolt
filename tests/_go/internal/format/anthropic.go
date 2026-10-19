@@ -323,6 +323,61 @@ func TestStreamToOpenAIDuplicateMessageStopKeepsOneDone(t *testing.T) {
 	}
 }
 
+// TestStreamToOpenAIPostTerminalEventsIgnored pins that the terminal event is
+// truly final. After message_stop has written [DONE], later content, error or
+// duplicate terminal events must emit nothing. A valid provider error is also
+// terminal: it is forwarded once, later source events are ignored, and the
+// single [DONE] still closes the translated stream.
+func TestStreamToOpenAIPostTerminalEventsIgnored(t *testing.T) {
+	const (
+		contentAfter = `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"after"}}`
+		errorEvent   = `data: {"type":"error","error":{"type":"overloaded_error","message":"late"}}`
+		toolAfter    = `data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-after","name":"late"}}`
+		messageStop  = `data: {"type":"message_stop"}`
+	)
+	for _, tc := range []struct {
+		name      string
+		terminal  string
+		wantError int
+	}{
+		{"message_stop", messageStop, 0},
+		{"provider error", errorEvent, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := strings.Join([]string{
+				`data: {"type":"message_start","message":{"id":"m","model":"m"}}`,
+				`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before"}}`,
+				tc.terminal,
+				contentAfter,
+				errorEvent,
+				messageStop,
+				toolAfter,
+			}, "\n\n") + "\n\n"
+
+			var out strings.Builder
+			if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
+				t.Fatalf("StreamToOpenAI = %v", err)
+			}
+			got := out.String()
+			if !strings.Contains(got, `"content":"before"`) {
+				t.Fatalf("pre-terminal content lost: %q", got)
+			}
+			if strings.Contains(got, `"content":"after"`) || strings.Contains(got, "tool-after") {
+				t.Fatalf("post-terminal content or tool block was emitted: %q", got)
+			}
+			if n := strings.Count(got, `"error"`); n != tc.wantError {
+				t.Fatalf("error frames = %d, want %d: %q", n, tc.wantError, got)
+			}
+			if n := strings.Count(got, "data: [DONE]"); n != 1 {
+				t.Fatalf("[DONE] count = %d, want 1: %q", n, got)
+			}
+			if !strings.HasSuffix(got, sse.DoneFrame) {
+				t.Fatalf("stream does not end at the single [DONE]: %q", got)
+			}
+		})
+	}
+}
+
 func TestStreamToOpenAIParallelToolCalls(t *testing.T) {
 	stream := strings.Join([]string{
 		"event: message_start",
@@ -947,8 +1002,8 @@ func TestNativeIdentityBound(t *testing.T) {
 }
 
 // TestNativeToolBlockCap pins the concurrent tool-block bound: unique starts
-// without stops fail closed, while a normal parallel stream still emits every
-// call and terminal events release the map.
+// without stops fail closed, while a terminal event closes the stream so a
+// later start cannot emit behind the terminal marker.
 func TestNativeToolBlockCap(t *testing.T) {
 	if nativeToolBlocksMax != 1024 {
 		t.Fatalf("nativeToolBlocksMax = %d; the pinned bound is 1024", nativeToolBlocksMax)
@@ -971,21 +1026,23 @@ func TestNativeToolBlockCap(t *testing.T) {
 		{"message_stop", `{"type":"message_stop"}`},
 		{"error", `{"type":"error","error":{"type":"overloaded_error","message":"x"}}`},
 	} {
-		t.Run("released by "+terminal.name, func(t *testing.T) {
+		t.Run("ignored after "+terminal.name, func(t *testing.T) {
 			var s strings.Builder
 			s.WriteString("data: " + `{"type":"message_start","message":{"id":"m","model":"m"}}` + "\n\n")
 			for i := 0; i < nativeToolBlocksMax; i++ {
 				fmt.Fprintf(&s, "data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t%d\",\"name\":\"n\"}}\n\n", i, i)
 			}
 			s.WriteString("data: " + terminal.event + "\n\n")
-			// Reusing index 0 is a duplicate unless the terminal released the map.
 			s.WriteString("data: " + `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"again","name":"n"}}` + "\n\n")
 			var o strings.Builder
 			if err := StreamToOpenAI(&o, strings.NewReader(s.String()), nil, nil); err != nil {
-				t.Fatalf("terminal did not release the tool-block map: %v", err)
+				t.Fatalf("terminal event failed translation: %v", err)
 			}
-			if !strings.Contains(o.String(), `"id":"again"`) {
-				t.Fatal("post-terminal tool block was not emitted")
+			if strings.Contains(o.String(), `"id":"again"`) {
+				t.Fatal("post-terminal tool block was emitted")
+			}
+			if n := strings.Count(o.String(), "data: [DONE]"); n != 1 {
+				t.Fatalf("[DONE] count = %d, want 1: %q", n, o.String())
 			}
 		})
 	}

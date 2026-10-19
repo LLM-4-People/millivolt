@@ -21,11 +21,19 @@ const (
 	// guardrail, not operator-tunable.
 	stagingSweepMinAge = 24 * time.Hour
 
-	// stagingSweepMaxEntries bounds one startup directory read. The database
-	// volume normally holds a handful of entries; the bound keeps a pathological
-	// directory from turning boot cleanup into an unbounded scan. Internal
-	// guardrail, not operator-tunable.
-	stagingSweepMaxEntries = 256
+	// stagingSweepBatchEntries bounds one directory read. Reads repeat until
+	// the directory is exhausted or the per-boot scan budget is spent, so an
+	// aged orphan behind the first batch is still examined in the same sweep
+	// instead of being stranded permanently. Internal guardrail, not
+	// operator-tunable.
+	stagingSweepBatchEntries = 256
+
+	// stagingSweepMaxEntries bounds the total directory entries one startup
+	// sweep examines, and therefore the removals it can perform. The database
+	// volume normally holds a handful of entries; the budget keeps a
+	// pathological directory from turning boot cleanup into an unbounded
+	// scan. Internal guardrail, not operator-tunable.
+	stagingSweepMaxEntries = 4096
 )
 
 // isStagingName reports whether base is one of the known transient names this
@@ -109,6 +117,18 @@ func (s *Store) protectedLivePaths() (map[string]struct{}, error) {
 			protected[protectedPathKey(base+suffix)] = struct{}{}
 		}
 	}
+	// Quarantine places every sidecar beside the quarantined main, so the
+	// protected set above covers the current spelling (incoming.invalid-wal).
+	// Keep the earlier incoming-wal.invalid order protected too: an upgrade
+	// must not sweep evidence written by a release that predates the rename.
+	for _, base := range bases {
+		incoming := PendingSnapshotPath(base)
+		for _, quarantine := range []string{pendingSnapshotInvalidSuffix, pendingSnapshotInterruptedSuffix} {
+			for _, sidecar := range snapshotSidecarSuffixes {
+				protected[protectedPathKey(incoming+sidecar+quarantine)] = struct{}{}
+			}
+		}
+	}
 	return protected, nil
 }
 
@@ -143,7 +163,8 @@ func (s *Store) isProtectedLivePath(protected map[string]struct{}, path string) 
 // publish normally remove their own staging paths; only a process that dies
 // between creation and defer leaves them behind. The sweep runs at startup,
 // before any handler can create a new staging entry, and is bounded in both
-// age and directory entries. Removal failures are logged and never fail boot.
+// age and directory entries; the directory is read in bounded batches up to
+// that total budget. Removal failures are logged and never fail boot.
 func (s *Store) sweepOrphanedStaging(now time.Time) int {
 	dir := s.stageDir()
 	d, err := os.Open(dir)
@@ -152,11 +173,6 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		return 0
 	}
 	defer d.Close()
-	entries, err := d.ReadDir(stagingSweepMaxEntries)
-	if err != nil && !errors.Is(err, io.EOF) {
-		log.Printf("storage: read staging directory %s: %v", dir, err)
-		return 0
-	}
 	removed := 0
 	protected, err := s.protectedLivePaths()
 	if err != nil {
@@ -165,41 +181,62 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		log.Printf("storage: staging sweep skipped: %v", err)
 		return 0
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		path := filepath.Join(dir, name)
-		// Path identity wins over name shape. A db_path named
-		// millivolt-snapshot-live.db must survive even though its basename
-		// matches snapshotStagingPattern, and so must a symlink target with
-		// that shape. Resolving the entry also matches a lexical directory
-		// alias (a symlinked db_path parent) to the resolved live identity.
-		if s.isProtectedLivePath(protected, path) {
-			continue
-		}
-		if !s.isStagingName(name) {
-			continue
-		}
-		info, err := entry.Info()
-		if err != nil {
-			if !os.IsNotExist(err) {
-				log.Printf("storage: inspect staging entry %s: %v", path, err)
+	scanned := 0
+	for scanned < stagingSweepMaxEntries {
+		batch := min(stagingSweepBatchEntries, stagingSweepMaxEntries-scanned)
+		entries, readErr := d.ReadDir(batch)
+		if len(entries) == 0 {
+			if readErr != nil && !errors.Is(readErr, io.EOF) {
+				log.Printf("storage: read staging directory %s: %v", dir, readErr)
 			}
-			continue
+			break
 		}
-		if now.Sub(info.ModTime()) < stagingSweepMinAge {
-			// Recent enough to be an in-progress writer; never guess.
-			continue
+		scanned += len(entries)
+		for _, entry := range entries {
+			name := entry.Name()
+			path := filepath.Join(dir, name)
+			// Path identity wins over name shape. A db_path named
+			// millivolt-snapshot-live.db must survive even though its basename
+			// matches snapshotStagingPattern, and so must a symlink target with
+			// that shape. Resolving the entry also matches a lexical directory
+			// alias (a symlinked db_path parent) to the resolved live identity.
+			if s.isProtectedLivePath(protected, path) {
+				continue
+			}
+			if !s.isStagingName(name) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				if !os.IsNotExist(err) {
+					log.Printf("storage: inspect staging entry %s: %v", path, err)
+				}
+				continue
+			}
+			if now.Sub(info.ModTime()) < stagingSweepMinAge {
+				// Recent enough to be an in-progress writer; never guess.
+				continue
+			}
+			if info.IsDir() {
+				err = os.RemoveAll(path)
+			} else {
+				err = os.Remove(path)
+			}
+			if err != nil && !os.IsNotExist(err) {
+				log.Printf("storage: remove orphaned staging entry %s: %v", path, err)
+				continue
+			}
+			removed++
 		}
-		if info.IsDir() {
-			err = os.RemoveAll(path)
-		} else {
-			err = os.Remove(path)
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				log.Printf("storage: read staging directory %s: %v", dir, readErr)
+			}
+			break
 		}
-		if err != nil && !os.IsNotExist(err) {
-			log.Printf("storage: remove orphaned staging entry %s: %v", path, err)
-			continue
-		}
-		removed++
+	}
+	if scanned >= stagingSweepMaxEntries {
+		log.Printf("storage: staging sweep reached its %d-entry budget in %s", stagingSweepMaxEntries, dir)
 	}
 	return removed
 }

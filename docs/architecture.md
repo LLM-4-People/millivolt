@@ -215,8 +215,9 @@ Decode and validation finish before an apply path takes the writer connection.
 The upload and decoded database files are removed on every handler path,
 including over-cap, invalid archive, apply failure and client disconnect. A
 boot-time sweep reclaims only known staging names older than a safety age,
-bounded in entries per boot; the live database, pending snapshot, rollback set
-and state marker are outside that registry. The attached inspect/merge and
+examining the directory in bounded batches up to a per-boot entry budget; the
+live database, pending snapshot, rollback set, state marker and quarantined
+admission evidence are outside that registry. The attached inspect/merge and
 decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
 with URI metacharacters stays literal and writes through the attached schema
 fail.

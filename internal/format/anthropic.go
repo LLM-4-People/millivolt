@@ -619,6 +619,9 @@ func mapFinishReason(reason string) string {
 // observe, when non-nil, receives original usage-bearing/terminal payloads
 // synchronously; it must not retain the borrowed bytes. This lets the caller
 // capture dynamic source-only accounting without changing the wire document.
+// A terminal source event (message_stop or a valid provider error) closes the
+// translation: later source events are ignored so nothing follows the one
+// [DONE] marker.
 func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, observe func([]byte)) error {
 	scanner := bufio.NewScanner(src)
 	scanner.Buffer(make([]byte, 0, sseLineBufInit), sseLineBufMax)
@@ -638,6 +641,10 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		nextToolIndex    int
 		usage            nativeUsage
 		doneSent         bool
+		// terminal records that a terminal source event (message_stop or a
+		// valid provider error) has been translated. Everything after it is
+		// protocol debris and must not emit frames behind the terminal marker.
+		terminal bool
 		// sawError records that the provider already delivered its own failure
 		// statement (event: error). The truncation signal must never stack on
 		// top of it: an errored stream terminates without message_stop, which
@@ -672,6 +679,12 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 
 	var event string
 	for scanner.Scan() {
+		if terminal {
+			// [DONE] is the terminal frame: ignore every later source event,
+			// including content, errors and repeated terminal events, so
+			// nothing can appear behind it.
+			continue
+		}
 		// Keep the scanner's bytes: Text() copies the line and DataPayload's
 		// []byte conversion copied it again. Only the rare event: line needs a
 		// string.
@@ -881,6 +894,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			// Terminate the stream and release any blocks a malformed provider
 			// left open (their terminal stop events may never arrive).
 			sawMessageStop = true
+			terminal = true
 			clear(toolCalls)
 			toolInitialBytes = 0
 			if err := writeDone(); err != nil {
@@ -901,6 +915,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				continue
 			}
 			sawError = true
+			terminal = true
 			if err := emit(sse.Chunk(id, created, model, []map[string]any{}, e.openAIError())); err != nil {
 				return err
 			}

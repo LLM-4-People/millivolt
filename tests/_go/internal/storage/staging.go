@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -392,5 +393,99 @@ func TestStagingSweepProtectsResolvedSymlinkAdmissionPaths(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Errorf("sweep left the true staging orphan %s: %v", orphan, err)
+	}
+}
+
+// TestStagingSweepReclaimsOrphansPastFirstBatch pins the batched directory
+// walk. With more old orphans than one read batch, a single ReadDir batch
+// leaves the tail unexamined on every boot; the sweep must keep reading in
+// bounded batches until the directory is exhausted (or the per-boot budget is
+// reached), while the protected staging-shaped live path still survives.
+func TestStagingSweepReclaimsOrphansPastFirstBatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "millivolt-snapshot-live.db")
+	makeOldLivePath(t, path)
+	// The filesystem returns directory order, not lexical order, so the
+	// regression needs more removable orphans than one batch rather than a
+	// single entry that could land in the first batch by chance.
+	const orphans = 300
+	names := make([]string, orphans)
+	for i := range names {
+		names[i] = filepath.Join(dir, fmt.Sprintf("millivolt-snapshot-orphan-%03d", i))
+		makeStagingEntry(t, names[i], true)
+	}
+
+	s := &Store{path: path}
+	if removed := s.sweepOrphanedStaging(time.Now()); removed != orphans {
+		t.Fatalf("sweep removed %d entries, want all %d orphans", removed, orphans)
+	}
+	for _, name := range names {
+		if _, err := os.Stat(name); !os.IsNotExist(err) {
+			t.Fatalf("sweep left an orphan past the first read batch: %s: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("sweep removed the protected live path: %v", err)
+	}
+}
+
+// TestStagingSweepPreservesQuarantinedPendingSidecars pins the quarantine
+// naming and the sweep fence together. A rejected or interrupted pending
+// snapshot moves its sidecars beside the quarantined main, and those files
+// must use the protected sidecar spelling rather than a suffix order the
+// sweep's path fence does not know. The live basename is staging-shaped so a
+// name-only sweep would reclaim the old sidecars if the fence missed them.
+func TestStagingSweepPreservesQuarantinedPendingSidecars(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		suffix string
+	}{
+		{"rejected", pendingSnapshotInvalidSuffix},
+		{"interrupted", pendingSnapshotInterruptedSuffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "millivolt-snapshot-live.db")
+			s := &Store{path: path}
+			incoming := PendingSnapshotPath(path)
+			makeStagingEntry(t, incoming, false)
+			for _, sidecar := range snapshotSidecarSuffixes {
+				makeStagingEntry(t, incoming+sidecar, false)
+			}
+			if err := quarantinePendingSnapshot(incoming, tc.suffix); err != nil {
+				t.Fatal(err)
+			}
+
+			quarantined := incoming + tc.suffix
+			actual := make(map[string]string, len(snapshotSidecarSuffixes))
+			for _, sidecar := range snapshotSidecarSuffixes {
+				normalized := quarantined + sidecar
+				legacy := incoming + sidecar + tc.suffix
+				actualPath := normalized
+				if _, err := os.Stat(normalized); err != nil {
+					if _, legacyErr := os.Stat(legacy); legacyErr != nil {
+						t.Fatalf("quarantined sidecar %s missing in both spellings", sidecar)
+					}
+					actualPath = legacy
+				}
+				actual[sidecar] = actualPath
+			}
+
+			if removed := s.sweepOrphanedStaging(time.Now()); removed != 0 {
+				t.Fatalf("sweep removed %d quarantined entries, want 0", removed)
+			}
+			if _, err := os.Stat(quarantined); err != nil {
+				t.Fatalf("sweep removed the quarantined main file: %v", err)
+			}
+			for _, sidecar := range snapshotSidecarSuffixes {
+				want := quarantined + sidecar
+				if _, err := os.Stat(want); err != nil {
+					t.Fatalf("quarantined sidecar %s was not kept under the protected spelling: %v", sidecar, err)
+				}
+				if actual[sidecar] != want {
+					t.Fatalf("quarantine wrote sidecar %s at %s, want the protected spelling %s", sidecar, actual[sidecar], want)
+				}
+			}
+		})
 	}
 }
