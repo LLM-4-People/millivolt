@@ -882,8 +882,13 @@ translation of non-streaming responses, the non-streaming 200 quality spool
 any bound are refused with `503` and `Retry-After` before the body or upstream
 response is read. Request-body reads must make progress within 30 seconds and
 finish within the 10-minute absolute upload bound, so a stalled peer releases
-its reservation without cutting off a slow but progressing upload. All three
-budgets accept `0` = unlimited and hot-reload. `max_queue_size` (default 1024
+its reservation without cutting off a slow but progressing upload. Buffered
+whole-document response reads have a two-minute fallback when the send has no
+deadline and a ten-minute ceiling even when `X-Proxy-Timeout-Ms` is longer, so
+a slow or stalled body releases its response-buffer reservation; a shorter
+caller deadline wins and `models_discovery_timeout` (at most five minutes) is
+preserved. All three budgets accept `0` = unlimited and hot-reload.
+`max_queue_size` (default 1024
 per group) and `max_queue_wait` (default 10m) bound a held or saturated
 provider's parked work; both accept explicit `0` = unlimited. Independent
 per-key/header concurrency remains unlimited by default. The scheduler retains

@@ -370,8 +370,9 @@ func TestModelsDiscoveryDeadlineCoversBodiesAcrossFormats(t *testing.T) {
 
 // TestModelsDiscoveryHonorsConfiguredTimeoutBeyondReadFallback proves the
 // configured models_discovery_timeout, up to five minutes, is authoritative
-// for the whole discovery body read; the two-minute whole-document guardrail
-// applies only when the caller context has no deadline.
+// for the whole discovery body read below the ten-minute whole-document
+// ceiling; the two-minute fallback applies only when the caller context has no
+// deadline at all.
 func TestModelsDiscoveryHonorsConfiguredTimeoutBeyondReadFallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		const bodyDelay = wholeDocumentReadTimeout + 30*time.Second

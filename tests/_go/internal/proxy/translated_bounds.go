@@ -270,9 +270,9 @@ func (b *delayedReadBody) Close() error {
 }
 
 // TestTranslatedNonStreamReadHonorsLongerDeadline proves the 2-minute
-// whole-document guardrail is a fallback, not an override: a 5-minute parent
-// deadline or X-Proxy-Timeout-Ms must let a body that completes after
-// 2 minutes finish normally.
+// whole-document fallback is not an override: a 5-minute parent deadline or
+// X-Proxy-Timeout-Ms, still below the 10-minute ceiling, must let a body that
+// completes after 2 minutes finish normally.
 func TestTranslatedNonStreamReadHonorsLongerDeadline(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -335,6 +335,92 @@ func TestTranslatedNonStreamReadHonorsLongerDeadline(t *testing.T) {
 			})
 		})
 	}
+}
+
+// trickleThenStallBody delivers one byte after delay, then stalls until Close.
+// The early byte is deliberate: the shared upstream idle guard resets on every
+// completed Read, so a body that makes one slow progress step and then stops
+// can outlive a plain stalled body and pin its reservation under a long send
+// deadline. Only the whole-document ceiling can release it.
+type trickleThenStallBody struct {
+	delay   time.Duration
+	unblock chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	served  bool
+}
+
+func (b *trickleThenStallBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.served {
+		b.mu.Unlock()
+		<-b.unblock
+		return 0, errors.New("stalled body closed")
+	}
+	b.served = true
+	b.mu.Unlock()
+	timer := time.NewTimer(b.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if len(p) == 0 {
+			return 0, nil
+		}
+		p[0] = ' '
+		return 1, nil
+	case <-b.unblock:
+		return 0, errors.New("trickle body closed before its first byte")
+	}
+}
+
+func (b *trickleThenStallBody) Close() error {
+	b.once.Do(func() { close(b.unblock) })
+	return nil
+}
+
+// TestTranslatedNonStreamReadCapsLongHeaderDeadline pins the upper guardrail:
+// a client-supplied one-hour X-Proxy-Timeout-Ms must not pin a whole-document
+// response-buffer reservation for an hour. The body delivers one byte and then
+// stalls, which the shared idle guard would only release well past the ceiling;
+// the whole-document read must answer 502 at wholeDocumentReadMax and release
+// the process-wide reservation.
+func TestTranslatedNonStreamReadCapsLongHeaderDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		body := &trickleThenStallBody{delay: 6 * time.Minute, unblock: make(chan struct{})}
+		p := New(config.Default(), metrics.Noop{})
+		p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				Body:          body,
+				ContentLength: -1,
+				Request:       r,
+			}, nil
+		})})
+		r := translatedRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+		r.Header.Set("X-Proxy-Timeout-Ms", "3600000")
+		started := time.Now()
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+		elapsed := time.Since(started)
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+		}
+		if elapsed != wholeDocumentReadMax {
+			t.Fatalf("elapsed = %s, want the %s whole-document ceiling", elapsed, wholeDocumentReadMax)
+		}
+		if !strings.Contains(w.Body.String(), "upstream document read exceeded") {
+			t.Fatalf("the rejected read must name the whole-document guardrail: %s", w.Body.String())
+		}
+		if got := p.respBudget.bytes.Load(); got != 0 {
+			t.Fatalf("response budget after read timeout = %d, want 0", got)
+		}
+		select {
+		case <-body.unblock:
+		default:
+			t.Fatal("stalled body was not closed at the ceiling")
+		}
+	})
 }
 
 // TestTranslatedNonStreamReadDeadlineReleasesBudget pins the whole-document

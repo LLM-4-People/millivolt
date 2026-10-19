@@ -561,6 +561,49 @@ func TestAuditCapturesListExhaustion(t *testing.T) {
 	}
 }
 
+// TestAuditCapturesListFirstPageZeroCursorCountsAsProgress pins the first-page
+// half of the capture listing's paging rule. A full first page can end at
+// (0, ""), the zero timestamp with an empty record id; there is no sent cursor
+// to compare against, so the returned pair is progress and the older row must
+// remain reachable. The value check used to call that pair non-advancing and
+// report exhaustion on the first page.
+func TestAuditCapturesListFirstPageZeroCursorCountsAsProgress(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, schemaPath, `[{"id":"c1","started_at":10},{"id":"","started_at":0}]`)
+	service := newTestService(t, proxy, Limits{})
+
+	first, err := service.auditCapturesList(context.Background(), AuditCapturesListInput{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Exhausted {
+		t.Fatalf("a first-page cursor at (0, \"\") must count as progress: %+v", first)
+	}
+	if !first.More || first.Returned != 2 {
+		t.Fatalf("first page = %+v, want two records with more true", first)
+	}
+	if first.NextBeforeMs == nil || *first.NextBeforeMs != 0 ||
+		first.NextBeforeID == nil || *first.NextBeforeID != "" {
+		t.Fatalf("zero cursor = %+v, want ms 0 and an explicit empty id", first)
+	}
+
+	proxy.json(http.MethodGet, schemaPath, `[]`)
+	second, err := service.auditCapturesList(context.Background(), AuditCapturesListInput{
+		BeforeMs: first.NextBeforeMs, BeforeID: first.NextBeforeID, Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("the zero cursor must be resumable: %v", err)
+	}
+	if !second.Exhausted || second.Returned != 0 {
+		t.Fatalf("an empty continuation must be exhaustion: %+v", second)
+	}
+	continuation := proxy.last(t).Query.Get("q")
+	if !strings.Contains(continuation, "(started_at, id) < (0, CAST(X'' AS TEXT))") {
+		t.Fatalf("the zero/empty cursor must stay an exact keyset value: %q", continuation)
+	}
+}
+
 // TestAuditCapturesListRefusesWithoutStorage pins the same prerequisite as the
 // start path.
 func TestAuditCapturesListRefusesWithoutStorage(t *testing.T) {

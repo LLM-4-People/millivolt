@@ -25,35 +25,57 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
-// wholeDocumentReadTimeout bounds one whole-document upstream body read
-// (translated non-streaming responses and model-discovery pages) when the
-// caller supplied no deadline of its own. A caller deadline from the per-send
-// X-Proxy-Timeout-Ms or the model-discovery budget is authoritative, shorter
-// or longer. Streaming SSE is never buffered, so this guardrail does not apply
-// to it. Internal safety guardrail, not user-tunable.
+// wholeDocumentReadTimeout is the fallback budget for one whole-document
+// upstream body read (translated non-streaming responses and model-discovery
+// pages) when the caller supplied no deadline of its own. A shorter caller
+// deadline from the per-send X-Proxy-Timeout-Ms or the model-discovery budget
+// wins. Streaming SSE is never buffered, so this guardrail does not apply to
+// it. Internal safety guardrail, not user-tunable.
 const wholeDocumentReadTimeout = 2 * time.Minute
 
+// wholeDocumentReadMax is the absolute ceiling for one whole-document upstream
+// body read, even when the caller's deadline is longer (an arbitrarily large
+// X-Proxy-Timeout-Ms). It bounds how long one buffered read can pin its
+// process-wide response-buffer reservation. The configured model-discovery
+// timeout is at most 5 minutes, so its budgets and every shorter caller
+// deadline are preserved. Internal safety guardrail, not user-tunable.
+const wholeDocumentReadMax = 10 * time.Minute
+
 // readWholeDocument reads at most limit bytes, failing closed when the body
-// makes no completion before its deadline. The 2-minute fallback applies only
-// when ctx carries no deadline; an existing caller deadline is honored as-is,
-// whether shorter or longer. Closing the body is what unblocks a transport
+// makes no completion before its deadline. A caller deadline is honored up to
+// wholeDocumentReadMax; a longer one is capped there so it cannot pin the
+// response-buffer reservation indefinitely. With no caller deadline the
+// two-minute fallback applies. Closing the body is what unblocks a transport
 // Read; callers release their response-buffer reservation on return. The
 // partial prefix is returned with the error so byte accounting stays exact.
 func readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
 	readCtx := ctx
-	fallback := false
-	if _, ok := ctx.Deadline(); !ok {
+	// bound is the guardrail this read applies, or 0 when a caller deadline
+	// at or below the ceiling already supplies the shorter bound.
+	bound := time.Duration(0)
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Until(deadline) > wholeDocumentReadMax {
+			bound = wholeDocumentReadMax
+		}
+	} else {
+		bound = wholeDocumentReadTimeout
+	}
+	if bound > 0 {
 		var cancel context.CancelFunc
-		readCtx, cancel = context.WithTimeout(ctx, wholeDocumentReadTimeout)
+		readCtx, cancel = context.WithTimeout(ctx, bound)
 		defer cancel()
-		fallback = true
 	}
 	stop := context.AfterFunc(readCtx, func() { body.Close() })
 	defer stop()
 	b, err := io.ReadAll(io.LimitReader(body, limit))
 	if err != nil {
-		if fallback && ctx.Err() == nil && readCtx.Err() != nil {
-			return b, fmt.Errorf("upstream document read exceeded %s: %w", wholeDocumentReadTimeout, err)
+		// Closing a wrapped transport body cancels its attempt context, so the
+		// parent ctx may read as canceled after our own deadline fired. The
+		// bounded child's deadline error distinguishes the guardrail from a
+		// caller cancel: when bound is set it is always earlier than the
+		// caller's deadline.
+		if bound > 0 && readCtx.Err() == context.DeadlineExceeded {
+			return b, fmt.Errorf("upstream document read exceeded %s: %w", bound, err)
 		}
 		return b, err
 	}

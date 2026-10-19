@@ -128,7 +128,7 @@ semantics below, correct SQL is guesswork.
 | `audit_status` | Capture sessions, their scope and live capture counts, the scope vocabularies, and the storage prerequisite. |
 | `audit_start` | Start or edit one capture session. Requires `confirm: "start capture"` and refuses when durable storage is off. |
 | `audit_stop` | Stop one session by id, or every session with `stop_all: "stop every capture session"`. |
-| `audit_captures_list` | Page the requests that have a stored capture, through a bounded `SELECT` over `requests WHERE debug = 1`. |
+| `audit_captures_list` | Page the requests that have a stored capture, through a bounded `SELECT` over `requests WHERE debug = 1` whose `request_debug` sidecar exists and has not expired. |
 | `audit_capture_get` | Read one capture document by request record id. |
 | `operator_state` | Pause, limits, quota/storm and restart status in one call. |
 | `set_pause` | Create, edit or resume pause holds. |
@@ -160,18 +160,25 @@ the explorer's status-class vocabulary, which travels as `status:2xx`.
 An unknown dimension, malformed filter or unknown status is refused before the
 request is sent.
 
+`explore`'s `error_total` uses two units. With `dim: error` it is the union of
+distinct affected requests represented by the error cards, including recovered
+quality failures whose final status is 200; for every other dimension it is the
+canonical error count. A card share is `N / error_total` and cannot exceed 100%.
+Do not compare it across the two cases as one metric.
+
 ### Pagination
 
 `records` and `audit_captures_list` page newest-first with a paired
 `(before_ms, before_id)` cursor. Both fields or neither.
 
 The proxy scans a bounded number of rows per call, so a page can be short or
-empty while its `more` flag is still true. `exhausted` is true when the cursor
-did not advance, and also when `more` is false: treat it as "stop paging". A
-non-advancing cursor means the scan budget cannot reach the next row, and
-treating it as "keep going" is an endless loop; an empty page with an advanced
-cursor is instead the normal shape of "the budget ran out before a match", so
-page again.
+empty while its `more` flag is still true. `exhausted` is true when a page that
+was given a cursor returns that same cursor, and also when `more` is false:
+treat it as "stop paging". A first page has no cursor to repeat, so any returned
+cursor counts as progress, including `(0, "")`. A non-advancing cursor means the
+scan budget cannot reach the next row, and treating it as "keep going" is an
+endless loop; an empty page with an advanced cursor is instead the normal shape
+of "the budget ran out before a match", so page again.
 
 Deep history needs this rather than `OFFSET`, which degrades on every page.
 
@@ -267,7 +274,8 @@ guard cannot be applied at all.
 **Read-back is by record id.** `audit_capture_get` takes the REQUEST RECORD id
 (`requests.id`), not the session id. There is no listing endpoint, so
 `audit_captures_list` discovers those ids by querying `requests WHERE debug = 1`
-and reports that it does so. Captured documents are sensitive: credentials are
+with an existing, unexpired `request_debug` sidecar and reports that it does so.
+Captured documents are sensitive: credentials are
 redacted from headers, but body content is not sanitized.
 
 **Sessions survive a restart.** The proxy restores them from its own state, so a

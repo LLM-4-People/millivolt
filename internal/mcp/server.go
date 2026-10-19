@@ -136,7 +136,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "records",
 		Title:       "Page the durable request log",
-		Description: "One page of finalized records, newest first, from durable history, with the raw-to-canonical model_canon map the server applied to the page. Page with the paired before_ms/before_id cursor (both or neither), copying the previous page's next_before_ms/next_before_id pair into them. The server scans a bounded number of rows per call and advances the cursor on every row it SCANNED, including rows the scope filter excluded, so an EMPTY page with an advanced cursor and more true is the normal shape of 'the budget ran out before a match': page again. exhausted is true when the cursor did not advance, and also when more is false: treat it as 'stop paging'. storage reports whether durable storage backs this at all: with storage.enabled false the route scans nothing, so this page is NOT the end of history and the in-memory ring still holds recent records.",
+		Description: "One page of finalized records, newest first, from durable history, with the raw-to-canonical model_canon map the server applied to the page. Page with the paired before_ms/before_id cursor (both or neither), copying the previous page's next_before_ms/next_before_id pair into them. The server scans a bounded number of rows per call and advances the cursor on every row it SCANNED, including rows the scope filter excluded, so an EMPTY page with an advanced cursor and more true is the normal shape of 'the budget ran out before a match': page again. exhausted is true when a cursor that was sent comes back unchanged, or when more is false: treat it as 'stop paging'. A first page has no cursor to repeat, so any returned cursor counts as progress. storage reports whether durable storage backs this at all: with storage.enabled false the route scans nothing, so this page is NOT the end of history and the in-memory ring still holds recent records.",
 		Annotations: readOnly("Page the durable request log"),
 	}, s.records)
 
@@ -178,7 +178,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "audit_captures_list",
 		Title:       "List captured requests",
-		Description: "List the requests that have a stored capture document, newest first, paging with the paired before_ms/before_id cursor. The proxy has no capture listing endpoint: this is a bounded SELECT over requests WHERE debug = 1, so it shows stored documents only. Each row's id is what audit_capture_get takes.",
+		Description: "List the requests that have a stored capture document, newest first, paging with the paired before_ms/before_id cursor. The proxy has no capture listing endpoint: this is a bounded SELECT over requests WHERE debug = 1 with an existing, unexpired request_debug sidecar, so it shows stored documents only. Each row's id is what audit_capture_get takes.",
 		Annotations: readOnly("List captured requests"),
 	}, s.auditCapturesList)
 

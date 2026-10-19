@@ -136,7 +136,8 @@ upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for either spelling (`max_tokens` or
 `max_completion_tokens`). A valid request is also rejected with HTTP 400 before
 an upstream send when it carries more than 10,000 entries in a `messages`,
-`tools` or `stop` array, more than 10,000 distinct top-level members, or more
+`tools` or `stop` array, more than 1,024 aggregate `tool_calls` members across
+every message, more than 10,000 distinct top-level members, or more
 than 10,000 distinct `logit_bias` keys merged across duplicate top-level
 objects. Content composition has two independent limits. A content array above
 4,096 parts is not rejected for that reason: within the aggregate budget it
@@ -239,9 +240,10 @@ configured/per-request timeout only until send headers arrive, without a body
 deadline on its parked run. Model discovery ignores the per-request timeout
 and uses `models_discovery_timeout` for the whole discovery operation.
 Buffered whole-document reads (translated non-streaming responses and discovery
-pages) apply a two-minute read guardrail only when the send has no deadline of
-its own; an explicit `X-Proxy-Timeout-Ms` or `models_discovery_timeout` is
-honored even when it is longer.
+pages) apply a two-minute fallback guardrail when the send has no deadline of
+its own and a ten-minute ceiling even against a longer `X-Proxy-Timeout-Ms`.
+A shorter caller deadline still wins, and `models_discovery_timeout` (at most
+five minutes) sits below the ceiling, so its configured budget is untouched.
 Provider Retry-After/reset hints are a floor on the wait, not a replacement
 for adaptive exponential backoff. A long hint is not clamped by the ordinary
 adaptive cap and can therefore outlast it. A short hint does not reset the

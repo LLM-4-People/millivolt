@@ -618,6 +618,63 @@ func TestRecordsResumesFromEmptyIDCursor(t *testing.T) {
 	}
 }
 
+// TestRecordsFirstPageZeroCursorCountsAsProgress pins the first-page half of
+// the paging rule. A full first page can end at (0, ""), the zero timestamp
+// with an empty record id. There is no sent cursor to compare against, so the
+// returned pair is progress and the next page must be reachable; the old
+// value check read it as non-advancing and reported exhaustion, stopping the
+// walk before the older rows.
+func TestRecordsFirstPageZeroCursorCountsAsProgress(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":""}],"more":true,"cursor_ms":0,"cursor_id":""}`)
+	service := newTestService(t, proxy, Limits{})
+
+	first, err := service.records(context.Background(), RecordsInput{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Exhausted {
+		t.Fatalf("a first-page cursor at (0, \"\") must count as progress: %+v", first)
+	}
+	if !first.More || first.Returned != 1 {
+		t.Fatalf("first page = %+v, want one record with more true", first)
+	}
+	if first.NextBeforeMs == nil || *first.NextBeforeMs != 0 ||
+		first.NextBeforeID == nil || *first.NextBeforeID != "" {
+		t.Fatalf("zero cursor = %+v, want ms 0 and an explicit empty id", first)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"next_before_ms":0`) ||
+		!strings.Contains(string(encoded), `"next_before_id":""`) {
+		t.Fatalf("the zero cursor must be published, not omitted: %s", encoded)
+	}
+
+	proxy.json(http.MethodGet, logPath, `{"records":[{"id":"older"}],"more":false,"cursor_ms":0,"cursor_id":"older"}`)
+	second, err := service.records(context.Background(), RecordsInput{
+		BeforeMs: first.NextBeforeMs, BeforeID: first.NextBeforeID, Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("the zero cursor must be resumable: %v", err)
+	}
+	if second.Returned != 1 {
+		t.Fatalf("continuation = %+v, want the older row", second)
+	}
+	requests := proxy.requestsFor(http.MethodGet, logPath)
+	if len(requests) != 2 {
+		t.Fatalf("page calls = %d, want 2", len(requests))
+	}
+	assertQuery(t, requests[1], "before_ms", "0")
+	values, present := requests[1].Query["before_id"]
+	if !present || len(values) != 1 || values[0] != "" {
+		t.Fatalf("continuation before_id = %v present=%v, want one explicit empty value (full query %q)",
+			values, present, requests[1].Query.Encode())
+	}
+}
+
 // TestChartCarriesBothPeriodStatBands pins the two period-wide [avg, min, max]
 // arrays the proxy sends beside the percentiles. They were part of the payload
 // all along and had no field, so ttft_stat and tps_stat were dropped silently:

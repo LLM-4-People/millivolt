@@ -560,6 +560,56 @@ func TestScopeSchemaStatesTheOwnerBounds(t *testing.T) {
 	}
 }
 
+// TestExploreErrorTotalSchemaDistinguishesTheErrorDimension pins the published
+// error_total description to the two units the proxy actually returns. The
+// error dimension's total is the union of affected requests represented by its
+// cards, which includes recovered quality failures whose final status is 200;
+// every other dimension reports the canonical error count. One generic
+// "requests that are errors" sentence erased that distinction from the model.
+func TestExploreErrorTotalSchemaDistinguishesTheErrorDimension(t *testing.T) {
+	session := connect(t, newTestService(t, newFakeProxy(t), Limits{}))
+	listed, err := session.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name != "explore" {
+			continue
+		}
+		encoded, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal the explore output schema: %v", err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatalf("parse the explore output schema: %v", err)
+		}
+		property, ok := schema.Properties["error_total"]
+		if !ok {
+			t.Fatalf("the explore output schema publishes no error_total property: %s", encoded)
+		}
+		description := strings.Join(strings.Fields(property.Description), " ")
+		for _, needle := range []string{
+			"for the error dimension",
+			"distinct affected requests",
+			"error-card union",
+			"recovered final-200",
+			"for every other dimension",
+			"canonical error",
+		} {
+			if !strings.Contains(description, needle) {
+				t.Fatalf("the explore error_total schema must state %q: %q", needle, description)
+			}
+		}
+		return
+	}
+	t.Fatal("the explore tool is not registered")
+}
+
 // TestProtocolVersionsMirrorTheSDK pins the accepted protocol versions listed
 // in docs/mcp.md to the bundled SDK's own list, which is the owner of that set.
 // The guide's hand list used to be unguarded, so a dependency upgrade or a doc

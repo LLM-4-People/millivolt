@@ -67,7 +67,7 @@ type ExploreInput struct {
 type ExploreOutput struct {
 	Dim                 string           `json:"dim" jsonschema:"the dimension that was broken down"`
 	Total               int64            `json:"total" jsonschema:"in-scope requests, excluding the active dimension's own filter"`
-	Errors              int64            `json:"error_total" jsonschema:"in-scope requests that are errors"`
+	Errors              int64            `json:"error_total" jsonschema:"for the error dimension: distinct affected requests in the error-card union, including recovered final-200 quality failures; for every other dimension: in-scope requests that are canonical errors"`
 	Groups              []map[string]any `json:"groups" jsonschema:"up to 24 groups; percentiles are null below 4 samples"`
 	Truncation          Truncation       `json:"truncation" jsonschema:"whether groups were withheld"`
 	Rail                map[string]int   `json:"rail" jsonschema:"distinct value count per dimension, following the full filter set"`
@@ -312,21 +312,25 @@ func (s *Service) records(ctx context.Context, in RecordsInput) (*RecordsOutput,
 	return out, nil
 }
 
-// cursorAdvancedAt reports whether the proxy's returned cursor differs from
-// the one that was sent. Presence is explicit: a nil sent cursor means no
-// cursor was sent, while a non-nil cursor may carry an empty ID, which is a
-// valid exact key. Identical cursors mean the next call would repeat this page
-// exactly.
+// cursorAdvancedAt reports whether the proxy's returned cursor is progress over
+// the one that was sent. Presence is explicit: a nil sent cursor means the
+// first page, while a non-nil cursor may carry an empty ID, which is a valid
+// exact key. A first page has no prior position to repeat, so ANY returned
+// cursor counts as progress, including the zero timestamp with an empty id;
+// only a returned cursor identical to one actually sent means the next call
+// would repeat the same page.
 func cursorAdvancedAt(sent *pageCursor, gotMs int64, gotID string) bool {
 	if sent == nil {
-		return gotMs != 0 || gotID != ""
+		return true
 	}
 	return gotMs != sent.StartMs || gotID != sent.ID
 }
 
 // exhausted is the one owner of the paging-stop rule: a page whose cursor does
 // not advance is the end of what this scan budget can reach, whatever `more`
-// claims, and so is a page the proxy says is the last one.
+// claims, and so is a page the proxy says is the last one. A first page always
+// counts its returned cursor as progress, so this rule only compares cursors
+// once a cursor was sent.
 //
 // A page that returned NOTHING is deliberately not exhaustion. The proxy scans a
 // bounded number of rows per call and advances its cursor on every row it
