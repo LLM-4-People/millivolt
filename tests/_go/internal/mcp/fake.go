@@ -25,6 +25,10 @@ type fakeProxy struct {
 	seen []seenRequest
 	// routes maps "METHOD path" (path only, query excluded) to a response.
 	routes map[string]cannedResponse
+	// handlers maps "METHOD path" to a response built from the request. A
+	// handler wins over a canned route and lets a test answer a paged query by
+	// inspecting its q parameter.
+	handlers map[string]func(*http.Request) cannedResponse
 }
 
 type seenRequest struct {
@@ -44,7 +48,7 @@ type cannedResponse struct {
 
 func newFakeProxy(t *testing.T) *fakeProxy {
 	t.Helper()
-	proxy := &fakeProxy{routes: map[string]cannedResponse{}}
+	proxy := &fakeProxy{routes: map[string]cannedResponse{}, handlers: map[string]func(*http.Request) cannedResponse{}}
 	proxy.server = httptest.NewServer(http.HandlerFunc(proxy.serve))
 	t.Cleanup(proxy.server.Close)
 	return proxy
@@ -55,6 +59,15 @@ func (f *fakeProxy) respond(method, path string, response cannedResponse) *fakeP
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.routes[method+" "+path] = response
+	return f
+}
+
+// dynamic registers a response builder for one method and path. It is the
+// escape hatch for a paged request whose answer depends on the q parameter.
+func (f *fakeProxy) dynamic(method, path string, handler func(*http.Request) cannedResponse) *fakeProxy {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.handlers[method+" "+path] = handler
 	return f
 }
 
@@ -84,8 +97,14 @@ func (f *fakeProxy) serve(w http.ResponseWriter, r *http.Request) {
 		Method: r.Method, Path: r.URL.Path, Query: r.URL.Query(),
 		Auth: r.Header.Get("Authorization"), Body: string(body),
 	})
-	response, ok := f.routes[r.Method+" "+r.URL.Path]
+	key := r.Method + " " + r.URL.Path
+	response, ok := f.routes[key]
+	handler := f.handlers[key]
 	f.mu.Unlock()
+	if handler != nil {
+		response = handler(r)
+		ok = true
+	}
 	if !ok {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)

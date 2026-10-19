@@ -210,6 +210,12 @@ also in the tool descriptions, which is where a model reads them.
   Call `values` before filtering on one of those. Model filters take the
   **canonical** name the proxy folds from `model_rules` (which is what the
   `values` tool returns), never a raw stored spelling.
+- **`values(model)` is paged and folded.** The tool reads raw spellings in
+  bounded keyset pages, so a vocabulary larger than the proxy's
+  `storage_query_max_rows` no longer fails with 413, then folds and merges the
+  pages through `model_rules`. Past its documented working bound it fails
+  explicitly rather than returning a partial vocabulary. The ordinary `limit`
+  still reports its own explicit truncation marker.
 - `time` is a **daypart bucket**, not a duration: `time:24h` matches nothing. The
   buckets are `night`, `work`, `evening` and `weekend`.
 - `status` takes the proxy's **status classes**, not HTTP shorthand: `2xx`,

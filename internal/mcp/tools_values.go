@@ -3,8 +3,10 @@ package mcp
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -12,22 +14,22 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
-// valuesDimensions maps every probeable filter dimension to the statement that
-// enumerates it. It is a closed set of hardcoded statements, never a formatted
-// user string: the caller names a key here, so no dimension, column or clause
-// can come from the model. A dimension that is NOT here has no stored column to
-// read - `time` is a Go-owned daypart bucket and `error` is a Go-owned
-// type|code|message composite - so both are documented in describe instead of
-// being faked in SQL, which would be a second owner drifting from the first.
-//
-// model is the one dimension whose rows are folded before they are returned:
-// the SQL enumerates the RAW stored spellings with no LIMIT, and values()
-// folds and merges them through the proxy's own rule pipeline. A raw-level
-// LIMIT is not valid there because the cap applies to the canonical result.
+// modelDimension is the one probeable dimension whose values are folded rather
+// than returned as stored. It has a paged probe (modelPageStatement) instead of
+// an entry in valuesDimensions.
+const modelDimension = "model"
+
+// valuesDimensions maps every NON-MODEL probeable filter dimension to the
+// statement that enumerates it. It is a closed set of hardcoded statements,
+// never a formatted user string: the caller names a key here, so no dimension,
+// column or clause can come from the model. A dimension that is NOT here has no
+// stored column to read - `time` is a Go-owned daypart bucket and `error` is a
+// Go-owned type|code|message composite - so both are documented in describe
+// instead of being faked in SQL, which would be a second owner drifting from
+// the first. model is documented separately because its probe is paged.
 var valuesDimensions = map[string]func(limit int) string{
 	"client":        func(limit int) string { return countStatement("client", "", limit) },
 	"provider":      func(limit int) string { return countStatement("provider", "", limit) },
-	"model":         func(limit int) string { return countStatement("model", "", 0) },
 	"conversation":  func(limit int) string { return countStatement("conversation_id", "", limit) },
 	"key":           func(limit int) string { return countStatement("key_hash", "", limit) },
 	"status":        func(limit int) string { return countStatement("CAST(status_code AS TEXT)", "", limit) },
@@ -43,24 +45,70 @@ var valuesDimensions = map[string]func(limit int) string{
 }
 
 // countStatement is the one shape every column-valued probe uses. value and
-// where are trusted constants from the table above, never model input. A
-// non-positive limit omits the LIMIT clause, for the one probe whose cap is
-// applied after a client-side fold.
+// where are trusted constants from the table above, never model input, and
+// limit is always a positive bounded page.
 func countStatement(value, where string, limit int) string {
 	statement := "SELECT " + value + " AS value, COUNT(*) AS requests FROM requests"
 	if where != "" {
 		statement += " WHERE " + where
 	}
-	statement += " GROUP BY value ORDER BY requests DESC, value ASC"
-	if limit > 0 {
-		statement += " LIMIT " + strconv.Itoa(limit)
-	}
-	return statement
+	return statement + " GROUP BY value ORDER BY requests DESC, value ASC LIMIT " + strconv.Itoa(limit)
 }
 
+// modelPageStatement enumerates one bounded page of RAW stored model
+// spellings, ordered by spelling so a keyset cursor can advance without
+// OFFSET. after nil starts at the lowest spelling (including the empty one);
+// otherwise the page starts strictly after the last spelling of the previous
+// page. The raw spelling is only a paging key: values() folds every page
+// through the proxy's canonicalization rules and merges counts before applying
+// the caller's limit, so a spelling that collapses into a returned canonical
+// name is never dropped by the page bound.
+//
+// The generic query route caps a result at storage_query_max_rows, which is a
+// deployment setting this client cannot read. A single unpaged SELECT DISTINCT
+// therefore turned a large vocabulary into HTTP 413. Each page here is well
+// below the default cap and the caller halves it when the proxy still answers
+// 413, so the generic cap bounds a page instead of making the dimension
+// unreadable.
+func modelPageStatement(after *string, limit int) string {
+	statement := "SELECT model AS value, COUNT(*) AS requests FROM requests"
+	if after != nil {
+		statement += " WHERE model > " + sqlString(*after)
+	}
+	return statement + " GROUP BY value ORDER BY value ASC LIMIT " + strconv.Itoa(limit)
+}
+
+// Model vocabulary bounds. These are internal safety limits, not configurable
+// values: the point is that one dimension whose spelling is attacker-controlled
+// cannot make the tool allocate or grind without bound. A page is folded and
+// discarded, so only canonical names and their counts are retained.
+const (
+	// modelValuesPageSize is the keyset page this tool asks for. It is far
+	// below the default storage_query_max_rows (10,000) and is halved on a 413
+	// so a stricter deployment still works.
+	modelValuesPageSize = 1000
+	// modelValuesMaxRawSpellings bounds the raw vocabulary the fold walks even
+	// when many spellings collapse into one canonical name. Without it, a
+	// hostile client could keep the pager busy with an unbounded number of
+	// spellings that all merge into a single returned value.
+	modelValuesMaxRawSpellings = 100_000
+	// modelValuesMaxCanonical bounds the merged working map and therefore the
+	// tool's memory. A vocabulary past it fails closed instead of returning a
+	// partial list, because a partial model vocabulary would silently turn a
+	// valid filter into an empty result.
+	modelValuesMaxCanonical = 20_000
+	// modelValuesMaxCanonicalBytes bounds the sum of the retained canonical
+	// spellings. The count cap alone still allows 20,000 very long names.
+	modelValuesMaxCanonicalBytes = 4 << 20
+)
+
 // probeableDimensions is the error message's vocabulary, in a stable order.
+// model is included even though it is not in valuesDimensions: it is still a
+// stored, filterable dimension, just one with a paged probe.
 func probeableDimensions() string {
-	return strings.Join(slices.Sorted(maps.Keys(valuesDimensions)), ", ")
+	dimensions := append(slices.Sorted(maps.Keys(valuesDimensions)), modelDimension)
+	slices.Sort(dimensions)
+	return strings.Join(dimensions, ", ")
 }
 
 // ValuesInput enumerates one dimension's vocabulary.
@@ -103,16 +151,16 @@ const valuesNote = "these are the values a dim:id filter must name exactly; an u
 // success from every scoped tool, so a model that guesses a value reports a
 // confident zero instead of a correctable error.
 func (s *Service) values(ctx context.Context, in ValuesInput) (*ValuesOutput, error) {
-	build, known := valuesDimensions[in.Dim]
-	if !known {
-		return nil, fmt.Errorf("dim %q is not probeable; use one of %s", in.Dim, probeableDimensions())
-	}
 	limit, err := resolveLimit("limit", in.Limit, s.limits.PageSize, 1, logPageMax)
 	if err != nil {
 		return nil, err
 	}
-	if in.Dim == "model" {
+	if in.Dim == modelDimension {
 		return s.modelValues(ctx, limit)
+	}
+	build, known := valuesDimensions[in.Dim]
+	if !known {
+		return nil, fmt.Errorf("dim %q is not probeable; use one of %s", in.Dim, probeableDimensions())
 	}
 	// One extra row is the exact truncation signal: a value exists beyond the
 	// cap, without guessing from a suspiciously full page.
@@ -136,33 +184,102 @@ func (s *Service) values(ctx context.Context, in ValuesInput) (*ValuesOutput, er
 // the same config.ApplyModelRules pipeline and merges the counts, so the
 // vocabulary returned is the vocabulary a filter accepts.
 //
-// Every distinct raw spelling is read, because the cap applies to the merged
-// canonical names: a raw-level LIMIT could drop spellings whose summed count
-// belongs in the returned page.
+// The raw vocabulary is read in bounded keyset pages. The cap applies to the
+// merged canonical names, so a raw-level page is not the result cap: every page
+// is folded and discarded, and a spelling that collapses into a returned
+// canonical name contributes its count no matter which page carried it. The
+// generic query route's storage_query_max_rows is therefore never asked to
+// return the whole raw vocabulary in one result.
+//
+// The pages are separate reads, so a write committed between them can race the
+// walk. That is acceptable for a discovery surface: a filter value is either
+// present in the history the walk observed or it is not, and the same
+// best-effort contract already applies to every other vocabulary probe.
 func (s *Service) modelValues(ctx context.Context, limit int) (*ValuesOutput, error) {
 	exec, err := s.client.modelRules(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("read the proxy's model canonicalization rules before enumerating models: %v", err)
 	}
-	rows, err := s.client.querySQL(ctx, valuesDimensions["model"](0))
-	if err != nil {
-		return nil, err
+	vocabulary := newModelVocabulary()
+	pageSize := modelValuesPageSize
+	var after *string
+	for {
+		page, err := s.client.querySQL(ctx, modelPageStatement(after, pageSize))
+		if err != nil {
+			// The proxy's row or byte cap is a deployment setting this client
+			// cannot read. A 413 means this page is too large; shrink it and
+			// retry the same cursor. One row per page is the floor: if even
+			// that is over a byte cap, report the failure instead of pretending
+			// the vocabulary is empty or complete.
+			if pageSize > 1 && queryPageTooLarge(err) {
+				pageSize /= 2
+				continue
+			}
+			return nil, fmt.Errorf("enumerate model spellings: %w", err)
+		}
+		for _, row := range page {
+			if err := vocabulary.add(rowString(row, "value"), rowInt64(row, "requests"), exec); err != nil {
+				return nil, err
+			}
+		}
+		if len(page) < pageSize {
+			break
+		}
+		last := rowString(page[len(page)-1], "value")
+		if after != nil && last == *after {
+			// A full page that ends on the cursor means the cursor did not
+			// advance. Refuse it instead of folding the same rows forever.
+			return nil, fmt.Errorf("model spelling page did not advance past %q", last)
+		}
+		after = &last
 	}
-	kept, truncation := clamp(foldModelValues(rows, exec), limit, "values", "raise limit, or ask query for a GROUP BY over the same column")
-	return &ValuesOutput{Dim: "model", Values: kept, Returned: len(kept), Truncation: truncation, Note: valuesNote}, nil
+	kept, truncation := clamp(vocabulary.values(), limit, "values", "raise limit, or ask query for a GROUP BY over the same column")
+	return &ValuesOutput{Dim: modelDimension, Values: kept, Returned: len(kept), Truncation: truncation, Note: modelValuesNote()}, nil
 }
 
-// foldModelValues folds each raw spelling through the compiled pipeline and
-// sums the counts of spellings that collapse into one canonical name, in the
-// same most-frequent-first order the SQL probes use.
-func foldModelValues(rows rows, exec []config.ModelRuleExec) []ValueCount {
-	counts := map[string]int64{}
-	for _, row := range rows {
-		canonical := config.ApplyModelRules(exec, rowString(row, "value"))
-		counts[canonical] += rowInt64(row, "requests")
+// modelVocabulary accumulates folded model counts across bounded raw pages.
+// Only canonical names and their counts are retained, so the working set is
+// bounded by the canonical vocabulary rather than by the raw spelling count.
+type modelVocabulary struct {
+	counts map[string]int64
+	bytes  int
+	raw    int
+}
+
+func newModelVocabulary() *modelVocabulary {
+	return &modelVocabulary{counts: make(map[string]int64)}
+}
+
+// add folds one raw spelling and merges its count. It fails closed at either
+// bound: a partial vocabulary would be indistinguishable from a complete one,
+// and a filter on a missing canonical name is an empty success.
+func (v *modelVocabulary) add(raw string, requests int64, exec []config.ModelRuleExec) error {
+	v.raw++
+	if v.raw > modelValuesMaxRawSpellings {
+		return fmt.Errorf("model vocabulary is too large to enumerate safely: more than %d distinct raw spellings; "+
+			"inspect raw spellings with query over a WHERE started_at range and GROUP BY model", modelValuesMaxRawSpellings)
 	}
-	out := make([]ValueCount, 0, len(counts))
-	for value, requests := range counts {
+	canonical := config.ApplyModelRules(exec, raw)
+	if _, seen := v.counts[canonical]; !seen {
+		if len(v.counts) >= modelValuesMaxCanonical {
+			return fmt.Errorf("model vocabulary is too large to enumerate safely: more than %d distinct canonical model names after model_rules; "+
+				"add model_rules that collapse more spellings, or inspect raw spellings with query over a WHERE started_at range and GROUP BY model", modelValuesMaxCanonical)
+		}
+		if v.bytes+len(canonical) > modelValuesMaxCanonicalBytes {
+			return fmt.Errorf("model vocabulary is too large to enumerate safely: canonical model names exceed the %d byte bound; "+
+				"add model_rules that collapse more spellings, or inspect raw spellings with query over a WHERE started_at range and GROUP BY model", modelValuesMaxCanonicalBytes)
+		}
+		v.bytes += len(canonical)
+	}
+	v.counts[canonical] += requests
+	return nil
+}
+
+// values extracts the folded counts in the same most-frequent-first order the
+// other probes use.
+func (v *modelVocabulary) values() []ValueCount {
+	out := make([]ValueCount, 0, len(v.counts))
+	for value, requests := range v.counts {
 		out = append(out, ValueCount{Value: value, Requests: requests})
 	}
 	slices.SortFunc(out, func(a, b ValueCount) int {
@@ -172,4 +289,21 @@ func foldModelValues(rows rows, exec []config.ModelRuleExec) []ValueCount {
 		return strings.Compare(a.Value, b.Value)
 	})
 	return out
+}
+
+// queryPageTooLarge reports the proxy's explicit result-size refusal. It is
+// kept here, next to the one caller that can react to it, instead of turning
+// every read error into a retry.
+func queryPageTooLarge(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusRequestEntityTooLarge
+}
+
+// modelValuesNote appends the model-only working bound to the shared note. The
+// bound is user-visible because a refusal is a contract: the tool must not look
+// like it returned a complete vocabulary when it stopped early.
+func modelValuesNote() string {
+	return valuesNote + fmt.Sprintf(" Model enumeration reads at most %d distinct raw spellings and folds them into at most %d canonical names (%d bytes); "+
+		"past either bound it fails explicitly instead of returning a partial vocabulary.",
+		modelValuesMaxRawSpellings, modelValuesMaxCanonical, modelValuesMaxCanonicalBytes)
 }
