@@ -2,7 +2,9 @@ name: Checks and images
 
 on:
   push:
-    # Docs-only pushes never cut a release or rebuild images.
+    # Docs-only pushes never cut a release or rebuild images. Their Markdown
+    # links, anchors and typography are validated by the unfiltered docs job in
+    # docs.yml instead of rebuilding this whole matrix.
     paths-ignore:
       - 'docs/**'
       - '**/*.md'

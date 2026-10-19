@@ -220,12 +220,13 @@ also in the tool descriptions, which is where a model reads them.
 
 Audit is the proxy's debug-capture subsystem.
 
-**Capture requires durable storage.** With `db_path` empty the proxy accepts a
-session, reports success, and stores nothing; every read-back is a 404.
-`audit_start` and `audit_captures_list` therefore check the storage signal first
-and refuse with that explanation, and `audit_status` reports it. Starting a
-session that can never capture would be a silent no-op, which is worse than a
-refusal.
+**Capture requires durable storage.** With `db_path` empty, `audit_start` is
+refused by the proxy with 503 `durable storage is disabled` and creates no
+session; every capture read-back is a 404 because no capture document can
+exist. `audit_start` and `audit_captures_list` therefore check the storage
+signal first and refuse with that explanation, and `audit_status` reports it.
+Starting a session that can never capture would be a silent no-op, which is
+worse than a refusal.
 
 **Scope is explicit.** An empty dimension matches anything; non-empty dimensions
 are AND-ed and names within one dimension are OR-ed. There is no unrestricted

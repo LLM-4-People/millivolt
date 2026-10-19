@@ -15,6 +15,24 @@ import tempfile
 
 from .support import ROOT, git_environment, require, source_inventory, test_layout_errors
 
+# Go's filename platform suffixes, from internal/syslist. A test ignored for any
+# other reason is a silent skip: it satisfies physical/native parity but never
+# runs, so the overlay rejects it instead of counting it as covered.
+PLATFORM_TAGS = frozenset("""
+    aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd
+    openbsd plan9 solaris wasip1 windows zos
+    386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64
+    mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x
+    sparc sparc64 wasm
+""".split())
+
+
+def platform_test_name(name):
+    """True when Go's platform suffix explains why it ignored this test file."""
+    stem = name[:-len("_test.go")] if name.endswith("_test.go") else name[:-len(".go")]
+    parts = stem.rsplit("_", 1)
+    return len(parts) == 2 and parts[1] in PLATFORM_TAGS
+
 
 def discover(root):
     root = Path(root).resolve(strict=True)
@@ -60,8 +78,11 @@ def overlay(root):
 def package_parity(replacements, document):
     """Every physical test must appear in Go's native package discovery.
 
-    IgnoredGoFiles accounts for legitimate platform/build-tag exclusions. No
-    second package registry or fixed test count can silently drift from Go.
+    IgnoredGoFiles is accepted only when a recognized GOOS or GOARCH filename
+    suffix explains the exclusion. Any other ignored test, such as a file behind
+    ``//go:build integration``, would satisfy parity while never running, so it
+    is a hard error. No second package registry or fixed test count can silently
+    drift from Go.
     """
     decoder = json.JSONDecoder()
     found = set()
@@ -77,6 +98,9 @@ def package_parity(replacements, document):
                 require(isinstance(name, str), "invalid Go test filename")
                 if name.endswith("_test.go"):
                     path = str(Path(package["Dir"]) / name)
+                    if field == "IgnoredGoFiles":
+                        require(platform_test_name(name),
+                                "Go ignored a test for a non-platform reason, so it never runs: " + path)
                     require(path not in found, "Go discovered a duplicate test: " + path)
                     found.add(path)
         document = document[end:].lstrip()

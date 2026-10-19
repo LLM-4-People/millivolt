@@ -326,7 +326,8 @@ type Config struct {
 	StorageQueryMaxBytes ByteSize      `yaml:"storage_query_max_bytes" json:"storage_query_max_bytes"` // ad-hoc SELECT JSON result budget; restart required
 	StorageQueryMaxRows  int           `yaml:"storage_query_max_rows" json:"storage_query_max_rows"`   // ad-hoc SELECT row budget; restart required
 	// BackupMaxBytes caps one Settings backup download or restore upload.
-	// The archive is buffered; this is the admit/reject ceiling, not a heap guarantee.
+	// Downloads and restores stream through private staging files; this is the
+	// admit/reject ceiling, not a heap guarantee.
 	BackupMaxBytes ByteSize `yaml:"backup_max_bytes" json:"backup_max_bytes"`
 
 	// ---- MCP endpoint ----

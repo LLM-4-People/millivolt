@@ -157,7 +157,8 @@ func BenchmarkOpenLegacyIndexBuild(b *testing.B) {
 
 // BenchmarkOpenTotals isolates the boot aggregate path: one durable meta row
 // versus the pre-cache full request scan on the same 50k-row database. File
-// materialization runs outside the timer.
+// materialization, including the rescan meta delete, runs outside the timer;
+// each measured iteration times Open only.
 func BenchmarkOpenTotals(b *testing.B) {
 	dir := b.TempDir()
 	seed := filepath.Join(dir, "seed.db")
@@ -203,6 +204,7 @@ func BenchmarkOpenTotals(b *testing.B) {
 		b.Run(mode, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
+				b.StopTimer()
 				path := filepath.Join(dir, fmt.Sprintf("%s-%d.db", mode, i))
 				copyFile(b, seed, path)
 				if mode == "rescan" {

@@ -311,7 +311,7 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Help: "Maximum rows returned by /metrics/query. Oversized results fail with HTTP 413; use SQL filters or LIMIT. Does not limit dashboard aggregates or exports. Restart required.",
 			Kind: KindInt, HotReload: false, Min: num(StorageQueryMaxRowsMin), Max: num(StorageQueryMaxRowsMax)},
 		{Key: "backup_max_bytes", Category: "backup", Label: "Backup size cap",
-			Help: "Maximum size of one Settings backup download or restore upload. Larger archives are refused. The archive is buffered in the process.",
+			Help: "Maximum size of one Settings backup download or restore upload. Larger archives are refused. Downloads and restores stream through private staging files; this is the admit/reject ceiling, not a heap guarantee.",
 			Kind: KindBytes, HotReload: true, Min: num(float64(BackupMaxBytesMin)), Max: num(float64(BackupMaxBytesMax))},
 
 		// ---- mcp ----

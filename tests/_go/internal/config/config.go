@@ -156,6 +156,43 @@ func TestProxyExampleMatchesExample(t *testing.T) {
 	}
 }
 
+// TestBackupHelpDescribesStreamingStaging pins the backup_max_bytes wording to
+// the archive implementation: downloads and restores stream through private
+// staging files. The old help claimed the archive was buffered in the process,
+// and byte equality alone cannot catch a stale but generated statement.
+func TestBackupHelpDescribesStreamingStaging(t *testing.T) {
+	field := FieldByKey("backup_max_bytes")
+	if field == nil {
+		t.Fatal("backup_max_bytes is missing from Schema()")
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "proxy.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	example := string(raw)
+	start := strings.Index(example, "# ---- Backup ----")
+	end := strings.Index(example, "# ---- MCP ----")
+	if start < 0 || end <= start {
+		t.Fatal("proxy.example.yaml must keep the Backup section before MCP")
+	}
+	for _, surface := range []struct{ name, text string }{
+		{"schema help", field.Help},
+		{"proxy.example.yaml Backup section", example[start:end]},
+	} {
+		normalized := strings.Join(strings.Fields(surface.text), " ")
+		for _, needle := range []string{"stream", "staging"} {
+			if !strings.Contains(normalized, needle) {
+				t.Errorf("%s must state %q: %q", surface.name, needle, normalized)
+			}
+		}
+		for _, stale := range []string{"buffered in the process", "archive is buffered"} {
+			if strings.Contains(normalized, stale) {
+				t.Errorf("%s still claims %q: %q", surface.name, stale, normalized)
+			}
+		}
+	}
+}
+
 func TestExampleProfilesAreIsolated(t *testing.T) {
 	example, pristine, defaults := Example(), Example(), Default()
 	if err := example.Validate(); err != nil {

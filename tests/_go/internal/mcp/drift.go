@@ -263,6 +263,27 @@ func TestSnapshotCapNamesBothStorageBranches(t *testing.T) {
 		}
 	}
 
+	// The guide's hand-written snapshot row is a duplicated reference fact:
+	// extract its formula and compare it with the owner, so a doc-only edit to
+	// a different multiplier fails here.
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	row := regexp.MustCompile(`(?m)^\| ` + "`snapshot`" + ` \| (.+) \|$`).FindStringSubmatch(string(guide))
+	if row == nil {
+		t.Fatal("docs/mcp.md must keep the snapshot tool row")
+	}
+	rowFormula := regexp.MustCompile("capped at `([0-9]+) \\* dash_log_rows`").FindStringSubmatch(row[1])
+	if rowFormula == nil {
+		t.Fatalf("the docs/mcp.md snapshot row must state the cap formula: %q", row[1])
+	}
+	if rowFormula[1] != strconv.Itoa(web.BootRingCapMul) {
+		t.Fatalf("the docs/mcp.md snapshot row states %s * dash_log_rows, the owner is %d (internal/web BootRingCapMul)",
+			rowFormula[1], web.BootRingCapMul)
+	}
+	assertBranches("the guide row", row[1])
+
 	proxy := newFakeProxy(t)
 	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
 	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
@@ -286,6 +307,35 @@ func TestSnapshotCapNamesBothStorageBranches(t *testing.T) {
 		return
 	}
 	t.Fatal("the snapshot tool is not registered")
+}
+
+// TestAuditGuideRequiresDurableStorage pins the storage-off capture contract:
+// the proxy answers 503 and creates no session. The old guide claimed the
+// session started and stored nothing, which contradicted the proxy and the
+// operations guide.
+func TestAuditGuideRequiresDurableStorage(t *testing.T) {
+	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
+	if err != nil {
+		t.Fatalf("read the MCP guide: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(guide)), " ")
+	for _, needle := range []string{
+		"With `db_path` empty, `audit_start` is refused by the proxy with 503 `durable storage is disabled` and creates no session",
+		"every capture read-back is a 404",
+	} {
+		if !strings.Contains(text, needle) {
+			t.Fatalf("docs/mcp.md must state %q", needle)
+		}
+	}
+	for _, stale := range []string{
+		"accepts a session",
+		"reports success, and stores nothing",
+		"sessions start and nothing is ever stored",
+	} {
+		if strings.Contains(text, stale) {
+			t.Fatalf("docs/mcp.md still claims %q; the proxy returns 503 and creates no session", stale)
+		}
+	}
 }
 
 // TestPurgePhraseHasOneOwner pins the confirmation phrase to PurgeConfirmation:

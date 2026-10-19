@@ -922,14 +922,14 @@ func fullSnapshot(t *testing.T, b *metrics.Buffer) livePayload {
 // reload-path bug: reloadConfig re-applied the full-snapshot cap gated only
 // on the buffer (always non-nil), never on store presence - so an
 // in-memory-only instance (db_path empty / -db-path none) got its full
-// snapshots capped to 8×dash_log_rows on the FIRST reload while the ring
-// held history_size records, and the /metrics/agg/log paging fallback is
-// dead without a store: older rows became unreachable until restart. The
-// gate must mirror boot: capped only when durable storage is on, unlimited
-// otherwise (then the ring IS all history); a delta is never capped.
+// snapshots capped to web.BootRingCapMul × dash_log_rows on the FIRST reload
+// while the ring held history_size records, and the /metrics/agg/log paging
+// fallback is dead without a store: older rows became unreachable until
+// restart. The gate must mirror boot: capped only when durable storage is on,
+// unlimited otherwise (then the ring IS all history); a delta is never capped.
 func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
-	const rows = 1                         // smallest band value; 8×rows cap
-	const capN = web.BootRingCapMul * rows // 8
+	const rows = 1                         // smallest band value; cap is BootRingCapMul * rows
+	const capN = web.BootRingCapMul * rows // derived cap owned by internal/web
 	const total = capN + 2                 // strictly more than the cap
 
 	b := metrics.NewBuffer(total)

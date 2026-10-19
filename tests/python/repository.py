@@ -27,27 +27,51 @@ class RepositoryChecks(unittest.TestCase):
                 self.assertEqual(check.test_layout_errors([name]),
                                  ["physical test filename must omit _test suffix: " + name])
 
-    def test_markdown_targets_and_scope(self):
+    def test_markdown_targets_anchors_and_scope(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             (root / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
             (root / "docs").mkdir()
             (root / "node_modules").mkdir()
-            (root / "docs" / "existing file.md").write_text("# Existing\n", encoding="utf-8")
+            (root / "docs" / "existing file.md").write_text(
+                "# Existing\n\n## Notes\n\n## Notes\n\n## What's new?\n\n"
+                '<a id="explicit-anchor"></a>\n<span name="legacy-anchor"></span>\n',
+                encoding="utf-8")
             (root / "node_modules" / "README.md").write_text("[ignored](absent)", encoding="utf-8")
             fence = chr(96) * 3
             (root / "README.md").write_text(
-                "[good](docs/existing%20file.md#heading)\n"
+                "# Readme\n\n"
+                "[good](docs/existing%20file.md#existing)\n"
+                "[cross-document anchor](docs/existing%20file.md#existing)\n"
                 "[external](https://example.invalid/no-network)\n"
                 "[mail](mailto:operator@example.invalid)\n"
-                "[local anchor](#heading)\n"
-                + fence + "\n[example](absent-example)\n" + fence + "\n"
+                "[local anchor](#readme)\n"
+                "[duplicate heading](docs/existing%20file.md#notes)\n"
+                "[duplicate suffix](docs/existing%20file.md#notes-1)\n"
+                "[punctuation](docs/existing%20file.md#whats-new)\n"
+                "[explicit](docs/existing%20file.md#explicit-anchor)\n"
+                "[explicit name](docs/existing%20file.md#legacy-anchor)\n"
+                + fence + "\n[example](absent-example)\n[example anchor](#absent-anchor)\n" + fence + "\n"
                 "[reference]: <docs/existing file.md>\n", encoding="utf-8",
             )
             self.assertEqual(check.markdown_errors(root), [])
-            (root / "docs" / "bad.md").write_text("[broken](missing.md)\n", encoding="utf-8")
-            self.assertEqual(check.markdown_errors(root),
-                             ["docs/bad.md:1: missing local link missing.md"])
+            (root / "README.md").write_text(
+                "# Readme\n\n"
+                "[broken](missing.md)\n[broken anchor](#missing-heading)\n"
+                "[wrong duplicate](docs/existing%20file.md#notes-2)\n", encoding="utf-8")
+            self.assertEqual(check.markdown_errors(root), [
+                "README.md:3: missing local link missing.md",
+                "README.md:4: missing local anchor #missing-heading",
+                "README.md:5: missing local anchor docs/existing%20file.md#notes-2",
+            ])
+            (root / "docs" / "bad.md").write_text(
+                "[broken anchor](existing%20file.md#missing-heading)\n", encoding="utf-8")
+            self.assertEqual(check.markdown_errors(root), [
+                "README.md:3: missing local link missing.md",
+                "README.md:4: missing local anchor #missing-heading",
+                "README.md:5: missing local anchor docs/existing%20file.md#notes-2",
+                "docs/bad.md:1: missing local anchor existing%20file.md#missing-heading",
+            ])
 
     def test_markdown_escape_is_not_portable(self):
         with tempfile.TemporaryDirectory() as temp:

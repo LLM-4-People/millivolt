@@ -92,9 +92,21 @@ func TestPrivate(t *testing.T) {
         with self.assertRaisesRegex(RuntimeError, "symlink"):
             runner.discover(self.root)
 
-    def test_package_parity_includes_platform_exclusions(self):
+    def test_package_parity_accepts_only_platform_exclusions(self):
         runner.package_parity(self.mapping, self.metadata())
-        runner.package_parity(self.mapping, self.metadata().replace("TestGoFiles", "IgnoredGoFiles"))
+        platform = {
+            str(self.root / "value_windows_test.go"): str(self.tests / "value_windows.go"),
+            str(self.root / "value_linux_amd64_test.go"): str(self.tests / "value_linux_amd64.go"),
+        }
+        runner.package_parity(platform, json.dumps({
+            "Dir": str(self.root),
+            "IgnoredGoFiles": ["value_windows_test.go", "value_linux_amd64_test.go"],
+        }))
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(self.mapping, self.metadata().replace("TestGoFiles", "IgnoredGoFiles"))
+        with self.assertRaisesRegex(RuntimeError, "never run"):
+            runner.package_parity(self.mapping, json.dumps(
+                {"Dir": str(self.root), "IgnoredGoFiles": ["value_integration_test.go"]}))
         for invalid in ("", "null", "[]", "{}", self.metadata() + self.metadata(),
                         self.metadata().replace("value_test.go", "other_test.go")):
             with self.subTest(document=invalid), self.assertRaises((RuntimeError, ValueError)):
@@ -167,6 +179,17 @@ func TestExternal(t *testing.T) {}
             self.assertEqual(runner.run(["test", "-count=1", "./..."], self.root), 0)
             self.assertEqual(runner.run(["vet", "./..."], self.root), 0)
             self.assertEqual(runner.run(["mod", "tidy", "-diff"], self.root), 0)
+
+    @unittest.skipUnless(shutil.which("go"), "Go is required for native overlay integration")
+    def test_build_tag_ignored_test_fails_instead_of_passing_parity(self):
+        # A build tag that excludes the file on every platform would otherwise
+        # satisfy physical/native package parity while never running a test.
+        (self.tests / "integration.go").write_text(
+            '//go:build integration\n\npackage fixture\n\nimport "testing"\n\nfunc TestIntegration(t *testing.T) {}\n',
+            encoding="utf-8")
+        with patch.dict(os.environ, {"GOFLAGS": "", "GOPROXY": "off", "GOSUMDB": "off"}):
+            with self.assertRaisesRegex(RuntimeError, "never run"):
+                runner.run(["test", "-count=1", "./..."], self.root)
 
 
 if __name__ == "__main__":

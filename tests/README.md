@@ -30,12 +30,16 @@ virtual suffix through a temporary native `-overlay` manifest. It changes no pro
 exports no private APIs, and uses the root `go.mod` and `go.sum` only.
 
 The runner checks physical-file/native-package discovery parity, rejects
-misplaced, ignored, duplicate and symlinked tests, and removes its private
-manifest on success or failure. The `_go` directory is intentionally excluded
-from Go's normal recursive package walk. New Go tests and their helpers use
-ordinary `.go` filenames inside the mirrored tree. Platform filename suffixes
-and build tags retain their native Go meaning; `_test` exists only in the
-temporary virtual filenames.
+misplaced, duplicate and symlinked tests, and removes its private manifest on
+success or failure. The `_go` directory is intentionally excluded from Go's
+normal recursive package walk. It also fails when Go ignores a test for any
+reason other than a recognized GOOS or GOARCH filename suffix. A
+`//go:build integration` file is therefore a hard error rather than a silently
+unrun test. New Go tests and their helpers use ordinary `.go` filenames inside
+the mirrored tree. Platform filename suffixes retain their native Go meaning.
+Build constraints still apply inside files Go does compile, but one that
+excludes a test entirely is rejected as a silent skip; `_test` exists only in
+the temporary virtual filenames.
 
 Package-private access, source-package working directories, benchmarks, fuzz
 tests and race detection are retained. Runtime file reads do not see virtual
