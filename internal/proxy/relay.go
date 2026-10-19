@@ -236,6 +236,20 @@ func chatRequestBody(b []byte) bool {
 		bytes.Contains(b, []byte(`"prompt"`))
 }
 
+// qualitySpoolReadCap is the most one spool attempt can hold: the kept body
+// cap plus the single overflowing read chunk. The overflowing chunk is
+// retained so the verbatim streaming passthrough loses no byte, so the
+// reservation that bounds the spool must cover it too.
+const qualitySpoolReadCap = qualitySpoolMax + nonStreamChunk
+
+// qualitySpoolReserve is the respBudget reservation for one spool attempt:
+// the declared Content-Length when the body fits the spool, otherwise the
+// full bounded read cap. It sits next to spoolBody so the reservation always
+// describes the buffer it protects.
+func qualitySpoolReserve(contentLength int64) int64 {
+	return responseReadReserve(contentLength, qualitySpoolReadCap)
+}
+
 // spoolBody drains body up to qualitySpoolMax (plus one chunk) before
 // returning. overflow=true when the cap was hit - the body is certainly not a
 // degenerate shell and the caller commits to verbatim relay. err is the
@@ -453,15 +467,31 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 
-		// Spool the whole 2xx body before writing anything.
+		// Spool the whole 2xx body before writing anything. The spool holds
+		// the document in memory, so it takes the same process-wide
+		// whole-document reservation as translation and discovery; otherwise
+		// concurrent spools could multiply the budget. The reservation is
+		// released once this attempt is classified and written, or abandoned
+		// for a retry, before any re-send can spool again. The translated
+		// branch above returns before this point, so the two never stack on
+		// one attempt.
+		reserve := qualitySpoolReserve(resp.ContentLength)
+		if !s.respBudget.acquire(reserve) {
+			writeResponseBufferBudget(w, rec)
+			return
+		}
 		spooled, over, spoolErr := spoolBody(resp.Body)
 		if over {
+			// Past the cap the body streams through; only the bounded prefix
+			// was buffered, so the whole-document reservation ends here.
+			s.respBudget.release(reserve)
 			copyResponseHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			s.nonStreamBody(ctx, w, io.MultiReader(bytes.NewReader(spooled), resp.Body), rec)
 			return
 		}
 		if spoolErr != nil && spoolErr != io.EOF {
+			s.respBudget.release(reserve)
 			if ctx.Err() == context.Canceled {
 				markClientGone(rec)
 				resp.Body.Close()
@@ -512,6 +542,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					At:         time.Now(),
 				}
 				captureUpstreamMeta(&at, resp, t.authHeader)
+				s.respBudget.release(reserve)
 				next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
 				if !ok {
 					return
@@ -525,6 +556,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				continue
 			}
 			s.commitSpooledBody(w, resp, spooled, rec, analysis)
+			s.respBudget.release(reserve)
 			return
 		}
 
@@ -564,6 +596,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					at.ErrorCode = code
 				}
 				captureUpstreamMeta(&at, resp, t.authHeader)
+				s.respBudget.release(reserve)
 				next, nextCancel, ok := s.absorbResend(ctx, w, r, t, key, body, rec, groupKey, hooks, at, resp)
 				if !ok {
 					return
@@ -592,11 +625,13 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			rec.ErrorMsg = metrics.DegenerateMessage(code)
 			rec.StatusCode = http.StatusBadGateway
 			http.Error(w, errJSONCode(typeAPIError, metrics.DegenerateMessage(code), code), http.StatusBadGateway)
+			s.respBudget.release(reserve)
 			return
 		}
 
 		// Healthy: commit the spooled body verbatim.
 		s.commitSpooledBody(w, resp, spooled, rec, analysis)
+		s.respBudget.release(reserve)
 		return
 	}
 }

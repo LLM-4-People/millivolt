@@ -11,7 +11,9 @@ const sseKeepaliveComment = ": keepalive\n\n"
 
 // sseWriteProgressDeadline bounds one client-facing stream write; a stalled
 // reader fails the write and releases the pacer instead of pinning shutdown.
-const sseWriteProgressDeadline = time.Minute
+// A package variable is the deterministic test seam; production never changes
+// it.
+var sseWriteProgressDeadline = time.Minute
 
 // sseKeepaliveInterval is how often a quiet SSE socket gets a comment.
 // Chat Completions is data-only SSE: spec-compliant clients (including the
@@ -89,8 +91,16 @@ func (p *ssePacer) Write(b []byte) (int, error) {
 		p.commitSSELocked()
 	}
 	p.lastWrite = time.Now()
-	// Bound one SSE write: a client that stops reading must not pin the
-	// handler (and Stop) inside the network write forever. Re-armed per write.
+	return p.writeSSELocked(b)
+}
+
+// writeSSELocked is the one owner of a client-facing stream write: it re-arms
+// the short progress bound immediately before every event or keepalive frame,
+// so a quiet long-lived stream never inherits the deadline armed by an earlier
+// frame. Callers hold p.mu.
+func (p *ssePacer) writeSSELocked(b []byte) (int, error) {
+	// A client that stops reading must not pin the handler (and Stop) inside
+	// the network write forever. Re-armed per write, including keepalives.
 	_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(sseWriteProgressDeadline))
 	return p.w.Write(b)
 }
@@ -209,7 +219,7 @@ func (p *ssePacer) writeComment(force bool) bool {
 	if !force && time.Since(p.lastWrite) < p.interval {
 		return true
 	}
-	if _, err := io.WriteString(p.w, sseKeepaliveComment); err != nil {
+	if _, err := p.writeSSELocked([]byte(sseKeepaliveComment)); err != nil {
 		return false
 	}
 	p.lastWrite = time.Now()
