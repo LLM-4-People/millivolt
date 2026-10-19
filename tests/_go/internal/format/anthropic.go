@@ -45,6 +45,39 @@ func TestTranslateRequestBasic(t *testing.T) {
 	}
 }
 
+func TestTranslateRequestContentArraysAndToolDefaults(t *testing.T) {
+	in := `{"model":"m","messages":[
+		{"role":"system","content":[{"type":"text","text":"be nice"},{"type":"image"}]},
+		{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"noargs","arguments":""}}]},
+		{"role":"tool","tool_call_id":"c1","content":[{"type":"text","text":"result"}]}
+	],"tools":[{"type":"function","function":{"name":"noargs","description":"d"}}]}`
+	out, err := TranslateRequest([]byte(in), 4096, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["system"] != "be nice" {
+		t.Fatalf("array system = %v, want be nice", got["system"])
+	}
+	msgs := got["messages"].([]any)
+	assistant := msgs[0].(map[string]any)
+	block := assistant["content"].([]any)[0].(map[string]any)
+	if input, ok := block["input"].(map[string]any); !ok || len(input) != 0 {
+		t.Fatalf("empty tool arguments input = %#v, want {}", block["input"])
+	}
+	toolResult := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if toolResult["content"] != "result" {
+		t.Fatalf("array tool result = %#v, want result", toolResult["content"])
+	}
+	tool := got["tools"].([]any)[0].(map[string]any)
+	if schema, ok := tool["input_schema"].(map[string]any); !ok || len(schema) != 0 {
+		t.Fatalf("omitted parameters schema = %#v, want {}", tool["input_schema"])
+	}
+}
+
 func TestTranslateRequestToolCalls(t *testing.T) {
 	in := `{"model":"m","messages":[
 		{"role":"user","content":"weather?"},

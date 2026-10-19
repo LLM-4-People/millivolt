@@ -111,7 +111,7 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey st
 	for _, m := range in.Messages {
 		// Extract system messages into the top-level system field.
 		if m.Role == "system" || m.Role == "developer" {
-			if s, ok := m.ContentString(); ok {
+			if s, ok := m.ContentText(); ok {
 				if system.Len() > 0 {
 					system.WriteString("\n\n")
 				}
@@ -213,6 +213,35 @@ func (m openaiMessage) ContentString() (string, bool) {
 	return "", false
 }
 
+// ContentText accepts both the string form and the OpenAI content-array form,
+// joining text parts in order. Other part types are ignored rather than
+// stringified; callers that require structured content use the raw message.
+func (m openaiMessage) ContentText() (string, bool) {
+	if s, ok := m.ContentString(); ok {
+		return s, true
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(m.Content, &parts); err != nil {
+		return "", false
+	}
+	var b strings.Builder
+	for _, part := range parts {
+		if part.Type == "text" && part.Text != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n\n")
+			}
+			b.WriteString(part.Text)
+		}
+	}
+	if b.Len() == 0 {
+		return "", false
+	}
+	return b.String(), true
+}
+
 func (m openaiMessage) toAnthropic() (anthropicMessage, error) {
 	switch m.Role {
 	case "user":
@@ -227,11 +256,18 @@ func (m openaiMessage) toAnthropic() (anthropicMessage, error) {
 				blocks = append(blocks, map[string]any{"type": "text", "text": s})
 			}
 			for _, tc := range m.ToolCalls {
+				args := strings.TrimSpace(tc.Function.Arguments)
+				if args == "" || args == "null" {
+					args = "{}"
+				}
+				if !json.Valid([]byte(args)) {
+					return anthropicMessage{}, errParseOpenAIBody(errors.New("tool call arguments must be valid JSON"))
+				}
 				blocks = append(blocks, map[string]any{
 					"type":  "tool_use",
 					"id":    tc.ID,
 					"name":  tc.Function.Name,
-					"input": json.RawMessage(tc.Function.Arguments),
+					"input": json.RawMessage(args),
 				})
 			}
 			return anthropicMessage{Role: "assistant", Content: blocks}, nil
@@ -239,10 +275,7 @@ func (m openaiMessage) toAnthropic() (anthropicMessage, error) {
 		return anthropicMessage{Role: "assistant", Content: rawOrString(m.Content)}, nil
 	case "tool", "function":
 		// A tool result becomes a user message with a tool_result block.
-		var s string
-		if err := json.Unmarshal(m.Content, &s); err != nil {
-			s = string(m.Content)
-		}
+		s, _ := m.ContentText()
 		block := map[string]any{
 			"type":        "tool_result",
 			"tool_use_id": m.ToolCallID,
@@ -263,10 +296,14 @@ func rawOrString(raw json.RawMessage) any {
 }
 
 func (t openaiTool) toAnthropic() anthropicTool {
+	schema := t.Function.Parameters
+	if len(schema) == 0 || string(schema) == "null" {
+		schema = json.RawMessage(`{}`)
+	}
 	return anthropicTool{
 		Name:        t.Function.Name,
 		Description: t.Function.Description,
-		InputSchema: t.Function.Parameters,
+		InputSchema: schema,
 	}
 }
 
