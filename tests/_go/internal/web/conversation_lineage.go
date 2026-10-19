@@ -65,6 +65,52 @@ func TestConversationLineageResolution(t *testing.T) {
 	}
 }
 
+func TestConversationLineageGroupLookupMatchesResolvedGroups(t *testing.T) {
+	rows := []contrib{
+		lineageRow("s:parent", ""),
+		lineageRow("s:child", "s:parent"),
+		lineageRow("s:orphan", "s:missing"),
+	}
+	for seed := range int64(8) {
+		var l conversationLineage
+		for _, i := range rand.New(rand.NewSource(seed)).Perm(len(rows)) {
+			l.observe(&rows[i], true, true)
+		}
+		_, groups := l.resolve()
+		for name, want := range groups {
+			got := l.group(name)
+			if got.lineage != &l || got.index != want.index {
+				t.Fatalf("seed=%d name=%q lookup=%+v want index %d", seed, name, got, want.index)
+			}
+			if !reflect.DeepEqual(l.info(got), l.info(want)) {
+				t.Fatalf("seed=%d name=%q metadata differs", seed, name)
+			}
+		}
+		if got := l.group("s:missing"); got.lineage != nil {
+			t.Fatalf("seed=%d missing name resolved to %+v", seed, got)
+		}
+	}
+}
+
+func TestConversationLineageConversationIDMatchesDictionary(t *testing.T) {
+	var base dimensionDictionary
+	base.intern("base-a")
+	base.intern("base-b")
+	q := queryDimensions{}
+	q.base[dimConversation] = base
+	for _, name := range []string{"base-a", "base-b", "extra-a"} {
+		id := q.intern(dimConversation, name)
+		l := conversationLineage{names: &q}
+		if got := l.conversationID(q.name(dimConversation, id)); got != id {
+			t.Fatalf("name %q id %d round-tripped as %d", name, id, got)
+		}
+	}
+	l := conversationLineage{names: &q}
+	if got := l.conversationID("missing"); got != 0 {
+		t.Fatalf("missing name resolved to id %d", got)
+	}
+}
+
 func TestConversationLineageNamespaceAndPivots(t *testing.T) {
 	for _, missingKind := range []string{"different key", "different client", "same scope", "keyless"} {
 		t.Run(missingKind, func(t *testing.T) {

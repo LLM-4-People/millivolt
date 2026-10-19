@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"runtime"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -652,6 +654,209 @@ func TestExplorerSelectedVisitorSingleValued(t *testing.T) {
 		if !slices.Equal(got, want) {
 			t.Fatalf("row %d buckets = %v, want %v", row, got, want)
 		}
+	}
+}
+
+// explorerDistinctNames builds zero-padded names so lexical tie-breaking in
+// the card ranking matches numeric fixture order.
+func explorerDistinctNames(prefix string, count int) []string {
+	names := make([]string, count)
+	for i := range names {
+		names[i] = fmt.Sprintf("%s-%07d", prefix, i)
+	}
+	return names
+}
+
+func explorerDistinctDictionary(names []string) dimensionDictionary {
+	d := dimensionDictionary{
+		names:  make([]string, len(names)+1),
+		ids:    make(map[string]uint32, len(names)),
+		counts: make([]int, len(names)+1),
+	}
+	for i, name := range names {
+		id := uint32(i + 1)
+		d.names[id] = name
+		d.ids[name] = id
+		d.counts[id] = 1
+	}
+	return d
+}
+
+// explorerDistinctConversationFold mirrors a prepared projection whose
+// dictionary and resolved lineage already own one entry per history value.
+// The fold itself must not allocate another per-value structure.
+func explorerDistinctConversationFold(names []string) *explorerFold {
+	p := &projectionData{}
+	p.dimensions.dict[dimConversation] = explorerDistinctDictionary(names)
+	p.lineage.nodes = make([]conversationNode, len(names))
+	p.lineage.groups = make([]conversationGroupNode, len(names))
+	p.lineage.groupIndex = make(map[uint32]uint32, len(names))
+	p.lineage.rowNodes = make([]uint32, len(names))
+	for i := range names {
+		id := uint32(i + 1)
+		p.lineage.nodes[i] = conversationNode{identity: conversationKey{id: id}, group: uint32(i)}
+		p.lineage.groups[i] = conversationGroupNode{conv: id, node: uint32(i)}
+		p.lineage.groupIndex[id] = uint32(i)
+		p.lineage.rowNodes[i] = uint32(i + 1)
+	}
+	f := newExplorerFold("conversation", "", nil)
+	f.prepare(p, nil)
+	f.rowCount = len(names)
+	return f
+}
+
+func explorerDistinctErrorFold(names []string) *explorerFold {
+	p := &projectionData{}
+	p.dimensions.dict[dimError] = explorerDistinctDictionary(names)
+	f := newExplorerFold("error", "", nil)
+	f.prepare(p, nil)
+	f.rowCount = len(names)
+	return f
+}
+
+// explorerFoldAllocatedBytes reports TotalAlloc for one synchronous fold. The
+// fixture is built before this call, so the bound covers the fold and payload
+// work that attacker-controlled distinct values could amplify.
+func explorerFoldAllocatedBytes(fn func()) uint64 {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestExplorerDistinctGroupsStayBounded pins the explorer's internal group
+// budget at one million distinct values. Exact per-value accumulators stop at
+// explorerGroupBudget and the remainder folds into the synthetic other card,
+// so neither the error affected-ID maps nor the conversation payload map
+// scales with history cardinality. The top cards and scope/rail totals remain
+// exact and the completed payload is stable across calls.
+func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
+	const distinct = 1_000_000
+	const maxAlloc = 64 << 20
+	names := map[string][]string{
+		"conversation": explorerDistinctNames("conv", distinct),
+		"error":        explorerDistinctNames("err", distinct),
+	}
+	rowIDs := make([]string, distinct)
+	for i := range rowIDs {
+		rowIDs[i] = strconv.Itoa(i)
+	}
+	for _, dim := range []string{"conversation", "error"} {
+		t.Run(dim, func(t *testing.T) {
+			values := names[dim]
+			var f *explorerFold
+			if dim == "conversation" {
+				f = explorerDistinctConversationFold(values)
+			} else {
+				f = explorerDistinctErrorFold(values)
+			}
+			errorIDs := make([]uint32, 1)
+			ent := []errEnt{{typ: "failure", code: "500"}}
+			var got explorerPayload
+			allocated := explorerFoldAllocatedBytes(func() {
+				for i := range values {
+					c := contrib{id: rowIDs[i], rowIndex: uint32(i + 1), start: int64(i), status: 200}
+					if dim == "conversation" {
+						c.conv = values[i]
+					} else {
+						errorIDs[0] = uint32(i + 1)
+						c.status, c.isErr = 500, true
+						c.errorIDs, c.ent = errorIDs, ent
+					}
+					if err := f.fold(&c); err != nil {
+						t.Fatal(err)
+					}
+				}
+				got = f.payload()
+			})
+			if allocated > maxAlloc {
+				t.Fatalf("%s distinct fold allocated %.1f MiB, want at most %d MiB", dim,
+					float64(allocated)/(1<<20), maxAlloc>>20)
+			}
+			if tracked := len(f.groups); tracked != explorerGroupBudget {
+				t.Fatalf("%s tracked groups = %d, want the %d-group budget", dim, tracked, explorerGroupBudget)
+			}
+			overflow := distinct - explorerGroupBudget
+			if len(got.Groups) != xpNodeCap || got.Groups[0].Name != explorerOtherName || got.Groups[0].N != int64(overflow) {
+				t.Fatalf("%s overflow card = %+v (cards %d), want %q N=%d", dim, got.Groups[0], len(got.Groups), explorerOtherName, overflow)
+			}
+			if dim == "error" && got.Groups[0].ErrEvents != int64(overflow) {
+				t.Fatalf("error overflow occurrences = %d, want %d", got.Groups[0].ErrEvents, overflow)
+			}
+			if got.Total != distinct || got.Scope.Matches != distinct || got.Rail[dim] != distinct {
+				t.Fatalf("%s totals = total %d scope %+v rail %d, want %d", dim, got.Total, got.Scope, got.Rail[dim], distinct)
+			}
+			if dim == "error" && (got.ErrorTot != distinct || got.Scope.Errors != distinct || got.Groups[0].ErrFinal != int64(overflow)) {
+				t.Fatalf("error health totals = scope %+v card %+v", got.Scope, got.Groups[0])
+			}
+			// The synthetic card leads, followed by the exact lexical top of
+			// the tracked set. No untracked value can displace a tracked card.
+			for i := 1; i < xpNodeCap; i++ {
+				if got.Groups[i].Name != values[i-1] || got.Groups[i].N != 1 {
+					t.Fatalf("%s card %d = %q N=%d, want %q N=1", dim, i, got.Groups[i].Name, got.Groups[i].N, values[i-1])
+				}
+				if dim == "conversation" && (got.Groups[i].Conversation == nil || got.Groups[i].Conversation.Role != conversationMain) {
+					t.Fatalf("conversation card %d lost lineage: %+v", i, got.Groups[i].Conversation)
+				}
+			}
+			if again := f.payload(); !reflect.DeepEqual(got, again) {
+				t.Fatalf("%s payload differs across calls", dim)
+			}
+			t.Logf("%s: %d distinct values -> %d tracked, %d overflow, %.1f MiB allocated", dim,
+				distinct, len(f.groups), overflow, float64(allocated)/(1<<20))
+		})
+	}
+}
+
+// TestExplorerGroupBudgetExceedsNodeCap keeps the bounded top-card ranking
+// meaningful: an overflow bucket only ever aggregates values that could not
+// have appeared as cards themselves. It also pins the budget published in
+// docs/operations.md so that contract and the owner cannot drift apart.
+func TestExplorerGroupBudgetExceedsNodeCap(t *testing.T) {
+	if explorerGroupBudget < xpNodeCap {
+		t.Fatalf("explorerGroupBudget = %d, want at least xpNodeCap %d", explorerGroupBudget, xpNodeCap)
+	}
+	if explorerGroupBudget != 8192 {
+		t.Fatalf("explorerGroupBudget = %d, want the 8192 documented in docs/operations.md", explorerGroupBudget)
+	}
+}
+
+// TestExplorerOverflowAffectedRequests pins the overflow bucket's health
+// semantics: error occurrences still count individually, while N and ErrFinal
+// count affected requests, including when one request contributes several
+// overflow errors.
+func TestExplorerOverflowAffectedRequests(t *testing.T) {
+	f := newExplorerFold("error", "", nil)
+	for i := range explorerGroupBudget {
+		c := contrib{id: fmt.Sprintf("tracked-%d", i), status: 500, isErr: true,
+			ent: []errEnt{{typ: fmt.Sprintf("tracked-%d", i), code: "500"}}}
+		if err := f.fold(&c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if f.overflow || len(f.groups) != explorerGroupBudget {
+		t.Fatalf("exact budget = %d groups, overflow=%v", len(f.groups), f.overflow)
+	}
+	first := contrib{id: "overflow-1", status: 500, isErr: true,
+		ent: []errEnt{{typ: "extra-a", code: "500"}, {typ: "extra-b", code: "500"}, {typ: "extra-a", code: "500"}}}
+	second := contrib{id: "overflow-2", status: 500, isErr: true,
+		ent: []errEnt{{typ: "extra-a", code: "500"}}}
+	for _, c := range []*contrib{&first, &second} {
+		if err := f.fold(c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !f.overflow || len(f.groups) != explorerGroupBudget {
+		t.Fatalf("overflow = %v with %d tracked groups", f.overflow, len(f.groups))
+	}
+	if f.other.n != 4 || f.otherAffected != 2 || f.other.errFin != 2 || f.other.code != "" {
+		t.Fatalf("overflow accumulator = %+v (affected %d)", f.other, f.otherAffected)
+	}
+	card := f.payload().Groups[0]
+	if card.Name != explorerOtherName || card.N != 2 || card.ErrEvents != 4 || card.ErrFinal != 2 || card.Code != "" {
+		t.Fatalf("overflow card = %+v", card)
 	}
 }
 

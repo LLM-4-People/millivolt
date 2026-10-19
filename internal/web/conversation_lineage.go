@@ -691,6 +691,52 @@ func (l *conversationLineage) groups() map[string]conversationGroup {
 	return groups
 }
 
+// group resolves one selected card's public conversation name to its in-scope
+// group without materializing every group in the request. Explorer payloads
+// therefore allocate metadata only for their bounded top cards.
+func (l *conversationLineage) group(name string) conversationGroup {
+	l.solve()
+	if l.names == nil {
+		return conversationGroup{}
+	}
+	conv := l.conversationID(name)
+	if conv == 0 {
+		return conversationGroup{}
+	}
+	var index uint32
+	var ok bool
+	if l.base != nil {
+		index, ok = l.base.groupIndex[conv]
+	}
+	if !ok {
+		index, ok = l.extraGroupIndex[conv]
+	}
+	if !ok || !conversationBit(l.groupFlags, index) {
+		return conversationGroup{}
+	}
+	return conversationGroup{lineage: l, index: index}
+}
+
+// conversationID is the inverse of queryDimensions.name for this request's
+// conversation dictionary, without interning an unknown selected-card name.
+func (l *conversationLineage) conversationID(name string) uint32 {
+	if l.names == nil || name == "" {
+		return 0
+	}
+	base := l.names.base[dimConversation]
+	if id := base.ids[name]; id != 0 {
+		return id
+	}
+	id := l.names.extra[dimConversation].ids[name]
+	if id == 0 {
+		return 0
+	}
+	if count := len(base.names); count > 0 {
+		id += uint32(count - 1)
+	}
+	return id
+}
+
 // resolve keeps the standalone unit-test contract: it returns the rail summary
 // and the gallery groups for the declarations observed so far.
 func (l *conversationLineage) resolve() (conversationSummary, map[string]conversationGroup) {

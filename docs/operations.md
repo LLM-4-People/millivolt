@@ -1184,6 +1184,14 @@ explorer health badges are hidden independently. Error-dimension headline
 counts can count error occurrences, so do not treat every displayed error
 number as the same metric.
 
+The explorer gallery renders at most 24 cards. Its fold tracks exact
+per-value accumulators for at most 8192 distinct values in the active
+dimension; later values are combined into a synthetic `other` card with
+aggregate count, cost, token, tool and health fields, competing for the 24
+cards by that count. `other` is a display bucket, not an exact value to filter
+on. Rail distinct-value counts, footer scope totals and conversation summaries
+still cover the whole filtered history, so card counts need not add up to them.
+
 ### Snapshots, live feeds and monitoring
 
 The HTML includes the canonical bootstrap state so the first paint need not wait

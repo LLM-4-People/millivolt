@@ -257,12 +257,21 @@ conversation topology (identities, parent declarations, resolved issues and
 public-ID groups) and the canonical model IDs/dictionary for the compiled
 model-rule revision. Appends extend both by the new rows; destructive
 replacement publishes fresh tables, and a rules change rebuilds only the model
-table. Requests mark their own rail/gallery flags on the shared topology, build
-the conversation group map only for the conversation dimension, and overlay
+table. Requests mark their own rail/gallery flags on the shared topology, resolve
+lineage metadata only for the returned conversation cards, and overlay
 ring/pending declarations without mutating the published build. Projected
 metric samples stay in shared sorted orders: single-valued dimensions retain one
 group id per row, while tool/error membership spans preserve multi-valued
-occurrences. Selected groups use the same exact rank reader as chart buckets,
+occurrences. Exact group accumulators are capped at
+`explorerGroupBudget` (8192) distinct values per fold. Values beyond the budget
+fold into one synthetic `other` card carrying aggregate count, cost, token,
+tool and health fields; no per-value accumulator or error affected-ID map is
+allocated for them. The card ranking remains exact among tracked values, with
+`other` competing by its aggregate count, and overflow memberships map to the
+reserved other id so their percentile samples still select correctly. Rail
+distinct-value counts, scope totals and conversation summaries remain
+whole-history values and are not derived from the truncated group set.
+Selected groups use the same exact rank reader as chart buckets,
 and only top cards derive percentile payloads. Pending dedupe retains only
 relevant pending IDs, not another history-sized seen set. Chart's rank reader
 also produces the occurrence-weighted avg/min/max in the same traversal, so a

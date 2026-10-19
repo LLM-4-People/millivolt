@@ -46,6 +46,18 @@ const (
 	// xpNodeCap mirrors the explorer gallery's per-dimension node cap (the
 	// single owner now - the client no longer applies its own cap).
 	xpNodeCap = 24
+	// explorerGroupBudget bounds the exact per-group accumulators one explorer
+	// fold retains. Distinct values beyond it fold into the synthetic "other"
+	// bucket, so the exact group table and its ranking work stay bounded by the
+	// budget rather than an attacker-controlled distinct-value count. It is
+	// much larger than xpNodeCap so ordinary dimensions keep exact top-card
+	// ranking. This is an internal guardrail, not a tunable.
+	explorerGroupBudget = 8192
+	// explorerOtherID reserves a dictionary slot that no real dimension value
+	// can occupy, so overflow memberships can still select the synthetic card
+	// without colliding with an unset (zero) membership. Internal only.
+	explorerOtherID   = ^uint32(0)
+	explorerOtherName = "other"
 	// pctMinSamples suppresses percentile stats below this many samples
 	// (tail-latency numbers from a handful of requests are noise).
 	pctMinSamples = 4
@@ -1648,6 +1660,13 @@ type explorerFold struct {
 	railSeen      [dimCount][]uint64
 	railCount     [dimCount]int
 	groups        map[uint32]*entAcc
+	// other aggregates every distinct value beyond explorerGroupBudget. It
+	// participates in ranking like a card but owns no per-value map: an error
+	// row's affected-request count comes from lastRequest, which is exact
+	// because one row's occurrences arrive contiguously.
+	other         entAcc
+	otherAffected int
+	overflow      bool
 	order         metricOrderSource
 	rowCount      int
 	// Single-valued dimensions store one group id per projected row (4 bytes).
@@ -1674,6 +1693,7 @@ func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold 
 	e := &explorerFold{
 		dim: dim, statusCode: statusCode, allFS: allFS, grpFS: grpFS,
 		groups: make(map[uint32]*entAcc),
+		other:  entAcc{id: explorerOtherID, name: explorerOtherName},
 		seen:   make(map[string]struct{}),
 	}
 	// Unprepared folds (direct fixtures) still need a names source for the
@@ -1829,7 +1849,9 @@ func (e *explorerFold) fold(c *contrib) error {
 				if ent.at > g.lastMs {
 					g.lastMs = ent.at
 				}
-				if g.code == "" {
+				// Mixed overflow errors have no single representative code;
+				// leave it empty instead of naming one arbitrary failure.
+				if g != &e.other && g.code == "" {
 					g.code = ent.code
 				}
 			}
@@ -1841,15 +1863,23 @@ func (e *explorerFold) fold(c *contrib) error {
 func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	g := e.groups[dimKey]
 	if g == nil {
-		g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
-		e.groups[dimKey] = g
+		if len(e.groups) >= explorerGroupBudget {
+			// Stop allocating exact groups at the budget. The synthetic card
+			// aggregates every later distinct value; repeated occurrences of
+			// an already tracked value still reach it through the map above.
+			e.overflow = true
+			g = &e.other
+		} else {
+			g = &entAcc{id: dimKey, name: e.dims.name(e.dimIndex, dimKey)}
+			e.groups[dimKey] = g
+		}
 	}
 	// Health counts are affected requests, while tool/error occurrences still
 	// retain their existing event, sample, cost and token multiplicity. Error
-	// groups need the affected-ID set for their headline; other groups only
-	// need the last ID because one row's visits are contiguous.
+	// groups need the affected-ID set for their headline; the overflow bucket
+	// only needs the last ID because one row's visits are contiguous.
 	var firstRequest bool
-	if e.dimIndex == dimError {
+	if e.dimIndex == dimError && g != &e.other {
 		if g.affected == nil {
 			g.affected = make(map[string]struct{})
 		}
@@ -1861,6 +1891,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	} else {
 		firstRequest = g.n == 0 || g.lastRequest != c.id
 		g.lastRequest = c.id
+		if e.dimIndex == dimError && firstRequest {
+			e.otherAffected++
+		}
 	}
 	g.n++
 	var err error
@@ -1899,7 +1932,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			if e.singleMember == nil {
 				e.singleMember = make([]uint32, e.rowCount)
 			}
-			e.singleMember[c.rowIndex-1] = dimKey
+			e.singleMember[c.rowIndex-1] = g.id
 		} else {
 			if e.memberSpans == nil {
 				e.memberSpans = make([]explorerMemberSpan, e.rowCount)
@@ -1909,7 +1942,7 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 				span.start = uint32(len(e.members))
 			}
 			span.count++
-			e.members = append(e.members, dimKey)
+			e.members = append(e.members, g.id)
 		}
 	}
 	// Durable samples stay in immutable metric order. Only raw ring/pending
@@ -1933,6 +1966,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 // occurrences otherwise. Ranking and the wire N field read the same owner.
 func (e *explorerFold) groupCount(g *entAcc) int {
 	if e.dimIndex == dimError {
+		if g == &e.other {
+			return e.otherAffected
+		}
 		return len(g.affected)
 	}
 	return g.n
@@ -1941,23 +1977,35 @@ func (e *explorerFold) groupCount(g *entAcc) int {
 // rankedGroups selects the returned top cards before sample derivation:
 // discarded groups never allocate response arrays or perform sample selection.
 // Counts follow groupCount; names break ties deterministically, independently
-// of dictionary insertion or map order.
+// of dictionary insertion or map order. The overflow bucket ranks by its
+// aggregate count but allocates nothing per excluded value.
 func (e *explorerFold) rankedGroups() []*entAcc {
-	top := make([]*entAcc, 0, min(len(e.groups), xpNodeCap))
-	for _, g := range e.groups {
+	capacity := len(e.groups)
+	if e.overflow {
+		capacity++
+	}
+	top := make([]*entAcc, 0, min(capacity, xpNodeCap))
+	insert := func(g *entAcc) {
 		n := e.groupCount(g)
 		at := sort.Search(len(top), func(i int) bool {
 			other := e.groupCount(top[i])
-			return n > other || n == other && g.name < top[i].name
+			return n > other || n == other && (g.name < top[i].name ||
+				g.name == top[i].name && g.id < top[i].id)
 		})
 		if at == xpNodeCap {
-			continue
+			return
 		}
 		if len(top) < xpNodeCap {
 			top = append(top, nil)
 		}
 		copy(top[at+1:], top[at:])
 		top[at] = g
+	}
+	for _, g := range e.groups {
+		insert(g)
+	}
+	if e.overflow {
+		insert(&e.other)
 	}
 	return top
 }
@@ -1992,10 +2040,6 @@ func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(ro
 
 func (e *explorerFold) payload() explorerPayload {
 	conversations := e.lineage.summary()
-	var conversationGroups map[string]conversationGroup
-	if e.dimIndex == dimConversation {
-		conversationGroups = e.lineage.groups()
-	}
 	top := e.rankedGroups()
 	// Resolve compact selected-group membership once, then both metrics read
 	// the same row spans. Emitting every occurrence preserves duplicate tools
@@ -2029,7 +2073,12 @@ func (e *explorerFold) payload() explorerPayload {
 			Tools:             g.tools, Code: g.code, LastMs: g.lastMs,
 		}
 		if e.dimIndex == dimConversation {
-			ent.Conversation = e.lineage.info(conversationGroups[g.name])
+			// Resolve lineage for the selected cards only. Materializing every
+			// in-scope conversation group allocated a map proportional to the
+			// distinct-value count just to look up at most xpNodeCap names.
+			if g != &e.other {
+				ent.Conversation = e.lineage.info(e.lineage.group(g.name))
+			}
 		}
 		ent.CostPerMTok = metrics.ScaledRatio(g.cost, g.costInOut, 1e6)
 		if e.dimIndex == dimError {
