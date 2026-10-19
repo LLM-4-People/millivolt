@@ -234,6 +234,109 @@ func (b *stalledReadBody) Close() error {
 	return nil
 }
 
+// delayedReadBody serves its payload after delay, or fails early when Close
+// interrupts the wait. A real transport body behaves the same way: canceling
+// the request context closes it and unblocks a pending Read with an error.
+type delayedReadBody struct {
+	delay   time.Duration
+	data    []byte
+	unblock chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	served  bool
+}
+
+func (b *delayedReadBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	if b.served {
+		b.mu.Unlock()
+		return 0, io.EOF
+	}
+	b.served = true
+	b.mu.Unlock()
+	timer := time.NewTimer(b.delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return copy(p, b.data), nil
+	case <-b.unblock:
+		return 0, errors.New("delayed body closed before completion")
+	}
+}
+
+func (b *delayedReadBody) Close() error {
+	b.once.Do(func() { close(b.unblock) })
+	return nil
+}
+
+// TestTranslatedNonStreamReadHonorsLongerDeadline proves the 2-minute
+// whole-document guardrail is a fallback, not an override: a 5-minute parent
+// deadline or X-Proxy-Timeout-Ms must let a body that completes after
+// 2 minutes finish normally.
+func TestTranslatedNonStreamReadHonorsLongerDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		configure func(*testing.T, *http.Request) *http.Request
+	}{
+		{
+			name: "parent context",
+			configure: func(t *testing.T, r *http.Request) *http.Request {
+				ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+				t.Cleanup(cancel)
+				return r.WithContext(ctx)
+			},
+		},
+		{
+			name: "header timeout",
+			configure: func(t *testing.T, r *http.Request) *http.Request {
+				// The per-send deadline lives on the attempt context, so a
+				// 5-minute header budget must reach the body read as well.
+				r.Header.Set("X-Proxy-Timeout-Ms", "300000")
+				return r
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				const bodyDelay = wholeDocumentReadTimeout + 30*time.Second
+				body := &delayedReadBody{
+					delay:   bodyDelay,
+					data:    []byte(translatedAnthropicReply),
+					unblock: make(chan struct{}),
+				}
+				p := New(config.Default(), metrics.Noop{})
+				p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode:    http.StatusOK,
+						Header:        http.Header{"Content-Type": []string{"application/json"}},
+						Body:          body,
+						ContentLength: -1,
+						Request:       r,
+					}, nil
+				})})
+				r := translatedRequest([]byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+				r = tc.configure(t, r)
+				started := time.Now()
+				w := httptest.NewRecorder()
+				p.ServeHTTP(w, r)
+				elapsed := time.Since(started)
+				if w.Code != http.StatusOK {
+					t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+				}
+				if elapsed != bodyDelay {
+					t.Fatalf("elapsed = %s, want %s", elapsed, bodyDelay)
+				}
+				if !strings.Contains(w.Body.String(), `"ok"`) {
+					t.Fatalf("translated body lost content: %s", w.Body.String())
+				}
+				if got := p.respBudget.bytes.Load(); got != 0 {
+					t.Fatalf("response budget after successful read = %d, want 0", got)
+				}
+			})
+		})
+	}
+}
+
 // TestTranslatedNonStreamReadDeadlineReleasesBudget pins the whole-document
 // fallback deadline: with no X-Proxy-Timeout-Ms, a stalled translated body
 // answers 502 after wholeDocumentReadTimeout and releases the process-wide

@@ -301,6 +301,52 @@ func TestModelsDiscoveryDeadlineCoversBodiesAcrossFormats(t *testing.T) {
 	}
 }
 
+// TestModelsDiscoveryHonorsConfiguredTimeoutBeyondReadFallback proves the
+// configured models_discovery_timeout, up to five minutes, is authoritative
+// for the whole discovery body read; the two-minute whole-document guardrail
+// applies only when the caller context has no deadline.
+func TestModelsDiscoveryHonorsConfiguredTimeoutBeyondReadFallback(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const bodyDelay = wholeDocumentReadTimeout + 30*time.Second
+		cfg := config.Default()
+		cfg.ModelsDiscoveryTimeout = 5 * time.Minute
+		body := &delayedReadBody{
+			delay:   bodyDelay,
+			data:    []byte(`{"data":[{"id":"model-one"}]}`),
+			unblock: make(chan struct{}),
+		}
+		p := New(cfg, metrics.Noop{})
+		p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if _, ok := r.Context().Deadline(); !ok {
+				return nil, fmt.Errorf("missing discovery deadline")
+			}
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        http.Header{"Content-Type": []string{"application/json"}},
+				Body:          body,
+				ContentLength: -1,
+				Request:       r,
+			}, nil
+		})})
+		started := time.Now()
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, modelsLimitRequest("openai"))
+		elapsed := time.Since(started)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+		}
+		if elapsed != bodyDelay {
+			t.Fatalf("elapsed = %s, want %s", elapsed, bodyDelay)
+		}
+		if !strings.Contains(w.Body.String(), "model-one") {
+			t.Fatalf("discovery lost the model entry: %s", w.Body.String())
+		}
+		if got := p.respBudget.bytes.Load(); got != 0 {
+			t.Fatalf("response budget after successful discovery = %d, want 0", got)
+		}
+	})
+}
+
 func TestModelsDiscoveryDeadlineAndLimitsDoNotResetBetweenPages(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		cfg := config.Default()

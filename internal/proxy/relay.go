@@ -27,27 +27,32 @@ import (
 
 // wholeDocumentReadTimeout bounds one whole-document upstream body read
 // (translated non-streaming responses and model-discovery pages) when the
-// caller supplied no shorter deadline. Streaming SSE is never buffered, so
-// this guardrail does not apply to it. The per-send X-Proxy-Timeout-Ms still
-// bounds the transport itself; this is the buffering fallback for the common
-// unset-header case. Internal safety guardrail, not user-tunable.
+// caller supplied no deadline of its own. A caller deadline from the per-send
+// X-Proxy-Timeout-Ms or the model-discovery budget is authoritative, shorter
+// or longer. Streaming SSE is never buffered, so this guardrail does not apply
+// to it. Internal safety guardrail, not user-tunable.
 const wholeDocumentReadTimeout = 2 * time.Minute
 
 // readWholeDocument reads at most limit bytes, failing closed when the body
-// makes no completion before the whole-document deadline. A shorter deadline
-// already on ctx wins (context.WithTimeout never extends a parent). Closing
-// the body is what unblocks a transport Read when the deadline is ours rather
-// than the caller's; callers release their response-buffer reservation on
-// return. The partial prefix is returned with the error so byte accounting
-// stays exact.
+// makes no completion before its deadline. The 2-minute fallback applies only
+// when ctx carries no deadline; an existing caller deadline is honored as-is,
+// whether shorter or longer. Closing the body is what unblocks a transport
+// Read; callers release their response-buffer reservation on return. The
+// partial prefix is returned with the error so byte accounting stays exact.
 func readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
-	readCtx, cancel := context.WithTimeout(ctx, wholeDocumentReadTimeout)
-	defer cancel()
+	readCtx := ctx
+	fallback := false
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		readCtx, cancel = context.WithTimeout(ctx, wholeDocumentReadTimeout)
+		defer cancel()
+		fallback = true
+	}
 	stop := context.AfterFunc(readCtx, func() { body.Close() })
 	defer stop()
 	b, err := io.ReadAll(io.LimitReader(body, limit))
 	if err != nil {
-		if ctx.Err() == nil && readCtx.Err() != nil {
+		if fallback && ctx.Err() == nil && readCtx.Err() != nil {
 			return b, fmt.Errorf("upstream document read exceeded %s: %w", wholeDocumentReadTimeout, err)
 		}
 		return b, err
@@ -443,7 +448,15 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				return
 			}
 			defer s.respBudget.release(reserve)
-			full, rerr := readWholeDocument(ctx, resp.Body, maxTranslateBodyBytes+1)
+			// The per-send deadline (X-Proxy-Timeout-Ms) lives on the
+			// attempt context that built this upstream request, not on the
+			// base request context; read under it so an explicit body
+			// budget longer than the fallback still applies.
+			readCtx := ctx
+			if resp.Request != nil {
+				readCtx = resp.Request.Context()
+			}
+			full, rerr := readWholeDocument(readCtx, resp.Body, maxTranslateBodyBytes+1)
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)
 				if rec.ClientDisconnected {
