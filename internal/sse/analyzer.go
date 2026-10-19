@@ -162,6 +162,12 @@ type Analyzer struct {
 	reqID string
 }
 
+// SetChatLike seeds the chat-completions shape from the request body before
+// any response frame arrives. A zero-frame, comment-only or [DONE]-only chat
+// stream must still classify as a degenerate completion; without this seed the
+// analyzer's chatlike flag can only be learned from a received payload.
+func (a *Analyzer) SetChatLike(v bool) { a.chatlike = v }
+
 // Feed ingests one raw SSE line (the bytes between \n delimiters, NOT
 // including the trailing \n). It must be called in order for every line the
 // proxy forwards. Feed returns immediately for lines that contain no
