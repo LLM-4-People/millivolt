@@ -8,6 +8,7 @@ Production sources, go.mod and go.sum are never replaced or copied.
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -15,23 +16,214 @@ import tempfile
 
 from .support import ROOT, git_environment, require, source_inventory, test_layout_errors
 
-# Go's filename platform suffixes, from internal/syslist. A test ignored for any
-# other reason is a silent skip: it satisfies physical/native parity but never
-# runs, so the overlay rejects it instead of counting it as covered.
-PLATFORM_TAGS = frozenset("""
+# Go's filename platform suffix vocabulary, from internal/syslist, split by
+# suffix position. A test ignored for any other reason is a silent skip: it
+# satisfies physical/native parity but never runs, so the overlay rejects it
+# instead of counting it as covered.
+PLATFORM_OS = frozenset("""
     aix android darwin dragonfly freebsd hurd illumos ios js linux nacl netbsd
     openbsd plan9 solaris wasip1 windows zos
+""".split())
+PLATFORM_ARCH = frozenset("""
     386 amd64 amd64p32 arm armbe arm64 arm64be loong64 mips mipsle mips64
     mips64le mips64p32 mips64p32le ppc ppc64 ppc64le riscv riscv64 s390 s390x
     sparc sparc64 wasm
 """.split())
+PLATFORM_TAGS = PLATFORM_OS | PLATFORM_ARCH
+# `unix` is the platform-family feature tag Go defines for unix-like GOOS
+# values. Every other feature or release tag would make the exclusion depend on
+# something other than the platform, so it is not a genuine platform exclusion.
+PLATFORM_CONSTRAINT_TAGS = PLATFORM_TAGS | {"unix"}
+UNIX_PLATFORMS = frozenset("""
+    aix android darwin dragonfly freebsd hurd illumos ios linux netbsd
+    openbsd solaris
+""".split())
+
+
+def platform_suffix(name):
+    """Return the GOOS/GOARCH pair named by Go's filename suffix, if any."""
+    stem = name[:-len("_test.go")] if name.endswith("_test.go") else name[:-len(".go")]
+    parts = stem.rsplit("_", 2)
+    if len(parts) < 2:
+        return None
+    last = parts[-1]
+    if last in PLATFORM_OS:
+        return last, None
+    if last in PLATFORM_ARCH:
+        if len(parts) == 3 and parts[-2] in PLATFORM_OS:
+            return parts[-2], last
+        return None, last
+    return None
 
 
 def platform_test_name(name):
     """True when Go's platform suffix explains why it ignored this test file."""
-    stem = name[:-len("_test.go")] if name.endswith("_test.go") else name[:-len(".go")]
-    parts = stem.rsplit("_", 1)
-    return len(parts) == 2 and parts[1] in PLATFORM_TAGS
+    return platform_suffix(name) is not None
+
+
+def _constraint_tokens(expression):
+    tokens = []
+    index = 0
+    while index < len(expression):
+        if expression[index].isspace():
+            index += 1
+            continue
+        for operator in ("&&", "||"):
+            if expression.startswith(operator, index):
+                tokens.append(operator)
+                index += len(operator)
+                break
+        else:
+            character = expression[index]
+            if character in "!()":
+                tokens.append(character)
+                index += 1
+            else:
+                match = re.match(r"[A-Za-z0-9_.]+", expression[index:])
+                if not match:
+                    raise ValueError("invalid Go build constraint: " + expression)
+                tokens.append(match.group(0))
+                index += len(match.group(0))
+    return tokens
+
+
+def _parse_constraint(expression):
+    """Parse a //go:build expression into a boolean tag tree."""
+    tokens = _constraint_tokens(expression)
+
+    def parse_or(index):
+        node, index = parse_and(index)
+        while index < len(tokens) and tokens[index] == "||":
+            right, index = parse_and(index + 1)
+            node = ("or", node, right)
+        return node, index
+
+    def parse_and(index):
+        node, index = parse_unary(index)
+        while index < len(tokens) and tokens[index] == "&&":
+            right, index = parse_unary(index + 1)
+            node = ("and", node, right)
+        return node, index
+
+    def parse_unary(index):
+        if index >= len(tokens):
+            raise ValueError("invalid Go build constraint: " + expression)
+        token = tokens[index]
+        if token == "!":
+            node, index = parse_unary(index + 1)
+            return ("not", node), index
+        if token == "(":
+            node, index = parse_or(index + 1)
+            if index >= len(tokens) or tokens[index] != ")":
+                raise ValueError("invalid Go build constraint: " + expression)
+            return node, index + 1
+        if token in ("&&", "||", ")"):
+            raise ValueError("invalid Go build constraint: " + expression)
+        return ("tag", token), index + 1
+
+    node, index = parse_or(0)
+    if index != len(tokens):
+        raise ValueError("invalid Go build constraint: " + expression)
+    return node
+
+
+def _parse_legacy_constraint(expression):
+    """Parse a legacy // +build line: space is OR, comma is AND."""
+    groups = []
+    for option in expression.split():
+        terms = []
+        for term in option.split(","):
+            negated = term.startswith("!")
+            name = term[1:] if negated else term
+            if not name:
+                raise ValueError("invalid Go build constraint: " + expression)
+            atom = ("tag", name)
+            terms.append(("not", atom) if negated else atom)
+        node = terms[0]
+        for term in terms[1:]:
+            node = ("and", node, term)
+        groups.append(node)
+    if not groups:
+        raise ValueError("invalid Go build constraint: " + expression)
+    node = groups[0]
+    for group in groups[1:]:
+        node = ("or", node, group)
+    return node
+
+
+def _build_constraints(content):
+    """Return the file's build constraints, which must precede the package."""
+    constraints = []
+    for line in content.splitlines():
+        if re.match(r"^\s*package\s", line):
+            break
+        match = re.match(r"^\s*//go:build\s+(.+?)\s*$", line)
+        if match:
+            constraints.append(_parse_constraint(match.group(1)))
+        match = re.match(r"^\s*//\s*\+build\s+(.+?)\s*$", line)
+        if match:
+            constraints.append(_parse_legacy_constraint(match.group(1)))
+    return constraints
+
+
+def _constraint_tags(node):
+    if node[0] == "tag":
+        return {node[1]}
+    if node[0] == "not":
+        return _constraint_tags(node[1])
+    return _constraint_tags(node[1]) | _constraint_tags(node[2])
+
+
+def _constraint_matches(node, tags):
+    if node[0] == "tag":
+        return node[1] in tags
+    if node[0] == "not":
+        return not _constraint_matches(node[1], tags)
+    if node[0] == "and":
+        return _constraint_matches(node[1], tags) and _constraint_matches(node[2], tags)
+    return _constraint_matches(node[1], tags) or _constraint_matches(node[2], tags)
+
+
+def platform_constraint_only(name, content):
+    """True when only the filename platform and platform build tags exclude it.
+
+    A platform suffix is necessary but not sufficient: ``value_linux.go`` with
+    ``//go:build integration`` is ignored for the integration tag, so it would
+    never run under the default suite. The constraints must name only platform
+    tags and must select at least one GOOS/GOARCH consistent with the suffix.
+    """
+    suffix = platform_suffix(name)
+    if suffix is None:
+        return False
+    try:
+        constraints = _build_constraints(content)
+    except ValueError:
+        return False
+    tags = set()
+    for constraint in constraints:
+        tags.update(_constraint_tags(constraint))
+    if not tags <= PLATFORM_CONSTRAINT_TAGS:
+        return False
+    platforms = [suffix[0]] if suffix[0] else sorted(PLATFORM_OS)
+    architectures = [suffix[1]] if suffix[1] else sorted(PLATFORM_ARCH)
+    for goos in platforms:
+        for goarch in architectures:
+            environment = {goos, goarch}
+            if goos in UNIX_PLATFORMS:
+                environment.add("unix")
+            if all(_constraint_matches(constraint, environment) for constraint in constraints):
+                return True
+    return False
+
+
+def ignored_test_source(replacements, package_dir, name):
+    """Read an ignored test from its real file, following the overlay map."""
+    path = str(Path(package_dir) / name)
+    source = replacements.get(path, path)
+    try:
+        return Path(source).read_text(encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError("cannot inspect ignored Go test: " + path) from error
 
 
 def discover(root):
@@ -78,11 +270,11 @@ def overlay(root):
 def package_parity(replacements, document):
     """Every physical test must appear in Go's native package discovery.
 
-    IgnoredGoFiles is accepted only when a recognized GOOS or GOARCH filename
-    suffix explains the exclusion. Any other ignored test, such as a file behind
-    ``//go:build integration``, would satisfy parity while never running, so it
-    is a hard error. No second package registry or fixed test count can silently
-    drift from Go.
+    IgnoredGoFiles is accepted only when the filename suffix and the file's own
+    build constraints together make this a genuine GOOS/GOARCH exclusion. A
+    platform-suffixed file behind ``//go:build integration`` is still a silent
+    skip, so it is a hard error. No second package registry or fixed test count
+    can silently drift from Go.
     """
     decoder = json.JSONDecoder()
     found = set()
@@ -100,6 +292,9 @@ def package_parity(replacements, document):
                     path = str(Path(package["Dir"]) / name)
                     if field == "IgnoredGoFiles":
                         require(platform_test_name(name),
+                                "Go ignored a test for a non-platform reason, so it never runs: " + path)
+                        content = ignored_test_source(replacements, package["Dir"], name)
+                        require(platform_constraint_only(name, content),
                                 "Go ignored a test for a non-platform reason, so it never runs: " + path)
                     require(path not in found, "Go discovered a duplicate test: " + path)
                     found.add(path)

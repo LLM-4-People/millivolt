@@ -3,6 +3,7 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import unittest
@@ -485,6 +486,84 @@ class RepositoryChecks(unittest.TestCase):
              (check.ROOT / "internal/web/gzip.go").read_text(encoding="utf-8")),
             ("internal/web/web.go",
              (check.ROOT / "internal/web/web.go").read_text(encoding="utf-8"))]), [])
+
+
+class PublishedContracts(unittest.TestCase):
+    """Pin hand-written publication and access summaries to their owners."""
+
+    def read(self, name):
+        return (check.ROOT / name).read_text(encoding="utf-8")
+
+    def test_image_tags_name_the_cut_revision(self):
+        workflow = self.read(".github/workflows/check.yml")
+        publish = workflow.split("\n  publish:\n", 1)[1].split("\n  publish-testing:\n", 1)[0]
+        meta = publish.split("- name: Define image tags and labels", 1)[1].split("- uses:", 1)[0]
+        tags = meta.split("tags: |", 1)[1].split("labels:", 1)[0]
+        # The sha tag and OCI revision label must name the revision this run
+        # actually built, not the triggering SHA that predates a VERSION-bump
+        # commit created by the cut step.
+        self.assertIn("type=raw,value=sha-${{ steps.cut.outputs.revision }}", tags)
+        self.assertNotRegex(tags, r"(?m)^\s*type=sha\b")
+        self.assertIn("org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}", meta)
+        self.assertIn("build-args: REVISION=${{ steps.cut.outputs.revision }}", publish)
+
+        operations = self.read("docs/operations.md")
+        section = operations.split("## Versions and images", 1)[1].split("\n## ", 1)[0]
+        rows = dict(re.findall(r"^\| `([^`]+)` \| (.*?) \|$", section, re.M))
+        self.assertIn("main-branch", rows["main"])
+        self.assertNotIn("development", rows["main"])
+        self.assertIn("non-prerelease release", rows["latest"])
+        self.assertIn("main-branch", rows["latest"])
+        self.assertIn("cut revision", rows["sha-<full commit>"])
+        self.assertIn("built", rows["sha-<full commit>"])
+
+        contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
+        self.assertIn("every push to `main`", contributing)
+        self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
+        self.assertIn("`latest` moves with each non-prerelease release cut by a main push or a manual tag",
+                      contributing)
+
+    def prose_paragraphs(self, text, needle, label):
+        paragraphs = [re.sub(r"\s+", " ", paragraph) for paragraph in text.split("\n\n")]
+        found = [paragraph for paragraph in paragraphs if needle in paragraph]
+        self.assertTrue(found, label + " has no summary containing " + needle)
+        return "\n".join(found)
+
+    def open_surface(self, text, label):
+        return self.prose_paragraphs(text, "stay open", label)
+
+    def mcp_surface(self, text, label):
+        return self.prose_paragraphs(text, "`/mcp`", label)
+
+    def test_access_summaries_share_the_open_surface_and_bearer_exception(self):
+        operations = self.read("docs/operations.md")
+        operations_open = self.open_surface(operations, "docs/operations.md")
+        for phrase in ("/session", "brand/PWA", "transparent inference"):
+            self.assertIn(phrase, operations_open)
+        canonical = operations.split("### Operator access", 1)[1].split("\n### ", 1)[0]
+        for phrase in ("GET /healthz", "POST /session", "/manifest.webmanifest",
+                       "/sw.js", "transparent inference", "canonical open-path list"):
+            self.assertIn(phrase, canonical)
+        self.assertIn("session cookie alone is refused", canonical)
+        self.assertIn("Bearer", canonical)
+
+        security = self.read("SECURITY.md")
+        security_open = self.open_surface(security, "SECURITY.md")
+        for phrase in ("/session", "brand/PWA", "transparent inference"):
+            self.assertIn(phrase, security_open)
+        self.assertIn("docs/operations.md#operator-access", security_open)
+        security_mcp = self.mcp_surface(security, "SECURITY.md")
+        self.assertIn("Bearer", security_mcp)
+        self.assertRegex(security_mcp, r"refuses? a session cookie|session cookie[^.]*refused")
+
+        reverse = self.read("docs/reverse-proxy.md")
+        reverse_open = self.open_surface(reverse, "docs/reverse-proxy.md")
+        for phrase in ("/session", "brand/PWA", "transparent inference"):
+            self.assertIn(phrase, reverse_open)
+        self.assertIn("operations.md#operator-access", reverse_open)
+        reverse_mcp = self.mcp_surface(reverse, "docs/reverse-proxy.md")
+        self.assertIn("Bearer", reverse_mcp)
+        self.assertIn("session cookie", reverse_mcp)
 
 
 if __name__ == "__main__":

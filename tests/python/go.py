@@ -94,14 +94,47 @@ func TestPrivate(t *testing.T) {
 
     def test_package_parity_accepts_only_platform_exclusions(self):
         runner.package_parity(self.mapping, self.metadata())
-        platform = {
-            str(self.root / "value_windows_test.go"): str(self.tests / "value_windows.go"),
-            str(self.root / "value_linux_amd64_test.go"): str(self.tests / "value_linux_amd64.go"),
+        platform_sources = {
+            "value_windows.go": "package fixture\n",
+            "value_linux_amd64.go": "package fixture\n",
         }
+        platform = {}
+        for name, content in platform_sources.items():
+            path = self.tests / name
+            path.write_text(content, encoding="utf-8")
+            platform[str(self.root / (name[:-len(".go")] + "_test.go"))] = str(path)
         runner.package_parity(platform, json.dumps({
             "Dir": str(self.root),
             "IgnoredGoFiles": ["value_windows_test.go", "value_linux_amd64_test.go"],
         }))
+        # A platform suffix alone is not enough: the file's build constraints
+        # must also select a matching platform under default tags. Otherwise a
+        # platform-suffixed integration test silently never runs.
+        constraints = (
+            ("value_linux.go", "//go:build linux\n\npackage fixture\n", True),
+            ("value_linux.go", "//go:build linux && amd64\n\npackage fixture\n", True),
+            ("value_linux.go", "//go:build !windows\n\npackage fixture\n", True),
+            ("value_linux.go", "//go:build integration\n\npackage fixture\n", False),
+            ("value_linux.go", "//go:build linux && integration\n\npackage fixture\n", False),
+            ("value_linux.go", "// +build integration\n\npackage fixture\n", False),
+            ("value_linux.go", "// +build linux\n\npackage fixture\n", True),
+            ("value_linux.go", "//go:build windows\n\npackage fixture\n", False),
+            ("value_linux_amd64.go", "//go:build arm64\n\npackage fixture\n", False),
+            ("value_windows.go", "//go:build unix\n\npackage fixture\n", False),
+        )
+        for name, content, accepted in constraints:
+            with self.subTest(name=name, content=content):
+                path = self.tests / name
+                path.write_text(content, encoding="utf-8")
+                virtual = str(self.root / (name[:-len(".go")] + "_test.go"))
+                mapping = {virtual: str(path)}
+                document = json.dumps({"Dir": str(self.root),
+                                       "IgnoredGoFiles": [Path(virtual).name]})
+                if accepted:
+                    runner.package_parity(mapping, document)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "never run"):
+                        runner.package_parity(mapping, document)
         with self.assertRaisesRegex(RuntimeError, "never run"):
             runner.package_parity(self.mapping, self.metadata().replace("TestGoFiles", "IgnoredGoFiles"))
         with self.assertRaisesRegex(RuntimeError, "never run"):
@@ -167,7 +200,7 @@ func TestHelper(t *testing.T) { if helperValue() != 42 { t.Fatal("helper missing
 import "testing"
 func TestExternal(t *testing.T) {}
 ''', encoding="utf-8")
-        (self.tests / "platform_windows.go").write_text("//go:build never && !never\n\npackage fixture\n", encoding="utf-8")
+        (self.tests / "platform_windows.go").write_text("//go:build windows\n\npackage fixture\n", encoding="utf-8")
         with runner.overlay(self.root) as (path, mapping):
             self.assertIn(str(self.root / "platform_windows_test.go"), mapping)
             listing = runner.go_command(["test", "-overlay=" + str(path), "-list", ".", "./..."],
@@ -184,10 +217,20 @@ func TestExternal(t *testing.T) {}
     def test_build_tag_ignored_test_fails_instead_of_passing_parity(self):
         # A build tag that excludes the file on every platform would otherwise
         # satisfy physical/native package parity while never running a test.
-        (self.tests / "integration.go").write_text(
+        integration = self.tests / "integration.go"
+        integration.write_text(
             '//go:build integration\n\npackage fixture\n\nimport "testing"\n\nfunc TestIntegration(t *testing.T) {}\n',
             encoding="utf-8")
         with patch.dict(os.environ, {"GOFLAGS": "", "GOPROXY": "off", "GOSUMDB": "off"}):
+            with self.assertRaisesRegex(RuntimeError, "never run"):
+                runner.run(["test", "-count=1", "./..."], self.root)
+            # A recognized platform suffix must not launder the same silently
+            # skipped integration test: Go ignores it for the build tag, not
+            # the platform, so parity must stay a hard error.
+            integration.unlink()
+            (self.tests / "integration_linux.go").write_text(
+                '//go:build integration\n\npackage fixture\n\nimport "testing"\n\nfunc TestIntegrationLinux(t *testing.T) {}\n',
+                encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "never run"):
                 runner.run(["test", "-count=1", "./..."], self.root)
 

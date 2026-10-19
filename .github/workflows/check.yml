@@ -241,7 +241,11 @@ jobs:
           tags: |
             type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=${{ env.RELEASE_VERSION }},enable=${{ env.RELEASE_VERSION != '' }}
-            type=sha,format=long
+            # Source the sha tag from the cut revision the build and OCI
+            # revision label use. The cut step may create a VERSION commit
+            # after the triggering SHA, so type=sha would name code this
+            # image does not contain.
+            type=raw,value=sha-${{ steps.cut.outputs.revision }}
             type=raw,value=latest,enable=${{ env.RELEASE_VERSION != '' && !contains(env.RELEASE_VERSION, '-') }}
           labels: |
             org.opencontainers.image.version=${{ env.RELEASE_VERSION }}

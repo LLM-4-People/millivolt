@@ -33,13 +33,16 @@ The runner checks physical-file/native-package discovery parity, rejects
 misplaced, duplicate and symlinked tests, and removes its private manifest on
 success or failure. The `_go` directory is intentionally excluded from Go's
 normal recursive package walk. It also fails when Go ignores a test for any
-reason other than a recognized GOOS or GOARCH filename suffix. A
-`//go:build integration` file is therefore a hard error rather than a silently
-unrun test. New Go tests and their helpers use ordinary `.go` filenames inside
-the mirrored tree. Platform filename suffixes retain their native Go meaning.
-Build constraints still apply inside files Go does compile, but one that
-excludes a test entirely is rejected as a silent skip; `_test` exists only in
-the temporary virtual filenames.
+reason other than a genuine GOOS/GOARCH exclusion. A platform filename suffix
+is necessary but not sufficient: the file's own build constraints must name
+only platform tags and select at least one platform consistent with that
+suffix. A `//go:build integration` file is therefore a hard error rather than
+a silently unrun test, including a platform-suffixed file such as
+`value_linux.go` with `//go:build integration`. New Go tests and their helpers
+use ordinary `.go` filenames inside the mirrored tree. Platform filename
+suffixes retain their native Go meaning. Build constraints still apply inside
+files Go does compile, but one that excludes a test entirely is rejected as a
+silent skip; `_test` exists only in the temporary virtual filenames.
 
 Package-private access, source-package working directories, benchmarks, fuzz
 tests and race detection are retained. Runtime file reads do not see virtual

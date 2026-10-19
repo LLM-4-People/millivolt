@@ -293,7 +293,11 @@ pass, every push to `main` that touches anything besides documentation
    tag and creates the GitHub release with the commit log since the previous
    tag as notes.
 3. It then builds and publishes the multi-arch image with `main`, `sha-*`,
-   `version` and (for non-prereleases) `latest` tags on ghcr.io.
+   `version` and (for non-prereleases) `latest` tags on ghcr.io. The `sha-*`
+   tag and the OCI revision label name the cut revision that was built, which
+   can include the workflow's own VERSION-bump commit. `latest` moves with each
+   non-prerelease release cut by a main push or a manual tag; prereleases and
+   the testing alias never update it.
 
 Docs-only pushes never cut a release or rebuild images. A manually pushed
 `v*` tag still ships exactly as tagged through the same pipeline. VERSION is

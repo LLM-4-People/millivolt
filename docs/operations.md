@@ -3,10 +3,10 @@
 Read the [security boundary](../SECURITY.md) before exposing the listener.
 The whole embedded dashboard is protected: every dashboard, `/metrics/*`,
 `/admin/*` and `/mcp` request requires the `MILLIVOLT_OPERATOR_TOKEN` credential
-and is denied while it is not configured. Only the unauthenticated `/healthz`
-liveness probe, origin-root brand/PWA files (`/favicon.ico`, icons,
-`/manifest.webmanifest`, `/sw.js`) and transparent inference stay open; see
-[operator access](#operator-access).
+and is denied while it is not configured. At the application gate, only the
+unauthenticated `/healthz` liveness probe, the `POST /session` login handshake,
+origin-root brand/PWA files and transparent inference stay open; see the
+canonical [operator access](#operator-access) list.
 
 ## Configuration and CLI
 
@@ -624,7 +624,7 @@ The registry target is `ghcr.io/llm-4-people/millivolt`. Check the
 and [image workflow](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml) for what has
 actually been published; a version in a checkout does not prove an image exists.
 Use a published digest to pin exact bytes. Version tags identify releases but
-are not intrinsically immutable; moving development/stable aliases can change.
+are not intrinsically immutable; moving branch and stable aliases can change.
 
 The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64`.
@@ -635,11 +635,11 @@ images.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving development image after a successful main-branch push. |
-| `testing` | Moving development image after a successful testing-branch push. |
-| `sha-<full commit>` | Source-commit tag for a published build. |
-| Version from `VERSION` | Created by the matching `v`-prefixed release tag. |
-| `latest` | Updated only by a non-prerelease version tag, not main-branch pushes. |
+| `main` | Moving production image for the released current `main` revision; updated by every code-bearing main-branch push. |
+| `testing` | Moving development image after a successful testing-branch push; never a release. |
+| `sha-<full commit>` | Release tag for the exact cut revision built and published. The cut revision can include the workflow's `VERSION`-bump commit, so it can differ from the push trigger SHA. Testing pushes do not publish it. |
+| Version from `VERSION` | Created by the matching `v`-prefixed release tag, whether cut by a main-branch push or pushed manually. |
+| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a main-branch push. Prereleases and testing pushes do not update it. |
 
 Set `MILLIVOLT_IMAGE` to the desired full image reference or published digest
 before the Compose pull/up commands. The `0.x` version series is initial
@@ -680,11 +680,13 @@ rebuild workflow; choose distinct ports and databases for separate instances.
 
 ## Operator and data routes
 
-All these endpoints sit behind the operator credential. Read handlers enforce
-their supported methods; wrong-method requests must not fall through to
-inference. The namespace is standardized: `/metrics/*` and dashboard routes
-are the protected read plane, and `/admin/*` is the operator action plane;
-the credential gates both.
+The routes below belong to millivolt. They are operator-gated unless the row
+is marked open; the canonical open-path list is in
+[operator access](#operator-access). Read handlers enforce their supported
+methods; wrong-method requests must not fall through to inference. The
+namespace is standardized: `/metrics/*` and dashboard routes are the protected
+read plane, and `/admin/*` is the operator action plane; the credential gates
+both.
 
 | Route | Action / important contract |
 | --- | --- |
@@ -765,7 +767,9 @@ proxy.yaml, so it cannot leak through Settings, `-print-config`,
 `/admin/config` output, snapshots or logs.
 
 The gate is deny by default and lives in one chokepoint in front of every
-route:
+route. This is the canonical open-path list; [Security](../SECURITY.md) and the
+[reverse-proxy guide](reverse-proxy.md) summarize it instead of maintaining a
+second list.
 
 - Open: `GET /healthz`, the `POST /session` login handshake (the one open
   operator route), origin-root brand/PWA files (`/favicon.ico`, icons,
@@ -815,7 +819,8 @@ IPs with idle expiry, so spoofed-address floods cannot grow it. A lockout
 response is `429` with a coarse rounded `Retry-After` and a generic body.
 
 With the variable unset or empty the deny-all state holds: the whole dashboard
-returns 403 and only `/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
+returns 403, the open `POST /session` handshake cannot mint a cookie, and only
+`/healthz`, brand/PWA files and inference respond. A nonempty value shorter than 16
 or longer than 512 characters fails the boot instead of silently weakening
 the gate. The credential is process bound: config reload does not re-read it,
 so rotating the value requires a real process restart (a supervisor restart

@@ -2,13 +2,13 @@
 
 Use a protected ingress when accessing millivolt beyond a trusted local machine.
 The whole dashboard is gated by the shared `MILLIVOLT_OPERATOR_TOKEN`
-credential; there is no tenant isolation and no per-user identity. Only the
-unauthenticated `/healthz` probe, origin-root brand/PWA files (`/favicon.ico`,
-icons, `/manifest.webmanifest`, `/sw.js`) and transparent inference
-stay open, so a load balancer can health-check the service without holding
-the credential.
-See [operator access](operations.md#operator-access). Read
-[Security](../SECURITY.md) first.
+credential; there is no tenant isolation and no per-user identity. At the
+application gate, only the unauthenticated `/healthz` probe, the `POST /session`
+login handshake, origin-root brand/PWA files and transparent inference stay
+open, so a load balancer can health-check the service without holding the
+credential and a browser can reach the login handshake. The canonical
+open-path list is in [operator access](operations.md#operator-access); this
+guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
 
 ```mermaid
 flowchart LR
@@ -28,15 +28,18 @@ Compose service. Use a maintained NGINX release with the `http2 on` directive
 The sample splits two prefix locations because they do not share an access
 model. `location /v1` is the OpenAI-compatible inference base: preserve provider
 `Authorization` and routing headers, and allowlist API clients. `location /`
-is the dashboard and operator plane (`/dash/`, `/metrics/`, `/admin/`,
-`/session`, `/mcp`, `/healthz`, `/favicon.ico` and the other brand/PWA files):
-allowlist operators, and keep `Host` plus the
-session cookie so Settings origin checks and the live feed work. A URL-capable
-MCP client uses this location with `/mcp` appended and its own Bearer header. Shared
-streaming proxy settings live on the `server` so both SSE paths stay
-unbuffered. Prefix `/v1` wins over `/` for `/v1/chat/completions` and
-`/v1/models`; `GET /models` without that prefix follows `location /` unless
-you add an exact `/models` block with the inference rules.
+covers everything else, including the dashboard and operator plane (`/dash/`,
+`/metrics/`, `/admin/`) plus the application-open `POST /session`, `/healthz`
+and brand/PWA paths: allowlist operators, and keep `Host` plus the session
+cookie so Settings origin checks and the live feed work. The `/session`
+handshake is open at millivolt so login works, but this location still
+allowlists it at the edge. A URL-capable MCP client uses this location with
+`/mcp` appended and the operator Bearer header: the application's MCP endpoint
+is Bearer-only and refuses the session cookie. Shared streaming proxy settings
+live on the `server` so both SSE paths stay unbuffered. Prefix `/v1` wins over
+`/` for `/v1/chat/completions` and `/v1/models`; `GET /models` without that
+prefix follows `location /` unless you add an exact `/models` block with the
+inference rules.
 
 1. Start the normal [Compose deployment](../README.md#docker-compose), retaining
    its loopback-only host port.

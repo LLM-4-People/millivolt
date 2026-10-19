@@ -7,9 +7,11 @@ has no authorization roles or tenant isolation. The whole dashboard is gated
 by the shared `MILLIVOLT_OPERATOR_TOKEN` environment credential and denied
 while it is unset (see [operator access](docs/operations.md#operator-access)):
 there is one operator identity, no per-user accounts and no audit trail of
-who acted. Only the `/healthz` liveness probe and transparent inference stay
-open. The upstream API key is forwarded for inference; it does not secure the
-dashboard or administration.
+who acted. Only the `GET /healthz` liveness probe, the `POST /session` login
+handshake, origin-root brand/PWA assets and transparent inference stay open at
+the application gate; the canonical open-path list is
+[operator access](docs/operations.md#operator-access). The upstream API key is
+forwarded for inference; it does not secure the dashboard or administration.
 
 The supplied listen address binds all interfaces. Prefer an explicit loopback
 listen for local use. Before network exposure, restrict access with network
@@ -31,7 +33,9 @@ by the HttpOnly session cookie. This does not
 prevent direct non-browser reads or secure a publicly reachable listener.
 Explicit non-browser calls remain supported; gated endpoints need the
 `Authorization: Bearer` credential or a session cookie minted through
-`POST /session`.
+`POST /session`. The `/mcp` endpoint is the exception: it requires the
+operator credential as a Bearer header and refuses a session cookie alone with
+`403`, because the caller's credential is forwarded on its internal calls.
 
 ## Upstream destinations and credentials
 
