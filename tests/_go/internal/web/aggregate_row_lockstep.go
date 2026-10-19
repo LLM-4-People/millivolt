@@ -72,23 +72,26 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 	if c.status != 502 {
 		t.Errorf("status = %d, want 502", c.status)
 	}
-	if c.client != "sentinel-client" {
-		t.Errorf("client = %q", c.client)
+	if c.labels == nil {
+		t.Fatal("scanned row lost its live label sidecar")
 	}
-	if c.prov != "sentinel.example" {
-		t.Errorf("prov = %q", c.prov)
+	if c.labels.client != "sentinel-client" {
+		t.Errorf("client = %q", c.labels.client)
 	}
-	if c.model != "sentinel-model" {
-		t.Errorf("model = %q, want the raw spelling (nil canonizer)", c.model)
+	if c.labels.prov != "sentinel.example" {
+		t.Errorf("prov = %q", c.labels.prov)
 	}
-	if c.key != "sentinel-key" {
-		t.Errorf("key = %q", c.key)
+	if c.labels.model != "sentinel-model" {
+		t.Errorf("model = %q, want the raw spelling (nil canonizer)", c.labels.model)
 	}
-	if c.conv != "sentinel-conversation" {
-		t.Errorf("conv = %q", c.conv)
+	if c.labels.key != "sentinel-key" {
+		t.Errorf("key = %q", c.labels.key)
 	}
-	if c.parentConv != "sentinel-parent" {
-		t.Errorf("parentConv = %q", c.parentConv)
+	if c.labels.conv != "sentinel-conversation" {
+		t.Errorf("conv = %q", c.labels.conv)
+	}
+	if c.labels.parentConv != "sentinel-parent" {
+		t.Errorf("parentConv = %q", c.labels.parentConv)
 	}
 	if c.in != 11 || c.out != 22 || c.cacheR != 33 || c.reason != 44 {
 		t.Errorf("tokens in/out/cache/read-reasoning = %d/%d/%d/%d, want 11/22/33/44", c.in, c.out, c.cacheR, c.reason)

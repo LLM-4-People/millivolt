@@ -200,32 +200,38 @@ func (a *AggAPI) queryCtx(r *http.Request) (context.Context, context.CancelFunc)
 
 // ---------- record materialization (shared by every endpoint) ----------
 
+// contribLabels owns the six single-valued dimension labels while a
+// contribution is still live. Projected rows drop this sidecar after
+// contribDimensions.intern and resolve labels from dimensionIDs instead;
+// retaining six string headers on every durable row duplicated bytes the
+// projection dictionaries already own.
+type contribLabels struct {
+	client, prov, model, key, conv, parentConv string
+}
+
 // contrib is one request's contribution to the aggregates: the subset of
 // Record fields any dashboard metric reads, derived identically from a stored
 // row or from a live ring record.
 type contrib struct {
-	id         string
-	start      int64
-	status     int
-	isErr      bool
-	has429     bool
-	cost       float64
-	in         int64
-	out        int64
-	cacheR     int64
-	reason     int64
-	tools      int64
-	ttft       int64
-	tps        float64
-	dec        int64
-	client     string
-	prov       string
-	model      string
-	key        string
-	conv       string
-	parentConv string
-	toolsL     []string
-	ent        []errEnt
+	id     string
+	start  int64
+	status int
+	isErr  bool
+	has429 bool
+	cost   float64
+	in     int64
+	out    int64
+	cacheR int64
+	reason int64
+	tools  int64
+	ttft   int64
+	tps    float64
+	dec    int64
+	// labels is non-nil only for ring/pending/unprojected rows. Projected
+	// rows are interned into the projection dictionaries and then drop it.
+	labels *contribLabels
+	toolsL []string
+	ent    []errEnt
 	// Dictionary IDs belong to the projection that materialized this row.
 	// Unprojected ring/pending records carry zero IDs and are interned by
 	// the same query-dimension adapter at the aggregation boundary.
@@ -250,6 +256,36 @@ type errEnt struct {
 	at       int64
 }
 
+// liveLabel reads one single-valued label from the live sidecar. Projected
+// rows carry no sidecar; their labels live in the projection dictionaries and
+// must be resolved from dimensionIDs.
+func (c *contrib) liveLabel(dim string) string {
+	if c.labels == nil {
+		return ""
+	}
+	switch dim {
+	case "client":
+		return c.labels.client
+	case "provider":
+		return c.labels.prov
+	case "model":
+		return c.labels.model
+	case "conversation":
+		return c.labels.conv
+	case "key":
+		return c.labels.key
+	}
+	return ""
+}
+
+// parentLabel reads the declared parent conversation from the live sidecar.
+func (c *contrib) parentLabel() string {
+	if c.labels == nil {
+		return ""
+	}
+	return c.labels.parentConv
+}
+
 // fromRecord maps a live ring record (Attempts already decoded) into a
 // contrib. The model field is CANONICALIZED here - the single lowest choke
 // point every grouping surface (explorer fold, scope filters, rail counts,
@@ -257,27 +293,29 @@ type errEnt struct {
 // and purge/export keep the exact stored spelling.
 func fromRecord(r *metrics.Record, mcz *modelCanonizer) contrib {
 	c := contrib{
-		id:         r.ID,
-		start:      r.Start.UnixMilli(),
-		status:     r.StatusCode,
-		isErr:      r.IsError(),
-		has429:     r.HasRateLimit(),
-		cost:       r.Cost,
-		in:         r.Usage.InputTokens,
-		out:        r.Usage.OutputTokens,
-		cacheR:     r.Usage.CacheReadTokens,
-		reason:     r.Usage.ReasoningTokens,
-		tools:      int64(r.ToolCalls),
-		ttft:       r.TTFTMs,
-		tps:        recordTPS(r),
-		dec:        recordDecodeMs(r),
-		client:     r.Client,
-		prov:       r.Provider,
-		model:      mcz.model(r.Model),
-		key:        r.KeyHash,
-		conv:       r.ConversationID,
-		parentConv: r.ParentConversationID,
-		toolsL:     r.ToolNames,
+		id:     r.ID,
+		start:  r.Start.UnixMilli(),
+		status: r.StatusCode,
+		isErr:  r.IsError(),
+		has429: r.HasRateLimit(),
+		cost:   r.Cost,
+		in:     r.Usage.InputTokens,
+		out:    r.Usage.OutputTokens,
+		cacheR: r.Usage.CacheReadTokens,
+		reason: r.Usage.ReasoningTokens,
+		tools:  int64(r.ToolCalls),
+		ttft:   r.TTFTMs,
+		tps:    recordTPS(r),
+		dec:    recordDecodeMs(r),
+		labels: &contribLabels{
+			client:     r.Client,
+			prov:       r.Provider,
+			model:      mcz.model(r.Model),
+			key:        r.KeyHash,
+			conv:       r.ConversationID,
+			parentConv: r.ParentConversationID,
+		},
+		toolsL: r.ToolNames,
 	}
 	c.ent = errorEntries(&metrics.Record{
 		StatusCode: r.StatusCode, ErrorType: r.ErrorType, ErrorCode: r.ErrorCode,
@@ -360,13 +398,17 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	var overall, gen float64
 	var errType, errCode, errMsg string
 	var attemptsJSON, toolNamesJSON []byte
+	var client, prov, model, key, conv, parentConv string
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
-		&c.client, &c.prov, &c.model, &c.key, &c.conv, &c.parentConv,
+		&client, &prov, &model, &key, &conv, &parentConv,
 		&c.in, &c.out, &c.cacheR, &c.reason,
 		&c.tools, &c.cost, &ttft, &overall, &gen, &toolNamesJSON, &c.dec); err != nil {
 		return c, err
 	}
-	c.model = mcz.model(c.model)
+	c.labels = &contribLabels{
+		client: client, prov: prov, model: mcz.model(model),
+		key: key, conv: conv, parentConv: parentConv,
+	}
 	c.start = startedAt
 	c.status = int(status)
 	c.ttft = ttft
@@ -1314,8 +1356,13 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 // request log is scoped by; the count endpoint matches them server-side over
 // ALL history so "scope X of Y" is a since-inception number on both sides.
 type scopeFilter struct {
-	dim, id  string
-	modelIDs []bool // query-bound raw-model membership; never an API parameter
+	dim, id string
+	// ids is the query-bound projection dictionary membership: the exact
+	// label slot for client/provider/conversation/key, or every raw model
+	// slot whose canonical spelling equals id. A non-nil empty slice means
+	// the projection has no matching label (projected rows cannot match);
+	// nil leaves the filter unbound for live-only matching.
+	ids []uint32
 }
 
 // matches reports whether one contribution satisfies the filter; the Go
@@ -1344,19 +1391,19 @@ func (f scopeFilter) matches(c *contrib) bool {
 			}
 		}
 		return false
-	case "client":
-		return c.client == f.id
-	case "provider":
-		return c.prov == f.id
-	case "model":
-		if id := c.dimensionIDs[dimModel]; c.dimensionIDs[dimStatus] != 0 && f.modelIDs != nil {
-			return int(id) < len(f.modelIDs) && f.modelIDs[id]
+	case "client", "provider", "model", "conversation", "key":
+		if c.rowIndex > 0 {
+			dim, _ := singleValuedDim(f.dim)
+			id := c.dimensionIDs[dim]
+			if len(f.ids) == 1 {
+				return id == f.ids[0]
+			}
+			// Model membership is appended in raw-dictionary order, so the
+			// multi-spelling canonical case stays O(log n) per row.
+			_, found := slices.BinarySearch(f.ids, id)
+			return found
 		}
-		return c.model == f.id
-	case "conversation":
-		return c.conv == f.id
-	case "key":
-		return c.key == f.id
+		return c.liveLabel(f.dim) == f.id
 	}
 	return false
 }
@@ -1802,8 +1849,10 @@ func (e *explorerFold) fold(c *contrib) error {
 	inGroup := scopedMatch(c, e.statusCode, e.grpFS)
 	ids := e.dims.singles(c)
 	parent := c.parentConvID
-	if c.rowIndex == 0 && c.parentConv != "" {
-		parent = e.dims.intern(dimConversation, c.parentConv)
+	if c.rowIndex == 0 {
+		if name := c.parentLabel(); name != "" {
+			parent = e.dims.intern(dimConversation, name)
+		}
 	}
 	e.lineage.observeRow(c, ids, parent, inRail, inGroup && e.dimIndex == dimConversation)
 	if inGroup {
@@ -2326,8 +2375,9 @@ func logCandidateMatch(c *storage.LogCandidate, goStatus string, fs []scopeFilte
 	}
 	cc := contrib{
 		id: c.Cursor.ID, start: c.Cursor.StartMs, status: c.Status,
-		model: mcz.model(c.Model), toolsL: c.ToolNames,
-		ent: errorEntries(&r),
+		labels: &contribLabels{model: mcz.model(c.Model)},
+		toolsL: c.ToolNames,
+		ent:    errorEntries(&r),
 	}
 	return scopedMatch(&cc, goStatus, fs)
 }

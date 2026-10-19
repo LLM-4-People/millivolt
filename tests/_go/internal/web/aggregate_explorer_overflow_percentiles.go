@@ -22,7 +22,7 @@ func TestExplorerOverflowPercentilesUseOtherMembership(t *testing.T) {
 			id:     fmt.Sprintf("request-%05d", i),
 			start:  int64(i),
 			status: 200,
-			client: fmt.Sprintf("client-%05d", i),
+			labels: &contribLabels{client: fmt.Sprintf("client-%05d", i)},
 			ttft:   int64(1_000 + i),
 			tps:    10 + float64(i)*0.5,
 		}

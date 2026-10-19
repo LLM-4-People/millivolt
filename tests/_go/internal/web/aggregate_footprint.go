@@ -121,7 +121,10 @@ func footprintStore(b *testing.B, n int) (*storage.Store, *config.Config, string
 	b.Helper()
 	d := config.Default()
 	opts := storage.Options{WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
-		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout}
+		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout,
+		// Mirror production: the written-id dedupe set is bounded by 2x the ring,
+		// not left unbounded by a zero test option.
+		WriteTrackCap: d.HistorySize * 2}
 	path := filepath.Join(b.TempDir(), "footprint.db")
 	s, err := storage.Open(path, opts)
 	if err != nil {
@@ -171,6 +174,47 @@ func footprintTotalAlloc() uint64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return m.TotalAlloc
+}
+
+// TestProjectionLabelSidecarGuard pins the memory contract behind the live
+// label sidecar: the retained per-request struct must stay at or below 272
+// bytes, projected rows must drop labels after interning, and ring/pending
+// rows must keep them. A regression here silently restores the six duplicated
+// string headers on every durable row.
+func TestProjectionLabelSidecarGuard(t *testing.T) {
+	const maxContribBytes = 272
+	if got := unsafe.Sizeof(contrib{}); got > maxContribBytes {
+		t.Fatalf("contrib = %d bytes, want <= %d", got, maxContribBytes)
+	}
+	rec := &metrics.Record{
+		ID: "live", Client: "client", Provider: "provider", Model: "MODEL-A",
+		KeyHash: "key", ConversationID: "s:child", ParentConversationID: "s:parent",
+		StatusCode: 200, Start: footprintBase,
+	}
+	ring := fromRecord(rec, nil)
+	if ring.labels == nil {
+		t.Fatal("ring row lost its live label sidecar")
+	}
+	if ring.liveLabel("client") != "client" || ring.liveLabel("model") != "MODEL-A" ||
+		ring.liveLabel("conversation") != "s:child" || ring.parentLabel() != "s:parent" {
+		t.Fatalf("ring labels = %+v", ring.labels)
+	}
+	if pending := fromPending(rec, nil); pending.labels == nil {
+		t.Fatal("pending row lost its live label sidecar")
+	}
+	var d contribDimensions
+	projected := fromRecord(rec, nil)
+	d.intern(&projected)
+	if projected.labels != nil {
+		t.Fatal("projected row retained the live label sidecar")
+	}
+	p, err := buildProjection([]contrib{fromRecord(rec, nil)}, storage.ProjectionCursor{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.rows) != 1 || p.rows[0].labels != nil {
+		t.Fatal("built projection retained a live label sidecar")
+	}
 }
 
 // BenchmarkProjectionFootprint reports the projection's retained bytes per
@@ -287,6 +331,41 @@ func BenchmarkStoreDiskBytes(b *testing.B) {
 	}
 }
 
+// footprintEmptyBaselineRSS measures the same process at readiness with an
+// open scratch store and an empty projection. Subtracting it isolates retained
+// history from the fixed test binary/runtime/store harness.
+func footprintEmptyBaselineRSS(b *testing.B) (float64, bool) {
+	b.Helper()
+	d := config.Default()
+	opts := storage.Options{WriteChanCap: d.StorageWriteChanCap, BatchCap: d.StorageBatchCap,
+		FlushInterval: d.StorageFlushInterval, QueryTimeout: d.StorageQueryTimeout,
+		// Mirror production: the written-id dedupe set is bounded by 2x the ring,
+		// not left unbounded by a zero test option.
+		WriteTrackCap: d.HistorySize * 2}
+	path := filepath.Join(b.TempDir(), "empty.db")
+	s, err := storage.Open(path, opts)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer func() {
+		if err := s.Close(); err != nil {
+			b.Error(err)
+		}
+	}()
+	api := NewAggAPI(metrics.NewBuffer(d.HistorySize), s, d.StorageQueryTimeout)
+	api.ModelCanon = d.ModelCanon
+	if err := api.PreloadHistory(context.Background()); err != nil {
+		b.Fatal(err)
+	}
+	runtime.GC()
+	runtime.GC()
+	rss, ok := footprintRSSMiB()
+	// Keep the empty API/store live through the RSS read just like the seeded
+	// rows keep theirs live.
+	runtime.KeepAlive(api)
+	return rss, ok
+}
+
 // BenchmarkProjectionProcessRSS reproduces the documented idle "after
 // readiness" row: seed, preload, settle, then read this process's resident
 // pages. The benchmark binary carries the test framework and every linked
@@ -294,8 +373,13 @@ func BenchmarkStoreDiskBytes(b *testing.B) {
 // proxy's exact RSS. That fixed binary/runtime constant weighs once per
 // process, so the per-100k normalization is only comparable at one size
 // across revisions; across sizes, compare the MiB difference between the two
-// rows instead.
+// rows instead. projection-MiB subtracts a measured empty-history baseline so
+// the retained projection can be compared independently of that harness.
 func BenchmarkProjectionProcessRSS(b *testing.B) {
+	baseline, ok := footprintEmptyBaselineRSS(b)
+	if !ok {
+		b.Skip("/proc/self/statm is unavailable on this platform")
+	}
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
 			s, d, _ := footprintStore(b, n)
@@ -312,6 +396,7 @@ func BenchmarkProjectionProcessRSS(b *testing.B) {
 					b.Skip("/proc/self/statm is unavailable on this platform")
 				}
 				b.ReportMetric(rss, "MiB")
+				b.ReportMetric(rss-baseline, "projection-MiB")
 				b.ReportMetric(rss*100_000/float64(n), "MiB-per-100k")
 				// The projection must stay live through the settling GCs and
 				// the RSS read above; see the liveness note in the footprint

@@ -49,7 +49,7 @@ func TestProjectionPreloadAndRawModelReuse(t *testing.T) {
 	}
 	var first *contrib
 	if err := api.withProjection(t.Context(), func(p *projectionData) error {
-		if !p.cursor.Ready || len(p.rows) != 1 || len(p.ids) != 1 || p.rows[0].model != "MODEL-A" || !p.hasStart || p.minStart != r.Start.UnixMilli() {
+		if !p.cursor.Ready || len(p.rows) != 1 || len(p.ids) != 1 || projectedLabels(p, &p.rows[0]).model != "MODEL-A" || !p.hasStart || p.minStart != r.Start.UnixMilli() {
 			t.Fatalf("incorrect raw preload: %+v", p)
 		}
 		first = &p.rows[0]
@@ -68,7 +68,7 @@ func TestProjectionPreloadAndRawModelReuse(t *testing.T) {
 			t.Fatalf("rules must remap one raw projection: %+v, %v", e, err)
 		}
 		if err := api.withProjection(t.Context(), func(p *projectionData) error {
-			if &p.rows[0] != first || p.rows[0].model != "MODEL-A" {
+			if &p.rows[0] != first || projectedLabels(p, &p.rows[0]).model != "MODEL-A" {
 				t.Fatal("view/rule change rebuilt or mutated raw history")
 			}
 			return nil

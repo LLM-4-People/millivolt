@@ -21,18 +21,20 @@ func explorerFoldFixtures() []contrib {
 	for i := range rows {
 		rows[i] = contrib{
 			id: fmt.Sprint(i), start: start + int64(i)*60000, status: 200,
-			client: fmt.Sprintf("client-%03d", i), prov: "old.example",
-			model: "MODEL-A", conv: fmt.Sprint(i % 11), key: fmt.Sprint(i % 3),
+			labels: &contribLabels{
+				client: fmt.Sprintf("client-%03d", i), prov: "old.example",
+				model: "MODEL-A", conv: fmt.Sprint(i % 11), key: fmt.Sprint(i % 3),
+			},
 			cost: float64(i%5) / 100, in: 100, out: 20, cacheR: 25, reason: 4,
 			ttft: int64(100 + i), tps: float64(i)/4 + 1,
 		}
 		if i%2 == 0 {
-			rows[i].model = "model-a"
+			rows[i].labels.model = "model-a"
 			rows[i].toolsL = []string{"lookup", "", "lookup", "read"}
 			rows[i].tools = 3
 		}
 		if i%3 == 0 {
-			rows[i].prov = "new.example"
+			rows[i].labels.prov = "new.example"
 		}
 		if i%5 == 0 {
 			rows[i].status, rows[i].isErr = 500, true
@@ -77,7 +79,7 @@ func TestExplorerEncodedFoldMatchesRaw(t *testing.T) {
 				raw, encoded := newExplorerFold(dim, "", fs), newExplorerFold(dim, "", fs)
 				encoded.prepare(p, mcz)
 				for i, c := range rows {
-					c.model = mcz.model(c.model)
+					rowLabels(&c).model = mcz.model(c.liveLabel("model"))
 					if err := raw.fold(&c); err != nil {
 						t.Fatal(err)
 					}
@@ -88,7 +90,8 @@ func TestExplorerEncodedFoldMatchesRaw(t *testing.T) {
 				// Local ring/pending membership can reuse projected IDs or add
 				// fresh names without ever mutating the shared dictionary.
 				extra := contrib{id: "extra", start: rows[0].start, live: true, stream: true,
-					client: "new-client", prov: "old.example", model: "model-a", toolsL: []string{"lookup", "new-tool"}}
+					labels: &contribLabels{client: "new-client", prov: "old.example", model: "model-a"},
+					toolsL: []string{"lookup", "new-tool"}}
 				_ = raw.fold(&extra)
 				_ = encoded.fold(&extra)
 				for _, g := range encoded.groups {
@@ -273,7 +276,7 @@ func TestExplorerFoldMetricCountsFollowProjectedMemberships(t *testing.T) {
 func TestExplorerRankedMetricsMergeExtras(t *testing.T) {
 	rows := make([]contrib, 3)
 	for i := range rows {
-		rows[i] = contrib{id: fmt.Sprint(i), prov: "old.example", status: 200,
+		rows[i] = contrib{id: fmt.Sprint(i), labels: &contribLabels{prov: "old.example"}, status: 200,
 			start: int64(i+1) * 1000, ttft: int64(i+1) * 10, tps: float64(i + 1),
 			toolsL: []string{"lookup"}, ent: []errEnt{{typ: "failure"}}}
 		if i == 1 {
@@ -291,7 +294,7 @@ func TestExplorerRankedMetricsMergeExtras(t *testing.T) {
 		if dim == "provider" && f.payload().Groups[0].TTFTP50 != nil {
 			t.Fatal("three projected samples bypassed the sparse gate")
 		}
-		extra := contrib{id: "ring", prov: "old.example", status: 200, start: 4000,
+		extra := contrib{id: "ring", labels: &contribLabels{prov: "old.example"}, status: 200, start: 4000,
 			ttft: 100, tps: 10, toolsL: []string{"lookup"}, ent: []errEnt{{typ: "failure"}}}
 		_ = f.fold(&extra)
 		g := f.payload().Groups[0]
@@ -323,7 +326,7 @@ func TestExplorerFoldTopCardsBeforeSampleDerivation(t *testing.T) {
 		for i := xpNodeCap + 5; i >= 0; i-- {
 			name := fmt.Sprintf("entity-%02d", i)
 			for sample, ttft := range []int64{40, 10, 30, 20} {
-				c := contrib{id: fmt.Sprint(sample), client: name, ttft: ttft, tps: float64(ttft) / 10, start: int64(sample)}
+				c := contrib{id: fmt.Sprint(sample), labels: &contribLabels{client: name}, ttft: ttft, tps: float64(ttft) / 10, start: int64(sample)}
 				if dim == "error" {
 					c.ent = []errEnt{{typ: name}}
 					// More error occurrences must not outrank more affected IDs.
@@ -412,13 +415,13 @@ func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
 		for i := 0; i < coldRows; i++ {
 			name, ttft, tps := fmt.Sprintf("cold-%05d", i), int64(1000+i), float64(i+1)/2
 			rows = append(rows, contrib{id: fmt.Sprintf("cold-row-%05d", i), start: int64(i+1) * 1000,
-				status: 200, client: name, prov: "p", model: "m", ttft: ttft, tps: tps})
+				status: 200, labels: &contribLabels{client: name, prov: "p", model: "m"}, ttft: ttft, tps: tps})
 			wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
 		}
 		for i := 0; i < 120; i++ {
 			name, ttft, tps := fmt.Sprintf("hot-%02d", i%10), int64(100000+i), float64(100+i)
 			rows = append(rows, contrib{id: fmt.Sprintf("hot-row-%03d", i), start: int64(coldRows+i+1) * 1000,
-				status: 200, client: name, prov: "p", model: "m", ttft: ttft, tps: tps})
+				status: 200, labels: &contribLabels{client: name, prov: "p", model: "m"}, ttft: ttft, tps: tps})
 			wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
 		}
 		p := explorerProjection(rows)
@@ -759,7 +762,7 @@ func TestExplorerSyntheticOtherIsDistinctFromRealOther(t *testing.T) {
 	add := func(client string) {
 		rows = append(rows, contrib{
 			id: fmt.Sprintf("row-%05d", len(rows)), start: start + int64(len(rows)),
-			status: 200, client: client,
+			status: 200, labels: &contribLabels{client: client},
 		})
 	}
 	for i := range fillers {
@@ -855,7 +858,7 @@ func TestExplorerDistinctGroupsStayBounded(t *testing.T) {
 				for i := range values {
 					c := contrib{id: rowIDs[i], rowIndex: uint32(i + 1), start: int64(i), status: 200}
 					if dim == "conversation" {
-						c.conv = values[i]
+						c.dimensionIDs[dimConversation] = uint32(i + 1)
 					} else {
 						errorIDs[0] = uint32(i + 1)
 						c.status, c.isErr = 500, true

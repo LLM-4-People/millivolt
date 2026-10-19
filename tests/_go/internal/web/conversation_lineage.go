@@ -12,7 +12,10 @@ import (
 )
 
 func lineageRow(id, parent string) contrib {
-	return contrib{conv: id, parentConv: parent, client: "fixture-client", key: "fixture-key", status: 200}
+	return contrib{
+		labels: &contribLabels{conv: id, parentConv: parent, client: "fixture-client", key: "fixture-key"},
+		status: 200,
+	}
 }
 
 func TestConversationLineageResolution(t *testing.T) {
@@ -117,19 +120,19 @@ func TestConversationLineageNamespaceAndPivots(t *testing.T) {
 			parent, child := lineageRow("s:parent", ""), lineageRow("s:child", "s:parent")
 			switch missingKind {
 			case "different key":
-				parent.key = "another-key"
+				rowLabels(&parent).key = "another-key"
 			case "different client":
-				parent.client = "another-client"
+				rowLabels(&parent).client = "another-client"
 			case "keyless":
-				parent.key, child.key = "", ""
+				rowLabels(&parent).key, rowLabels(&child).key = "", ""
 			}
 			var l conversationLineage
 			l.observe(&parent, false, false)
 			l.observe(&child, true, true)
 			summary, groups := l.resolve()
-			info := l.info(groups[child.conv])
+			info := l.info(groups[child.liveLabel("conversation")])
 			wantObserved := missingKind == "same scope" || missingKind == "keyless"
-			if summary != (conversationSummary{Sub: 1}) || info.Role != conversationSub || info.ParentID != parent.conv || info.ParentObserved == nil || *info.ParentObserved != wantObserved || info.ParentInScope == nil || *info.ParentInScope {
+			if summary != (conversationSummary{Sub: 1}) || info.Role != conversationSub || info.ParentID != parent.liveLabel("conversation") || info.ParentObserved == nil || *info.ParentObserved != wantObserved || info.ParentInScope == nil || *info.ParentInScope {
 				t.Fatalf("summary=%+v info=%+v", summary, info)
 			}
 			if missingKind == "keyless" {
@@ -137,7 +140,11 @@ func TestConversationLineageNamespaceAndPivots(t *testing.T) {
 					t.Fatal("empty key pivot broadened namespace")
 				}
 			} else {
-				want := []conversationPivotFilter{{Dim: "client", ID: child.client}, {Dim: "key", ID: child.key}, {Dim: "conversation", ID: parent.conv}}
+				want := []conversationPivotFilter{
+					{Dim: "client", ID: child.liveLabel("client")},
+					{Dim: "key", ID: child.liveLabel("key")},
+					{Dim: "conversation", ID: parent.liveLabel("conversation")},
+				}
 				if !reflect.DeepEqual(info.ParentScope, want) {
 					t.Fatalf("parent scope=%+v want=%+v", info.ParentScope, want)
 				}
@@ -146,11 +153,11 @@ func TestConversationLineageNamespaceAndPivots(t *testing.T) {
 	}
 	var l conversationLineage
 	a, b := lineageRow("s:same-label", "s:first"), lineageRow("s:same-label", "s:second")
-	b.key = "another-key"
+	rowLabels(&b).key = "another-key"
 	l.observe(&a, true, true)
 	l.observe(&b, true, true)
 	summary, groups := l.resolve()
-	info := l.info(groups[a.conv])
+	info := l.info(groups[a.liveLabel("conversation")])
 	if summary != (conversationSummary{Unresolved: 1}) || info.Role != conversationUnknown || info.Issue != "multiple_scopes" || info.ParentID != "" || len(info.ParentScope) != 0 {
 		t.Fatalf("ambiguous public ID selected a namespace: %+v %+v", summary, info)
 	}
@@ -255,7 +262,7 @@ func TestConversationLineageStoredRingPendingAndExactScope(t *testing.T) {
 func TestConversationLineageCollectsAncestorsOutsideScope(t *testing.T) {
 	fold := newExplorerFold("conversation", "", []scopeFilter{{dim: "provider", id: "child.example"}})
 	parent, child := lineageRow("s:parent", ""), lineageRow("s:child", "s:parent")
-	parent.prov, child.prov = "parent.example", "child.example"
+	rowLabels(&parent).prov, rowLabels(&child).prov = "parent.example", "child.example"
 	if err := fold.fold(&parent); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +295,7 @@ func lineageTopologyFixtures() []contrib {
 		lineageRow("s:mixed", ""),
 	}
 	mixed := lineageRow("s:mixed", "")
-	mixed.key = "other-key"
+	rowLabels(&mixed).key = "other-key"
 	return append(rows, mixed)
 }
 
@@ -296,9 +303,9 @@ func TestExplorerLineageProjectionParity(t *testing.T) {
 	rows := lineageTopologyFixtures()
 	for i := range rows {
 		if i%2 == 0 {
-			rows[i].prov = "fixture.example"
+			rowLabels(&rows[i]).prov = "fixture.example"
 		} else {
-			rows[i].prov = "other.example"
+			rowLabels(&rows[i]).prov = "other.example"
 		}
 	}
 	projected := explorerProjection(rows)
@@ -354,7 +361,7 @@ func TestExplorerLineageTopologyReusedAcrossRequests(t *testing.T) {
 			parent = fmt.Sprint("s:", i-1)
 		}
 		rows[i] = lineageRow(fmt.Sprint("s:", i), parent)
-		rows[i].prov = "fixture.example"
+		rowLabels(&rows[i]).prov = "fixture.example"
 	}
 	p := explorerProjection(rows)
 	nodes := len(p.lineage.nodes)

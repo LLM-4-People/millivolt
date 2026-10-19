@@ -325,20 +325,27 @@ func (l *conversationLineage) groupCount() uint32 {
 // observe is the standalone entry point used by lineage unit tests: it interns
 // names into the same query dictionary owner the explorer uses.
 func (l *conversationLineage) observe(c *contrib, inRail, inGroup bool) {
-	if c.conv == "" {
+	if c == nil {
 		return
 	}
 	if l.names == nil {
 		l.names = &queryDimensions{}
 	}
+	if c.rowIndex > 0 {
+		l.observeIDs(c.dimensionIDs, c.parentConvID, inRail, inGroup)
+		return
+	}
+	if c.liveLabel("conversation") == "" {
+		return
+	}
 	ids := [dimTool]uint32{
-		dimClient:       l.names.intern(dimClient, c.client),
-		dimKey:          l.names.intern(dimKey, c.key),
-		dimConversation: l.names.intern(dimConversation, c.conv),
+		dimClient:       l.names.intern(dimClient, c.liveLabel("client")),
+		dimKey:          l.names.intern(dimKey, c.liveLabel("key")),
+		dimConversation: l.names.intern(dimConversation, c.liveLabel("conversation")),
 	}
 	parent := uint32(0)
-	if c.parentConv != "" {
-		parent = l.names.intern(dimConversation, c.parentConv)
+	if name := c.parentLabel(); name != "" {
+		parent = l.names.intern(dimConversation, name)
 	}
 	l.observeIDs(ids, parent, inRail, inGroup)
 }

@@ -11,32 +11,48 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
-func TestProjectionDimensionsShareStoredLabels(t *testing.T) {
+func TestProjectionDropsStoredLabels(t *testing.T) {
 	var d contribDimensions
-	first := contrib{client: "fixture-client", prov: "fixture.example", model: "MODEL-A", conv: "conversation", key: "key-hash", status: 200}
+	want := map[int]string{
+		dimClient:       "fixture-client",
+		dimProvider:     "fixture.example",
+		dimModel:        "MODEL-A",
+		dimConversation: "conversation",
+		dimKey:          "key-hash",
+	}
+	first := contrib{
+		labels: &contribLabels{
+			client: want[dimClient], prov: want[dimProvider], model: want[dimModel],
+			conv: want[dimConversation], key: want[dimKey],
+		},
+		status: 200,
+	}
 	d.intern(&first)
+	if first.labels != nil {
+		t.Fatal("projected row retained the live label sidecar")
+	}
+	for dim, name := range want {
+		id := first.dimensionIDs[dim]
+		if got := d.dict[dim].names[id]; got != name {
+			t.Fatalf("%s = %q, want %q", dimensionNames[dim], got, name)
+		}
+	}
 	for range 16 {
-		row := contrib{status: 200}
-		for _, dim := range dimensionNames {
-			if field := dimField(dim, &row); field != nil {
-				*field = strings.Clone(*dimField(dim, &first))
-			}
+		row := contrib{
+			labels: &contribLabels{
+				client: strings.Clone(want[dimClient]), prov: strings.Clone(want[dimProvider]),
+				model: strings.Clone(want[dimModel]), conv: strings.Clone(want[dimConversation]),
+				key: strings.Clone(want[dimKey]),
+			},
+			status: 200,
 		}
 		d.intern(&row)
-		for dim, name := range dimensionNames {
-			field := dimField(name, &row)
-			if field == nil {
-				continue
-			}
-			id := row.dimensionIDs[dim]
-			canonical := d.dict[dim].names[id]
-			// Pointer inspection is test-only: production uses ordinary
-			// immutable Go strings, with no unsafe aliases or conversions.
-			if *field != canonical || unsafe.StringData(*field) != unsafe.StringData(canonical) {
-				t.Fatalf("%s retained a per-row copy instead of dictionary bytes", name)
-			}
-			if d.dict[dim].names[id] != *dimField(name, &first) {
-				t.Fatalf("%s canonicalization changed its raw spelling", name)
+		if row.labels != nil {
+			t.Fatal("projected row retained the live label sidecar")
+		}
+		for dim := range want {
+			if row.dimensionIDs[dim] != first.dimensionIDs[dim] {
+				t.Fatalf("%s duplicate changed slot: %d != %d", dimensionNames[dim], row.dimensionIDs[dim], first.dimensionIDs[dim])
 			}
 		}
 	}
@@ -51,21 +67,22 @@ func TestProjectionEmptyModelCanonicalization(t *testing.T) {
 	for _, replacement := range []string{"unknown", ""} {
 		t.Run(replacement, func(t *testing.T) {
 			mcz := &modelCanonizer{exec: config.CompileModelRules([]config.ModelRule{{Mode: config.ModelRulePattern, From: "^$", To: replacement}}), memo: map[string]string{}}
-			p := &projectionData{rows: []contrib{{id: "stored", status: 200, start: 1000, ttft: 10, tps: 2}}}
+			p := &projectionData{rows: []contrib{{id: "stored", status: 200, start: 1000, ttft: 10, tps: 2, rowIndex: 1}}}
 			p.dimensions.intern(&p.rows[0])
 			fs := []scopeFilter{{dim: "model", id: replacement}}
 			bound := bindScope(fs, p, mcz)
 			if !scopedMatch(&p.rows[0], "", bound) {
 				t.Fatal("projection lost valid empty-model canonicalization")
 			}
-			if fs[0].modelIDs != nil {
+			if fs[0].ids != nil {
 				t.Fatal("bound scope mutated caller")
 			}
 			raw, indexed := newExplorerFold("model", "", fs), newExplorerFold("model", "", fs)
 			indexed.prepare(p, mcz)
 			c := p.rows[0]
 			c.dimensionIDs = [dimTool]uint32{}
-			c.model = mcz.model(c.model)
+			c.rowIndex = 0
+			c.labels = &contribLabels{model: mcz.model("")}
 			_ = raw.fold(&c)
 			_ = indexed.fold(&p.rows[0])
 			if got, want := indexed.payload(), raw.payload(); !reflect.DeepEqual(got, want) {
@@ -77,8 +94,8 @@ func TestProjectionEmptyModelCanonicalization(t *testing.T) {
 
 // TestProjectionToolNamesShareDictionaryBytes pins the tool-name repoint in
 // intern: the per-row decode copies must become garbage after interning, not
-// stay live for the history's lifetime. Pointer inspection is test-only, like
-// the stored-label pin above; production uses ordinary immutable Go strings.
+// stay live for the history's lifetime. Pointer inspection is test-only;
+// production uses ordinary immutable Go strings.
 func TestProjectionToolNamesShareDictionaryBytes(t *testing.T) {
 	var d contribDimensions
 	row := contrib{status: 200, toolsL: []string{strings.Clone("web_search"), strings.Clone("bash_exec")}}
@@ -98,16 +115,20 @@ func TestProjectionToolNamesShareDictionaryBytes(t *testing.T) {
 
 func TestProjectionParentIdentitySharesConversationDictionary(t *testing.T) {
 	var d contribDimensions
-	child := contrib{conv: "child", parentConv: strings.Repeat("parent", 30), status: 200}
+	parentName := strings.Repeat("parent", 30)
+	child := contrib{labels: &contribLabels{conv: "child", parentConv: parentName}, status: 200}
 	d.intern(&child)
-	parentID := d.dict[dimConversation].ids[child.parentConv]
-	if parentID == 0 || d.dict[dimConversation].counts[parentID] != 0 {
+	if child.labels != nil {
+		t.Fatal("projected row retained the live label sidecar")
+	}
+	parentID := d.dict[dimConversation].ids[parentName]
+	if parentID == 0 || child.parentConvID != parentID || d.dict[dimConversation].counts[parentID] != 0 {
 		t.Fatal("a referenced parent fabricated an observed membership")
 	}
-	parent := contrib{conv: strings.Clone(child.parentConv), status: 200}
+	parent := contrib{labels: &contribLabels{conv: strings.Clone(parentName)}, status: 200}
 	d.intern(&parent)
-	if unsafe.StringData(child.parentConv) != unsafe.StringData(parent.conv) || d.dict[dimConversation].counts[parentID] != 1 {
-		t.Fatal("parent identity failed to reuse canonical bytes/counts")
+	if parent.dimensionIDs[dimConversation] != parentID || d.dict[dimConversation].counts[parentID] != 1 {
+		t.Fatal("parent identity failed to reuse its conversation dictionary slot/count")
 	}
 }
 
@@ -123,7 +144,7 @@ func modelCacheProjection(t *testing.T, models int) *projectionData {
 	t.Helper()
 	rows := make([]contrib, models)
 	for i := range rows {
-		rows[i] = contrib{model: fmt.Sprintf("Vendor/Model-%d", i), status: 200}
+		rows[i] = contrib{labels: &contribLabels{model: fmt.Sprintf("Vendor/Model-%d", i)}, status: 200}
 	}
 	p, err := buildProjection(rows, storage.ProjectionCursor{}, 1)
 	if err != nil {

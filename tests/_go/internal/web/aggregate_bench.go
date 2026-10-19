@@ -34,8 +34,20 @@ func benchmarkContributions(b *testing.B) []contrib {
 		api := NewAggAPI(metrics.NewBuffer(1), s, d.StorageQueryTimeout)
 		api.ModelCanon = d.ModelCanon
 		var rows []contrib
-		if err := api.streamWindow(context.Background(), 0, api.canonizer(), nil, func(c *contrib) error { rows = append(rows, *c); return nil }, nil); err != nil {
+		var projection *projectionData
+		prepare := func(p *projectionData) { projection = p }
+		if err := api.streamWindow(context.Background(), 0, api.canonizer(), prepare, func(c *contrib) error { rows = append(rows, *c); return nil }, nil); err != nil {
 			b.Fatal(err)
+		}
+		// The benchmark re-interns these rows into a fresh dictionary, so
+		// projected fixtures need their labels restored from the source
+		// projection's dictionaries.
+		if projection != nil {
+			for i := range rows {
+				if rows[i].labels == nil {
+					rows[i].labels = projectedLabels(projection, &rows[i])
+				}
+			}
 		}
 		return rows
 	}
@@ -45,7 +57,8 @@ func benchmarkContributions(b *testing.B) []contrib {
 		// Oldest first: row indexes and starts advance together, so a recent
 		// window has high row indexes and can use the retained metric tail.
 		start := now - int64(len(rows)-1-i)*1000
-		rows[i] = contrib{start: start, status: 200, in: 100, out: 50, ttft: int64(1 + i%3000), tps: float64(1 + i%500), prov: "fixture.example", model: "model", client: "client"}
+		rows[i] = contrib{start: start, status: 200, in: 100, out: 50, ttft: int64(1 + i%3000), tps: float64(1 + i%500),
+			labels: &contribLabels{prov: "fixture.example", model: "model", client: "client"}}
 	}
 	return rows
 }
@@ -391,9 +404,12 @@ func BenchmarkExplorerLineageTopology(b *testing.B) {
 					parent = fmt.Sprintf("s:%d", i-1)
 				}
 				rows[i] = contrib{
-					start: int64(i), status: 200, client: "fixture-client", key: "fixture-key",
-					prov: "fixture.example", model: "fixture-model",
-					conv: fmt.Sprintf("s:%d", i), parentConv: parent,
+					start: int64(i), status: 200,
+					labels: &contribLabels{
+						client: "fixture-client", key: "fixture-key",
+						prov: "fixture.example", model: "fixture-model",
+						conv: fmt.Sprintf("s:%d", i), parentConv: parent,
+					},
 				}
 			}
 			p := benchmarkExplorerProjection(rows)
@@ -426,7 +442,7 @@ func BenchmarkExplorerCanonicalModels(b *testing.B) {
 		b.Run(fmt.Sprintf("models_%d", models), func(b *testing.B) {
 			rows := make([]contrib, models)
 			for i := range rows {
-				rows[i] = contrib{model: fmt.Sprintf("vendor.example/Model-%d.5:tag-fp4", i), status: 200}
+				rows[i] = contrib{labels: &contribLabels{model: fmt.Sprintf("vendor.example/Model-%d.5:tag-fp4", i)}, status: 200}
 			}
 			p := benchmarkExplorerProjection(rows)
 			mcz := &modelCanonizer{exec: exec, identity: revision, memo: map[string]string{}}

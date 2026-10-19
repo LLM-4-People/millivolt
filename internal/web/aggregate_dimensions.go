@@ -70,21 +70,42 @@ func (d *contribDimensions) internErrorText(s string) string {
 	return s
 }
 
-// dimField owns the stored single-valued dimension mapping. Both the value
-// reader and projection interning use it, so rows can share dictionary-owned
-// string bytes without a second copy of dimension semantics.
-func dimField(dim string, c *contrib) *string {
+// singleValuedDim maps one API dimension name to its dictionary slot. Only
+// client/provider/model/conversation/key carry single string labels.
+func singleValuedDim(dim string) (int, bool) {
 	switch dim {
 	case "client":
-		return &c.client
+		return dimClient, true
 	case "provider":
-		return &c.prov
+		return dimProvider, true
 	case "model":
-		return &c.model
+		return dimModel, true
 	case "conversation":
-		return &c.conv
+		return dimConversation, true
 	case "key":
-		return &c.key
+		return dimKey, true
+	}
+	return 0, false
+}
+
+// dimField owns the live single-valued label mapping. Projected rows have no
+// sidecar and return nil; their labels are dictionary slots addressed by
+// dimensionIDs.
+func dimField(dim string, c *contrib) *string {
+	if c.labels == nil {
+		return nil
+	}
+	switch dim {
+	case "client":
+		return &c.labels.client
+	case "provider":
+		return &c.labels.prov
+	case "model":
+		return &c.labels.model
+	case "conversation":
+		return &c.labels.conv
+	case "key":
+		return &c.labels.key
 	}
 	return nil
 }
@@ -98,28 +119,20 @@ func (d *contribDimensions) intern(c *contrib) {
 			id := d.dict[dim].intern(name)
 			c.dimensionIDs[dim] = id
 			d.dict[dim].counts[id]++
-			if field := dimField(dimensionNames[dim], c); field != nil {
-				// SQL decodes equal labels into distinct allocations. The
-				// dictionary already owns their canonical immutable bytes.
-				*field = d.dict[dim].names[id]
-			}
 		}
 	}
-	if c.parentConv != "" {
+	if parent := c.parentLabel(); parent != "" {
 		// A declaration can name a parent before its first observed request.
-		// Reuse the conversation dictionary's bytes, but do not increment its
+		// Reuse the conversation dictionary's slot, but do not increment its
 		// membership count: a parent reference is not an observed conversation.
-		id := d.dict[dimConversation].intern(c.parentConv)
-		c.parentConv = d.dict[dimConversation].names[id]
-		c.parentConvID = id
+		c.parentConvID = d.dict[dimConversation].intern(parent)
 	}
 	c.toolIDs = make([]uint32, len(c.toolsL))
 	for i, name := range c.toolsL {
 		id := d.dict[dimTool].intern(name)
 		c.toolIDs[i] = id
-		// Share the dictionary's canonical bytes, like the single-valued
-		// label fields above: per-row decode copies become garbage instead
-		// of staying live for the history's lifetime.
+		// Share the dictionary's canonical bytes so per-row decode copies
+		// become garbage instead of staying live for the history's lifetime.
 		c.toolsL[i] = d.dict[dimTool].names[id]
 		d.dict[dimTool].counts[id]++
 	}
@@ -132,42 +145,66 @@ func (d *contribDimensions) intern(c *contrib) {
 		c.errorIDs[i] = d.dict[dimError].intern(errorKey(*e))
 		d.dict[dimError].counts[c.errorIDs[i]]++
 	}
+	// The row now owns dictionary slots; retained projection rows must not
+	// keep the live label sidecar (or its six string headers) alive.
+	c.labels = nil
 }
 
 func errorKey(e errEnt) string { return e.typ + "|" + e.code + "|" + e.msg }
 
-// Bind model filters to the raw dictionary once, keeping projection rows
-// immutable so readers can fold pointers without copying every contribution.
-// Ring extras still carry fromRecord's canonical spelling. Never mutate the
-// caller's filter slice: chart and cross-filter gallery may share that input.
+// Bind single-valued scope filters to the projection dictionaries once,
+// keeping projection rows immutable so readers can fold pointers without
+// copying every contribution. Exact labels bind to their one dictionary slot;
+// model filters preserve canonical semantics by collecting every raw slot
+// whose canonical spelling equals the filter. Ring extras still carry live
+// labels and match by exact string. Never mutate the caller's filter slice:
+// chart and cross-filter gallery may share that input.
 func bindScope(fs []scopeFilter, p *projectionData, mcz *modelCanonizer) []scopeFilter {
 	if p == nil {
 		return fs
 	}
 	var out []scopeFilter
-	var ids []uint32
+	var modelIDs []uint32
 	var models dimensionDictionary
 	for i, f := range fs {
-		if f.dim != "model" {
+		dim, ok := singleValuedDim(f.dim)
+		if !ok {
 			continue
 		}
 		if out == nil {
 			out = append([]scopeFilter(nil), fs...)
 		}
-		names := p.dimensions.dict[dimModel].names
-		if ids == nil {
-			ids, models = p.canonicalModels(mcz, names)
+		if dim != dimModel {
+			// The dictionary interns every nonempty label once, so an exact
+			// filter matches at most one slot. Empty labels occupy slot 0.
+			if f.id == "" {
+				out[i].ids = []uint32{0}
+			} else if id := p.dimensions.dict[dim].ids[f.id]; id != 0 {
+				out[i].ids = []uint32{id}
+			} else {
+				out[i].ids = []uint32{}
+			}
+			continue
 		}
-		out[i].modelIDs = make([]bool, len(names))
-		for id, name := range names {
+		names := p.dimensions.dict[dimModel].names
+		if modelIDs == nil {
+			modelIDs, models = p.canonicalModels(mcz, names)
+		}
+		// Append in raw-dictionary order: the membership slice stays sorted
+		// for the scope matcher's binary search.
+		ids := make([]uint32, 0, 1)
+		for rawID, name := range names {
 			canonical := name
-			if id < len(ids) {
-				canonical = models.names[ids[id]]
+			if rawID < len(modelIDs) {
+				canonical = models.names[modelIDs[rawID]]
 			} else {
 				canonical = mcz.model(name)
 			}
-			out[i].modelIDs[id] = canonical == f.id
+			if canonical == f.id {
+				ids = append(ids, uint32(rawID))
+			}
 		}
+		out[i].ids = ids
 	}
 	if out == nil {
 		return fs
@@ -287,8 +324,10 @@ func (q *queryDimensions) intern(dim int, name string) uint32 {
 // need string lookups; the dictionaries remain the sole membership owner.
 func (q *queryDimensions) singles(c *contrib) [dimTool]uint32 {
 	ids := c.dimensionIDs
-	if ids[dimStatus] != 0 {
-		ids[dimModel] = q.modelIDs[ids[dimModel]]
+	if c.rowIndex > 0 {
+		if rawID := ids[dimModel]; int(rawID) < len(q.modelIDs) {
+			ids[dimModel] = q.modelIDs[rawID]
+		}
 		return ids
 	}
 	for dim := range dimTool {
