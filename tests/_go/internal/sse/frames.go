@@ -2,6 +2,8 @@ package sse
 
 import (
 	"bytes"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +97,66 @@ func TestEmitFrameNilFlusherWritesFrameWithoutFlush(t *testing.T) {
 	}
 	if got := buf.String(); got != "data: {\"a\":1}\n\n" {
 		t.Fatalf("buffer = %q, want the exact data frame", got)
+	}
+}
+
+// TestEmitFrameDoesNotHTMLEscape pins the wire encoding: the emitter must
+// carry <, > and & literally (one byte each), because encoding/json's default
+// escaping inflates them to six bytes and can push an otherwise valid
+// translated content frame past the relay's frame cap. The payload stays
+// valid JSON and decodes to the original value.
+func TestEmitFrameDoesNotHTMLEscape(t *testing.T) {
+	obj := map[string]any{
+		"id": "req<&>",
+		"choices": []map[string]any{{
+			"delta": map[string]any{"content": "<tag> & done"},
+		}},
+	}
+	var buf bytes.Buffer
+	if err := EmitFrame(&buf, nil, obj); err != nil {
+		t.Fatalf("EmitFrame = %v", err)
+	}
+	frame := buf.String()
+	if !bytes.HasPrefix([]byte(frame), []byte("data: ")) || !bytes.HasSuffix([]byte(frame), []byte("\n\n")) {
+		t.Fatalf("frame envelope changed: %q", frame)
+	}
+	payload := strings.TrimSuffix(strings.TrimPrefix(frame, "data: "), "\n\n")
+	if strings.Contains(payload, `\u003c`) || strings.Contains(payload, `\u003e`) || strings.Contains(payload, `\u0026`) {
+		t.Fatalf("payload still HTML-escapes: %q", payload)
+	}
+	if !strings.Contains(payload, `<tag> & done`) {
+		t.Fatalf("payload lost literal HTML characters: %q", payload)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload is not valid JSON: %v (%q)", err, payload)
+	}
+}
+
+// TestEmitFramePreservesNormalJSON pins that omitting HTML escaping changes
+// nothing else: for a payload without <, > or &, the emitted payload is
+// byte-for-byte encoding/json's Marshal output (map order included).
+func TestEmitFramePreservesNormalJSON(t *testing.T) {
+	obj := map[string]any{
+		"id":      "chat-1",
+		"created": int64(1700000000),
+		"ok":      true,
+		"none":    nil,
+		"choices": []map[string]any{{
+			"index":         0,
+			"finish_reason": nil,
+			"delta":         map[string]any{"content": "plain text\nwith \"quotes\" and unicode é"},
+		}},
+	}
+	want, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := EmitFrame(&buf, nil, obj); err != nil {
+		t.Fatalf("EmitFrame = %v", err)
+	}
+	if got, expected := buf.String(), string(DataFrame(want)); got != expected {
+		t.Fatalf("frame = %q, want exact json.Marshal payload %q", got, expected)
 	}
 }

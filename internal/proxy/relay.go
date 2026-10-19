@@ -1711,7 +1711,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		return
 	}
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, sseScannerBufInit), sseScannerBufMax)
+	scanner.Buffer(make([]byte, 0, sseScannerBufInit), translatedFrameBufMax)
 	a := s.analyzerFor(rec)
 	// Frames are accumulated until their blank-line terminator, then written
 	// and flushed once: the transformer always emits "data: ...\n\n", so this

@@ -53,10 +53,13 @@ type nonStreamEnvelope struct {
 }
 
 type nonStreamChoice struct {
-	FinishReason string `json:"finish_reason"`
+	FinishReason string          `json:"finish_reason"`
+	Text         json.RawMessage `json:"text"`
 	Message      struct {
 		Role          json.RawMessage   `json:"role"`
 		Content       json.RawMessage   `json:"content"`
+		Refusal       json.RawMessage   `json:"refusal"`
+		FunctionCall  json.RawMessage   `json:"function_call"`
 		Reasoning     json.RawMessage   `json:"reasoning_content"`
 		ReasoningBare json.RawMessage   `json:"reasoning"`
 		ReasoningDet  json.RawMessage   `json:"reasoning_details"`
@@ -74,11 +77,12 @@ type nonStreamToolCall struct {
 
 // AnalyzeNonStreamBody decodes body once and derives the complete non-stream
 // metrics view: the quality outcome, usage (ParseUsage with provider
-// overrides), model/id, finish reason, answer presence (FlattenContent
-// semantics), reasoning presence (contentPresent semantics), tool calls,
-// bounded preview, cost (the existing ExtractCost key gate) and the canonical
-// top-level error envelope. It is the single analysis owner for both the
-// buffered quality path and the teeing relay.
+// overrides), model/id, finish reason, answer presence (message content and
+// legacy choices[].text content, plus answer-shaped refusal or deprecated
+// function_call declarations), reasoning presence (contentPresent semantics),
+// tool calls, bounded preview, cost (the existing ExtractCost key gate) and
+// the canonical top-level error envelope. It is the single analysis owner for
+// both the buffered quality path and the teeing relay.
 func AnalyzeNonStreamBody(body []byte, usageKeys map[string]string, costKeys []string, preview bool) NonStreamAnalysis {
 	var a NonStreamAnalysis
 	var raw nonStreamEnvelope
@@ -132,17 +136,32 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 	}
 	// The legacy typed extractor decoded every choice, so a non-string role in
 	// any choice cleared its record fields. Validate all of them; the first
-	// choice alone owns the classified content.
+	// choice alone owns the classified content. Legacy /v1/completions puts
+	// the answer in choices[].text, and the streaming analyzer counts the
+	// first non-empty choice text across the list as answer content, so keep
+	// the same cross-choice rule here.
+	hadChoiceText := false
+	var choiceText json.RawMessage
 	for i := range raw.Choices {
 		if _, ok := optionalJSONString(raw.Choices[i].Message.Role); !ok {
 			a.RecordFieldsOK = false
+		}
+		if !hadChoiceText && nonEmptyAnswerValue(raw.Choices[i].Text) {
+			hadChoiceText = true
+			choiceText = raw.Choices[i].Text
 		}
 	}
 	if len(raw.Choices) == 0 {
 		return
 	}
 	ch := raw.Choices[0]
-	hadAnswer := contentPresent(ch.Message.Content)
+	// A non-empty refusal or deprecated function_call declaration is
+	// answer-shaped output (the streaming analyzer's answerishSeen): visible
+	// provider bytes that must never be re-run, even though they are not
+	// content for HadAnswerContent/FirstAnswerAt accounting.
+	hadAnswerish := nonEmptyAnswerValue(ch.Message.Refusal) ||
+		nonEmptyAnswerValue(ch.Message.FunctionCall)
+	hadAnswer := contentPresent(ch.Message.Content) || hadChoiceText || hadAnswerish
 	hadReasoning := contentPresent(ch.Message.Reasoning) ||
 		contentPresent(ch.Message.ReasoningBare) ||
 		contentPresent(ch.Message.ReasoningDet) ||
@@ -154,6 +173,16 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 		a.HadAnswerContent = true
 		if preview {
 			a.Preview = TruncatePreview(text)
+		}
+	} else if hadChoiceText {
+		// Content wins the preview when both shapes appear; a completions
+		// body carries only text. Non-string text stays answer-shaped for the
+		// outcome but contributes no preview.
+		if text, ok := FlattenContent(choiceText); ok && text != "" {
+			a.HadAnswerContent = true
+			if preview {
+				a.Preview = TruncatePreview(text)
+			}
 		}
 	}
 	if toolCalls > 0 {
@@ -176,6 +205,30 @@ func (a *NonStreamAnalysis) analyzeRecordFields(raw nonStreamEnvelope, usageKeys
 		}
 		a.ToolNames = names
 	}
+}
+
+// nonEmptyAnswerValue applies the streaming analyzer's answer-shaped value
+// classification to the buffered body's refusal and deprecated function_call
+// fields: a non-empty string, non-empty array/object, or scalar other than
+// null/false counts. An empty string, empty object, empty array, null and
+// false are decoys, so a refusal-only or function_call-only response is
+// answer-shaped while its empty spelling stays a degenerate completion.
+func nonEmptyAnswerValue(raw json.RawMessage) bool {
+	t := bytes.TrimSpace(raw)
+	if len(t) == 0 {
+		return false
+	}
+	switch t[0] {
+	case '"':
+		var s string
+		return json.Unmarshal(t, &s) == nil && s != ""
+	case '[', '{':
+		i := SkipSpace(t, 1)
+		return i < len(t) && t[i] != ']' && t[i] != '}'
+	case 'n', 'f':
+		return false
+	}
+	return true
 }
 
 // rawValuePresent reports whether a raw field carries a non-null JSON value.

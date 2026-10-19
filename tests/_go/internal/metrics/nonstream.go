@@ -57,6 +57,41 @@ func TestAnalyzeNonStreamBodyOutcome(t *testing.T) {
 			"", true,
 		},
 		{
+			"refusal only",
+			`{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":"I cannot help with that"}}]}`,
+			"", true,
+		},
+		{
+			"empty refusal stays void",
+			`{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":""}}]}`,
+			CodeEmptyCompletion, true,
+		},
+		{
+			"null refusal stays void",
+			`{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":null}}]}`,
+			CodeEmptyCompletion, true,
+		},
+		{
+			"deprecated function_call only",
+			`{"choices":[{"finish_reason":"stop","message":{"content":null,"function_call":{"name":"lookup","arguments":"{}"}}}]}`,
+			"", true,
+		},
+		{
+			"empty function_call stays void",
+			`{"choices":[{"finish_reason":"stop","message":{"content":null,"function_call":{}}}]}`,
+			CodeEmptyCompletion, true,
+		},
+		{
+			"legacy completions text",
+			`{"choices":[{"finish_reason":"stop","text":"hello"}]}`,
+			"", true,
+		},
+		{
+			"empty legacy completions text stays void",
+			`{"choices":[{"finish_reason":"stop","text":""}]}`,
+			CodeEmptyCompletion, true,
+		},
+		{
 			"reasoning content only",
 			`{"choices":[{"finish_reason":"stop","message":{"content":null,"reasoning_content":"thought"}}]}`,
 			CodeReasoningOnly, true,
@@ -205,6 +240,31 @@ func TestAnalyzeNonStreamBodyFields(t *testing.T) {
 			finish:   "tool_calls",
 			tools:    2,
 			names:    []string{"lookup", "read"},
+			fieldsOK: true,
+		},
+		{
+			name:     "legacy completions text is answer content",
+			body:     `{"id":"cmpl-1","model":"m","choices":[{"finish_reason":"stop","text":"hello"}]}`,
+			preview:  true,
+			model:    "m",
+			id:       "cmpl-1",
+			finish:   "stop",
+			answer:   true,
+			wantPrev: "hello",
+			fieldsOK: true,
+		},
+		{
+			name:     "refusal is answer shaped but not content",
+			body:     `{"choices":[{"finish_reason":"stop","message":{"content":null,"refusal":"I cannot help"}}]}`,
+			preview:  true,
+			finish:   "stop",
+			fieldsOK: true,
+		},
+		{
+			name:     "deprecated function_call is answer shaped but not content",
+			body:     `{"choices":[{"finish_reason":"stop","message":{"content":null,"function_call":{"name":"lookup","arguments":"{}"}}}]}`,
+			preview:  true,
+			finish:   "stop",
 			fieldsOK: true,
 		},
 		{

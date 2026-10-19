@@ -65,22 +65,6 @@ var (
 	errNativeContentParts = errors.New("anthropic: content block limit exceeded")
 )
 
-// marshalWireJSON renders a translated wire document without encoding/json's
-// default HTML escaping. Marshal replaces every <, > and & in provider or
-// client strings with a six-byte escape sequence, inflating a body several
-// times over and defeating the proxy's byte caps; the literal characters are
-// valid JSON and need no escaping. Encoder appends one newline, trimmed here
-// so the translated document keeps its exact single-object shape.
-func marshalWireJSON(v any) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
-		return nil, err
-	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
-}
-
 // checkNativeIdentity enforces nativeIdentityMaxBytes on one provider-controlled
 // identity value before the translator echoes or retains it.
 func checkNativeIdentity(field, value string) error {
@@ -193,7 +177,7 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey st
 	if promptCacheKey != "" {
 		out["prompt_cache_key"] = promptCacheKey
 	}
-	return marshalWireJSON(out)
+	return sse.MarshalWireJSON(out)
 }
 
 type openaiMessage struct {
@@ -467,7 +451,7 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 		anthropicErrorEvent
 	}
 	if json.Unmarshal(anthropicBody, &errProbe) == nil && errProbe.Type == "error" {
-		return marshalWireJSON(errProbe.openAIError())
+		return sse.MarshalWireJSON(errProbe.openAIError())
 	}
 
 	var in struct {
@@ -527,7 +511,7 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 
 	out := sse.Completion(in.ID, time.Now().Unix(), in.Model,
 		sse.AssistantMessage(content.String(), toolCalls), mapFinishReason(in.StopReason), usage)
-	return marshalWireJSON(out)
+	return sse.MarshalWireJSON(out)
 }
 
 // Native input_tokens excludes cache reads and writes; OpenAI prompt_tokens
@@ -617,6 +601,12 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		return sse.EmitFrame(dst, flusher, obj)
 	}
 	writeDone := func() error {
+		// The terminal marker is written at most once. Providers/gateways
+		// sometimes repeat message_stop, and a second [DONE] after the stream
+		// is already closed is malformed wire output.
+		if doneSent {
+			return nil
+		}
 		if _, err := io.WriteString(dst, sse.DoneFrame); err != nil {
 			return err
 		}

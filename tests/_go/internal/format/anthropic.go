@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
 func TestTranslateRequestBasic(t *testing.T) {
@@ -285,6 +287,39 @@ func TestStreamToOpenAISingleDone(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), "data: [DONE]"); n != 1 {
 		t.Errorf("[DONE] count = %d, want 1: %q", n, out.String())
+	}
+}
+
+// TestStreamToOpenAIDuplicateMessageStopKeepsOneDone pins the terminal
+// idempotence: providers/gateways occasionally repeat message_stop, and a
+// second terminal event must not write a second [DONE] after the stream is
+// already closed.
+func TestStreamToOpenAIDuplicateMessageStopKeepsOneDone(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start","message":{"id":"msg_1","model":"claude"}}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n") + "\n"
+
+	var out strings.Builder
+	if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if n := strings.Count(got, "data: [DONE]"); n != 1 {
+		t.Fatalf("[DONE] count = %d, want 1: %q", n, got)
+	}
+	if !strings.HasSuffix(got, sse.DoneFrame) {
+		t.Fatalf("terminal frame must be the single [DONE]: %q", got)
 	}
 }
 

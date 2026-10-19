@@ -16,6 +16,24 @@ import (
 // chat-completions SDK stops reading after it.
 const DoneFrame = "data: [DONE]\n\n"
 
+// MarshalWireJSON renders one wire document without encoding/json's default
+// HTML escaping. Marshal replaces every <, > and & in a string with a
+// six-byte escape sequence, inflating a translated frame up to six times and
+// pushing legitimate content past the relay's frame cap; the literal
+// characters are valid JSON and need no escaping. Encoder appends one
+// newline, trimmed here so the document keeps its exact single-value shape.
+// This is the one non-HTML-escaping marshal for both the SSE frame emitter
+// and the translator's buffered request/response documents.
+func MarshalWireJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 // DataFrame renders one SSE frame around a marshaled payload: "data: " +
 // payload + the blank line that terminates the event.
 func DataFrame(payload []byte) []byte {
@@ -26,14 +44,14 @@ func DataFrame(payload []byte) []byte {
 	return b
 }
 
-// EmitFrame marshals obj, writes it to w as one SSE data frame, and flushes
-// when flusher is non-nil: the plain-chunk emit pipeline (one marshal, one
-// DataFrame render, one Write, one flush) the two bridges' streaming
-// emitters share. The obj itself - chunk shape and created stamping - stays
+// EmitFrame marshals obj without HTML escaping, writes it to w as one SSE
+// data frame, and flushes when flusher is non-nil: the plain-chunk emit
+// pipeline (one marshal, one DataFrame render, one Write, one flush) the two
+// bridges' streaming emitters share. The obj itself - chunk shape and created stamping - stays
 // with each caller, and so does every other write path: the error-frame
 // emitters keep their own write, flush and error handling (ErrorEnvelope).
 func EmitFrame(w io.Writer, flusher http.Flusher, obj any) error {
-	b, err := json.Marshal(obj)
+	b, err := MarshalWireJSON(obj)
 	if err != nil {
 		return err
 	}
