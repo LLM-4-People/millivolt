@@ -161,7 +161,9 @@ The one writer owns transactions and incremental totals. Its insertion plan
 binds arbitrary values, using exact zero/empty literals only for absent scalar
 work, and preserves existing conflict/rollback semantics. Record columns,
 migration, scanner and request-parameter presence bits must evolve together;
-explicit zero/false is not absence.
+explicit zero/false is not absence. Provider-alias repair applies every pair in
+one transaction, in source-key order, so a later trigger or constraint failure
+rolls earlier label rewrites back instead of leaving history half-merged.
 
 The durable log order is `(started_at, id)`. Every exact `LogFilter` equality
 field - provider, client, key hash, conversation id, model and status code -
@@ -194,7 +196,13 @@ attach that file in place, replace streams it into the pending snapshot and
 atomically renames it, and merge attaches it to the held writer transaction.
 Decode and validation finish before an apply path takes the writer connection.
 The upload and decoded database files are removed on every handler path,
-including over-cap, invalid archive, apply failure and client disconnect.
+including over-cap, invalid archive, apply failure and client disconnect. A
+boot-time sweep reclaims only known staging names older than a safety age,
+bounded in entries per boot; the live database, pending snapshot, rollback set
+and state marker are outside that registry. The attached inspect/merge and
+decoded source use the shared `SQLiteURI` with `mode=ro`, so a snapshot path
+with URI metacharacters stays literal and writes through the attached schema
+fail.
 
 Relevant coverage: storage writer/purge/request-parameter tests,
 `BenchmarkStorageWriter` and `BenchmarkProxyDurableContention`. The latter

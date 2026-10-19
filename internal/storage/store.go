@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,6 +59,14 @@ const queryMaxColumns = 128
 // fails closed (child Open fails -> failAndResume; dropped batches stay
 // counted in Dropped). Internal guardrail, not user-tunable.
 const sqliteBusyTimeout = 5 * time.Second
+
+// exportTimeout bounds one durable log export end to end. An export holds an
+// open read transaction for the whole stream, so an abandoned or trickling
+// consumer would otherwise pin the WAL snapshot indefinitely. The budget is
+// internal (not an operator tunable): it must never expire before the
+// interactive query timeout, and it is deliberately shorter than the
+// maintenance budget because an export is a delivery path, not a rebuild.
+const exportTimeout = 10 * time.Minute
 
 // maintenanceTimeout bounds long, non-interactive storage materialization and
 // maintenance work: the startup projection preload, the boot totals rebuild,
@@ -104,6 +113,11 @@ type Options struct {
 	// not testable). Zero keeps the production constant; config has no knob
 	// because the budget is an internal guardrail, not user-tunable.
 	MaintenanceTimeout time.Duration
+	// ExportTimeout shortens the exportTimeout guardrail for tests that assert
+	// the bounded export failure path quickly. Zero keeps the production
+	// constant; config has no knob because the budget is an internal guardrail,
+	// not user-tunable.
+	ExportTimeout time.Duration
 }
 
 // errNotSelect rejects any dashboard query that is not a single SELECT.
@@ -118,6 +132,13 @@ var ErrQueryLimit = errors.New("query result exceeds its byte, row, or column li
 // errors.Is instead of matching drifted wordings. Each surface keeps its own
 // status code; only the identity and the canonical message are shared.
 var ErrStorageDisabled = errors.New("durable storage is disabled")
+
+// ErrExportTimeout marks a log export that hit its own total budget. It is
+// distinct from a caller cancellation or caller deadline so the HTTP layer and
+// tests can tell "the server abandoned this export" from "the client went
+// away". After the sentinel, the response may already contain a partial
+// artifact; see ExportWhere.
+var ErrExportTimeout = errors.New("log export exceeded its time budget")
 
 // withQueryTimeout is the single choke point that bounds a dashboard SELECT
 // by QueryTimeout. Validate requires QueryTimeout > 0; a 0 fail-closes
@@ -134,6 +155,17 @@ func (s *Store) withMaintenanceTimeout(ctx context.Context) (context.Context, co
 	timeout := s.opts.MaintenanceTimeout
 	if timeout <= 0 {
 		timeout = maintenanceTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+// withExportTimeout bounds one export with the internal exportTimeout guardrail
+// (or the test seam value). A shorter caller deadline is preserved by
+// context.WithTimeout, and the caller's own cancellation still propagates.
+func (s *Store) withExportTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := s.opts.ExportTimeout
+	if timeout <= 0 {
+		timeout = exportTimeout
 	}
 	return context.WithTimeout(ctx, timeout)
 }
@@ -725,6 +757,13 @@ func Open(path string, opts Options) (*Store, error) {
 	if err := admission.commit(); err != nil {
 		closeErr := s.Close()
 		return fail(errors.Join(fmt.Errorf("pending snapshot: commit: %w", err), closeErr))
+	}
+	// Reclaim database-sized staging entries a previous process left behind
+	// when it died between creating a private file/directory and its defer.
+	// This runs after admission so the sweep cannot touch the pending slot it
+	// just resolved, and it never blocks or fails boot.
+	if removed := s.sweepOrphanedStaging(time.Now()); removed > 0 {
+		log.Printf("storage: reclaimed %d orphaned staging entries in %s", removed, s.stageDir())
 	}
 	return s, nil
 }
@@ -2061,15 +2100,10 @@ func (s *Store) LoadRecent(ctx context.Context, n int) ([]*metrics.Record, error
 	return out, rows.Err()
 }
 
-// ExportWhere streams every stored row matching the filter (an empty filter
-// = all rows - export is read-only, so "everything" is safe) as a compact
-// JSON array, one record per line, oldest-first, directly to the writer -
-// memory stays bounded no matter how much history exists. Returns the number
-// of records written.
-func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (int64, error) {
-	if err := f.Validate(); err != nil {
-		return 0, err
-	}
+// buildExportQuery is the one owner of the durable export statement. The
+// filter predicate is the same parameterized predicate purge and count use.
+// nowMs prunes expired debug captures while their request row is read.
+func buildExportQuery(f PurgeFilter, nowMs int64) (string, []any) {
 	// The page cursor and its debug capture ride one row from one pooled read
 	// connection. Loading each capture through a second connection would make
 	// enough concurrent exporters deadlock against the bounded read pool.
@@ -2077,46 +2111,105 @@ func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (in
 		SELECT d.payload FROM request_debug AS d
 		WHERE d.id = requests.id AND (d.expires_at = 0 OR d.expires_at > ?)) END AS debug_capture
 		FROM requests`
-	args := []any{time.Now().UnixMilli()}
+	args := []any{nowMs}
 	where, whereArgs := f.build() // the same parameterized predicate as purge/count
 	if where != "" {
 		q += ` WHERE ` + where
 		args = append(args, whereArgs...)
 	}
 	q += ` ORDER BY started_at ASC, id ASC`
-	rows, err := s.rdb.QueryContext(ctx, q, args...)
-	if err != nil {
+	return q, args
+}
+
+// exportFailure maps an export error to the caller's cancellation/deadline when
+// that is what happened, otherwise to ErrExportTimeout when the internal export
+// budget expired. A caller cancellation always wins over the internal deadline
+// so the two outcomes stay distinguishable.
+func exportFailure(parent, bounded context.Context, err error) error {
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
+	if errors.Is(bounded.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %w", ErrExportTimeout, context.DeadlineExceeded)
+	}
+	return err
+}
+
+// exportRowHook is a test seam (production leaves it nil). It runs after a row
+// is fetched and before it is written, so a test can stall the row source under
+// the export's own deadline without racing the SQLite driver.
+var exportRowHook func(context.Context)
+
+// ExportWhere streams every stored row matching the filter (an empty filter
+// = all rows - export is read-only, so "everything" is safe) as a compact
+// JSON array, one record per line, oldest-first, directly to the writer -
+// memory stays bounded no matter how much history exists. Returns the number
+// of records written.
+//
+// The whole stream is bounded by the internal exportTimeout (or the caller's
+// shorter deadline), because an open export read transaction holds a WAL
+// snapshot for its lifetime. A deadline that expires after the first byte was
+// written leaves a partial, incomplete artifact on the caller's writer: the
+// HTTP handler aborts the response instead of completing a 200 download. A
+// caller cancellation or caller deadline is returned as that context error;
+// the internal budget surfaces as ErrExportTimeout mixed with
+// context.DeadlineExceeded.
+func (s *Store) ExportWhere(ctx context.Context, f PurgeFilter, w io.Writer) (int64, error) {
+	if err := f.Validate(); err != nil {
 		return 0, err
+	}
+	bounded, cancel := s.withExportTimeout(ctx)
+	defer cancel()
+	q, args := buildExportQuery(f, time.Now().UnixMilli())
+	rows, err := s.rdb.QueryContext(bounded, q, args...)
+	if err != nil {
+		return 0, exportFailure(ctx, bounded, err)
 	}
 	defer rows.Close()
 	var n int64
-	if _, err := io.WriteString(w, "[\n"); err != nil {
-		return 0, err
+	write := func(text string) error {
+		if err := bounded.Err(); err != nil {
+			return err
+		}
+		_, err := io.WriteString(w, text)
+		return err
+	}
+	if err := write("[\n"); err != nil {
+		return 0, exportFailure(ctx, bounded, err)
 	}
 	for rows.Next() {
+		if exportRowHook != nil {
+			exportRowHook(bounded)
+		}
+		if err := bounded.Err(); err != nil {
+			return n, exportFailure(ctx, bounded, err)
+		}
 		r, capture, err := scanRecord(rows)
 		if err != nil {
-			return 0, err
+			return n, exportFailure(ctx, bounded, err)
 		}
 		b, err := marshalExport(r, capture)
 		if err != nil {
-			return 0, err
+			return n, exportFailure(ctx, bounded, err)
 		}
 		if n > 0 {
-			if _, err := io.WriteString(w, ",\n"); err != nil {
-				return 0, err
+			if err := write(",\n"); err != nil {
+				return n, exportFailure(ctx, bounded, err)
 			}
 		}
 		if _, err := w.Write(b); err != nil {
-			return 0, err
+			return n, exportFailure(ctx, bounded, err)
+		}
+		if err := bounded.Err(); err != nil {
+			return n, exportFailure(ctx, bounded, err)
 		}
 		n++
 	}
 	if err := rows.Err(); err != nil {
-		return n, err
+		return n, exportFailure(ctx, bounded, err)
 	}
-	if _, err := io.WriteString(w, "\n]\n"); err != nil {
-		return 0, err
+	if err := write("\n]\n"); err != nil {
+		return n, exportFailure(ctx, bounded, err)
 	}
 	return n, nil
 }
@@ -2354,23 +2447,47 @@ func (f PurgeFilter) build() (string, []any) {
 // shape a filtered Clear relies on); totals are label-independent, so no
 // rebuild is needed. Malformed pairs are skipped (config Validate already rejects them -
 // this is the last-chance deny), and each UPDATE is parameterized.
+//
+// All aliases commit as one transaction: a trigger or constraint failure on a
+// later alias rolls the earlier rewrites back instead of leaving history split
+// across old and new labels while the caller reports a failed merge. Pairs are
+// applied in source-key order so the outcome (and trigger failure point) does
+// not depend on Go map iteration order. An error returns 0 rows: nothing from
+// the rolled-back transaction was renamed.
 func (s *Store) RenameProviders(ctx context.Context, aliases map[string]string) (int64, error) {
 	if s == nil || len(aliases) == 0 {
 		return 0, nil
 	}
-	var total int64
+	type pair struct{ from, to string }
+	pairs := make([]pair, 0, len(aliases))
 	for from, to := range aliases {
 		from, to = strings.TrimSpace(from), strings.TrimSpace(to)
 		if from == "" || to == "" || from == to {
 			continue
 		}
-		res, err := s.db.ExecContext(ctx, "UPDATE requests SET provider = ? WHERE provider = ?", to, from)
+		pairs = append(pairs, pair{from: from, to: to})
+	}
+	if len(pairs) == 0 {
+		return 0, nil
+	}
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].from < pairs[j].from })
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var total int64
+	for _, p := range pairs {
+		res, err := tx.ExecContext(ctx, "UPDATE requests SET provider = ? WHERE provider = ?", p.to, p.from)
 		if err != nil {
-			return total, fmt.Errorf("rename provider %q: %w", from, err)
+			return 0, fmt.Errorf("rename provider %q: %w", p.from, err)
 		}
 		if n, err := res.RowsAffected(); err == nil {
 			total += n
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit provider aliases: %w", err)
 	}
 	return total, nil
 }
@@ -2510,16 +2627,24 @@ func (s *Store) CountWhere(ctx context.Context, f PurgeFilter) (int64, error) {
 	if err := f.Validate(); err != nil {
 		return 0, err
 	}
-	where, args := f.build()
-	q := "SELECT COUNT(*) FROM requests"
-	if where != "" {
-		q += " WHERE " + where
-	}
+	q, args := buildCountQuery(f)
 	ctx, cancel := s.withQueryTimeout(ctx)
 	defer cancel()
 	var n int64
 	err := s.rdb.QueryRowContext(ctx, q, args...).Scan(&n)
 	return n, err
+}
+
+// buildCountQuery is the one owner of the delete-preview count statement. It
+// shares the purge/export predicate owner, so a filter can never count a
+// different row set than the export or delete it previews.
+func buildCountQuery(f PurgeFilter) (string, []any) {
+	where, args := f.build()
+	q := "SELECT COUNT(*) FROM requests"
+	if where != "" {
+		q += " WHERE " + where
+	}
+	return q, args
 }
 
 func (s *Store) Close() error {

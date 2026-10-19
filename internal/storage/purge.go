@@ -106,21 +106,55 @@ func (s *Store) Clear(ctx context.Context, filter *PurgeFilter, buffer *metrics.
 	return out.result, out.err
 }
 
+// purgePredicate returns the allowlisted WHERE clause shared by both purge
+// deletes. A nil filter means "all rows" and returns an empty clause; a
+// non-nil filter that produces no constraint is rejected instead of being
+// widened to a full delete.
+func purgePredicate(filter *PurgeFilter) (string, []any, error) {
+	if filter == nil {
+		return "", nil, nil
+	}
+	where, args := filter.build()
+	if where == "" {
+		return "", nil, errors.New("purge filter produced no constraint")
+	}
+	return " WHERE " + where, args, nil
+}
+
+// buildPurgeDebugDelete is the one owner of the sidecar delete statement. A
+// full purge removes only captures whose request row exists: a capture can
+// precede its request's durable row and must survive. A filtered purge keeps
+// the correlated subquery so only captures of matched requests go.
+func buildPurgeDebugDelete(filter *PurgeFilter) (string, []any, error) {
+	if filter == nil {
+		return `DELETE FROM request_debug WHERE id IN (
+			SELECT d.id FROM request_debug AS d
+			WHERE EXISTS (SELECT 1 FROM requests AS r WHERE r.id = d.id))`, nil, nil
+	}
+	where, args, err := purgePredicate(filter)
+	if err != nil {
+		return "", nil, err
+	}
+	return "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests" + where + ")", args, nil
+}
+
+// buildPurgeRequestsDelete is the one owner of the request-row delete
+// statement. buildPurgeDebugDelete must run first in the same transaction so
+// matched sidecars cannot outlive their rows.
+func buildPurgeRequestsDelete(filter *PurgeFilter) (string, []any, error) {
+	where, args, err := purgePredicate(filter)
+	if err != nil {
+		return "", nil, err
+	}
+	return "DELETE FROM requests" + where, args, nil
+}
+
 func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	tx, err := s.db.BeginTx(cmd.ctx, nil)
 	if err != nil {
 		return PurgeResult{}, err
 	}
 	defer tx.Rollback()
-	where := ""
-	var args []any
-	if cmd.filter != nil {
-		where, args = cmd.filter.build()
-		if where == "" {
-			return PurgeResult{}, errors.New("purge filter produced no constraint")
-		}
-		where = " WHERE " + where
-	}
 	// Captures for requests still finalizing have no durable row yet and must
 	// survive. Orphan/expired capture cleanup remains owned by the TTL path.
 	// Scan the sidecar (usually small or empty) and probe requests per capture,
@@ -137,14 +171,11 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 			return PurgeResult{}, err
 		}
 	}
-	if cmd.filter == nil {
-		if _, err = tx.ExecContext(cmd.ctx,
-			`DELETE FROM request_debug WHERE id IN (
-				SELECT d.id FROM request_debug AS d
-				WHERE EXISTS (SELECT 1 FROM requests AS r WHERE r.id = d.id))`); err != nil {
-			return PurgeResult{}, err
-		}
-	} else if _, err = tx.ExecContext(cmd.ctx, "DELETE FROM request_debug WHERE id IN (SELECT id FROM requests"+where+")", args...); err != nil {
+	debugDelete, debugArgs, err := buildPurgeDebugDelete(cmd.filter)
+	if err != nil {
+		return PurgeResult{}, err
+	}
+	if _, err = tx.ExecContext(cmd.ctx, debugDelete, debugArgs...); err != nil {
 		return PurgeResult{}, err
 	}
 	// The net sidecar delta, not an absolute total, is what a purge may
@@ -158,7 +189,11 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 		}
 		debugDelta = debugAfter - debugBefore
 	}
-	res, err := tx.ExecContext(cmd.ctx, "DELETE FROM requests"+where, args...)
+	requestsDelete, requestsArgs, err := buildPurgeRequestsDelete(cmd.filter)
+	if err != nil {
+		return PurgeResult{}, err
+	}
+	res, err := tx.ExecContext(cmd.ctx, requestsDelete, requestsArgs...)
 	if err != nil {
 		return PurgeResult{}, err
 	}

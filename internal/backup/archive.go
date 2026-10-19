@@ -68,18 +68,8 @@ const (
 	// small frame past payloadMax.
 	decoderWindow = 8 << 20
 
-	// archiveTempPattern names the one transient encoded artifact. The
-	// wildcard keeps concurrent encodes distinct; every path removes it
-	// before returning an error and the caller removes it after serving.
-	archiveTempPattern = "millivolt-backup-*.mvb"
-
-	// restoreTempPattern names the one private directory that holds a decoded
-	// database member. The wildcard keeps concurrent restores distinct; the
-	// decoder removes it on every error and the caller removes it after
-	// inspect or apply.
-	restoreTempPattern = "millivolt-restore-db-*"
-
-	// restoreDatabaseName is the decoded member's file inside that directory.
+	// restoreDatabaseName is the decoded member's file inside the
+	// RestoreDatabaseStagingPattern directory.
 	// The directory is unique, so the name needs no further wildcard.
 	restoreDatabaseName = "snapshot.db"
 
@@ -268,7 +258,7 @@ func EncodeFile(stageDir string, a Archive, maxArchiveBytes int64) (string, int6
 	if dir == "" {
 		dir = os.TempDir()
 	}
-	f, err := os.CreateTemp(stageDir, archiveTempPattern)
+	f, err := os.CreateTemp(stageDir, ArchiveStagingPattern)
 	if err != nil {
 		return "", 0, fmt.Errorf("stage backup in %s: %w", dir, err)
 	}
@@ -773,7 +763,7 @@ func decodeFile(stageDir string, src io.Reader, maxPayload int64) (Archive, erro
 			return nil
 		case memberDatabase:
 			if db == nil {
-				dir, err := os.MkdirTemp(stageDir, restoreTempPattern)
+				dir, err := os.MkdirTemp(stageDir, RestoreDatabaseStagingPattern)
 				if err != nil {
 					return StageSnapshotError(stageDir, err)
 				}

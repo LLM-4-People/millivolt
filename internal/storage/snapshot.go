@@ -56,6 +56,26 @@ const (
 // file is a derived index that is meaningless without its WAL.
 var snapshotSidecarSuffixes = []string{"-wal", "-shm"}
 
+// Database-sized transient staging patterns this package creates on the live
+// database's volume. They are the only storage-owned names the startup sweep
+// may reclaim; the live database, pending slot, rollback set and state marker
+// use different names and are never matched.
+const (
+	snapshotStagingPattern = "millivolt-snapshot-*"
+	overlapStagingPattern  = "millivolt-overlap-*"
+	mergeStagingPattern    = "millivolt-merge-*"
+)
+
+// snapshotIncomingTempPattern and snapshotStateTempPattern are the two
+// atomic-publish temp names in the live database's directory.
+func snapshotIncomingTempPattern(path string) string {
+	return "." + filepath.Base(path) + "-incoming-*"
+}
+
+func snapshotStateTempPattern(path string) string {
+	return "." + filepath.Base(path) + "-state-*"
+}
+
 // snapshotDirSyncHook is a test seam (production nil) for observing or failing
 // directory durability. It runs wherever the snapshot protocol syncs the
 // database directory.
@@ -85,7 +105,7 @@ func syncSnapshotDir(dir string) error {
 // marker: temp file, file sync, rename, directory sync.
 func writeSnapshotState(path, state string) error {
 	target := path + pendingSnapshotStateSuffix
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-state-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), snapshotStateTempPattern(path))
 	if err != nil {
 		return err
 	}
@@ -185,7 +205,7 @@ func (s *Store) SnapshotFile(ctx context.Context) (path string, cleanup func(), 
 	if err := s.Flush(); err != nil {
 		return "", nil, fmt.Errorf("flush before backup: %w", err)
 	}
-	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-snapshot-*")
+	dir, err := os.MkdirTemp(s.stageDir(), snapshotStagingPattern)
 	if err != nil {
 		return "", nil, backup.StageSnapshotError(s.stageDir(), err)
 	}
@@ -305,7 +325,7 @@ func ValidatePendingSnapshot(path string) error {
 func publishSnapshot(path string, write func(io.Writer) error) error {
 	dir := filepath.Dir(path)
 	incoming := path + pendingSnapshotSuffix
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-incoming-*")
+	tmp, err := os.CreateTemp(dir, snapshotIncomingTempPattern(path))
 	if err != nil {
 		return err
 	}
@@ -903,7 +923,7 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 	if s == nil {
 		return 0, ErrStorageDisabled
 	}
-	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-overlap-*")
+	dir, err := os.MkdirTemp(s.stageDir(), overlapStagingPattern)
 	if err != nil {
 		return 0, backup.StageSnapshotError(s.stageDir(), err)
 	}
@@ -913,6 +933,26 @@ func (s *Store) SnapshotOverlap(ctx context.Context, data []byte) (int64, error)
 		return 0, err
 	}
 	return s.SnapshotOverlapFile(ctx, src)
+}
+
+// attachSnapshotDatabase attaches one packed snapshot under a code-owned alias
+// as a read-only schema. The URI comes from backup.SQLiteURI so a path
+// containing ?, #, %, spaces or non-ASCII bytes stays one literal filename
+// (ATTACH parses URI filenames, and a bare path would split at those bytes).
+// mode=ro makes every write through the attached schema fail; the main schema
+// on this connection stays writable, which is what a merge needs.
+func attachSnapshotDatabase(ctx context.Context, conn *sql.Conn, alias, path string) error {
+	if alias != "backup_inspect" && alias != "backup_merge" {
+		return fmt.Errorf("unknown backup schema")
+	}
+	if path == "" {
+		return fmt.Errorf("snapshot path is required")
+	}
+	params := url.Values{"mode": {"ro"}}
+	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS "+alias, backup.SQLiteURI(path, params)); err != nil {
+		return err
+	}
+	return nil
 }
 
 // SnapshotOverlapFile inspects an already-staged private packed snapshot in
@@ -933,7 +973,7 @@ func (s *Store) SnapshotOverlapFile(ctx context.Context, path string) (int64, er
 		return 0, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_inspect", path); err != nil {
+	if err := attachSnapshotDatabase(ctx, conn, "backup_inspect", path); err != nil {
 		return 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_inspect") }()
@@ -954,7 +994,7 @@ func (s *Store) MergeSnapshot(ctx context.Context, data []byte) (inserted, skipp
 	// purge holds the same mutex, so a merge can never queue behind (or race) a
 	// delete and starve the writer twice. Staging the caller's bytes does not
 	// need the lock.
-	dir, err := os.MkdirTemp(s.stageDir(), "millivolt-merge-*")
+	dir, err := os.MkdirTemp(s.stageDir(), mergeStagingPattern)
 	if err != nil {
 		return 0, 0, backup.StageSnapshotError(s.stageDir(), err)
 	}
@@ -996,7 +1036,7 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		return 0, 0, err
 	}
 	defer conn.Close()
-	if _, err := conn.ExecContext(ctx, "ATTACH DATABASE ? AS backup_merge", path); err != nil {
+	if err := attachSnapshotDatabase(ctx, conn, "backup_merge", path); err != nil {
 		return 0, 0, err
 	}
 	defer func() { _, _ = conn.ExecContext(context.Background(), "DETACH DATABASE backup_merge") }()

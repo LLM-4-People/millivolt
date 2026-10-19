@@ -729,6 +729,74 @@ func TestSnapshotOverlapFileInspectsInPlace(t *testing.T) {
 	assertNoSnapshotStaging(t, live.stageDir())
 }
 
+// TestAttachedSnapshotIsReadOnly pins the inspect and merge ATTACH contract:
+// the attached packed snapshot rejects writes (so a restore path can never
+// mutate the caller's file or its own source), the shared SQLiteURI keeps
+// metacharacter paths literal, and the live database remains writable for the
+// merge. The write is attempted on the same connection shape each production
+// site uses: the read pool for inspect, the held writer for merge.
+func TestAttachedSnapshotIsReadOnly(t *testing.T) {
+	live := openTestStore(t)
+	live.Record(&metrics.Record{ID: "shared", Provider: "live.example", Model: "n", StatusCode: 200})
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	src := openTestStore(t)
+	src.Record(&metrics.Record{ID: "shared", Provider: "backup.example", Model: "n", StatusCode: 200})
+	src.Record(&metrics.Record{ID: "backup-only", Provider: "backup.example", Model: "n", StatusCode: 200})
+	if err := src.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := src.Snapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A literal filename with every URI metacharacter the shared helper owns.
+	path := filepath.Join(t.TempDir(), "packed ?#% name.db")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		alias string
+		db    *sql.DB
+	}{
+		{name: "inspect read pool", alias: "backup_inspect", db: live.rdb},
+		{name: "merge writer", alias: "backup_merge", db: live.db},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := tc.db.Conn(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if err := attachSnapshotDatabase(t.Context(), conn, tc.alias, path); err != nil {
+				t.Fatalf("attach %s: %v", tc.alias, err)
+			}
+			defer conn.ExecContext(context.Background(), "DETACH DATABASE "+tc.alias)
+			if _, err := conn.ExecContext(t.Context(),
+				"INSERT INTO "+tc.alias+`.request_debug (id, session_id, captured_at, expires_at, payload)
+				VALUES ('attached-write', '', 0, 0, '')`); err == nil {
+				t.Fatalf("write through attached %s succeeded; attached snapshot is not read-only", tc.alias)
+			}
+		})
+	}
+	// Inspect and merge still work through the same helper.
+	if n, err := live.SnapshotOverlapFile(t.Context(), path); err != nil || n != 1 {
+		t.Fatalf("overlap through readonly attach = %d, %v; want 1, nil", n, err)
+	}
+	inserted, skipped, err := live.MergeSnapshotFile(t.Context(), path)
+	if err != nil {
+		t.Fatalf("merge through readonly attach: %v", err)
+	}
+	if inserted != 1 || skipped != 1 {
+		t.Fatalf("merge inserted=%d skipped=%d, want 1/1", inserted, skipped)
+	}
+	if got, err := live.LoadRecent(t.Context(), 10); err != nil || len(got) != 2 {
+		t.Fatalf("live rows after merge = %d, %v; want 2 rows", len(got), err)
+	}
+}
+
 func TestMergeSnapshotRejectsIncompatibleDebugTable(t *testing.T) {
 	live := openTestStore(t)
 	live.Record(&metrics.Record{ID: "live-row", Provider: "live.example", Model: "n", StatusCode: 200})

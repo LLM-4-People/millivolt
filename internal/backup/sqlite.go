@@ -95,7 +95,7 @@ func inspectSQLiteSnapshot(stageDir string, data []byte) (SnapshotCounts, error)
 	if len(data) < len(sqliteHeader) || string(data[:len(sqliteHeader)]) != sqliteHeader {
 		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
-	dir, err := os.MkdirTemp(stageDir, "millivolt-backup-db-*")
+	dir, err := os.MkdirTemp(stageDir, InspectDatabaseStagingPattern)
 	if err != nil {
 		return SnapshotCounts{}, StageSnapshotError(stageDir, err)
 	}

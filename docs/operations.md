@@ -130,10 +130,12 @@ See [persistence](#persistent-state-and-configuration) and
 ### Provider aliases and model grouping
 
 `provider_aliases` merges provider labels in stored history at boot/reload and
-rekeys new requests. It rejects self-maps and alias chains. This is a durable
-rename, not a temporary view: removing the alias does not reconstruct original
-labels. Existing in-memory ring records can retain their previous label until
-they age out or the process restarts. Back up before an intentional history rename.
+rekeys new requests. All aliases in one map commit as a single transaction, so
+a trigger or constraint failure on a later alias leaves every earlier label
+unchanged. It rejects self-maps and alias chains. This is a durable rename, not
+a temporary view: removing the alias does not reconstruct original labels.
+Existing in-memory ring records can retain their previous label until they age
+out or the process restarts. Back up before an intentional history rename.
 
 `model_rules` instead controls display/grouping. Its ordered exact, pattern and
 lowercase steps keep stored model spellings unchanged; an empty rule list groups
@@ -559,7 +561,8 @@ syncs it, and atomically renames it into place; Open admits the pending file
 only after it checks again, and the restore waits for process restart.
 Database **merge** attaches the decoded file read-only and inserts request ids
 that are not already in the live store immediately (live rows win on conflict);
-it does not require a restart. Its request rows, debug sidecars and
+the attached snapshot rejects writes, while the live database stays writable
+for the merge, and no restart is required. Its request rows, debug sidecars and
 since-inception totals commit as one transaction, so a failed totals write
 leaves no partial merge behind. Truncated or bit-flipped files are rejected.
 The `backup_max_bytes` setting is the archive ceiling; encoding enforces it
@@ -1065,6 +1068,13 @@ from the ring or durable storage) downloads compressed the same way. This is a
 breaking change for scripts that consumed the plain JSON download: there is
 no uncompressed fallback, so scripted consumers must decompress the artifact
 first.
+
+A durable export holds one read snapshot for the whole stream, so the server
+bounds it with an internal total budget. If the budget expires after bytes were
+written, the download is aborted mid-artifact instead of completing as a
+successful gzip: the saved file is partial and must be discarded. A caller
+cancellation or shorter caller deadline is reported separately from this
+server budget.
 
 In the dashboard, both database deletions live in Settings, in the storage
 category, and nowhere else. Delete matching uses the same filter/count owner

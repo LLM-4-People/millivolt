@@ -37,19 +37,9 @@ var (
 )
 
 const (
-	// restoreUploadPattern names one private upload staging file. The wildcard
-	// keeps concurrent restores distinct; the handler removes it on every
-	// path, including an upload read failure and a client disconnect.
-	restoreUploadPattern = "millivolt-restore-upload-*.mvb"
-
 	// restoreUploadBuffer bounds the streaming upload copy, so the request body
 	// never becomes one heap-sized slice.
 	restoreUploadBuffer = 32 << 10
-
-	// restorePendingBackupPattern names the private sibling that holds a
-	// pre-existing pending snapshot while a replace restore stages a new one.
-	// A failed config phase restores it to the admission slot byte-for-byte.
-	restorePendingBackupPattern = ".millivolt-restore-pending-*"
 )
 
 func handleBackup(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +456,7 @@ func stageRestoreUpload(dir string, body io.Reader, limit int64) (string, error)
 	if limit <= 0 {
 		return "", fmt.Errorf("backup size limit is invalid")
 	}
-	f, err := os.CreateTemp(dir, restoreUploadPattern)
+	f, err := os.CreateTemp(dir, backup.RestoreUploadStagingPattern)
 	if err != nil {
 		return "", err
 	}
@@ -793,7 +783,7 @@ func captureRestorePending(dbPath string) (*restorePendingGuard, error) {
 		}
 		return nil, fmt.Errorf("inspect pending snapshot: %w", err)
 	}
-	f, err := os.CreateTemp(filepath.Dir(pending), restorePendingBackupPattern)
+	f, err := os.CreateTemp(filepath.Dir(pending), backup.RestorePendingStagingPattern)
 	if err != nil {
 		return nil, fmt.Errorf("preserve pending snapshot: %w", err)
 	}
