@@ -1720,14 +1720,23 @@ const requestMetadataMaxElements = 10_000
 // user-tunable limit; text length never counts against it.
 const requestContentPartsMax = 16_384
 
+// requestToolCallsMax bounds the aggregate tool_calls array members over every
+// message. Each member expands into a typed tool-call value and, on the
+// translated Anthropic or Cursor wire, a content block/history part. A 300 KiB
+// body of empty calls therefore materializes six figures of typed values and
+// over a hundred MiB of transient allocation. Internal DoS guardrail, not a
+// wire-format or user-tunable limit; real requests carry a handful of calls
+// per turn.
+const requestToolCallsMax = 1024
+
 // boundRequestMetadata is a lexical preflight over the top-level document. It
 // rejects only a valid JSON document whose messages/tools/stop array,
-// logit_bias object, distinct top-level member count, or aggregate content
-// parts exceed their bounds. Invalid JSON returns nil so the existing
-// passthrough behavior is preserved; collection members are skipped with the
-// shared byte scanner. One small distinct-key set per top-level object records
-// only the keys it sees; escaped and non-ASCII keys decode only what their
-// comparison needs.
+// logit_bias object, distinct top-level member count, aggregate content parts,
+// or aggregate tool calls exceed their bounds. Invalid JSON returns nil so the
+// existing passthrough behavior is preserved; collection members are skipped
+// with the shared byte scanner. One small distinct-key set per top-level object
+// records only the keys it sees; escaped and non-ASCII keys decode only what
+// their comparison needs.
 func boundRequestMetadata(body []byte) error {
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
@@ -1749,9 +1758,11 @@ func boundRequestMetadata(body []byte) error {
 	// value, so raw member count is not the decoded map size.
 	var memberSeen map[string]struct{}
 	// contentParts accumulates message content-part array lengths plus the
-	// top-level system content. It stops growing at the first over-budget
-	// array, so the rejection costs one bounded prefix scan.
+	// top-level system content. toolCalls accumulates every message tool_calls
+	// member. Both stop growing at the first over-budget array, so the
+	// rejection costs one bounded prefix scan.
 	contentParts := 0
+	toolCalls := 0
 	for i < len(body) {
 		keyStart := i
 		end := skipJSONString(body, i)
@@ -1796,6 +1807,14 @@ func boundRequestMetadata(body []byte) error {
 					return requestMetadataOverflow(body, fmt.Errorf("request content parts exceed %d", requestContentPartsMax))
 				}
 				contentParts += parts
+				calls, ok := countRequestMessagesToolCalls(body, i, requestToolCallsMax-toolCalls)
+				if !ok {
+					return nil
+				}
+				if calls > requestToolCallsMax-toolCalls {
+					return requestMetadataOverflow(body, fmt.Errorf("request tool calls exceed %d", requestToolCallsMax))
+				}
+				toolCalls += calls
 			}
 			i = next
 		case "tools":
@@ -2059,6 +2078,111 @@ func countRequestMessageContentParts(data []byte, start, budget int) (int, int, 
 		return 0, 0, false
 	}
 	return parts, i + 1, true
+}
+
+// countRequestMessagesToolCalls counts the aggregate tool_calls array members
+// over the message objects of the messages array at start. budget is the
+// remaining aggregate allowance; a count above it means the aggregate bound is
+// exceeded. Non-object elements and non-array values contribute zero, matching
+// the typed decoder's shape tolerance. ok is false on malformed input so the
+// document keeps its passthrough behavior.
+func countRequestMessagesToolCalls(data []byte, start, budget int) (int, bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) || data[i] != '[' {
+		return 0, true
+	}
+	i = metrics.SkipSpace(data, i+1)
+	total := 0
+	for i < len(data) && data[i] != ']' {
+		n, next, ok := countRequestMessageToolCalls(data, i, budget-total)
+		if !ok {
+			return 0, false
+		}
+		if n > budget-total {
+			return total + n, true
+		}
+		total += n
+		i = metrics.SkipSpace(data, next)
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			if i >= len(data) || data[i] == ']' {
+				return 0, false
+			}
+			continue
+		}
+		if i < len(data) && data[i] == ']' {
+			break
+		}
+		return 0, false
+	}
+	if i >= len(data) || data[i] != ']' {
+		return 0, false
+	}
+	return total, true
+}
+
+// countRequestMessageToolCalls counts one message object's tool_calls array
+// members. Every occurrence accumulates: encoding/json decodes each duplicate
+// tool_calls member into a fresh typed slice before the field's last-wins
+// assignment, so each one allocates even though only the final slice survives.
+// Once the budget is crossed, counting stops and the over-count is returned so
+// the caller rejects before any translation decoder materializes the calls.
+func countRequestMessageToolCalls(data []byte, start, budget int) (int, int, bool) {
+	i := metrics.SkipSpace(data, start)
+	if i >= len(data) {
+		return 0, 0, false
+	}
+	if data[i] != '{' {
+		next := metrics.SkipJSONValue(data, i)
+		return 0, next, next >= 0
+	}
+	i = metrics.SkipSpace(data, i+1)
+	total := 0
+	for i < len(data) && data[i] != '}' {
+		end := skipJSONString(data, i)
+		if end < 0 {
+			return 0, 0, false
+		}
+		key := data[i:end]
+		i = metrics.SkipSpace(data, end)
+		if i >= len(data) || data[i] != ':' {
+			return 0, 0, false
+		}
+		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) {
+			return 0, 0, false
+		}
+		if requestKeyEqual(key, "tool_calls") {
+			n, next, ok := metrics.CountJSONArrayBytes(data, i, budget-total)
+			if !ok {
+				return 0, 0, false
+			}
+			total += n
+			if total > budget {
+				return total, 0, true
+			}
+			i = next
+		} else {
+			next := metrics.SkipJSONValue(data, i)
+			if next < 0 {
+				return 0, 0, false
+			}
+			i = next
+		}
+		i = metrics.SkipSpace(data, i)
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			continue
+		}
+		if i < len(data) && data[i] == '}' {
+			break
+		}
+		return 0, 0, false
+	}
+	if i >= len(data) || data[i] != '}' {
+		return 0, 0, false
+	}
+	return total, i + 1, true
 }
 
 func asciiKeyEqual(raw []byte, name string) bool {

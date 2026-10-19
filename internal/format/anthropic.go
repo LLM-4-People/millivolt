@@ -40,6 +40,14 @@ const (
 	// leaves ample headroom while failing a stream that opens unique blocks
 	// without ever closing them. Internal safety guardrail, not user-tunable.
 	nativeToolBlocksMax = 1024
+
+	// nativeToolInitialBytesMax bounds the total initial input JSON retained
+	// by the currently open tool blocks. Each start may carry up to one SSE
+	// line (sseLineBufMax), so the block count alone would allow a gigabyte of
+	// retained strings; normal starts carry {} or a small inline object and
+	// large arguments stream through input_json_delta. Internal safety
+	// guardrail, not user-tunable.
+	nativeToolInitialBytesMax = 4 << 20
 )
 
 var (
@@ -49,6 +57,9 @@ var (
 	// errNativeToolBlocks is the stable fail-closed reason for opening more
 	// concurrent tool blocks than nativeToolBlocksMax.
 	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
+	// errNativeToolInitialBytes is the stable fail-closed reason for retaining
+	// more initial tool input than nativeToolInitialBytesMax across open blocks.
+	errNativeToolInitialBytes = errors.New("anthropic: retained tool input limit exceeded")
 	// errNativeContentParts is the stable fail-closed reason for a response
 	// content-block array over metrics.ContentPartMax.
 	errNativeContentParts = errors.New("anthropic: content block limit exceeded")
@@ -587,10 +598,13 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 		created = time.Now().Unix()
 		// Anthropic addresses parallel tool_use blocks by index; track each
 		// block's identity so interleaved deltas get the right id/name.
-		toolCalls     = map[int]*nativeTool{}
-		nextToolIndex int
-		usage         nativeUsage
-		doneSent      bool
+		toolCalls = map[int]*nativeTool{}
+		// toolInitialBytes is the sum of every open block's retained initial
+		// JSON, released as blocks stop (or all at once on a terminal event).
+		toolInitialBytes int
+		nextToolIndex    int
+		usage            nativeUsage
+		doneSent         bool
 		// sawError records that the provider already delivered its own failure
 		// statement (event: error). The truncation signal must never stack on
 		// top of it: an errored stream terminates without message_stop, which
@@ -710,11 +724,24 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 					if len(toolCalls) >= nativeToolBlocksMax {
 						return fmt.Errorf("%w (limit %d)", errNativeToolBlocks, nativeToolBlocksMax)
 					}
+					// Check the retained size before converting the raw JSON to
+					// the string the open block keeps. One over-budget start
+					// fails the translation instead of adding its bytes to the
+					// open set; the decoder's own line-sized copy is bounded by
+					// sseLineBufMax.
+					retained := len(c.ContentBlock.Input)
+					if retained == 0 || bytes.Equal(c.ContentBlock.Input, []byte("null")) {
+						retained = len("{}")
+					}
+					if retained > nativeToolInitialBytesMax-toolInitialBytes {
+						return fmt.Errorf("%w (limit %d bytes)", errNativeToolInitialBytes, nativeToolInitialBytesMax)
+					}
 					initial := string(c.ContentBlock.Input)
 					if initial == "" || initial == "null" {
 						initial = "{}"
 					}
 					toolCalls[c.Index] = &nativeTool{index: nextToolIndex, initial: initial}
+					toolInitialBytes += len(initial)
 					nextToolIndex++
 					if err := emitTool(map[string]any{
 						"index": toolCalls[c.Index].index, "id": c.ContentBlock.ID, "type": "function",
@@ -801,9 +828,12 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				Index int `json:"index"`
 			}
 			if json.Unmarshal(payload, &c) == nil {
-				if tc := toolCalls[c.Index]; tc != nil && !tc.arguments {
-					if err := emitTool(map[string]any{"index": tc.index, "function": map[string]any{"arguments": tc.initial}}); err != nil {
-						return err
+				if tc := toolCalls[c.Index]; tc != nil {
+					toolInitialBytes -= len(tc.initial)
+					if !tc.arguments {
+						if err := emitTool(map[string]any{"index": tc.index, "function": map[string]any{"arguments": tc.initial}}); err != nil {
+							return err
+						}
 					}
 				}
 				delete(toolCalls, c.Index)
@@ -813,6 +843,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			// left open (their terminal stop events may never arrive).
 			sawMessageStop = true
 			clear(toolCalls)
+			toolInitialBytes = 0
 			if err := writeDone(); err != nil {
 				return err
 			}
@@ -822,6 +853,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			// empty error, and never claim a failure statement the provider did
 			// not make: the truncation path below then owns the single frame.
 			clear(toolCalls)
+			toolInitialBytes = 0
 			var e anthropicErrorEvent
 			if err := json.Unmarshal(payload, &e); err != nil {
 				continue
