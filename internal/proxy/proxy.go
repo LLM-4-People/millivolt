@@ -641,6 +641,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 			return
 		}
+		// The inbound cap covered the client's body, not the translated wire
+		// document: translation can grow it (wrapper fields, lifted system
+		// fragments, tool-result blocks) and a map/raw re-marshal must not
+		// silently bypass max_request_bytes. Fail closed before any send.
+		if int64(len(translated)) > int64(s.cfg().MaxRequestBytes) {
+			http.Error(w, errJSON(typeInvalidRequestError,
+				"translated request body exceeds "+config.FormatByteSize(int64(s.cfg().MaxRequestBytes))),
+				http.StatusRequestEntityTooLarge)
+			return
+		}
 		body = translated
 		// Parameter/composition metrics describe the translated upstream body,
 		// while routing keeps the client's original model and stream choice.

@@ -54,6 +54,22 @@ var (
 	errNativeContentParts = errors.New("anthropic: content block limit exceeded")
 )
 
+// marshalWireJSON renders a translated wire document without encoding/json's
+// default HTML escaping. Marshal replaces every <, > and & in provider or
+// client strings with a six-byte escape sequence, inflating a body several
+// times over and defeating the proxy's byte caps; the literal characters are
+// valid JSON and need no escaping. Encoder appends one newline, trimmed here
+// so the translated document keeps its exact single-object shape.
+func marshalWireJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
 // checkNativeIdentity enforces nativeIdentityMaxBytes on one provider-controlled
 // identity value before the translator echoes or retains it.
 func checkNativeIdentity(field, value string) error {
@@ -166,7 +182,7 @@ func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey st
 	if promptCacheKey != "" {
 		out["prompt_cache_key"] = promptCacheKey
 	}
-	return json.Marshal(out)
+	return marshalWireJSON(out)
 }
 
 type openaiMessage struct {
@@ -440,7 +456,7 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 		anthropicErrorEvent
 	}
 	if json.Unmarshal(anthropicBody, &errProbe) == nil && errProbe.Type == "error" {
-		return json.Marshal(errProbe.openAIError())
+		return marshalWireJSON(errProbe.openAIError())
 	}
 
 	var in struct {
@@ -500,7 +516,7 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 
 	out := sse.Completion(in.ID, time.Now().Unix(), in.Model,
 		sse.AssistantMessage(content.String(), toolCalls), mapFinishReason(in.StopReason), usage)
-	return json.Marshal(out)
+	return marshalWireJSON(out)
 }
 
 // Native input_tokens excludes cache reads and writes; OpenAI prompt_tokens

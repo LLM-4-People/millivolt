@@ -18,11 +18,11 @@ package proxy
 // It never invents model data (no static tables).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -32,6 +32,27 @@ import (
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
 )
 
+const (
+	// modelsDiscoveryMaxEntries bounds the model entries one discovery request
+	// may retain across every primary page and enrichment source. A compact
+	// 8 MiB body of {"id":"x"} objects holds over 600k entries, and one
+	// decoded map per entry costs hundreds of MiB; real provider catalogs are
+	// far smaller. The raw-byte budget alone therefore cannot bound discovery
+	// memory. Internal safety guardrail, not user-tunable; exceeding it fails
+	// closed, never a partial list.
+	modelsDiscoveryMaxEntries = 10_000
+	// modelsDiscoveryMaxOutputBytes bounds the normalized list document
+	// written to the client. Entry normalization only adds fields, but JSON
+	// string escaping can inflate provider strings, so the rendered document
+	// needs its own cap independent of the upstream byte budget. Internal
+	// safety guardrail, not user-tunable; exceeding it fails closed.
+	modelsDiscoveryMaxOutputBytes = 16 << 20 // 16 MiB
+)
+
+// errModelsDiscoveryEntries is the stable fail-closed reason for a discovery
+// source carrying more entries than modelsDiscoveryMaxEntries.
+var errModelsDiscoveryEntries = errors.New("model discovery entry limit exceeded")
+
 // modelsDiscovery is one request-scoped budget, shared across every primary
 // page/unary response and optional enrichment. Only discovery allocates it;
 // the shared upstream client's stream-safe timeout policy remains unchanged.
@@ -39,10 +60,23 @@ type modelsDiscovery struct {
 	ctx       context.Context
 	bytesLeft int64
 	pagesLeft int
+	// entriesLeft is the discovery-wide entry budget. Every producer debits it
+	// through consumeEntries before emitting the constructed list.
+	entriesLeft int
 	// releaseResponse holds the process-wide reservation for the page
 	// currently being decoded. Pagination releases it before the next fetch,
 	// so consecutive pages never accumulate reservations.
 	releaseResponse func()
+}
+
+// consumeEntries debits the discovery-wide entry budget and fails closed when
+// a source would push the retained list past modelsDiscoveryMaxEntries.
+func (d *modelsDiscovery) consumeEntries(n int) error {
+	if n > d.entriesLeft {
+		return errModelsDiscoveryEntries
+	}
+	d.entriesLeft -= n
+	return nil
 }
 
 func (d *modelsDiscovery) releaseResponseBuffer() {
@@ -59,7 +93,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	ctx, cancel := context.WithTimeout(r.Context(), cfg.ModelsDiscoveryTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
-	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages}
+	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages, entriesLeft: modelsDiscoveryMaxEntries}
 	defer d.releaseResponseBuffer()
 	key = s.resolveKeyTransparent(r, t, key)
 	switch t.format {
@@ -91,7 +125,11 @@ func (s *Server) serveOpenAIModels(d *modelsDiscovery, w http.ResponseWriter, r 
 		writeModelsError(w, err)
 		return
 	}
-	entries, constructed := unwrapEntries(body, "data")
+	entries, constructed, err := unwrapEntries(body, d.entriesLeft, "data")
+	if err != nil {
+		writeModelsError(w, err)
+		return
+	}
 	if !constructed {
 		// Not a shape we construct (foreign envelope or unparsable): relay
 		// verbatim - the passthrough contract for anything unknown.
@@ -110,10 +148,19 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 		writeModelsError(w, err)
 		return
 	}
+	if err := d.consumeEntries(len(entries)); err != nil {
+		writeModelsError(w, err)
+		return
+	}
 	s.enrichModelEntries(d, t, key, entries)
 	entries = normalizeModelEntries(entries, t.provider)
+	out := providerformat.ModelsListJSON(entries)
+	if len(out) > modelsDiscoveryMaxOutputBytes {
+		writeModelsError(w, fmt.Errorf("model discovery output exceeds %d bytes", modelsDiscoveryMaxOutputBytes))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(providerformat.ModelsListJSON(entries))
+	w.Write(out)
 }
 
 // writeModelsError surfaces a models-discovery failure - request build, fetch,
@@ -184,7 +231,7 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 		return nil, errResponseBufferBudget
 	}
 	d.releaseResponse = func() { s.respBudget.release(reserve) }
-	body, err := io.ReadAll(io.LimitReader(resp.Body, remaining+1))
+	body, err := readWholeDocument(d.ctx, resp.Body, remaining+1)
 	d.bytesLeft -= int64(len(body))
 	if int64(len(body)) > remaining {
 		return nil, fmt.Errorf("model discovery exceeded aggregate response byte limit")
@@ -208,38 +255,97 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 // array (Together). ok=false means "not ours to construct" (a foreign
 // envelope or unparsable body the caller relays verbatim / skips).
 //
+// limit bounds the entries decoded into maps before the decode: a compact
+// array of hundreds of thousands of tiny entries would otherwise expand into
+// hundreds of MiB. A recognized array past the limit returns
+// errModelsDiscoveryEntries (never a partial list); a merely unfamiliar shape
+// keeps the verbatim contract.
+//
 // A requested key whose value is not an entry array rejects the wrapper as a
 // whole - matching a strict struct decode, where one bad field fails the
 // document - while unrequested keys stay ignored.
-func unwrapEntries(body []byte, keys ...string) ([]map[string]any, bool) {
+func unwrapEntries(body []byte, limit int, keys ...string) ([]map[string]any, bool, error) {
+	raw, ok := selectModelArray(body, keys...)
+	if !ok {
+		return nil, false, nil
+	}
+	if err := checkModelArrayCount(raw, limit); err != nil {
+		if errors.Is(err, errModelsDiscoveryEntries) {
+			return nil, false, err
+		}
+		return nil, false, nil
+	}
+	var entries []map[string]any
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, false, nil
+	}
+	return entries, true, nil
+}
+
+// selectModelArray locates the first recognized entry array without decoding
+// its elements. The envelope rules match the previous direct decode: a
+// present requested key must hold an array (null is "absent"), every
+// requested key is validated before one is selected, and only when no
+// requested key holds an array does the bare top-level array shape apply.
+func selectModelArray(body []byte, keys ...string) (json.RawMessage, bool) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err == nil {
-		byKey := make([][]map[string]any, len(keys))
-		for i, k := range keys {
+		var selected json.RawMessage
+		for _, k := range keys {
 			raw, present := obj[k]
 			if !present {
 				continue
 			}
-			var entries []map[string]any
-			if err := json.Unmarshal(raw, &entries); err != nil {
-				byKey = nil
-				break
+			trimmed := bytes.TrimSpace(raw)
+			if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+				continue
 			}
-			byKey[i] = entries
-		}
-		if byKey != nil {
-			for _, entries := range byKey {
-				if entries != nil {
-					return entries, true
-				}
+			if trimmed[0] != '[' {
+				return nil, false
+			}
+			if selected == nil {
+				selected = raw
 			}
 		}
+		if selected != nil {
+			return selected, true
+		}
 	}
-	var arr []map[string]any
-	if err := json.Unmarshal(body, &arr); err == nil && arr != nil {
-		return arr, true
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, false
 	}
-	return nil, false
+	return body, true
+}
+
+// checkModelArrayCount scans an entry array and fails closed as soon as it
+// holds more than limit elements, so the caller never materializes the
+// oversized []map[string]any. Elements themselves stay as raw spans; the
+// count walk allocates only the small per-element raw buffer.
+func checkModelArrayCount(raw []byte, limit int) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return fmt.Errorf("model entries are not an array")
+	}
+	n := 0
+	for dec.More() {
+		var elem json.RawMessage
+		if err := dec.Decode(&elem); err != nil {
+			return err
+		}
+		n++
+		if n > limit {
+			return errModelsDiscoveryEntries
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // normalizeModelEntries guarantees the canonical OpenAI list invariants on
@@ -312,8 +418,8 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 	if err != nil {
 		return
 	}
-	src, ok := unwrapEntries(body, "data", "models")
-	if !ok {
+	src, ok, err := unwrapEntries(body, modelsDiscoveryMaxEntries, "data", "models")
+	if err != nil || !ok {
 		return
 	}
 	byID := make(map[string]map[string]any, len(src))
@@ -376,12 +482,27 @@ func (s *Server) serveAnthropicModels(d *modelsDiscovery, w http.ResponseWriter,
 			writeModelsError(w, err)
 			return
 		}
+		// Count the page's data array before the typed decode: the upstream is
+		// free to ignore the limit parameter, and the aggregate budget spans
+		// every page.
+		if raw, ok := selectModelArray(body, "data"); ok {
+			if err := checkModelArrayCount(raw, d.entriesLeft-len(entries)); err != nil {
+				if errors.Is(err, errModelsDiscoveryEntries) {
+					writeModelsError(w, errModelsDiscoveryEntries)
+					return
+				}
+			}
+		}
 		page, err := providerformat.TranslateAnthropicModels(body)
 		if err != nil {
 			writeModelsError(w, fmt.Errorf("decode anthropic models: %w", err))
 			return
 		}
 		entries = append(entries, page.Entries...)
+		if len(entries) > d.entriesLeft {
+			writeModelsError(w, errModelsDiscoveryEntries)
+			return
+		}
 		if page.NextAfter == "" {
 			break
 		}

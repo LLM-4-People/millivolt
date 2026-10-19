@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"net"
@@ -23,6 +24,36 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
+
+// wholeDocumentReadTimeout bounds one whole-document upstream body read
+// (translated non-streaming responses and model-discovery pages) when the
+// caller supplied no shorter deadline. Streaming SSE is never buffered, so
+// this guardrail does not apply to it. The per-send X-Proxy-Timeout-Ms still
+// bounds the transport itself; this is the buffering fallback for the common
+// unset-header case. Internal safety guardrail, not user-tunable.
+const wholeDocumentReadTimeout = 2 * time.Minute
+
+// readWholeDocument reads at most limit bytes, failing closed when the body
+// makes no completion before the whole-document deadline. A shorter deadline
+// already on ctx wins (context.WithTimeout never extends a parent). Closing
+// the body is what unblocks a transport Read when the deadline is ours rather
+// than the caller's; callers release their response-buffer reservation on
+// return. The partial prefix is returned with the error so byte accounting
+// stays exact.
+func readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
+	readCtx, cancel := context.WithTimeout(ctx, wholeDocumentReadTimeout)
+	defer cancel()
+	stop := context.AfterFunc(readCtx, func() { body.Close() })
+	defer stop()
+	b, err := io.ReadAll(io.LimitReader(body, limit))
+	if err != nil {
+		if ctx.Err() == nil && readCtx.Err() != nil {
+			return b, fmt.Errorf("upstream document read exceeded %s: %w", wholeDocumentReadTimeout, err)
+		}
+		return b, err
+	}
+	return b, nil
+}
 
 // costKeysFor returns the per-provider cost key paths from config (empty when
 // the provider has no override, in which case the built-in auto-detection in
@@ -412,7 +443,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				return
 			}
 			defer s.respBudget.release(reserve)
-			full, rerr := io.ReadAll(io.LimitReader(resp.Body, maxTranslateBodyBytes+1))
+			full, rerr := readWholeDocument(ctx, resp.Body, maxTranslateBodyBytes+1)
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)
 				if rec.ClientDisconnected {
@@ -449,6 +480,18 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					invalidateUsage(rec, terr)
 				}
 				http.Error(w, errJSON(typeAPIError, "translate upstream response: "+terr.Error()), http.StatusBadGateway)
+				return
+			}
+			// Translation can still grow the document (wrapper fields and
+			// provider-string rendering). The input cap above is not an output
+			// cap: past the same buffering bound the response cannot be relayed
+			// within the translated-shape contract, so fail closed before any
+			// byte reaches the client.
+			if int64(len(out)) > maxTranslateBodyBytes {
+				rec.StatusCode = http.StatusBadGateway
+				rec.ErrorType = "response_too_large"
+				rec.ErrorMsg = "translated response exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
+				http.Error(w, errJSON(typeAPIError, "translated response too large"), http.StatusBadGateway)
 				return
 			}
 			// The translated response owns completion shape and normalized
