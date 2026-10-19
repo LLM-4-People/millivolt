@@ -11,8 +11,9 @@ import (
 // ResponseHeaderTimeout only covers header arrival: a gateway that returns 200
 // and then emits nothing would otherwise pin the handler, the upstream
 // connection and the scheduler slot forever. Ten minutes is far beyond any
-// documented reasoning gap and remains an internal safety guardrail.
-const upstreamStreamIdleTimeout = 10 * time.Minute
+// documented reasoning gap and remains an internal safety guardrail. A package
+// variable is the deterministic test seam; production never changes it.
+var upstreamStreamIdleTimeout = 10 * time.Minute
 
 // idleCancelBody cancels the request context when a Read makes no progress for
 // the bound. Cancelling the attempt context is what closes the transport body

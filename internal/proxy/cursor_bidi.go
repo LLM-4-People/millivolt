@@ -417,6 +417,10 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		}
 		// Quota-envelope classification precedes storm observation. Keep the
 		// established bounded peek and re-wrap for the final error renderer.
+		// Arm the shared idle guard at receipt, exactly like the generic relay:
+		// the peek, the absorbed-attempt drain and the adopted run all read this
+		// body, and a tarpit past the headers must not pin the send forever.
+		resp.Body = newIdleCancelBody(resp.Body, upstreamCancel, upstreamStreamIdleTimeout)
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
 		retryable := cursorSendFailed(resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)
