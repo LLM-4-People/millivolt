@@ -54,6 +54,7 @@ func explorerProjection(rows []contrib) *projectionData {
 		p.ids[p.rows[i].id] = struct{}{}
 	}
 	p.metrics.append(p.rows, 0)
+	p.lineage = buildConversationTopology(p.rows)
 	return p
 }
 

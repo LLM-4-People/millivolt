@@ -1,5 +1,10 @@
 package web
 
+import (
+	"slices"
+	"sync"
+)
+
 // Dimension positions are internal dictionary slots, never wire values.
 // The names own the API dimension allowlist as well as index iteration.
 const (
@@ -106,6 +111,7 @@ func (d *contribDimensions) intern(c *contrib) {
 		// membership count: a parent reference is not an observed conversation.
 		id := d.dict[dimConversation].intern(c.parentConv)
 		c.parentConv = d.dict[dimConversation].names[id]
+		c.parentConvID = id
 	}
 	c.toolIDs = make([]uint32, len(c.toolsL))
 	for i, name := range c.toolsL {
@@ -139,6 +145,8 @@ func bindScope(fs []scopeFilter, p *projectionData, mcz *modelCanonizer) []scope
 		return fs
 	}
 	var out []scopeFilter
+	var ids []uint32
+	var models dimensionDictionary
 	for i, f := range fs {
 		if f.dim != "model" {
 			continue
@@ -147,9 +155,18 @@ func bindScope(fs []scopeFilter, p *projectionData, mcz *modelCanonizer) []scope
 			out = append([]scopeFilter(nil), fs...)
 		}
 		names := p.dimensions.dict[dimModel].names
+		if ids == nil {
+			ids, models = p.canonicalModels(mcz, names)
+		}
 		out[i].modelIDs = make([]bool, len(names))
 		for id, name := range names {
-			out[i].modelIDs[id] = mcz.model(name) == f.id
+			canonical := name
+			if id < len(ids) {
+				canonical = models.names[ids[id]]
+			} else {
+				canonical = mcz.model(name)
+			}
+			out[i].modelIDs[id] = canonical == f.id
 		}
 	}
 	if out == nil {
@@ -158,15 +175,88 @@ func bindScope(fs []scopeFilter, p *projectionData, mcz *modelCanonizer) []scope
 	return out
 }
 
+// modelProjectionCache owns the canonical model IDs and canonical dictionary
+// for one projection build. Appends extend the immutable prefix without
+// re-running the rules over history; a destructive replacement gets a fresh
+// cache from the new projection. A compiled-rules identity change rebuilds.
+// The cache is shared by chart/explorer/scope binding, never by the bounded
+// observer memo (which serves arbitrary observer names instead).
+type modelProjectionCache struct {
+	mu       sync.Mutex
+	ready    bool
+	version  int64
+	revision string
+	modelIDs []uint32
+	models   dimensionDictionary
+}
+
+func newModelProjectionCache() *modelProjectionCache { return &modelProjectionCache{} }
+
+func (c *modelProjectionCache) canonical(version int64, revision string, raw []string, mcz *modelCanonizer) ([]uint32, dimensionDictionary) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ready && c.revision == revision && c.version <= version && len(c.modelIDs) == len(raw) {
+		c.version = version
+		return c.modelIDs, c.models
+	}
+	if c.ready && c.revision == revision && c.version <= version && len(c.modelIDs) < len(raw) {
+		// The projection's raw-model dictionary only appends within one build:
+		// extend the canonical prefix instead of re-canonicalizing history.
+		ids := make([]uint32, len(raw))
+		copy(ids, c.modelIDs)
+		models := dimensionDictionary{
+			names: slices.Clone(c.models.names),
+			ids:   make(map[string]uint32, len(c.models.ids)+len(raw)-len(c.modelIDs)),
+		}
+		for name, id := range c.models.ids {
+			models.ids[name] = id
+		}
+		for i := len(c.modelIDs); i < len(raw); i++ {
+			ids[i] = models.intern(mcz.model(raw[i]))
+		}
+		models.counts = nil
+		c.modelIDs, c.models, c.version = ids, models, version
+		return ids, models
+	}
+	models := dimensionDictionary{names: []string{""}, ids: make(map[string]uint32)}
+	ids := make([]uint32, len(raw))
+	for i, name := range raw {
+		ids[i] = models.intern(mcz.model(name))
+	}
+	models.counts = nil
+	c.ready, c.revision, c.version = true, revision, version
+	c.modelIDs, c.models = ids, models
+	return ids, models
+}
+
+// canonicalModels returns the canonical ID map and dictionary for this
+// projection. Ad-hoc test/benchmark projections without a cache still build a
+// transient dictionary, preserving the uncached semantics.
+func (p *projectionData) canonicalModels(mcz *modelCanonizer, raw []string) ([]uint32, dimensionDictionary) {
+	revision := ""
+	if mcz != nil {
+		revision = mcz.identity
+	}
+	if p.modelCache != nil {
+		return p.modelCache.canonical(p.version, revision, raw, mcz)
+	}
+	models := dimensionDictionary{names: []string{""}, ids: make(map[string]uint32)}
+	ids := make([]uint32, len(raw))
+	for i, name := range raw {
+		ids[i] = models.intern(mcz.model(name))
+	}
+	models.counts = nil
+	return ids, models
+}
+
 // queryDimensions borrows immutable dictionary tables for one read-locked
-// projection. Only the small raw-model dictionary is re-grouped when rules
-// change; no per-row regex or string-map grouping is needed. Ring/pending
-// extras use local IDs after the borrowed namespace, without mutating it.
+// projection. The canonical model dictionary is projection-owned and keyed by
+// the projection version plus the compiled rules revision; only ring/pending
+// extras are interned locally. No per-row regex or string-map grouping runs.
 type queryDimensions struct {
 	base     [dimCount]dimensionDictionary
 	extra    [dimCount]dimensionDictionary
 	modelIDs []uint32
-	models   dimensionDictionary
 }
 
 func (q *queryDimensions) prepare(p *projectionData, mcz *modelCanonizer) {
@@ -174,14 +264,7 @@ func (q *queryDimensions) prepare(p *projectionData, mcz *modelCanonizer) {
 		return
 	}
 	q.base = p.dimensions.dict
-	raw := q.base[dimModel].names
-	q.modelIDs = make([]uint32, len(raw))
-	for i, name := range raw {
-		id := q.models.intern(mcz.model(name))
-		q.modelIDs[i] = id
-		q.models.counts[id] += q.base[dimModel].counts[i]
-	}
-	q.base[dimModel] = q.models
+	q.modelIDs, q.base[dimModel] = p.canonicalModels(mcz, q.base[dimModel].names)
 }
 
 func (q *queryDimensions) intern(dim int, name string) uint32 {

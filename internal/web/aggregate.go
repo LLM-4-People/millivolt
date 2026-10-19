@@ -217,6 +217,7 @@ type contrib struct {
 	// the same query-dimension adapter at the aggregation boundary.
 	dimensionIDs      [dimTool]uint32
 	rowIndex          uint32 // one-based projected position; zero is a ring/pending extra
+	parentConvID      uint32 // projection conversation dictionary slot of parentConv
 	toolIDs, errorIDs []uint32
 	// live marks an in-flight pending row (never a stored/finalized record).
 	// paused/stream/throttled are only meaningful when live is set - they
@@ -1618,6 +1619,9 @@ func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold 
 		groups: make(map[uint32]*entAcc),
 		seen:   make(map[string]struct{}),
 	}
+	// Unprepared folds (direct fixtures) still need a names source for the
+	// lineage payload; prepare borrows the same query dictionary owner.
+	e.lineage.names = &e.dims
 	for i, name := range dimensionNames {
 		if name == dim {
 			e.dimIndex = i
@@ -1631,6 +1635,7 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	e.dims.prepare(p, mcz)
 	e.allFS = bindScope(e.allFS, p, mcz)
 	e.grpFS = bindScope(e.grpFS, p, mcz)
+	e.lineage.prepare(p, &e.dims)
 	if p != nil {
 		e.order = p.metrics.allOrder()
 		// The unfiltered rail is exactly the shared dictionary's occupied
@@ -1639,10 +1644,22 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 		e.projectedRail = e.statusCode == "" && len(e.allFS) == 0
 		if e.projectedRail {
 			for dim, dictionary := range e.dims.base {
+				if dim == dimModel {
+					// Canonical model IDs share the projection's raw membership
+					// counts; the canonical dictionary intentionally carries no
+					// counts of its own (they change on every append).
+					continue
+				}
 				for id, n := range dictionary.counts {
 					if id > 0 && n > 0 {
 						e.markRail(dim, uint32(id))
 					}
+				}
+			}
+			rawCounts := p.dimensions.dict[dimModel].counts
+			for rawID, n := range rawCounts {
+				if n > 0 && rawID < len(e.dims.modelIDs) {
+					e.markRail(dimModel, e.dims.modelIDs[rawID])
 				}
 			}
 		}
@@ -1693,7 +1710,12 @@ func (e *explorerFold) fold(c *contrib) error {
 	// grpFS is allFS minus the active dim. Do not AND with inRail -
 	// that made inGroup ≡ inRail and collapsed the gallery to 100%.
 	inGroup := scopedMatch(c, e.statusCode, e.grpFS)
-	e.lineage.observe(c, inRail, inGroup && e.dimIndex == dimConversation)
+	ids := e.dims.singles(c)
+	parent := c.parentConvID
+	if c.rowIndex == 0 && c.parentConv != "" {
+		parent = e.dims.intern(dimConversation, c.parentConv)
+	}
+	e.lineage.observeRow(c, ids, parent, inRail, inGroup && e.dimIndex == dimConversation)
 	if inGroup {
 		e.total++
 		if c.isErr {
@@ -1704,7 +1726,7 @@ func (e *explorerFold) fold(c *contrib) error {
 		return nil
 	}
 	needsRail := inRail && !(e.projectedRail && c.rowIndex > 0)
-	for dim, id := range e.dims.singles(c) {
+	for dim, id := range ids {
 		if !needsRail && dim != e.dimIndex {
 			continue
 		}
@@ -1912,7 +1934,11 @@ func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(ro
 }
 
 func (e *explorerFold) payload() explorerPayload {
-	conversations, conversationGroups := e.lineage.resolve()
+	conversations := e.lineage.summary()
+	var conversationGroups map[string]conversationGroup
+	if e.dimIndex == dimConversation {
+		conversationGroups = e.lineage.groups()
+	}
 	top := e.rankedGroups()
 	// Resolve compact selected-group membership once, then both metrics read
 	// the same row spans. Emitting every occurrence preserves duplicate tools

@@ -21,6 +21,13 @@ type projectionData struct {
 	ids        map[string]struct{}
 	dimensions contribDimensions
 	metrics    projectionMetrics
+	// lineage is the resolved conversation topology for these rows. It is
+	// rebuilt on a destructive replacement and updated incrementally on
+	// append; requests only mark their own flags on it.
+	lineage conversationTopology
+	// modelCache retains canonical model IDs for the current build. Appends
+	// extend its prefix; a replacement publishes a fresh cache.
+	modelCache *modelProjectionCache
 	minStart   int64
 	hasStart   bool
 	cursor     storage.ProjectionCursor
@@ -315,6 +322,9 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 		// growRows covers the delta append with one owner; spare capacity never
 		// exceeds the incoming batch.
 		data.rows = growRows(data.rows, incoming)
+		if data.lineage.appendRows(incoming) {
+			data.lineage.resolve()
+		}
 		data.metrics.append(data.rows, previousRows)
 		data.cursor, data.version = next, version
 		p.data = data
@@ -333,11 +343,12 @@ func buildProjection(incoming []contrib, next storage.ProjectionCursor, version 
 		return projectionData{}, errors.New("analytical row index capacity exceeded")
 	}
 	data := projectionData{
-		ids:      make(map[string]struct{}, len(incoming)),
-		cursor:   next,
-		version:  version,
-		rows:     make([]contrib, len(incoming)),
-		hasStart: len(incoming) > 0,
+		ids:        make(map[string]struct{}, len(incoming)),
+		cursor:     next,
+		version:    version,
+		rows:       make([]contrib, len(incoming)),
+		hasStart:   len(incoming) > 0,
+		modelCache: newModelProjectionCache(),
 	}
 	for i := range incoming {
 		c := incoming[i]
@@ -353,6 +364,7 @@ func buildProjection(incoming []contrib, next storage.ProjectionCursor, version 
 		data.rows[i] = c
 	}
 	data.metrics.append(data.rows, 0)
+	data.lineage = buildConversationTopology(data.rows)
 	return data, nil
 }
 

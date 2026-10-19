@@ -1,12 +1,14 @@
 package web
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
 	"unsafe"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 func TestProjectionDimensionsShareStoredLabels(t *testing.T) {
@@ -117,6 +119,69 @@ func TestProjectionParentIdentitySharesConversationDictionary(t *testing.T) {
 // stranding the browser rail or the filter grammar. Set equality is
 // order-independent against the rail; the array's own order is pinned too
 // because it defines the dictionary slot indices.
+func modelCacheProjection(t *testing.T, models int) *projectionData {
+	t.Helper()
+	rows := make([]contrib, models)
+	for i := range rows {
+		rows[i] = contrib{model: fmt.Sprintf("Vendor/Model-%d", i), status: 200}
+	}
+	p, err := buildProjection(rows, storage.ProjectionCursor{}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &p
+}
+
+// The canonical model IDs and dictionary are projection-owned: consecutive
+// requests share the immutable snapshot, a rules change rebuilds it, a
+// non-destructive version bump extends it, and a destructive replacement
+// publishes a fresh cache.
+func TestProjectionModelCacheReuseAndInvalidation(t *testing.T) {
+	p := modelCacheProjection(t, 1000)
+	lower := &modelCanonizer{
+		exec:     config.CompileModelRules([]config.ModelRule{{Mode: config.ModelRuleLower}}),
+		identity: "lower",
+		memo:     map[string]string{},
+	}
+	var first, second queryDimensions
+	first.prepare(p, lower)
+	second.prepare(p, lower)
+	if len(first.modelIDs) != 1001 || len(second.modelIDs) != 1001 {
+		t.Fatalf("canonical IDs = %d/%d, want 1001", len(first.modelIDs), len(second.modelIDs))
+	}
+	if &first.modelIDs[0] != &second.modelIDs[0] || &first.base[dimModel].names[0] != &second.base[dimModel].names[0] {
+		t.Fatal("consecutive requests re-canonicalized the projection")
+	}
+	if got := first.base[dimModel].names[first.modelIDs[1]]; got != "vendor/model-0" {
+		t.Fatalf("canonical model = %q", got)
+	}
+	raw := &modelCanonizer{identity: "raw", memo: map[string]string{}}
+	var rulesChanged queryDimensions
+	rulesChanged.prepare(p, raw)
+	if rulesChanged.base[dimModel].names[rulesChanged.modelIDs[1]] != "Vendor/Model-0" {
+		t.Fatal("rules change reused the old canonical dictionary")
+	}
+	// A version bump with an unchanged raw dictionary is a cache hit, not a
+	// rebuild; a new raw name extends the prefix in place.
+	names := p.dimensions.dict[dimModel].names
+	ids, _ := p.modelCache.canonical(p.version+1, raw.identity, names, raw)
+	if len(ids) != len(names) || &ids[0] != &rulesChanged.modelIDs[0] {
+		t.Fatal("unchanged model dictionary rebuilt on an append version")
+	}
+	extended := append(append([]string(nil), names...), "vendor/model-new")
+	ids, models := p.modelCache.canonical(p.version+2, raw.identity, extended, raw)
+	if len(ids) != len(extended) || models.names[ids[len(extended)-1]] != "vendor/model-new" {
+		t.Fatalf("extended dictionary = %q", models.names[ids[len(extended)-1]])
+	}
+	if ids[1] != rulesChanged.modelIDs[1] {
+		t.Fatal("extension did not retain the immutable canonical prefix")
+	}
+	replacement := modelCacheProjection(t, 10)
+	if replacement.modelCache == p.modelCache {
+		t.Fatal("destructive replacement reused the previous cache")
+	}
+}
+
 func TestDimensionNamesMirrorExplorerRail(t *testing.T) {
 	want := []string{"client", "provider", "model", "conversation", "key", "status", "time", "tool", "error"}
 	if !reflect.DeepEqual(dimensionNames[:], want) {

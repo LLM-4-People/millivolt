@@ -226,6 +226,247 @@ func TestConversationLineageCollectsAncestorsOutsideScope(t *testing.T) {
 	}
 }
 
+// lineageTopologyFixtures cover mixed namespaces, conflicts, self-edges,
+// cycles, unresolved parents and ordinary chains. The projection-built view
+// must answer exactly like the standalone declaration walk.
+func lineageTopologyFixtures() []contrib {
+	rows := []contrib{
+		lineageRow("s:root", ""),
+		lineageRow("s:child", "s:root"),
+		lineageRow("s:missing", "s:absent"),
+		lineageRow("s:conflicted", "s:first"),
+		lineageRow("s:conflicted", "s:second"),
+		lineageRow("s:cycle-a", "s:cycle-b"),
+		lineageRow("s:cycle-b", "s:cycle-a"),
+		lineageRow("s:self", "s:self"),
+		lineageRow("s:mixed", ""),
+	}
+	mixed := lineageRow("s:mixed", "")
+	mixed.key = "other-key"
+	return append(rows, mixed)
+}
+
+func TestExplorerLineageProjectionParity(t *testing.T) {
+	rows := lineageTopologyFixtures()
+	for i := range rows {
+		if i%2 == 0 {
+			rows[i].prov = "fixture.example"
+		} else {
+			rows[i].prov = "other.example"
+		}
+	}
+	projected := explorerProjection(rows)
+	reversed := make([]contrib, len(rows))
+	for i := range rows {
+		reversed[i] = rows[len(rows)-1-i]
+	}
+	shuffled := explorerProjection(reversed)
+	scopes := [][]scopeFilter{
+		nil,
+		{{dim: "provider", id: "fixture.example"}},
+		{{dim: "status", id: "2xx"}},
+		{{dim: "conversation", id: "s:root"}},
+	}
+	for _, dim := range []string{"conversation", "provider", "status"} {
+		for _, fs := range scopes {
+			encoded := newExplorerFold(dim, "", fs)
+			encoded.prepare(projected, nil)
+			raw := newExplorerFold(dim, "", fs)
+			for i := range projected.rows {
+				if err := encoded.fold(&projected.rows[i]); err != nil {
+					t.Fatal(err)
+				}
+				c := rows[i]
+				if err := raw.fold(&c); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, want := encoded.payload(), raw.payload()
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s %v cached lineage differs from raw declarations: got=%+v want=%+v", dim, fs, got, want)
+			}
+			other := newExplorerFold(dim, "", fs)
+			other.prepare(shuffled, nil)
+			for i := range shuffled.rows {
+				if err := other.fold(&shuffled.rows[i]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if reversed := other.payload(); !reflect.DeepEqual(got, reversed) {
+				t.Fatalf("%s %v projection order changed the payload: got=%+v reversed=%+v", dim, fs, got, reversed)
+			}
+		}
+	}
+}
+
+func TestExplorerLineageTopologyReusedAcrossRequests(t *testing.T) {
+	const conversations = 5000
+	rows := make([]contrib, conversations)
+	for i := range rows {
+		parent := ""
+		if i%7 == 0 && i > 0 {
+			parent = fmt.Sprint("s:", i-1)
+		}
+		rows[i] = lineageRow(fmt.Sprint("s:", i), parent)
+		rows[i].prov = "fixture.example"
+	}
+	p := explorerProjection(rows)
+	nodes := len(p.lineage.nodes)
+	allocs := testing.AllocsPerRun(3, func() {
+		fold := newExplorerFold("provider", "", nil)
+		fold.prepare(p, nil)
+		for i := range p.rows {
+			if err := fold.fold(&p.rows[i]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = fold.payload()
+	})
+	if len(p.lineage.nodes) != nodes || nodes != conversations {
+		t.Fatalf("cached topology rebuilt: nodes=%d want=%d", len(p.lineage.nodes), conversations)
+	}
+	// A per-request string-keyed graph costs several allocations per
+	// conversation; the cached view retains only flags and payload shapes.
+	if allocs > 256 {
+		t.Fatalf("warm explorer allocated %.0f objects per request, want <= 256", allocs)
+	}
+}
+
+// A ring/pending row can declare a parent for a conversation the projection
+// already contains. The shared topology must stay immutable while the request
+// view resolves the effective graph.
+func TestExplorerLineagePendingOverlayChangesProjectedRole(t *testing.T) {
+	s := testStore(t)
+	buf := metrics.NewBuffer(16)
+	now := time.Now().Add(-time.Minute)
+	record := func(id, conv, parent string) *metrics.Record {
+		r := mkRec(id, now, 200, "", nil, 10, 20, 1, 1, 0, 0)
+		r.ConversationID, r.ParentConversationID = conv, parent
+		return r
+	}
+	parent, child := record("parent", "s:parent", ""), record("child", "s:child", "")
+	s.Record(parent)
+	s.Record(child)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(buf, s, time.Second)
+	p, err := api.explorer(t.Context(), "conversation", nil, "")
+	if err != nil || p.Conversations != (conversationSummary{Main: 2}) {
+		t.Fatalf("baseline=%+v err=%v", p.Conversations, err)
+	}
+	// The in-flight request is a second request in the projected child
+	// conversation, not a duplicate finalized ID.
+	pendingChild := record("pending-child", "s:child", "s:parent")
+	buf.PublishLive("begin", pendingChild)
+	p, err = api.explorer(t.Context(), "conversation", nil, "")
+	if err != nil || p.Conversations != (conversationSummary{Main: 1, Sub: 1}) {
+		t.Fatalf("pending parent declaration ignored: %+v err=%v", p.Conversations, err)
+	}
+	var childInfo *conversationInfo
+	for _, g := range p.Groups {
+		if g.Name == "s:child" {
+			childInfo = g.Conversation
+		}
+	}
+	if childInfo == nil || childInfo.Role != conversationSub || childInfo.ParentID != "s:parent" ||
+		childInfo.ParentObserved == nil || !*childInfo.ParentObserved ||
+		childInfo.ParentInScope == nil || !*childInfo.ParentInScope {
+		t.Fatalf("pending child card=%+v", childInfo)
+	}
+	// A second pending declaration closes a cycle with the projection. Both
+	// nodes must become unresolved; the cached projection topology is untouched.
+	pendingParent := record("pending-parent", "s:parent", "s:child")
+	buf.PublishLive("begin", pendingParent)
+	p, err = api.explorer(t.Context(), "conversation", nil, "")
+	if err != nil || p.Conversations != (conversationSummary{Unresolved: 2}) {
+		t.Fatalf("pending cycle not resolved: %+v err=%v", p.Conversations, err)
+	}
+	for _, g := range p.Groups {
+		if g.Name != "s:child" && g.Name != "s:parent" {
+			continue
+		}
+		if g.Conversation == nil || g.Conversation.Role != conversationUnknown || g.Conversation.Issue != "cycle" {
+			t.Fatalf("cycle card %s = %+v", g.Name, g.Conversation)
+		}
+	}
+	if len(api.projection.data.lineage.nodes) != 2 || api.projection.data.lineage.nodes[0].issue != conversationIssueNone {
+		t.Fatal("request overlay mutated the published topology")
+	}
+}
+
+// A pending row can be the first observed node for a parent reference. The
+// request overlay must link it without rebuilding or mutating the projection.
+func TestExplorerLineagePendingParentObservation(t *testing.T) {
+	s := testStore(t)
+	buf := metrics.NewBuffer(16)
+	now := time.Now().Add(-time.Minute)
+	orphan := mkRec("orphan", now, 200, "", nil, 10, 20, 1, 1, 0, 0)
+	orphan.ConversationID, orphan.ParentConversationID = "s:orphan", "s:ghost"
+	s.Record(orphan)
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(buf, s, time.Second)
+	p, err := api.explorer(t.Context(), "conversation", nil, "")
+	if err != nil || p.Conversations != (conversationSummary{Sub: 1}) {
+		t.Fatalf("missing parent baseline=%+v err=%v", p.Conversations, err)
+	}
+	if p.Groups[0].Conversation == nil || *p.Groups[0].Conversation.ParentObserved {
+		t.Fatalf("unobserved parent invented: %+v", p.Groups[0].Conversation)
+	}
+	ghost := mkRec("ghost", now.Add(time.Second), 200, "", nil, 10, 20, 1, 1, 0, 0)
+	ghost.ConversationID = "s:ghost"
+	buf.PublishLive("begin", ghost)
+	p, err = api.explorer(t.Context(), "conversation", nil, "")
+	if err != nil || p.Conversations != (conversationSummary{Main: 1, Sub: 1}) {
+		t.Fatalf("pending parent not observed: %+v err=%v", p.Conversations, err)
+	}
+	for _, g := range p.Groups {
+		if g.Name == "s:orphan" && (g.Conversation == nil || !*g.Conversation.ParentObserved ||
+			!*g.Conversation.ParentInScope || g.Conversation.ParentID != "s:ghost") {
+			t.Fatalf("pending parent card=%+v", g.Conversation)
+		}
+	}
+}
+
+func TestConversationTopologyAppendUpdatesIssues(t *testing.T) {
+	var d contribDimensions
+	rows := []contrib{lineageRow("s:child", "s:missing"), lineageRow("s:root", "")}
+	for i := range rows {
+		d.intern(&rows[i])
+	}
+	top := buildConversationTopology(rows)
+	child := top.index[conversationKey{
+		client: rows[0].dimensionIDs[dimClient],
+		key:    rows[0].dimensionIDs[dimKey],
+		id:     rows[0].dimensionIDs[dimConversation],
+	}]
+	if got := conversationIssueName(top.nodes[child].issue); got != "" {
+		t.Fatalf("missing parent must not invent an issue, got %q", got)
+	}
+	incoming := []contrib{lineageRow("s:missing", "s:child")}
+	d.intern(&incoming[0])
+	if !top.appendRows(incoming) {
+		t.Fatal("new parent declaration must dirty the topology")
+	}
+	top.resolve()
+	if got := conversationIssueName(top.nodes[child].issue); got != "cycle" {
+		t.Fatalf("append did not resolve the new cycle: %q", got)
+	}
+	if len(top.rowNodes) != len(rows)+len(incoming) {
+		t.Fatalf("row nodes = %d, want %d", len(top.rowNodes), len(rows)+len(incoming))
+	}
+	leaf := lineageRow("s:leaf", "")
+	d.intern(&leaf)
+	if top.appendRows([]contrib{leaf}) {
+		t.Fatal("a parentless leaf must not force a full re-resolution")
+	}
+	if len(top.rowNodes) != len(rows)+len(incoming)+1 {
+		t.Fatal("leaf row node missing")
+	}
+}
+
 func BenchmarkConversationLineageFold(b *testing.B) {
 	for _, conversations := range []int{1, 1000, 10000} {
 		b.Run(fmt.Sprint(conversations), func(b *testing.B) {

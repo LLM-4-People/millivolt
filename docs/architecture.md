@@ -245,9 +245,17 @@ errors, tools, time buckets and live-only classes. Ad-hoc SELECT results are
 encoded once during the bounded scan and the endpoint writes that array
 directly; row/byte cap failure still precedes every response byte.
 
-Explorer uses dictionary IDs, scoped predicates and bitsets. Projected metric
-samples stay in shared sorted orders: single-valued dimensions retain one group
-id per row, while tool/error membership spans preserve multi-valued
+Explorer uses dictionary IDs, scoped predicates and bitsets. The projection
+also owns two derived tables keyed by its immutable build: the interned
+conversation topology (identities, parent declarations, resolved issues and
+public-ID groups) and the canonical model IDs/dictionary for the compiled
+model-rule revision. Appends extend both by the new rows; destructive
+replacement publishes fresh tables, and a rules change rebuilds only the model
+table. Requests mark their own rail/gallery flags on the shared topology, build
+the conversation group map only for the conversation dimension, and overlay
+ring/pending declarations without mutating the published build. Projected
+metric samples stay in shared sorted orders: single-valued dimensions retain one
+group id per row, while tool/error membership spans preserve multi-valued
 occurrences. Selected groups use the same exact rank reader as chart buckets,
 and only top cards derive percentile payloads. Pending dedupe retains only
 relevant pending IDs, not another history-sized seen set. Chart's rank reader
@@ -307,12 +315,14 @@ the rules or re-sort thousands of names.
 Observer records carry server-local `time_bucket`; browser-local dates are
 presentation only. Raw names remain raw for exact export/delete semantics.
 
-The explorer's one iterative lineage resolver observes declarations by
-client/key/conversation before applying rail/gallery scopes. Parent-only
+The explorer's one iterative lineage resolver validates declarations by
+client/key/conversation before applying rail/gallery scopes. The resolved graph
+is a projection-owned table, interned by dimension slot; a request only marks
+flags and overlays unprojected ring/pending declarations. Parent-only
 dictionary names do not become observed memberships. Conflicts, cycles and
 mixed namespaces remain unknown; missing parents are not invented roots.
 Summary counts follow full-filter rail scope; conversation cards follow the
-gallery cross-filter. Payloads retain small resolved fields, not the temporary
+gallery cross-filter. Payloads retain small resolved fields, not a per-request
 graph. Parent pivots remain exact namespace-qualified leaves.
 
 ## Operator plane clients

@@ -78,6 +78,75 @@ func TestProjectionPreloadAndRawModelReuse(t *testing.T) {
 	}
 }
 
+// An append must extend the projection-owned canonical model table; a stale
+// dictionary would silently drop newly observed models from explorer groups.
+func TestProjectionModelCacheExtendsOnAppend(t *testing.T) {
+	api, _ := projectionAPI(t)
+	now := time.Now()
+	first := cacheRecord("model-a", now.Add(-2*time.Minute))
+	first.Model = "MODEL-A"
+	api.store.Record(first)
+	if err := api.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	e, err := api.explorer(t.Context(), "model", nil, "")
+	if err != nil || len(e.Groups) != 1 || e.Groups[0].Name != "MODEL-A" {
+		t.Fatalf("first model discovery = %+v, %v", e, err)
+	}
+	second := cacheRecord("model-b", now.Add(-time.Minute))
+	second.Model = "MODEL-B"
+	api.store.Record(second)
+	if err := api.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	e, err = api.explorer(t.Context(), "model", nil, "")
+	names := make(map[string]int64)
+	for _, g := range e.Groups {
+		names[g.Name] = g.N
+	}
+	if err != nil || names["MODEL-A"] != 1 || names["MODEL-B"] != 1 {
+		t.Fatalf("appended model missing from canonical dictionary: %+v, %v", e, err)
+	}
+}
+
+// Projection-owned lineage/model caches are read by concurrent explorer folds
+// while the single builder appends. This pins the lock discipline under -race.
+func TestProjectionCachesConcurrentReadersAndAppends(t *testing.T) {
+	api, _ := projectionAPI(t)
+	now := time.Now()
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 12 {
+				if _, err := api.explorer(t.Context(), "provider", nil, ""); err != nil {
+					t.Errorf("explorer: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	for i := range 40 {
+		r := cacheRecord(fmt.Sprintf("concurrent-%d", i), now.Add(time.Duration(i)*time.Millisecond))
+		r.Model = fmt.Sprintf("MODEL-%d", i%3)
+		api.store.Record(r)
+		if i%10 == 9 {
+			if err := api.store.Flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := api.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+	e, err := api.explorer(t.Context(), "provider", nil, "")
+	if err != nil || e.Total != 40 {
+		t.Fatalf("final explorer = %+v, %v", e, err)
+	}
+}
+
 func TestProjectionExternalDeleteNeverResurrectsRing(t *testing.T) {
 	api, other := projectionAPI(t)
 	now := time.Now()

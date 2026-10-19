@@ -222,6 +222,79 @@ func BenchmarkAggregateFlightCoalesce(b *testing.B) {
 	b.ReportMetric(callers-1, "waits/op")
 }
 
+func benchmarkExplorerProjection(rows []contrib) *projectionData {
+	p, err := buildProjection(rows, storage.ProjectionCursor{}, 1)
+	if err != nil {
+		panic(err)
+	}
+	return &p
+}
+
+// BenchmarkExplorerLineageTopology measures a warm explorer request over a
+// projection that already owns the resolved conversation graph. The per-request
+// work is scoped matching, rail/gallery flags and the bounded payload, not a
+// rebuild of every conversation node.
+func BenchmarkExplorerLineageTopology(b *testing.B) {
+	for _, conversations := range []int{4_000, 100_000, 200_000} {
+		b.Run(fmt.Sprintf("conversations_%d", conversations), func(b *testing.B) {
+			rows := make([]contrib, conversations)
+			for i := range rows {
+				parent := ""
+				if i%7 == 0 && i > 0 {
+					parent = fmt.Sprintf("s:%d", i-1)
+				}
+				rows[i] = contrib{
+					start: int64(i), status: 200, client: "fixture-client", key: "fixture-key",
+					prov: "fixture.example", model: "fixture-model",
+					conv: fmt.Sprintf("s:%d", i), parentConv: parent,
+				}
+			}
+			p := benchmarkExplorerProjection(rows)
+			mcz := &modelCanonizer{memo: map[string]string{}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				fold := newExplorerFold("provider", "", nil)
+				fold.prepare(p, mcz)
+				for i := range p.rows {
+					if err := fold.fold(&p.rows[i]); err != nil {
+						b.Fatal(err)
+					}
+				}
+				_ = fold.payload()
+			}
+		})
+	}
+}
+
+// BenchmarkExplorerCanonicalModels measures the steady-state query dictionary
+// preparation. The cold first request after a projection/rules change pays the
+// canonicalization once; every subsequent revision-compatible request reuses
+// the projection-owned canonical IDs and dictionary.
+func BenchmarkExplorerCanonicalModels(b *testing.B) {
+	rules := config.Default().ModelCanon()
+	exec := config.CompileModelRules(rules.Rules)
+	revision := modelCanonIdentity(rules)
+	for _, models := range []int{10_000, 100_000} {
+		b.Run(fmt.Sprintf("models_%d", models), func(b *testing.B) {
+			rows := make([]contrib, models)
+			for i := range rows {
+				rows[i] = contrib{model: fmt.Sprintf("vendor.example/Model-%d.5:tag-fp4", i), status: 200}
+			}
+			p := benchmarkExplorerProjection(rows)
+			mcz := &modelCanonizer{exec: exec, identity: revision, memo: map[string]string{}}
+			var warm queryDimensions
+			warm.prepare(p, mcz)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				var q queryDimensions
+				q.prepare(p, mcz)
+			}
+		})
+	}
+}
+
 // Unlike the fold kernel, this includes revision checks, query preparation,
 // ring/pending merge and payload construction. Clear only the result memo on
 // each iteration: it measures a previously unseen view, not a warm cache hit.

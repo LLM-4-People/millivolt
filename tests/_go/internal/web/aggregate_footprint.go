@@ -231,6 +231,8 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 				interned := footprintHeap() - base
 				p.rows = growRows(nil, incoming)
 				p.metrics.append(p.rows, 0)
+				p.lineage = buildConversationTopology(p.rows)
+				p.modelCache = newModelProjectionCache()
 				ordered := footprintHeap() - base
 				// Same liveness anchor as above: the staged projection must
 				// survive the snapshot's GC; this anchor is its last use.
