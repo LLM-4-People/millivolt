@@ -185,18 +185,35 @@ const requestDebugDDL = `CREATE TABLE IF NOT EXISTS request_debug (
 CREATE INDEX IF NOT EXISTS idx_request_debug_expires ON request_debug (expires_at);
 CREATE INDEX IF NOT EXISTS idx_request_debug_session ON request_debug (session_id);`
 
-// requestLogIndexDDL is the single owner of the ordered log indexes. It runs
-// after migrate, not inside the fresh schema, because client, conversation_id
-// and the other equality columns were added by ALTER TABLE on legacy databases:
-// creating an index on a column that does not exist yet fails the whole boot
-// before the migration can add it.
-const requestLogIndexDDL = `CREATE INDEX IF NOT EXISTS idx_requests_log ON requests (started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_provider_log ON requests (provider, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_model_log ON requests (model, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_client_log ON requests (client, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_key_log ON requests (key_hash, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_conversation_log ON requests (conversation_id, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_requests_status_log ON requests (status_code, started_at, id);`
+// requestLogIndexDDL is the single owner of the ordered log index. migrate
+// drops every superseded request-log index before running it, so a legacy
+// database ends up with exactly this one secondary log index.
+//
+// (started_at, id) is the durable log order. Filtered pages and exports still
+// apply their exact equality predicates in SQL, but the planner scans this
+// index in cursor order and rechecks each predicate per row; equality-only
+// counts and purges scan the table. Either way the predicate is unchanged, so
+// results, order and pagination stay exact without six parallel
+// (dimension, started_at, id) copies whose bytes dominated the durable
+// footprint. Only the access path differs.
+const requestLogIndexDDL = `CREATE INDEX IF NOT EXISTS idx_requests_log ON requests (started_at, id);`
+
+// supersededRequestLogIndexes is the one list of request-log indexes migrate
+// removes. The three legacy spellings predate the ordered composites; the six
+// dimension composites are what the previous schema maintained. Their presence
+// on an existing database is also the one-shot trigger for reclaiming the pages
+// they leave behind, so a fresh or already-migrated database never vacuums.
+var supersededRequestLogIndexes = []string{
+	"idx_requests_started_at",
+	"idx_requests_provider",
+	"idx_requests_model",
+	"idx_requests_provider_log",
+	"idx_requests_model_log",
+	"idx_requests_client_log",
+	"idx_requests_key_log",
+	"idx_requests_conversation_log",
+	"idx_requests_status_log",
+}
 
 var schema = `
 CREATE TABLE IF NOT EXISTS requests (
@@ -680,9 +697,9 @@ func Open(path string, opts Options) (*Store, error) {
 	}
 	db.SetMaxOpenConns(sqliteWriterConns)
 	// Planner statistics are a read-path guardrail, not request data. They let
-	// SQLite cost the ordered log index against the provider/model equality
-	// indexes instead of relying on default guesses. Refresh only when absent
-	// or materially stale so ordinary boots pay no write.
+	// SQLite cost the ordered log index scan against a table scan instead of
+	// relying on default guesses. Refresh only when absent or materially stale
+	// so ordinary boots pay no write.
 	ensureRequestStatistics(db)
 
 	// Read pool: with WAL, readers don't block the single writer. Dashboard
@@ -1628,16 +1645,24 @@ func readTotals(ctx context.Context, db interface {
 // raises "malformed JSON" on any non-JSON value, denying the errors-only
 // purge/count/export outright.
 func migrate(db *sql.DB) error {
-	// The canonical ordered log indexes replace their timestamp-only and
-	// single-column provider/model predecessors once. Creation is owned by
-	// requestLogIndexDDL below, after the column pass, because some leading
-	// columns are added by ALTER TABLE on legacy databases. DROP IF EXISTS
-	// keeps every re-run harmless and never touches the replacements.
-	for _, index := range []string{
-		"idx_requests_started_at",
-		"idx_requests_provider",
-		"idx_requests_model",
-	} {
+	// idx_requests_log(started_at, id) is the only request-log index. Remove
+	// every superseded spelling once: the timestamp-only and single-column
+	// provider/model predecessors, plus the six per-dimension composites this
+	// schema used to maintain. Their equality predicates remain in every
+	// page/count/export/purge statement: pages and exports recheck them while
+	// scanning the ordered index, equality-only counts and purges scan the
+	// table, so results never change; only the access path does. Creation is
+	// owned by requestLogIndexDDL below, after the column pass, because some
+	// legacy columns are added by ALTER TABLE. DROP IF EXISTS keeps every
+	// re-run harmless and never touches idx_requests_log.
+	reclaim := false
+	for _, index := range supersededRequestLogIndexes {
+		var exists int
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM sqlite_schema
+			WHERE type = 'index' AND tbl_name = 'requests' AND name = ?)`, index).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect superseded index %s: %w", index, err)
+		}
+		reclaim = reclaim || exists == 1
 		if _, err := db.Exec("DROP INDEX IF EXISTS " + index); err != nil {
 			return err
 		}
@@ -1768,7 +1793,47 @@ func migrate(db *sql.DB) error {
 	if _, err := db.Exec(requestLogIndexDDL); err != nil {
 		return fmt.Errorf("log indexes: %w", err)
 	}
+	if reclaim {
+		reclaimIndexPages(db)
+	}
 	return nil
+}
+
+// reclaimIndexPages repacks the database after migrate dropped superseded
+// request-log indexes. Dropping an index moves its pages to SQLite's freelist;
+// without a rebuild the file keeps that space indefinitely. migrate calls this
+// only when it actually found one of those indexes, so a fresh or
+// already-migrated database never vacuums, and a failed reclaim is never
+// retried on a later boot.
+//
+// VACUUM cannot run inside a transaction and needs temporary space up to twice
+// the database size. A failure is deliberately non-fatal: the dropped indexes
+// are already gone, every request row and aggregate is intact, and the operator
+// can reclaim the freelist manually (see docs/operations.md). The connection
+// comes from the same DSN pool, so WAL mode, busy_timeout, synchronous and the
+// other connection pragmas remain in force.
+func reclaimIndexPages(db *sql.DB) {
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		log.Printf("storage: reclaim freed index pages: acquire connection: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "VACUUM"); err != nil {
+		log.Printf("storage: reclaim freed index pages: VACUUM failed: %v (request rows are intact; run VACUUM manually to reclaim disk)", err)
+		return
+	}
+	// VACUUM may renumber implicit rowids on a table whose primary key is not
+	// INTEGER (requests keys on TEXT id). Reset the append-only projection
+	// witness so persisted totals are not blessed against a stale rowid
+	// watermark; the next preload rebuilds analytical history from rows.
+	if _, err := conn.ExecContext(ctx, `UPDATE request_projection_state
+		SET epoch = epoch + 1,
+			high_rowid = MAX(0, COALESCE((SELECT MAX(rowid) FROM requests), 0))
+		WHERE singleton = 1`); err != nil {
+		log.Printf("storage: reclaim freed index pages: reset analytical projection: %v (request rows are intact; aggregates will rebuild)", err)
+	}
 }
 
 // tableColumnSet reads one table's column-name set through PRAGMA table_info,
@@ -2078,10 +2143,13 @@ const logCandidateColumns = `
 
 // buildBeforeQuery is the single owner of the durable log page statement
 // shape: newest-first below an exclusive (started_at,id) cursor, with SQL-safe
-// exact predicates applied by SQLite before decoding. Every LogFilter equality
-// field has an index ending in the same (started_at,id) order, so its page
-// needs one range scan and no sort; callers that need canonical-model or class
-// semantics still match in Go. columns is code-owned, never request input.
+// exact predicates applied by SQLite before decoding. idx_requests_log is the
+// only request-log index, so the page walks it in cursor order and rechecks
+// each equality predicate per row: one ordered scan and no sort. A filter with
+// no time bound still scans from newest, so a highly selective equality pays a
+// longer scan than the old per-dimension index did. Callers that need
+// canonical-model or class semantics still match in Go. columns is code-owned,
+// never request input.
 func buildBeforeQuery(columns string, before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
 	q := `SELECT ` + columns + ` FROM requests WHERE 1=1`
 	var args []any

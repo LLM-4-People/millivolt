@@ -258,10 +258,11 @@ func BenchmarkProjectionFootprint(b *testing.B) {
 // BenchmarkStoreDiskBytes reports the durable SQLite bytes retained per
 // stored record: the database file, its WAL sidecar and the shared-memory
 // WAL index after the final flush, before Close folds the WAL back in. Row
-// payload, the unique id index, the three secondary indexes, the projection
-// triggers' state and the marshaled response-header JSON are all inside the
-// number; it is the disk-side twin of the projection benchmarks above. The
-// database and WAL must exist; the rebuildable shm index may be absent.
+// payload, the unique id index, the single ordered request-log index, the
+// projection triggers' state and the marshaled response-header JSON are all
+// inside the number; it is the disk-side twin of the projection benchmarks
+// above. The database and WAL must exist; the rebuildable shm index may be
+// absent.
 func BenchmarkStoreDiskBytes(b *testing.B) {
 	for _, n := range footprintSizes {
 		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {

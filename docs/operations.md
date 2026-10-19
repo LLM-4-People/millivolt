@@ -1444,6 +1444,27 @@ SQLite retains finalized records; the ring and pending registry support live
 observation. Full bootstrap windows are capped in durable mode and older log
 rows page from storage. Without storage, the ring is the available history.
 
+The durable log order owns one secondary index, `idx_requests_log(started_at,
+id)`. Exact provider, model, client, key-hash, conversation and status filters
+remain SQL predicates: the log page and ordered export recheck them on that
+scan, while an equality-only preview count or purge reads the table instead of
+maintaining per-dimension composite indexes. `BenchmarkStoreDiskBytes` measures
+this on its deterministic synthetic fixture (10,000 and 100,000 seeded
+records); on that fixture the 100,000-row database fell from 118.2 MiB to
+45.4 MiB. It is a reproducible fixture scope, not a prediction of a
+deployment's disk use or a capacity ceiling.
+
+Dropping a superseded request-log index only moves its pages to SQLite's
+freelist, so the first startup that finds and removes one also runs a one-time
+`VACUUM` after the migration. Fresh and already-migrated databases skip it. A
+`VACUUM` needs free temporary space up to roughly twice the database size; if
+it fails for space, locking or interruption, startup logs a warning and
+continues with every row intact, but the freed pages stay on the freelist.
+Reclaim them manually during a maintenance window: stop the proxy, run
+`sqlite3 /data/proxy.db 'VACUUM;'` (or any SQLite client) against `db_path`,
+and confirm `PRAGMA freelist_count` returns 0. The automatic pass is never
+retried on a later boot, so a failed attempt needs this manual step.
+
 Enqueue is bounded and nonblocking. Overflow or write failures can lose durable
 records even when HTTP succeeds. Bootstrap's
 `storage:{enabled,dropped,totals_degraded}` reports cumulative process-local

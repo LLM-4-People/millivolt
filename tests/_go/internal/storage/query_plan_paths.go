@@ -22,13 +22,52 @@ func assertIndexRange(t *testing.T, plan, index string) {
 	}
 }
 
-// TestExportCountAndPurgeUseOrderedCompositeIndexes pins the plan for every
-// production path the docs promise is an index range: the durable export,
-// the delete-preview count and both purge deletes. The statements come from
-// the same builders the production methods use, so a schema/index change or a
-// predicate rewrite that reintroduces a whole-log scan fails here rather than
-// silently changing query cost.
-func TestExportCountAndPurgeUseOrderedCompositeIndexes(t *testing.T) {
+// assertLogIndexScan pins one plan to idx_requests_log, the only request-log
+// index, without assuming SQLite spells the access as SCAN or SEARCH.
+func assertLogIndexScan(t *testing.T, plan string) {
+	t.Helper()
+	if !strings.Contains(plan, "USING INDEX idx_requests_log") && !strings.Contains(plan, "USING COVERING INDEX idx_requests_log") {
+		t.Fatalf("plan does not use idx_requests_log:\n%s", plan)
+	}
+	if strings.Contains(plan, "TEMP B-TREE") {
+		t.Fatalf("plan sorts instead of using log order:\n%s", plan)
+	}
+}
+
+// TestFilteredExportStreamsInLogOrder pins the durable export plan for every
+// purge filter: its ORDER BY (started_at, id) is served by idx_requests_log,
+// while equality predicates are rechecked per row. An unfiltered scan or a
+// temp sort would mean the single-index schema broke streaming export.
+func TestFilteredExportStreamsInLogOrder(t *testing.T) {
+	s := openTestStore(t)
+	seedQueryBeforeRows(t, s, 5_000, 10, 10)
+	before := time.Now().UnixMilli() - 1_000
+	for _, tc := range []struct {
+		name   string
+		filter PurgeFilter
+	}{
+		{"provider", PurgeFilter{Provider: "provider-03"}},
+		{"model", PurgeFilter{Model: "model-03"}},
+		{"client", PurgeFilter{Client: "client-003"}},
+		{"conversation", PurgeFilter{ConversationID: "conv-000005"}},
+		{"status", PurgeFilter{StatusCode: 500}},
+		{"before", PurgeFilter{BeforeMs: before}},
+		{"provider_and_status", PurgeFilter{Provider: "provider-03", StatusCode: 500}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			exportSQL, exportArgs := buildExportQuery(tc.filter, time.Now().UnixMilli())
+			assertLogIndexScan(t, explainQueryPlan(t, s.rdb, exportSQL, exportArgs))
+		})
+	}
+}
+
+// TestCountAndPurgePlanAgainstTheSingleLogIndex pins the cost of dropping the
+// six per-dimension composites: an equality-only preview count or purge cannot
+// seek an index, so it scans the requests table and rechecks the predicate. A
+// time-bounded filter still gets an idx_requests_log range. Both purge-side
+// statements come from the production builders, and the sidecar delete keeps
+// its primary-key probe.
+func TestCountAndPurgePlanAgainstTheSingleLogIndex(t *testing.T) {
 	s := openTestStore(t)
 	seedQueryBeforeRows(t, s, 5_000, 10, 10)
 	before := time.Now().UnixMilli() - 1_000
@@ -37,36 +76,47 @@ func TestExportCountAndPurgeUseOrderedCompositeIndexes(t *testing.T) {
 		filter PurgeFilter
 		index  string
 	}{
-		{"provider", PurgeFilter{Provider: "provider-03"}, "idx_requests_provider_log"},
-		{"model", PurgeFilter{Model: "model-03"}, "idx_requests_model_log"},
-		{"client", PurgeFilter{Client: "client-003"}, "idx_requests_client_log"},
-		{"conversation", PurgeFilter{ConversationID: "conv-000005"}, "idx_requests_conversation_log"},
-		{"status", PurgeFilter{StatusCode: 500}, "idx_requests_status_log"},
+		{"provider", PurgeFilter{Provider: "provider-03"}, ""},
+		{"model", PurgeFilter{Model: "model-03"}, ""},
+		{"client", PurgeFilter{Client: "client-003"}, ""},
+		{"conversation", PurgeFilter{ConversationID: "conv-000005"}, ""},
+		{"status", PurgeFilter{StatusCode: 500}, ""},
 		{"before", PurgeFilter{BeforeMs: before}, "idx_requests_log"},
-		{"provider_and_status", PurgeFilter{Provider: "provider-03", StatusCode: 500}, "idx_requests_status_log"},
+		{"provider_and_status", PurgeFilter{Provider: "provider-03", StatusCode: 500}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			exportSQL, exportArgs := buildExportQuery(tc.filter, time.Now().UnixMilli())
-			assertIndexRange(t, explainQueryPlan(t, s.rdb, exportSQL, exportArgs), tc.index)
-
 			countSQL, countArgs := buildCountQuery(tc.filter)
-			assertIndexRange(t, explainQueryPlan(t, s.rdb, countSQL, countArgs), tc.index)
-
+			countPlan := explainQueryPlan(t, s.rdb, countSQL, countArgs)
 			deleteSQL, deleteArgs, err := buildPurgeRequestsDelete(&tc.filter)
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertIndexRange(t, explainQueryPlan(t, s.rdb, deleteSQL, deleteArgs), tc.index)
+			deletePlan := explainQueryPlan(t, s.rdb, deleteSQL, deleteArgs)
+			for _, plan := range []string{countPlan, deletePlan} {
+				if tc.index == "" {
+					if !strings.Contains(plan, "SCAN requests") || strings.Contains(plan, "USING INDEX") {
+						t.Fatalf("equality predicate should be a plain table scan:\n%s", plan)
+					}
+					continue
+				}
+				assertIndexRange(t, plan, tc.index)
+			}
 
 			debugSQL, debugArgs, err := buildPurgeDebugDelete(&tc.filter)
 			if err != nil {
 				t.Fatal(err)
 			}
 			plan := explainQueryPlan(t, s.rdb, debugSQL, debugArgs)
-			assertIndexRange(t, plan, tc.index)
 			if !strings.Contains(plan, "SEARCH request_debug") {
 				t.Fatalf("sidecar delete does not probe its primary key:\n%s", plan)
+			}
+			if tc.index == "" {
+				if !strings.Contains(plan, "SCAN requests") {
+					t.Fatalf("sidecar subquery should scan requests for an equality predicate:\n%s", plan)
+				}
+			} else if !strings.Contains(plan, "USING INDEX "+tc.index) && !strings.Contains(plan, "USING COVERING INDEX "+tc.index) {
+				t.Fatalf("sidecar subquery does not use %s:\n%s", tc.index, plan)
 			}
 		})
 	}

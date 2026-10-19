@@ -258,16 +258,10 @@ var ErrorKeyExamples = []string{"server_error|500|"}
 // against the DDL itself in both directions, so an index added, removed or
 // renamed on either side cannot drift.
 var RequestIndexes = []string{
-	"idx_requests_log(started_at, id): the keyset order the durable log page and deep history use; its leading started_at also serves a started_at-only range",
-	"idx_requests_provider_log(provider, started_at, id): exact provider equality in the same cursor order, so a filtered page is one range scan with no sort",
-	"idx_requests_model_log(model, started_at, id): exact stored-model equality in the same cursor order; a canonical spelling still matches in Go when rules rewrite names",
-	"idx_requests_client_log(client, started_at, id): exact stored client label equality in the same cursor order; the planner uses one index per query, so other equalities in the same filter are rechecked against each row",
-	"idx_requests_key_log(key_hash, started_at, id): exact stored key hash equality in the same cursor order; this is the hash, never the raw credential",
-	"idx_requests_conversation_log(conversation_id, started_at, id): exact conversation id equality in the same cursor order; the explorer still selects conversation leaves in Go",
-	"idx_requests_status_log(status_code, started_at, id): exact stored status code equality in the same cursor order; a status class (2xx, 4xx, 5xx, cancel, err) is not an equality and stays in the Go matcher",
+	"idx_requests_log(started_at, id): the only request-log index and the keyset order the durable log page and deep history use. A filtered log page or ordered export walks it and rechecks its exact equality predicates per row; an equality-only count or purge scans the table. Its leading started_at also serves a started_at-only range",
 	"idx_request_debug_expires(expires_at): the capture TTL sweep",
 	"idx_request_debug_session(session_id): captures by session",
-	"there is NO index on error_type or cost - nor on any column the indexes above do not cover; filtering on anything else scans the table",
+	"there is NO index on provider, model, client, key_hash, conversation_id, status_code, error_type or cost - nor on any column idx_requests_log does not cover; the log page and export recheck an equality predicate on the ordered scan, while any other filter scans the table",
 }
 
 // vocabularies is the one owner of every filter dimension's value space. A
@@ -490,7 +484,7 @@ var tableDocs = []TableDoc{
 				"a NEGATIVE value marks a pre-tracking row where only nonzero values were known"},
 		},
 		Notes: []string{
-			"No index on error_type or cost: filter on started_at ranges or an indexed column to keep a scan bounded. The exact equality columns the log page pushes down (provider, client, key_hash, conversation_id, model, status_code) each have an ordered composite index.",
+			"idx_requests_log is the only request-log index: a started_at range bounds the ordered scan, while every exact equality the log page pushes down (provider, client, key_hash, conversation_id, model, status_code) is rechecked against each scanned row. There is no index on error_type or cost.",
 			"debug = 1 rows are exactly the requests with a readable capture document (until debug_capture_ttl expires), and a purge of those rows " +
 				"deletes the capture document with them.",
 			"The req_* family records the request PARAMETERS the client asked for, not what the upstream did. Most columns use 0 for an unset value, " +

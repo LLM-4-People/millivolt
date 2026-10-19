@@ -935,27 +935,26 @@ func TestDescribeStatesTheStructuralLimitsAndTheSQLIdiom(t *testing.T) {
 	if strings.Contains(notes, "/metrics/agg/log") {
 		t.Fatalf("describe must not send the model to a raw HTTP route: %q", notes)
 	}
-	// The index list is a planner reference, not prose: it names the two real
-	// request_debug indexes and does not claim there is no index on started_at
-	// alone (idx_requests_log leads on it).
+	// The index list is a planner reference, not prose: it names the one
+	// request-log index, the two real request_debug indexes, and does not claim
+	// there is no index on started_at alone (idx_requests_log leads on it).
 	indexes := strings.Join(out.Indexes, " ")
 	for _, needle := range []string{
 		"idx_requests_log(started_at, id)",
-		"idx_requests_provider_log(provider, started_at, id)",
-		"idx_requests_model_log(model, started_at, id)",
-		"idx_requests_client_log(client, started_at, id)",
-		"idx_requests_key_log(key_hash, started_at, id)",
-		"idx_requests_conversation_log(conversation_id, started_at, id)",
-		"idx_requests_status_log(status_code, started_at, id)",
 		"idx_request_debug_expires(expires_at)",
 		"idx_request_debug_session(session_id)",
-		"NO index on error_type or cost",
+		"NO index on provider, model, client, key_hash, conversation_id, status_code, error_type or cost",
 	} {
 		if !strings.Contains(indexes, needle) {
 			t.Fatalf("the index reference must state %q, got %q", needle, indexes)
 		}
 	}
-	for _, forbidden := range []string{"request_debug(payload)", "started_at alone", "idx_requests_provider(provider)", "idx_requests_model(model)"} {
+	for _, forbidden := range []string{
+		"request_debug(payload)", "started_at alone",
+		"idx_requests_provider(provider)", "idx_requests_model(model)",
+		"idx_requests_provider_log", "idx_requests_model_log", "idx_requests_client_log",
+		"idx_requests_key_log", "idx_requests_conversation_log", "idx_requests_status_log",
+	} {
 		if strings.Contains(indexes, forbidden) {
 			t.Fatalf("the index reference still contains %q: %q", forbidden, indexes)
 		}

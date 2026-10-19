@@ -178,17 +178,25 @@ explicit zero/false is not absence. Provider-alias repair applies every pair in
 one transaction, in source-key order, so a later trigger or constraint failure
 rolls earlier label rewrites back instead of leaving history half-merged.
 
-The durable log order is `(started_at, id)`. Every exact `LogFilter` equality
-field - provider, client, key hash, conversation id, model and status code -
-has an ordered composite index ending in that key, so a filtered log page,
-count, export or purge scans one index range in cursor order instead of sorting
-or scanning its match set. SQLite uses one index per query and rechecks any
-remaining equality predicates against each row. The web log page pushes
-provider, client, key hash, conversation id and canonical numeric status into
-SQL. Model filters remain wholly Go-owned: canonical matching trims every
-stored spelling and applies the configured rules, so raw SQL equality would
-silently drop a padded or rewritten stored model that still matches. Status
-classes also stay in Go. The page handler classifies active filters:
+The durable log order is `(started_at, id)`, owned by the sole request-log
+index `idx_requests_log`. Every exact `LogFilter` equality field - provider,
+client, key hash, conversation id, model and status code - stays a SQL
+predicate: a filtered log page or ordered export rechecks it while scanning
+the ordered index, and an equality-only preview count or purge scans the
+table. Results, order and pagination stay exact without six per-dimension
+composite indexes; a time bound becomes an index range. An upgrade that
+actually finds and drops one of those superseded indexes repacks the database
+once with `VACUUM`, because SQLite otherwise only moves the freed index pages
+to its freelist. Fresh and already-migrated databases skip it, and a failed
+reclaim logs a warning without failing startup: every row stays intact and
+manual reclamation remains possible. A successful reclaim resets the
+projection witness, because `VACUUM` may renumber implicit rowids. The web log
+page pushes provider, client, key hash, conversation id and canonical numeric
+status into SQL. Model filters remain wholly Go-owned: canonical
+matching trims every stored spelling and applies the configured rules, so raw
+SQL equality would silently drop a padded or rewritten stored model that still
+matches. Status classes also stay in Go. The page handler classifies active
+filters:
 when every predicate is SQL-exact it requests exactly the remaining rows, and
 Go-only predicates grow geometrically from the page size to the 512-row batch
 cap within the 4,096-row scan budget. Both preserve the exclusive

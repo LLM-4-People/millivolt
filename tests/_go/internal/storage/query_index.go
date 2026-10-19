@@ -48,48 +48,96 @@ func requestIndexColumns(t *testing.T, db *sql.DB, name string) []string {
 	return columns
 }
 
-// assertOrderedRequestLogIndexes pins the canonical log indexes and the
-// absence of every superseded spelling. It is shared by the fresh-schema and
-// reopen-after-migration contract tests.
-func assertOrderedRequestLogIndexes(t *testing.T, db *sql.DB) {
+// legacyDimensionRequestIndexes is the test-owned record of the six
+// per-dimension composites the schema used to maintain. Production now owns
+// only idx_requests_log; migration must remove these from an existing database,
+// and the equivalence regression creates them to prove they were optional.
+var legacyDimensionRequestIndexes = []struct{ name, columns string }{
+	{"idx_requests_provider_log", "provider, started_at, id"},
+	{"idx_requests_model_log", "model, started_at, id"},
+	{"idx_requests_client_log", "client, started_at, id"},
+	{"idx_requests_key_log", "key_hash, started_at, id"},
+	{"idx_requests_conversation_log", "conversation_id, started_at, id"},
+	{"idx_requests_status_log", "status_code, started_at, id"},
+}
+
+// createLegacyDimensionRequestIndexes recreates the six superseded composites
+// on an existing database, the shape an older binary leaves behind.
+func createLegacyDimensionRequestIndexes(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, tc := range []struct {
-		name    string
-		columns []string
-	}{
-		{"idx_requests_log", []string{"started_at", "id"}},
-		{"idx_requests_provider_log", []string{"provider", "started_at", "id"}},
-		{"idx_requests_model_log", []string{"model", "started_at", "id"}},
-		{"idx_requests_client_log", []string{"client", "started_at", "id"}},
-		{"idx_requests_key_log", []string{"key_hash", "started_at", "id"}},
-		{"idx_requests_conversation_log", []string{"conversation_id", "started_at", "id"}},
-		{"idx_requests_status_log", []string{"status_code", "started_at", "id"}},
-	} {
-		if !requestIndexExists(t, db, tc.name) {
-			t.Fatalf("canonical index %s is missing", tc.name)
+	for _, index := range legacyDimensionRequestIndexes {
+		if _, err := db.Exec("CREATE INDEX IF NOT EXISTS " + index.name + " ON requests (" + index.columns + ")"); err != nil {
+			t.Fatalf("create legacy index %s: %v", index.name, err)
 		}
-		if got := requestIndexColumns(t, db, tc.name); !reflect.DeepEqual(got, tc.columns) {
-			t.Fatalf("index %s key columns = %v, want %v", tc.name, got, tc.columns)
+	}
+}
+
+// namedRequestIndexes lists the schema-created indexes on requests in name
+// order. SQLite's primary-key autoindex has a NULL sql column and is separate.
+func namedRequestIndexes(t *testing.T, db *sql.DB) []string {
+	t.Helper()
+	rows, err := db.QueryContext(t.Context(),
+		`SELECT name FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NOT NULL ORDER BY name`)
+	if err != nil {
+		t.Fatalf("list request indexes: %v", err)
+	}
+	defer rows.Close()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan request index: %v", err)
 		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("request index rows: %v", err)
+	}
+	return names
+}
+
+// assertRequestLogIndexOwnership pins the production request log schema to its
+// single owner: idx_requests_log(started_at, id) exists, no superseded or
+// per-dimension composite survives, and the primary-key autoindex is retained.
+func assertRequestLogIndexOwnership(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if got := namedRequestIndexes(t, db); !reflect.DeepEqual(got, []string{"idx_requests_log"}) {
+		t.Fatalf("named request indexes = %v, want only idx_requests_log", got)
+	}
+	if got := requestIndexColumns(t, db, "idx_requests_log"); !reflect.DeepEqual(got, []string{"started_at", "id"}) {
+		t.Fatalf("idx_requests_log key columns = %v, want [started_at id]", got)
 	}
 	for _, name := range []string{"idx_requests_started_at", "idx_requests_provider", "idx_requests_model"} {
 		if requestIndexExists(t, db, name) {
-			t.Fatalf("superseded index %s still exists", name)
+			t.Fatalf("superseded request index %s still exists", name)
 		}
+	}
+	for _, index := range legacyDimensionRequestIndexes {
+		if requestIndexExists(t, db, index.name) {
+			t.Fatalf("superseded dimension index %s still exists", index.name)
+		}
+	}
+	var autoIndexes int
+	if err := db.QueryRowContext(t.Context(),
+		`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND tbl_name = 'requests' AND sql IS NULL`).Scan(&autoIndexes); err != nil {
+		t.Fatalf("inspect primary-key autoindex: %v", err)
+	}
+	if autoIndexes != 1 {
+		t.Fatalf("requests primary-key autoindexes = %d, want 1", autoIndexes)
 	}
 }
 
-func TestRequestLogIndexesAreOrderedComposites(t *testing.T) {
+func TestRequestLogIndexIsTheOnlyLogIndex(t *testing.T) {
 	s := openTestStore(t)
-	assertOrderedRequestLogIndexes(t, s.rdb)
+	assertRequestLogIndexOwnership(t, s.rdb)
 }
 
-// TestMigrateReplacesSupersededProviderAndModelIndexes creates a fixture with
-// the old single-column indexes and history, then reopens it twice: the first
-// open must create the ordered composites, drop the old spellings and keep
-// every row; the second open proves the drop-and-create pass is idempotent and
-// never removes the replacements.
-func TestMigrateReplacesSupersededProviderAndModelIndexes(t *testing.T) {
+// TestMigrateDropsSupersededRequestIndexes creates a fixture with the old
+// single-column indexes and history, then reopens it twice: the first open must
+// drop the old spellings and keep every row; before the second open the six
+// per-dimension composites are recreated, so that open proves migrate removes
+// them too. The projection must survive both index-only migrations.
+func TestMigrateDropsSupersededRequestIndexes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy-indexes.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -113,10 +161,25 @@ CREATE INDEX idx_requests_log ON requests (started_at, id);`); err != nil {
 	if err != nil {
 		t.Fatalf("open legacy indexes: %v", err)
 	}
-	assertOrderedRequestLogIndexes(t, s.rdb)
+	assertRequestLogIndexOwnership(t, s.rdb)
 	assertRecentIDs(t, s, wantIDs)
-	epoch, highRowID := projectionState(t, s.rdb)
+	epoch, _ := projectionState(t, s.rdb)
 	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// An older binary left the six dimension composites on this database.
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createLegacyDimensionRequestIndexes(t, db)
+	for _, index := range legacyDimensionRequestIndexes {
+		if !requestIndexExists(t, db, index.name) {
+			t.Fatalf("fixture did not create legacy index %s", index.name)
+		}
+	}
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,11 +188,21 @@ CREATE INDEX idx_requests_log ON requests (started_at, id);`); err != nil {
 		t.Fatalf("reopen migrated indexes: %v", err)
 	}
 	defer s2.Close()
-	assertOrderedRequestLogIndexes(t, s2.rdb)
+	assertRequestLogIndexOwnership(t, s2.rdb)
 	assertRecentIDs(t, s2, wantIDs)
-	// An index-only migration must not invalidate the analytical projection.
-	if gotEpoch, gotHighRowID := projectionState(t, s2.rdb); gotEpoch != epoch || gotHighRowID != highRowID {
-		t.Fatalf("projection state = (%d, %d), want unchanged (%d, %d)", gotEpoch, gotHighRowID, epoch, highRowID)
+	// The six-index open reclaims the freed pages with VACUUM, which may
+	// renumber implicit rowids, so the projection witness must be invalidated
+	// and its high-water mark recomputed from the surviving rows.
+	gotEpoch, gotHighRowID := projectionState(t, s2.rdb)
+	if gotEpoch <= epoch {
+		t.Fatalf("projection epoch after reclaim = %d, want greater than %d", gotEpoch, epoch)
+	}
+	var maxRowID int64
+	if err := s2.rdb.QueryRowContext(t.Context(), `SELECT COALESCE(MAX(rowid), 0) FROM requests`).Scan(&maxRowID); err != nil {
+		t.Fatal(err)
+	}
+	if gotHighRowID != maxRowID {
+		t.Fatalf("projection high rowid after reclaim = %d, want max rowid %d", gotHighRowID, maxRowID)
 	}
 }
 
@@ -182,13 +255,13 @@ func explainQueryPlan(t *testing.T, db *sql.DB, query string, args []any) string
 	return strings.Join(details, "\n")
 }
 
-// TestQueryBeforeEqualityUsesOrderedCompositeIndex pins the plan for the exact
-// production QueryBefore statement: every LogFilter equality field chooses its
-// ordered composite index and SQLite performs no sort, with and without the
-// exclusive cursor bound. A future schema change that drops, renames or
-// re-columns one of these indexes fails here instead of silently turning a
-// filtered page into a whole-log scan.
-func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
+// TestQueryBeforeEqualityUsesTheSingleLogIndex pins the plan for the exact
+// production QueryBefore statement: every LogFilter equality field walks
+// idx_requests_log in cursor order and SQLite rechecks the equality per row,
+// with and without the exclusive cursor bound. A future schema change that
+// drops, renames or re-columns the single log index fails here instead of
+// silently turning a filtered page into a table scan or a sort.
+func TestQueryBeforeEqualityUsesTheSingleLogIndex(t *testing.T) {
 	s := openTestStore(t)
 	seedQueryBeforeRows(t, s, 5_000, 10, 10)
 
@@ -198,21 +271,20 @@ func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
 		before *LogCursor
 		field  LogField
 		value  string
-		index  string
 	}{
-		{"provider", nil, LogProvider, "provider-03", "idx_requests_provider_log"},
-		{"model", nil, LogModel, "model-03", "idx_requests_model_log"},
-		{"client", nil, LogClient, "client-003", "idx_requests_client_log"},
-		{"key_hash", nil, LogKeyHash, "key-000005", "idx_requests_key_log"},
-		{"conversation", nil, LogConversation, "conv-000005", "idx_requests_conversation_log"},
-		{"status", nil, LogStatus, "500", "idx_requests_status_log"},
-		{"status_common", nil, LogStatus, "200", "idx_requests_status_log"},
-		{"provider_cursor", cursor, LogProvider, "provider-03", "idx_requests_provider_log"},
-		{"model_cursor", cursor, LogModel, "model-03", "idx_requests_model_log"},
-		{"client_cursor", cursor, LogClient, "client-003", "idx_requests_client_log"},
-		{"key_hash_cursor", cursor, LogKeyHash, "key-000005", "idx_requests_key_log"},
-		{"conversation_cursor", cursor, LogConversation, "conv-000005", "idx_requests_conversation_log"},
-		{"status_cursor", cursor, LogStatus, "500", "idx_requests_status_log"},
+		{"provider", nil, LogProvider, "provider-03"},
+		{"model", nil, LogModel, "model-03"},
+		{"client", nil, LogClient, "client-003"},
+		{"key_hash", nil, LogKeyHash, "key-000005"},
+		{"conversation", nil, LogConversation, "conv-000005"},
+		{"status", nil, LogStatus, "500"},
+		{"status_common", nil, LogStatus, "200"},
+		{"provider_cursor", cursor, LogProvider, "provider-03"},
+		{"model_cursor", cursor, LogModel, "model-03"},
+		{"client_cursor", cursor, LogClient, "client-003"},
+		{"key_hash_cursor", cursor, LogKeyHash, "key-000005"},
+		{"conversation_cursor", cursor, LogConversation, "conv-000005"},
+		{"status_cursor", cursor, LogStatus, "500"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			filter := &LogFilter{All: []LogPredicate{{Field: tc.field, Value: tc.value}}}
@@ -221,17 +293,14 @@ func TestQueryBeforeEqualityUsesOrderedCompositeIndex(t *testing.T) {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
 			plan := explainQueryPlan(t, s.rdb, query, args)
-			if !strings.Contains(plan, "USING INDEX "+tc.index) && !strings.Contains(plan, "USING COVERING INDEX "+tc.index) {
-				t.Fatalf("plan does not use %s:\n%s", tc.index, plan)
-			}
-			if strings.Contains(plan, "idx_requests_log") {
-				t.Fatalf("equality page fell back to the bare log index:\n%s", plan)
+			if !strings.Contains(plan, "USING INDEX idx_requests_log") && !strings.Contains(plan, "USING COVERING INDEX idx_requests_log") {
+				t.Fatalf("plan does not use idx_requests_log:\n%s", plan)
 			}
 			if strings.Contains(plan, "TEMP B-TREE") {
 				t.Fatalf("equality page sorts instead of scanning index order:\n%s", plan)
 			}
-			if !strings.Contains(plan, "SEARCH requests") {
-				t.Fatalf("equality page is not an index search:\n%s", plan)
+			if !strings.Contains(plan, "SCAN requests") && !strings.Contains(plan, "SEARCH requests") {
+				t.Fatalf("equality page is not an index scan:\n%s", plan)
 			}
 		})
 	}
