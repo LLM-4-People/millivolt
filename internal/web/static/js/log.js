@@ -48,9 +48,12 @@ function resetLogWindow() {
 // incrementally and materialize at most the visible cap.
 //
 // Archive mutation owners: resetLogWindow clears through logArchiveClear and
-// fetchOlderLog prepends through logArchivePrepend. A direct replacement or
-// length change (tests, future callers) is observed by the identity check and
-// rebuilt once with the same keyset and duplicate-suppression semantics.
+// fetchOlderLog prepends through logArchivePrepend. Every write must go through
+// one of those owners, or replace the array / change its length (tests, future
+// callers); either is observed by the identity check and rebuilt once with the
+// same keyset and duplicate-suppression semantics. Replacing an element in
+// place at an unchanged length is unsupported: the identity cache keys on the
+// array object and its length, so that edit alone is not observed.
 let _logArchiveIndex = null;
 let _logArchiveSeq = 0;
 // Archive traversals are the G6 regression guard: the identity rebuild below

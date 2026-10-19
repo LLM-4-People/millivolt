@@ -2637,6 +2637,67 @@ async function main() {
     for (const key of ['__bigArchive', '__bigRing', '__bigData', '__bigSavedData', '__bigSavedArchive']) delete w[key];
   }
 
+  // ---- test 10c-quinquies: archive writes must use a supported owner ----
+  // The archive identity cache keys on the array object and its length, so a
+  // same-length in-place element replacement is intentionally not a supported
+  // mutation and is not observed by the cache. Every archive write must use
+  // logArchiveClear or logArchivePrepend, or replace the array / change its
+  // length. This regression performs the unsupported edit deliberately, then
+  // invokes the supported prepend owner: the owner must expose the resulting
+  // archive to the merge exactly like a cold (uncached) merge, with no stale
+  // duplicate and no lost row.
+  {
+    const savedData = w.eval('lastData');
+    const savedArchive = w.eval('logArchive');
+    const ring = [
+      mkRec('memoq-ring0', 200, 1700003000000),
+      mkRec('memoq-ring1', 200, 1700003001000),
+    ];
+    const old2 = mkRec('memoq-old2', 200, 1700002700000);
+    const archive = [
+      mkRec('memoq-old0', 200, 1700002900000),
+      mkRec('memoq-old1', 200, 1700002800000),
+      old2,
+    ];
+    const newOld = mkRec('memoq-old0b', 200, 1700002600000);
+    const data = { records: ring, counters: {}, _rev: 7 };
+    w.__memoqRing = ring; w.__memoqArchive = archive; w.__memoqNew = newOld; w.__memoqData = data;
+    w.eval('lastData = window.__memoqData; logArchive = window.__memoqArchive; logLimit = 0;');
+    const ids = list => list.map(r => r.id).join(',');
+    w.mergeLogArchive(ring); // warm the archive identity and the merge memo
+    const warmRev = w.eval('_logArchiveIndex.rev');
+    const warmScans = w.eval('_logArchiveScans');
+    // Unsupported: replace elements in place without changing the length.
+    // old0 becomes an archived duplicate of a live id (it must be suppressed)
+    // and old1 becomes a new archive id (it must appear). The identity cache
+    // cannot observe either edit on its own.
+    archive[0] = { ...ring[0] };
+    archive[1] = mkRec('memoq-old1b', 200, 1700002800000);
+    w.logArchivePrepend([newOld]);
+    const merged = w.mergeLogArchive(ring);
+    const ownerRev = w.eval('_logArchiveIndex.rev');
+    const ownerScans = w.eval('_logArchiveScans');
+    // Cold oracle: a supported array replacement discards every identity and
+    // memo, so this merge recomputes the same resulting archive from scratch.
+    w.__memoqOracleArchive = w.eval('logArchive').slice();
+    w.eval('logArchive = window.__memoqOracleArchive');
+    const oracle = w.mergeLogArchive(ring);
+    check('a supported archive owner exposes in-place edits and matches the cold merge oracle',
+      ids(merged) === 'memoq-old0b,memoq-old1b,memoq-old2,memoq-ring0,memoq-ring1' &&
+      merged.length === oracle.length &&
+      merged.every((r, i) => r === oracle[i]) &&
+      merged[0] === newOld && merged[1] === archive[1] && merged[2] === old2 &&
+      merged[3] === ring[0] && merged[4] === ring[1] &&
+      !merged.includes(archive[0]) &&
+      new Set(merged.map(r => r.id)).size === merged.length);
+    check('the supported archive mutation advances the identity revision once with one rebuild and one merge scan',
+      ownerRev === warmRev + 1 && ownerScans === warmScans + 2);
+    // Restore and repaint the suite's own state.
+    w.__memoqSavedData = savedData; w.__memoqSavedArchive = savedArchive;
+    w.eval('lastData = window.__memoqSavedData; logArchive = window.__memoqSavedArchive; resetLogWindow(); renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+    for (const key of ['__memoqRing', '__memoqArchive', '__memoqNew', '__memoqData', '__memoqOracleArchive', '__memoqSavedData', '__memoqSavedArchive']) delete w[key];
+  }
+
   // ---- test 10d: the request log nests by local calendar day - a divider
   // rides above each day's first row, moves with live inserts, and never
   // duplicates or orphans across full resyncs. Fixtures anchor to local
