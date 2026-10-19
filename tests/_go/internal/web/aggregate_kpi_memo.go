@@ -252,71 +252,246 @@ func TestKPIMemoHitKeepsLiveInFlight(t *testing.T) {
 	}
 }
 
-// Commits racing the fold must never publish stale totals under a fresh key.
-// The final settled poll always converges on the exact durable+ring count.
+// kpiPayloadEqual compares the observable totals by value: the derived
+// pointers are allocated per call, so pointer identity is not meaningful.
+func kpiPayloadEqual(a, b kpiPayload) bool {
+	eq := func(x, y *float64) bool {
+		if x == nil || y == nil {
+			return x == nil && y == nil
+		}
+		return *x == *y
+	}
+	if a.err != nil || b.err != nil {
+		return false
+	}
+	return a.Requests == b.Requests && a.Errors == b.Errors && a.InFlight == b.InFlight &&
+		a.Cost == b.Cost && eq(a.CostPerReq, b.CostPerReq) && eq(a.CostPerMTok, b.CostPerMTok) &&
+		a.InputTok == b.InputTok && a.OutputTok == b.OutputTok && a.CacheRead == b.CacheRead &&
+		a.Reasoning == b.Reasoning && eq(a.AvgTTFT, b.AvgTTFT) && eq(a.AvgTPS, b.AvgTPS)
+}
+
 // Concurrent cold callers for one exact key must share one fold. The test
 // owner holds the leader in flight while the other callers arrive; without the
 // fold owner each caller would enter its own compute.
 func TestKPIMemoFoldCoalescesSameKeyColdFolds(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	for i := range 3 {
+		buf.Record(mkRec(fmt.Sprintf("coalesce-%d", i), time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
+	}
+	api := NewAggAPI(buf, nil, time.Second)
+
 	const callers = 8
-	var m kpiMemo
-	started := make(chan struct{})
+	entered := make(chan kpiMemoKey, callers)
 	release := make(chan struct{})
-	var once sync.Once
-	m.testFold = func(kpiMemoKey) {
-		once.Do(func() { close(started) })
+	var hookCalls atomic.Int32
+	api.kpiMemo.testFold = func(key kpiMemoKey) {
+		hookCalls.Add(1)
+		entered <- key
 		<-release
 	}
-	var computes atomic.Int32
-	results := make(chan storage.Totals, callers)
+
+	key := api.kpiMemoKey()
+	start := make(chan struct{})
+	results := make(chan kpiPayload, callers)
 	var wg sync.WaitGroup
+	wg.Add(callers)
 	for range callers {
-		wg.Go(func() {
-			results <- m.foldKPI(kpiMemoKey{}, func() (storage.Totals, bool) {
-				computes.Add(1)
-				return storage.Totals{Requests: 7}, true
-			})
-		})
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- api.kpi()
+		}()
 	}
-	<-started
+	close(start)
+
+	select {
+	case got := <-entered:
+		if got != key {
+			t.Fatalf("fold key = %+v, want %+v", got, key)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cold fold did not start")
+	}
+	// The leader is held inside the fold, so no other caller may have entered
+	// it: every same-key caller is waiting on the fold owner.
+	if got := api.kpiMemo.folds; got != 1 {
+		t.Fatalf("concurrent folds = %d, want 1", got)
+	}
 	close(release)
 	wg.Wait()
 	close(results)
-	if got := computes.Load(); got != 1 {
-		t.Fatalf("same-key computes = %d, want 1", got)
-	}
-	if got := m.folds; got != 1 {
+
+	if got := api.kpiMemo.folds; got != 1 {
 		t.Fatalf("cold folds = %d, want 1", got)
 	}
+	if got := hookCalls.Load(); got != 1 {
+		t.Fatalf("fold hook calls = %d, want 1", got)
+	}
+	var want kpiPayload
+	first := true
 	for got := range results {
-		if got.Requests != 7 {
-			t.Fatalf("coalesced totals requests = %d, want 7", got.Requests)
+		if got.Requests != 3 || got.InputTok != 30 || got.OutputTok != 15 {
+			t.Fatalf("kpi totals = requests %d in %d out %d, want 3/30/15",
+				got.Requests, got.InputTok, got.OutputTok)
+		}
+		if first {
+			want, first = got, false
+			continue
+		}
+		if !kpiPayloadEqual(got, want) {
+			t.Fatalf("concurrent callers received different KPI payloads: %+v vs %+v", got, want)
 		}
 	}
 }
 
-// Different exact keys are not coalesced or reused: each performs its own
-// compute even though the fold owner serializes them.
-func TestKPIMemoFoldDoesNotReuseAcrossKeys(t *testing.T) {
-	var m kpiMemo
-	var computes atomic.Int32
-	compute := func() (storage.Totals, bool) {
-		n := computes.Add(1)
-		return storage.Totals{Requests: int64(n)}, true
+// A waiter that arrives while the leader holds the fold must not return until
+// the leader publishes. kpi() has no cancellation parameter, so there is no
+// opt-out path to assert: the waiter simply blocks on the fold owner, then
+// reuses the leader's memoized totals.
+func TestKPIMemoWaiterBlocksUntilLeaderPublishes(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	buf.Record(mkRec("waiter", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
+	api := NewAggAPI(buf, nil, time.Second)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	api.kpiMemo.testFold = func(kpiMemoKey) {
+		entered <- struct{}{}
+		<-release
 	}
-	first := m.foldKPI(kpiMemoKey{finalized: 1}, compute)
-	second := m.foldKPI(kpiMemoKey{finalized: 2}, compute)
-	if first.Requests != 1 || second.Requests != 2 {
-		t.Fatalf("different-key results = %d/%d, want 1/2", first.Requests, second.Requests)
+
+	leaderDone := make(chan kpiPayload, 1)
+	go func() { leaderDone <- api.kpi() }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("leader did not enter the fold")
 	}
-	if got := computes.Load(); got != 2 {
-		t.Fatalf("different-key computes = %d, want 2", got)
+
+	waiterStarted := make(chan struct{})
+	waiterDone := make(chan kpiPayload, 1)
+	go func() {
+		close(waiterStarted)
+		waiterDone <- api.kpi()
+	}()
+	<-waiterStarted
+	select {
+	case got := <-waiterDone:
+		t.Fatalf("waiter returned before the fold was released: requests=%d", got.Requests)
+	case <-time.After(25 * time.Millisecond):
 	}
-	if got := m.folds; got != 2 {
-		t.Fatalf("different-key folds = %d, want 2", got)
+
+	close(release)
+	leader := <-leaderDone
+	waiter := <-waiterDone
+	if leader.Requests != 1 || waiter.Requests != 1 {
+		t.Fatalf("requests leader=%d waiter=%d, want 1/1", leader.Requests, waiter.Requests)
+	}
+	if !kpiPayloadEqual(leader, waiter) {
+		t.Fatalf("waiter did not receive the leader result: %+v vs %+v", waiter, leader)
+	}
+	if got := api.kpiMemo.folds; got != 1 {
+		t.Fatalf("cold folds = %d, want 1", got)
 	}
 }
 
+// Different exact keys are not coalesced or reused: each performs its own
+// fold even though the fold owner serializes them.
+func TestKPIMemoDifferentKeysFoldOnceEach(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	api := NewAggAPI(buf, nil, time.Second)
+	if got := api.kpi(); got.Requests != 0 || api.kpiMemo.folds != 1 {
+		t.Fatalf("initial kpi = requests %d folds %d, want 0/1", got.Requests, api.kpiMemo.folds)
+	}
+	firstKey := api.kpiMemoKey()
+	buf.Record(mkRec("second-key", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
+	secondKey := api.kpiMemoKey()
+	if firstKey == secondKey {
+		t.Fatal("ring commit did not change the memo key")
+	}
+	got := api.kpi()
+	if got.Requests != 1 {
+		t.Fatalf("second-key requests = %d, want 1", got.Requests)
+	}
+	if api.kpiMemo.folds != 2 {
+		t.Fatalf("different-key folds = %d, want 2", api.kpiMemo.folds)
+	}
+	if _, ok := api.kpiMemo.get(firstKey); ok {
+		t.Fatal("the old key was reused for the new totals")
+	}
+	if totals, ok := api.kpiMemo.get(secondKey); !ok || totals.Requests != 1 {
+		t.Fatalf("new-key memo = %d/%v, want requests 1", totals.Requests, ok)
+	}
+	if got := api.kpi(); got.Requests != 1 {
+		t.Fatalf("memo-hit requests = %d, want 1", got.Requests)
+	}
+	if api.kpiMemo.folds != 2 {
+		t.Fatalf("memo hit folded again: folds = %d, want 2", api.kpiMemo.folds)
+	}
+}
+
+// A commit landing mid-fold must prevent publication under the pre-commit key,
+// and every concurrent caller must still converge on the committed totals.
+func TestKPIMemoMidFoldCommitIsNotPublishedUnderOldKey(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	buf.Record(mkRec("before-fold", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
+	api := NewAggAPI(buf, nil, time.Second)
+	oldKey := api.kpiMemoKey()
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	api.kpiMemo.testFold = func(kpiMemoKey) {
+		entered <- struct{}{}
+		<-release
+	}
+
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan kpiPayload, callers)
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- api.kpi()
+		}()
+	}
+	close(start)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cold fold did not start")
+	}
+
+	// Commit while the leader is held before its snapshot.
+	buf.Record(mkRec("during-fold", time.Now(), 200, "", nil, 10, 100, 10, 5, 0, 0.01))
+	newKey := api.kpiMemoKey()
+	if newKey == oldKey {
+		t.Fatal("mid-fold commit did not change the memo key")
+	}
+	close(release)
+	wg.Wait()
+	close(results)
+
+	if _, ok := api.kpiMemo.get(oldKey); ok {
+		t.Fatal("stale KPI totals were published under the pre-commit key")
+	}
+	for got := range results {
+		if got.Requests != 2 {
+			t.Fatalf("mid-fold caller requests = %d, want 2", got.Requests)
+		}
+	}
+	// A caller at the settled key computes and publishes the final totals.
+	if got := api.kpi(); got.Requests != 2 {
+		t.Fatalf("settled kpi requests = %d, want 2", got.Requests)
+	}
+	if totals, ok := api.kpiMemo.get(api.kpiMemoKey()); !ok || totals.Requests != 2 {
+		t.Fatalf("settled memo = %d/%v, want requests 2", totals.Requests, ok)
+	}
+}
+
+// Commits racing the fold must never publish stale totals under a fresh key.
+// The final settled poll always converges on the exact durable+ring count.
 func TestKPIMemoConcurrentCommitsConverge(t *testing.T) {
 	s := kpiMemoStore(t)
 	buf := metrics.NewBuffer(512)
