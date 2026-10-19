@@ -2,11 +2,14 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -14,6 +17,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
+	"github.com/LLM-4-People/millivolt/internal/storage"
 )
 
 // TestLogPageQueryClassification pins the one pushdown owner: exact stored
@@ -336,5 +340,341 @@ func TestLogPageStartsAtDurableNewestWithoutRing(t *testing.T) {
 	page := get(t, http.HandlerFunc(api.HandleLogPage), "/metrics/agg/log?limit=10")
 	if rows := page["records"].([]any); len(rows) != 1 || rows[0].(map[string]any)["id"] != "durable" {
 		t.Fatalf("empty/late-start ring must not hide durable history: %v", page)
+	}
+}
+
+// ---------- live-log narrow-scan regression ----------
+
+const (
+	logPageRegressionRows        = 200_000
+	logPageRegressionStatusEvery = 500
+)
+
+// logPageRegressionStart is local noon so the time-bucket case is stable in
+// every test timezone: the fixture spans just over three minutes inside the
+// "work" bucket.
+func logPageRegressionStart() time.Time {
+	return time.Date(2024, 1, 1, 12, 0, 0, 0, time.Local)
+}
+
+// logPageRegressionRecord is the single owner of the 200k-row fixture shape:
+// start times ascend one millisecond apart, every 500th row is a 5xx with an
+// error signature, and every third row carries a tool name. No row carries the
+// "missing" tool the miss benchmark probes.
+func logPageRegressionRecord(i int, base time.Time) *metrics.Record {
+	status := 200
+	var errType, errCode, errMsg string
+	if i%logPageRegressionStatusEvery == 0 {
+		status, errType, errCode, errMsg = 500, "upstream", "500", "upstream failed"
+	}
+	var tools []string
+	if i%3 == 0 {
+		tools = []string{"search"}
+	}
+	return &metrics.Record{
+		ID: fmt.Sprintf("row-%06d", i), Provider: fmt.Sprintf("provider-%02d", i%10),
+		Model: fmt.Sprintf("model-%02d", i%10), Client: fmt.Sprintf("client-%03d", i%500),
+		KeyHash: fmt.Sprintf("key-%06d", i), ConversationID: fmt.Sprintf("conv-%06d", i),
+		StatusCode: status, ErrorType: errType, ErrorCode: errCode, ErrorMsg: errMsg,
+		Start: base.Add(time.Duration(i) * time.Millisecond), ToolNames: tools,
+	}
+}
+
+// logPageRegressionStore seeds the 200k-row fixture into a private scratch
+// store. The write cadence intentionally matches the page benchmark so test
+// and benchmark exercise the same committed shape.
+func logPageRegressionStore(tb testing.TB) *storage.Store {
+	tb.Helper()
+	d := config.Default()
+	s, err := storage.Open(filepath.Join(tb.TempDir(), "log-page.db"), storage.Options{
+		WriteChanCap:  d.StorageWriteChanCap,
+		BatchCap:      d.StorageBatchCap,
+		FlushInterval: time.Millisecond,
+		QueryTimeout:  time.Minute,
+		WriteTrackCap: logPageRegressionRows * 2,
+	})
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = s.Close() })
+	base := logPageRegressionStart()
+	for i := 0; i < logPageRegressionRows; i++ {
+		s.Record(logPageRegressionRecord(i, base))
+		if i%2048 == 2047 {
+			if err := s.Flush(); err != nil {
+				tb.Fatal(err)
+			}
+		}
+	}
+	if err := s.Flush(); err != nil {
+		tb.Fatal(err)
+	}
+	return s
+}
+
+// referenceLogPage is the pre-narrow-scan page algorithm kept as a test
+// oracle: full-record decode plus the same scopedMatch and scan discipline.
+// The narrow handler must return byte-identical records, cursor and "more"
+// signal for every filter class.
+func referenceLogPage(t *testing.T, s *storage.Store, before *storage.LogCursor, fs []scopeFilter, statusCode string, limit int, mcz *modelCanonizer) ([]metrics.ObservedRecord, bool, int64, string) {
+	t.Helper()
+	filter, allPushed := logPageQuery(fs, statusCode, mcz)
+	out := make([]*metrics.Record, 0, limit)
+	cursor := before
+	scanned := 0
+	hitEnd := s == nil
+	batch := min(limit, logScanBatch)
+	if s != nil {
+		for scanned < logScanMax && len(out) < limit {
+			if allPushed {
+				batch = limit - len(out)
+			}
+			if remain := logScanMax - scanned; remain < batch {
+				batch = remain
+			}
+			if batch <= 0 {
+				break
+			}
+			rows, err := s.QueryBefore(t.Context(), cursor, &filter, batch)
+			if err != nil {
+				t.Fatalf("reference log page: %v", err)
+			}
+			if len(rows) == 0 {
+				hitEnd = true
+				break
+			}
+			scanned += len(rows)
+			for _, rec := range rows {
+				if rec == nil {
+					continue
+				}
+				cursor = &storage.LogCursor{StartMs: rec.Start.UnixMilli(), ID: rec.ID}
+				c := fromRecord(rec, mcz)
+				if !scopedMatch(&c, statusCode, fs) {
+					continue
+				}
+				out = append(out, rec)
+				if len(out) >= limit {
+					break
+				}
+			}
+			if len(out) >= limit {
+				break
+			}
+			if len(rows) < batch {
+				hitEnd = true
+				break
+			}
+			if !allPushed {
+				batch = min(batch*2, logScanBatch)
+			}
+		}
+	}
+	var cursorMs int64
+	var cursorID string
+	if cursor != nil {
+		cursorMs, cursorID = cursor.StartMs, cursor.ID
+	}
+	return metrics.ObserveRecords(out), !hitEnd && s != nil, cursorMs, cursorID
+}
+
+// logPageWire normalizes an observed-record payload through JSON so it can be
+// compared byte-for-byte with the handler's decoded response body.
+func logPageWire(t *testing.T, v any) any {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TestLogPageNarrowScanMatchesFullDecode is the 200k-row semantic and
+// allocation regression: Go-owned predicates still scan at most logScanMax
+// rows in newest-first order, produce exactly the full-decode page, and pay
+// only the narrow candidate projection for rejected rows. The pre-fix path
+// measured about 55-72ms and 8.1MB per limit-60 miss on this shape; the
+// ceilings below sit well under that while leaving headroom for drivers.
+func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
+	s := logPageRegressionStore(t)
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Minute)
+	h := http.HandlerFunc(api.HandleLogPage)
+	mcz := api.canonizer()
+	for _, tc := range []struct {
+		name, query  string
+		fs           []scopeFilter
+		status       string
+		wantRows     int
+		wantCursorID string
+	}{
+		{
+			name: "tool_missing", query: "f=tool:missing",
+			fs: []scopeFilter{{dim: "tool", id: "missing"}}, wantRows: 0, wantCursorID: "row-195904",
+		},
+		{
+			name: "status_class_5xx", query: "f=status:5xx",
+			fs: []scopeFilter{{dim: "status", id: "5xx"}}, wantRows: 8, wantCursorID: "row-195904",
+		},
+		{
+			name: "error_predicate", query: "f=error:" + url.QueryEscape("upstream|500|upstream failed"),
+			fs: []scopeFilter{{dim: "error", id: "upstream|500|upstream failed"}}, wantRows: 8, wantCursorID: "row-195904",
+		},
+		{
+			name: "time_window", query: "f=time:work",
+			fs: []scopeFilter{{dim: "time", id: "work"}}, wantRows: 60, wantCursorID: "row-199940",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page := get(t, h, "/metrics/agg/log?limit=60&"+tc.query)
+			rows, ok := page["records"].([]any)
+			if !ok || len(rows) != tc.wantRows {
+				t.Fatalf("records = %v, want %d rows", page["records"], tc.wantRows)
+			}
+			refRecords, refMore, refCursorMs, refCursorID := referenceLogPage(t, s, nil, tc.fs, tc.status, 60, mcz)
+			if got := logPageWire(t, refRecords); !reflect.DeepEqual(page["records"], got) {
+				t.Fatalf("narrow page differs from full decode:\n got=%v\nwant=%v", page["records"], got)
+			}
+			if page["more"] != refMore {
+				t.Fatalf("more = %v, want %v", page["more"], refMore)
+			}
+			if got := int64(page["cursor_ms"].(float64)); got != refCursorMs {
+				t.Fatalf("cursor_ms = %d, want %d", got, refCursorMs)
+			}
+			if page["cursor_id"] != refCursorID || page["cursor_id"] != tc.wantCursorID {
+				t.Fatalf("cursor_id = %v, want %v (full decode %v)", page["cursor_id"], tc.wantCursorID, refCursorID)
+			}
+			if page["more"] != true {
+				t.Fatalf("more = %v, want true for a scan-limited/truncated page", page["more"])
+			}
+		})
+	}
+	// Allocation ceiling for the two scan-limited Go-only misses. Before this
+	// change the same limit-60 pages decoded 4,096 full rows (~8MB/190k
+	// allocs); the narrow scan must stay far below that while returning the
+	// identical empty page and progress cursor.
+	for _, tc := range []struct {
+		name, query string
+		maxBytes    int64
+		maxAllocs   int64
+	}{
+		{"tool_missing", "/metrics/agg/log?limit=60&f=tool:missing", 5 << 20, 120_000},
+		{"status_class_5xx", "/metrics/agg/log?limit=60&f=status:5xx", 5 << 20, 120_000},
+	} {
+		t.Run("alloc/"+tc.name, func(t *testing.T) {
+			res := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					w := httptest.NewRecorder()
+					h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
+					if w.Code != http.StatusOK {
+						b.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
+					}
+				}
+			})
+			if got := res.AllocedBytesPerOp(); got > tc.maxBytes {
+				t.Fatalf("%s allocated %d bytes/op, want at most %d", tc.query, got, tc.maxBytes)
+			}
+			if got := res.AllocsPerOp(); got > tc.maxAllocs {
+				t.Fatalf("%s allocated %d times/op, want at most %d", tc.query, got, tc.maxAllocs)
+			}
+		})
+	}
+}
+
+// TestLogPageCanonicalModelRulesUseNarrowMatcher pins the residual matcher for
+// configured canonicalization: SQL must not push the raw model equality, the
+// Go matcher must still apply the rules, and full records must retain their
+// stored spelling. The first page scans the full budget without a match; the
+// continuation below its cursor returns the older canonical matches exactly.
+func TestLogPageCanonicalModelRulesUseNarrowMatcher(t *testing.T) {
+	s := testStoreWithQueryTimeout(t, time.Minute)
+	base := logPageRegressionStart()
+	for i := 0; i < 5_000; i++ {
+		model := "Vendor/Other:fp4"
+		if i < 5 {
+			model = "Vendor/Target:fp4"
+		}
+		s.Record(&metrics.Record{
+			ID: fmt.Sprintf("row-%04d", i), Provider: "p", Model: model,
+			Start: base.Add(time.Duration(i) * time.Millisecond), StatusCode: 200,
+		})
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Minute)
+	api.ModelCanon = func() config.ModelCanon { return config.ModelCanon{Rules: config.DefaultModelRules()} }
+	h := http.HandlerFunc(api.HandleLogPage)
+	mcz := api.canonizer()
+	fs := []scopeFilter{{dim: "model", id: "target"}}
+	plan := planLogPage(fs, "", mcz)
+	if plan.allPushed || len(plan.filter.All) != 0 || len(plan.goFilters) != 1 {
+		t.Fatalf("model rules plan = %+v, want the Go matcher to own the model predicate", plan)
+	}
+
+	first := get(t, h, "/metrics/agg/log?limit=10&f=model:target")
+	if rows := first["records"].([]any); len(rows) != 0 || first["more"] != true || first["cursor_id"] != "row-0904" {
+		t.Fatalf("first page = %v, want an empty scan-limited page at row-0904", first)
+	}
+	refRecords, refMore, refCursorMs, refCursorID := referenceLogPage(t, s, nil, fs, "", 10, mcz)
+	if got := logPageWire(t, refRecords); !reflect.DeepEqual(first["records"], got) ||
+		first["more"] != refMore || int64(first["cursor_ms"].(float64)) != refCursorMs || first["cursor_id"] != refCursorID {
+		t.Fatalf("first narrow page differs from full decode: got=%v ref=%v/%v/%d/%s", first, refRecords, refMore, refCursorMs, refCursorID)
+	}
+
+	before := &storage.LogCursor{StartMs: int64(first["cursor_ms"].(float64)), ID: first["cursor_id"].(string)}
+	second := get(t, h, fmt.Sprintf("/metrics/agg/log?limit=10&before_ms=%d&before_id=%s&f=model:target", before.StartMs, url.QueryEscape(before.ID)))
+	rows := second["records"].([]any)
+	if len(rows) != 5 || second["more"] != false || second["cursor_id"] != "row-0000" {
+		t.Fatalf("continuation = %v, want the five canonical matches ending at row-0000", second)
+	}
+	for i, row := range rows {
+		if got := row.(map[string]any)["model"]; got != "Vendor/Target:fp4" {
+			t.Fatalf("row %d model = %v, want the stored raw spelling", i, got)
+		}
+	}
+	refRecords, refMore, refCursorMs, refCursorID = referenceLogPage(t, s, before, fs, "", 10, mcz)
+	if got := logPageWire(t, refRecords); !reflect.DeepEqual(second["records"], got) ||
+		second["more"] != refMore || int64(second["cursor_ms"].(float64)) != refCursorMs || second["cursor_id"] != refCursorID {
+		t.Fatalf("continuation differs from full decode: got=%v ref=%v/%v/%d/%s", second, refRecords, refMore, refCursorMs, refCursorID)
+	}
+}
+
+// TestLogPageErrorPredicateMatchesAbsorbedAttempt pins the residual error
+// matcher's attempt projection: an error that exists only on an absorbed
+// retry (the final response was 200) must still match, exactly as the full
+// decode did, without materializing every scanned row.
+func TestLogPageErrorPredicateMatchesAbsorbedAttempt(t *testing.T) {
+	s := testStoreWithQueryTimeout(t, time.Minute)
+	base := logPageRegressionStart()
+	attempts := []metrics.RetryAttempt{{
+		StatusCode: 503, ErrorType: "overloaded", ErrorCode: "server_busy",
+		ErrorMsg: "upstream busy", At: base.Add(-time.Second),
+	}}
+	s.Record(&metrics.Record{
+		ID: "absorbed", Provider: "p", Model: "m", Start: base, StatusCode: 200,
+		Attempts: attempts,
+	})
+	s.Record(&metrics.Record{
+		ID: "unrelated", Provider: "p", Model: "m", Start: base.Add(time.Millisecond), StatusCode: 200,
+	})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Minute)
+	h := http.HandlerFunc(api.HandleLogPage)
+	fs := []scopeFilter{{dim: "error", id: "overloaded|server_busy|upstream busy"}}
+	page := get(t, h, "/metrics/agg/log?limit=10&f=error:"+url.QueryEscape(fs[0].id))
+	rows := page["records"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["id"] != "absorbed" || page["more"] != false {
+		t.Fatalf("absorbed-attempt page = %v, want exactly [absorbed] and no more", page)
+	}
+	refRecords, refMore, refCursorMs, refCursorID := referenceLogPage(t, s, nil, fs, "", 10, api.canonizer())
+	if got := logPageWire(t, refRecords); !reflect.DeepEqual(page["records"], got) ||
+		page["more"] != refMore || int64(page["cursor_ms"].(float64)) != refCursorMs || page["cursor_id"] != refCursorID {
+		t.Fatalf("absorbed-attempt narrow page differs from full decode: got=%v ref=%v/%v/%d/%s", page, refRecords, refMore, refCursorMs, refCursorID)
 	}
 }

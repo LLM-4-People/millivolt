@@ -2202,55 +2202,96 @@ const (
 	logScanMax   = 4096
 )
 
-// logPageQuery owns the live-log pushdown classification. Exact stored
+// logPagePlan is the single classification owner for the live-log scope:
+// exact stored predicates SQL enforces before decode, plus the residual
+// Go-owned scope the authoritative matcher must still evaluate. allPushed
+// reports that every active predicate is represented exactly, so each
+// candidate is expected to be an output row.
+type logPagePlan struct {
+	filter    storage.LogFilter
+	goFilters []scopeFilter
+	goStatus  string
+	allPushed bool
+}
+
+// planLogPage derives one request's pushdown and residual scope. Exact stored
 // dimensions become SQL predicates; everything the projection derives (status
-// classes, errors, tools, time buckets, canonical models) still needs the
-// authoritative Go matcher. allPushed reports that every active predicate is
-// represented exactly by the filter, so each decoded row is expected to be an
-// output row and the page can request only what it still needs.
-func logPageQuery(fs []scopeFilter, statusCode string, mcz *modelCanonizer) (filter storage.LogFilter, allPushed bool) {
-	allPushed = true
+// classes, errors, tools, time buckets, canonical models) stays in the
+// authoritative Go matcher and is matched against the narrow candidate read.
+func planLogPage(fs []scopeFilter, statusCode string, mcz *modelCanonizer) logPagePlan {
+	plan := logPagePlan{allPushed: true}
+	modelRules := mcz != nil && len(mcz.exec) > 0
 	for _, f := range fs {
+		pushed := true
 		switch f.dim {
 		case "client":
-			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
 		case "provider":
-			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
 		case "key":
-			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
 		case "conversation":
-			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
 		case "model":
 			// Canonical equality is pushable only while no rule rewrites the
 			// stored spelling. SQL matches the raw column exactly; the Go
 			// matcher trims even with no rules, so a padded filter value can
 			// still reject decoded rows and must keep the growing scan.
-			if len(mcz.exec) == 0 {
-				filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
-				if strings.TrimSpace(f.id) != f.id {
-					allPushed = false
-				}
+			if !modelRules {
+				plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
+				pushed = strings.TrimSpace(f.id) == f.id
 			} else {
-				allPushed = false
+				pushed = false
 			}
 		default:
-			allPushed = false
+			pushed = false
+		}
+		if !pushed {
+			plan.goFilters = append(plan.goFilters, f)
+			plan.allPushed = false
 		}
 	}
 	if statusCode != "" {
 		if n, err := strconv.Atoi(statusCode); err == nil {
 			canonical := strconv.Itoa(n)
-			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogStatus, Value: canonical})
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogStatus, Value: canonical})
 			// A non-canonical spelling ("0200") still narrows SQL to the same
 			// code, but the Go matcher rejects it, so scanning must grow.
 			if canonical != statusCode {
-				allPushed = false
+				plan.goStatus = statusCode
+				plan.allPushed = false
 			}
 		} else {
-			allPushed = false
+			plan.goStatus = statusCode
+			plan.allPushed = false
 		}
 	}
-	return filter, allPushed
+	return plan
+}
+
+// logPageQuery preserves the original classification contract for callers and
+// tests that only need the SQL filter and the all-pushed verdict.
+func logPageQuery(fs []scopeFilter, statusCode string, mcz *modelCanonizer) (filter storage.LogFilter, allPushed bool) {
+	plan := planLogPage(fs, statusCode, mcz)
+	return plan.filter, plan.allPushed
+}
+
+// logCandidateMatch evaluates the residual Go-owned scope against the narrow
+// candidate projection. Exact predicates already enforced by the candidate
+// query are deliberately absent from the plan, so every field this matcher
+// reads comes from the scanned row itself.
+func logCandidateMatch(c *storage.LogCandidate, goStatus string, fs []scopeFilter, mcz *modelCanonizer) bool {
+	r := metrics.Record{
+		StatusCode: c.Status, ErrorType: c.ErrorType, ErrorCode: c.ErrorCode,
+		ErrorMsg: c.ErrorMsg, Attempts: c.Attempts,
+		Start: time.UnixMilli(c.Cursor.StartMs),
+	}
+	cc := contrib{
+		id: c.Cursor.ID, start: c.Cursor.StartMs, status: c.Status,
+		model: mcz.model(c.Model), toolsL: c.ToolNames,
+		ent: errorEntries(&r),
+	}
+	return scopedMatch(&cc, goStatus, fs)
 }
 
 // HandleLogPage starts at durable newest, then pages below an exact (time,id)
@@ -2320,18 +2361,19 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	}
 	// Push exact, SQL-safe dimensions into the page query. Canonical model
 	// equality is pushable only when no rules rewrite names; class filters,
-	// errors, tools and time buckets stay in the authoritative Go matcher.
-	logFilter, allPushed := logPageQuery(fs, statusCode, mcz)
-	out := make([]*metrics.Record, 0, limit)
+	// errors, tools and time buckets stay in the authoritative Go matcher,
+	// which reads the narrow candidate projection instead of full records.
+	plan := planLogPage(fs, statusCode, mcz)
+	accepted := make([]storage.LogCursor, 0, limit)
 	scanned := 0
 	hitEnd := a.store == nil
 	batch := min(limit, logScanBatch)
 	if a.store != nil {
-		for scanned < logScanMax && len(out) < limit {
-			if allPushed {
-				// Every decoded row is an expected output row, so ask for
+		for scanned < logScanMax && len(accepted) < limit {
+			if plan.allPushed {
+				// Every scanned row is an expected output row, so ask for
 				// exactly what the page still needs.
-				batch = limit - len(out)
+				batch = limit - len(accepted)
 			}
 			if remain := logScanMax - scanned; remain < batch {
 				batch = remain
@@ -2339,44 +2381,54 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			if batch <= 0 {
 				break
 			}
-			rows, err := a.store.QueryBefore(ctx, cursor, &logFilter, batch)
+			candidates, err := a.store.QueryBeforeCandidates(ctx, cursor, &plan.filter, batch)
 			if err != nil {
 				log.Printf("agg log page: %v", err)
 				adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
 				return
 			}
-			if len(rows) == 0 {
+			if len(candidates) == 0 {
 				hitEnd = true
 				break
 			}
-			scanned += len(rows)
-			for _, rec := range rows {
-				if rec == nil {
+			scanned += len(candidates)
+			for i := range candidates {
+				cand := &candidates[i]
+				cursor = &storage.LogCursor{StartMs: cand.Cursor.StartMs, ID: cand.Cursor.ID}
+				if !plan.allPushed && !logCandidateMatch(cand, plan.goStatus, plan.goFilters, mcz) {
 					continue
 				}
-				cursor = &storage.LogCursor{StartMs: rec.Start.UnixMilli(), ID: rec.ID}
-				c := fromRecord(rec, mcz)
-				if !scopedMatch(&c, statusCode, fs) {
-					continue
-				}
-				out = append(out, rec)
-				if len(out) >= limit {
+				accepted = append(accepted, cand.Cursor)
+				if len(accepted) >= limit {
 					break
 				}
 			}
-			if len(out) >= limit {
+			if len(accepted) >= limit {
 				break
 			}
-			if len(rows) < batch {
+			if len(candidates) < batch {
 				hitEnd = true
 				break
 			}
-			if !allPushed {
+			if !plan.allPushed {
 				// Go-only predicates may reject most rows: grow from the page
 				// size towards the per-call batch/scan caps instead of decoding
 				// a full batch on the first request.
 				batch = min(batch*2, logScanBatch)
 			}
+		}
+	}
+	// The full response rows are materialized once, for the accepted page
+	// only: a rejected candidate scan never pays for prompts, previews,
+	// headers, or request parameters. The storage call is bounded by the page
+	// size and preserves the scan order.
+	out := make([]*metrics.Record, 0, limit)
+	if len(accepted) > 0 {
+		out, err = a.store.LogPageRecords(ctx, accepted)
+		if err != nil {
+			log.Printf("agg log page: %v", err)
+			adminjson.WriteError(w, http.StatusInternalServerError, "log page failed")
+			return
 		}
 	}
 	var cursorMs int64

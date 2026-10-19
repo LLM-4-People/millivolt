@@ -161,6 +161,7 @@ func BenchmarkHandleLogPage(b *testing.B) {
 		{"empty", "/metrics/agg/log?limit=%d"},
 		{"sql_provider", "/metrics/agg/log?limit=%d&f=provider:provider-03"},
 		{"go_status_class", "/metrics/agg/log?limit=%d&f=status:2xx"},
+		{"go_status_class_5xx", "/metrics/agg/log?limit=%d&f=status:5xx"},
 		{"go_tool_missing", "/metrics/agg/log?limit=%d&f=tool:missing"},
 	}
 	for _, limit := range []int{60, 200} {

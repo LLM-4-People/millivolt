@@ -1955,6 +1955,24 @@ type LogCursor struct {
 	ID      string
 }
 
+// LogCandidate is the narrow projection one durable row contributes to the
+// live-log page's authoritative Go matcher. SQL still applies every exact
+// stored predicate; this struct carries only the derived inputs SQL cannot
+// express (status classes, error signatures, tools, canonical models and time
+// buckets) plus the ordering key. Full Record materialization is deferred to
+// LogPageRecords for the rows the matcher accepts, so a rejected scan row
+// never decodes prompts, previews, headers, or request parameters.
+type LogCandidate struct {
+	Cursor    LogCursor
+	Status    int
+	Model     string
+	ToolNames []string
+	ErrorType string
+	ErrorCode string
+	ErrorMsg  string
+	Attempts  []metrics.RetryAttempt
+}
+
 // QueryBefore returns a newest-first page below the exclusive cursor. A nil
 // cursor starts at durable newest, independently of the arrival-ordered ring.
 // LogField is the closed set of exact durable columns a log page may push
@@ -2015,14 +2033,23 @@ func (f *LogFilter) where() (string, []any, error) {
 	return clause, args, nil
 }
 
-// buildQueryBefore is the single owner of the durable log page statement:
-// newest-first below an exclusive (started_at,id) cursor, with SQL-safe exact
-// predicates applied by SQLite before decoding. Every LogFilter equality field
-// has an index ending in the same (started_at,id) order, so its page needs one
-// range scan and no sort; callers that need canonical-model or class semantics
-// still match in Go.
-func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
-	q := `SELECT ` + recordColumns + `, NULL AS debug_capture FROM requests WHERE 1=1`
+// logCandidateColumns is the closed narrow projection the live-log Go matcher
+// reads. Keep it aligned with LogCandidate: every column here is consumed by
+// the derived predicates, never by response materialization. Adding a field
+// means extending both together.
+const logCandidateColumns = `
+	id, started_at, status_code, model, tool_names,
+	error_type, error_code, error_msg, attempts
+`
+
+// buildBeforeQuery is the single owner of the durable log page statement
+// shape: newest-first below an exclusive (started_at,id) cursor, with SQL-safe
+// exact predicates applied by SQLite before decoding. Every LogFilter equality
+// field has an index ending in the same (started_at,id) order, so its page
+// needs one range scan and no sort; callers that need canonical-model or class
+// semantics still match in Go. columns is code-owned, never request input.
+func buildBeforeQuery(columns string, before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
+	q := `SELECT ` + columns + ` FROM requests WHERE 1=1`
 	var args []any
 	if before != nil {
 		q += ` AND (started_at, id) < (?, ?)`
@@ -2037,6 +2064,10 @@ func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, 
 	q += ` ORDER BY started_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 	return q, args, nil
+}
+
+func buildQueryBefore(before *LogCursor, filter *LogFilter, limit int) (string, []any, error) {
+	return buildBeforeQuery(recordColumns+`, NULL AS debug_capture`, before, filter, limit)
 }
 
 // QueryBefore pages durable records newest-first below an exact (time,id)
@@ -2066,6 +2097,108 @@ func (s *Store) QueryBefore(ctx context.Context, before *LogCursor, filter *LogF
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// QueryBeforeCandidates pages the narrow matcher projection newest-first
+// below the same exclusive cursor and SQL predicates as QueryBefore. It is the
+// log page's scan read: one bounded statement whose rows carry only the
+// derived fields the Go matcher needs, never a full Record.
+func (s *Store) QueryBeforeCandidates(ctx context.Context, before *LogCursor, filter *LogFilter, limit int) ([]LogCandidate, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	ctx, cancel := s.withQueryTimeout(ctx)
+	defer cancel()
+	q, args, err := buildBeforeQuery(logCandidateColumns, before, filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.rdb.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []LogCandidate
+	for rows.Next() {
+		var c LogCandidate
+		var toolNames, attemptsJSON string
+		if err := rows.Scan(
+			&c.Cursor.ID, &c.Cursor.StartMs, &c.Status, &c.Model, &toolNames,
+			&c.ErrorType, &c.ErrorCode, &c.ErrorMsg, &attemptsJSON,
+		); err != nil {
+			return nil, err
+		}
+		if names, err := DecodeToolNamesColumn([]byte(toolNames)); err != nil {
+			log.Printf("storage: parse tool names for %s: %v", c.Cursor.ID, err)
+		} else {
+			c.ToolNames = names
+		}
+		if attempts, err := DecodeAttemptsColumn([]byte(attemptsJSON)); err != nil {
+			log.Printf("storage: parse attempts for %s: %v", c.Cursor.ID, err)
+		} else {
+			c.Attempts = attempts
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// LogPageRecords materializes exactly the accepted log-page cursors in one
+// bounded statement, preserving the scan's newest-first order. The caller
+// passes at most one page of IDs; a row accepted by the candidate scan but
+// missing or out of order here is an explicit consistency error, never a
+// silently shortened page. The IN list cannot exceed the page limit, so this
+// is a bounded key lookup rather than a second history scan.
+func (s *Store) LogPageRecords(ctx context.Context, cursors []LogCursor) ([]*metrics.Record, error) {
+	if len(cursors) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := s.withQueryTimeout(ctx)
+	defer cancel()
+	var q strings.Builder
+	q.WriteString(`SELECT ` + recordColumns + `, NULL AS debug_capture FROM requests WHERE id IN (`)
+	args := make([]any, 0, len(cursors))
+	seen := make(map[string]struct{}, len(cursors))
+	for i, c := range cursors {
+		if c.ID == "" {
+			return nil, fmt.Errorf("log page records: empty record id at position %d", i)
+		}
+		if _, dup := seen[c.ID]; dup {
+			return nil, fmt.Errorf("log page records: duplicate record id %q", c.ID)
+		}
+		seen[c.ID] = struct{}{}
+		if i > 0 {
+			q.WriteByte(',')
+		}
+		q.WriteByte('?')
+		args = append(args, c.ID)
+	}
+	q.WriteString(`) ORDER BY started_at DESC, id DESC`)
+	rows, err := s.rdb.QueryContext(ctx, q.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*metrics.Record, 0, len(cursors))
+	for rows.Next() {
+		r, _, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) != len(cursors) {
+		return nil, fmt.Errorf("log page records: materialized %d of %d accepted rows", len(out), len(cursors))
+	}
+	for i, c := range cursors {
+		if out[i].ID != c.ID || out[i].Start.UnixMilli() != c.StartMs {
+			return nil, fmt.Errorf("log page records: accepted row %d does not match its scan cursor", i)
+		}
+	}
+	return out, nil
 }
 
 // LoadRecent returns up to n of the newest stored records, oldest-first. It
