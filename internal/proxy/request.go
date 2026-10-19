@@ -37,10 +37,6 @@ import (
 // This is an allocation guardrail, not a second request-size limit.
 const requestReadHintMax = 1 << 20
 
-// A decimal integer with fewer than 309 digits cannot overflow float64.
-// Exponents are checked separately by the standard decoder.
-const requestFloatDigits = 309
-
 // setResolvedAuth stamps the extracted upstream key into the target's
 // configured auth header (name + prefix); an empty key stamps nothing. The
 // one owner shared by the generic upstream request builder, the metadata
@@ -1378,44 +1374,13 @@ func readRequestBodyTail(reader io.Reader, body []byte) ([]byte, error) {
 	return grown, nil
 }
 
-// discardedJSON accepts every JSON shape like any without materializing
-// nested schemas/metadata. Syntax is validated by the enclosing JSON decoder.
+// discardedJSON accepts every syntactically valid JSON shape without
+// materializing nested schemas, metadata, or numbers. The enclosing decoder
+// already validated the value; re-decoding it into any would allocate the
+// whole element merely to discard it.
 type discardedJSON struct{}
 
-func (*discardedJSON) UnmarshalJSON(raw []byte) error {
-	if requestNumberNeedsDecode(raw) {
-		var discarded any
-		return json.Unmarshal(raw, &discarded)
-	}
-	return nil
-}
-
-// This is only a conservative range-check trigger, not a JSON parser. The
-// enclosing standard decoder owns syntax; unusual numeric candidates use its
-// original any/float64 semantics. Matching inside strings is harmless.
-func requestNumberNeedsDecode(raw []byte) bool {
-	digits := 0
-	for i, c := range raw {
-		if c >= '0' && c <= '9' {
-			digits++
-			if digits >= requestFloatDigits {
-				return true
-			}
-			continue
-		}
-		if digits > 0 && (c == 'e' || c == 'E') {
-			next := i + 1
-			if next < len(raw) && (raw[next] == '+' || raw[next] == '-') {
-				next++
-			}
-			if next < len(raw) && raw[next] >= '0' && raw[next] <= '9' {
-				return true
-			}
-		}
-		digits = 0
-	}
-	return false
-}
+func (*discardedJSON) UnmarshalJSON([]byte) error { return nil }
 
 // maxRequestOutputTokens bounds a client-supplied max_tokens /
 // max_completion_tokens at the trust boundary. Mainstream model output caps
@@ -1613,6 +1578,12 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 // normal request.
 const requestMetadataMaxElements = 10_000
 
+// requestContentPartMax bounds one message's content-part array before the
+// best-effort composition decoder materializes it. Multimodal messages do not
+// need thousands of parts; without this bound a tiny array of empty objects in
+// one message expands into a large typed slice.
+const requestContentPartMax = 4096
+
 // boundRequestMetadata is an allocation-free preflight over the top-level
 // document. It rejects only a JSON document whose messages/tools array or
 // logit_bias object exceeds the bound. Invalid JSON returns nil so the
@@ -1629,9 +1600,10 @@ func boundRequestMetadata(body []byte) error {
 		return nil
 	}
 	// logit_bias is a map field: duplicate top-level objects merge in
-	// encoding/json, so their key counts accumulate. Slice fields overwrite,
-	// so any single over-cap occurrence is already the maximum decoded size.
-	logitBias := 0
+	// encoding/json, so distinct keys accumulate across every occurrence.
+	// Slice fields overwrite, so any single over-cap occurrence is already the
+	// maximum decoded size.
+	var logitSeen map[string]struct{}
 	logitOver := false
 	for i < len(body) {
 		keyStart := i
@@ -1648,25 +1620,34 @@ func boundRequestMetadata(body []byte) error {
 		if i >= len(body) {
 			return nil
 		}
-		switch {
-		case jsonKeyIs(key, "messages"), jsonKeyIs(key, "tools"):
+		switch requestCollectionKey(key) {
+		case "messages", "tools":
 			n, next, ok := countJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
 				return nil
 			}
 			if n > requestMetadataMaxElements {
-				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", string(key), requestMetadataMaxElements))
+				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", requestCollectionKey(key), requestMetadataMaxElements))
 			}
 			i = next
-		case jsonKeyIs(key, "logit_bias"):
-			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements)
+		case "logit_bias":
+			if logitOver {
+				next := skipJSONValue(body, i)
+				if next < 0 {
+					return nil
+				}
+				i = next
+				break
+			}
+			if logitSeen == nil {
+				logitSeen = make(map[string]struct{})
+			}
+			n, next, ok := countJSONLogitBias(body, i, requestMetadataMaxElements, logitSeen)
 			if !ok {
 				return nil
 			}
-			if n > requestMetadataMaxElements || logitBias > requestMetadataMaxElements-n {
+			if n > requestMetadataMaxElements {
 				logitOver = true
-			} else {
-				logitBias += n
 			}
 			i = next
 		default:
@@ -1694,15 +1675,15 @@ func boundRequestMetadata(body []byte) error {
 	return nil
 }
 
-// jsonKeyIs compares a raw top-level key (including its quotes) using the same
-// case-insensitive field match encoding/json applies to struct tags. It does
-// not treat '-' or '_' as separators: encoding/json folds case only, so
-// "Messages" reaches the messages field while "Mes-sages" remains unknown.
-// The common unescaped ASCII case allocates nothing; only an escaped or
-// non-ASCII key takes the decoder path.
-func jsonKeyIs(raw []byte, want string) bool {
+// requestCollectionKey returns the canonical bounded collection name for a
+// raw top-level JSON key, or "" when the key is not one of them. encoding/json
+// matches struct fields case-insensitively, so "Messages"/"MESSAGES" reach
+// messages; it does not fold '-' or '_', so "Mes-sages" stays unknown. The
+// common unescaped ASCII key allocates nothing; escaped and non-ASCII keys are
+// decoded once and compared with strings.EqualFold.
+func requestCollectionKey(raw []byte) string {
 	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return false
+		return ""
 	}
 	inner := raw[1 : len(raw)-1]
 	ascii := true
@@ -1713,25 +1694,48 @@ func jsonKeyIs(raw []byte, want string) bool {
 		}
 	}
 	if ascii {
-		if len(inner) != len(want) {
+		switch {
+		case asciiKeyEqual(inner, "messages"):
+			return "messages"
+		case asciiKeyEqual(inner, "tools"):
+			return "tools"
+		case asciiKeyEqual(inner, "logit_bias"):
+			return "logit_bias"
+		}
+		return ""
+	}
+	var key string
+	if json.Unmarshal(raw, &key) != nil {
+		return ""
+	}
+	switch {
+	case strings.EqualFold(key, "messages"):
+		return "messages"
+	case strings.EqualFold(key, "tools"):
+		return "tools"
+	case strings.EqualFold(key, "logit_bias"):
+		return "logit_bias"
+	}
+	return ""
+}
+
+func asciiKeyEqual(raw []byte, name string) bool {
+	if len(raw) != len(name) {
+		return false
+	}
+	for i, c := range raw {
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		w := name[i]
+		if w >= 'A' && w <= 'Z' {
+			w += 'a' - 'A'
+		}
+		if c != w {
 			return false
 		}
-		for i, c := range inner {
-			if c >= 'A' && c <= 'Z' {
-				c += 'a' - 'A'
-			}
-			w := want[i]
-			if w >= 'A' && w <= 'Z' {
-				w += 'a' - 'A'
-			}
-			if c != w {
-				return false
-			}
-		}
-		return true
 	}
-	var s string
-	return json.Unmarshal(raw, &s) == nil && strings.EqualFold(s, want)
+	return true
 }
 
 // countJSONArrayBytes counts top-level members of a JSON array. A non-array
@@ -1773,41 +1777,55 @@ func countJSONArrayBytes(data []byte, i, max int) (int, int, bool) {
 	return n, i + 1, true
 }
 
-// countJSONObjectKeys counts members of a JSON object without materializing
-// them; the same non-object tolerance as countJSONArrayBytes applies. Once
-// the bound is crossed it saturates and keeps scanning to the closing brace
-// so duplicate top-level objects can be added and the caller can advance.
-func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
+// countJSONLogitBias accumulates the distinct keys of one logit_bias object
+// into seen. encoding/json reuses the non-nil map field across duplicate
+// top-level logit_bias objects, so distinct keys, not raw members, are the
+// decoded size. Duplicate members of one object therefore do not consume the
+// bound. Once seen exceeds max, the map is cleared and the rest of the object
+// is skipped without decoding keys; the caller preserves the overflow state
+// and skips later logit_bias occurrences entirely.
+func countJSONLogitBias(data []byte, i, max int, seen map[string]struct{}) (int, int, bool) {
 	i = metrics.SkipSpace(data, i)
 	if i >= len(data) {
 		return 0, 0, false
 	}
 	if data[i] != '{' {
 		next := skipJSONValue(data, i)
-		return 0, next, next >= 0
+		return len(seen), next, next >= 0
 	}
 	i = metrics.SkipSpace(data, i+1)
-	n := 0
+	over := false
 	for i < len(data) && data[i] != '}' {
+		keyStart := i
 		end := skipJSONString(data, i)
 		if end < 0 {
 			return 0, 0, false
+		}
+		if !over {
+			var key string
+			if json.Unmarshal(data[keyStart:end], &key) != nil {
+				return 0, 0, false
+			}
+			if _, exists := seen[key]; !exists {
+				if len(seen) >= max {
+					over = true
+					clear(seen)
+				} else {
+					seen[key] = struct{}{}
+				}
+			}
 		}
 		i = metrics.SkipSpace(data, end)
 		if i >= len(data) || data[i] != ':' {
 			return 0, 0, false
 		}
 		i = metrics.SkipSpace(data, i+1)
+		if i >= len(data) {
+			return 0, 0, false
+		}
 		next := skipJSONValue(data, i)
 		if next <= i {
 			return 0, 0, false
-		}
-		n++
-		if n > max {
-			// Keep scanning to the end of the object: duplicate logit_bias
-			// objects merge, and the caller must still reach the next
-			// top-level member before reporting the accumulated overflow.
-			n = max + 1
 		}
 		i = metrics.SkipSpace(data, next)
 		if i < len(data) && data[i] == ',' {
@@ -1822,7 +1840,10 @@ func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
 	if i >= len(data) || data[i] != '}' {
 		return 0, 0, false
 	}
-	return n, i + 1, true
+	if over {
+		return max + 1, i + 1, true
+	}
+	return len(seen), i + 1, true
 }
 
 // requestMetadataOverflow rejects only a fully valid JSON document. The
@@ -2007,6 +2028,11 @@ func (c *requestContent) UnmarshalJSON(content []byte) error {
 			c.chars = int(size)
 		}
 		return nil
+	}
+	if i := metrics.SkipSpace(content, 0); i < len(content) && content[i] == '[' {
+		if n, _, ok := countJSONArrayBytes(content, i, requestContentPartMax); !ok || n > requestContentPartMax {
+			return nil // best-effort composition, never a routing/type failure
+		}
 	}
 	var parts []struct {
 		Type string            `json:"type"`

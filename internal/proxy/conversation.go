@@ -306,6 +306,9 @@ func topLevelJSONKey(data []byte, key string) (tail []byte, duplicate bool) {
 // index just past the value, or -1 when the bytes run out inside an
 // unterminated structure. Lexical only: it never validates the value.
 func skipJSONValue(data []byte, i int) int {
+	if i < 0 || i >= len(data) {
+		return -1
+	}
 	switch data[i] {
 	case '"':
 		return skipJSONString(data, i)

@@ -688,11 +688,11 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 		}
 		return "[" + strings.TrimSuffix(strings.Repeat(elem+",", n), ",") + "]"
 	}
-	object := func(n int) string {
+	objectRange := func(start, n int) string {
 		var b strings.Builder
 		b.WriteByte('{')
-		for i := 0; i < n; i++ {
-			if i > 0 {
+		for i := start; i < start+n; i++ {
+			if i > start {
 				b.WriteByte(',')
 			}
 			fmt.Fprintf(&b, `"k%d":0`, i)
@@ -700,6 +700,7 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 		b.WriteByte('}')
 		return b.String()
 	}
+	object := func(n int) string { return objectRange(0, n) }
 	for _, tc := range []struct {
 		name    string
 		body    string
@@ -713,8 +714,10 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 		{"case-folded messages key", `{"Messages":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
 		{"case-folded logit_bias key", `{"LOGIT_BIAS":` + object(requestMetadataMaxElements+1) + `}`, true},
 		{"separator key is not a messages field", `{"Mes-sages":` + array(requestMetadataMaxElements+1, `{}`) + `}`, false},
-		{"duplicate logit_bias objects accumulate", `{"logit_bias":` + object(requestMetadataMaxElements/2+1) + `,"logit_bias":` + object(requestMetadataMaxElements/2+1) + `}`, true},
-		{"duplicate logit_bias objects under cap", `{"logit_bias":` + object(4000) + `,"logit_bias":` + object(4000) + `}`, false},
+		{"duplicate logit_bias objects accumulate", `{"logit_bias":` + objectRange(0, requestMetadataMaxElements/2+1) + `,"logit_bias":` + objectRange(requestMetadataMaxElements/2+1, requestMetadataMaxElements/2+1) + `}`, true},
+		{"duplicate logit_bias objects under cap", `{"logit_bias":` + objectRange(0, 4000) + `,"logit_bias":` + objectRange(4000, 4000) + `}`, false},
+		{"duplicate logit_bias members count once", `{"logit_bias":{"a":0` + strings.Repeat(`,"a":0`, requestMetadataMaxElements) + `}}`, false},
+		{"truncated logit_bias passes through", `{"model":"m","logit_bias":{"a":`, false},
 		{"non-array messages is not an element collection", `{"model":"m","messages":"not-an-array"}`, false},
 		{"malformed JSON stays passthrough", `{"model":"m","messages":[`, false},
 		{"malformed over-cap prefix stays passthrough", `{"model":"m","messages":` + array(requestMetadataMaxElements+1, `{}`) + `,X}`, false},
@@ -767,5 +770,35 @@ func TestRequestElementOverflowReturns400BeforeUpstream(t *testing.T) {
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("upstream called %d times, want 0", got)
+	}
+}
+
+func TestRequestNestedPayloadAllocationBound(t *testing.T) {
+	nested := strings.TrimSuffix(strings.Repeat("{} ,", 200_000), ",")
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"content parts", `{"model":"m","messages":[{"role":"user","content":[` + nested + `]}]}`},
+		{"tool payload", `{"model":"m","tools":[{"nested":[` + nested + `],"n":1e999}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(tc.body)
+			var parseErr error
+			res := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					var rec metrics.Record
+					parseErr = parseLLMRequest(raw, &rec, false)
+					if parseErr != nil {
+						b.Fatalf("parse returned %v", parseErr)
+					}
+				}
+			})
+			if alloc := res.AllocedBytesPerOp(); alloc > 4<<20 {
+				t.Fatalf("%d-byte %s allocated %d bytes/op, want bounded nested decoding", len(raw), tc.name, alloc)
+			} else {
+				t.Logf("%s: %d bytes, %d bytes/op", tc.name, len(raw), alloc)
+			}
+		})
 	}
 }
