@@ -1628,6 +1628,11 @@ func boundRequestMetadata(body []byte) error {
 	if i < len(body) && body[i] == '}' {
 		return nil
 	}
+	// logit_bias is a map field: duplicate top-level objects merge in
+	// encoding/json, so their key counts accumulate. Slice fields overwrite,
+	// so any single over-cap occurrence is already the maximum decoded size.
+	logitBias := 0
+	logitOver := false
 	for i < len(body) {
 		keyStart := i
 		end := skipJSONString(body, i)
@@ -1658,8 +1663,10 @@ func boundRequestMetadata(body []byte) error {
 			if !ok {
 				return nil
 			}
-			if n > requestMetadataMaxElements {
-				return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
+			if n > requestMetadataMaxElements || logitBias > requestMetadataMaxElements-n {
+				logitOver = true
+			} else {
+				logitBias += n
 			}
 			i = next
 		default:
@@ -1674,36 +1681,57 @@ func boundRequestMetadata(body []byte) error {
 			return nil
 		}
 		if body[i] == '}' {
-			return nil
+			break
 		}
 		if body[i] != ',' {
 			return nil
 		}
 		i = metrics.SkipSpace(body, i+1)
 	}
+	if logitOver {
+		return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
+	}
 	return nil
 }
 
-// requestMetadataOverflow rejects only a fully valid JSON document. The
-// lexical counter can have seen an over-cap prefix before invalid trailing
-// bytes; malformed input must keep its unchanged passthrough contract, so
-// validation happens only on the rejection path.
-func requestMetadataOverflow(body []byte, err error) error {
-	if !json.Valid(body) {
-		return nil
-	}
-	return err
-}
-
-// jsonKeyIs compares a raw top-level key (including its quotes) without
-// allocating for the common unescaped case. Only an escaped key takes the
-// decoder path, so a flood of ordinary keys remains allocation-free.
+// jsonKeyIs compares a raw top-level key (including its quotes) using the same
+// case-insensitive field match encoding/json applies to struct tags. It does
+// not treat '-' or '_' as separators: encoding/json folds case only, so
+// "Messages" reaches the messages field while "Mes-sages" remains unknown.
+// The common unescaped ASCII case allocates nothing; only an escaped or
+// non-ASCII key takes the decoder path.
 func jsonKeyIs(raw []byte, want string) bool {
-	if len(raw) >= 2 && bytes.IndexByte(raw, '\\') < 0 {
-		return string(raw[1:len(raw)-1]) == want
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return false
+	}
+	inner := raw[1 : len(raw)-1]
+	ascii := true
+	for _, c := range inner {
+		if c >= 0x80 || c == '\\' {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		if len(inner) != len(want) {
+			return false
+		}
+		for i, c := range inner {
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			w := want[i]
+			if w >= 'A' && w <= 'Z' {
+				w += 'a' - 'A'
+			}
+			if c != w {
+				return false
+			}
+		}
+		return true
 	}
 	var s string
-	return json.Unmarshal(raw, &s) == nil && s == want
+	return json.Unmarshal(raw, &s) == nil && strings.EqualFold(s, want)
 }
 
 // countJSONArrayBytes counts top-level members of a JSON array. A non-array
@@ -1746,7 +1774,9 @@ func countJSONArrayBytes(data []byte, i, max int) (int, int, bool) {
 }
 
 // countJSONObjectKeys counts members of a JSON object without materializing
-// them; the same non-object tolerance as countJSONArrayBytes applies.
+// them; the same non-object tolerance as countJSONArrayBytes applies. Once
+// the bound is crossed it saturates and keeps scanning to the closing brace
+// so duplicate top-level objects can be added and the caller can advance.
 func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
 	i = metrics.SkipSpace(data, i)
 	if i >= len(data) {
@@ -1774,7 +1804,10 @@ func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
 		}
 		n++
 		if n > max {
-			return n, next, true
+			// Keep scanning to the end of the object: duplicate logit_bias
+			// objects merge, and the caller must still reach the next
+			// top-level member before reporting the accumulated overflow.
+			n = max + 1
 		}
 		i = metrics.SkipSpace(data, next)
 		if i < len(data) && data[i] == ',' {
@@ -1790,6 +1823,17 @@ func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
 		return 0, 0, false
 	}
 	return n, i + 1, true
+}
+
+// requestMetadataOverflow rejects only a fully valid JSON document. The
+// lexical counter can have seen an over-cap prefix before invalid trailing
+// bytes; malformed input must keep its unchanged passthrough contract, so
+// validation happens only on the rejection path.
+func requestMetadataOverflow(body []byte, err error) error {
+	if !json.Valid(body) {
+		return nil
+	}
+	return err
 }
 
 func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
