@@ -12,6 +12,19 @@ func countField(field int, n uint64) []byte {
 	return appendVarint(appendTag(nil, field, wireVarint), n)
 }
 
+func TestParseGetUsableModelsSharesFrameFieldBudget(t *testing.T) {
+	var details []byte
+	for range protoFieldCountMax/2 + 1 {
+		details = append(details, countField(999, 1)...)
+	}
+	var body []byte
+	body = appendMessage(body, fGetUsableModelsResponseModels, details)
+	body = appendMessage(body, fGetUsableModelsResponseModels, details)
+	if _, err := ParseGetUsableModelsResponse(body); !errors.Is(err, errProtoFieldCount) {
+		t.Fatalf("repeated ModelDetails reset the frame budget: %v", err)
+	}
+}
+
 func TestRunRejectsUnrepresentableProtoCounts(t *testing.T) {
 	for _, checkpoint := range []bool{false, true} {
 		r := &CursorRun{}
