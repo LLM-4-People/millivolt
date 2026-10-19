@@ -1,7 +1,6 @@
 package config
 
 import (
-	"slices"
 	"strings"
 	"testing"
 )
@@ -85,33 +84,28 @@ func TestProviderLabelsRequireCanonicalForm(t *testing.T) {
 }
 
 // TestProviderIdentityYAMLLoad pins the YAML boundary too: a padded alias chain
-// or a padded/mixed-case provider label is dropped with the key named in the
-// skipped list, never applied and never silently kept.
+// or a padded/mixed-case provider label is an invalid recognized value, so the
+// fail-closed loader returns an error instead of applying or silently dropping
+// the key.
 func TestProviderIdentityYAMLLoad(t *testing.T) {
 	t.Run("padded alias chain", func(t *testing.T) {
 		c, skipped, err := LoadBytes([]byte("provider_aliases:\n  a: \" b \"\n  b: c\n"))
-		if err != nil {
-			t.Fatalf("LoadBytes() = %v, want the invalid key skipped", err)
+		if err == nil || !strings.Contains(err.Error(), "provider_aliases") {
+			t.Fatalf("LoadBytes() = %v, %v; want the invalid alias chain rejected", c, err)
 		}
-		if len(c.ProviderAliases) != 0 {
-			t.Fatalf("ProviderAliases = %#v, want none", c.ProviderAliases)
-		}
-		if !slices.Contains(skipped, "provider_aliases") {
-			t.Fatalf("skipped = %v, want provider_aliases named", skipped)
+		if c != nil || skipped != nil {
+			t.Fatalf("rejected LoadBytes returned config/skipped: %+v %v", c, skipped)
 		}
 	})
 	for _, label := range []string{" OpenAI.com ", "OpenAI.com"} {
 		t.Run("provider label "+label, func(t *testing.T) {
 			body := "providers:\n  \"" + label + "\":\n    models_path: /v1/models\n"
 			c, skipped, err := LoadBytes([]byte(body))
-			if err != nil {
-				t.Fatalf("LoadBytes() = %v, want the invalid key skipped", err)
+			if err == nil || !strings.Contains(err.Error(), "providers") {
+				t.Fatalf("LoadBytes() = %v, %v; want the non-canonical label rejected", c, err)
 			}
-			if _, present := c.Providers[label]; present {
-				t.Fatalf("Providers kept the non-canonical label %q", label)
-			}
-			if !slices.Contains(skipped, "providers") {
-				t.Fatalf("skipped = %v, want providers named", skipped)
+			if c != nil || skipped != nil {
+				t.Fatalf("rejected LoadBytes returned config/skipped: %+v %v", c, skipped)
 			}
 		})
 	}

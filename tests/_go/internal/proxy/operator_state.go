@@ -283,6 +283,30 @@ func TestOperatorStateMethodGates(t *testing.T) {
 	}
 }
 
+// TestOperatorStateResponsesNoStore pins the shared writer's cache directive:
+// every cookie-authenticated operator-state response (GET snapshot and POST
+// applied state) is private process state and must never be stored by a shared
+// cache. The header lives in writeOperatorState, not per handler.
+func TestOperatorStateResponsesNoStore(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	for _, tc := range operatorCases {
+		h := tc.handler(p)
+		for _, req := range []*http.Request{
+			httptest.NewRequest(http.MethodGet, "/admin/operator", nil),
+			httptest.NewRequest(http.MethodPost, "/admin/operator", strings.NewReader(tc.disable)),
+		} {
+			rec := httptest.NewRecorder()
+			h(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s = %d %s", req.Method, tc.name, rec.Code, rec.Body.String())
+			}
+			if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+				t.Errorf("%s %s Cache-Control = %q, want no-store", req.Method, tc.name, cc)
+			}
+		}
+	}
+}
+
 // TestOperatorStateUntilRFC3339UTC pins rfc3339OrNil's wire format on every
 // surface that renders it: each pause hold's until, the pause document's
 // soonest until, each debug session's until, and the debug document's

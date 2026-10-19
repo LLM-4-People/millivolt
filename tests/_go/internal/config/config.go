@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -73,6 +74,27 @@ func assertOverlaySkipped(t *testing.T, raw, key string) {
 	}
 	if !reflect.DeepEqual(c.Map()[key], Default().Map()[key]) {
 		t.Errorf("LoadFile(%q) applied %s = %v, want default %v", raw, key, c.Map()[key], Default().Map()[key])
+	}
+}
+
+// assertOverlayRejected pins the fail-closed boundary: an invalid recognized
+// value is an error, never a silently restored default. The key names the
+// offending field when the error has one.
+func assertOverlayRejected(t *testing.T, raw, key string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "c.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := LoadFile(path)
+	if err == nil {
+		t.Fatalf("LoadFile(%q) = %+v, want a fail-closed error", raw, c)
+	}
+	if key != "" && !strings.Contains(err.Error(), key) {
+		t.Errorf("LoadFile(%q) error = %q, want it to name %q", raw, err, key)
+	}
+	if c != nil {
+		t.Errorf("LoadFile(%q) returned a config with the error: %+v", raw, c)
 	}
 }
 
@@ -513,7 +535,7 @@ func TestLoadFileSkipsUnknownKey(t *testing.T) {
 
 func TestLoadFileRepairDropsBrokenKeys(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "c.yaml")
-	raw := "max_retries: 3\nmax_retriez: 9\nhistory_size: 0\n"
+	raw := "max_retries: 3\nmax_retriez: 9\n"
 	if err := os.WriteFile(p, []byte(raw), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -521,22 +543,50 @@ func TestLoadFileRepairDropsBrokenKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MaxRetries != 3 || c.HistorySize != Default().HistorySize {
-		t.Fatalf("repaired config max_retries=%d history_size=%d", c.MaxRetries, c.HistorySize)
+	if c.MaxRetries != 3 {
+		t.Fatalf("repaired config max_retries=%d", c.MaxRetries)
 	}
 	joined := strings.Join(skipped, ",")
-	if !strings.Contains(joined, "max_retriez") || !strings.Contains(joined, "history_size") {
+	if !strings.Contains(joined, "max_retriez") {
 		t.Fatalf("skipped = %v", skipped)
 	}
 	body, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(body, []byte("max_retriez")) || bytes.Contains(body, []byte("history_size: 0\n")) {
+	if bytes.Contains(body, []byte("max_retriez")) {
 		t.Fatalf("repaired file still contains dropped keys:\n%s", body)
 	}
 	if !bytes.Contains(body, []byte("max_retries: 3\n")) {
 		t.Fatalf("repaired file lost the valid override:\n%s", body)
+	}
+}
+
+// Boot repair must not manufacture a default for an invalid recognized value:
+// that is policy, not debris. The source stays byte-identical for the operator
+// to fix, including a mixed valid/invalid SSRF allowlist (the whole field is
+// one value; salvaging the valid prefix is not a valid policy).
+func TestLoadFileRepairRejectsInvalidValueWithoutRewrite(t *testing.T) {
+	for _, tc := range []struct{ name, raw string }{
+		{"invalid history size", "max_retries: 3\nmax_retriez: 9\nhistory_size: 0\n"},
+		{"mixed allowlist", "allowed_base_urls:\n  - https://api.example.com\n  - api.openai.com\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "c.yaml")
+			if err := os.WriteFile(p, []byte(tc.raw), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if cfg, skipped, err := LoadFileRepair(p); err == nil || cfg != nil || skipped != nil {
+				t.Fatalf("LoadFileRepair() = %+v, %v, %v; want the invalid value rejected", cfg, skipped, err)
+			}
+			got, err := os.ReadFile(p)
+			if err != nil || !bytes.Equal(got, []byte(tc.raw)) {
+				t.Fatalf("repair rewrote the invalid source: %v %q", err, got)
+			}
+			if _, err := os.Stat(p + invalidConfigSuffix); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("repair moved the invalid source aside: %v", err)
+			}
+		})
 	}
 }
 
@@ -1332,7 +1382,9 @@ func TestValidateProvidersErrorDeterministic(t *testing.T) {
 func TestLoadFileStrictFailsClosed(t *testing.T) {
 	for _, tc := range []struct{ name, body string }{
 		{"invalid allowlist", "allowed_base_urls:\n  - api.openai.com\n"},
+		{"mixed allowlist", "allowed_base_urls:\n  - https://api.example.com\n  - api.openai.com\n"},
 		{"invalid listen", "listen: 8080\n"},
+		{"invalid history size", "history_size: 0\n"},
 		{"syntax error", "listen: [\n"},
 		{"nested duplicate", "providers:\n  alpha:\n    models_path: a\n    models_path: b\n"},
 	} {
@@ -1404,8 +1456,9 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 			if _, _, err := LoadFileRepair(p); err == nil {
 				t.Fatalf("LoadFileRepair accepted bad allowed_base_urls entry %q", tc.entry)
 			}
-			if _, statErr := os.Stat(p); statErr != nil {
-				t.Fatalf("invalid allowlist source was rewritten/removed: %v", statErr)
+			got, readErr := os.ReadFile(p)
+			if readErr != nil || !bytes.Equal(got, []byte(yaml)) {
+				t.Fatalf("invalid allowlist source was rewritten/removed: %v %q", readErr, got)
 			}
 		})
 	}
