@@ -712,6 +712,7 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 		{"logit_bias over cap", `{"model":"m","logit_bias":` + object(requestMetadataMaxElements+1) + `}`, true},
 		{"escaped messages key", `{"mess\u0061ges":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
 		{"case-folded messages key", `{"Messages":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
+		{"escaped case-folded messages key", `{"\u004dESSAGES":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
 		{"case-folded logit_bias key", `{"LOGIT_BIAS":` + object(requestMetadataMaxElements+1) + `}`, true},
 		{"separator key is not a messages field", `{"Mes-sages":` + array(requestMetadataMaxElements+1, `{}`) + `}`, false},
 		{"duplicate logit_bias objects accumulate", `{"logit_bias":` + objectRange(0, requestMetadataMaxElements/2+1) + `,"logit_bias":` + objectRange(requestMetadataMaxElements/2+1, requestMetadataMaxElements/2+1) + `}`, true},

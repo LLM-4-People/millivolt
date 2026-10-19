@@ -134,7 +134,10 @@ are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for either spelling (`max_tokens` or
-`max_completion_tokens`). Invalid JSON is
+`max_completion_tokens`). A valid request above 10,000 messages, tools, or
+distinct `logit_bias` entries is rejected with HTTP 400 before an upstream
+send. A message content array above 4,096 parts still relays unchanged but
+contributes no dashboard composition counts. Invalid JSON is
 passed through on the nontranslated path. The proxy can retry transient
 transport failures, 429 and 5xx before returning the final response, and
 retryable in-band error events on an open stream before any generation
