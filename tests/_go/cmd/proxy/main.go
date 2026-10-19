@@ -997,14 +997,30 @@ func TestApplySnapshotLimitGatedOnDurableStore(t *testing.T) {
 // config values, no WriteTimeout - it would cut off long-lived SSE streams)
 // went unnoticed. The tie is asserted behaviorally: the context the server
 // hands its listeners IS the caller's srvCtx, so cancelling it is observable
-// by every connection the server accepted.
+// by every connection the server accepted. The delivery wrapper is asserted
+// through the constructor too: Handler must be deadlineHandler, not the raw
+// handler, and a request must still reach the wrapped handler.
 func TestNewHTTPServerContract(t *testing.T) {
 	cfg := config.Default()
 	cfg.ReadHeaderTimeout = 3 * time.Second
 	cfg.IdleTimeout = 4 * time.Minute
 	srvCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	srv := newHTTPServer(http.NotFoundHandler(), cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Fixture-Handler", "reached")
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := newHTTPServer(next, cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
+	wrapped, ok := srv.Handler.(deadlineHandler)
+	if !ok {
+		t.Fatalf("Handler = %T, want the deadlineHandler delivery wrapper", srv.Handler)
+	}
+	rr := httptest.NewRecorder()
+	wrapped.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "http://proxy.example/", nil))
+	if rr.Code != http.StatusNoContent || rr.Header().Get("X-Fixture-Handler") != "reached" {
+		t.Fatalf("wrapped handler = status %d header %q, want the constructor's handler reached",
+			rr.Code, rr.Header().Get("X-Fixture-Handler"))
+	}
 	if srv.ReadHeaderTimeout != cfg.ReadHeaderTimeout || srv.IdleTimeout != cfg.IdleTimeout {
 		t.Fatalf("timeouts = (%v, %v), want the boot config's (%v, %v)",
 			srv.ReadHeaderTimeout, srv.IdleTimeout, cfg.ReadHeaderTimeout, cfg.IdleTimeout)
