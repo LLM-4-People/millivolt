@@ -9623,6 +9623,117 @@ async function main() {
       }
     }
 
+    // F10: a grown visible window keeps server/day order. Older page rows
+    // append below the loaded history; a live row with no newer neighbor still
+    // paints at the top. Day dividers move with their opener, not the insert.
+    {
+      const saved = {data: w.eval('lastData'), page: w.eval('dashCfg.log_rows'), fill: w.scheduleLogFill};
+      w.scheduleLogFill = () => {};
+      const growMid = new Date(); growMid.setHours(0, 0, 0, 0);
+      const growAt = day => growMid.getTime() - day * 86400000 + 3600000;
+      const grow = [
+        mkRec('grow-old', 200, growAt(2)),
+        mkRec('grow-yday', 200, growAt(1)),
+        mkRec('grow-today1', 200, growAt(0)),
+        mkRec('grow-today2', 200, growAt(0) + 3600000),
+        mkRec('grow-today3', 200, growAt(0) + 7200000),
+      ];
+      w.__growData = {records: grow, counters: {}, _rev: 0};
+      w.eval('logArchive = []; logLimit = 0; dashCfg.log_rows = 2; lastData = window.__growData; ' +
+        'renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+      check('window growth: first paint honors the page cap',
+        rows().map(r => r.dataset.id).join() === 'grow-today3,grow-today2');
+      w.eval('dashCfg.log_rows = 5; renderRequestsIncremental(derive(lastData).scopedRecs);');
+      check('window growth: older rows append in server order',
+        rows().map(r => r.dataset.id).join() === 'grow-today3,grow-today2,grow-today1,grow-yday,grow-old');
+      const grownSeps = [...d.querySelectorAll('#tbl-requests tr.day-sep')];
+      check('window growth: day dividers stay attached to their openers',
+        grownSeps.length === 3 &&
+        grownSeps[0].nextElementSibling?.dataset.id === 'grow-today3' &&
+        grownSeps[1].nextElementSibling?.dataset.id === 'grow-yday' &&
+        grownSeps[2].nextElementSibling?.dataset.id === 'grow-old');
+      w.resetLogWindow();
+      w.eval('dashCfg.log_rows = ' + saved.page + ';');
+      w.renderAll(saved.data);
+      w.scheduleLogFill = saved.fill;
+      delete w.__growData;
+    }
+
+    // F11: a live record that arrives while an older page is in flight is not
+    // history. It must paint at the top when the page lands, not be appended
+    // under the loaded rows.
+    {
+      const saved = {data: w.eval('lastData'), page: logPage, fill: w.scheduleLogFill};
+      w.scheduleLogFill = () => {};
+      const base = 1700005000000;
+      const ring = [
+        mkRec('race-r1', 200, base + 1000),
+        mkRec('race-r2', 200, base + 2000),
+        mkRec('race-r3', 200, base + 3000),
+      ];
+      w.__raceData = {records: ring, counters: {}, _rev: 0};
+      w.eval('logArchive = []; logLimit = 0; dashCfg.log_rows = 60; lastData = window.__raceData; ' +
+        'logFetching = false; logExhausted = false; logCursor = null; ' +
+        'renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+      let release = null;
+      logPageGate = new Promise(resolve => { release = resolve; });
+      logPage = {records: [mkRec('race-old', 200, base)], more: false, cursor_ms: base, cursor_id: 'race-old'};
+      try {
+        w.fetchOlderLog();
+        await sleep(10);
+        // The live event lands in the ring while the page is still held; its
+        // scheduled paint has not run yet.
+        ring.push(mkRec('race-live', 200, base + 4000));
+        w.eval('bumpRecords(); bumpData();');
+        check('the racing live row is not painted while the page is held',
+          !rows().some(tr => tr.dataset.id === 'race-live') && w.eval('logFetching'));
+        release();
+        await settleUntil(() => rows().some(tr => tr.dataset.id === 'race-old'));
+        check('a live row racing an older page paints at the top',
+          rows().map(tr => tr.dataset.id).join() === 'race-live,race-r3,race-r2,race-r1,race-old');
+        check('the racing live row is never duplicated under loaded history', rows().length === 5);
+      } finally {
+        logPageGate = null;
+        logPage = saved.page;
+        w.resetLogWindow();
+        w.renderAll(saved.data);
+        w.scheduleLogFill = saved.fill;
+        delete w.__raceData;
+      }
+    }
+
+    // F12: repeated live arrivals never expand an already-expanded window.
+    // Expansion belongs to the scroll/fill owner; a live paint only fills or
+    // ages out rows inside the fixed budget.
+    {
+      const saved = {data: w.eval('lastData'), page: w.eval('dashCfg.log_rows'), fill: w.scheduleLogFill};
+      w.scheduleLogFill = () => {};
+      const base = 1700006000000;
+      const ring = Array.from({length: 120}, (_, i) =>
+        mkRec('bound-base' + String(i).padStart(3, '0'), 200, base + i * 1000));
+      w.__boundData = {records: ring, counters: {}, _rev: 0};
+      w.eval('logArchive = []; logLimit = 120; dashCfg.log_rows = 60; lastData = window.__boundData; ' +
+        'renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+      let maxRows = 0;
+      for (let i = 0; i < 50; i++) {
+        ring.push(mkRec('bound-live' + String(i).padStart(2, '0'), 200, base + 120000 + i));
+        w.eval('bumpRecords()');
+        w.renderRequestsIncremental(ring);
+        maxRows = Math.max(maxRows, rows().length);
+      }
+      check('repeated live arrivals keep the expanded window bounded',
+        maxRows === 120 && rows().length === 120 && w.eval('logLimit') === 120 &&
+        w.eval('logHTML.size') === 120);
+      check('the bounded window keeps the newest live rows at the top',
+        rows()[0].dataset.id === 'bound-live49' &&
+        rows()[rows().length - 1].dataset.id === 'bound-base050');
+      w.resetLogWindow();
+      w.eval('dashCfg.log_rows = ' + saved.page + ';');
+      w.renderAll(saved.data);
+      w.scheduleLogFill = saved.fill;
+      delete w.__boundData;
+    }
+
     // F3: the chart payload carries its window/scope identity. A changed key
     // clears the old payload and paints the skeleton before the response; a
     // failed new key shows an honest failure with no old totals.
@@ -9969,6 +10080,72 @@ async function main() {
       const restored = typeof w.restoreFocus === 'function' ? w.restoreFocus(token) : false;
       check('the shared focus restore never steals focus from a moved operator',
         !!token && restored === false && d.activeElement === other);
+    }
+
+    // F13: owner cleanup and stable focus identities. A competing prompt must
+    // not leave the Settings veil/pressed state behind; removing a scope chip
+    // must land on its surviving neighbor/root; a drawer whose initiating row
+    // was replaced must return focus to the equivalent control.
+    {
+      const sheet = d.getElementById('settings-sheet');
+      const veil = d.getElementById('settings-veil');
+      const settingsBtn = d.getElementById('btn-settings');
+      if (w.settingsIsOpen()) w.closeSettings(true);
+      w.openSettings();
+      await settleUntil(() => w.settingsIsOpen() && sheet.classList.contains('open'));
+      await sleep(20);
+      const prompt = w.askOperatorToken();
+      await sleep(0);
+      check('an operator prompt preempts open Settings without a stale veil or pressed trigger',
+        !w.settingsIsOpen() && !sheet.classList.contains('open') && !veil.classList.contains('open') &&
+        settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        !d.getElementById('operator-dialog').hidden);
+      d.querySelector('#operator-dialog [data-operator-auth="cancel"]').click();
+      await prompt;
+      check('the Settings takeover cleanup survives prompt cancel',
+        !sheet.classList.contains('open') && !veil.classList.contains('open') &&
+        settingsBtn.getAttribute('aria-pressed') === 'false' &&
+        d.getElementById('operator-dialog').hidden && !d.querySelector('main').hasAttribute('inert'));
+    }
+    {
+      w.navigateTo([{dim: 'provider', id: 'chip-focus.example'}, {dim: 'client', id: 'c'}]);
+      const chips = () => [...d.querySelectorAll('#xp-scope .chip-x')];
+      await settleUntil(() => chips().length === 2);
+      const first = chips()[0];
+      first.focus();
+      first.click();
+      const survivor = await settleUntil(() => chips().length === 1 && d.activeElement === chips()[0]);
+      check('removing a scope chip focuses the surviving neighbor',
+        survivor && chips()[0].dataset.chipDim === 'client');
+      const last = chips()[0];
+      last.focus();
+      last.click();
+      const rootFocused = await settleUntil(() => d.activeElement === d.querySelector('#xp-scope .bc-root'));
+      check('removing the last scope chip falls back to the all-traffic root',
+        rootFocused && chips().length === 0);
+      w.navigateTo([]);
+      await settleUntil(() => w.eval('explorerFilters().length') === 0);
+    }
+    {
+      const base = 1700007000000;
+      const rowBtn = () => d.querySelector('#tbl-requests tr.exp-row[data-id="focus-drawer"] button[data-open-req]');
+      fire('begin', { record: { ...mkRec('focus-drawer', 0, base) }, in_flight: 1 });
+      await settleUntil(() => !!rowBtn());
+      rowBtn().focus();
+      rowBtn().click();
+      await settleUntil(() => !d.getElementById('drawer').hidden);
+      const oldBtn = rowBtn();
+      fire('end', { record: { ...mkRec('focus-drawer', 200, base), duration_ms: 100 }, in_flight: 0 });
+      await settleUntil(() => {
+        const next = rowBtn();
+        return !!next && next !== oldBtn && !next.closest('tr').classList.contains('live-row');
+      });
+      check('the drawer initiating control was replaced while the drawer stayed open',
+        !oldBtn.isConnected && !!rowBtn());
+      const newBtn = rowBtn();
+      w.closeDrawer();
+      check('closing the drawer after row replacement restores the equivalent control',
+        d.activeElement === newBtn);
     }
 
     // F9: a page opened in a hidden tab must not arm the clock or poll before
