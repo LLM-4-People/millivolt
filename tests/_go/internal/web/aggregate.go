@@ -999,6 +999,138 @@ func TestExplorerErrorTotalAndCardNShareAffectedRequestUnit(t *testing.T) {
 	}
 }
 
+// TestExplorerErrorTotalCountsRecoveredQualityFailures pins the error
+// gallery's denominator to the union of affected requests its cards represent,
+// not the narrower Record.IsError set. An absorbed quality failure (final 200,
+// attempt 200 with a structured error type) is an error event and a card
+// membership, but IsError does not count it because no status or absorbed
+// server failure occurred. The denominator must still include it exactly once,
+// or a recovered card's N can exceed the denominator (or lose its share
+// entirely when no final error exists).
+func TestExplorerErrorTotalCountsRecoveredQualityFailures(t *testing.T) {
+	base := time.UnixMilli(1_800_000_000_000)
+	quality := func(id string, at time.Time, attempts int) *metrics.Record {
+		r := &metrics.Record{ID: id, Provider: "p", Model: "m", Start: at, StatusCode: 200}
+		for i := range attempts {
+			r.Attempts = append(r.Attempts, metrics.RetryAttempt{
+				StatusCode: 200, ErrorType: "empty_completion", ErrorMsg: "empty",
+				At: at.Add(time.Duration(i) * time.Millisecond),
+			})
+		}
+		return r
+	}
+	errorGroup := func(t *testing.T, p map[string]any, name string) map[string]any {
+		t.Helper()
+		for _, raw := range p["groups"].([]any) {
+			g := raw.(map[string]any)
+			if g["name"] == name {
+				return g
+			}
+		}
+		t.Fatalf("missing error card %q in %v", name, p["groups"])
+		return nil
+	}
+
+	t.Run("recovered-only", func(t *testing.T) {
+		s := testStore(t)
+		s.Record(quality("recovered-1", base, 1))
+		s.Record(quality("recovered-2", base.Add(time.Second), 2))
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		api := NewAggAPI(metrics.NewBuffer(1), s, time.Second)
+		p := get(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=error")
+		if p["error_total"] != float64(2) {
+			t.Fatalf("error_total = %v, want 2 affected recovered requests", p["error_total"])
+		}
+		g := errorGroup(t, p, "empty_completion|200|empty")
+		if g["n"] != float64(2) || g["err_events"] != float64(3) {
+			t.Fatalf("recovered card = %v, want N=2 err_events=3", g)
+		}
+		if g["n"].(float64) > p["error_total"].(float64) {
+			t.Fatalf("recovered card N %v exceeds error_total %v", g["n"], p["error_total"])
+		}
+	})
+
+	t.Run("mixed-final-and-absorbed", func(t *testing.T) {
+		s := testStore(t)
+		s.Record(quality("recovered-1", base, 1))
+		s.Record(quality("recovered-2", base.Add(time.Second), 2))
+		s.Record(&metrics.Record{
+			ID: "final", Provider: "p", Model: "m", Start: base.Add(2 * time.Second),
+			StatusCode: 500, ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "boom",
+		})
+		// One request carrying both a final failure and an absorbed quality
+		// failure must join the union once even though it appears on two cards.
+		s.Record(&metrics.Record{
+			ID: "combined", Provider: "p", Model: "m", Start: base.Add(3 * time.Second),
+			StatusCode: 500, ErrorType: "upstream", ErrorCode: "500", ErrorMsg: "boom",
+			Attempts: []metrics.RetryAttempt{{
+				StatusCode: 200, ErrorType: "empty_completion", ErrorMsg: "empty",
+				At: base.Add(3 * time.Second),
+			}},
+		})
+		if err := s.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		api := NewAggAPI(metrics.NewBuffer(1), s, time.Second)
+		p := get(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=error")
+		if p["error_total"] != float64(4) {
+			t.Fatalf("error_total = %v, want 4 distinct affected requests (card Ns total 5, one shared)", p["error_total"])
+		}
+		recovered := errorGroup(t, p, "empty_completion|200|empty")
+		final := errorGroup(t, p, "upstream|500|boom")
+		if recovered["n"] != float64(3) || final["n"] != float64(2) {
+			t.Fatalf("mixed cards = %v / %v, want N=3 and N=2", recovered, final)
+		}
+		if recovered["err_events"] != float64(4) || final["err_events"] != float64(2) {
+			t.Fatalf("mixed events = %v / %v, want 4 and 2", recovered["err_events"], final["err_events"])
+		}
+		for name, g := range map[string]map[string]any{"recovered": recovered, "final": final} {
+			if g["n"].(float64) > p["error_total"].(float64) {
+				t.Fatalf("%s card N %v exceeds error_total %v", name, g["n"], p["error_total"])
+			}
+		}
+	})
+}
+
+// TestExplorerToolCardsCountAffectedRequests pins tool cards to affected
+// requests for N/share while keeping the calls KPI in call units. A nonstream
+// response repeats a tool name once per call, so three calls to one tool in a
+// single request must not produce N=3, a share above 100%, or a tripled calls
+// KPI.
+func TestExplorerToolCardsCountAffectedRequests(t *testing.T) {
+	s := testStore(t)
+	base := time.UnixMilli(1_800_000_000_000)
+	s.Record(&metrics.Record{
+		ID: "three-calls", Provider: "p", Model: "m", Start: base, StatusCode: 200,
+		ToolCalls: 3, ToolNames: []string{"lookup", "lookup", "lookup"},
+	})
+	s.Record(&metrics.Record{
+		ID: "one-call", Provider: "p", Model: "m", Start: base.Add(time.Second), StatusCode: 200,
+		ToolCalls: 1, ToolNames: []string{"lookup"},
+	})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	api := NewAggAPI(metrics.NewBuffer(1), s, time.Second)
+	p := get(t, http.HandlerFunc(api.HandleAggExplorer), "/metrics/agg/explorer?dim=tool")
+	if p["total"] != float64(2) {
+		t.Fatalf("total = %v, want 2 requests", p["total"])
+	}
+	groups := p["groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("tool groups = %v, want one lookup card", groups)
+	}
+	g := groups[0].(map[string]any)
+	if g["name"] != "lookup" || g["n"] != float64(2) || g["tools"] != float64(4) {
+		t.Fatalf("tool card = %v, want affected N=2 and calls=4", g)
+	}
+	if g["n"].(float64) > p["total"].(float64) {
+		t.Fatalf("tool card N %v exceeds total %v", g["n"], p["total"])
+	}
+}
+
 // The per-entity blended $/Mtok must exclude 0-cost records exactly like the
 // KPI band's blended denominators do - an entity mixing priced and unpriced
 // traffic (a client hitting both a priced provider and runinfra) must not

@@ -170,19 +170,31 @@ func TestExplorerFoldOccurrenceSemantics(t *testing.T) {
 			_ = f.fold(&c)
 		}
 		p := f.payload()
-		if p.Total != 2 || p.ErrorTot != 1 || p.Rail[dim] != 1 || len(p.Groups) != 1 {
+		wantErrTotal := int64(1)
+		if dim == "error" {
+			// Both rows carry an error card membership, including the
+			// recovered row whose final status is 200.
+			wantErrTotal = 2
+		}
+		if p.Total != 2 || p.ErrorTot != wantErrTotal || p.Rail[dim] != 1 || len(p.Groups) != 1 {
 			t.Fatalf("%s scope/rail = %+v", dim, p)
 		}
 		g := p.Groups[0]
-		wantN := int64(3)
+		wantCost := .1 // one affected request reports .1; b reports 0
 		if dim == "error" {
-			wantN = 2
+			wantCost = .2 // error events keep occurrence multiplicity
+		}
+		if g.N != 2 || g.Cost != wantCost || g.ErrFinal != 1 {
+			t.Fatalf("%s affected-request aggregation = %+v", dim, g)
+		}
+		if dim == "error" {
 			if g.ErrEvents != 3 || g.LastMs != 2100 || g.Code != "500" {
 				t.Fatalf("error occurrence metadata = %+v", g)
 			}
-		}
-		if g.N != wantN || g.Cost != .2 || g.ErrFinal != 1 {
-			t.Fatalf("%s occurrence aggregation = %+v", dim, g)
+		} else if g.Tools != 3 {
+			// Two calls on request a plus one on request b, summed once per
+			// affected request rather than once per repeated tool name.
+			t.Fatalf("tool calls = %d, want 3", g.Tools)
 		}
 	}
 }
@@ -208,17 +220,18 @@ func TestExplorerFoldPendingDedupeIsBounded(t *testing.T) {
 	}
 }
 
-// Metric sample counting follows the projected memberships exactly (the
-// error dim counts affected requests; tool occurrences count duplicates),
-// and the per-dimension membership owner retains one entry per projected
-// membership (single id per row for single-valued dims, CSR for multi).
+// Metric sample counting follows the projected memberships exactly (error
+// keeps failure-event occurrences; tool keeps one sample per affected
+// request), and the per-dimension membership owner retains one entry per
+// projected membership (single id per row for single-valued dims, CSR for
+// multi).
 func TestExplorerFoldMetricCountsFollowProjectedMemberships(t *testing.T) {
 	rows := explorerFoldFixtures()
 	p := explorerProjection(rows)
 	mcz := &modelCanonizer{exec: config.CompileModelRules([]config.ModelRule{{Mode: config.ModelRuleLower}}), memo: make(map[string]string)}
 	wants := map[string]map[string]int{
 		"model": {"model-a": 137},
-		"tool":  {"lookup": 138, "read": 69}, // duplicate occurrences count
+		"tool":  {"lookup": 69, "read": 69}, // repeated tool names in a row are one membership
 		"error": {"upstream|500|failure": 56, "timeout|408|": 28},
 	}
 	for dim, counts := range wants {
@@ -283,11 +296,11 @@ func TestExplorerRankedMetricsMergeExtras(t *testing.T) {
 		_ = f.fold(&extra)
 		g := f.payload().Groups[0]
 		wantN, wantP50, wantP95 := int64(4), 25.0, 89.5
-		if dim != "provider" {
+		if dim == "error" {
+			// Error samples still follow failure-event occurrences: row 1's
+			// repeated entry contributes a second sample.
 			wantP50, wantP95 = 20, 86
-			if dim == "tool" {
-				wantN = 5
-			} else if g.ErrEvents != 5 {
+			if g.ErrEvents != 5 {
 				t.Fatalf("error occurrences = %d, want 5", g.ErrEvents)
 			}
 		}
@@ -440,9 +453,10 @@ func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
 		}
 	})
 
-	t.Run("tool/duplicate-occurrences", func(t *testing.T) {
+	t.Run("tool/affected-vs-calls", func(t *testing.T) {
 		rows := make([]contrib, 40)
 		wantTTFT, wantTPS := make(map[string][]float64), make(map[string][]float64)
+		var wantCalls int64
 		for i := range rows {
 			ttft, tps := int64(10*i+1), float64(i+1)/4
 			var tools []string
@@ -453,7 +467,15 @@ func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
 			}
 			rows[i] = contrib{id: fmt.Sprint(i), start: int64(i+1) * 1000, status: 200,
 				toolsL: tools, tools: int64(len(tools)), ttft: ttft, tps: tps}
+			wantCalls += int64(len(tools))
+			// Repeated names are calls, not extra affected requests: one
+			// percentile sample per request per tool card.
+			seen := make(map[string]struct{}, len(tools))
 			for _, name := range tools {
+				if _, duplicate := seen[name]; duplicate {
+					continue
+				}
+				seen[name] = struct{}{}
 				wantTTFT[name], wantTPS[name] = append(wantTTFT[name], float64(ttft)), append(wantTPS[name], tps)
 			}
 		}
@@ -466,8 +488,8 @@ func TestExplorerPayloadCompactSelectionEquivalence(t *testing.T) {
 			}
 		}
 		got := f.payload()
-		if len(got.Groups) != xpNodeCap || got.Groups[0].Name != "hot" || got.Groups[0].N != 70 {
-			t.Fatalf("duplicate tool occurrences = %+v", got.Groups[0])
+		if len(got.Groups) != xpNodeCap || got.Groups[0].Name != "hot" || got.Groups[0].N != 40 || got.Groups[0].Tools != wantCalls {
+			t.Fatalf("affected tool card = %+v, want hot N=40 calls=%d", got.Groups[0], wantCalls)
 		}
 		for _, group := range got.Groups {
 			p50, p95 := explorerPercentilesFromOccurrences(wantTTFT[group.Name])

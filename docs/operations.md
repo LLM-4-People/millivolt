@@ -1123,8 +1123,12 @@ Status, Errors and Keys. Their meanings are server-owned: model grouping and
 time-bucket membership are not browser guesses. Conversations can show declared
 parents and main/sub/unresolved counts; read the
 [lineage contract](protocol.md#main-and-sub-conversations) before interpreting them.
-Tools and error occurrences can have multiple memberships per request, while
-error/429 health badges count distinct affected requests.
+Tools and error signatures can each have multiple memberships per request.
+Tool cards count affected requests for N and share, with request-level card
+metrics counted once per affected request; their calls KPI separately sums
+request ToolCalls, so repeated same-name calls do not inflate the request count.
+A request using several tools contributes to each tool card. Error/429 health
+badges and every gallery share use distinct affected requests.
 
 The [visual guide](dashboard.md) covers every timeline and its controls. Overview
 is the summary: it carries no plot, and its tiles take the whole card (requests
@@ -1192,9 +1196,14 @@ record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
 received and aborted around), and counts as the provider error it is. Zero
 explorer health badges are hidden independently. Error-dimension card
-headlines count failure events (final plus absorbed), while card N and the
-gallery share denominator `error_total` count affected requests. A card's
-share is therefore N / `error_total` and can never exceed 100%. Do not treat
+headlines count failure events (final plus absorbed), while card N counts
+distinct affected requests. The gallery share denominator `error_total` is the
+union of affected requests represented by the error cards, so a card's share
+is N / `error_total` and can never exceed 100%. This denominator includes
+recovered quality failures whose final status is not an error (for example an
+absorbed empty-completion attempt), counting each affected request once even
+when no request ends in an error status. For every other dimension
+`error_total` remains the canonical affected-request error count. Do not treat
 every displayed error number as the same metric.
 
 The explorer gallery renders at most 24 cards. Its fold tracks exact

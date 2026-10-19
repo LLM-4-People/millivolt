@@ -505,9 +505,9 @@ function watchGallery() {
 }
 
 // xpNodeCard renders one gallery node-card from the server's entity aggregate
-// (jsonEnt): share of all requests (error dim: of all failure events) since
-// inception + the per-dimension KPI set (`nodeKpis`). No client-side math
-// beyond formatting - percentiles arrive precomputed.
+// (jsonEnt): share of all requests (error dim: of all error-affected requests)
+// since inception + the per-dimension KPI set (`nodeKpis`). No client-side
+// math beyond formatting - percentiles arrive precomputed.
 function kpiCell(label, inner, title) {
   const t = title ? ` title="${escapeHtml(title)}"` : '';
   return `<span${t}>${escapeHtml(label)} ${inner}</span>`;
@@ -609,7 +609,8 @@ function xpNodeCard(st, e, payload) {
   // A request may have received 429 and a genuine failure; 429 alone is not
   // an error. Hide zero counts; separators only join visible signals.
   // Error-dimension headlines count failure events (final + absorbed), while
-  // the share below stays in affected-request units so the two can never mix.
+  // card N, the share numerator and the share denominator all stay in
+  // affected-request units so the two can never mix.
   const signals = [
     e.err_final > 0 ? `<span class="xp-node-err" title="Requests with a genuine failure, including recovered failures; 429 is not an error">${fmt(e.err_final)} err</span>` : '',
     e.rate_limit_requests > 0 ? `<span class="xp-node-rate" title="${escapeHtml(X429_COUNTING_RULE)}">${fmt(e.rate_limit_requests)} ×429</span>` : '',
@@ -620,8 +621,10 @@ function xpNodeCard(st, e, payload) {
   // never measured: no share row at all, never a fabricated 0%.
   let shareFrac = null, shareLabel = '';
   if (dim === 'error') {
-    // error_total counts affected requests exactly like card N; using the
-    // occurrence headline here let retried failures push a share past 100%.
+    // error_total is the union of affected requests represented by the error
+    // cards (final plus absorbed/recovered), exactly like card N. Using either
+    // failure events or only Record.IsError requests made the share disappear
+    // or exceed 100%.
     if (payload.error_total) { shareFrac = e.n / payload.error_total; shareLabel = 'of error requests'; }
   } else if (payload.total) {
     shareFrac = e.n / payload.total;

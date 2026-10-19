@@ -1479,14 +1479,14 @@ func statusCodeEquals(code int, text string) bool {
 type jsonEnt struct {
 	Conversation      *conversationInfo `json:"conversation,omitempty"`
 	Name              string            `json:"name"`
-	N                 int64             `json:"n"`
+	N                 int64             `json:"n"` // affected requests for error/tool cards, occurrences otherwise
 	Cost              float64           `json:"cost"`
 	In                int64             `json:"in"`
 	Out               int64             `json:"out"`
 	Cache             int64             `json:"cache"`
 	ErrFinal          int64             `json:"err_final"`
 	RateLimitRequests int64             `json:"rate_limit_requests"`
-	Tools             int64             `json:"tools"`
+	Tools             int64             `json:"tools"` // ToolCalls summed once per affected request: calls, not requests
 	// Blended $/Mtok over this entity's COST-REPORTING in+out tokens
 	// (Totals' CostInOut rule, mirrored per entity) - nil when the
 	// denominator is 0. An unpriced provider's tokens never dilute it.
@@ -1495,7 +1495,7 @@ type jsonEnt struct {
 	TTFTP95     *float64 `json:"ttft_p95"`
 	TPSP50      *float64 `json:"tps_p50"`
 	TPSP95      *float64 `json:"tps_p95"`
-	ErrEvents   int64    `json:"err_events"`
+	ErrEvents   int64    `json:"err_events"` // error-dimension failure events (final plus absorbed)
 	Code        string   `json:"code"`
 	LastMs      int64    `json:"last_ms"`
 	// Synthetic marks the overflow card. Its Name is a display label, not a
@@ -1685,7 +1685,14 @@ type explorerFold struct {
 	seen         map[string]struct{}
 	total        int64
 	errTot       int64
-	scope        scopePayload
+	// errAffected is the error dimension's share denominator: the union of
+	// affected requests represented by its cards. Every contrib is one request
+	// folded exactly once, so counting rows with at least one error entry is
+	// the union without a second history-scale ID set. It is deliberately
+	// broader than errTot (Record.IsError): an absorbed quality failure is an
+	// error card membership even when the final status is 200.
+	errAffected int64
+	scope       scopePayload
 }
 
 func newExplorerFold(dim, statusCode string, allFS []scopeFilter) *explorerFold {
@@ -1804,6 +1811,13 @@ func (e *explorerFold) fold(c *contrib) error {
 		if c.isErr {
 			e.errTot++
 		}
+		// The error gallery denominator is the union of the requests its cards
+		// represent. Each contribution is one request, so this counts every
+		// affected request exactly once regardless of how many failure events
+		// or error signatures it carries.
+		if e.dimIndex == dimError && len(c.ent) > 0 {
+			e.errAffected++
+		}
 	}
 	if !inRail && !inGroup {
 		return nil
@@ -1880,10 +1894,15 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 			e.groups[dimKey] = g
 		}
 	}
-	// Health counts are affected requests, while tool/error occurrences still
-	// retain their existing event, sample, cost and token multiplicity. Error
-	// groups need the affected-ID set for their headline; the overflow bucket
-	// only needs the last ID because one row's visits are contiguous.
+	// Health counts are affected requests. Error cards keep occurrence
+	// multiplicity for ErrEvents, samples, cost and tokens, while their N is
+	// the distinct affected-request count. Tool cards fold one contribution
+	// per request per tool name (a nonstream response repeats a name once per
+	// call), so their N, share and request-level accumulators are
+	// request-based while the calls KPI still sums ToolCalls. Error groups need
+	// the affected-ID set for their headline; the overflow bucket only needs
+	// the last ID because one row's visits are contiguous. Tool duplicates are
+	// contiguous too, so the same last-ID guard dedupes them.
 	var firstRequest bool
 	if e.dimIndex == dimError && g != &e.other {
 		if g.affected == nil {
@@ -1900,6 +1919,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 		if e.dimIndex == dimError && firstRequest {
 			e.otherAffected++
 		}
+	}
+	if e.dimIndex == dimTool && !firstRequest {
+		return g, nil
 	}
 	g.n++
 	var err error
@@ -1952,7 +1974,8 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 		}
 	}
 	// Durable samples stay in immutable metric order. Only raw ring/pending
-	// extras need per-group values; counts preserve occurrence multiplicity.
+	// extras need per-group values; error counts keep occurrence multiplicity
+	// while every other dimension contributes one sample per affected request.
 	if validMetricSample(c.ttft) {
 		g.ttftN++
 		if c.rowIndex == 0 {
@@ -1968,8 +1991,9 @@ func (e *explorerFold) foldGroup(dimKey uint32, c *contrib) (*entAcc, error) {
 	return g, nil
 }
 
-// groupCount is a card's headline count: affected requests for errors,
-// occurrences otherwise. Ranking and the wire N field read the same owner.
+// groupCount is a card's headline count: affected requests for error and tool
+// cards, occurrences for every other dimension. Error keeps event occurrences
+// separately in ErrEvents. Ranking and the wire N field read the same owner.
 func (e *explorerFold) groupCount(g *entAcc) int {
 	if e.dimIndex == dimError {
 		if g == &e.other {
@@ -2044,6 +2068,18 @@ func (e *explorerFold) selectedVisitor(selected *explorerSelectedGroups) func(ro
 	}
 }
 
+// errorTotal is the explorer's error_total field. The error breakdown uses the
+// union of affected requests represented by its cards, the same unit as card N
+// and share; every other dimension keeps the canonical Record.IsError count.
+// Keeping the units identical is what guarantees an error card's share is at
+// most 100% without a client-side clamp hiding a denominator mismatch.
+func (e *explorerFold) errorTotal() int64 {
+	if e.dimIndex == dimError {
+		return e.errAffected
+	}
+	return e.errTot
+}
+
 func (e *explorerFold) payload() explorerPayload {
 	conversations := e.lineage.summary()
 	top := e.rankedGroups()
@@ -2100,7 +2136,7 @@ func (e *explorerFold) payload() explorerPayload {
 	for dim, name := range dimensionNames {
 		rail[name] = e.railCount[dim]
 	}
-	return explorerPayload{Dim: e.dim, Total: e.total, ErrorTot: e.errTot, Rail: rail, Groups: ents, Scope: e.scope, Conversations: conversations}
+	return explorerPayload{Dim: e.dim, Total: e.total, ErrorTot: e.errorTotal(), Rail: rail, Groups: ents, Scope: e.scope, Conversations: conversations}
 }
 
 // HandleAggExplorer serves the per-dimension breakdown over ALL history. The

@@ -571,6 +571,16 @@ async function main() {
       multiShare.querySelector('.share-pct')?.textContent === '50.0%' &&
       errorShare(1, 1, 2).querySelector('.share-pct')?.textContent === '50.0%' &&
       errorShare(2, 4, 2).querySelector('.share-pct')?.textContent === '100.0%');
+    // Tool cards use the same affected-request unit for N/share while the
+    // calls KPI stays in call units: one request with three same-name calls is
+    // 1 req at 100%, never 3 req above the denominator, and calls reads 3.
+    const toolShare = d.createElement('div');
+    toolShare.innerHTML = w.xpNodeCard({activeDim:'tool',filters:[]},
+      {...entity, name:'lookup', n:1, tools:3}, {total:1, error_total:0});
+    check('tool gallery share counts affected requests while calls stays call-counted',
+      toolShare.querySelector('.xp-node-share')?.title === 'of requests' &&
+      toolShare.querySelector('.share-pct')?.textContent === '100.0%' &&
+      toolShare.querySelector('.xp-node-kpis').textContent.includes('calls 3'));
     const savedAgg=w.eval('explorerAgg');
     const trigger=d.getElementById('xp-dim-trigger'), originalStyle=w.getComputedStyle;
     try {
