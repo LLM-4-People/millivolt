@@ -53,13 +53,18 @@ const (
 
 // snapshotSidecarSuffixes is the ordered set of SQLite sidecar suffixes the
 // admission protocol moves, removes, and restores. WAL precedes SHM: the SHM
-// file is a derived index that is meaningless without its WAL.
-var snapshotSidecarSuffixes = []string{"-wal", "-shm"}
+// file is a derived index that is meaningless without its WAL. A rollback
+// journal is also a sidecar here: preflight switches the staged file to
+// journal_mode=DELETE, so a crash mid-preflight can leave a hot journal that
+// would otherwise be applied to a later, different pending snapshot.
+var snapshotSidecarSuffixes = []string{"-wal", "-shm", "-journal"}
 
 // Database-sized transient staging patterns this package creates on the live
 // database's volume. They are the only storage-owned names the startup sweep
-// may reclaim; the live database, pending slot, rollback set and state marker
-// use different names and are never matched.
+// may reclaim. The sweep also excludes every path derived from the live
+// database by identity, so a db_path whose basename matches one of these
+// patterns, its sidecars, the pending slot, the rollback set and the state
+// marker remain protected regardless of name shape.
 const (
 	snapshotStagingPattern = "millivolt-snapshot-*"
 	overlapStagingPattern  = "millivolt-overlap-*"
@@ -168,6 +173,17 @@ func removeSnapshotState(path string) error {
 // PendingSnapshotPath is the staged SQLite file Open admits for path.
 func PendingSnapshotPath(path string) string {
 	return path + pendingSnapshotSuffix
+}
+
+// RemovePendingSnapshot removes a staged pending snapshot and every SQLite
+// sidecar it owns. Sidecars go first so a crash cannot leave a stale WAL, SHM
+// or hot rollback journal beside a missing main file. It is the one owner of
+// pending-slot cleanup outside the admission protocol itself.
+func RemovePendingSnapshot(path string) error {
+	if err := removeSnapshotSidecars(path); err != nil {
+		return err
+	}
+	return removeIfExists(path)
 }
 
 // DBPath is the running database's own file: the boot-time path the store
@@ -352,11 +368,9 @@ func publishSnapshot(path string, write func(io.Writer) error) error {
 	// The incoming file is a self-contained rollback-journal database. Remove
 	// any sidecar belonging to a superseded incoming snapshot before the new
 	// main is renamed into place, so a crash can never pair the new database
-	// with stale WAL frames.
-	for _, suffix := range snapshotSidecarSuffixes {
-		if err := removeIfExists(incoming + suffix); err != nil {
-			return err
-		}
+	// with stale WAL frames or replay a hot rollback journal over it.
+	if err := removeSnapshotSidecars(incoming); err != nil {
+		return err
 	}
 	if err := os.Rename(staged, incoming); err != nil {
 		return err
@@ -385,6 +399,14 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 		return nil, err
 	}
 	incoming := path + pendingSnapshotSuffix
+	// A packed pending snapshot is a self-contained file. Any sidecar beside
+	// it is crash debris from an interrupted preflight, not part of the
+	// snapshot: a hot rollback journal would either fail the read-only
+	// integrity open or, worse, replay pages from an unrelated snapshot when
+	// opened read-write. Remove the set before inspecting the main file.
+	if err := removeSnapshotSidecars(incoming); err != nil {
+		return nil, err
+	}
 	if err := backup.CheckDatabaseFile(incoming); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -422,6 +444,15 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 // or apply to the wrong database. The initializer is the same one Open runs,
 // so a snapshot admitted here cannot fail Open's schema sequence later.
 func preflightPendingSnapshot(path string) error {
+	// The packed file is self-contained; sidecars beside it are debris from an
+	// interrupted earlier preflight. Remove them before opening: a hot journal
+	// would otherwise be applied to this (possibly different) snapshot and
+	// silently replace its pages with older data. A clean preflight close
+	// leaves none of its own, so the post-close pass below is a fence for a
+	// filesystem that retained the unlink.
+	if err := removeSnapshotSidecars(path); err != nil {
+		return err
+	}
 	params := url.Values{}
 	params.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()))
 	db, err := sql.Open("sqlite", backup.SQLiteURI(path, params))
@@ -443,11 +474,12 @@ func preflightPendingSnapshot(path string) error {
 		return err
 	}
 	// The initializer proves the writer INSERT executes, but a NULL request id
-	// would still pass that probe and then make every later history scan fail.
-	// SQLite permits NULL in a TEXT PRIMARY KEY, including tables created
+	// or another NULL value in a column scanRecord reads into a non-null Go
+	// type would still pass that probe and then make every later history scan
+	// fail. SQLite permits NULL in a TEXT PRIMARY KEY, including tables created
 	// before the fresh schema gained NOT NULL, so check the staged rows before
 	// any live file is touched.
-	if err := preflightRequestIDs(context.Background(), db, "", "pending snapshot"); err != nil {
+	if err := preflightRequestScanValues(context.Background(), db, "", "pending snapshot"); err != nil {
 		db.Close()
 		return err
 	}
@@ -457,12 +489,7 @@ func preflightPendingSnapshot(path string) error {
 	// A clean close after switching to DELETE leaves no sidecar. Remove any
 	// stale one only now: deleting a WAL while it is open would discard its
 	// committed pages.
-	for _, suffix := range snapshotSidecarSuffixes {
-		if err := removeIfExists(path + suffix); err != nil {
-			return err
-		}
-	}
-	return nil
+	return removeSnapshotSidecars(path)
 }
 
 // writerProbeIDAttempts bounds the sentinel-id search for the admission
@@ -908,6 +935,19 @@ func quarantinePendingSnapshot(incoming, suffix string) error {
 	return os.Rename(incoming, incoming+suffix)
 }
 
+// removeSnapshotSidecars removes every SQLite sidecar for path. It is the one
+// owner of the "packed snapshot is self-contained" cleanup: publication,
+// preflight and admission all discard sidecars before opening their main file,
+// so a stale journal or WAL can never attach to a different snapshot.
+func removeSnapshotSidecars(path string) error {
+	for _, suffix := range snapshotSidecarSuffixes {
+		if err := removeIfExists(path + suffix); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func removeIfExists(path string) error {
 	err := os.Remove(path)
 	if err == nil || os.IsNotExist(err) {
@@ -1182,7 +1222,7 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 	if err := preflightMergeTable(ctx, db, "requests"); err != nil {
 		return err
 	}
-	if err := preflightRequestIDs(ctx, db, "backup_merge", "backup"); err != nil {
+	if err := preflightRequestScanValues(ctx, db, "backup_merge", "backup"); err != nil {
 		return err
 	}
 	haveAttempts := false
@@ -1216,14 +1256,15 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 	return nil
 }
 
-// preflightRequestIDs rejects a request table whose id column contains NULL.
-// id is the one requests column SQLite permits to be NULL despite the fresh
-// NOT NULL PRIMARY KEY DDL: a legacy table keeps its original column
-// definition (constraints are not retrofitted), and SQLite has always allowed
-// NULL in a non-WITHOUT-ROWID TEXT PRIMARY KEY. scanRecord scans id into a
-// string, so one such row makes every history read fail after admission. The
-// check runs before a merge transaction starts or a replacement is installed.
-func preflightRequestIDs(ctx context.Context, db mergeConn, schema, source string) error {
+// preflightRequestScanValues rejects a request table whose rows contain NULL
+// in any column scanRecord scans into a non-null Go type. id is the classic
+// case because SQLite permits NULL in a legacy TEXT PRIMARY KEY, but the same
+// failure exists for every other scan column: a crafted or pre-NOT-NULL
+// snapshot can hold NULL tool_names, attempts, status_code or a flag, and one
+// such row makes every history read fail after admission. The check runs
+// before a merge transaction starts or a replacement is installed. Empty
+// strings and zero values remain valid; only NULL is rejected.
+func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, source string) error {
 	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
 		return fmt.Errorf("unknown backup schema")
 	}
@@ -1231,14 +1272,49 @@ func preflightRequestIDs(ctx context.Context, db mergeConn, schema, source strin
 	if schema != "" {
 		table = schema + ".requests"
 	}
-	var nulls int64
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE id IS NULL`).Scan(&nulls); err != nil {
+	details, err := tableColumnDetails(ctx, db, schema, "requests")
+	if err != nil {
 		return err
 	}
-	if nulls != 0 {
-		return fmt.Errorf("%s requests contains %d rows with a NULL id; history rows require a non-NULL id", source, nulls)
+	present := make(map[string]struct{}, len(details))
+	for _, col := range details {
+		present[col.name] = struct{}{}
 	}
-	return nil
+	columns := make([]string, 0, len(details))
+	for _, name := range recordScanColumns() {
+		if _, ok := present[name]; ok {
+			columns = append(columns, name)
+		}
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("%s requests has no scan-required columns", source)
+	}
+	conditions := make([]string, len(columns))
+	for i, name := range columns {
+		conditions[i] = `"` + name + `" IS NULL`
+	}
+	var nulls int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM `+table+` WHERE `+strings.Join(conditions, " OR ")).Scan(&nulls); err != nil {
+		return err
+	}
+	if nulls == 0 {
+		return nil
+	}
+	// Only a failing table pays the per-column scan; the error names the first
+	// scan-critical column that is actually NULL so an operator can inspect
+	// the offending snapshot directly.
+	for _, name := range columns {
+		var count int64
+		if err := db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM `+table+` WHERE "`+name+`" IS NULL`).Scan(&count); err != nil {
+			return err
+		}
+		if count != 0 {
+			return fmt.Errorf("%s requests contains %d rows with a NULL %s; history rows require non-NULL values for every scanRecord column", source, count, name)
+		}
+	}
+	return fmt.Errorf("%s requests contains NULL values in scan-required columns", source)
 }
 
 func preflightMergeTable(ctx context.Context, db mergeConn, table string) error {

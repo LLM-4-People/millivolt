@@ -1814,6 +1814,22 @@ const recordColumns = `
 		debug, debug_session_id, req_param_presence
 	`
 
+// recordScanColumns parses recordColumns into its ordered column names. Every
+// column it returns is scanned by scanRecord into a non-null Go string,
+// integer, float or bool, so admission preflight must reject NULL in any of
+// them. debug_capture is deliberately not part of recordColumns: callers add
+// it separately and it is nullable.
+func recordScanColumns() []string {
+	parts := strings.Split(recordColumns, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // scanRecord scans one row (in the canonical recordColumns order plus the
 // caller's debug_capture column) into a metrics.Record, restoring the exact
 // dashboard JSON shape (pointer request params including explicit zero/false,

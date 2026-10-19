@@ -463,11 +463,12 @@ func TestOpenLeavesPendingOnUnreadableIncoming(t *testing.T) {
 }
 
 // TestOpenRestoresLiveWhenSidecarRenameFails pins rollback safety for the
-// sidecar moves: the live database is moved aside with its WAL/SHM siblings,
-// so a sidecar rename that cannot complete must abort admission and restore
-// the original files instead of deleting or replacing the live database.
+// sidecar moves: the live database is moved aside with its WAL, SHM and
+// rollback-journal siblings, so a sidecar rename that cannot complete must
+// abort admission and restore the original files instead of deleting or
+// replacing the live database.
 func TestOpenRestoresLiveWhenSidecarRenameFails(t *testing.T) {
-	for _, sidecar := range []string{"-wal", "-shm"} {
+	for _, sidecar := range snapshotSidecarSuffixes {
 		t.Run(sidecar, func(t *testing.T) {
 			dir := t.TempDir()
 			dstPath := filepath.Join(dir, "dst.db")

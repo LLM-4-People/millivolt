@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/backup"
@@ -28,9 +29,27 @@ const (
 
 // isStagingName reports whether base is one of the known transient names this
 // service creates on the live database's volume. The registry is deliberately
-// closed: the live database, PendingSnapshotPath, the .previous rollback set,
-// the admission state marker and unrelated operator files never match.
+// closed: unrelated operator files and the public backup download artifact
+// never match. Live-derived paths are protected separately by path identity,
+// so a matching basename is still safe. A SQLite sidecar of a staging name
+// matches too, so a crash between creating a staging main and removing its WAL,
+// SHM or rollback journal cannot orphan the sidecar.
 func (s *Store) isStagingName(base string) bool {
+	if s.isBaseStagingName(base) {
+		return true
+	}
+	for _, suffix := range snapshotSidecarSuffixes {
+		if strings.HasSuffix(base, suffix) && s.isBaseStagingName(strings.TrimSuffix(base, suffix)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isBaseStagingName matches the main-file/directory shapes of the closed
+// staging registry. It intentionally does not know about the live path; the
+// sweep applies the path-derived protection fence before consulting it.
+func (s *Store) isBaseStagingName(base string) bool {
 	if backup.IsStagingName(base) {
 		return true
 	}
@@ -46,6 +65,32 @@ func (s *Store) isStagingName(base string) bool {
 		}
 	}
 	return false
+}
+
+// protectedLivePaths is the absolute safety fence for the startup sweep: the
+// live database and every file the pending-admission protocol derives from it
+// are excluded by path, regardless of whether their names happen to match a
+// staging pattern. This covers a db_path whose basename itself looks like
+// millivolt-snapshot-* or millivolt-backup-*, including its SQLite sidecars,
+// the pending .incoming slot, the .previous rollback set, the durable state
+// marker and quarantined admission evidence.
+func (s *Store) protectedLivePaths() map[string]struct{} {
+	bases := []string{
+		s.path,
+		PendingSnapshotPath(s.path),
+		s.path + pendingSnapshotPreviousSuffix,
+		s.path + pendingSnapshotStateSuffix,
+		PendingSnapshotPath(s.path) + pendingSnapshotInvalidSuffix,
+		PendingSnapshotPath(s.path) + pendingSnapshotInterruptedSuffix,
+	}
+	protected := make(map[string]struct{}, len(bases)*(len(snapshotSidecarSuffixes)+1))
+	for _, base := range bases {
+		protected[filepath.Clean(base)] = struct{}{}
+		for _, suffix := range snapshotSidecarSuffixes {
+			protected[filepath.Clean(base+suffix)] = struct{}{}
+		}
+	}
+	return protected
 }
 
 // sweepOrphanedStaging reclaims known snapshot/archive staging entries left by
@@ -68,8 +113,15 @@ func (s *Store) sweepOrphanedStaging(now time.Time) int {
 		return 0
 	}
 	removed := 0
+	protected := s.protectedLivePaths()
 	for _, entry := range entries {
 		name := entry.Name()
+		// Path identity wins over name shape. A db_path named
+		// millivolt-snapshot-live.db must survive even though its basename
+		// matches snapshotStagingPattern.
+		if _, ok := protected[filepath.Clean(filepath.Join(dir, name))]; ok {
+			continue
+		}
 		if !s.isStagingName(name) {
 			continue
 		}

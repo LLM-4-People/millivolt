@@ -10,12 +10,12 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
-// legacyIDSnapshot builds a packed snapshot whose requests table keeps the
-// pre-NOT-NULL id definition (SQLite allows NULL in a TEXT PRIMARY KEY) and
-// whose only row carries the requested id value. Rebuilding via a copied
-// schema is how an old millivolt database looked; the production migration
-// never retrofits constraints on an existing table.
-func legacyIDSnapshot(t *testing.T, id any) []byte {
+// legacySnapshot copies one canonical snapshot row into a database built from
+// a caller-supplied legacy schema, applies mutate, and returns the packed
+// bytes. Rebuilding through a copied schema is how an old millivolt database
+// looked; the production migration never retrofits constraints on an existing
+// table.
+func legacySnapshot(t *testing.T, legacySchema string, mutate func(*sql.DB) error) []byte {
 	t.Helper()
 	src := openTestStore(t)
 	src.Record(&metrics.Record{ID: "legacy-row", Provider: "neutral.example", Model: "n", StatusCode: 200})
@@ -36,7 +36,6 @@ func legacyIDSnapshot(t *testing.T, id any) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacySchema := strings.Replace(schema, "id TEXT NOT NULL PRIMARY KEY", "id TEXT PRIMARY KEY", 1)
 	if _, err := db.Exec(legacySchema); err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -53,14 +52,11 @@ func legacyIDSnapshot(t *testing.T, id any) []byte {
 		db.Close()
 		t.Fatal(err)
 	}
-	if id == nil {
-		_, err = db.Exec(`UPDATE requests SET id = NULL WHERE id = 'legacy-row'`)
-	} else {
-		_, err = db.Exec(`UPDATE requests SET id = ? WHERE id = 'legacy-row'`, id)
-	}
-	if err != nil {
-		db.Close()
-		t.Fatal(err)
+	if mutate != nil {
+		if err := mutate(db); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -70,6 +66,21 @@ func legacyIDSnapshot(t *testing.T, id any) []byte {
 		t.Fatal(err)
 	}
 	return data
+}
+
+// legacyIDSnapshot builds a packed snapshot whose requests table keeps the
+// pre-NOT-NULL id definition (SQLite allows NULL in a TEXT PRIMARY KEY) and
+// whose only row carries the requested id value.
+func legacyIDSnapshot(t *testing.T, id any) []byte {
+	t.Helper()
+	return legacySnapshot(t, strings.Replace(schema, "id TEXT NOT NULL PRIMARY KEY", "id TEXT PRIMARY KEY", 1), func(db *sql.DB) error {
+		if id == nil {
+			_, err := db.Exec(`UPDATE requests SET id = NULL WHERE id = 'legacy-row'`)
+			return err
+		}
+		_, err := db.Exec(`UPDATE requests SET id = ? WHERE id = 'legacy-row'`, id)
+		return err
+	})
 }
 
 // TestMergeRejectsNullRequestID pins the merge preflight: SQLite permits NULL
@@ -115,6 +126,201 @@ func TestMergeRejectsNullRequestID(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "live-row" {
 		t.Fatalf("live rows after rejected merge = %#v, want live-row", rows)
+	}
+}
+
+// nullableColumnSnapshot builds a packed snapshot whose requests table keeps
+// the requested column nullable (a pre-NOT-NULL legacy definition) and whose
+// only row stores value in that column.
+func nullableColumnSnapshot(t *testing.T, notNullDDL, nullableDDL, column string, value any) []byte {
+	t.Helper()
+	legacySchema := strings.Replace(schema, notNullDDL, nullableDDL, 1)
+	return legacySnapshot(t, legacySchema, func(db *sql.DB) error {
+		_, err := db.Exec(`UPDATE requests SET "`+column+`" = ? WHERE id = 'legacy-row'`, value)
+		return err
+	})
+}
+
+func nullableScanColumnCases() []struct {
+	name        string
+	column      string
+	notNullDDL  string
+	nullableDDL string
+} {
+	return []struct {
+		name        string
+		column      string
+		notNullDDL  string
+		nullableDDL string
+	}{
+		{
+			name:        "tool_names",
+			column:      "tool_names",
+			notNullDDL:  "tool_names TEXT NOT NULL DEFAULT ''",
+			nullableDDL: "tool_names TEXT",
+		},
+		{
+			name:        "attempts",
+			column:      "attempts",
+			notNullDDL:  "attempts TEXT NOT NULL DEFAULT 'null'",
+			nullableDDL: "attempts TEXT",
+		},
+	}
+}
+
+// TestMergeRejectsNullScanRequiredColumns pins merge fail-closed behavior for
+// the scan-critical columns beyond id: a crafted or legacy backup with NULL
+// tool_names or attempts passes integrity inspection but must be rejected
+// before the merge transaction inserts a row that makes history reads fail.
+func TestMergeRejectsNullScanRequiredColumns(t *testing.T) {
+	for _, tc := range nullableScanColumnCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			live := mergeTestLive(t)
+			data := nullableColumnSnapshot(t, tc.notNullDDL, tc.nullableDDL, tc.column, nil)
+			inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
+			if err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
+				t.Fatalf("merge with NULL %s = %v, want a NULL-column rejection", tc.column, err)
+			}
+			if inserted != 0 || skipped != 0 {
+				t.Fatalf("failed merge counts inserted=%d skipped=%d, want 0/0", inserted, skipped)
+			}
+			rows, err := live.LoadRecent(t.Context(), 10)
+			if err != nil {
+				t.Fatalf("live history unreadable after rejected merge: %v", err)
+			}
+			if len(rows) != 1 || rows[0].ID != "live-row" {
+				t.Fatalf("live rows after rejected merge = %#v, want live-row", rows)
+			}
+		})
+	}
+}
+
+// TestOpenQuarantinesNullScanRequiredColumnSnapshot pins the replace path for
+// the same columns: validation must reject the pending file, and the next boot
+// must quarantine it without installing a history-breaking database.
+func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
+	for _, tc := range nullableScanColumnCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dstPath := filepath.Join(dir, "dst.db")
+			live, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			live.Record(&metrics.Record{ID: "keep-old", Provider: "neutral.example", Model: "n", StatusCode: 200})
+			if err := live.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			if err := live.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			data := nullableColumnSnapshot(t, tc.notNullDDL, tc.nullableDDL, tc.column, nil)
+			if err := StageSnapshot(dstPath, data); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidatePendingSnapshot(dstPath); err == nil || !strings.Contains(err.Error(), "NULL "+tc.column) {
+				t.Fatalf("ValidatePendingSnapshot = %v, want a NULL %s rejection", err, tc.column)
+			}
+			if _, err := os.Stat(PendingSnapshotPath(dstPath)); err != nil {
+				t.Fatalf("validation consumed the rejected pending snapshot: %v", err)
+			}
+
+			reopened, err := Open(dstPath, testOpts)
+			if err != nil {
+				t.Fatalf("Open after rejected pending snapshot: %v", err)
+			}
+			defer reopened.Close()
+			rows, err := reopened.LoadRecent(t.Context(), 10)
+			if err != nil {
+				t.Fatalf("live history unreadable after rejected replacement: %v", err)
+			}
+			if len(rows) != 1 || rows[0].ID != "keep-old" {
+				t.Fatalf("live rows after rejection = %#v, want keep-old", rows)
+			}
+			if _, err := os.Stat(PendingSnapshotPath(dstPath) + pendingSnapshotInvalidSuffix); err != nil {
+				t.Fatalf("rejected pending snapshot was not quarantined: %v", err)
+			}
+		})
+	}
+}
+
+// TestMergeAcceptsEmptyToolNames pins the other side of the boundary: an empty
+// string is valid for every text scan column, including tool_names and
+// attempts, so it must still merge and remain readable.
+func TestMergeAcceptsEmptyToolNames(t *testing.T) {
+	live := mergeTestLive(t)
+	data := nullableColumnSnapshot(t,
+		"tool_names TEXT NOT NULL DEFAULT ''", "tool_names TEXT", "tool_names", "")
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatalf("empty tool_names rejected: %v", err)
+	}
+	if inserted != 1 || skipped != 0 {
+		t.Fatalf("inserted=%d skipped=%d, want 1/0", inserted, skipped)
+	}
+	rows, err := live.LoadRecent(t.Context(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.ID == "legacy-row" && len(row.ToolNames) == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("merged rows = %#v, want the empty-tool-names row", rows)
+	}
+}
+
+// TestPreflightRejectsNullInEveryRecordScanColumn proves the preflight is
+// derived from recordColumns rather than a small hand-picked set: every
+// column scanRecord scans into a non-null Go value is rejected when NULL.
+func TestPreflightRejectsNullInEveryRecordScanColumn(t *testing.T) {
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.db")
+	data := legacySnapshot(t, strings.ReplaceAll(schema, " NOT NULL", ""), nil)
+	if err := os.WriteFile(fixture, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(dir, "canonical.db")
+	if err := os.WriteFile(canonical, packedSnapshot(t, "legacy-row"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`ATTACH DATABASE ? AS pristine`, canonical); err != nil {
+		t.Fatal(err)
+	}
+	defer db.Exec(`DETACH DATABASE pristine`)
+
+	// Parse recordColumns independently of the production parser so weakening
+	// recordScanColumns cannot make this coverage test pass vacuously.
+	columns := recordColumnNames()
+	if len(columns) == 0 {
+		t.Fatal("recordColumnNames returned no columns")
+	}
+	if got := recordScanColumns(); len(got) != len(columns) {
+		t.Fatalf("recordScanColumns has %d columns, recordColumns has %d", len(got), len(columns))
+	}
+	for _, column := range columns {
+		if _, err := db.Exec(`UPDATE requests SET "` + column + `" = NULL`); err != nil {
+			t.Fatalf("set %s NULL: %v", column, err)
+		}
+		err := preflightRequestScanValues(t.Context(), db, "", "fixture")
+		if err == nil || !strings.Contains(err.Error(), "NULL "+column) {
+			t.Fatalf("preflight with NULL %s = %v, want a NULL %s rejection", column, err, column)
+		}
+		if _, err := db.Exec(`DELETE FROM requests`); err != nil {
+			t.Fatalf("reset %s row: %v", column, err)
+		}
+		if _, err := db.Exec(`INSERT INTO requests SELECT * FROM pristine.requests`); err != nil {
+			t.Fatalf("restore %s row: %v", column, err)
+		}
 	}
 }
 

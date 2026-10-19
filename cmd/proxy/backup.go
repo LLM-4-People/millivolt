@@ -764,8 +764,8 @@ func restoreConfigFile(path string, raw []byte, mode os.FileMode, exists bool) e
 
 // restorePendingGuard owns a pre-existing admission slot while a replace
 // restore stages a new snapshot. A pending snapshot is one self-contained
-// rollback-journal file: the staging owner removes superseded -wal/-shm
-// sidecars before publish, so the slot is a single file.
+// rollback-journal file: the staging owner removes superseded -wal/-shm/
+// -journal sidecars before publish, so the slot is a single file.
 type restorePendingGuard struct {
 	pending string
 	backup  string
@@ -814,10 +814,11 @@ func (g *restorePendingGuard) rollback() error {
 		g.backup = ""
 		return nil
 	}
-	for _, suffix := range []string{"", "-wal", "-shm"} {
-		if err := os.Remove(g.pending + suffix); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove staged pending snapshot: %w", err)
-		}
+	// A -journal is part of the pending set too: preflight runs in
+	// rollback-journal mode, and a crash can leave a hot journal that must not
+	// attach to a later snapshot. storage owns the sidecar set and ordering.
+	if err := storage.RemovePendingSnapshot(g.pending); err != nil {
+		return fmt.Errorf("remove staged pending snapshot: %w", err)
 	}
 	return nil
 }

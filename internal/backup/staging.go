@@ -8,8 +8,11 @@ import "strings"
 // part of this registry.
 const (
 	// ArchiveStagingPattern names the one transient encoded artifact created
-	// by EncodeFile. The wildcard keeps concurrent encodes distinct.
-	ArchiveStagingPattern = "millivolt-backup-*.mvb"
+	// by EncodeFile. The wildcard keeps concurrent encodes distinct. The
+	// leading dot makes the name private: the public download artifact is
+	// millivolt-backup-<UTC stamp>.mvb, and a retained download must never be
+	// mistaken for an orphaned staging file.
+	ArchiveStagingPattern = ".millivolt-backup-*.mvb"
 
 	// RestoreDatabaseStagingPattern names the private directory holding a
 	// decoded database member.
