@@ -336,6 +336,14 @@ function toggleDimMenu() {
 // server's since-inception breakdown (pre-sorted, pre-capped server-side).
 // Card = entityBadge + request count + KPI row + sparkline with error overlay
 // + error tally. Clicking a card toggles that value as a log filter.
+//
+// A scope change or invalidation repaints the gallery twice: first the loading
+// marker (the old cards are unusable), then the matching payload. The first
+// repaint destroys the focused card, but its replacement does not exist until
+// the second one. Park that focus identity across the gap and consume it on the
+// payload that resolves it; a terminal empty/failure paint clears it so focus
+// is never restored into an unrelated later render.
+let _galleryFocus = null;
 function renderGallery(st) {
   // Scope identity, not innerHTML replacement, gates the cards: a payload for
   // another filter/status set (or another breakdown dimension) is unusable.
@@ -346,24 +354,32 @@ function renderGallery(st) {
     const key = el.closest('.xp-node[data-xp-key]')?.dataset.xpKey;
     return key == null ? null : `.xp-node[data-xp-key="${CSS.escape(key)}"]`;
   });
+  if (focus) _galleryFocus = focus;
   const scopeKey = scopeQS();
   const payload = explorerAgg && explorerAgg.dim === st.activeDim &&
     explorerAgg.scopeKey === scopeKey ? explorerAgg : null;
   if (!payload) {
     const failed = explorerFailure && explorerFailure.scopeKey === scopeKey &&
       explorerFailure.dim === st.activeDim;
+    if (failed) _galleryFocus = null;
     if (updateSection('xp-gallery', `<div class="empty">${failed ? 'breakdown unavailable' : 'loading breakdown…'}</div>`)) restoreFocus(focus);
     return;
   }
   if (!payload.groups || !payload.groups.length) {
+    _galleryFocus = null;
     if (updateSection('xp-gallery', `<div class="empty">no ${entityType(st.activeDim).label.toLowerCase()} values yet</div>`)) restoreFocus(focus);
     return;
   }
   const cards = payload.groups.map(e => xpNodeCard(st, e, payload)).join('');
+  // The payload resolves any token parked by the loading repaint; a fresh
+  // capture covers an ordinary card-list repaint. Consume it in both cases so
+  // a card that vanished cannot hold focus for a later unrelated render.
+  const restore = _galleryFocus || focus;
+  _galleryFocus = null;
   // Only a changed gallery needs the post-layout sizing pass; an identical
   // payload leaves both the DOM and the layout untouched.
   if (updateSection('xp-gallery', cards)) {
-    restoreFocus(focus);
+    restoreFocus(restore);
     sizeGallery();
   }
 }

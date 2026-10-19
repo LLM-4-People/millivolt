@@ -9719,6 +9719,68 @@ async function main() {
         await settleUntil(() => !!w.eval('explorerAgg'), 3000);
       }
     }
+    // F6 navigation: activating a gallery card changes scope, and the loading
+    // repaint destroys that card before the matching payload exists. The focus
+    // identity must survive both repaints; a card that vanishes from the
+    // filtered payload must not hand focus to some other card.
+    {
+      const savedFetch = w.fetch;
+      const ent = (name, n) => ({ name, n, cost: 0, in: 10, out: 5, cache: 2, tools: 0,
+        err_final: 0, rate_limit_requests: 0, cost_per_mtok: null,
+        ttft_p50: null, ttft_p95: null, tps_p50: null, tps_p95: null });
+      const payload = groups => ({ dim: 'provider', total: 2, error_total: 0,
+        rail: { provider: groups.length }, groups, scope: { matches: 2, errors: 0 } });
+      let hold = false;
+      const held = [];
+      w.fetch = (url, opts) => {
+        const u = String(url);
+        if (!u.includes('/metrics/agg/explorer')) return savedFetch(url, opts);
+        if (!hold) return Promise.resolve({ ok: true, json: async () => payload([ent('focus-nav.example', 2)]) });
+        return new Promise(resolve => held.push({ resolve }));
+      };
+      const card = key => d.querySelector(`#xp-gallery [data-xp-key="${key}"]`);
+      const prime = async () => {
+        hold = false;
+        w.navigateTo([{ dim: 'client', id: 'focus-nav-client' }]);
+        // Wait for the hashchange's loading repaint and payload, not the old
+        // scenario's card: the unfiltered card is the one without `selected`.
+        await settleUntil(() => !!card('focus-nav.example') &&
+          !card('focus-nav.example').classList.contains('selected'));
+      };
+      // A browser maps Enter on the focused button to the same click event the
+      // delegated explorer handler consumes; jsdom has no implicit activation,
+      // so the production path is invoked through click() from keyboard focus.
+      const activate = () => {
+        card('focus-nav.example').focus();
+        hold = true;
+        card('focus-nav.example').click();
+        return settleUntil(() => held.length === 1 &&
+          /loading breakdown/.test(d.getElementById('xp-gallery').textContent) &&
+          !card('focus-nav.example'));
+      };
+      try {
+        await prime();
+        check('a gallery card activation paints the loading state and drops the old card',
+          await activate() && d.activeElement === d.body);
+        held.shift().resolve({ ok: true, json: async () => payload([ent('focus-nav.example', 3)]) });
+        await settleUntil(() => d.activeElement === card('focus-nav.example'));
+        check('the filtered payload restores focus to the equivalent gallery card',
+          d.activeElement === card('focus-nav.example') && d.activeElement !== d.body);
+
+        await prime();
+        check('the second card activation paints the loading state again',
+          await activate() && d.activeElement === d.body);
+        held.shift().resolve({ ok: true, json: async () => payload([ent('focus-nav-other.example', 2)]) });
+        await settleUntil(() => !!card('focus-nav-other.example') && !card('focus-nav.example'));
+        check('a vanished gallery card does not move focus to a different card',
+          !!card('focus-nav-other.example') && d.activeElement === d.body);
+      } finally {
+        hold = false;
+        w.fetch = savedFetch;
+        w.navigateTo([]);
+        await settleUntil(() => !!w.eval('explorerAgg'), 3000);
+      }
+    }
     {
       w.eval("chartView.preset = 'traffic'; chartView.hidden = {}; chartView.pct = 95; chartView.window = 'all'; fillChartControls(); renderChart();");
       const leg = () => d.querySelector('#traffic-legend .leg-item[data-series="err"]');
