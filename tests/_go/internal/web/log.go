@@ -12,8 +12,51 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/LLM-4-People/millivolt/internal/config"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
+
+// TestLogPageQueryClassification pins the one pushdown owner: exact stored
+// dimensions are SQL predicates, while derived predicates must keep the
+// growing Go scan even when some of their rows also narrow SQL.
+func TestLogPageQueryClassification(t *testing.T) {
+	plain := &modelCanonizer{memo: map[string]string{}}
+	withRules := &modelCanonizer{
+		exec: config.CompileModelRules([]config.ModelRule{{Mode: "lower"}}),
+		memo: map[string]string{},
+	}
+	for _, tc := range []struct {
+		name       string
+		fs         []scopeFilter
+		status     string
+		mcz        *modelCanonizer
+		wantPushed bool
+		wantAll    int
+	}{
+		{"empty", nil, "", plain, true, 0},
+		{"client", []scopeFilter{{dim: "client", id: "c"}}, "", plain, true, 1},
+		{"provider", []scopeFilter{{dim: "provider", id: "p"}}, "", plain, true, 1},
+		{"key", []scopeFilter{{dim: "key", id: "k"}}, "", plain, true, 1},
+		{"conversation", []scopeFilter{{dim: "conversation", id: "s:1"}}, "", plain, true, 1},
+		{"model raw", []scopeFilter{{dim: "model", id: "m"}}, "", plain, true, 1},
+		{"model padded", []scopeFilter{{dim: "model", id: " m "}}, "", plain, false, 1},
+		{"model rules", []scopeFilter{{dim: "model", id: "m"}}, "", withRules, false, 0},
+		{"status class", []scopeFilter{{dim: "status", id: "5xx"}}, "", plain, false, 0},
+		{"time", []scopeFilter{{dim: "time", id: "work"}}, "", plain, false, 0},
+		{"tool", []scopeFilter{{dim: "tool", id: "search"}}, "", plain, false, 0},
+		{"error", []scopeFilter{{dim: "error", id: "x|y|z"}}, "", plain, false, 0},
+		{"numeric status", nil, "429", plain, true, 1},
+		{"noncanonical status", nil, "0429", plain, false, 1},
+		{"sql and go", []scopeFilter{{dim: "provider", id: "p"}, {dim: "tool", id: "search"}}, "", plain, false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			filter, pushed := logPageQuery(tc.fs, tc.status, tc.mcz)
+			if pushed != tc.wantPushed || len(filter.All) != tc.wantAll {
+				t.Fatalf("pushed=%v predicates=%d, want pushed=%v predicates=%d", pushed, len(filter.All), tc.wantPushed, tc.wantAll)
+			}
+		})
+	}
+}
 
 func TestLogPageRetainsTimestampTies(t *testing.T) {
 	s := testStore(t)

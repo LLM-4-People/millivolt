@@ -1584,7 +1584,7 @@ func TestBootstrapSnapshotAndState(t *testing.T) {
 	}
 	waitTotals(t, s, 3)
 	agg := NewAggAPI(buf, s, time.Second)
-	// Cap the full snapshot (main.go derives 8×dash_log_rows; this pins the
+	// Cap the full snapshot (main.go derives web.BootRingCapMul * dash_log_rows; this pins the
 	// cap mechanics to a tiny ring).
 	buf.SetSnapshotLimit(2)
 
