@@ -1848,6 +1848,118 @@ func TestRestoreConfigApplyFailureRollsBackConfigAndPending(t *testing.T) {
 	}
 }
 
+// TestConcurrentRestoresSerializeAdmissionSlot pins the shared admission-slot
+// transaction: a combined config+database restore paused before its config
+// write must not let a database-only restore publish a newer pending snapshot
+// that the combined restore's rollback then deletes. The database-only
+// handler waits on reloadMu; after the combined restore fails, its own
+// rollback runs before the database-only publication exists, so the later
+// snapshot survives.
+func TestConcurrentRestoresSerializeAdmissionSlot(t *testing.T) {
+	liveReloadFixture(t)
+	live, opts, livePath, dir := openLiveStoreFixture(t)
+	start := config.Default()
+	start.MaxRetries = 1
+	start.DBPath = livePath
+	if err := config.WriteFile(liveConfigPath, start); err != nil {
+		t.Fatal(err)
+	}
+	liveCfg = start.Clone()
+	liveStore = live
+
+	source := func(name, id string) []byte {
+		t.Helper()
+		src, err := storage.Open(filepath.Join(dir, name), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		src.Record(&metrics.Record{ID: id, Provider: "neutral.example", Model: "n", StatusCode: 200})
+		if err := src.Flush(); err != nil {
+			src.Close()
+			t.Fatal(err)
+		}
+		data, err := src.Snapshot(t.Context())
+		src.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	combinedData := source("combined-src.db", "combined-row")
+	laterData := source("later-src.db", "later-row")
+
+	archived := config.Default()
+	archived.MaxRetries = 42
+	archived.DBPath = livePath
+	var yaml bytes.Buffer
+	if err := config.WriteYAML(&yaml, archived); err != nil {
+		t.Fatal(err)
+	}
+	combinedArchive, err := backup.Encode(dir, backup.Archive{Config: yaml.Bytes(), Database: combinedData})
+	if err != nil {
+		t.Fatal(err)
+	}
+	laterArchive, err := backup.Encode(dir, backup.Archive{Database: laterData})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	paused, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		restoreConfigWriteHook = nil
+		restoreConfigReloadHook = nil
+	})
+	restoreConfigWriteHook = func(string, *config.Config) error {
+		close(paused)
+		<-release
+		return errors.New("injected config write failure")
+	}
+
+	mux := http.NewServeMux()
+	registerBackupRoutes(mux)
+	combinedResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?config=1&database=1", bytes.NewReader(combinedArchive)))
+		combinedResult <- rr
+	}()
+	<-paused
+
+	laterResult := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rr := httptest.NewRecorder()
+		mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/admin/restore?database=1", bytes.NewReader(laterArchive)))
+		laterResult <- rr
+	}()
+	// Before the fix the database-only handler completes while the combined
+	// restore is paused. With both handlers sharing reloadMu it stays blocked,
+	// so release the combined restore after the serialization window.
+	var later *httptest.ResponseRecorder
+	select {
+	case later = <-laterResult:
+	case <-time.After(2 * time.Second):
+	}
+	close(release)
+
+	if rr := <-combinedResult; rr.Code != http.StatusBadRequest {
+		t.Fatalf("combined restore status %d body %s, want 400 from the config phase", rr.Code, rr.Body.String())
+	}
+	if later == nil {
+		later = <-laterResult
+	}
+	if later.Code != http.StatusOK {
+		t.Fatalf("database-only restore status %d body %s, want 200", later.Code, later.Body.String())
+	}
+	pending, err := os.ReadFile(storage.PendingSnapshotPath(livePath))
+	if err != nil {
+		t.Fatalf("failed combined restore deleted the later database-only publication: %v", err)
+	}
+	if !bytes.Equal(pending, laterData) {
+		t.Fatal("pending snapshot is not the later database-only restore's publication")
+	}
+	assertNoPreservedPending(t, dir)
+}
+
 // TestRestoreConfigDatabaseReplacePublishesBoth pins the successful
 // config+database replace: the prepared config is written and hot-reloaded, the
 // snapshot is published at the effective db_path (replacing any older pending

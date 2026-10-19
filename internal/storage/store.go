@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -165,7 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_requests_status_log ON requests (status_code, sta
 
 var schema = `
 CREATE TABLE IF NOT EXISTS requests (
-	id TEXT PRIMARY KEY,
+	id TEXT NOT NULL PRIMARY KEY,
 	provider TEXT NOT NULL,
 	model TEXT NOT NULL,
 	key_hash TEXT NOT NULL,
@@ -573,6 +574,16 @@ func initializeDatabase(db *sql.DB, path string) error {
 	if err := migrate(db); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	// Schema/migrate alone does not prove the writer can write this database.
+	// Run the exact writer INSERT (same column list, conflict clause and value
+	// list) inside a transaction and roll it back. An extra required column or
+	// an id without a unique key fails here, before a live store starts its
+	// writer goroutine (or a pending snapshot is admitted) and every batch
+	// fails. Shared by Open and the pending-snapshot preflight so live boot
+	// and restore admission cannot disagree about a writable schema.
+	if err := probeWriterInsert(db); err != nil {
+		return fmt.Errorf("writer insert probe: %w", err)
+	}
 	return nil
 }
 
@@ -608,23 +619,24 @@ func Open(path string, opts Options) (*Store, error) {
 	if busyTimeout <= 0 {
 		busyTimeout = sqliteBusyTimeout
 	}
-	busy := fmt.Sprintf("_pragma=busy_timeout(%d)", busyTimeout.Milliseconds())
+	busy := fmt.Sprintf("busy_timeout(%d)", busyTimeout.Milliseconds())
 	// journal_size_limit bounds the WAL file after checkpoints (the default
 	// keeps the high-water mark for the process lifetime). wal_autocheckpoint
 	// stays at SQLite's 1000-page default: the batch writer commits every
 	// flush interval, and a larger threshold trades WAL bytes for fewer
 	// checkpoint passes; it is measured by BenchmarkStorageWriter.
-	dsn := path + "?" + busy +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)" +
-		"&_pragma=journal_size_limit(67108864)" +
-		// Take the write lock at BEGIN for every explicit transaction. A
-		// deferred BEGIN would establish a read snapshot before insertBatch
-		// compares its totals witness, so a restart-handoff writer committing
-		// in that window would turn the upgrade into SQLITE_BUSY_SNAPSHOT
-		// instead of the busy wait the writer contract promises.
-		"&_txlock=immediate"
-	db, err := sql.Open("sqlite", dsn)
+	params := url.Values{}
+	params.Add("_pragma", busy)
+	params.Add("_pragma", "journal_mode(WAL)")
+	params.Add("_pragma", "synchronous(NORMAL)")
+	params.Add("_pragma", "journal_size_limit(67108864)")
+	// Take the write lock at BEGIN for every explicit transaction. A deferred
+	// BEGIN would establish a read snapshot before insertBatch compares its
+	// totals witness, so a restart-handoff writer committing in that window
+	// would turn the upgrade into SQLITE_BUSY_SNAPSHOT instead of the busy
+	// wait the writer contract promises.
+	params.Set("_txlock", "immediate")
+	db, err := sql.Open("sqlite", backup.SQLiteURI(path, params))
 	if err != nil {
 		return fail(fmt.Errorf("open sqlite: %w", err))
 	}
@@ -646,7 +658,9 @@ func Open(path string, opts Options) (*Store, error) {
 	// (a bare "path?mode=ro" is silently opened read-write). Only the busy
 	// timeout rides this DSN: a mode=ro connection cannot change
 	// journal_mode, and synchronous is write-path state.
-	rdb, err := sql.Open("sqlite", "file:"+path+"?mode=ro&"+busy)
+	readParams := url.Values{"mode": {"ro"}}
+	readParams.Add("_pragma", busy)
+	rdb, err := sql.Open("sqlite", backup.SQLiteURI(path, readParams))
 	if err != nil {
 		db.Close()
 		return fail(fmt.Errorf("open read pool: %w", err))

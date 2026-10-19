@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -401,8 +402,9 @@ func admitPendingSnapshot(path string) (*snapshotAdmission, error) {
 // or apply to the wrong database. The initializer is the same one Open runs,
 // so a snapshot admitted here cannot fail Open's schema sequence later.
 func preflightPendingSnapshot(path string) error {
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)", path, sqliteBusyTimeout.Milliseconds())
-	db, err := sql.Open("sqlite", dsn)
+	params := url.Values{}
+	params.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()))
+	db, err := sql.Open("sqlite", backup.SQLiteURI(path, params))
 	if err != nil {
 		return err
 	}
@@ -420,13 +422,14 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
-	// Schema/migrate alone does not prove the writer can write this database.
-	// Run the exact writer INSERT (same column list, conflict clause and value
-	// list) inside a transaction and roll it back. An extra required column or
-	// an id without a unique key fails here, before the live file is touched.
-	if err := probeWriterInsert(db); err != nil {
+	// The initializer proves the writer INSERT executes, but a NULL request id
+	// would still pass that probe and then make every later history scan fail.
+	// SQLite permits NULL in a TEXT PRIMARY KEY, including tables created
+	// before the fresh schema gained NOT NULL, so check the staged rows before
+	// any live file is touched.
+	if err := preflightRequestIDs(context.Background(), db, "", "pending snapshot"); err != nil {
 		db.Close()
-		return fmt.Errorf("writer insert probe: %w", err)
+		return err
 	}
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close preflight database: %w", err)
@@ -1139,6 +1142,9 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 	if err := preflightMergeTable(ctx, db, "requests"); err != nil {
 		return err
 	}
+	if err := preflightRequestIDs(ctx, db, "backup_merge", "backup"); err != nil {
+		return err
+	}
 	haveAttempts := false
 	incoming, err := tableColumnDetails(ctx, db, "backup_merge", "requests")
 	if err != nil {
@@ -1166,6 +1172,31 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	return nil
+}
+
+// preflightRequestIDs rejects a request table whose id column contains NULL.
+// id is the one requests column SQLite permits to be NULL despite the fresh
+// NOT NULL PRIMARY KEY DDL: a legacy table keeps its original column
+// definition (constraints are not retrofitted), and SQLite has always allowed
+// NULL in a non-WITHOUT-ROWID TEXT PRIMARY KEY. scanRecord scans id into a
+// string, so one such row makes every history read fail after admission. The
+// check runs before a merge transaction starts or a replacement is installed.
+func preflightRequestIDs(ctx context.Context, db mergeConn, schema, source string) error {
+	if schema != "" && schema != "backup_merge" && schema != "backup_inspect" {
+		return fmt.Errorf("unknown backup schema")
+	}
+	table := "requests"
+	if schema != "" {
+		table = schema + ".requests"
+	}
+	var nulls int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE id IS NULL`).Scan(&nulls); err != nil {
+		return err
+	}
+	if nulls != 0 {
+		return fmt.Errorf("%s requests contains %d rows with a NULL id; history rows require a non-NULL id", source, nulls)
 	}
 	return nil
 }

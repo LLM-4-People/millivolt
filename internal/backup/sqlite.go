@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,21 @@ import (
 )
 
 const sqliteHeader = "SQLite format 3\x00"
+
+// SQLiteURI composes the file: URI every SQLite connection uses for path.
+// The path is percent-escaped and params are query-escaped, so metacharacters
+// that would otherwise split the DSN (?, #), be decoded a second time (%), or
+// delimit a URI (spaces and non-ASCII bytes) stay literal filename bytes.
+// OmitHost keeps a relative path relative (file:proxy.db) instead of making
+// its first segment a URI authority; absolute paths keep the conventional
+// file:/... spelling SQLite accepts.
+func SQLiteURI(path string, params url.Values) string {
+	u := url.URL{Scheme: "file", Path: path, OmitHost: true}
+	if len(params) > 0 {
+		u.RawQuery = params.Encode()
+	}
+	return u.String()
+}
 
 // ErrInvalidSnapshot is a semantic reject: the bytes are not a usable
 // millivolt SQLite snapshot. Transient I/O while verifying is a different error.
@@ -108,7 +124,7 @@ func inspectSQLiteFile(path string) (SnapshotCounts, error) {
 	if n < len(sqliteHeader) || string(hdr[:n]) != sqliteHeader {
 		return SnapshotCounts{}, invalidSnapshot("not a SQLite database")
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	db, err := sql.Open("sqlite", SQLiteURI(path, url.Values{"mode": {"ro"}}))
 	if err != nil {
 		return SnapshotCounts{}, err
 	}

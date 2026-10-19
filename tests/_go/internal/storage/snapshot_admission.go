@@ -90,6 +90,43 @@ func TestAdmissionRejectsUnwritableWriterSchema(t *testing.T) {
 	}
 }
 
+// TestOpenRejectsUnwritableLiveWriterSchema pins the boot-time counterpart of
+// admission's writer insert probe: an existing live database with an extra
+// NOT NULL column passes schema/migrate but would make every committed batch
+// fail. Open must fail closed at boot instead of starting a store that
+// silently drops all durable writes.
+func TestOpenRejectsUnwritableLiveWriterSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "live.db")
+	live, err := Open(path, testOpts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`ALTER TABLE requests ADD COLUMN audit_extra TEXT NOT NULL`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(path, testOpts)
+	if err == nil {
+		reopened.Close()
+		t.Fatal("Open accepted a live schema whose writer INSERT cannot execute")
+	}
+	if !strings.Contains(err.Error(), "writer insert probe") {
+		t.Fatalf("Open error %q does not name the writer insert probe", err)
+	}
+}
+
 // TestValidatePendingSnapshotRunsAdmissionPreflight pins the restore-time
 // validation owner: it validates the staged pending file with the same
 // schema/migrate and writer-insert preflight boot runs, rejects a file that
@@ -178,7 +215,7 @@ func TestAdmissionRejectsIDWithoutUniqueKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	badSchema := strings.Replace(schema, "id TEXT PRIMARY KEY", "id TEXT", 1)
+	badSchema := strings.Replace(schema, "id TEXT NOT NULL PRIMARY KEY", "id TEXT", 1)
 	if _, err := db.Exec(badSchema); err != nil {
 		t.Fatal(err)
 	}

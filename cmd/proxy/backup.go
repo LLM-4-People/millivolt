@@ -253,11 +253,18 @@ func handleRestore(w http.ResponseWriter, r *http.Request) {
 	var configPlan *restoreConfigPlan
 	var dbGuard *restorePendingGuard
 	dbRestart := false
-	if wantConfig {
-		// Keep this transaction's config read, write, reload and rollback
-		// serialized with SIGHUP, Settings saves, and /admin/reload.
+	// Every apply phase that touches the database or config serializes under
+	// reloadMu. A database-only replace publishes the same PendingSnapshotPath
+	// admission slot a combined restore stages, so without this lock a failed
+	// combined restore could roll back (delete) a later database-only
+	// publication. Holding it for the whole phase also keeps config reads,
+	// writes, reloads and rollbacks serialized with SIGHUP, Settings saves, and
+	// /admin/reload, and makes each guard rollback own only its own slot.
+	if wantConfig || wantDB {
 		reloadMu.Lock()
 		defer reloadMu.Unlock()
+	}
+	if wantConfig {
 		plan, err := prepareRestoreConfig(arch.Config, configMode)
 		if err != nil {
 			adminjson.WriteErrorJSON(w, http.StatusBadRequest, err.Error())
@@ -908,6 +915,12 @@ func applyRestoreDatabase(ctx context.Context, dbPath, source, mode string, stor
 // keeps the old one. The decoded member streams into a destination-side
 // temporary file, so the database never returns to the heap.
 func restoreDatabase(ctx context.Context, path, mode string) (restart bool, err error) {
+	// Standalone database-only restores share the admission slot with the
+	// HTTP restore phase, so they take the same serialization lock before
+	// reading the live config or staging anything. The caller must not already
+	// hold reloadMu.
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
 	liveMu.Lock()
 	dbPath := ""
 	if liveCfg != nil {
