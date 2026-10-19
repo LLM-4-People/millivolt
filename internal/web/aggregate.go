@@ -496,10 +496,8 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 			}
 		}
 		for i, r := range ring {
-			if i%ctxCheckRows == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
+			if err := checkFoldContext(ctx, i); err != nil {
+				return err
 			}
 			if p != nil {
 				if _, dup := p.ids[r.ID]; dup {
@@ -512,6 +510,9 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 			}
 		}
 		if finish != nil {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if err := finish(); err != nil {
 				return err
 			}
@@ -1027,20 +1028,16 @@ func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []sc
 				}
 			} else {
 				for i := range p.rows {
-					if i%ctxCheckRows == 0 {
-						if err := ctx.Err(); err != nil {
-							return err
-						}
+					if err := checkFoldContext(ctx, i); err != nil {
+						return err
 					}
 					upd(&p.rows[i])
 				}
 			}
 		}
 		for i, r := range ring {
-			if i%ctxCheckRows == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
+			if err := checkFoldContext(ctx, i); err != nil {
+				return err
 			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {
@@ -1082,20 +1079,16 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 				}
 			} else {
 				for i := range p.rows {
-					if i%ctxCheckRows == 0 {
-						if err := ctx.Err(); err != nil {
-							return err
-						}
+					if err := checkFoldContext(ctx, i); err != nil {
+						return err
 					}
 					upd(&p.rows[i])
 				}
 			}
 		}
 		for i, r := range ring {
-			if i%ctxCheckRows == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
+			if err := checkFoldContext(ctx, i); err != nil {
+				return err
 			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {
@@ -1114,10 +1107,8 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 			}
 		}
 		for i, r := range ring {
-			if i%ctxCheckRows == 0 {
-				if err := ctx.Err(); err != nil {
-					return err
-				}
+			if err := checkFoldContext(ctx, i); err != nil {
+				return err
 			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {

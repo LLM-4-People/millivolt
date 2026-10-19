@@ -61,6 +61,15 @@ const rowsGrowChunk = 4096
 // bounding abandoned-request work to a few thousand rows.
 const ctxCheckRows = 4096
 
+// checkFoldContext reports the caller's cancellation error at each
+// ctxCheckRows-row boundary. Fold and ring loops share this cadence owner.
+func checkFoldContext(ctx context.Context, row int) error {
+	if row%ctxCheckRows != 0 {
+		return nil
+	}
+	return ctx.Err()
+}
+
 // growRows appends with chunk-bounded spare capacity. Growth copies the whole
 // retained rows block, so it must stay amortized for the small per-refresh
 // deltas of the query path while never leaving large live slack: batches
@@ -273,10 +282,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 			scanned++
 			// Check cancellation periodically so an abandoned dashboard request
 			// cannot keep a full-history decode running to completion.
-			if scanned%ctxCheckRows == 0 {
-				return ctx.Err()
-			}
-			return nil
+			return checkFoldContext(ctx, scanned)
 		})
 		if err == nil {
 			err = ctx.Err()

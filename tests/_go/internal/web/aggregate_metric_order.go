@@ -226,29 +226,37 @@ func TestMetricOrderSourceMatchesMaterializedMerge(t *testing.T) {
 	}
 }
 
-// TestMetricOrderSourceReadAllocationBounded pins the unchanged-view read: the
-// rank reader must not allocate a history-sized merge for every fresh view.
-func TestMetricOrderSourceReadAllocationBounded(t *testing.T) {
+// TestChartUnchangedViewAllocationBounded pins the unchanged-view chart read:
+// the rank reader must not materialize a history-sized merge for every fresh
+// view. The membership bytes are per-view bounded state; the old all-order
+// materialization added three sample slices proportional to history.
+func TestChartUnchangedViewAllocationBounded(t *testing.T) {
 	const history = 200_000
 	rows := benchmarkMetricRows(history + 16)
-	var m projectionMetrics
-	m.append(rows[:history], 0)
-	m.append(rows, history)
-	source := m.allOrderSource()
-	mask := make([]uint8, len(rows))
-	counts := []int{len(rows)}
-	for i := range mask {
-		mask[i] = 1
+	for i := range rows {
+		rows[i].rowIndex = uint32(i + 1)
 	}
+	p := &projectionData{rows: rows}
+	p.metrics.append(rows, 0)
+	now := time.Now().UnixMilli()
+	from, step, count := chartWindowEdges(now, now-15*60*1000)
 	res := testing.Benchmark(func(b *testing.B) {
 		b.ReportAllocs()
 		for b.Loop() {
-			_, _, _ = rankPercentilesStatsMerge(source.base.ttft, source.pending.ttft, mask, counts, nil, nil)
+			f := newChartFold(from, step, count, "", nil)
+			f.prepare(p, nil)
+			for i := range rows {
+				if err := f.fold(&rows[i]); err != nil {
+					b.Fatal(err)
+				}
+			}
+			f.freezeOrder()
+			_ = f.payload(now)
 		}
 	})
 	const limit = 1 << 20
 	if got := res.AllocedBytesPerOp(); got > limit {
-		t.Fatalf("unchanged-view rank read allocated %d bytes/op, want at most %d", got, limit)
+		t.Fatalf("unchanged-view chart read allocated %d bytes/op, want at most %d", got, limit)
 	}
 }
 
