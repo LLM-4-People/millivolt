@@ -3,10 +3,12 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -90,6 +92,277 @@ func TestModelsDiscoveryEntryLimitFailsClosedWithBoundedAllocation(t *testing.T)
 		t.Fatalf("entry-limit rejection allocated %d bytes for a %d-byte body, want <= %d", alloc, len(raw), allocBound)
 	}
 	t.Logf("entry-limit rejection: body=%d entries=650000 alloc=%d", len(raw), alloc)
+}
+
+// wideModelEnvelope builds an OpenAI envelope with one small data array plus
+// n distinct unrelated top-level members. The members are the cheapest shape
+// for the replaced map decode: every one materialized its own map entry, key
+// string header and raw-message slice even though discovery only reads data.
+func wideModelEnvelope(n int, entries string) []byte {
+	body := make([]byte, 0, n*8+len(entries)+32)
+	body = append(body, `{"data":[`...)
+	body = append(body, entries...)
+	body = append(body, ']')
+	for i := 0; i < n; i++ {
+		body = append(body, ',', '"', 'k')
+		body = strconv.AppendInt(body, int64(i), 10)
+		body = append(body, '"', ':', '0')
+	}
+	body = append(body, '}')
+	return body
+}
+
+// TestModelsDiscoveryUnrelatedEnvelopeMembersStayBounded is the envelope
+// allocation regression: finding the top-level data array must not decode
+// every sibling member. A ~7.7 MiB body with 650k unrelated members expands
+// into a 650k-entry map (over 100 MiB allocated) when the envelope is decoded
+// wholesale, while the lexical selection costs the bounded body plus the
+// small served list.
+func TestModelsDiscoveryUnrelatedEnvelopeMembersStayBounded(t *testing.T) {
+	raw := wideModelEnvelope(650_000, `{"id":"model-one","context_length":4096},{"id":"model-two"}`)
+	if len(raw) > int(config.Default().ModelsDiscoveryMaxBytes) {
+		t.Fatalf("fixture body = %d bytes, want <= the default discovery cap", len(raw))
+	}
+	p := New(config.Default(), metrics.Noop{})
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return modelHTTPResponse(r, raw), nil
+	})})
+	w := httptest.NewRecorder()
+	alloc := proxyAllocDelta(func() {
+		p.ServeHTTP(w, modelsLimitRequest("openai"))
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body prefix %q)", w.Code, w.Body.String()[:min(len(w.Body.String()), 200)])
+	}
+	var doc struct {
+		Data []struct {
+			ID            string  `json:"id"`
+			ContextLength float64 `json:"context_length"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Data) != 2 || doc.Data[0].ID != "model-one" || doc.Data[1].ID != "model-two" {
+		t.Fatalf("served entries = %+v, want the two data entries", doc.Data)
+	}
+	// A wholesale map decode allocates over 100 MiB for this fixture. The
+	// lexical walk allocates with the body plus the output; the bound leaves
+	// room for race instrumentation in CI.
+	const allocBound = 32 << 20
+	if alloc > allocBound {
+		t.Fatalf("unrelated envelope members allocated %d bytes for a %d-byte body, want <= %d", alloc, len(raw), allocBound)
+	}
+	t.Logf("wide envelope: body=%d members=650000 alloc=%d", len(raw), alloc)
+}
+
+// TestModelsDiscoveryEnvelopeShapes pins the envelope-selection contract that
+// the lexical scan must preserve from the replaced map decode: supported root
+// shapes, duplicate-key last-wins, nested-data exclusion, strict requested-key
+// typing, malformed-document fallback, and the entry budget.
+func TestModelsDiscoveryEnvelopeShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		body        string
+		keys        []string
+		wantIDs     []string
+		constructed bool
+	}{
+		{
+			name:        "openai wrapper",
+			body:        `{"object":"list","data":[{"id":"a"},{"id":"b"}]}`,
+			keys:        []string{"data"},
+			wantIDs:     []string{"a", "b"},
+			constructed: true,
+		},
+		{
+			name:        "anthropic wrapper",
+			body:        `{"data":[{"id":"a"}],"has_more":false}`,
+			keys:        []string{"data"},
+			wantIDs:     []string{"a"},
+			constructed: true,
+		},
+		{
+			name:        "bare array",
+			body:        `[{"id":"a"}]`,
+			keys:        []string{"data"},
+			wantIDs:     []string{"a"},
+			constructed: true,
+		},
+		{
+			name:        "empty array",
+			body:        `{"data":[]}`,
+			keys:        []string{"data"},
+			wantIDs:     nil,
+			constructed: true,
+		},
+		{
+			name:        "keys select in argument order",
+			body:        `{"models":[{"id":"from-models"}],"data":[{"id":"from-data"}]}`,
+			keys:        []string{"data", "models"},
+			wantIDs:     []string{"from-data"},
+			constructed: true,
+		},
+		{
+			name:        "duplicate key last wins",
+			body:        `{"data":[{"id":"first"}],"data":[{"id":"last"}]}`,
+			keys:        []string{"data"},
+			wantIDs:     []string{"last"},
+			constructed: true,
+		},
+		{
+			name:        "duplicate null last is absent",
+			body:        `{"data":[{"id":"first"}],"data":null}`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "duplicate non-array last rejects wrapper",
+			body:        `{"data":[{"id":"first"}],"data":"not-an-array"}`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "nested data is not a candidate",
+			body:        `{"object":"list","meta":{"data":[{"id":"nested"}]}}`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "wrong-shape key rejects whole wrapper",
+			body:        `{"data":{},"models":[{"id":"from-models"}]}`,
+			keys:        []string{"data", "models"},
+			constructed: false,
+		},
+		{
+			name:        "null key falls through",
+			body:        `{"data":null,"models":[{"id":"from-models"}]}`,
+			keys:        []string{"data", "models"},
+			wantIDs:     []string{"from-models"},
+			constructed: true,
+		},
+		{
+			name:        "escaped key",
+			body:        `{"da\u0074a":[{"id":"a"}]}`,
+			keys:        []string{"data"},
+			wantIDs:     []string{"a"},
+			constructed: true,
+		},
+		{
+			name:        "whitespace",
+			body:        " \n\t{ \"data\" : [ {\"id\":\"a\"} ] }\r\n",
+			keys:        []string{"data"},
+			wantIDs:     []string{"a"},
+			constructed: true,
+		},
+		{
+			name:        "malformed object is verbatim",
+			body:        `{"data":[{"id":"a"}]`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "trailing garbage is verbatim",
+			body:        `{"data":[{"id":"a"}]}x`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "malformed sibling is verbatim",
+			body:        `{"data":[{"id":"a"}],"junk":}`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "malformed bare array is not constructed",
+			body:        `[{"id":"a"},`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "non-object entry is not constructed",
+			body:        `{"data":[1]}`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "null root",
+			body:        `null`,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+		{
+			name:        "empty body",
+			body:        ``,
+			keys:        []string{"data"},
+			constructed: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			entries, constructed, err := unwrapEntries([]byte(tc.body), modelsDiscoveryMaxEntries, tc.keys...)
+			if err != nil {
+				t.Fatalf("unwrapEntries error = %v, want none", err)
+			}
+			if constructed != tc.constructed {
+				t.Fatalf("constructed = %v, want %v", constructed, tc.constructed)
+			}
+			if len(entries) != len(tc.wantIDs) {
+				t.Fatalf("entries = %d, want %d", len(entries), len(tc.wantIDs))
+			}
+			for i, want := range tc.wantIDs {
+				if id, _ := entries[i]["id"].(string); id != want {
+					t.Fatalf("entry %d id = %q, want %q", i, id, want)
+				}
+			}
+		})
+	}
+	// The entry budget still fails closed before any list is decoded.
+	if _, _, err := unwrapEntries([]byte(`{"data":[{"id":"a"}]}`), 0, "data"); !errors.Is(err, errModelsDiscoveryEntries) {
+		t.Fatalf("budget error = %v, want errModelsDiscoveryEntries", err)
+	}
+}
+
+// TestModelsDiscoveryEnvelopeScanNormalListsKeepsOpenAIAndAnthropic are the
+// normal controls for the lexical selection: ordinary OpenAI and Anthropic
+// discovery bodies still serve their complete canonical lists.
+func TestModelsDiscoveryEnvelopeScanNormalListsKeepsOpenAIAndAnthropic(t *testing.T) {
+	for _, tc := range []struct {
+		shape string
+		body  string
+	}{
+		{
+			shape: "openai",
+			body:  `{"object":"list","data":[{"id":"normal-one"},{"id":"normal-two"}]}`,
+		},
+		{
+			shape: "anthropic",
+			body:  `{"data":[{"id":"normal-one","display_name":"One"},{"id":"normal-two","display_name":"Two"}],"has_more":false}`,
+		},
+	} {
+		t.Run(tc.shape, func(t *testing.T) {
+			p := New(config.Default(), metrics.Noop{})
+			p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return modelHTTPResponse(r, []byte(tc.body)), nil
+			})})
+			w := httptest.NewRecorder()
+			p.ServeHTTP(w, modelsLimitRequest(tc.shape))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body %s)", w.Code, w.Body.String())
+			}
+			var doc struct {
+				Object string `json:"object"`
+				Data   []struct {
+					ID string `json:"id"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if doc.Object != "list" || len(doc.Data) != 2 || doc.Data[0].ID != "normal-one" || doc.Data[1].ID != "normal-two" {
+				t.Fatalf("served document = %+v, want the two normal entries", doc)
+			}
+		})
+	}
 }
 
 // TestModelsDiscoveryEntryLimitBoundary pins the exact inclusive bound: the

@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 
@@ -299,39 +300,123 @@ func unwrapEntries(body []byte, limit int, keys ...string) ([]map[string]any, bo
 }
 
 // selectModelArray locates the first recognized entry array without decoding
-// its elements. The envelope rules match the previous direct decode: a
-// present requested key must hold an array (null is "absent"), every
-// requested key is validated before one is selected, and only when no
-// requested key holds an array does the bare top-level array shape apply.
+// its elements or its sibling members. json.Valid owns whole-document validity
+// (the same syntax gate as the map decode it replaces: trailing garbage,
+// escapes, numeric spelling and nesting depth all fail exactly as before),
+// and the lexical walk records only the requested keys' value spans. An
+// envelope with hundreds of thousands of unrelated members therefore costs no
+// map entry, key header or raw-message slice per member; memory stays at the
+// caller's bounded body plus this small fixed selection table.
+//
+// The envelope rules match the previous direct decode: a present requested
+// key must hold an array (null is "absent"), every requested key is validated
+// before one is selected, duplicate members keep encoding/json's last-wins
+// semantics, nested members are never candidates, and only when no requested
+// key holds an array does the bare top-level array shape apply.
 func selectModelArray(body []byte, keys ...string) (json.RawMessage, bool) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(body, &obj); err == nil {
-		var selected json.RawMessage
-		for _, k := range keys {
-			raw, present := obj[k]
-			if !present {
-				continue
-			}
-			trimmed := bytes.TrimSpace(raw)
-			if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
-				continue
-			}
-			if trimmed[0] != '[' {
-				return nil, false
-			}
-			if selected == nil {
-				selected = raw
-			}
-		}
-		if selected != nil {
-			return selected, true
-		}
-	}
 	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
+	if len(trimmed) == 0 {
 		return nil, false
 	}
-	return body, true
+	if trimmed[0] != '{' {
+		if trimmed[0] != '[' {
+			return nil, false
+		}
+		return body, true
+	}
+	// A malformed top-level object is not a recognized envelope (the caller
+	// relays it verbatim), never a partially understood list. Validity first
+	// lets the lexical pass below trust every member span it skips.
+	if !json.Valid(body) {
+		return nil, false
+	}
+	spans := make([]modelMemberSpan, len(keys))
+	i := metrics.SkipSpace(body, 0)
+	i++ // '{', guaranteed by the trimmed root above
+	for {
+		i = metrics.SkipSpace(body, i)
+		if i >= len(body) {
+			return nil, false
+		}
+		if body[i] == '}' {
+			break
+		}
+		keyStart := i
+		keyEnd := metrics.SkipJSONString(body, i)
+		if keyEnd < 0 {
+			return nil, false
+		}
+		key := body[keyStart:keyEnd]
+		i = metrics.SkipSpace(body, keyEnd)
+		if i >= len(body) || body[i] != ':' {
+			return nil, false
+		}
+		i = metrics.SkipSpace(body, i+1)
+		valueStart := i
+		valueEnd := metrics.SkipJSONValue(body, i)
+		if valueEnd <= valueStart {
+			return nil, false
+		}
+		for idx := range keys {
+			if modelJSONKeyEquals(key, keys[idx]) {
+				// Later occurrences overwrite earlier ones: encoding/json's
+				// object decode retains the last duplicate value.
+				spans[idx] = modelMemberSpan{start: valueStart, end: valueEnd, present: true}
+			}
+		}
+		i = metrics.SkipSpace(body, valueEnd)
+		if i < len(body) && body[i] == ',' {
+			i++
+			continue
+		}
+		if i >= len(body) || body[i] != '}' {
+			return nil, false
+		}
+		break
+	}
+	var selected json.RawMessage
+	for idx := range keys {
+		span := spans[idx]
+		if !span.present {
+			continue
+		}
+		raw := body[span.start:span.end]
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+			continue
+		}
+		if trimmed[0] != '[' {
+			return nil, false
+		}
+		if selected == nil {
+			selected = raw
+		}
+	}
+	return selected, selected != nil
+}
+
+// modelMemberSpan is one top-level object member's raw value span in the
+// discovery body. A span is a subslice, never a copied value.
+type modelMemberSpan struct {
+	start   int
+	end     int
+	present bool
+}
+
+// modelJSONKeyEquals reports whether a quoted JSON object key decodes to key.
+// The common unescaped valid-UTF-8 member compares in place with no
+// allocation; escaped or invalid-UTF-8 members fall back to the standard
+// decoder so key semantics stay exactly encoding/json's.
+func modelJSONKeyEquals(rawKey []byte, key string) bool {
+	inner := rawKey[1 : len(rawKey)-1]
+	if bytes.IndexByte(inner, '\\') < 0 && utf8.Valid(inner) {
+		return string(inner) == key
+	}
+	var decoded string
+	if err := json.Unmarshal(rawKey, &decoded); err != nil {
+		return false
+	}
+	return decoded == key
 }
 
 // checkModelArrayCount scans an entry array and fails closed as soon as it

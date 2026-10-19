@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -355,6 +356,28 @@ func TestAnalyzeNonStreamBodyFields(t *testing.T) {
 			answer:    true,
 			fieldsOK:  true,
 		},
+		{
+			name:     "multi choice first choice wins",
+			body:     `{"id":"chat-1","model":"m","choices":[{"finish_reason":"stop","message":{"content":"first","tool_calls":[{"id":"c1","function":{"name":"lookup"}}]}},{"finish_reason":"stop","message":{"content":"second"}},{"finish_reason":"stop","text":"legacy"}]}`,
+			preview:  true,
+			model:    "m",
+			id:       "chat-1",
+			finish:   "stop",
+			answer:   true,
+			tools:    1,
+			names:    []string{"lookup"},
+			wantPrev: "first",
+			fieldsOK: true,
+		},
+		{
+			name:     "multi choice legacy text rescues an empty first choice",
+			body:     `{"choices":[{"finish_reason":"stop","message":{"content":null}},{"finish_reason":"stop","text":"legacy answer"}]}`,
+			preview:  true,
+			finish:   "stop",
+			answer:   true,
+			wantPrev: "legacy answer",
+			fieldsOK: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -567,4 +590,109 @@ func TestAnalyzeNonStreamBodyPreview(t *testing.T) {
 	if got := AnalyzeNonStreamBody(parts, nil, nil, true); got.Preview != "ab" {
 		t.Fatalf("parts preview = %q, want ab", got.Preview)
 	}
+}
+
+// nonStreamChoicesArray builds one top-level choices array of n objects. The
+// first object can carry a healthy choice so an over-bound body still proves
+// the bound wins over otherwise-classifiable content.
+func nonStreamChoicesArray(n int, first string) []byte {
+	body := make([]byte, 0, n*3+len(first)+2)
+	body = append(body, '[')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			body = append(body, ',')
+		}
+		if i == 0 && first != "" {
+			body = append(body, first...)
+			continue
+		}
+		body = append(body, '{', '}')
+	}
+	body = append(body, ']')
+	return body
+}
+
+// nonStreamChoicesBody wraps a choices array in a healthy completion envelope
+// and pads it with JSON whitespace to size bytes when size is nonzero.
+func nonStreamChoicesBody(t *testing.T, n int, first string, size int) []byte {
+	t.Helper()
+	body := append([]byte(`{"id":"chat-1","model":"m","choices":`), nonStreamChoicesArray(n, first)...)
+	body = append(body, '}')
+	if size == 0 {
+		return body
+	}
+	if size < len(body) {
+		t.Fatalf("size %d cannot hold the %d-byte choices body", size, len(body))
+	}
+	body = body[:len(body)-1]
+	body = append(body, bytes.Repeat([]byte{' '}, size-len(body)-1)...)
+	return append(body, '}')
+}
+
+// TestAnalyzeNonStreamBodyChoicesBound pins the pre-decode choices cardinality
+// bound: an array at the cap keeps the full typed analysis, while any
+// top-level occurrence over the cap is a response-level error and no record
+// fields are applied. The lexical scan must honor escaped keys and nested
+// decoys and cannot be bypassed by a duplicate top-level member.
+func TestAnalyzeNonStreamBodyChoicesBound(t *testing.T) {
+	healthy := `{"finish_reason":"stop","message":{"content":"hello"}}`
+
+	atCap := nonStreamChoicesBody(t, nonStreamChoicesMax, healthy, 0)
+	if got := AnalyzeNonStreamBody(atCap, nil, nil, true); got.ErrorType != "" || !got.RecordFieldsOK ||
+		got.Outcome != "" || !got.HadAnswerContent || got.Preview != "hello" {
+		t.Fatalf("array at the cap = %+v, want a fully analyzed healthy body", got)
+	}
+
+	overCap := nonStreamChoicesBody(t, nonStreamChoicesMax+1, healthy, 0)
+	got := AnalyzeNonStreamBody(overCap, nil, nil, true)
+	if got.ErrorType != nonStreamChoicesErrorType || got.ErrorCode != nonStreamChoicesErrorType ||
+		got.ErrorMsg == "" || got.RecordFieldsOK || got.Outcome != "" || got.HadAnswerContent || got.Preview != "" {
+		t.Fatalf("over-cap choices = %+v, want a non-retryable analysis error and no record fields", got)
+	}
+
+	escaped := append([]byte(`{"choic\u0065s":`), nonStreamChoicesArray(nonStreamChoicesMax+1, healthy)...)
+	escaped = append(escaped, '}')
+	if got := AnalyzeNonStreamBody(escaped, nil, nil, false); got.ErrorType != nonStreamChoicesErrorType {
+		t.Fatalf("escaped over-cap choices = %+v, want %q", got, nonStreamChoicesErrorType)
+	}
+
+	nested := append([]byte(`{"wrapper":{"choices":`), nonStreamChoicesArray(nonStreamChoicesMax+1, healthy)...)
+	nested = append(nested, `},"choices":`...)
+	nested = append(nested, nonStreamChoicesArray(2, healthy)...)
+	nested = append(nested, '}')
+	if got := AnalyzeNonStreamBody(nested, nil, nil, true); got.ErrorType != "" || !got.RecordFieldsOK ||
+		got.Outcome != "" || got.Preview != "hello" {
+		t.Fatalf("nested choices decoy = %+v, want the top-level array to classify normally", got)
+	}
+
+	duplicate := append([]byte(`{"choices":[],"choices":`), nonStreamChoicesArray(nonStreamChoicesMax+1, healthy)...)
+	duplicate = append(duplicate, '}')
+	if got := AnalyzeNonStreamBody(duplicate, nil, nil, false); got.ErrorType != nonStreamChoicesErrorType {
+		t.Fatalf("duplicate top-level choices = %+v, want the later over-cap member to fail closed", got)
+	}
+
+	// A non-array choices value is malformed input, not an over-bound
+	// collection: the typed decode owns its historical failure behavior.
+	if got := AnalyzeNonStreamBody([]byte(`{"choices":"bad"}`), nil, nil, false); got.ErrorType != "" || got.RecordFieldsOK || got.Outcome != "" {
+		t.Fatalf("non-array choices = %+v, want the historical malformed-body result", got)
+	}
+}
+
+// TestAnalyzeNonStreamBodyChoicesAllocation is the regression for the spool
+// amplification: 40,000 tiny choice objects used to materialize a ~60 MiB
+// []nonStreamChoice from a 1 MiB body. The bound must reject the body after a
+// lexical prefix scan without decoding the array.
+func TestAnalyzeNonStreamBodyChoicesAllocation(t *testing.T) {
+	body := nonStreamChoicesBody(t, 40_000, "", 1<<20)
+	var got NonStreamAnalysis
+	alloc := contentAllocDelta(func() { got = AnalyzeNonStreamBody(body, nil, nil, false) })
+	if got.ErrorType != nonStreamChoicesErrorType || got.RecordFieldsOK {
+		t.Fatalf("40k-choice body = %+v, want the choices-bound error", got)
+	}
+	const maxAlloc = 1 << 20
+	if alloc > maxAlloc {
+		t.Fatalf("AnalyzeNonStreamBody allocated %d bytes for a %d-byte 40k-choice body, want <= %d",
+			alloc, len(body), maxAlloc)
+	}
+	t.Logf("40k-choice body: input=%d alloc=%d", len(body), alloc)
 }

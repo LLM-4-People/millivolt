@@ -5,6 +5,22 @@ import (
 	"encoding/json"
 )
 
+// nonStreamChoicesMax bounds the top-level choices array before the typed
+// envelope decode materializes it. A non-streaming completion needs one choice
+// for the client and a handful for n-best or multi-candidate providers; a body
+// carrying tens of thousands of tiny choice objects would otherwise expand a
+// bounded 1 MiB spool into tens of MiB of typed structs for every concurrent
+// spool. Internal safety guardrail, not a wire-format or user-tunable limit.
+const nonStreamChoicesMax = 1024
+
+// nonStreamChoicesErrorType classifies an over-bound choices array as a
+// response-level error. The class is deliberately not a retryable provider
+// availability spelling: the same response would violate the bound again, so
+// the relay commits the provider's bytes verbatim and records the error.
+const nonStreamChoicesErrorType = "response_too_large"
+
+const nonStreamChoicesErrorMessage = "upstream response choices exceed the non-stream analysis bound"
+
 // NonStreamAnalysis is one decoded view of a fully buffered non-streaming
 // OpenAI-shaped response body. The relay's quality gate and its record commit
 // both read this value, so a spooled body is decoded once instead of once for
@@ -83,8 +99,23 @@ type nonStreamToolCall struct {
 // tool calls, bounded preview, cost (the existing ExtractCost key gate) and
 // the canonical top-level error envelope. It is the single analysis owner for
 // both the buffered quality path and the teeing relay.
+//
+// The top-level choices array is lexically bounded before the typed decode: an
+// over-bound body is classified as an error without materializing the choices
+// and without attempting the cost decode, which would otherwise expand the
+// same array generically. A body without a decodable top-level choices array
+// keeps the historical malformed-body behavior (the typed decode owns it).
 func AnalyzeNonStreamBody(body []byte, usageKeys map[string]string, costKeys []string, preview bool) NonStreamAnalysis {
 	var a NonStreamAnalysis
+	if nonStreamChoicesOverLimit(body) {
+		// Outcome deliberately stays empty: this is a response-level analysis
+		// error, not one of the degenerate completion classes that the quality
+		// retry budgets own.
+		a.ErrorType = nonStreamChoicesErrorType
+		a.ErrorCode = nonStreamChoicesErrorType
+		a.ErrorMsg = nonStreamChoicesErrorMessage
+		return a
+	}
 	var raw nonStreamEnvelope
 	decodeErr := json.Unmarshal(body, &raw)
 	if decodeErr == nil {
@@ -250,4 +281,84 @@ func optionalJSONString(raw json.RawMessage) (string, bool) {
 		return "", false
 	}
 	return s, true
+}
+
+// nonStreamChoicesOverLimit reports whether any top-level choices member of
+// the body is an array with more than nonStreamChoicesMax elements. The scan
+// is lexical and stops at the first proof of overflow, so a hostile array
+// costs only the prefix needed to reach the bound and no typed allocation.
+// Nested choices keys, string contents, and escaped key spellings are handled
+// by the same JSON traversal rules as the typed decode. A body without a
+// top-level choices array (including malformed input) reports false and leaves
+// shape validation to json.Unmarshal, preserving the historical malformed-body
+// behavior.
+//
+// Every top-level occurrence is checked rather than only the first: duplicate
+// object keys are ambiguous, and a second occurrence that the standard decoder
+// would honor must not bypass the bound. Any over-bound occurrence fails the
+// whole body closed.
+func nonStreamChoicesOverLimit(body []byte) bool {
+	// Keep responses without a choices member (the Responses API shape and
+	// other passthrough documents) on the vectorized negative path. A key
+	// spelling of ASCII "choices" can only hide a letter through a Unicode
+	// escape, so any other body cannot carry the key.
+	if !bytes.Contains(body, []byte(`"choices"`)) && !bytes.Contains(body, []byte(`\u`)) {
+		return false
+	}
+	i := SkipSpace(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return false
+	}
+	i = SkipSpace(body, i+1)
+	for i < len(body) {
+		if body[i] == '}' {
+			return false
+		}
+		if body[i] != '"' {
+			return false // a top-level member must open with a key string
+		}
+		keyStart := i
+		keyEnd := SkipJSONString(body, i)
+		if keyEnd < 0 {
+			return false
+		}
+		i = SkipSpace(body, keyEnd)
+		if i >= len(body) || body[i] != ':' {
+			return false
+		}
+		i = SkipSpace(body, i+1)
+		if i >= len(body) {
+			return false
+		}
+		if nonStreamChoicesKey(body[keyStart:keyEnd]) {
+			if body[i] == '[' {
+				if n, _, ok := CountJSONArrayBytes(body, i, nonStreamChoicesMax); ok && n > nonStreamChoicesMax {
+					return true
+				}
+			}
+			// A non-array value is the typed decode's malformed shape; a
+			// later duplicate choices member must still be checked.
+		}
+		next := SkipJSONValue(body, i)
+		if next < 0 {
+			return false
+		}
+		i = SkipSpace(body, next)
+		if i >= len(body) || body[i] != ',' {
+			return false // the object ended or the scan is malformed
+		}
+		i = SkipSpace(body, i+1)
+	}
+	return false
+}
+
+// nonStreamChoicesKey compares one quoted top-level key token with "choices".
+// The ordinary spelling takes the allocation-free byte path; escaped or
+// non-ASCII spellings decode through the standard JSON string rules.
+func nonStreamChoicesKey(raw []byte) bool {
+	if len(raw) == len(`"choices"`) && bytes.Equal(raw, []byte(`"choices"`)) {
+		return true
+	}
+	var name string
+	return json.Unmarshal(raw, &name) == nil && name == "choices"
 }
