@@ -29,7 +29,12 @@ defines their supported combinations.
 decoder. Ordinary content is measured without retaining decoded prompt/schema
 trees; opt-in previews stay bounded. Exceptional decoder compatibility belongs
 at that owner, not a second routing parser. The Start stamp follows body upload
-and precedes metadata/translation CPU.
+and precedes metadata/translation CPU. Upstream whole-document buffers share
+one process-wide `max_inflight_response_bytes` reservation: translated
+non-streaming responses, the non-streaming 200 quality spool, and
+model-discovery pages. Admission reserves the declared Content-Length when it
+fits the bounded read cap, otherwise that cap, and refuses with a retryable
+`503` and `Retry-After` before reading the upstream body.
 
 `resolveRequestOverrides` in
 [request.go](../internal/proxy/request.go) merges the matching

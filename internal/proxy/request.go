@@ -1506,10 +1506,10 @@ func growRequestBodyCap(buf []byte, need, limit int) []byte {
 	return grown
 }
 
-// discardedJSON accepts every syntactically valid JSON shape without
-// materializing nested schemas, metadata, or numbers. The enclosing decoder
-// already validated the value; re-decoding it into any would allocate the
-// whole element merely to discard it.
+// discardedJSON accepts every syntactically valid JSON shape as a no-op. The
+// enclosing decoder owns syntax validation, and the metadata key scan only
+// locates values with the shared lexical scanner, so nothing is materialized
+// or re-decoded merely to be discarded.
 type discardedJSON struct{}
 
 func (*discardedJSON) UnmarshalJSON([]byte) error { return nil }
@@ -1628,12 +1628,12 @@ const requestMetadataKeysMax = 1024
 
 // requestMetadataKeys counts a metadata object's distinct top-level keys
 // without materializing a per-key value map. The enclosing document decode
-// validates JSON syntax before this runs, so the scan is lexical; each value
-// still passes the shared discardedJSON numeric check to keep the established
-// overflow behavior. Duplicate metadata members merge like the previous map
-// field, and null clears the accumulated keys. The recorded count saturates at
-// requestMetadataKeysMax: a value at the cap means "at least this many keys",
-// never that a larger map was fully counted.
+// validates JSON syntax before this runs, and this scan only locates values
+// with the shared lexical scanner before passing them to the no-op
+// discardedJSON, so no value is decoded. Duplicate metadata members merge like
+// the previous map field, and null clears the accumulated keys. The recorded
+// count saturates at requestMetadataKeysMax: a value at the cap means "at
+// least this many keys", never that a larger map was fully counted.
 type requestMetadataKeys struct {
 	keys map[string]struct{}
 }

@@ -123,8 +123,9 @@ func purgePredicate(filter *PurgeFilter) (string, []any, error) {
 
 // buildPurgeDebugDelete is the one owner of the sidecar delete statement. A
 // full purge removes only captures whose request row exists: a capture can
-// precede its request's durable row and must survive. A filtered purge keeps
-// the correlated subquery so only captures of matched requests go.
+// precede its request's durable row and must survive, so its DELETE uses an
+// EXISTS guard. A filtered purge deletes captures through an IN subquery over
+// the request rows matching the same filter.
 func buildPurgeDebugDelete(filter *PurgeFilter) (string, []any, error) {
 	if filter == nil {
 		return `DELETE FROM request_debug WHERE id IN (
@@ -157,12 +158,11 @@ func (s *Store) purgeTransaction(cmd *purgeCommand) (PurgeResult, error) {
 	defer tx.Rollback()
 	// Captures for requests still finalizing have no durable row yet and must
 	// survive. Orphan/expired capture cleanup remains owned by the TTL path.
-	// Scan the sidecar (usually small or empty) and probe requests per capture,
-	// instead of probing the sidecar once per request row. In-flight captures
-	// have no durable request row yet and survive by construction; a filtered
-	// clear keeps the correlated subquery so only captures of matched requests
-	// go. Clearing every capture is wrong: a capture can precede its request's
-	// durable row.
+	// buildPurgeDebugDelete issues the one sidecar DELETE: a full purge keeps
+	// the EXISTS guard so captures without a durable request row survive, and
+	// a filtered purge deletes exactly the captures whose request row matches
+	// the same predicate as the request delete. Clearing every capture is
+	// wrong: a capture can precede its request's durable row.
 	var debugDelta int64
 	debugBefore := int64(0)
 	if s.debugMaxBytes > 0 {

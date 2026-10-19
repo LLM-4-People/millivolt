@@ -63,9 +63,11 @@ const sqliteBusyTimeout = 5 * time.Second
 // exportTimeout bounds one durable log export end to end. An export holds an
 // open read transaction for the whole stream, so an abandoned or trickling
 // consumer would otherwise pin the WAL snapshot indefinitely. The budget is
-// internal (not an operator tunable): it must never expire before the
-// interactive query timeout, and it is deliberately shorter than the
-// maintenance budget because an export is a delivery path, not a rebuild.
+// internal (not an operator tunable) and deliberately equal to the
+// maintenance budget (both 10 minutes): both bound one full-history storage
+// operation, and an export is a delivery path, not a rebuild, so it is not
+// given a longer ceiling than maintenance. The interactive query timeout is a
+// separate bound for dashboard SELECTs.
 const exportTimeout = 10 * time.Minute
 
 // maintenanceTimeout bounds long, non-interactive storage materialization and
