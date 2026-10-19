@@ -1716,12 +1716,12 @@ const requestMetadataMaxElements = 10_000
 // one message expands into a large typed slice.
 const requestContentPartMax = 4096
 
-// boundRequestMetadata is an allocation-free preflight over the top-level
-// document. It rejects only a JSON document whose messages/tools array or
-// logit_bias object exceeds the bound. Invalid JSON returns nil so the
-// existing passthrough behavior is preserved; no collection, key, or nested
-// value is materialized. Collection members are skipped lexically with the
-// shared byte scanner, so a metadata flood costs one pass over the body.
+// boundRequestMetadata is a lexical preflight over the top-level document. It
+// rejects only a JSON document whose messages/tools array or logit_bias object
+// exceeds the bound. Invalid JSON returns nil so the existing passthrough
+// behavior is preserved; collection members are skipped with the shared byte
+// scanner. Ordinary top-level keys allocate nothing; escaped keys and the
+// bounded distinct logit_bias key set decode only what their comparison needs.
 func boundRequestMetadata(body []byte) error {
 	i := metrics.SkipSpace(body, 0)
 	if i >= len(body) || body[i] != '{' {
@@ -1922,6 +1922,14 @@ func countJSONLogitBias(data []byte, i, max int, seen map[string]struct{}) (int,
 		return 0, 0, false
 	}
 	if data[i] != '{' {
+		// encoding/json sets a map field to nil when the value is null, so a
+		// null between duplicate objects resets the accumulated map rather
+		// than leaving the previous keys counted. Other non-object values are
+		// type errors handled by the main decode; leave the accumulator alone.
+		if len(data)-i >= 4 && bytes.Equal(data[i:i+4], []byte("null")) {
+			clear(seen)
+			return 0, i + 4, true
+		}
 		next := skipJSONValue(data, i)
 		return len(seen), next, next >= 0
 	}

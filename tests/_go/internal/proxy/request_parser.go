@@ -719,6 +719,7 @@ func TestRequestCollectionElementBounds(t *testing.T) {
 		{"duplicate logit_bias objects under cap", `{"logit_bias":` + objectRange(0, 4000) + `,"logit_bias":` + objectRange(4000, 4000) + `}`, false},
 		{"duplicate logit_bias members count once", `{"logit_bias":{"a":0` + strings.Repeat(`,"a":0`, requestMetadataMaxElements) + `}}`, false},
 		{"truncated logit_bias passes through", `{"model":"m","logit_bias":{"a":`, false},
+		{"null logit_bias resets duplicate objects", `{"logit_bias":` + objectRange(0, 6000) + `,"logit_bias":null,"logit_bias":` + objectRange(6000, 6000) + `}`, false},
 		{"non-array messages is not an element collection", `{"model":"m","messages":"not-an-array"}`, false},
 		{"malformed JSON stays passthrough", `{"model":"m","messages":[`, false},
 		{"malformed over-cap prefix stays passthrough", `{"model":"m","messages":` + array(requestMetadataMaxElements+1, `{}`) + `,X}`, false},
