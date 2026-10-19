@@ -298,11 +298,19 @@ func (s *Server) latestThrottleSnap() []persistedThrottle {
 // snapshot. The generation guard means a concurrent header change is either
 // included in this write or written by the next iteration; only the latest
 // generation can finish successfully.
+//
+// The whole convergence attempt is bounded by one StorageQueryTimeout, not one
+// store call per iteration: sustained header churn must not keep an operator
+// POST open indefinitely. A bounded failure leaves the dirty generation in
+// place for the background writer or a later flush; the policy is already
+// applied in memory.
 func (s *Server) persistThrottleSync() error {
 	s.throttle.mu.Lock()
 	s.throttle.persistGen++
 	s.throttle.mu.Unlock()
-	if err := s.persistThrottleLatest(context.Background()); err != nil {
+	ctx, cancel := s.storeQueryCtx()
+	defer cancel()
+	if err := s.persistThrottleLatest(ctx); err != nil {
 		return &operatorPersistenceError{err}
 	}
 	return nil
@@ -366,6 +374,13 @@ func (s *Server) persistThrottleLatestLocked(ctx context.Context) error {
 			// Memory-only policy: leave the generation dirty so a later attach
 			// can persist it, and report success to callers.
 			return nil
+		}
+		// Check the caller's bound before every write, not only inside the
+		// store call: a generation that keeps moving between writes would
+		// otherwise restart this loop past the deadline. The dirty generation
+		// stays for the background writer.
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		snap := s.latestThrottleSnap()
 		err := s.writeThrottleSnap(ctx, target, snap)

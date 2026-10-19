@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
@@ -339,6 +340,128 @@ func TestThrottleStaleWriteRewritesLatest(t *testing.T) {
 	if len(items) != 1 || items[0].Provider != "provider.example" || items[0].Concurrency != 2 {
 		t.Fatalf("final durable policy = %+v, want the latest concurrency 2", items)
 	}
+}
+
+// ctxHookThrottlePersist exposes the caller's context to a test hook, so a
+// write can supersede its own generation and park until the operator's
+// convergence bound expires. Every attempted write is recorded for the final
+// durability assertion; LoadThrottle always starts empty so restore cannot
+// mask the writes under test.
+type ctxHookThrottlePersist struct {
+	mu    sync.Mutex
+	saves int
+	raw   []byte
+	save  func(context.Context, []byte) error
+}
+
+func (p *ctxHookThrottlePersist) SaveThrottle(ctx context.Context, raw []byte) error {
+	p.mu.Lock()
+	p.saves++
+	p.raw = append(p.raw[:0], raw...)
+	p.mu.Unlock()
+	return p.save(ctx, raw)
+}
+
+func (*ctxHookThrottlePersist) LoadThrottle(context.Context) ([]byte, error) { return nil, nil }
+
+func (p *ctxHookThrottlePersist) stats() (saves int, raw []byte) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.saves, append([]byte(nil), p.raw...)
+}
+
+// TestThrottleOperatorSyncBoundedUnderGenerationChurn is the observation-7
+// regression: a synchronous operator edit must not stay open while header
+// churn keeps superseding its writes. The store supersedes the first three
+// writes, parks the fourth just past the storage timeout, then ignores the
+// expired context on any later call. Only the convergence loop's own deadline
+// check can stop after that fourth write, report the persistence warning, and
+// leave the latest generation for a later flush.
+func TestThrottleOperatorSyncBoundedUnderGenerationChurn(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cfg := config.Default()
+		cfg.StorageQueryTimeout = 30 * time.Millisecond
+		p := New(cfg, metrics.Noop{})
+		// Keep the coalescing writer parked; this test exercises the bounded
+		// operator path and then a direct flush.
+		deferThrottleWriter(p)
+		defer func() { _ = p.CloseThrottlePersist(context.Background()) }()
+
+		start := time.Now()
+		var calls atomic.Int32
+		sink := &ctxHookThrottlePersist{save: func(_ context.Context, _ []byte) error {
+			n := calls.Add(1)
+			switch {
+			case n < 4:
+				// Supersede this write while it is in flight.
+				applyThrottleHeader(t, p, "churn.example", hdrLimitConcurrency, strconv.Itoa(int(n)+1))
+				return nil
+			case n == 4:
+				// Supersede once more, then hold the write just past the
+				// operator's bound so its timer is unambiguously observed. The
+				// extra millisecond is this store's own artificial latency, not
+				// the loop's: a loop that failed to check its context between
+				// writes would issue another, converging write here.
+				applyThrottleHeader(t, p, "churn.example", hdrLimitConcurrency, "99")
+				time.Sleep(cfg.StorageQueryTimeout + time.Millisecond)
+				return nil
+			default:
+				return nil
+			}
+		}}
+		p.attachThrottlePersist(sink)
+
+		rr := postThrottle(t, p, `{"provider":"operator.example","concurrency":7}`)
+		elapsed := time.Since(start)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("operator POST status = %d body %s", rr.Code, rr.Body.String())
+		}
+		var state map[string]any
+		if err := json.Unmarshal(rr.Body.Bytes(), &state); err != nil {
+			t.Fatal(err)
+		}
+		if state["warning"] == nil {
+			t.Fatalf("timed-out operator write reported no persistence warning: %s", rr.Body.String())
+		}
+		if elapsed > cfg.StorageQueryTimeout+time.Millisecond {
+			t.Fatalf("operator call took %s, want at most the %s bound plus the store's artificial delay", elapsed, cfg.StorageQueryTimeout)
+		}
+		if saves, _ := sink.stats(); saves != 4 {
+			t.Fatalf("operator path attempted %d writes, want the four bounded supersessions", saves)
+		}
+		if got := schedThrottleFor(p.scheduler, "operator.example").Limit.Concurrency; got != 7 {
+			t.Fatalf("operator cap = %d, want applied in memory as 7", got)
+		}
+		if got := schedThrottleFor(p.scheduler, "churn.example").Limit.Concurrency; got != 99 {
+			t.Fatalf("churned cap = %d, want latest 99", got)
+		}
+		gen, persisted := throttleGenerations(p)
+		if persisted >= gen {
+			t.Fatalf("bounded failure cleared the dirty generation: persisted=%d latest=%d", persisted, gen)
+		}
+
+		// The dirty generation converges later; the failed sync must not have
+		// cleared it or written a stale document.
+		if err := p.FlushThrottles(context.Background()); err != nil {
+			t.Fatalf("flush after the bounded operator failure: %v", err)
+		}
+		gen, persisted = throttleGenerations(p)
+		if persisted != gen {
+			t.Fatalf("flush left generation dirty: persisted=%d latest=%d", persisted, gen)
+		}
+		saves, raw := sink.stats()
+		if saves != 5 {
+			t.Fatalf("writes after flush = %d, want one converged write after the four bounded attempts", saves)
+		}
+		items := assertThrottleDocumentMatchesPolicy(t, raw, p)
+		found := map[string]int64{}
+		for _, it := range items {
+			found[it.Provider] = int64(it.Concurrency)
+		}
+		if found["operator.example"] != 7 || found["churn.example"] != 99 {
+			t.Fatalf("flushed policy = %+v, want operator 7 and churn 99", found)
+		}
+	})
 }
 
 // flakyThrottlePersist fails the configured number of writes, then records the
