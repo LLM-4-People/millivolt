@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -258,11 +259,11 @@ func TestModelsDiscoveryEnrichmentSharesBudgetAndDegrades(t *testing.T) {
 
 type modelsWaitBody struct {
 	ctx    context.Context
-	closed bool
+	closed atomic.Bool
 }
 
 func (b *modelsWaitBody) Read([]byte) (int, error) { <-b.ctx.Done(); return 0, b.ctx.Err() }
-func (b *modelsWaitBody) Close() error             { b.closed = true; return nil }
+func (b *modelsWaitBody) Close() error             { b.closed.Store(true); return nil }
 
 func TestModelsDiscoveryDeadlineCoversBodiesAcrossFormats(t *testing.T) {
 	for _, shape := range []string{"openai", "anthropic", "cursor"} {
@@ -291,7 +292,7 @@ func TestModelsDiscoveryDeadlineCoversBodiesAcrossFormats(t *testing.T) {
 					started := time.Now()
 					w := httptest.NewRecorder()
 					p.ServeHTTP(w, r)
-					if w.Code != 502 || b == nil || !b.closed || time.Since(started) != want {
+					if w.Code != 502 || b == nil || !b.closed.Load() || time.Since(started) != want {
 						t.Fatalf("status=%d elapsed=%s body=%v", w.Code, time.Since(started), b)
 					}
 				})
