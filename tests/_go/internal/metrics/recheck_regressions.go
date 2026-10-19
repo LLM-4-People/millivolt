@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -55,4 +56,52 @@ func TestNonStreamChoicesBoundFastPath(t *testing.T) {
 			t.Fatalf("%q did not trigger the choices traversal", key)
 		}
 	}
+}
+
+// legacyChoicesKeyGate is the pre-fast-path gate: a byte-by-byte quote scan
+// with bytes.EqualFold. The benchmark keeps it beside the production gate so
+// the exact-token path can be compared fairly on the same fixtures.
+func legacyChoicesKeyGate(body []byte) bool {
+	const token = `choices`
+	if bytes.Contains(body, []byte(`\u`)) {
+		return true
+	}
+	for i := 0; i+len(token)+2 <= len(body); i++ {
+		if body[i] != '"' || body[i+len(token)+1] != '"' {
+			continue
+		}
+		if bytes.EqualFold(body[i+1:i+len(token)+1], []byte(token)) {
+			return true
+		}
+	}
+	return false
+}
+
+var choicesGateSink bool
+
+func benchmarkChoicesGate(b *testing.B, name string, body []byte, gate func([]byte) bool) {
+	b.Run(name, func(b *testing.B) {
+		b.SetBytes(int64(len(body)))
+		b.ReportAllocs()
+		for b.Loop() {
+			choicesGateSink = gate(body)
+		}
+	})
+}
+
+func BenchmarkChoicesKeyGate(b *testing.B) {
+	prefix := strings.Repeat("x", 64<<10)
+	bodies := []struct {
+		name string
+		body []byte
+	}{
+		{"exact", []byte(`{"prefix":"` + prefix + `","choices":[]}`)},
+		{"mixed", []byte(`{"prefix":"` + prefix + `","CHOICES":[]}`)},
+		{"absent", []byte(`{"prefix":"` + prefix + `","other":[]}`)},
+	}
+	for _, tc := range bodies {
+		benchmarkChoicesGate(b, tc.name+"/old", tc.body, legacyChoicesKeyGate)
+		benchmarkChoicesGate(b, tc.name+"/new", tc.body, containsChoicesKeyToken)
+	}
+	_ = choicesGateSink
 }

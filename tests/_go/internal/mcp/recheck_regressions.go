@@ -472,6 +472,33 @@ func TestDescribeDescriptionStatesToolNamesNoValue(t *testing.T) {
 	t.Fatal("describe is not registered")
 }
 
+// TestDescribeNoteKeepsModelFiltersGoOwned pins the INT-1 residual: the
+// request-log note lists only the SQL-exact log-page equalities and states that
+// model matching remains Go-owned.
+func TestDescribeNoteKeepsModelFiltersGoOwned(t *testing.T) {
+	var note string
+	for _, table := range tableDocs {
+		if table.Table == "requests" {
+			note = strings.Join(table.Notes, " ")
+			break
+		}
+	}
+	if note == "" {
+		t.Fatal("requests table notes missing")
+	}
+	if strings.Contains(note, "conversation_id, model, status_code") {
+		t.Fatalf("note still claims model pushdown: %s", note)
+	}
+	for _, needle := range []string{"provider", "client", "key_hash", "conversation_id", "status_code"} {
+		if !strings.Contains(note, needle) {
+			t.Fatalf("note omits pushed equality %q: %s", needle, note)
+		}
+	}
+	if !strings.Contains(note, "Model filters are Go-owned") {
+		t.Fatalf("note does not state model filters are Go-owned: %s", note)
+	}
+}
+
 // TestValuesToolToleratesEmptyAndMalformedToolNames pins MCP-5: a migrated
 // empty tool_names column is no vocabulary, never a malformed-JSON 500.
 func TestValuesToolToleratesEmptyAndMalformedToolNames(t *testing.T) {

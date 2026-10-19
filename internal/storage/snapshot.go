@@ -1400,6 +1400,14 @@ var recordScanMillisColumns = []string{
 // writer's accounting applies.
 var aggregateMetricColumns = []string{"cost", "gen_tps", "overall_tps"}
 
+// aggregateCountColumns are the INTEGER request fields Totals.Add folds with
+// metrics.SumCounts. A negative row would make the checked fold fail, and a
+// column sum above int64 promotes to a SQLite REAL total that cannot be
+// represented in Totals.
+var aggregateCountColumns = []string{
+	"input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens", "ttft_ms",
+}
+
 // recordScanChecks derives one value check per recordColumns entry from the
 // scan destinations scanRecord itself uses. Every numeric destination accepts
 // the schema's own storage classes only: INTEGER for an integer or bool
@@ -1442,6 +1450,10 @@ func recordScanChecks() ([]recordScanCheck, error) {
 				check.accepted = "an integer millisecond timestamp within the RFC 3339 range"
 				check.reject += fmt.Sprintf(` OR %s < %d OR %s > %d`,
 					quoted, recordScanMillisMin, quoted, recordScanMillisMax)
+			}
+			if slices.Contains(aggregateCountColumns, column) {
+				check.accepted = "a nonnegative integer"
+				check.reject += ` OR ` + quoted + ` < 0`
 			}
 		case recordScanReal:
 			check.accepted = "a number"
@@ -1568,28 +1580,55 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 	return fmt.Errorf("%s requests contains values scanRecord cannot read", source)
 }
 
-// preflightAggregateValues applies the aggregate metric domain to the actual
-// stored range of every aggregate-bearing REAL column. It reuses
-// metrics.SumValues as the one range policy: MIN..MAX is the widest two-value
-// sum the column can produce, so the same predicate that rejects a poisoned
-// per-request value also rejects a column whose smallest and largest values
-// cannot be added representably. The caller has already rejected NULL and
-// non-numeric storage classes, so a valid pair is the remaining border.
+// preflightAggregateValues applies the aggregate domain to the actual stored
+// totals of every aggregate-bearing column. Per-row checks prove each value is
+// representable; this check proves the full column sum the rebuild and writer
+// accounting will produce is also representable. REAL totals go through
+// metrics.SumValues, and INTEGER totals must remain a nonnegative int64 through
+// metrics.SumCounts. SQLite returns NULL for an empty column, a REAL for an
+// integer SUM that overflowed int64, and an integer otherwise.
 func preflightAggregateValues(ctx context.Context, db mergeConn, table, source string, present map[string]struct{}) error {
 	for _, column := range aggregateMetricColumns {
 		if _, ok := present[column]; !ok {
 			continue
 		}
-		var low, high sql.NullFloat64
+		var total sql.NullFloat64
 		if err := db.QueryRowContext(ctx,
-			`SELECT MIN("`+column+`"), MAX("`+column+`") FROM `+table).Scan(&low, &high); err != nil {
-			return fmt.Errorf("%s requests.%s range: %w", source, column, err)
+			`SELECT SUM("`+column+`") FROM `+table).Scan(&total); err != nil {
+			return fmt.Errorf("%s requests.%s total: %w", source, column, err)
 		}
-		if !low.Valid || !high.Valid {
-			continue // the per-column NULL check already names this row
+		if !total.Valid {
+			continue
 		}
-		if _, err := metrics.SumValues(low.Float64, high.Float64); err != nil {
-			return fmt.Errorf("%s requests contains an invalid %s value; aggregate metrics require a finite nonnegative number", source, column)
+		if _, err := metrics.SumValues(total.Float64); err != nil {
+			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a finite nonnegative sum", source, column)
+		}
+	}
+	for _, column := range aggregateCountColumns {
+		if _, ok := present[column]; !ok {
+			continue
+		}
+		var total any
+		var kind string
+		if err := db.QueryRowContext(ctx,
+			`SELECT SUM("`+column+`"), typeof(SUM("`+column+`")) FROM `+table).Scan(&total, &kind); err != nil {
+			// This SQLite build can report integer overflow from SUM itself
+			// instead of promoting the result to REAL. Both mean the checked
+			// int64 total is unrepresentable, so report the same domain error.
+			if strings.Contains(err.Error(), "integer overflow") {
+				return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
+			}
+			return fmt.Errorf("%s requests.%s total: %w", source, column, err)
+		}
+		if total == nil {
+			continue
+		}
+		value, ok := total.(int64)
+		if !ok || kind != "integer" {
+			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
+		}
+		if _, err := metrics.SumCounts(value); err != nil {
+			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
 		}
 	}
 	return nil

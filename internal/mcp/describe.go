@@ -484,7 +484,7 @@ var tableDocs = []TableDoc{
 				"a NEGATIVE value marks a pre-tracking row where only nonzero values were known"},
 		},
 		Notes: []string{
-			"idx_requests_log is the only request-log index: a started_at range bounds the ordered scan, while every exact equality the log page pushes down (provider, client, key_hash, conversation_id, model, status_code) is rechecked against each scanned row. There is no index on error_type or cost.",
+			"idx_requests_log is the only request-log index: a started_at range bounds the ordered scan, while the exact log-page predicates it pushes down (provider, client, key_hash, conversation_id and canonical numeric status_code) are rechecked against each scanned row. Model filters are Go-owned because canonical matching trims stored spellings and applies the configured rules. There is no index on error_type or cost.",
 			"debug = 1 rows are exactly the requests with a readable capture document (until debug_capture_ttl expires), and a purge of those rows " +
 				"deletes the capture document with them.",
 			"The req_* family records the request PARAMETERS the client asked for, not what the upstream did. Most columns use 0 for an unset value, " +

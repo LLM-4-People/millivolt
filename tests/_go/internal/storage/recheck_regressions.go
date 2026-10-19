@@ -3,6 +3,8 @@ package storage
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -27,6 +29,41 @@ func snapshotWithStartAndDuration(t *testing.T, start, duration int64) []byte {
 		_, err := db.Exec(`UPDATE requests SET started_at = ?, duration_ms = ? WHERE id = 'legacy-row'`, start, duration)
 		return err
 	})
+}
+
+func snapshotFromRecords(t *testing.T, records []*metrics.Record) []byte {
+	t.Helper()
+	live := openTestStore(t)
+	for _, record := range records {
+		if record.Start.IsZero() {
+			record.Start = time.UnixMilli(1_800_200_000_000)
+		}
+		live.Record(record)
+	}
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := live.Snapshot(t.Context())
+	if err != nil {
+		t.Fatalf("snapshot records: %v", err)
+	}
+	return data
+}
+
+func aggregateRecords(t *testing.T, count int, apply func(*metrics.Record)) []*metrics.Record {
+	t.Helper()
+	records := make([]*metrics.Record, count)
+	start := time.UnixMilli(1_800_200_000_000)
+	for i := range records {
+		records[i] = &metrics.Record{
+			ID: fmt.Sprintf("aggregate-%02d", i), Provider: "neutral.example",
+			Model: "n", StatusCode: 200, Start: start.Add(time.Duration(i) * time.Millisecond),
+		}
+		if apply != nil {
+			apply(records[i])
+		}
+	}
+	return records
 }
 
 func replaceSnapshot(t *testing.T, data []byte) (*Store, error) {
@@ -133,6 +170,115 @@ func TestRestoreRejectsAggregateUnsafeValues(t *testing.T) {
 	}
 }
 
+// TestRestoreRejectsAggregateTotalOverflow pins the STO-1 residual: every row
+// can be representable while the full column total is not. Admission must
+// reject the aggregate before replace installs or merge commits.
+func TestRestoreRejectsAggregateTotalOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*metrics.Record)
+	}{
+		{"cost", func(r *metrics.Record) { r.Cost = 1e307 }},
+		{"gen_tps", func(r *metrics.Record) { r.DecodeTPS = 1e307 }},
+		{"overall_tps", func(r *metrics.Record) { r.OverallTPS = 1e307 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := snapshotFromRecords(t, aggregateRecords(t, 20, tc.apply))
+			requireRejected(t, data, "invalid "+tc.name+" aggregate")
+			requireMergeRejected(t, data, "invalid "+tc.name+" aggregate")
+		})
+	}
+}
+
+// TestRestoreRejectsIntegerTotalOverflowAndNegative pins the integer half of
+// the aggregate preflight: a SUM promoted to REAL, or a negative per-row
+// count, cannot feed Totals.Add's checked arithmetic.
+func TestRestoreRejectsIntegerTotalOverflowAndNegative(t *testing.T) {
+	for _, column := range aggregateCountColumns {
+		t.Run(column, func(t *testing.T) {
+			row := 0
+			overflow := snapshotFromRecords(t, aggregateRecords(t, 2, func(r *metrics.Record) {
+				value := int64(1)
+				if row == 0 {
+					value = math.MaxInt64
+				}
+				row++
+				switch column {
+				case "input_tokens":
+					r.Usage.InputTokens = value
+				case "output_tokens":
+					r.Usage.OutputTokens = value
+				case "cache_read_tokens":
+					r.Usage.CacheReadTokens = value
+				case "reasoning_tokens":
+					r.Usage.ReasoningTokens = value
+				case "ttft_ms":
+					r.TTFTMs = value
+				default:
+					t.Fatalf("no fixture for %s", column)
+				}
+			}))
+			// MaxInt64 plus one overflows int64, so SUM cannot stay an integer.
+			requireRejected(t, overflow, "invalid "+column+" aggregate")
+			requireMergeRejected(t, overflow, "invalid "+column+" aggregate")
+
+			negative := snapshotFromRecords(t, aggregateRecords(t, 1, func(r *metrics.Record) {
+				switch column {
+				case "input_tokens":
+					r.Usage.InputTokens = -1
+				case "output_tokens":
+					r.Usage.OutputTokens = -1
+				case "cache_read_tokens":
+					r.Usage.CacheReadTokens = -1
+				case "reasoning_tokens":
+					r.Usage.ReasoningTokens = -1
+				case "ttft_ms":
+					r.TTFTMs = -1
+				}
+			}))
+			requireRejected(t, negative, "invalid "+column)
+			requireMergeRejected(t, negative, "invalid "+column)
+		})
+	}
+}
+
+// TestRestoreAcceptsFiniteAggregateTotals is the control: 20 ordinary rows
+// install, their totals stay representable, and the same set merges cleanly.
+func TestRestoreAcceptsFiniteAggregateTotals(t *testing.T) {
+	data := snapshotFromRecords(t, aggregateRecords(t, 20, func(r *metrics.Record) {
+		r.Cost = 1.5
+		r.DecodeTPS = 20
+		r.OverallTPS = 20
+		r.TTFTMs = 100
+		r.Usage.InputTokens = 10
+		r.Usage.OutputTokens = 5
+		r.Usage.CacheReadTokens = 2
+		r.Usage.ReasoningTokens = 1
+	}))
+	live, err := replaceSnapshot(t, data)
+	if err != nil {
+		t.Fatalf("finite aggregate control rejected: %v", err)
+	}
+	if live.Totals().Err() != nil {
+		t.Fatalf("finite aggregate control totals error: %v", live.Totals().Err())
+	}
+	if live.Totals().Requests != 20 {
+		t.Fatalf("finite aggregate control requests = %d", live.Totals().Requests)
+	}
+
+	merge := mergeTestLive(t)
+	inserted, skipped, err := merge.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatalf("finite aggregate merge rejected: %v", err)
+	}
+	if inserted != 20 || skipped != 0 {
+		t.Fatalf("finite aggregate merge inserted=%d skipped=%d, want 20/0", inserted, skipped)
+	}
+	if merge.Totals().Err() != nil {
+		t.Fatalf("finite aggregate merge totals error: %v", merge.Totals().Err())
+	}
+}
+
 // TestRestoreRejectsUnrepresentableTimestamps pins STO-2: milliseconds outside
 // the time.Time JSON range are rejected on both admission paths.
 func TestRestoreRejectsUnrepresentableTimestamps(t *testing.T) {
@@ -151,6 +297,33 @@ func TestRestoreRejectsUnrepresentableTimestamps(t *testing.T) {
 		}
 		if live.Totals().Err() != nil {
 			t.Fatalf("valid started_at %d totals error: %v", value, live.Totals().Err())
+		}
+	}
+}
+
+// TestRestoreTimestampBoundariesAreUTC pins the race-safe half of the STO-2
+// residual: every scanned time and the derived End stay in UTC, so marshalling
+// does not depend on the process-local zone. The non-race companion sets a
+// fixed non-UTC time.Local and exercises the same boundaries.
+func TestRestoreTimestampBoundariesAreUTC(t *testing.T) {
+	for _, value := range []int64{recordScanMillisMin, recordScanMillisMax, time.Now().UnixMilli()} {
+		data := snapshotWithValue(t, "started_at", value)
+		live, err := replaceSnapshot(t, data)
+		if err != nil {
+			t.Fatalf("started_at %d rejected: %v", value, err)
+		}
+		rows, err := live.LoadRecent(t.Context(), 1)
+		if err != nil {
+			t.Fatalf("started_at %d load: %v", value, err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("started_at %d rows = %d", value, len(rows))
+		}
+		if rows[0].Start.Location() != time.UTC || rows[0].End.Location() != time.UTC {
+			t.Fatalf("started_at %d locations = %v/%v, want UTC", value, rows[0].Start.Location(), rows[0].End.Location())
+		}
+		if _, err := json.Marshal(rows[0]); err != nil {
+			t.Fatalf("started_at %d does not marshal: %v", value, err)
 		}
 	}
 }

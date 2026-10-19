@@ -1986,22 +1986,27 @@ func scanRecord(rows *sql.Rows) (*metrics.Record, []byte, error) {
 	if err := rows.Scan(targets...); err != nil {
 		return nil, nil, err
 	}
-	r.Start = time.UnixMilli(s.startMs)
+	// time.UnixMilli returns local time. Keep every derived Time in UTC so JSON
+	// marshalling is independent of the process zone: the admitted minimum
+	// millisecond is year 0 in UTC, but a negative offset would render it as
+	// year -1, which time.Time.MarshalJSON rejects. The stored epoch values are
+	// unchanged.
+	r.Start = time.UnixMilli(s.startMs).UTC()
 	r.End = r.Start.Add(time.Duration(s.durMs) * time.Millisecond)
 	r.DurationMs = s.durMs // restore the stored duration; End is derived from it
 	r.TTFTMs = s.ttftMs
 	r.HadAnswerContent = s.hadAnswer != 0
 	if s.firstMs > 0 {
-		r.FirstTokenAt = time.UnixMilli(s.firstMs)
+		r.FirstTokenAt = time.UnixMilli(s.firstMs).UTC()
 	}
 	if s.lastMs > 0 {
-		r.LastTokenAt = time.UnixMilli(s.lastMs)
+		r.LastTokenAt = time.UnixMilli(s.lastMs).UTC()
 	}
 	if s.firstAnswerMs > 0 {
-		r.FirstAnswerAt = time.UnixMilli(s.firstAnswerMs)
+		r.FirstAnswerAt = time.UnixMilli(s.firstAnswerMs).UTC()
 	}
 	if s.finalAttemptMs > 0 {
-		r.FinalAttemptAt = time.UnixMilli(s.finalAttemptMs)
+		r.FinalAttemptAt = time.UnixMilli(s.finalAttemptMs).UTC()
 	}
 	if s.respHdr != "" {
 		if err := json.Unmarshal([]byte(s.respHdr), &r.ResponseHeaders); err != nil {

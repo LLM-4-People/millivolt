@@ -362,18 +362,45 @@ func nonStreamChoicesOverLimit(body []byte) bool {
 // fail the real traversal below.
 func containsChoicesKeyToken(body []byte) bool {
 	const token = `choices`
-	if bytes.Contains(body, []byte(`\u`)) {
+	// The overwhelmingly common exact spelling keeps the vectorized whole-body
+	// search instead of paying the quote-by-quote scan below. Any Unicode escape
+	// may spell a key letter, so it also forces the full traversal.
+	if bytes.Contains(body, []byte(`"choices"`)) || bytes.Contains(body, []byte(`\u`)) {
 		return true
 	}
-	for i := 0; i+len(token)+2 <= len(body); i++ {
-		if body[i] != '"' || body[i+len(token)+1] != '"' {
-			continue
+	for offset := 0; offset < len(body); {
+		quote := bytes.IndexByte(body[offset:], '"')
+		if quote < 0 {
+			return false
 		}
-		if bytes.EqualFold(body[i+1:i+len(token)+1], []byte(token)) {
+		quote += offset
+		closing := quote + len(token) + 1
+		if closing < len(body) && choicesKeyFold(body[quote+1:quote+len(token)+1]) && body[closing] == '"' {
 			return true
 		}
+		offset = quote + 1
 	}
 	return false
+}
+
+// choicesKeyFold is the allocation-free ASCII case fold used by the mixed-case
+// key scan. JSON keys are UTF-8; a non-ASCII byte cannot equal an ASCII letter,
+// so the fold is exact for this token.
+func choicesKeyFold(candidate []byte) bool {
+	const token = "choices"
+	if len(candidate) != len(token) {
+		return false
+	}
+	for i := range candidate {
+		c := candidate[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != token[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // nonStreamChoicesKey compares one quoted top-level key token with "choices".

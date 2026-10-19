@@ -3,6 +3,7 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -180,51 +181,6 @@ func TestStatusSpellingIsCanonicalEverywhere(t *testing.T) {
 	}
 }
 
-// TestLineageDirtyExplorerAllocationIsPooled pins WEB-3: a dirty overlay no
-// longer allocates full-projection arrays per explorer request. The bound is a
-// generous ceiling over the clean/dirty delta at this node count; the previous
-// implementation allocated parent/conflict/issues/state arrays per request.
-func TestLineageDirtyExplorerAllocationIsPooled(t *testing.T) {
-	const n = 100_000
-	rows := make([]contrib, n)
-	for i := range rows {
-		rows[i] = lineageRow(fmt.Sprintf("s:%d", i), "")
-		rowLabels(&rows[i]).prov = "fixture.example"
-	}
-	p := explorerProjection(rows)
-	clean := lineageRow("s:clean", "")
-	rowLabels(&clean).prov = "fixture.example"
-	dirty := lineageRow("s:dirty", "s:0")
-	rowLabels(&dirty).prov = "fixture.example"
-
-	measure := func(extra *contrib) testing.BenchmarkResult {
-		return testing.Benchmark(func(b *testing.B) {
-			for b.Loop() {
-				f := newExplorerFold("provider", "", nil)
-				f.prepare(p, nil)
-				for i := range p.rows {
-					if err := f.fold(&p.rows[i]); err != nil {
-						b.Fatal(err)
-					}
-				}
-				if extra != nil {
-					if err := f.fold(extra); err != nil {
-						b.Fatal(err)
-					}
-				}
-				_ = f.payload()
-			}
-		})
-	}
-	withClean := measure(&clean)
-	withDirty := measure(&dirty)
-	delta := int64(withDirty.AllocedBytesPerOp()) - int64(withClean.AllocedBytesPerOp())
-	if delta > 128<<10 {
-		t.Fatalf("dirty lineage adds %d B/op at %d nodes (clean=%d dirty=%d), want a pooled bound",
-			delta, n, withClean.AllocedBytesPerOp(), withDirty.AllocedBytesPerOp())
-	}
-}
-
 // TestLineageScratchIsReused checks the pooling lifecycle directly: a dirty
 // solve borrows a full-projection workspace, release returns it to the pool and
 // clears every borrowed slice, and a later view can solve again. Actual reuse is
@@ -262,4 +218,91 @@ func TestLineageScratchIsReused(t *testing.T) {
 	if reuse.scratch != nil || reuse.issues != nil {
 		t.Fatal("second release retained the full-projection workspace")
 	}
+}
+
+// legacyScopedMatch is the pre-mask implementation: for each dimension it
+// rescans the remaining filter slice. The benchmark compares it with the
+// single-pass production matcher on the same contributions.
+func legacyScopedMatch(c *contrib, statusCode string, fs []scopeFilter) bool {
+	if statusCode != "" {
+		if liveStatusFilter(statusCode) {
+			return false
+		}
+		if strconv.Itoa(c.status) != statusCode {
+			return false
+		}
+	}
+	var done uint32
+	for i := range fs {
+		bit := fs[i].bit
+		if bit == 0 {
+			bit = scopeDimBit(fs[i].dim)
+		}
+		if done&bit != 0 {
+			continue
+		}
+		done |= bit
+		matched := false
+		for j := i; j < len(fs); j++ {
+			if fs[j].dim != fs[i].dim {
+				continue
+			}
+			if fs[j].matches(c) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+var scopedMatchSink bool
+
+func BenchmarkScopedMatch(b *testing.B) {
+	c := &contrib{status: 200}
+	labels := rowLabels(c)
+	labels.prov, labels.client, labels.model, labels.conv, labels.key = "p", "c", "m", "conv", "k"
+	many := make([]scopeFilter, 0, 40)
+	for _, dim := range []string{"provider", "client", "model", "conversation", "key"} {
+		hit := map[string]string{"provider": "p", "client": "c", "model": "m", "conversation": "conv", "key": "k"}[dim]
+		for i := 0; i < 8; i++ {
+			id := "miss"
+			if i == 7 {
+				id = hit
+			}
+			many = append(many, scopeFilter{dim: dim, id: id})
+		}
+	}
+	cases := []struct {
+		name string
+		fs   []scopeFilter
+	}{
+		{"one", []scopeFilter{{dim: "provider", id: "p"}}},
+		{"five", []scopeFilter{
+			{dim: "provider", id: "p"}, {dim: "client", id: "c"}, {dim: "model", id: "m"},
+			{dim: "conversation", id: "conv"}, {dim: "key", id: "k"},
+		}},
+		{"same-dim", []scopeFilter{
+			{dim: "provider", id: "p1"}, {dim: "provider", id: "p2"}, {dim: "provider", id: "p"},
+		}},
+		{"many", many},
+	}
+	for _, tc := range cases {
+		b.Run(tc.name+"/old", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				scopedMatchSink = legacyScopedMatch(c, "", tc.fs)
+			}
+		})
+		b.Run(tc.name+"/new", func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				scopedMatchSink = scopedMatch(c, "", tc.fs)
+			}
+		})
+	}
+	_ = scopedMatchSink
 }

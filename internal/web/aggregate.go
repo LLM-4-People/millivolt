@@ -1501,31 +1501,28 @@ func scopedMatch(c *contrib, statusCode string, fs []scopeFilter) bool {
 			return false
 		}
 	}
-	var done uint32
+	// One pass with two dimension masks preserves OR-within and AND-across:
+	// seen records every dimension that must match, matched records the
+	// dimensions already satisfied. After one member of a dimension matches,
+	// later members are skipped without rescanning the remaining slice.
+	var seen, matched uint32
 	for i := range fs {
 		bit := fs[i].bit
 		if bit == 0 {
 			bit = scopeDimBit(fs[i].dim)
 		}
-		if done&bit != 0 {
-			continue
-		}
-		done |= bit
-		matched := false
-		for j := i; j < len(fs); j++ {
-			if fs[j].dim != fs[i].dim {
-				continue
-			}
-			if fs[j].matches(c) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if bit == 0 {
 			return false
 		}
+		seen |= bit
+		if matched&bit != 0 {
+			continue
+		}
+		if fs[i].matches(c) {
+			matched |= bit
+		}
 	}
-	return true
+	return matched == seen
 }
 
 // statusCodeEquals compares a contribution's numeric status with the validated
