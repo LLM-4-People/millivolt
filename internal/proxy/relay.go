@@ -452,14 +452,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 		if spoolErr != nil && spoolErr != io.EOF {
-			markStreamErr(ctx, rec, spoolErr)
-			copyResponseHeaders(w.Header(), resp.Header)
-			w.WriteHeader(resp.StatusCode)
-			if _, werr := w.Write(spooled); werr != nil {
+			if ctx.Err() == context.Canceled {
 				markClientGone(rec)
-			} else {
-				rec.ResponseBytes += int64(len(spooled))
+				resp.Body.Close()
+				return
 			}
+			// The status line is still uncommitted: a partial upstream body
+			// must not be relabeled as a successful 200. Surface a clean 502
+			// through the shared transport-failure writer.
+			markStreamErr(ctx, rec, spoolErr)
+			writeClientError(w, rec, errStreamRead, "upstream error: "+transportErrText(spoolErr), http.StatusBadGateway)
 			resp.Body.Close()
 			return
 		}
