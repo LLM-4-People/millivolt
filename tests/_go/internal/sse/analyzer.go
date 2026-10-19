@@ -52,6 +52,44 @@ func TestAnalyzerTokenTiming(t *testing.T) {
 	}
 }
 
+// TestLegacyCompletionTextIsAnswerContent pins the legacy /v1/completions
+// prompt-stream answer field: a non-empty choices[].text is answer content
+// (TTFT, chunk count, preview), while a nested "text" key is not. An empty
+// leading choice text never hides a non-empty sibling choice.
+func TestLegacyCompletionTextIsAnswerContent(t *testing.T) {
+	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	var a Analyzer
+	a.CapturePreview = true
+	a.Feed([]byte(`data: {"id":"cmpl-1","choices":[{"text":"Hello","index":0}]}`), now)
+	if a.firstAnswerAt.IsZero() {
+		t.Fatal("choices[].text must mark answer content")
+	}
+	if a.chunkCount != 1 {
+		t.Fatalf("chunkCount = %d, want 1", a.chunkCount)
+	}
+	if string(a.preview) != "Hello" {
+		t.Fatalf("preview = %q, want the legacy completion text", a.preview)
+	}
+
+	// A nested "text" key (a reasoning part) is not the choice's answer.
+	var b Analyzer
+	b.Feed([]byte(`data: {"choices":[{"delta":{"reasoning_details":[{"text":"thought"}]}}]}`), now)
+	if !b.firstAnswerAt.IsZero() {
+		t.Fatal("a nested text key must not count as answer content")
+	}
+
+	// A multi-choice chunk may lead with an empty choice: capture the first
+	// non-empty choice text instead.
+	var c Analyzer
+	c.CapturePreview = true
+	c.Feed([]byte(`data: {"choices":[{"text":""},{"text":"B"}]}`), now)
+	if c.firstAnswerAt.IsZero() || string(c.preview) != "B" {
+		t.Fatalf("first non-empty choice text not captured: answer=%v preview=%q",
+			!c.firstAnswerAt.IsZero(), c.preview)
+	}
+}
+
 // TTFT must fire on the FIRST token of ANY kind - reasoning or answer - across
 // providers' many reasoning field names. A reasoning-only stream must set
 // firstTokenAt (TTFT) at the first reasoning chunk, not wait for answer content.

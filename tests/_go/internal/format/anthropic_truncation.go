@@ -1,8 +1,11 @@
 package format
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // TestStreamToOpenAITruncatedSignalsError: an upstream Anthropic stream that
@@ -122,5 +125,83 @@ func TestStreamToOpenAIErrorEventNotDoubleSignaled(t *testing.T) {
 	}
 	if n := strings.Count(got, "data: [DONE]"); n != 1 {
 		t.Fatalf("[DONE] count = %d, want 1: %q", n, got)
+	}
+}
+
+// TestStreamToOpenAIProviderErrorFrame covers both provider error shapes: an
+// error event with an empty error object must not emit an empty error chunk
+// (which also left the truncation guard armed, producing a second error), so
+// the truncation path supplies the one canonical failure frame; a non-empty
+// provider error is forwarded exactly once. Both end with one [DONE].
+func TestStreamToOpenAIProviderErrorFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		payload     string
+		wantType    string
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "empty error object falls back to truncation",
+			payload:     `{"type":"error","error":{}}`,
+			wantType:    "upstream_error",
+			wantCode:    metrics.CodeTruncated,
+			wantMessage: metrics.DegenerateMessage(metrics.CodeTruncated),
+		},
+		{
+			name:        "non-empty provider error control",
+			payload:     `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			wantType:    "overloaded_error",
+			wantMessage: "Overloaded",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := strings.Join([]string{
+				"event: message_start",
+				`data: {"type":"message_start","message":{"id":"msg_1","model":"claude"}}`,
+				"",
+				"event: error",
+				"data: " + tc.payload,
+				"",
+			}, "\n") + "\n"
+
+			var out strings.Builder
+			if err := StreamToOpenAI(&out, strings.NewReader(stream), nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			body := out.String()
+			if n := strings.Count(body, "data: [DONE]"); n != 1 {
+				t.Fatalf("[DONE] count = %d, want 1: %q", n, body)
+			}
+
+			type errorFrame struct {
+				Message string `json:"message"`
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+			}
+			var errorFrames []errorFrame
+			for _, line := range strings.Split(body, "\n") {
+				if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+					continue
+				}
+				var frame struct {
+					Error *errorFrame `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &frame); err != nil {
+					t.Fatalf("bad chunk %q: %v", line, err)
+				}
+				if frame.Error != nil {
+					errorFrames = append(errorFrames, *frame.Error)
+				}
+			}
+			if len(errorFrames) != 1 {
+				t.Fatalf("error frames = %d, want exactly 1: %q", len(errorFrames), body)
+			}
+			got := errorFrames[0]
+			if got.Type != tc.wantType || got.Code != tc.wantCode || got.Message != tc.wantMessage {
+				t.Fatalf("error frame = %+v, want type %q code %q message %q: %q",
+					got, tc.wantType, tc.wantCode, tc.wantMessage, body)
+			}
+		})
 	}
 }

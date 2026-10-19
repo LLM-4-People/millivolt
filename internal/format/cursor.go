@@ -184,18 +184,19 @@ func cursorAssistantBlob(text string, calls []openaiToolCall) map[string]any {
 		// args must never be JSON null, a bare string, or a bare scalar: the
 		// server maps over it ("Cannot read properties of null (reading
 		// 'map')" - a live crash class). cursor2api's parseArgs contract: {}
-		// when empty, {_raw: raw} for anything that isn't a JSON object.
+		// when empty, {_raw: raw} for anything that isn't a JSON object. That
+		// fallback is the default; only a complete top-level object replaces
+		// it with raw JSON. The first-byte check keeps a huge array, scalar,
+		// or malformed text out of nested Go values entirely, and raw object
+		// JSON also keeps number precision and key order exact instead of
+		// round-tripping through float64/map[string]any.
 		var args any = map[string]any{}
 		if raw := strings.TrimSpace(c.Function.Arguments); raw != "" && raw != "null" {
-			var parsed any
-			if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
-				if _, ok := parsed.(map[string]any); ok {
-					args = parsed
-				} else {
-					args = map[string]any{"_raw": raw}
+			args = map[string]any{"_raw": raw}
+			if raw[0] == '{' {
+				if rawJSON := []byte(raw); json.Valid(rawJSON) {
+					args = json.RawMessage(rawJSON)
 				}
-			} else {
-				args = map[string]any{"_raw": raw}
 			}
 		}
 		parts = append(parts, map[string]any{

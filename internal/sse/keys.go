@@ -22,6 +22,12 @@ type frameKeys struct {
 	model        []byte
 	requestID    []byte
 	choices      []byte
+	// text is the first non-empty choices[].text answer string of a legacy
+	// /v1/completions prompt stream (no delta wrapper). choicesDepth scopes
+	// the capture to the choice object itself, so nested "text" keys (a
+	// reasoning part, a Responses content part) never become answer tokens.
+	text         []byte
+	choicesDepth int
 	thought      []byte
 	// eventType is the LAST top-level string "type" value. encoding/json
 	// resolves duplicate keys last-wins but treats a null value as a no-op and
@@ -99,7 +105,7 @@ func (k *frameKeys) scan(payload []byte) {
 			if id == keyNone && top && typeKeyFold(key) {
 				id = keyType
 			}
-			k.observe(id, value, top)
+			k.observe(id, value, top, depth)
 			// Continue at the value so nested keys and later siblings are
 			// still seen; a plain string value is skipped by the quote case.
 			i = j
@@ -108,6 +114,9 @@ func (k *frameKeys) scan(payload []byte) {
 			i++
 		case '}', ']':
 			depth--
+			if k.choicesDepth > 0 && depth < k.choicesDepth {
+				k.choicesDepth = 0
+			}
 			i++
 		default:
 			i++
@@ -130,6 +139,7 @@ const (
 	keyModel
 	keyError
 	keyContent
+	keyText
 	keyThought
 	keyRefusal
 	keyChoices
@@ -161,6 +171,8 @@ func identifyFrameKey(key []byte) frameKey {
 		return keyError
 	case "content":
 		return keyContent
+	case "text":
+		return keyText
 	case "thought":
 		return keyThought
 	case "refusal":
@@ -279,12 +291,13 @@ func typeKeyFold(key []byte) bool {
 	return true
 }
 
-// observe applies one matched key occurrence. Single-value fields keep the
-// first occurrence (the same value metrics.JSONKey returns); eventType keeps
-// the last top-level occurrence because encoding/json resolves duplicate
-// top-level keys last-wins. Reasoning/refusal/function_call presence is the
-// union over occurrences: any occurrence with a non-empty value qualifies.
-func (k *frameKeys) observe(id frameKey, value []byte, top bool) {
+// observe applies one matched key occurrence at its containing-object depth.
+// Single-value fields keep the first occurrence (the same value metrics.JSONKey
+// returns); eventType keeps the last top-level occurrence because encoding/json
+// resolves duplicate top-level keys last-wins. Reasoning/refusal/function_call
+// presence is the union over occurrences: any occurrence with a non-empty value
+// qualifies. choices[].text is captured only at the choice object's own depth.
+func (k *frameKeys) observe(id frameKey, value []byte, top bool, depth int) {
 	switch id {
 	case keyID:
 		if k.requestID == nil {
@@ -312,6 +325,17 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool) {
 		if k.content == nil {
 			k.content = value
 		}
+	case keyText:
+		// Legacy prompt-completion answer: the choice object itself carries
+		// "text". choicesDepth (set by the enclosing top-level "choices"
+		// array) is the array's inner depth, so the direct member object sits
+		// one level deeper. Anything nested further is not answer text. Keep
+		// the first NON-EMPTY choice text: a multi-choice chunk may lead with
+		// an empty choice while another choice carries the answer.
+		if k.text == nil && k.choicesDepth > 0 && depth == k.choicesDepth+1 &&
+			startsNonEmptyJSONString(value) {
+			k.text = value
+		}
 	case keyThought:
 		if k.thought == nil {
 			k.thought = value
@@ -323,6 +347,11 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool) {
 	case keyChoices:
 		if k.choices == nil {
 			k.choices = value
+		}
+		// A top-level choices array opens the only scope where a direct
+		// member's "text" is a legacy prompt-completion answer.
+		if top && len(value) > 0 && value[0] == '[' {
+			k.choicesDepth = depth + 1
 		}
 	case keyThinking:
 		if !k.thinkingNonEmpty {
@@ -367,12 +396,26 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool) {
 	}
 }
 
+// startsNonEmptyJSONString reports whether value is a JSON string whose
+// contents are not empty. No decode is needed for presence.
+func startsNonEmptyJSONString(value []byte) bool {
+	return len(value) > 1 && value[0] == '"' && value[1] != '"'
+}
+
 // contentStart reports whether the first content value is a non-empty string
 // (not ""). The analyzer's answer-token gate deliberately reads only the first
 // occurrence, so a leading empty/decoy content value is not overridden by a
 // later one.
 func (k *frameKeys) contentStart() bool {
-	return len(k.content) > 1 && k.content[0] == '"' && k.content[1] != '"'
+	return startsNonEmptyJSONString(k.content)
+}
+
+// textStart reports whether the probe captured a non-empty legacy
+// /v1/completions choices[].text answer string. Scoping to the choice object
+// is what keeps a nested "text" key (a reasoning part or a typed content part)
+// from being counted as answer content.
+func (k *frameKeys) textStart() bool {
+	return k.text != nil
 }
 
 // reasoningStart reports whether the payload carries reasoning ("thinking")

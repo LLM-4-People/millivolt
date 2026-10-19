@@ -260,7 +260,9 @@ func (m openaiMessage) toAnthropic() (anthropicMessage, error) {
 		// Assistant messages with tool calls map to content blocks.
 		if len(m.ToolCalls) > 0 {
 			blocks := []map[string]any{}
-			if s, ok := m.ContentString(); ok && s != "" {
+			// ContentText owns both accepted history shapes: the plain string
+			// and the bounded content-array text parts.
+			if s, ok := m.ContentText(); ok && s != "" {
 				blocks = append(blocks, map[string]any{"type": "text", "text": s})
 			}
 			for _, tc := range m.ToolCalls {
@@ -799,16 +801,19 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				return err
 			}
 		case "error":
-			// Forward the error payload inline. A malformed payload is skipped
-			// (consistent with the other branches) - never emit an empty error.
+			// Forward the error payload inline. A malformed or empty payload is
+			// skipped (consistent with the other branches) - never emit an
+			// empty error, and never claim a failure statement the provider did
+			// not make: the truncation path below then owns the single frame.
 			clear(toolCalls)
 			var e anthropicErrorEvent
 			if err := json.Unmarshal(payload, &e); err != nil {
 				continue
 			}
-			if e.Error.Type != "" || e.Error.Message != "" {
-				sawError = true
+			if e.Error.Type == "" && e.Error.Message == "" {
+				continue
 			}
+			sawError = true
 			if err := emit(sse.Chunk(id, created, model, []map[string]any{}, e.openAIError())); err != nil {
 				return err
 			}

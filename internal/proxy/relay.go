@@ -469,8 +469,17 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			}
 			// The status line is still uncommitted: a partial upstream body
 			// must not be relabeled as a successful 200. Surface a clean 502
-			// through the shared transport-failure writer.
+			// through the shared transport-failure writer, and stamp the
+			// decided status on the record first - the provisional upstream
+			// 200 was captured before the body spooled, and writeClientError
+			// only supplies a status when none is decided. A concurrent client
+			// cancel keeps its markClientGone classification instead.
 			markStreamErr(ctx, rec, spoolErr)
+			if rec.ClientDisconnected {
+				resp.Body.Close()
+				return
+			}
+			rec.StatusCode = http.StatusBadGateway
 			writeClientError(w, rec, errStreamRead, "upstream error: "+transportErrText(spoolErr), http.StatusBadGateway)
 			resp.Body.Close()
 			return

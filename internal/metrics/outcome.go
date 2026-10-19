@@ -17,8 +17,9 @@ import (
 // behave (the client retries it, the user retries it, nothing is masked).
 const (
 	// CodeEmptyCompletion: the stream terminated cleanly (terminator seen),
-	// but produced no answer content, no reasoning, and no tool calls, with a
-	// stop (or absent) finish_reason.
+	// but produced no answer content, no answer-shaped output (a non-empty
+	// refusal or deprecated function_call declaration), no reasoning, and no
+	// tool calls, with a stop (or absent) finish_reason.
 	CodeEmptyCompletion = "empty_completion"
 	// CodeEmptyToolCall: finish_reason tool_calls but zero tool-call deltas
 	// and no answer content - the model "declared" a tool and never called it.
@@ -55,8 +56,10 @@ func DegenerateMessage(code string) string {
 // ClassifyOutcome evaluates a finished upstream stream against the degenerate
 // classes. finish is the last non-empty finish_reason seen; terminatorSeen
 // says a documented end-of-stream marker was observed ([DONE], a non-null
-// finish_reason chunk, or a Responses-API terminal event); hadAnswer says any
-// answer content was streamed; hadReasoning says reasoning ("thinking")
+// finish_reason chunk, or a Responses-API terminal event); hadAnswer says
+// answer output was delivered - content (chat delta.content or legacy
+// choices[].text) or answer-shaped bytes (a non-empty refusal or deprecated
+// function_call declaration); hadReasoning says reasoning ("thinking")
 // deltas were streamed (auxiliary output, never the completion contract);
 // toolCalls counts distinct tool-call deltas; chatlike gates the whole rule on
 // "this really was a chat-completions/Responses stream" so a foreign SSE

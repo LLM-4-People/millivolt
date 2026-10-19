@@ -104,6 +104,48 @@ func TestAnalyzerOutcomeCodes(t *testing.T) {
 			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
 			`data: [DONE]`,
 		}, ""},
+		// Legacy /v1/completions prompt streams carry the answer in
+		// choices[].text, never in a chat delta.content. A healthy prompt
+		// stream must not be rewritten as empty_completion.
+		{"legacy prompt text stream is healthy", []string{
+			`data: {"id":"cmpl-1","choices":[{"text":"Hello"}]}`,
+			`data: {"id":"cmpl-1","choices":[{"text":" world"}]}`,
+			`data: {"id":"cmpl-1","choices":[{"text":"","finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, ""},
+		// A refusal or deprecated function_call declaration is answer-shaped
+		// visible output even though it is not content: a clean stop after it
+		// is a delivered answer, never a degenerate void.
+		{"refusal-only stop is answer-shaped", []string{
+			`data: {"id":"1","choices":[{"delta":{"refusal":"I cannot help with that"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, ""},
+		{"deprecated function_call-only stop is answer-shaped", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"lookup","arguments":"{}"}}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, ""},
+		// ...but an EMPTY refusal/function_call value is not output: the
+		// degenerate class still owns it.
+		{"empty refusal stop is still void", []string{
+			`data: {"id":"1","choices":[{"delta":{"refusal":""}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, metrics.CodeEmptyCompletion},
+		{"empty object function_call stop is still void", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{}}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, metrics.CodeEmptyCompletion},
+		// Refusal + reasoning is still an answer (the refusal is visible
+		// contract output); reasoning ALONE keeps its own class.
+		{"reasoning then refusal is healthy", []string{
+			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"thinking"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"refusal":"no"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			`data: [DONE]`,
+		}, ""},
 		{"reasoning-only length is healthy (client cap)", []string{
 			`data: {"id":"1","choices":[{"delta":{"reasoning_content":"ran out"}}]}`,
 			`data: {"id":"1","choices":[{"delta":{},"finish_reason":"length"}]}`,

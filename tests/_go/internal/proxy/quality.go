@@ -470,7 +470,16 @@ func streamUpstream(t *testing.T, chunks ...string) *httptest.Server {
 
 func streamRequest(t *testing.T, srv *httptest.Server, upstream *httptest.Server) (int, string) {
 	t.Helper()
-	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	return streamRequestTo(t, srv, upstream, "/v1/chat/completions",
+		`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+}
+
+// streamRequestTo is streamRequest with an explicit upstream path and body:
+// the relay is path-transparent, so the same fixture drives chat completions
+// and legacy prompt completions streams.
+func streamRequestTo(t *testing.T, srv *httptest.Server, upstream *httptest.Server, path, body string) (int, string) {
+	t.Helper()
+	req, _ := http.NewRequest("POST", srv.URL+path, strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer sk-k")
 	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
 	resp, err := http.DefaultClient.Do(req)
@@ -1210,6 +1219,50 @@ func TestNonStreamRetryTransportFailureIs502APIError(t *testing.T) {
 	}
 	if rec.Retries != 1 || len(rec.Attempts) != 1 || rec.Attempts[0].ErrorType != metrics.CodeEmptyCompletion {
 		t.Fatalf("absorbed void attempt not logged: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	}
+}
+
+// TestNonStreamSpoolReadErrorStamps502: an upstream 200 whose declared
+// Content-Length is never fulfilled fails the spool read. The client is
+// answered with the decided 502, and the record must carry that 502 - not the
+// provisional upstream 200 stamped before the body spooled.
+func TestNonStreamSpoolReadErrorStamps502(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Length", "1024")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"id":"1","choices":[`))
+		w.(http.Flusher).Flush()
+		panic(http.ErrAbortHandler) // abort mid-body: the proxy sees an unexpected EOF
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer sk-k")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 for a truncated upstream body", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), `"type":"stream_read_error"`) {
+		t.Fatalf("502 body must carry the stream_read_error envelope: %s", body)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if !rec.IsError() || rec.StatusCode != http.StatusBadGateway || rec.ErrorType != "stream_read_error" {
+		t.Fatalf("record = status %d type %q error=%v, want 502/stream_read_error",
+			rec.StatusCode, rec.ErrorType, rec.IsError())
 	}
 }
 
@@ -2339,18 +2392,24 @@ func TestStreamThinkingStopNoDoneRescued(t *testing.T) {
 	}
 }
 
-// TestStreamThinkingRefusalThenStopNotRescued: a refusal delta is answer-shaped
-// output the client saw - even after reasoning, the reasoning-only stop is
-// never re-sent; it surfaces the in-band provider error instead.
-func TestStreamThinkingRefusalThenStopNotRescued(t *testing.T) {
+// TestStreamThinkingRefusalThenStopDeliveredNotRescued: a refusal delta is
+// answer-shaped output the client saw. Even after reasoning it is delivered
+// contract output, so the stop is healthy (never reasoning_only), the terminal
+// region relays verbatim, and nothing is re-sent behind the refusal.
+func TestStreamThinkingRefusalThenStopDeliveredNotRescued(t *testing.T) {
 	var calls atomic.Int32
+	chunks := []string{
+		thinkingRoleFrame,
+		thinkingFrame,
+		`data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help with that"}}]}` + "\n\n",
+		thinkingStopFrames,
+	}
+	want := strings.Join(chunks, "")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
-		w.Write([]byte(thinkingRoleFrame + thinkingFrame +
-			`data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help with that"}}]}` + "\n\n" +
-			thinkingStopFrames))
+		w.Write([]byte(want))
 		w.(http.Flusher).Flush()
 	}))
 	defer upstream.Close()
@@ -2360,19 +2419,19 @@ func TestStreamThinkingRefusalThenStopNotRescued(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
-	if !strings.Contains(got, `"refusal":"I cannot help with that"`) {
-		t.Fatalf("the refusal must stay on the wire: %s", got)
+	if got != want {
+		t.Fatalf("reasoning + refusal + stop must relay verbatim:\n got %q\nwant %q", got, want)
 	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeReasoningOnly+`"`) {
-		t.Fatalf("the reasoning-only stop must surface in-band: %s", got)
+	if strings.Contains(got, `"error"`) {
+		t.Fatalf("a delivered refusal must not be rewritten as an error: %s", got)
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (never rescued after a refusal)", n)
 	}
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
-	if !rec.IsError() || rec.ErrorType != "upstream_error" || rec.ErrorCode != metrics.CodeReasoningOnly {
-		t.Fatalf("record must classify as the surfaced provider error: %+v", rec)
+	if rec.IsError() || rec.ErrorType != "" || rec.FinishReason != "stop" {
+		t.Fatalf("record must carry the delivered refusal, not an error: %+v", rec)
 	}
 }
 
@@ -2482,6 +2541,133 @@ func TestStreamRefusalOnlyTruncationNotRescued(t *testing.T) {
 	}
 	if n := calls.Load(); n != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (refusal bytes are never appended to)", n)
+	}
+}
+
+// TestCompletionsPromptStreamTextHealthy: a legacy /v1/completions prompt
+// stream carries its answer in choices[].text. Its finish chunk and exactly
+// one [DONE] must relay verbatim - no synthetic empty_completion error, no
+// error record - because text is answer content just like chat delta.content.
+func TestCompletionsPromptStreamTextHealthy(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"cmpl-1","object":"text_completion","choices":[{"text":"Hello","index":0,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"cmpl-1","object":"text_completion","choices":[{"text":" world","index":0,"finish_reason":null}]}` + "\n\n",
+		`data: {"id":"cmpl-1","object":"text_completion","choices":[{"text":"","index":0,"finish_reason":"stop"}]}` + "\n\n",
+		`data: [DONE]` + "\n\n",
+	}
+	want := strings.Join(chunks, "")
+	upstream := streamUpstream(t, chunks...)
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequestTo(t, srv, upstream, "/v1/completions",
+		`{"model":"m","stream":true,"prompt":"hi"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if got != want {
+		t.Fatalf("prompt stream must relay verbatim:\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, `"error"`) {
+		t.Fatalf("no synthetic error may replace the terminal region: %s", got)
+	}
+	if n := strings.Count(got, "data: [DONE]"); n != 1 {
+		t.Fatalf("[DONE] count = %d, want exactly 1: %s", n, got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	rec := recs[0]
+	if rec.IsError() || rec.ErrorType != "" || rec.ErrorCode != "" {
+		t.Fatalf("healthy prompt stream flagged as error: %+v", rec)
+	}
+	if !rec.HadAnswerContent || rec.FinishReason != "stop" {
+		t.Fatalf("record must carry the prompt completion answer: content=%v finish=%q",
+			rec.HadAnswerContent, rec.FinishReason)
+	}
+}
+
+// TestStreamRefusalOnlyStopHealthy: a refusal-only chat stream that stops
+// cleanly delivered visible answer-shaped output; the terminal region must be
+// released verbatim instead of being rewritten as empty_completion.
+func TestStreamRefusalOnlyStopHealthy(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"A","choices":[{"delta":{"refusal":"I cannot help with that"}}]}` + "\n\n",
+		thinkingStopFrames,
+	}
+	want := strings.Join(chunks, "")
+	upstream := streamUpstream(t, chunks...)
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if got != want {
+		t.Fatalf("refusal-only stop must relay verbatim:\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, `"error"`) {
+		t.Fatalf("a refusal-only answer must not be rewritten as an error: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if rec := recs[0]; rec.IsError() || rec.ErrorType != "" || rec.FinishReason != "stop" {
+		t.Fatalf("refusal-only stop must record a clean answer: %+v", rec)
+	}
+}
+
+// TestStreamFunctionCallOnlyStopHealthy: the deprecated delta.function_call
+// declaration is answer-shaped visible output too - a clean stop after it is
+// not a degenerate empty completion.
+func TestStreamFunctionCallOnlyStopHealthy(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"A","choices":[{"delta":{"function_call":{"name":"lookup","arguments":"{}"}}}]}` + "\n\n",
+		thinkingStopFrames,
+	}
+	want := strings.Join(chunks, "")
+	upstream := streamUpstream(t, chunks...)
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if got != want {
+		t.Fatalf("function_call-only stop must relay verbatim:\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, `"error"`) {
+		t.Fatalf("a function_call declaration must not be rewritten as an error: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if rec := recs[0]; rec.IsError() || rec.ErrorType != "" || rec.FinishReason != "stop" {
+		t.Fatalf("function_call-only stop must record a clean answer: %+v", rec)
+	}
+}
+
+// TestStreamEmptyRefusalStopStillVoid is the control for the answer-shaped
+// rule: an EMPTY refusal string is not output, so a clean stop after it keeps
+// the degenerate empty_completion class.
+func TestStreamEmptyRefusalStopStillVoid(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"A","choices":[{"delta":{"refusal":""}}]}` + "\n\n",
+		thinkingStopFrames,
+	}
+	upstream := streamUpstream(t, chunks...)
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(100)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	_, got := streamRequest(t, srv, upstream)
+	if !strings.Contains(got, `"code":"`+metrics.CodeEmptyCompletion+`"`) {
+		t.Fatalf("an empty refusal must keep the empty_completion class: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if rec := recs[0]; !rec.IsError() || rec.ErrorCode != metrics.CodeEmptyCompletion {
+		t.Fatalf("empty-refusal record must carry the degenerate outcome: %+v", rec)
 	}
 }
 

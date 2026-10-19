@@ -8,6 +8,7 @@
 // The format we handle:
 //
 //	data: {"choices":[{"delta":{"content":"text"}}],"usage":{...}}
+//	data: {"choices":[{"text":"text"}],"usage":{...}}   (legacy /v1/completions)
 //	data: [DONE]
 //
 // In particular we care about:
@@ -46,7 +47,8 @@ type Analyzer struct {
 	// Reasoning/answer separation: tracks when reasoning ("thinking") tokens
 	// vs answer tokens arrive. Reasoning tokens are from reasoning_content
 	// (DeepSeek R1, Qwen QwQ, etc.) or thinking blocks (Claude); answer tokens
-	// are from content.
+	// are from chat delta.content, Responses content deltas, and the legacy
+	// /v1/completions choices[].text field.
 	firstReasoningAt time.Time
 	firstAnswerAt    time.Time
 
@@ -81,8 +83,10 @@ type Analyzer struct {
 	// answerishSeen marks a delta that carried answer-shaped bytes the
 	// streaming rescue must never append after, even though they are not
 	// metrics content: a refusal message (the official delta field for
-	// refusals) or a deprecated function_call declaration. Rescue-gating
-	// state only - the record's content accounting is unchanged.
+	// refusals) or a deprecated function_call declaration. It also feeds
+	// OutcomeCode's answer presence (a clean stop after either is a delivered
+	// answer, not a degenerate void); it never changes the record's content
+	// accounting (HadAnswerContent stays content-only).
 	answerishSeen bool
 
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
@@ -233,7 +237,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Track first/last token of any kind (content, reasoning, or tool call).
 	// The first content-bearing chunk marks TTFT.
 	eventType := keys.responseEventType(payload)
-	hasContent := keys.contentStart() || responsesContentEvent(eventType, &keys)
+	hasContent := keys.contentStart() || keys.textStart() || responsesContentEvent(eventType, &keys)
 	hasReasoning := keys.reasoningStart() || responsesReasoningEvent(eventType, &keys)
 	toolBlock := extractContainer(keys.toolCalls, '[', ']')
 	hasToolCall := len(toolBlock) > 0 && metrics.SkipSpace(toolBlock, 1) < len(toolBlock)-1
@@ -264,6 +268,9 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		// operator enabled capture_body_preview).
 		if a.CapturePreview && a.preview == nil {
 			a.preview = extractPreview(keys.content)
+			if a.preview == nil {
+				a.preview = extractPreview(keys.text)
+			}
 		}
 	}
 
@@ -595,12 +602,16 @@ func (a *Analyzer) HasInBandError() bool { return a.errType != "" }
 // Answer presence and reasoning presence are separate inputs: reasoning is
 // auxiliary output, so a reasoning-only stop is its own degenerate class
 // (metrics.CodeReasoningOnly), never a healthy completion and never the
-// nothing-at-all void. "" = healthy; otherwise the error code to surface (or,
-// on the passthrough path, the code whose in-band error chunk replaces the
-// held terminal event).
+// nothing-at-all void. Answer-shaped output includes content (chat
+// delta.content, legacy choices[].text) and the visible non-content forms the
+// rescue gates already protect - a non-empty refusal or deprecated
+// function_call declaration; empty values of either are not answer output.
+// "" = healthy; otherwise the error code to surface (or, on the passthrough
+// path, the code whose in-band error chunk replaces the held terminal event).
 func (a *Analyzer) OutcomeCode() string {
+	hadAnswer := !a.firstAnswerAt.IsZero() || a.answerishSeen
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
-		!a.firstAnswerAt.IsZero(), !a.firstReasoningAt.IsZero(), a.toolCalls, a.chatlike)
+		hadAnswer, !a.firstReasoningAt.IsZero(), a.toolCalls, a.chatlike)
 }
 
 // RetryableTruncation reports whether the finished stream is a truncation

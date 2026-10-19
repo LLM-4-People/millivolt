@@ -116,6 +116,68 @@ func TestTranslateRequestToolCalls(t *testing.T) {
 	}
 }
 
+// TestTranslateRequestAssistantToolCallText pins that assistant history text
+// survives beside tool_calls in both accepted content shapes: the content-array
+// form (which the tool-call branch used to drop because it only read the string
+// form) and the plain string form as the control. The text block precedes the
+// tool_use blocks and argument normalization is unchanged.
+func TestTranslateRequestAssistantToolCallText(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"array text", `[{"type":"text","text":"checking the tool"}]`, "checking the tool"},
+		{"string control", `"checking the tool"`, "checking the tool"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"model":"m","messages":[
+				{"role":"user","content":"weather?"},
+				{"role":"assistant","content":%s,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"NY\"}"}}]},
+				{"role":"tool","tool_call_id":"call_1","content":"sunny"}
+			]}`, tc.content)
+			out, err := TranslateRequest([]byte(body), 4096, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got struct {
+				Messages []struct {
+					Role    string          `json:"role"`
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Messages) != 3 {
+				t.Fatalf("messages len = %d, want 3: %s", len(got.Messages), out)
+			}
+			var blocks []struct {
+				Type  string          `json:"type"`
+				Text  string          `json:"text"`
+				ID    string          `json:"id"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			}
+			if err := json.Unmarshal(got.Messages[1].Content, &blocks); err != nil {
+				t.Fatalf("assistant content is not a block array: %v (%s)", err, out)
+			}
+			if len(blocks) != 2 {
+				t.Fatalf("assistant blocks = %#v, want text + tool_use: %s", blocks, out)
+			}
+			if blocks[0].Type != "text" || blocks[0].Text != tc.want {
+				t.Fatalf("assistant text block = %#v, want %q: %s", blocks[0], tc.want, out)
+			}
+			if blocks[1].Type != "tool_use" || blocks[1].ID != "call_1" || blocks[1].Name != "get_weather" {
+				t.Fatalf("assistant tool_use block = %#v: %s", blocks[1], out)
+			}
+			if string(blocks[1].Input) != `{"city":"NY"}` {
+				t.Fatalf("tool_use input = %s, want the call's arguments", blocks[1].Input)
+			}
+		})
+	}
+}
+
 func TestTranslateResponse(t *testing.T) {
 	in := `{"id":"msg_1","model":"claude","role":"assistant","content":[{"type":"text","text":"hello world"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":3}}`
 	out, err := TranslateResponse([]byte(in))
