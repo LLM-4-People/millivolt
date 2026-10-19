@@ -370,14 +370,16 @@ const (
 	explorerMaxGroups       = 24
 	chartMaxBuckets         = 31
 	serverQueryRowLimitNote = "storage_query_max_rows (per-deployment, 413 past it); storage_query_max_bytes bounds the encoded result"
-
-	// snapshotCapRule is the one statement of the full-snapshot bound, shared
-	// by the snapshot tool description and this reference. The multiplier
-	// matches internal/web BootRingCapMul: cmd/proxy applies it only when
-	// durable storage backs the ring and leaves the limit at 0 otherwise, so
-	// the storage-off branch is part of the contract rather than an omission.
-	snapshotCapRule = "A full snapshot is capped at 2 * dash_log_rows records when durable storage is enabled; with storage off the ring is the only history and the snapshot is not capped."
 )
+
+// snapshotCapRule is the one statement of the full-snapshot bound, shared by
+// the snapshot tool description and this reference. The multiplier matches
+// internal/web BootRingCapMul: cmd/proxy applies it only when durable storage
+// backs the ring and leaves the limit at 0 otherwise, so the storage-off
+// branch is part of the contract rather than an omission. The value is a
+// literal here because importing internal/web from this package would create a
+// cycle through its MCP mirror tests; the drift test owns the comparison.
+const snapshotCapRule = "A full snapshot is capped at 2 * dash_log_rows records when durable storage is enabled; with storage off the ring is the only history and the snapshot is not capped."
 
 // tableDocs is the column reference. It documents the columns an analysis
 // actually uses rather than restating DDL, which the live schema probe above
@@ -511,7 +513,7 @@ var tableDocs = []TableDoc{
 		},
 		Notes: []string{
 			"Only the capture endpoint returns a decoded payload; selecting payload here returns one JSON string per row.",
-			"Capture requires durable storage. With db_path empty, sessions start and nothing is ever stored.",
+			"Capture requires durable storage. With db_path empty, creating a capture session is refused with 503 `durable storage is disabled` and creates no session; every read-back is a 404.",
 		},
 	},
 	{

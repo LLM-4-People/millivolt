@@ -310,32 +310,59 @@ func TestSnapshotCapNamesBothStorageBranches(t *testing.T) {
 }
 
 // TestAuditGuideRequiresDurableStorage pins the storage-off capture contract:
-// the proxy answers 503 and creates no session. The old guide claimed the
-// session started and stored nothing, which contradicted the proxy and the
-// operations guide.
+// the proxy answers 503 and creates no session. The old guide and describe note
+// claimed the session started and stored nothing, which contradicted the proxy
+// and the operations guide.
 func TestAuditGuideRequiresDurableStorage(t *testing.T) {
+	assertContract := func(surface, text string) {
+		t.Helper()
+		normalized := strings.Join(strings.Fields(text), " ")
+		for _, needle := range []string{
+			"503 `durable storage is disabled`",
+			"creates no session",
+			"read-back is a 404",
+		} {
+			if !strings.Contains(normalized, needle) {
+				t.Errorf("%s must state %q: %q", surface, needle, normalized)
+			}
+		}
+		for _, stale := range []string{
+			"accepts a session",
+			"reports success, and stores nothing",
+			"sessions start",
+			"nothing is ever stored",
+		} {
+			if strings.Contains(normalized, stale) {
+				t.Errorf("%s still claims %q; the proxy returns 503 and creates no session", surface, stale)
+			}
+		}
+	}
+
 	guide, err := os.ReadFile(filepath.Join("..", "..", "docs", "mcp.md"))
 	if err != nil {
 		t.Fatalf("read the MCP guide: %v", err)
 	}
-	text := strings.Join(strings.Fields(string(guide)), " ")
-	for _, needle := range []string{
-		"With `db_path` empty, `audit_start` is refused by the proxy with 503 `durable storage is disabled` and creates no session",
-		"every capture read-back is a 404",
-	} {
-		if !strings.Contains(text, needle) {
-			t.Fatalf("docs/mcp.md must state %q", needle)
+	assertContract("docs/mcp.md", string(guide))
+
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, debugPath, emptyDebugStatus)
+	proxy.json(http.MethodGet, schemaPath, `[]`)
+	reference, err := newTestService(t, proxy, Limits{}).describe(t.Context(), DescribeInput{})
+	if err != nil {
+		t.Fatalf("describe: %v", err)
+	}
+	note := ""
+	for _, table := range reference.Tables {
+		if table.Table == "request_debug" {
+			note = strings.Join(table.Notes, " ")
+			break
 		}
 	}
-	for _, stale := range []string{
-		"accepts a session",
-		"reports success, and stores nothing",
-		"sessions start and nothing is ever stored",
-	} {
-		if strings.Contains(text, stale) {
-			t.Fatalf("docs/mcp.md still claims %q; the proxy returns 503 and creates no session", stale)
-		}
+	if note == "" {
+		t.Fatal("describe must document the request_debug table and its storage contract")
 	}
+	assertContract("the describe request_debug note", note)
 }
 
 // TestPurgePhraseHasOneOwner pins the confirmation phrase to PurgeConfirmation:
