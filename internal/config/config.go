@@ -156,6 +156,12 @@ type Config struct {
 	// request cap for chunked bodies) and refuses a request that would exceed
 	// this budget, before reading it. 0 = unlimited.
 	MaxInflightBodyBytes ByteSize `yaml:"max_inflight_body_bytes" json:"max_inflight_body_bytes"`
+	// MaxInflightResponseBytes is the process-wide budget for whole-document
+	// upstream response bodies buffered before translation or model discovery.
+	// The reservation is held only while buffering and released after write or
+	// translation; a request above the remaining budget is refused with 503
+	// before reading the upstream body. 0 = unlimited.
+	MaxInflightResponseBytes ByteSize `yaml:"max_inflight_response_bytes" json:"max_inflight_response_bytes"`
 	// QueueRetryAfter is the Retry-After hint sent to clients when the proxy's
 	// own queue is full or the wait is exceeded. HTTP Retry-After is integer
 	// seconds; RetryAfterSeconds is the single conversion for that header.
@@ -860,10 +866,13 @@ const (
 	// the floor could not hold one maximum-size capture.
 	DebugStoreMaxBytesMin = 16 << 20 // 16 MiB
 	DebugStoreMaxBytesMax = 8 << 30  // 8 GiB
-	// Process-wide in-flight body budget band. Zero means unlimited; a
-	// nonzero budget below one maximum request body cannot admit real work.
-	MaxInflightBodyBytesMin = 1 << 20  // 1 MiB
-	MaxInflightBodyBytesMax = 64 << 30 // 64 GiB
+	// Process-wide in-flight body and response-buffer budget bands. Zero means
+	// unlimited; a nonzero budget below one maximum request body or one small
+	// buffered response cannot admit real work.
+	MaxInflightBodyBytesMin     = 1 << 20  // 1 MiB
+	MaxInflightBodyBytesMax     = 64 << 30 // 64 GiB
+	MaxInflightResponseBytesMin = 1 << 20  // 1 MiB
+	MaxInflightResponseBytesMax = 64 << 30 // 64 GiB
 	// Ad-hoc query result bands (Validate, overlay, Settings schema).
 	StorageQueryMaxBytesMin = 4 << 10
 	StorageQueryMaxBytesMax = 64 << 20
@@ -947,14 +956,15 @@ func Default() *Config {
 		MaxIdleConnsPerHost: 512,
 		IdleConnTimeout:     90 * time.Second,
 
-		MaxRetries:           5,
-		MaxQueueSize:         1024,
-		MaxQueueWait:         10 * time.Minute,
-		MaxInflightRequests:  10000,
-		MaxInflightBodyBytes: 256 << 20,
-		QueueRetryAfter:      2 * time.Second,
-		BaseBackoff:          1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
-		MaxBackoff:           2 * time.Minute,
+		MaxRetries:               5,
+		MaxQueueSize:             1024,
+		MaxQueueWait:             10 * time.Minute,
+		MaxInflightRequests:      10000,
+		MaxInflightBodyBytes:     256 << 20,
+		MaxInflightResponseBytes: 256 << 20,
+		QueueRetryAfter:          2 * time.Second,
+		BaseBackoff:              1 * time.Second, // start at 1s, double each attempt/failed request, cap at MaxBackoff
+		MaxBackoff:               2 * time.Minute,
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
@@ -1240,6 +1250,11 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxInflightBodyBytes != 0 {
 		if err := checkByteSize("max_inflight_body_bytes", c.MaxInflightBodyBytes, MaxInflightBodyBytesMin, MaxInflightBodyBytesMax); err != nil {
+			return err
+		}
+	}
+	if c.MaxInflightResponseBytes != 0 {
+		if err := checkByteSize("max_inflight_response_bytes", c.MaxInflightResponseBytes, MaxInflightResponseBytesMin, MaxInflightResponseBytesMax); err != nil {
 			return err
 		}
 	}

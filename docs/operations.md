@@ -868,9 +868,15 @@ document at 8 MiB; normal provider labels derived from base URLs remain below
 both bounds.
 
 Admission is bounded end to end. `max_inflight_requests` is the process-wide
-inference ceiling (default 10000) and `max_inflight_body_bytes` its buffered
-body budget (default 256 MiB); requests above either bound are refused with
-`503` and `Retry-After` before their bodies are buffered. `max_queue_size` (default 1024
+inference ceiling (default 10000), `max_inflight_body_bytes` its buffered
+body budget (default 256 MiB), and `max_inflight_response_bytes` its budget
+for whole-document upstream response buffers used by translated non-streaming
+responses and model discovery (default 256 MiB). Requests above any bound are
+refused with `503` and `Retry-After` before the body or upstream response is
+read. Request-body reads must make progress within 30 seconds and finish
+within the 10-minute absolute upload bound, so a stalled peer releases its
+reservation without cutting off a slow but progressing upload. All three
+budgets accept `0` = unlimited and hot-reload. `max_queue_size` (default 1024
 per group) and `max_queue_wait` (default 10m) bound a held or saturated
 provider's parked work; both accept explicit `0` = unlimited. Independent
 per-key/header concurrency remains unlimited by default. The scheduler retains

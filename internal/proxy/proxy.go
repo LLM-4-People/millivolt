@@ -277,6 +277,9 @@ type Server struct {
 	// inflight bounds buffered inference requests process-wide (see
 	// MaxInflightRequests). Lock-free so reload can change the bound live.
 	inflight inflightLimiter
+	// respBudget bounds whole-document upstream response buffers process-wide
+	// (see MaxInflightResponseBytes). Lock-free so reload can change it live.
+	respBudget responseBufferBudget
 	// tokenRefresh coalesces concurrent expired-token exchanges for the same
 	// provider + refresh token, holding no credentials after completion.
 	tokenRefresh tokenRefreshCoalescer
@@ -325,6 +328,7 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	s.cfgSnap.Store(cfg)
 	s.client.Store(newUpstreamClient(cfg))
 	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))
+	s.respBudget.set(int64(cfg.MaxInflightResponseBytes))
 	return s
 }
 
@@ -406,6 +410,7 @@ func (s *Server) Reload(cfg *config.Config) {
 	}
 	// Re-apply the live-tunable scheduler + conversation settings.
 	s.inflight.set(cfg.MaxInflightRequests, int64(cfg.MaxInflightBodyBytes))
+	s.respBudget.set(int64(cfg.MaxInflightResponseBytes))
 	s.scheduler.UpdateOptions(schedulerOptions(cfg))
 	s.convos.UpdateLimits(cfg.ConversationIdleGap, cfg.ConversationMaxOpen)
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)

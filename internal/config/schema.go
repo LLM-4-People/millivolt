@@ -171,6 +171,8 @@ var schemaRegistry = sync.OnceValue(func() []Field {
 			Kind: KindInt, HotReload: true, Min: num(0), Max: num(1_000_000)},
 		{Key: "max_inflight_body_bytes", Category: "queue", Label: "Max in-flight body bytes",
 			Help: "Process-wide budget for buffered inbound request bodies. Admission reserves the declared Content-Length, or the request-body cap for chunked bodies, and refuses with 503 before reading when the budget would be exceeded. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(float64(MaxInflightBodyBytesMin)), Max: num(float64(MaxInflightBodyBytesMax)), ZeroMeans: "unlimited"},
+		{Key: "max_inflight_response_bytes", Category: "queue", Label: "Max in-flight response bytes",
+			Help: "Process-wide budget for whole-document upstream response bodies buffered before translation or model discovery. Admission reserves the declared Content-Length, or the bounded read cap when it is unknown, and refuses with 503 before reading when the budget would be exceeded. The reservation is released after the buffer is written or translated. 0 = unlimited. Hot-reloads.", Kind: KindBytes, HotReload: true, Min: num(float64(MaxInflightResponseBytesMin)), Max: num(float64(MaxInflightResponseBytesMax)), ZeroMeans: "unlimited"},
 		{Key: "max_queue_wait", Category: "queue", Label: "Max queue wait",
 			Help: "How long a request may sit in the queue before 429. " + FormatDuration(0) + " is unlimited. Operator-hold time is excluded.",
 			Kind: KindDuration, HotReload: true, Min: num(0), ZeroMeans: "unlimited"},

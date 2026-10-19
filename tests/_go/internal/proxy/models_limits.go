@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -373,5 +374,68 @@ func TestModelsConfiguredHeadersAcrossFormats(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// TestModelsDiscoveryResponseBufferBudgetRefusesBeforeRead pins the
+// process-wide reservation on discovery: a full budget refuses the page before
+// its body is read, and releasing the concurrent reservation restores the
+// capacity for the retry. The reservation stays held until the discovery
+// document has been written.
+func TestModelsDiscoveryResponseBufferBudgetRefusesBeforeRead(t *testing.T) {
+	p := New(config.Default(), metrics.Noop{})
+	raw := bytes.Repeat([]byte{'x'}, 50)
+	p.respBudget.set(int64(len(raw)))
+
+	response := func(body *modelsCountBody) {
+		p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Header:        make(http.Header),
+				Body:          body,
+				ContentLength: int64(len(raw)),
+				Request:       r,
+			}, nil
+		})})
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://provider.example/v1/models", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &modelsDiscovery{ctx: req.Context(), bytesLeft: 1000, pagesLeft: 2}
+	if !p.respBudget.acquire(int64(len(raw))) {
+		t.Fatal("failed to hold the concurrent reservation")
+	}
+	refusedBody := &modelsCountBody{Reader: bytes.NewReader(raw)}
+	response(refusedBody)
+	if _, err := p.fetchModelsResponse(d, req, &target{provider: "provider.example"}, ""); !errors.Is(err, errResponseBufferBudget) {
+		t.Fatalf("error = %v, want errResponseBufferBudget", err)
+	}
+	if refusedBody.n != 0 {
+		t.Fatalf("refused discovery read %d bytes before admission", refusedBody.n)
+	}
+	p.respBudget.release(int64(len(raw)))
+
+	acceptedBody := &modelsCountBody{Reader: bytes.NewReader(raw)}
+	response(acceptedBody)
+	body, err := p.fetchModelsResponse(d, req, &target{provider: "provider.example"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != len(raw) || acceptedBody.n != len(raw) {
+		t.Fatalf("accepted discovery read %d bytes, want %d", acceptedBody.n, len(raw))
+	}
+	if got := p.respBudget.bytes.Load(); got != int64(len(raw)) {
+		t.Fatalf("held discovery reservation = %d, want %d", got, len(raw))
+	}
+	d.releaseResponseBuffer()
+	if got := p.respBudget.bytes.Load(); got != 0 {
+		t.Fatalf("response budget after discovery release = %d, want 0", got)
+	}
+
+	w := httptest.NewRecorder()
+	writeModelsError(w, errResponseBufferBudget)
+	if w.Code != http.StatusServiceUnavailable || w.Header().Get("Retry-After") != "1" {
+		t.Fatalf("discovery admission status=%d Retry-After=%q, want 503 and 1", w.Code, w.Header().Get("Retry-After"))
 	}
 }

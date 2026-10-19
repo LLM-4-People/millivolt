@@ -213,6 +213,15 @@ max_inflight_requests: 10000
 #   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
 max_inflight_body_bytes: 256MiB
 
+# Process-wide budget for whole-document upstream response bodies buffered before
+# translation or model discovery. Admission reserves the declared Content-Length, or the
+# bounded read cap when it is unknown, and refuses with 503 before reading when the budget
+# would be exceeded. The reservation is released after the buffer is written or
+# translated. 0 = unlimited. Hot-reloads.
+# Hot-reload: yes.
+#   type: bytes · range 1MiB..64GiB (0B = unlimited) · default 256MiB
+max_inflight_response_bytes: 256MiB
+
 # How long a request may sit in the queue before 429. 0s is unlimited. Operator-hold time
 # is excluded.
 # Hot-reload: yes.

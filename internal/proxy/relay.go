@@ -388,6 +388,16 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
 		if !isOpenAIWire(t.format) {
+			// Reserve the whole-document buffer process-wide before reading.
+			// The reservation is held until this branch has written the
+			// translated body, so concurrent translations cannot multiply the
+			// per-document cap without bound.
+			reserve := responseReadReserve(resp.ContentLength, maxTranslateBodyBytes+1)
+			if !s.respBudget.acquire(reserve) {
+				writeResponseBufferBudget(w, rec)
+				return
+			}
+			defer s.respBudget.release(reserve)
 			full, rerr := io.ReadAll(io.LimitReader(resp.Body, maxTranslateBodyBytes+1))
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)

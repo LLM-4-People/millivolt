@@ -20,6 +20,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,17 @@ type modelsDiscovery struct {
 	ctx       context.Context
 	bytesLeft int64
 	pagesLeft int
+	// releaseResponse holds the process-wide reservation for the page
+	// currently being decoded. Pagination releases it before the next fetch,
+	// so consecutive pages never accumulate reservations.
+	releaseResponse func()
+}
+
+func (d *modelsDiscovery) releaseResponseBuffer() {
+	if d.releaseResponse != nil {
+		d.releaseResponse()
+		d.releaseResponse = nil
+	}
 }
 
 // serveModels owns the whole upstream discovery deadline, including transparent
@@ -48,6 +60,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	defer cancel()
 	r = r.WithContext(ctx)
 	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages}
+	defer d.releaseResponseBuffer()
 	key = s.resolveKeyTransparent(r, t, key)
 	switch t.format {
 	case "cursor":
@@ -104,8 +117,14 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 }
 
 // writeModelsError surfaces a models-discovery failure - request build, fetch,
-// or decode - with the uniform 502 JSON wrapper.
+// or decode - with the uniform 502 JSON wrapper. Response-buffer admission is
+// the one retryable exception: it happens before the status line is committed,
+// so it carries the same 503 + Retry-After as the translated relay.
 func writeModelsError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errResponseBufferBudget) {
+		writeResponseBufferBudget(w, nil)
+		return
+	}
 	http.Error(w, errJSON(typeAPIError, err.Error()), http.StatusBadGateway)
 }
 
@@ -138,6 +157,9 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 	if d.bytesLeft <= 0 {
 		return nil, fmt.Errorf("model discovery exceeded aggregate response byte limit")
 	}
+	// The previous page has been decoded into entries (or written verbatim)
+	// before discovery asks for the next one, so release its reservation now.
+	d.releaseResponseBuffer()
 	d.pagesLeft--
 	// Reuse the existing header policy exactly once. A unary model RPC keeps
 	// its protected protocol/auth identity; ordinary GETs (including optional
@@ -154,6 +176,14 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 	}
 	defer resp.Body.Close()
 	remaining := d.bytesLeft
+	// Reserve the whole-document buffer process-wide before reading. The
+	// reservation covers the current body until the caller has decoded or
+	// written it; serveModels releases the last one on return.
+	reserve := responseReadReserve(resp.ContentLength, remaining+1)
+	if !s.respBudget.acquire(reserve) {
+		return nil, errResponseBufferBudget
+	}
+	d.releaseResponse = func() { s.respBudget.release(reserve) }
 	body, err := io.ReadAll(io.LimitReader(resp.Body, remaining+1))
 	d.bytesLeft -= int64(len(body))
 	if int64(len(body)) > remaining {
