@@ -333,6 +333,12 @@ func (m openaiMessage) toAnthropic() (anthropicMessage, error) {
 				if !json.Valid([]byte(args)) {
 					return anthropicMessage{}, errParseOpenAIBody(errors.New("tool call arguments must be valid JSON"))
 				}
+				// Anthropic's ToolUseBlock.input is an object. A valid JSON
+				// array/string/number/bool would be forwarded as an invalid
+				// upstream request, so reject it in the request translator.
+				if args[0] != '{' {
+					return anthropicMessage{}, errParseOpenAIBody(errors.New("tool call arguments must be a JSON object"))
+				}
 				blocks = append(blocks, map[string]any{
 					"type":  "tool_use",
 					"id":    tc.ID,
@@ -677,47 +683,26 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			[]map[string]any{sse.DeltaChoice(map[string]any{"tool_calls": []map[string]any{call}}, nil)}, nil))
 	}
 
+	// SSE event type is block-scoped: it belongs to the blank-line-delimited
+	// block carrying it, never to the next block. A data line that arrives
+	// before its block's event: field is held in pending until the event field
+	// or the block boundary reveals the type (SSE field order is not
+	// significant); the payload's own type remains the fallback.
 	var event string
-	for scanner.Scan() {
-		if terminal {
-			// [DONE] is the terminal frame: ignore every later source event,
-			// including content, errors and repeated terminal events, so
-			// nothing can appear behind it.
-			continue
-		}
-		// Keep the scanner's bytes: Text() copies the line and DataPayload's
-		// []byte conversion copied it again. Only the rare event: line needs a
-		// string.
-		line := scanner.Bytes()
-		if bytes.HasPrefix(line, []byte("event:")) {
-			event = strings.TrimPrefix(strings.TrimPrefix(string(line), "event:"), " ")
-			continue
-		}
-		// Payload extraction is the frames owner's DataPayload: the full
-		// "data:" prefix is required, one optional leading space is consumed,
-		// ordinary payload bytes stay verbatim.
-		payload, ok := sse.DataPayload(line)
-		if !ok {
-			continue
-		}
+	var pending []byte
+	pendingSeen := false
 
-		if event == "" {
+	dispatch := func(ev string, payload []byte) error {
+		if ev == "" {
 			// Some Anthropic-compatible gateways omit the event: line and
 			// carry the event type only in the payload.
 			var probe struct {
 				Type string `json:"type"`
 			}
 			if json.Unmarshal(payload, &probe) == nil {
-				event = probe.Type
+				ev = probe.Type
 			}
 		}
-
-		// Consume the event for THIS data line, then reset it before dispatch so
-		// a `continue` in any branch can never leave a stale event to misroute
-		// the next data line (e.g. an unknown signature_delta followed by a
-		// data-only message_stop).
-		ev := event
-		event = ""
 		// Costs belong to the source usage-bearing/terminal document, not a
 		// transformed content token. Observation never decodes every token.
 		if observe != nil && (ev == "message_start" || ev == "message_delta" || ev == "message_stop" || ev == "error") {
@@ -813,7 +798,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				Index int `json:"index"`
 			}
 			if json.Unmarshal(payload, &d) != nil {
-				continue
+				return nil
 			}
 			delta := map[string]any{}
 			switch d.Delta.Type {
@@ -832,7 +817,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 					},
 				}
 			default:
-				continue
+				return nil
 			}
 			if err := emit(sse.Chunk(id, created, model,
 				[]map[string]any{sse.DeltaChoice(delta, nil)}, nil)); err != nil {
@@ -846,7 +831,7 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 				Usage json.RawMessage `json:"usage"`
 			}
 			if json.Unmarshal(payload, &d) != nil {
-				continue
+				return nil
 			}
 			var wireUsage map[string]any
 			if len(d.Usage) > 0 && string(d.Usage) != "null" {
@@ -909,18 +894,96 @@ func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, 
 			toolInitialBytes = 0
 			var e anthropicErrorEvent
 			if err := json.Unmarshal(payload, &e); err != nil {
-				continue
+				return nil
 			}
 			if e.Error.Type == "" && e.Error.Message == "" {
-				continue
+				return nil
 			}
 			sawError = true
 			terminal = true
 			if err := emit(sse.Chunk(id, created, model, []map[string]any{}, e.openAIError())); err != nil {
 				return err
 			}
+			// A provider error is a terminal source event: close the translated
+			// stream now with the single [DONE] instead of waiting for an
+			// upstream that may hold the connection open forever.
+			return writeDone()
 		}
+		return nil
+	}
 
+	// flushPending dispatches the block's held data line at its blank-line
+	// boundary, using the payload type fallback when the block carried no
+	// event: field. It also resets a bare event-only block.
+	flushPending := func() error {
+		if !pendingSeen {
+			event = ""
+			return nil
+		}
+		ev := event
+		payload := pending
+		event = ""
+		pendingSeen = false
+		return dispatch(ev, payload)
+	}
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 || bytes.Equal(line, []byte("\r")) {
+			if err := flushPending(); err != nil {
+				return err
+			}
+			if terminal {
+				return nil
+			}
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			ev := strings.TrimPrefix(strings.TrimPrefix(string(line), "event:"), " ")
+			if pendingSeen {
+				// Field order is not significant: the data arrived first, so
+				// this event field types that held payload.
+				payload := pending
+				pendingSeen = false
+				if err := dispatch(ev, payload); err != nil {
+					return err
+				}
+				if terminal {
+					return nil
+				}
+				continue
+			}
+			event = ev
+			continue
+		}
+		// Payload extraction is the frames owner's DataPayload: the full
+		// "data:" prefix is required, one optional leading space is consumed,
+		// ordinary payload bytes stay verbatim.
+		payload, ok := sse.DataPayload(line)
+		if !ok {
+			continue
+		}
+		if event != "" {
+			ev := event
+			event = ""
+			if err := dispatch(ev, payload); err != nil {
+				return err
+			}
+			if terminal {
+				return nil
+			}
+			continue
+		}
+		// Hold the data line until its block boundary (or a later event:
+		// field) reveals the type; the payload type is the fallback.
+		pending = append(pending[:0], payload...)
+		pendingSeen = true
+	}
+	if err := flushPending(); err != nil {
+		return err
+	}
+	if terminal {
+		return nil
 	}
 
 	// Truncation: the stream ended without message_delta ever carrying a

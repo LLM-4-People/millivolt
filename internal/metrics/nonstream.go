@@ -3,6 +3,7 @@ package metrics
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 )
 
 // nonStreamChoicesMax bounds the top-level choices array before the typed
@@ -299,10 +300,12 @@ func optionalJSONString(raw json.RawMessage) (string, bool) {
 // whole body closed.
 func nonStreamChoicesOverLimit(body []byte) bool {
 	// Keep responses without a choices member (the Responses API shape and
-	// other passthrough documents) on the vectorized negative path. A key
-	// spelling of ASCII "choices" can only hide a letter through a Unicode
-	// escape, so any other body cannot carry the key.
-	if !bytes.Contains(body, []byte(`"choices"`)) && !bytes.Contains(body, []byte(`\u`)) {
+	// other passthrough documents) on the vectorized negative path. The typed
+	// decoder matches the struct field case-insensitively and decodes Unicode
+	// escapes to the same key, so every spelling it honors must pass this gate:
+	// compare the quoted token case-insensitively and fall through to the full
+	// traversal for any body carrying an escape.
+	if !containsChoicesKeyToken(body) {
 		return false
 	}
 	i := SkipSpace(body, 0)
@@ -352,6 +355,27 @@ func nonStreamChoicesOverLimit(body []byte) bool {
 	return false
 }
 
+// containsChoicesKeyToken reports whether body can contain a top-level choices
+// key under the typed decoder's matching rules: ASCII case variants are matched
+// without allocating, and any Unicode escape forces the full traversal because
+// a key letter may be spelled as \uXXXX. Nested keys and string contents still
+// fail the real traversal below.
+func containsChoicesKeyToken(body []byte) bool {
+	const token = `choices`
+	if bytes.Contains(body, []byte(`\u`)) {
+		return true
+	}
+	for i := 0; i+len(token)+2 <= len(body); i++ {
+		if body[i] != '"' || body[i+len(token)+1] != '"' {
+			continue
+		}
+		if bytes.EqualFold(body[i+1:i+len(token)+1], []byte(token)) {
+			return true
+		}
+	}
+	return false
+}
+
 // nonStreamChoicesKey compares one quoted top-level key token with "choices".
 // The ordinary spelling takes the allocation-free byte path; escaped or
 // non-ASCII spellings decode through the standard JSON string rules.
@@ -360,5 +384,7 @@ func nonStreamChoicesKey(raw []byte) bool {
 		return true
 	}
 	var name string
-	return json.Unmarshal(raw, &name) == nil && name == "choices"
+	// encoding/json matches a struct field case-insensitively when no exact
+	// tag match exists, so the typed decode honors "Choices"/"CHOICES" too.
+	return json.Unmarshal(raw, &name) == nil && strings.EqualFold(name, "choices")
 }

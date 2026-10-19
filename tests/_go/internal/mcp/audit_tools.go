@@ -78,7 +78,7 @@ func TestAuditStartRefusesWithoutDurableStorage(t *testing.T) {
 	proxy.json(http.MethodGet, bootstrapPath, storageOffBootstrap)
 	service := newTestService(t, proxy, Limits{})
 	_, err := service.auditStart(context.Background(), AuditStartInput{
-		Clients: []string{"dev-traffic"}, Duration: "15m", Confirm: auditConfirmStart,
+		Clients: []string{"dev-traffic"}, Duration: stringPtr("15m"), Confirm: auditConfirmStart,
 	})
 	if err == nil {
 		t.Fatal("starting a capture without durable storage must be refused")
@@ -109,7 +109,7 @@ func TestAuditStartGuards(t *testing.T) {
 		{"no confirmation", AuditStartInput{Clients: []string{"dev-traffic"}}, "confirm must be"},
 		{"wrong confirmation", AuditStartInput{Clients: []string{"dev-traffic"}, Confirm: "yes"}, "confirm must be"},
 		{"no scope", AuditStartInput{Confirm: auditConfirmStart}, "at least one of clients, providers or models"},
-		{"bad duration", AuditStartInput{Clients: []string{"dev-traffic"}, Confirm: auditConfirmStart, Duration: "30m"}, "15m, 1h, 6h, 12h, 24h"},
+		{"bad duration", AuditStartInput{Clients: []string{"dev-traffic"}, Confirm: auditConfirmStart, Duration: stringPtr("30m")}, "15m, 1h, 6h, 12h, 24h"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := service.auditStart(ctx, tc.in); err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -134,7 +134,7 @@ func TestAuditStartBodyShape(t *testing.T) {
 	service := newTestService(t, proxy, Limits{})
 	ctx := context.Background()
 
-	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"dev-traffic"}, Duration: "15m", Confirm: auditConfirmStart}); err != nil {
+	if _, err := service.auditStart(ctx, AuditStartInput{Clients: []string{"dev-traffic"}, Duration: stringPtr("15m"), Confirm: auditConfirmStart}); err != nil {
 		t.Fatal(err)
 	}
 	body := decodeBody(t, proxy.requestsFor(http.MethodPost, debugPath)[0])

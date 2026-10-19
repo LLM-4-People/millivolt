@@ -156,7 +156,7 @@ func nullableScanColumnCases() []struct {
 		{
 			name:        "tool_names",
 			column:      "tool_names",
-			notNullDDL:  "tool_names TEXT NOT NULL DEFAULT ''",
+			notNullDDL:  "tool_names TEXT NOT NULL DEFAULT 'null'",
 			nullableDDL: "tool_names TEXT",
 		},
 		{
@@ -251,7 +251,7 @@ func TestOpenQuarantinesNullScanRequiredColumnSnapshot(t *testing.T) {
 func TestMergeAcceptsEmptyToolNames(t *testing.T) {
 	live := mergeTestLive(t)
 	data := nullableColumnSnapshot(t,
-		"tool_names TEXT NOT NULL DEFAULT ''", "tool_names TEXT", "tool_names", "")
+		"tool_names TEXT NOT NULL DEFAULT 'null'", "tool_names TEXT", "tool_names", "")
 	inserted, skipped, err := live.MergeSnapshot(t.Context(), data)
 	if err != nil {
 		t.Fatalf("empty tool_names rejected: %v", err)
@@ -316,7 +316,7 @@ func snapshotWithoutRequestColumn(t *testing.T, column string) []byte {
 func TestMergeRejectsOmittedScanColumnOnNullableLive(t *testing.T) {
 	livePath := filepath.Join(t.TempDir(), "live.db")
 	if err := os.WriteFile(livePath, nullableColumnSnapshot(t,
-		"tool_names TEXT NOT NULL DEFAULT ''", "tool_names TEXT", "tool_names", ""), 0o600); err != nil {
+		"tool_names TEXT NOT NULL DEFAULT 'null'", "tool_names TEXT", "tool_names", ""), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	live, err := Open(livePath, testOpts)

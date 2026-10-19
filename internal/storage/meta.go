@@ -14,6 +14,10 @@ const (
 	// (migrate writes it after a clean probe or after the repair itself), so
 	// later boots skip the unindexed full-table probe.
 	attemptsRepairMetaKey = "attempts_repaired"
+	// toolNamesRepairMetaKey marks the one-time tool_names-'' repair as done.
+	// The empty spelling is not valid JSON, so json_each over the raw column
+	// fails; 'null' is the writer's canonical no-value document.
+	toolNamesRepairMetaKey = "tool_names_repaired"
 )
 
 // SaveMeta writes a durable key/value (operator state, not request rows).

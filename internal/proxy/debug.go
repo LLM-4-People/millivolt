@@ -489,8 +489,18 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 	}
 	if !*body.Enabled {
 		if id != "" {
-			s.resetOperatorState(w, s.DebugSnapshot, func() error { _, err := s.removeDebug(id, time.Time{}); return err },
-				"debug session %s stopped", id)
+			found, err := s.removeDebug(id, time.Time{})
+			if err != nil {
+				log.Printf("debug session %s stop failed: %v", id, err)
+				writeOperatorState(w, s.DebugSnapshot(), err)
+				return
+			}
+			if !found {
+				adminjson.WriteError(w, http.StatusNotFound, "debug session not found")
+				return
+			}
+			log.Printf("debug session %s stopped", id)
+			writeOperatorState(w, s.DebugSnapshot(), nil)
 		} else {
 			s.resetOperatorState(w, s.DebugSnapshot, func() error { return s.applyDebug(nil) },
 				"debug sessions cleared")
@@ -515,15 +525,34 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return prev, pauseDurationError()
 		}
-		clients := sanitizeNameList(body.Clients)
-		providers := sanitizeNameList(body.Providers)
-		models := body.Models
-		scopeOmitted := body.Clients == nil && body.Providers == nil && body.Models == nil
-		if hasPrev && scopeOmitted {
-			clients, providers, models = prev.Clients, prev.Providers, prev.Models
+		// Presence is per dimension: an omitted dimension keeps the edited
+		// session's value, while an explicitly empty array clears it. A create
+		// starts with every omitted dimension empty ("any"). Replacing the
+		// whole scope whenever any dimension was named silently dropped the
+		// provider/model filters of a partial edit and broadened capture.
+		clients, providers, models := prev.Clients, prev.Providers, prev.Models
+		if !hasPrev {
+			clients, providers, models = nil, nil, nil
+		}
+		if body.Clients != nil {
+			clients = sanitizeNameList(body.Clients)
+		}
+		if body.Providers != nil {
+			providers = sanitizeNameList(body.Providers)
+		}
+		if body.Models != nil {
+			models = body.Models
 		}
 		snap = persistedDebug{
 			Clients: clients, Providers: providers, Models: models, Duration: dur,
+		}
+		if hasPrev {
+			snap.ID = id
+		} else {
+			// Mint the create's id before editDebug installs it, so this
+			// request can report exactly the session its own transaction
+			// created even when another create runs concurrently.
+			snap.ID = newPauseID()
 		}
 		snap.Until = mergeUntil(hasPrev, body.Duration == nil, dur, wait, prev.Duration, prev.Until)
 		return snap, nil
@@ -538,7 +567,14 @@ func (s *Server) HandleDebug(w http.ResponseWriter, r *http.Request) {
 	} else {
 		log.Printf("debug session started (%s)", debugDescribe(snap))
 	}
-	writeOperatorState(w, s.DebugSnapshot(), nil)
+	state := s.DebugSnapshot()
+	if !hasPrev && snap.ID != "" {
+		// The create response carries the id the transaction actually
+		// installed, so a concurrent starter never has to infer its session
+		// from a before/after list difference.
+		state["created_id"] = snap.ID
+	}
+	writeOperatorState(w, state, nil)
 }
 
 // DebugSnapshot builds the GET /admin/debug state document - the single

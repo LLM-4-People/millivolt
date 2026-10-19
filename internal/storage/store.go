@@ -278,7 +278,7 @@ CREATE TABLE IF NOT EXISTS requests (
 	rate_limited INTEGER NOT NULL DEFAULT 0,
 	retries INTEGER NOT NULL DEFAULT 0,
 	retry_after_ms INTEGER NOT NULL DEFAULT 0,
-	tool_names TEXT NOT NULL DEFAULT '',
+	tool_names TEXT NOT NULL DEFAULT 'null',
 	req_max_tokens INTEGER NOT NULL DEFAULT 0,
 	req_temperature REAL NOT NULL DEFAULT 0,
 	req_top_p REAL NOT NULL DEFAULT 0,
@@ -1704,7 +1704,7 @@ func migrate(db *sql.DB) error {
 		{"rate_limited", "ALTER TABLE requests ADD COLUMN rate_limited INTEGER NOT NULL DEFAULT 0"},
 		{"retries", "ALTER TABLE requests ADD COLUMN retries INTEGER NOT NULL DEFAULT 0"},
 		{"retry_after_ms", "ALTER TABLE requests ADD COLUMN retry_after_ms INTEGER NOT NULL DEFAULT 0"},
-		{"tool_names", "ALTER TABLE requests ADD COLUMN tool_names TEXT NOT NULL DEFAULT ''"},
+		{"tool_names", "ALTER TABLE requests ADD COLUMN tool_names TEXT NOT NULL DEFAULT 'null'"},
 		{"req_max_tokens", "ALTER TABLE requests ADD COLUMN req_max_tokens INTEGER NOT NULL DEFAULT 0"},
 		{"req_temperature", "ALTER TABLE requests ADD COLUMN req_temperature REAL NOT NULL DEFAULT 0"},
 		{"req_top_p", "ALTER TABLE requests ADD COLUMN req_top_p REAL NOT NULL DEFAULT 0"},
@@ -1785,6 +1785,29 @@ func migrate(db *sql.DB) error {
 		}
 		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, attemptsRepairMetaKey); err != nil {
 			return fmt.Errorf("repair attempts marker: %w", err)
+		}
+	}
+	// Same one-shot repair for tool_names: the original ADD COLUMN defaulted to
+	// '' (not valid JSON), so a database migrated from before the column keeps
+	// that spelling even though every writer path stores 'null' or an array.
+	// Decode treats both as no names, but raw json_each consumers such as the
+	// MCP values(dim:"tool") probe require valid JSON, so canonicalize once.
+	var repairedToolNames string
+	if err := db.QueryRow(`SELECT value FROM meta WHERE key = ?`, toolNamesRepairMetaKey).Scan(&repairedToolNames); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("repair tool_names marker: %w", err)
+	}
+	if repairedToolNames == "" {
+		var brokenToolNames int
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM requests WHERE tool_names = '')`).Scan(&brokenToolNames); err != nil {
+			return fmt.Errorf("repair tool_names: %w", err)
+		}
+		if brokenToolNames != 0 {
+			if _, err := db.Exec(`UPDATE requests SET tool_names = 'null' WHERE tool_names = ''`); err != nil {
+				return fmt.Errorf("repair tool_names: %w", err)
+			}
+		}
+		if _, err := db.Exec(`INSERT OR REPLACE INTO meta(key, value) VALUES (?, '1')`, toolNamesRepairMetaKey); err != nil {
+			return fmt.Errorf("repair tool_names marker: %w", err)
 		}
 	}
 	// Every leading equality column now exists, whether this database was just
@@ -2094,40 +2117,76 @@ type LogPredicate struct {
 	Value string
 }
 
-// LogFilter carries SQL-safe exact predicates plus an optional exact status.
-// Zero value selects everything.
+// LogFilter carries SQL-safe exact predicates plus optional alternative
+// groups. All predicates are AND-ed. Each Any group is one dimension's OR
+// alternatives, and every group is AND-ed with All and with the other groups:
+// repeated provider filters remain one provider alternative set while a
+// repeated client filter stays a separate, intersecting set. Zero value
+// selects everything.
 type LogFilter struct {
 	All []LogPredicate
+	Any [][]LogPredicate
 }
 
 func (f *LogFilter) where() (string, []any, error) {
 	if f == nil {
 		return "", nil, nil
 	}
-	var clause string
-	args := make([]any, 0, len(f.All))
-	for _, p := range f.All {
-		var column string
+	argCount := len(f.All)
+	for _, group := range f.Any {
+		argCount += len(group)
+	}
+	args := make([]any, 0, argCount)
+	columnOf := func(p LogPredicate) (string, error) {
 		switch p.Field {
 		case LogProvider:
-			column = "provider"
+			return "provider", nil
 		case LogClient:
-			column = "client"
+			return "client", nil
 		case LogKeyHash:
-			column = "key_hash"
+			return "key_hash", nil
 		case LogConversation:
-			column = "conversation_id"
+			return "conversation_id", nil
 		case LogModel:
-			column = "model"
+			return "model", nil
 		case LogStatus:
-			column = "status_code"
+			return "status_code", nil
 		default:
 			// Deny by default: a typo or a future field must never silently
 			// broaden the page to unfiltered rows.
-			return "", nil, fmt.Errorf("unknown log field %d", p.Field)
+			return "", fmt.Errorf("unknown log field %d", p.Field)
+		}
+	}
+	var clause string
+	for _, p := range f.All {
+		column, err := columnOf(p)
+		if err != nil {
+			return "", nil, err
 		}
 		clause += " AND " + column + " = ?"
 		args = append(args, p.Value)
+	}
+	for _, predicates := range f.Any {
+		if len(predicates) == 0 {
+			// A caller-built empty group has no meaning and rendering it as
+			// "()" would be invalid SQL. Deny it instead of silently dropping
+			// an intended constraint.
+			return "", nil, fmt.Errorf("empty log predicate group")
+		}
+		var group strings.Builder
+		for i, p := range predicates {
+			column, err := columnOf(p)
+			if err != nil {
+				return "", nil, err
+			}
+			if i > 0 {
+				group.WriteString(" OR ")
+			}
+			group.WriteString(column)
+			group.WriteString(" = ?")
+			args = append(args, p.Value)
+		}
+		clause += " AND (" + group.String() + ")"
 	}
 	return clause, args, nil
 }

@@ -390,8 +390,19 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 		if body.MaxQueued != nil && *body.MaxQueued < 0 {
 			return prev, fmt.Errorf("max_queued must be >= 0")
 		}
-		clients := sanitizeNameList(body.Clients)
-		providers := sanitizeNameList(body.Providers)
+		// Scope presence is per dimension: an omitted dimension preserves the
+		// edited hold's value, while an explicitly empty array clears it. A
+		// create starts with every omitted dimension empty ("any").
+		clients, providers := prev.Clients, prev.Providers
+		if !hasPrev {
+			clients, providers = nil, nil
+		}
+		if body.Clients != nil {
+			clients = sanitizeNameList(body.Clients)
+		}
+		if body.Providers != nil {
+			providers = sanitizeNameList(body.Providers)
+		}
 		newc := body.New.value
 		scopeOmitted := !body.All.set && !body.New.set && body.Clients == nil && body.Providers == nil
 		var all bool
@@ -399,7 +410,6 @@ func (s *Server) HandlePause(w http.ResponseWriter, r *http.Request) {
 			// Replace without restated scope keeps the hold. Compat
 			// {"paused":true} → All is only for a new hold.
 			all, newc = prev.All, prev.New
-			clients, providers = prev.Clients, prev.Providers
 		} else {
 			all = scopeOmitted || body.All.value
 			// An explicit empty / whitespace-only scope is not a

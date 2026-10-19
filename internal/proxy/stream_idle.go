@@ -26,6 +26,10 @@ type idleCancelBody struct {
 	timer   *time.Timer
 	mu      sync.Mutex
 	closed  bool
+	// paused suppresses the idle bound while a reader legitimately has no
+	// expected progress (a parked Cursor Run waiting for a client tool result).
+	// The pauser owns the decision; this type only owns the timer mechanics.
+	paused bool
 }
 
 func newIdleCancelBody(rc io.ReadCloser, cancel context.CancelFunc, timeout time.Duration) io.ReadCloser {
@@ -37,13 +41,39 @@ func newIdleCancelBody(rc io.ReadCloser, cancel context.CancelFunc, timeout time
 
 func (b *idleCancelBody) arm() {
 	b.mu.Lock()
-	if !b.closed {
-		if b.timer == nil {
-			b.timer = time.AfterFunc(b.timeout, b.cancel)
-		} else {
-			b.timer.Reset(b.timeout)
-		}
+	b.armLocked()
+	b.mu.Unlock()
+}
+
+func (b *idleCancelBody) armLocked() {
+	if b.closed || b.paused {
+		return
 	}
+	if b.timer == nil {
+		b.timer = time.AfterFunc(b.timeout, b.cancel)
+	} else {
+		b.timer.Reset(b.timeout)
+	}
+}
+
+// PauseIdle suppresses the idle bound and stops any timer already armed for an
+// in-flight Read. The caller decides when silence is legitimate; the generic
+// bound stays in force for every other response body.
+func (b *idleCancelBody) PauseIdle() {
+	b.mu.Lock()
+	b.paused = true
+	if b.timer != nil {
+		b.timer.Stop()
+	}
+	b.mu.Unlock()
+}
+
+// ResumeIdle re-arms the idle bound. It also covers a Read that is still
+// blocked: the fresh timer cancels that read if progress does not resume.
+func (b *idleCancelBody) ResumeIdle() {
+	b.mu.Lock()
+	b.paused = false
+	b.armLocked()
 	b.mu.Unlock()
 }
 

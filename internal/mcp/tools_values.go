@@ -38,8 +38,13 @@ var valuesDimensions = map[string]func(limit int) string{
 	"error_message": func(limit int) string { return countStatement("error_msg", "error_msg != ''", limit) },
 	"tool": func(limit int) string {
 		// Tool names live in a JSON-array column, one array per request, so the
-		// enumeration walks it rather than grouping the raw text.
-		return "SELECT j.value AS value, COUNT(*) AS requests FROM requests r, json_each(r.tool_names) j" +
+		// enumeration walks it rather than grouping the raw text. A legacy
+		// empty spelling (or any malformed value) is no vocabulary, never a
+		// malformed-JSON error: the CASE keeps json_each's input valid. One
+		// request contributes once per distinct name even when its array
+		// repeats a name, so COUNT(DISTINCT r.id) is the request count.
+		return "SELECT j.value AS value, COUNT(DISTINCT r.id) AS requests FROM requests r," +
+			" json_each(CASE WHEN json_valid(r.tool_names) THEN r.tool_names ELSE '[]' END) j" +
 			" WHERE j.value != '' GROUP BY j.value ORDER BY requests DESC, value ASC LIMIT " + strconv.Itoa(limit)
 	},
 }

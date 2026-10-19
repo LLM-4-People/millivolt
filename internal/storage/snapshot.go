@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -476,6 +477,15 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
+	// initializeDatabase reconciles the four owned analytical triggers but
+	// leaves every other trigger in place. An unowned write-path trigger on
+	// requests could delete or rewrite accepted rows after the writer has
+	// accounted them, so replacement admission rejects the whole set instead
+	// of trusting the writer probe (which reads its own sentinel back).
+	if err := preflightRequestTriggers(context.Background(), db); err != nil {
+		db.Close()
+		return err
+	}
 	// The initializer proves the writer INSERT executes, but a NULL request id
 	// or another stored value scanRecord cannot read into its destination
 	// would still pass that probe and then make every later history scan fail.
@@ -487,6 +497,15 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
+	// The legacy empty attempts spelling is a valid admission input (scans
+	// treat it as no attempts), but HasError/count/export/purge run json_each
+	// over the raw column. Canonicalize it to the writer's own no-value
+	// document in the staged file before any live file is touched; merge does
+	// the equivalent during its INSERT.
+	if err := canonicalizePendingAttempts(context.Background(), db); err != nil {
+		db.Close()
+		return err
+	}
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close preflight database: %w", err)
 	}
@@ -494,6 +513,60 @@ func preflightPendingSnapshot(path string) error {
 	// stale one only now: deleting a WAL while it is open would discard its
 	// committed pages.
 	return removeSnapshotSidecars(path)
+}
+
+// preflightRequestTriggers rejects every trigger on requests that is not one of
+// the four analytical triggers this package owns. ensureProjectionTriggers has
+// already restored the owned definitions, so any other name is foreign: a
+// replacement snapshot is a database file, and an unowned INSERT/UPDATE/DELETE
+// trigger could silently delete or rewrite writes that insertBatch still counts.
+func preflightRequestTriggers(ctx context.Context, db mergeConn) error {
+	owned := make(map[string]struct{}, len(projectionTriggers))
+	for _, tr := range projectionTriggers {
+		owned[tr.name] = struct{}{}
+	}
+	rows, err := db.QueryContext(ctx, `SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'requests'`)
+	if err != nil {
+		return fmt.Errorf("pending snapshot triggers: %w", err)
+	}
+	defer rows.Close()
+	var foreign []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if _, ok := owned[name]; !ok {
+			foreign = append(foreign, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(foreign) != 0 {
+		sort.Strings(foreign)
+		return fmt.Errorf("pending snapshot requests has %d unowned trigger(s) (%s); only the analytical projection triggers are permitted",
+			len(foreign), strings.Join(foreign, ", "))
+	}
+	return nil
+}
+
+// canonicalizePendingAttempts turns the legacy empty attempts spelling into the
+// writer's canonical no-value document in a staged replacement. The empty
+// spelling is admission-compatible for scans, but HasError's json_each over the
+// raw column would fail on it. A missing legacy attempts column needs no work.
+func canonicalizePendingAttempts(ctx context.Context, db *sql.DB) error {
+	columns, err := tableColumnSet(ctx, db, "", "requests")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["attempts"]; !ok {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE requests SET attempts = 'null' WHERE attempts = ''`); err != nil {
+		return fmt.Errorf("canonicalize pending attempts: %w", err)
+	}
+	return nil
 }
 
 // writerProbeIDAttempts bounds the sentinel-id search for the admission
@@ -539,6 +612,21 @@ func probeWriterInsert(db *sql.DB) error {
 	}
 	if !inserted {
 		return fmt.Errorf("writer insert probe did not insert its row")
+	}
+	// RowsAffected alone proves only that SQLite executed the INSERT. Read the
+	// sentinel back inside the same transaction so a trigger that deletes or
+	// rewrites the inserted row fails admission here, where the writer would
+	// otherwise account a durable row that is not in history.
+	var gotID string
+	var gotStatus int
+	if err := tx.QueryRow(`SELECT id, status_code FROM requests WHERE id = ?`, probeID).Scan(&gotID, &gotStatus); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("writer insert probe row is missing after insert")
+		}
+		return err
+	}
+	if gotID != probeID || gotStatus != probe.StatusCode {
+		return fmt.Errorf("writer insert probe row changed after insert (id %q status %d)", gotID, gotStatus)
 	}
 	return tx.Rollback()
 }
@@ -1232,27 +1320,6 @@ func preflightMergeSchema(ctx context.Context, db mergeConn) error {
 	if err := preflightRequestScanValues(ctx, db, "backup_merge", "backup"); err != nil {
 		return err
 	}
-	haveAttempts := false
-	incoming, err := tableColumnDetails(ctx, db, "backup_merge", "requests")
-	if err != nil {
-		return err
-	}
-	for _, col := range incoming {
-		if col.name == "attempts" {
-			haveAttempts = true
-			break
-		}
-	}
-	if haveAttempts {
-		var malformed int64
-		if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_merge.requests
-			WHERE attempts IS NOT NULL AND attempts <> '' AND json_valid(attempts) = 0`).Scan(&malformed); err != nil {
-			return fmt.Errorf("backup requests.attempts: %w", err)
-		}
-		if malformed != 0 {
-			return fmt.Errorf("backup requests.attempts contains %d malformed JSON values", malformed)
-		}
-	}
 	if err := db.QueryRowContext(ctx, `SELECT name FROM backup_merge.sqlite_master WHERE type='table' AND name='request_debug'`).Scan(&name); err == nil {
 		if err := preflightMergeTable(ctx, db, "request_debug"); err != nil {
 			return err
@@ -1306,14 +1373,43 @@ type recordScanCheck struct {
 	accepted string
 }
 
+// recordScanMillisMin and recordScanMillisMax bound every stored millisecond
+// timestamp that scanRecord turns into a time.Time. time.Time.MarshalJSON
+// rejects years outside [0,9999], so a value outside this range is accepted by
+// SQLite and every later dashboard encode fails. The bounds are the first and
+// last millisecond of that representable window.
+const (
+	recordScanMillisMin = int64(-62167219200000) // 0000-01-01T00:00:00Z
+	recordScanMillisMax = int64(253402300799999) // 9999-12-31T23:59:59.999Z
+	// recordScanDurationMaxMs is the largest duration_ms whose conversion to
+	// time.Duration in scanRecord cannot overflow: duration_ms * time.Millisecond
+	// must fit in int64 nanoseconds.
+	recordScanDurationMaxMs = int64(math.MaxInt64) / int64(time.Millisecond)
+)
+
+// recordScanMillisColumns are the columns scanRecord converts through
+// time.UnixMilli. Every field serialized as time.Time must be listed here.
+var recordScanMillisColumns = []string{
+	"started_at", "first_token_at", "last_token_at", "first_answer_at", "final_attempt_at",
+}
+
+// aggregateMetricColumns are the REAL columns whose values feed the checked
+// aggregate domain (metrics.SumValues): the KPI cost total and the throughput
+// sums. A finite but negative, or non-finite, value here poisons every
+// aggregate and JSON encode, so restore admission applies the same domain the
+// writer's accounting applies.
+var aggregateMetricColumns = []string{"cost", "gen_tps", "overall_tps"}
+
 // recordScanChecks derives one value check per recordColumns entry from the
 // scan destinations scanRecord itself uses. Every numeric destination accepts
 // the schema's own storage classes only: INTEGER for an integer or bool
 // destination, INTEGER or REAL for a real destination. Text and blob coercions
 // are deliberately rejected even where database/sql would parse them, because
 // the writer never produces them and accepting them would hide a poisoned
-// snapshot. A text destination accepts any non-NULL value, including blob,
-// which database/sql converts to a string without error.
+// snapshot. A text destination accepts the TEXT storage class only: SQLite
+// permits a BLOB in a TEXT-affinity column, and the log cursor binds exact
+// filter keys as TEXT, so a BLOB id scans as a Go string but can never be
+// materialized by LogPageRecords.
 func recordScanChecks() ([]recordScanCheck, error) {
 	columns := recordScanColumns()
 	var record metrics.Record
@@ -1332,7 +1428,8 @@ func recordScanChecks() ([]recordScanCheck, error) {
 		check := recordScanCheck{column: column, reject: quoted + ` IS NULL`}
 		switch kind {
 		case recordScanText:
-			check.accepted = "a non-NULL value"
+			check.accepted = "a text value"
+			check.reject += ` OR typeof(` + quoted + `) <> 'text'`
 		case recordScanInteger:
 			check.accepted = "an integer"
 			check.reject += ` OR typeof(` + quoted + `) <> 'integer'`
@@ -1340,6 +1437,11 @@ func recordScanChecks() ([]recordScanCheck, error) {
 				minValue := -(int64(1) << (bits - 1))
 				maxValue := int64(1)<<(bits-1) - 1
 				check.reject += fmt.Sprintf(` OR %s < %d OR %s > %d`, quoted, minValue, quoted, maxValue)
+			}
+			if slices.Contains(recordScanMillisColumns, column) {
+				check.accepted = "an integer millisecond timestamp within the RFC 3339 range"
+				check.reject += fmt.Sprintf(` OR %s < %d OR %s > %d`,
+					quoted, recordScanMillisMin, quoted, recordScanMillisMax)
 			}
 		case recordScanReal:
 			check.accepted = "a number"
@@ -1350,6 +1452,17 @@ func recordScanChecks() ([]recordScanCheck, error) {
 				// comparison matches the conversion.
 				maxValue := strconv.FormatFloat(float64(math.MaxFloat32), 'g', -1, 64)
 				check.reject += fmt.Sprintf(` OR %s > %s OR %s < -%s`, quoted, maxValue, quoted, maxValue)
+			}
+			if slices.Contains(aggregateMetricColumns, column) {
+				// SQLite stores +Inf/-Inf as REAL and NaN as NULL. The generic
+				// NULL and storage-class checks above already catch NaN; the
+				// finite/nonnegative border below plus the MIN/MAX domain check
+				// in preflightAggregateValues rejects the infinite and negative
+				// values metrics.SumValues refuses.
+				check.accepted = "a finite nonnegative number"
+				maxValue := strconv.FormatFloat(math.MaxFloat64, 'g', -1, 64)
+				check.reject += fmt.Sprintf(` OR %s < 0 OR %s > %s OR %s < -%s`,
+					quoted, quoted, maxValue, quoted, maxValue)
 			}
 		case recordScanBool:
 			check.accepted = "an integer 0 or 1"
@@ -1412,6 +1525,22 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 		return err
 	}
 	if invalid == 0 {
+		if err := preflightRequestDuration(ctx, db, table, source, present); err != nil {
+			return err
+		}
+		if err := preflightAggregateValues(ctx, db, table, source, present); err != nil {
+			return err
+		}
+		if _, ok := present["attempts"]; ok {
+			var malformed int64
+			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+
+				` WHERE attempts IS NOT NULL AND attempts <> '' AND json_valid(attempts) = 0`).Scan(&malformed); err != nil {
+				return fmt.Errorf("%s requests.attempts: %w", source, err)
+			}
+			if malformed != 0 {
+				return fmt.Errorf("%s requests.attempts contains %d malformed JSON values", source, malformed)
+			}
+		}
 		return nil
 	}
 	// Only a failing table pays the per-column scans; the error names the first
@@ -1437,6 +1566,60 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 		return fmt.Errorf("%s requests contains %d rows with an invalid %s value; scanRecord requires %s", source, count, check.column, check.accepted)
 	}
 	return fmt.Errorf("%s requests contains values scanRecord cannot read", source)
+}
+
+// preflightAggregateValues applies the aggregate metric domain to the actual
+// stored range of every aggregate-bearing REAL column. It reuses
+// metrics.SumValues as the one range policy: MIN..MAX is the widest two-value
+// sum the column can produce, so the same predicate that rejects a poisoned
+// per-request value also rejects a column whose smallest and largest values
+// cannot be added representably. The caller has already rejected NULL and
+// non-numeric storage classes, so a valid pair is the remaining border.
+func preflightAggregateValues(ctx context.Context, db mergeConn, table, source string, present map[string]struct{}) error {
+	for _, column := range aggregateMetricColumns {
+		if _, ok := present[column]; !ok {
+			continue
+		}
+		var low, high sql.NullFloat64
+		if err := db.QueryRowContext(ctx,
+			`SELECT MIN("`+column+`"), MAX("`+column+`") FROM `+table).Scan(&low, &high); err != nil {
+			return fmt.Errorf("%s requests.%s range: %w", source, column, err)
+		}
+		if !low.Valid || !high.Valid {
+			continue // the per-column NULL check already names this row
+		}
+		if _, err := metrics.SumValues(low.Float64, high.Float64); err != nil {
+			return fmt.Errorf("%s requests contains an invalid %s value; aggregate metrics require a finite nonnegative number", source, column)
+		}
+	}
+	return nil
+}
+
+// preflightRequestDuration applies the derived-End domain shared by replace and
+// merge. scanRecord multiplies duration_ms by time.Millisecond and adds it to
+// started_at, so a negative or too-large duration either wraps the Duration or
+// moves End outside the RFC 3339 window even when the multiplication is safe.
+// The subtraction form keeps started_at + duration_ms from overflowing SQLite
+// integers; the standalone bounds already reject values that would make the
+// subtraction itself unsafe.
+func preflightRequestDuration(ctx context.Context, db mergeConn, table, source string, present map[string]struct{}) error {
+	if _, ok := present["duration_ms"]; !ok {
+		return nil
+	}
+	maxDuration := strconv.FormatInt(recordScanDurationMaxMs, 10)
+	invalid := `typeof("duration_ms") <> 'integer' OR "duration_ms" < 0 OR "duration_ms" > ` + maxDuration
+	if _, ok := present["started_at"]; ok {
+		invalid += ` OR "started_at" < ` + strconv.FormatInt(recordScanMillisMin, 10) + ` - "duration_ms"` +
+			` OR "started_at" > ` + strconv.FormatInt(recordScanMillisMax, 10) + ` - "duration_ms"`
+	}
+	var count int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE `+invalid).Scan(&count); err != nil {
+		return fmt.Errorf("%s requests.duration_ms: %w", source, err)
+	}
+	if count != 0 {
+		return fmt.Errorf("%s requests contains %d rows with an invalid duration_ms value; duration must be nonnegative, representable as time.Duration, and keep End within the RFC 3339 range", source, count)
+	}
+	return nil
 }
 
 func preflightMergeTable(ctx context.Context, db mergeConn, table string) error {

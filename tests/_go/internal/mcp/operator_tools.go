@@ -91,7 +91,7 @@ func TestSetPauseBodyShape(t *testing.T) {
 	ctx := context.Background()
 
 	limit := 4
-	out, err := service.setPause(ctx, SetPauseInput{Paused: true, All: true, Duration: "1h", MaxQueued: &limit})
+	out, err := service.setPause(ctx, SetPauseInput{Paused: true, All: true, Duration: stringPtr("1h"), MaxQueued: &limit})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestSetPauseValidation(t *testing.T) {
 		in   SetPauseInput
 		want string
 	}{
-		{"bad duration", SetPauseInput{Paused: true, All: true, Duration: "2m"}, "15m, 1h, 6h, 12h, 24h"},
+		{"bad duration", SetPauseInput{Paused: true, All: true, Duration: stringPtr("2m")}, "15m, 1h, 6h, 12h, 24h"},
 		{"negative cap", SetPauseInput{Paused: true, All: true, MaxQueued: &negative}, "max_queued must be >= 0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -531,6 +531,32 @@ func ParseErrorEnvelope(b []byte) (typ, code, msg string) {
 	return parseErrorValue(probe.Error)
 }
 
+// ParseResponseFailedEnvelope parses the provider error carried by a Responses
+// API response.failed event. That event nests its failure at
+// response.error ({"type":"response.failed","response":{...,"error":{...}}}),
+// so the top-level ParseErrorEnvelope sees only a decoy. The nested object is
+// decoded through the same parseErrorValue rules, and a top-level error wins
+// when a gateway also mirrors it there.
+func ParseResponseFailedEnvelope(b []byte) (typ, code, msg string) {
+	trimmed := bytes.TrimSpace(b)
+	if len(trimmed) == 0 {
+		return "", "", ""
+	}
+	var probe struct {
+		Error    json.RawMessage `json:"error"`
+		Response struct {
+			Error json.RawMessage `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(trimmed, &probe); err != nil {
+		return "", "", ""
+	}
+	if typ, code, msg = parseErrorValue(probe.Error); typ != "" {
+		return typ, code, msg
+	}
+	return parseErrorValue(probe.Response.Error)
+}
+
 // parseErrorValue applies the canonical envelope rules to an already-captured
 // top-level "error" value. ParseErrorEnvelope and the one-pass non-stream
 // analysis share it so both surfaces read the same decoys, string/numeric

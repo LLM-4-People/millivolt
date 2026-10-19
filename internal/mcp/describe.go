@@ -154,7 +154,7 @@ func (s *Service) describe(ctx context.Context, _ DescribeInput) (*DescribeOutpu
 			"Timestamps are Unix MILLISECONDS, not seconds: started_at, first_token_at, last_token_at, first_answer_at, first_reasoning_at and final_attempt_at.",
 			"ttft_ms, duration_ms, processing_ms, queue_wait_ms, retry_after_ms, upstream_connect_ms, upstream_tls_ms and upstream_ttfb_ms are integer milliseconds.",
 			"cost is USD. overall_tps and gen_tps are tokens per second.",
-			"attempts and tool_names are JSON-array TEXT columns: use json_each(attempts) or json_extract(attempts, '$[0].status_code').",
+			"attempts and tool_names are JSON TEXT columns holding an array, or 'null' when there is no value: use json_each(attempts) or json_extract(attempts, '$[0].status_code').",
 			"There is NO unixnow() function in this SQLite build. For a relative window use strftime('%s','now')*1000, " +
 				"for example WHERE started_at >= strftime('%s','now')*1000 - 3600000 for the last hour.",
 			"Use keyset pagination (WHERE (started_at, id) < (?, ?)) rather than OFFSET for deep history; OFFSET degrades on every page.",
@@ -258,10 +258,10 @@ var ErrorKeyExamples = []string{"server_error|500|"}
 // against the DDL itself in both directions, so an index added, removed or
 // renamed on either side cannot drift.
 var RequestIndexes = []string{
-	"idx_requests_log(started_at, id): the only request-log index and the keyset order the durable log page and deep history use. A filtered log page or ordered export walks it and rechecks its exact equality predicates per row; an equality-only count or purge scans the table. Its leading started_at also serves a started_at-only range",
+	"idx_requests_log(started_at, id): the only request-log index and the keyset order the durable log page and deep history use. The log page pushes provider, client, key_hash, conversation_id and canonical numeric status_code into SQL and rechecks them per scanned row; model, status classes, tools, errors and time buckets stay Go-owned. The ordered export and purge use the separate filter surface (provider, model, client, conversation_id, error_type, status_code, has_error, debug and time bounds; no key_hash) and an equality-only count or purge scans the table. Its leading started_at also serves a started_at-only range",
 	"idx_request_debug_expires(expires_at): the capture TTL sweep",
 	"idx_request_debug_session(session_id): captures by session",
-	"there is NO index on provider, model, client, key_hash, conversation_id, status_code, error_type or cost - nor on any column idx_requests_log does not cover; the log page and export recheck an equality predicate on the ordered scan, while any other filter scans the table",
+	"there is NO index on provider, model, client, key_hash, conversation_id, status_code, error_type or cost - nor on any column idx_requests_log does not cover; an exact log-page predicate is rechecked on the ordered scan, and any other filter scans the table",
 }
 
 // vocabularies is the one owner of every filter dimension's value space. A
@@ -440,7 +440,7 @@ var tableDocs = []TableDoc{
 			{Name: "response_headers", Type: "TEXT", Meaning: "upstream response headers with credentials redacted; JSON object text"},
 			{Name: "stream", Type: "INTEGER", Meaning: "1 when the client asked for a streamed response"},
 			{Name: "tool_calls", Type: "INTEGER", Meaning: "count of tool calls in the response"},
-			{Name: "tool_names", Type: "TEXT", Meaning: "JSON array of tool names; use json_each or json_extract"},
+			{Name: "tool_names", Type: "TEXT", Meaning: "JSON array of tool names, or 'null' when none; use json_each or json_extract"},
 			{Name: "attempts", Type: "TEXT", Meaning: "JSON array of absorbed upstream attempts; each has status_code, error_type and at"},
 			{Name: "final_attempt_at", Type: "INTEGER", Unit: "unix milliseconds", Meaning: "start of the attempt that produced the returned response"},
 			{Name: "error_type", Type: "TEXT", Meaning: "classified error class; empty on success"},

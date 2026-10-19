@@ -75,11 +75,11 @@ type SetPauseInput struct {
 	// Paused false resumes. With no HoldID it resumes EVERYTHING.
 	Paused    bool     `json:"paused" jsonschema:"true parks matching new requests, false resumes"`
 	HoldID    string   `json:"hold_id,omitempty" jsonschema:"edit or resume exactly this hold"`
-	All       bool     `json:"all,omitempty" jsonschema:"hold ALL traffic. Naming no scope at all is the SAME global hold, so leave every scope field empty only when you mean everything"`
+	All       bool     `json:"all,omitempty" jsonschema:"hold ALL traffic. On a CREATE, naming no scope at all is the SAME global hold; on an EDIT (hold_id set), omitted scope fields preserve that hold's existing scope, so it is not widened"`
 	New       bool     `json:"new,omitempty" jsonschema:"hold clients that were unseen when the hold was created"`
 	Clients   []string `json:"clients,omitempty" jsonschema:"client scope; names within one dimension are alternatives"`
 	Providers []string `json:"providers,omitempty" jsonschema:"provider scope; provider and client constraints intersect"`
-	Duration  string   `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty until resumed"`
+	Duration  *string  `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty until resumed; omit on an edit to preserve the existing deadline"`
 	MaxQueued *int     `json:"max_queued,omitempty" jsonschema:"how many matching waiters the hold parks before refusing"`
 }
 
@@ -104,11 +104,11 @@ func (s *Service) setPause(ctx context.Context, in SetPauseInput) (*SetPauseOutp
 		body["id"] = in.HoldID
 	}
 	if in.Paused {
-		if in.Duration != "" {
-			if err := validateCaptureDuration(in.Duration); err != nil {
+		if in.Duration != nil {
+			if err := validateCaptureDuration(*in.Duration); err != nil {
 				return nil, fmt.Errorf("duration: %v", err)
 			}
-			body["duration"] = in.Duration
+			body["duration"] = *in.Duration
 		}
 		if in.All {
 			body["all"] = true
@@ -137,8 +137,66 @@ func (s *Service) setPause(ctx context.Context, in SetPauseInput) (*SetPauseOutp
 	if warning, ok := state["warning"].(string); ok {
 		out.Warning = warning
 	}
-	out.Scope = describePauseScope(in)
+	out.Scope = describePauseState(in, state)
 	return out, nil
+}
+
+// describePauseState prefers the hold the proxy actually installed for an edit.
+// The request-derived fallback covers creates, resumes and a response whose
+// hold cannot be found, but only the state summary tells the model that an
+// omitted dimension was preserved rather than cleared.
+func describePauseState(in SetPauseInput, state map[string]any) string {
+	if !in.Paused || in.HoldID == "" {
+		return describePauseScope(in)
+	}
+	holds, _ := state["holds"].([]any)
+	for _, raw := range holds {
+		hold, _ := raw.(map[string]any)
+		if id, _ := hold["id"].(string); id == in.HoldID {
+			return describePauseHold(in.HoldID, hold)
+		}
+	}
+	return describePauseScope(in)
+}
+
+func describePauseHold(id string, hold map[string]any) string {
+	all, _ := hold["all"].(bool)
+	newc, _ := hold["new"].(bool)
+	clients := pauseHoldNames(hold["clients"])
+	providers := pauseHoldNames(hold["providers"])
+	parts := []string{}
+	if all {
+		parts = append(parts, "all traffic")
+	}
+	if newc {
+		parts = append(parts, "clients unseen at hold creation")
+	}
+	if len(clients) > 0 {
+		parts = append(parts, "clients "+strings.Join(clients, ","))
+	}
+	if len(providers) > 0 {
+		parts = append(parts, "providers "+strings.Join(providers, ","))
+	}
+	if len(parts) == 0 {
+		return "edited hold " + id + " in place"
+	}
+	return "edited hold " + id + ": " + strings.Join(parts, " and ")
+}
+
+func pauseHoldNames(value any) []string {
+	switch list := value.(type) {
+	case []string:
+		return list
+	case []any:
+		out := make([]string, 0, len(list))
+		for _, raw := range list {
+			if name, ok := raw.(string); ok {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func describePauseScope(in SetPauseInput) string {

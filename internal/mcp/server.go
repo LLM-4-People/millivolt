@@ -108,7 +108,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "describe",
 		Title:       "Describe the millivolt instance",
-		Description: "Start here. Returns the live SQLite schema, the full requests/request_debug/meta column reference with units and meaning, the exact SQL health predicates (a 429 alone is not an error), the value vocabulary of EVERY filter dimension (including the status classes - there is no 3xx, and 499 is 'cancel' - the time daypart buckets, and the error type|code|message key), the live known client/provider/model names and tool names, the indexes, every result limit, and the working SQL idioms for this build. Without it you cannot write correct SQL: timestamps are Unix milliseconds, cost is USD, attempts/tool_names are JSON-array text columns, unixnow() does not exist (use strftime('%s','now')*1000), and 'time' is a daypart bucket rather than a duration.",
+		Description: "Start here. Returns the live SQLite schema, the full requests/request_debug/meta column reference with units and meaning, the exact SQL health predicates (a 429 alone is not an error), the value vocabulary of EVERY filter dimension (including the status classes - there is no 3xx, and 499 is 'cancel' - the time daypart buckets, and the error type|code|message key), the live known client/provider/model names and tool names, the indexes, every result limit, and the working SQL idioms for this build. Without it you cannot write correct SQL: timestamps are Unix milliseconds, cost is USD, attempts/tool_names are JSON text columns holding an array, or 'null' when there is no value, unixnow() does not exist (use strftime('%s','now')*1000), and 'time' is a daypart bucket rather than a duration.",
 		Annotations: readOnly("Describe the millivolt instance"),
 	}, s.describe)
 
@@ -199,7 +199,7 @@ func (s *Service) Register(server *sdk.Server) {
 	addTool(server, &sdk.Tool{
 		Name:        "set_pause",
 		Title:       "Pause, edit or resume requests",
-		Description: "Park matching NEW requests behind a hold, edit a hold in place by hold_id, or resume (paused=false with no hold_id resumes everything). BLAST RADIUS: a hold with all=true, or a hold that names NO scope at all, is a GLOBAL hold on every client and provider - the proxy treats an omitted scope as all traffic, so leaving every scope field empty is the widest setting this tool has. Narrow it with clients or providers. A hold parks new sends and retries; in-flight requests are never cancelled, and excess waiting work can be refused. Overlapping scopes are rejected rather than silently replaced.",
+		Description: "Park matching NEW requests behind a hold, edit a hold in place by hold_id, or resume (paused=false with no hold_id resumes everything). BLAST RADIUS: on a CREATE, a hold with all=true, or a hold that names NO scope at all, is a GLOBAL hold on every client and provider - the proxy treats an omitted create scope as all traffic, so leaving every scope field empty is the widest setting this tool has. On an EDIT (hold_id set), omitted scope fields preserve the hold's existing scope instead of widening it. Narrow it with clients or providers. A hold parks new sends and retries; in-flight requests are never cancelled, and excess waiting work can be refused. Overlapping scopes are rejected rather than silently replaced.",
 		Annotations: mutating("Pause, edit or resume requests"),
 	}, s.setPause)
 

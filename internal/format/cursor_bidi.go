@@ -535,6 +535,7 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 		return call
 	}
 	argv := map[string]any{}
+	argsPresent := false
 	// One field budget for the whole args map: nested Value containers and
 	// every entry share the frame allowance instead of resetting it per entry.
 	budget := newProtoFieldBudget()
@@ -550,6 +551,7 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 			call.CallID = string(a.raw)
 		case fMcpArgsArgs:
 			// map<string, bytes(Value)> entry: field 1 = key (string), field 2 = value (Value).
+			argsPresent = true
 			if k, v, ok := decodeStringValueMapEntry(a.raw, budget); ok {
 				argv[k] = v
 			}
@@ -566,7 +568,15 @@ func parseMcpArgs(f *protoField) CursorToolCall {
 	if call.CallID == "" {
 		call.CallID = "call_" + UUID4()
 	}
-	if len(argv) > 0 {
+	// A no-argument tool call still needs an OpenAI function.arguments value
+	// that parses as JSON; the empty zero value is not valid JSON. The
+	// repository's documented normalization for null/empty arguments is "{}".
+	// An args entry that failed to decode (over-budget or malformed) is
+	// different: the call did carry arguments we could not read, so keep the
+	// zero value rather than claiming an empty argument set.
+	if !argsPresent {
+		call.Args = "{}"
+	} else if len(argv) > 0 {
 		if b, err := json.Marshal(argv); err == nil {
 			call.Args = string(b)
 		}

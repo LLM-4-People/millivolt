@@ -1764,6 +1764,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 	// is one Write and one Flush per event instead of two of each, and the
 	// buffer is reused across events with no per-line allocation.
 	var frame []byte
+	terminal := false
 	writeFrame := func() bool {
 		if len(frame) == 0 {
 			return true
@@ -1784,6 +1785,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			}
 			a.Feed(line, time.Now())
 		}
+		terminal = bytes.Equal(frame, []byte(sse.DoneFrame))
 		frame = frame[:0]
 		flusher.Flush()
 		return true
@@ -1793,6 +1795,14 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		if len(line) == 0 {
 			frame = append(frame, '\n')
 			if !writeFrame() {
+				return
+			}
+			if terminal {
+				// The terminal [DONE] resolved the stream. Stop reading so
+				// post-terminal debris cannot surface as a translation error
+				// on a completed record; the caller closes the upstream body
+				// and joins the translator.
+				a.Fill(rec)
 				return
 			}
 			continue
@@ -2037,6 +2047,13 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				case holding:
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
+					if sse.TerminalLine(line) {
+						// The stream stops reading at the terminal marker, so
+						// the blank line that terminates its SSE block is no
+						// longer consumed from upstream; emit it here to keep
+						// the client wire byte-identical.
+						hold = append(hold, '\n')
+					}
 					// The terminal marker itself: everything that defines the
 					// outcome has arrived - resolve the hold NOW instead of
 					// waiting for EOF (a stalled upstream that keeps the
@@ -2049,6 +2066,14 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
+						// One terminal owner: the marker resolved the record and
+						// released the terminal region. Stop reading so a client
+						// that closes right after [DONE] cannot turn this into a
+						// 499, and post-terminal debris (including a scanner
+						// overflow) cannot rewrite the completed record. The
+						// caller closes the upstream body.
+						a.Fill(rec)
+						return rescueNone
 					}
 				case !prev && a.Terminated():
 					// This line opened the terminal region: withhold it (and
@@ -2056,6 +2081,9 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					holding = true
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
+					if sse.TerminalLine(line) {
+						hold = append(hold, '\n')
+					}
 					if !writeOut() {
 						return rescueNone
 					}
@@ -2066,6 +2094,8 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
+						a.Fill(rec)
+						return rescueNone
 					}
 				default:
 					// A provider error event that just parsed, still unwritten:

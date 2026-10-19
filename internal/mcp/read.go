@@ -266,6 +266,10 @@ type debugStatus struct {
 	Until          *string        `json:"until"`
 	TTL            string         `json:"ttl"`
 	MaxBytes       string         `json:"max_bytes"`
+	// CreatedID is the authoritative id a create installed. It is present only
+	// on the POST response, so concurrent creates can each name their own
+	// session instead of resolving from a shared before/after list.
+	CreatedID string `json:"created_id,omitempty"`
 	// Warning is the proxy's persistence warning: the state was applied in
 	// memory but could not be saved for restart.
 	Warning string `json:"warning,omitempty"`

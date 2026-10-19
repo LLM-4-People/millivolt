@@ -339,6 +339,13 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
 	}
+	// A Responses failure states its provider error under response.error, not
+	// the top-level error key the frame gate looks for. Decode it only on the
+	// terminal failure event (the hot path for every other frame stays a byte
+	// scan), and let the first real error win like every other in-band path.
+	if eventType == "response.failed" {
+		a.captureResponseFailedError(payload)
+	}
 	// Refusal and deprecated function_call deltas are answer-shaped bytes:
 	// a rescue appending a fresh attempt after them would duplicate visible
 	// output-shaped text, so they disqualify the thinking rescue.
@@ -465,7 +472,19 @@ func (a *Analyzer) captureStreamError(payload []byte) {
 	if a.errType != "" {
 		return
 	}
-	typ, code, msg := metrics.ParseErrorEnvelope(payload)
+	a.setStreamError(metrics.ParseErrorEnvelope(payload))
+}
+
+// captureResponseFailedError records the nested provider error of a Responses
+// response.failed event. The same first-real-error rule applies.
+func (a *Analyzer) captureResponseFailedError(payload []byte) {
+	if a.errType != "" {
+		return
+	}
+	a.setStreamError(metrics.ParseResponseFailedEnvelope(payload))
+}
+
+func (a *Analyzer) setStreamError(typ, code, msg string) {
 	if typ == "" {
 		return
 	}
@@ -630,8 +649,11 @@ func (a *Analyzer) OutcomeCode() string {
 func (a *Analyzer) RetryableTruncation() bool {
 	// answerishSeen (a refusal or deprecated function_call delta) is
 	// answer-shaped output the client saw: no rescue may append behind it,
-	// even though it is not metrics content.
-	if !a.chatlike || a.terminatorSeen || a.answerishSeen {
+	// even though it is not metrics content. Responses feeds are excluded once
+	// any event was seen: their per-response sequence numbers are documented
+	// ordering state, and a re-send would restart them mid-stream (the same
+	// wire-safety gate RetryableReasoningTruncation applies).
+	if !a.chatlike || a.terminatorSeen || a.answerishSeen || a.responsesStream {
 		return false
 	}
 	a.flushEvent()

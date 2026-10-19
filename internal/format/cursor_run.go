@@ -147,6 +147,15 @@ type CursorRun struct {
 	turnEnded bool
 
 	stopPump chan struct{}
+
+	// idlePauser is the transport body's idle-bound seam, when it exposes one.
+	// A parked run by definition makes no read progress until a client tool
+	// result arrives, so the run pauses the generic bound while parked and
+	// resumes it when the continuation starts. nil when the body has no bound.
+	idlePauser interface {
+		PauseIdle()
+		ResumeIdle()
+	}
 }
 
 // cursorToolSettleIdleMs is how long to wait for sibling tool calls after the
@@ -220,7 +229,7 @@ func NewCursorRun(out io.Writer, in io.Reader, blobs *KVBlobStore, closeFn func(
 	if blobs == nil {
 		blobs = newKVBlobStore()
 	}
-	return &CursorRun{
+	run := &CursorRun{
 		sw:        &streamWriter{w: out},
 		in:        newConnectReader(bufio.NewReader(in)),
 		blobs:     blobs,
@@ -230,6 +239,13 @@ func NewCursorRun(out io.Writer, in io.Reader, blobs *KVBlobStore, closeFn func(
 		pending:   map[string]CursorToolCall{},
 		stopPump:  make(chan struct{}),
 	}
+	if pauser, ok := in.(interface {
+		PauseIdle()
+		ResumeIdle()
+	}); ok {
+		run.idlePauser = pauser
+	}
+	return run
 }
 
 // Start launches the pump + heartbeat.
@@ -692,6 +708,12 @@ func cursorVisibleDelta(delta map[string]any) bool {
 
 // finish assembles the TurnResult with the usage snapshot.
 func (r *CursorRun) finish(outcome TurnOutcome, calls []CursorToolCall, err error, visible bool) TurnResult {
+	if outcome == TurnParked && r.idlePauser != nil {
+		// The pump is (or is about to be) blocked reading a stream that will
+		// stay silent until the client returns a tool result. The parked-run
+		// store's cursor_park_ttl owns that wait, not the generic idle bound.
+		r.idlePauser.PauseIdle()
+	}
 	prompt, output, reasoning := r.usageSnapshot()
 	if errors.Is(err, metrics.ErrMetricRange) {
 		prompt, output, reasoning = 0, 0, 0
@@ -731,6 +753,11 @@ func (r *CursorRun) resumeTurn(results map[string]ToolResult, steerText string, 
 			return TurnResult{Outcome: TurnErrored, Err: closeErr}
 		}
 		return TurnResult{Outcome: TurnErrored, Err: fmt.Errorf("cursor: parked stream closed before results arrived")}
+	}
+	if r.idlePauser != nil {
+		// The continuation is expected to make progress again: restore the
+		// generic idle bound before any result write can unblock the pump.
+		r.idlePauser.ResumeIdle()
 	}
 	for id := range results {
 		if _, ok := r.pending[id]; !ok {

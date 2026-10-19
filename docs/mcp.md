@@ -249,6 +249,15 @@ proxy's native model normalization, so use the `known_models` values rather than
 guessing spellings. A scope overlapping a live session is rejected (`409`)
 rather than silently replacing it.
 
+**Edits change only named dimensions.** With a session id, an omitted
+`clients`, `providers` or `models` field preserves that dimension and an
+explicitly empty array clears it. An omitted `duration` preserves the deadline
+and an explicit empty string clears it. A create response also carries
+`created_id`, the id its own request installed, so concurrent starts resolve
+their own sessions. `set_pause` follows the same presence rules for scope and
+duration when `hold_id` targets an edit; without `hold_id`, an omitted create
+scope is the documented global hold.
+
 **Starting requires a confirmation.** `audit_start` takes
 `confirm: "start capture"` because capture stores full request and response
 bodies.

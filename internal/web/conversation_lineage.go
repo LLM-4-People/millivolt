@@ -8,6 +8,8 @@ package web
 // yet. Nodes retain interned dictionary slots, never records or content, and
 // the per-request view retains only bounded bitsets and overlays.
 
+import "sync"
+
 const (
 	conversationMain    = "main"
 	conversationSub     = "sub"
@@ -268,12 +270,29 @@ type conversationGroup struct {
 	index   uint32
 }
 
+// conversationLineageScratch is the full-projection resolution workspace. It
+// is pooled because a dirty overlay needs arrays indexed by every projection
+// node; allocating them per explorer request made each dirty request scale with
+// total history. Payload construction returns it after the last issue read.
+type conversationLineageScratch struct {
+	parent   []int32
+	conflict []bool
+	issues   []uint8
+	state    []uint8
+	path     []uint32
+}
+
+var conversationLineageScratchPool = sync.Pool{New: func() any { return new(conversationLineageScratch) }}
+
 // conversationLineage is one request's view over the projection topology.
 // canonical bitsets carry rail/gallery membership; extras and overrides carry
-// ring/pending declarations without mutating the shared topology.
+// ring/pending declarations without mutating the shared topology. scratch is
+// borrowed from conversationLineageScratchPool only while resolve/payload needs
+// it, so a request never retains a full-projection array afterwards.
 type conversationLineage struct {
-	base  *conversationTopology
-	names *queryDimensions
+	base    *conversationTopology
+	names   *queryDimensions
+	scratch *conversationLineageScratch
 
 	railNodes  []uint64
 	railGroups []uint64
@@ -524,36 +543,66 @@ func (l *conversationLineage) solve() {
 	}
 	baseNodes := l.baseNodes()
 	total := int(baseNodes) + len(l.extras)
-	if cap(l.issues) < total {
-		l.issues = make([]uint8, total)
-	} else {
-		l.issues = l.issues[:total]
+	sc := l.scratch
+	if sc == nil {
+		sc = conversationLineageScratchPool.Get().(*conversationLineageScratch)
+		l.scratch = sc
 	}
-	if cap(l.state) < total {
-		l.state = make([]uint8, total)
+	if cap(sc.issues) < total {
+		sc.issues = make([]uint8, total)
 	} else {
-		l.state = l.state[:total]
+		sc.issues = sc.issues[:total]
 	}
-	parent := make([]int32, total)
-	conflict := make([]bool, total)
+	if cap(sc.state) < total {
+		sc.state = make([]uint8, total)
+	} else {
+		sc.state = sc.state[:total]
+	}
+	if cap(sc.parent) < total {
+		sc.parent = make([]int32, total)
+	} else {
+		sc.parent = sc.parent[:total]
+	}
+	if cap(sc.conflict) < total {
+		sc.conflict = make([]bool, total)
+	} else {
+		sc.conflict = sc.conflict[:total]
+		clear(sc.conflict)
+	}
+	l.issues, l.state, l.path = sc.issues, sc.state, sc.path[:0]
 	for i := uint32(0); i < baseNodes; i++ {
 		n := &l.base.nodes[i]
 		pid := n.parent
-		conflict[i] = n.conflict
+		sc.conflict[i] = n.conflict
 		if decl, ok := l.overrides[i]; ok {
 			pid = decl.parent
-			conflict[i] = conflict[i] || decl.conflict
+			sc.conflict[i] = sc.conflict[i] || decl.conflict
 		}
-		parent[i] = l.parentIndex(n.identity, pid, baseNodes)
+		sc.parent[i] = l.parentIndex(n.identity, pid, baseNodes)
 	}
 	for i := range l.extras {
 		n := &l.extras[i]
-		conflict[baseNodes+uint32(i)] = n.conflict
-		parent[baseNodes+uint32(i)] = l.parentIndex(n.identity, n.parent, baseNodes)
+		sc.conflict[baseNodes+uint32(i)] = n.conflict
+		sc.parent[baseNodes+uint32(i)] = l.parentIndex(n.identity, n.parent, baseNodes)
 	}
-	l.path = l.path[:0]
-	resolveConversationIssues(parent, conflict, l.issues, l.state, l.path)
+	sc.path = sc.path[:0]
+	resolveConversationIssues(sc.parent, sc.conflict, sc.issues, sc.state, sc.path)
+	l.path = sc.path
 	l.dirty = false
+}
+
+// releaseScratch returns the resolution workspace to the pool after the last
+// issue read. dirty is set again so a second payload build on the same view
+// re-resolves instead of reading arrays the pool may have handed elsewhere.
+func (l *conversationLineage) releaseScratch() {
+	sc := l.scratch
+	if sc == nil {
+		return
+	}
+	l.scratch = nil
+	l.issues, l.state, l.path = nil, nil, nil
+	l.dirty = true
+	conversationLineageScratchPool.Put(sc)
 }
 
 func (l *conversationLineage) parentIndex(identity conversationKey, parent uint32, baseNodes uint32) int32 {

@@ -1445,10 +1445,15 @@ observation. Full bootstrap windows are capped in durable mode and older log
 rows page from storage. Without storage, the ring is the available history.
 
 The durable log order owns one secondary index, `idx_requests_log(started_at,
-id)`. Exact provider, model, client, key-hash, conversation and status filters
-remain SQL predicates: the log page and ordered export recheck them on that
-scan, while an equality-only preview count or purge reads the table instead of
-maintaining per-dimension composite indexes. `BenchmarkStoreDiskBytes` measures
+id)`. The log page pushes exact provider, client, key-hash, conversation and
+canonical numeric status predicates into SQL and rechecks them on that scan;
+model, status-class, tool, error and time-bucket filters stay Go-owned because
+they match canonical/derived values, not raw stored text. The export and purge
+filter surface is different: it accepts exact provider, model, client,
+conversation, error type, status code, `has_error`, `debug`, and time bounds,
+with no key-hash selector, and its equality-only preview count or purge scans
+the table instead of maintaining per-dimension composite indexes.
+`BenchmarkStoreDiskBytes` measures
 this on its deterministic synthetic fixture (10,000 and 100,000 seeded
 records); on that fixture the 100,000-row database fell from 118.2 MiB to
 45.4 MiB. It is a reproducible fixture scope, not a prediction of a

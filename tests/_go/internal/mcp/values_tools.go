@@ -81,7 +81,7 @@ func TestValuesToolProbeIsPinned(t *testing.T) {
 		"error_type":    {"error_type AS value", "error_type != ''"},
 		"error_code":    {"error_code AS value", "error_code != ''"},
 		"error_message": {"error_msg AS value", "error_msg != ''"},
-		"tool":          {"json_each(r.tool_names)", "j.value != ''", "AS value"},
+		"tool":          {"json_each(CASE WHEN json_valid(r.tool_names) THEN r.tool_names ELSE '[]' END)", "j.value != ''", "AS value"},
 	}
 	if len(valuesDimensions) != len(want) {
 		t.Fatalf("non-model probeable dimensions = %d, want %d", len(valuesDimensions), len(want))

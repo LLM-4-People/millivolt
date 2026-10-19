@@ -95,8 +95,10 @@ type AuditStartInput struct {
 	Clients   []string `json:"clients,omitempty" jsonschema:"client scope; names within one dimension are alternatives"`
 	Providers []string `json:"providers,omitempty" jsonschema:"provider scope"`
 	Models    []string `json:"models,omitempty" jsonschema:"model scope; native model normalization applies"`
-	// Duration is 15m, 1h, 6h, 12h, 24h, or empty for until stopped.
-	Duration string `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty for until stopped"`
+	// Duration is 15m, 1h, 6h, 12h, 24h, or empty for until stopped. A pointer
+	// distinguishes an omitted value (preserve on edit) from an explicit empty
+	// one (clear the deadline).
+	Duration *string `json:"duration,omitempty" jsonschema:"15m, 1h, 6h, 12h, 24h, or empty for until stopped; omit on an edit to preserve the existing deadline"`
 	// Confirm names the intended effect so an accidental call is visible in the
 	// transcript.
 	Confirm string `json:"confirm" jsonschema:"must be 'start capture': capture stores request and response BODIES and is sensitive"`
@@ -132,8 +134,10 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 	if in.SessionID == "" && len(in.Clients) == 0 && len(in.Providers) == 0 && len(in.Models) == 0 {
 		return nil, fmt.Errorf("at least one of clients, providers or models is required; a capture session has no unrestricted all-traffic scope")
 	}
-	if err := validateCaptureDuration(in.Duration); err != nil {
-		return nil, err
+	if in.Duration != nil {
+		if err := validateCaptureDuration(*in.Duration); err != nil {
+			return nil, err
+		}
 	}
 	before, err := s.client.debug(ctx)
 	if err != nil {
@@ -166,8 +170,8 @@ func (s *Service) auditStart(ctx context.Context, in AuditStartInput) (*AuditSta
 	if in.Models != nil {
 		body["models"] = in.Models
 	}
-	if in.Duration != "" {
-		body["duration"] = in.Duration
+	if in.Duration != nil {
+		body["duration"] = *in.Duration
 	}
 	status, err := s.client.postDebug(ctx, body)
 	if err != nil {
@@ -477,7 +481,7 @@ func auditSession(session debugSession) AuditSession {
 // the fields are already in the response, and the alternative is a caller
 // re-reading the session state just to see its scope.
 func auditStateOutput(status *debugStatus, requested string, before []debugSession, storage StorageInfo, retention string) *AuditStartOutput {
-	id := resolveStartedSession(requested, before, status.Sessions)
+	id := resolveStartedSession(requested, status.CreatedID, before, status.Sessions)
 	return &AuditStartOutput{
 		Started:   startedSession(id, status.Sessions),
 		Edited:    requested != "",
@@ -501,9 +505,15 @@ func startedSession(id string, sessions []debugSession) AuditSession {
 }
 
 // resolveStartedSession is the one owner of that answer.
-func resolveStartedSession(requested string, before, after []debugSession) string {
+func resolveStartedSession(requested, createdID string, before, after []debugSession) string {
 	if requested != "" {
 		return requested
+	}
+	// A create response from the proxy names the session its own transaction
+	// installed. That is authoritative under concurrency; the before/after
+	// diff below is only a compatibility fallback for an older proxy.
+	if createdID != "" {
+		return createdID
 	}
 	live := map[string]bool{}
 	for _, session := range before {

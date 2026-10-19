@@ -1357,6 +1357,10 @@ func (a *AggAPI) bootstrap(snapshot metrics.Snapshot) bootstrapPayload {
 // ALL history so "scope X of Y" is a since-inception number on both sides.
 type scopeFilter struct {
 	dim, id string
+	// bit is the dimension's bit in the scope grouping mask, derived from the
+	// canonical dimensionNames order at parse time. Zero means a directly
+	// constructed fixture; scopedMatch computes it then.
+	bit uint32
 	// ids is the query-bound projection dictionary membership: the exact
 	// label slot for client/provider/conversation/key, or every raw model
 	// slot whose canonical spelling equals id. A non-nil empty slice means
@@ -1429,7 +1433,7 @@ func parseScopeFilters(q url.Values) ([]scopeFilter, bool) {
 		if !validDims[dim] {
 			return nil, false
 		}
-		out = append(out, scopeFilter{dim: dim, id: id})
+		out = append(out, scopeFilter{dim: dim, id: id, bit: scopeDimBit(dim)})
 	}
 	return out, true
 }
@@ -1456,21 +1460,37 @@ func parseScope(q url.Values) (fs []scopeFilter, statusCode string, ok bool) {
 		return nil, "", false
 	}
 	if s := q.Get("s"); s != "" {
-		if liveStatusFilter(s) {
-			statusCode = s
-		} else {
-			n, err := strconv.Atoi(s)
-			if err != nil || n < 0 || n > 9999 {
-				return nil, "", false
-			}
-			statusCode = s
+		var valid bool
+		statusCode, valid = canonicalStatusSelector(s)
+		if !valid {
+			return nil, "", false
 		}
 	}
 	return fs, statusCode, true
 }
 
+// canonicalStatusSelector is the one status-spelling owner for every web
+// surface: a live in-flight class stays verbatim, and an exact numeric code is
+// rendered in canonical decimal form. "0200" and "+200" therefore match the
+// same rows as "200" in chart, explorer and log instead of being accepted by
+// validation and silently matching zero in the byte-for-byte Go matcher.
+func canonicalStatusSelector(s string) (string, bool) {
+	if liveStatusFilter(s) {
+		return s, true
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 || n > 9999 {
+		return "", false
+	}
+	return strconv.Itoa(n), true
+}
+
 // scopedMatch reports whether a contribution satisfies the full log scope
-// (Requests-card status filter + explorer filters).
+// (Requests-card status filter + explorer filters). Filters are AND-ed across
+// dimensions and OR-ed within one dimension: repeated f=model:a&f=model:b are
+// alternatives, exactly the grammar the MCP scope and the public docs state.
+// The first filter of each dimension evaluates the whole group, later members
+// are skipped, so each group matches at most once.
 func scopedMatch(c *contrib, statusCode string, fs []scopeFilter) bool {
 	if statusCode != "" {
 		if liveStatusFilter(statusCode) {
@@ -1481,8 +1501,27 @@ func scopedMatch(c *contrib, statusCode string, fs []scopeFilter) bool {
 			return false
 		}
 	}
-	for _, f := range fs {
-		if !f.matches(c) {
+	var done uint32
+	for i := range fs {
+		bit := fs[i].bit
+		if bit == 0 {
+			bit = scopeDimBit(fs[i].dim)
+		}
+		if done&bit != 0 {
+			continue
+		}
+		done |= bit
+		matched := false
+		for j := i; j < len(fs); j++ {
+			if fs[j].dim != fs[i].dim {
+				continue
+			}
+			if fs[j].matches(c) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			return false
 		}
 	}
@@ -1600,6 +1639,19 @@ var validDims = func() map[string]bool {
 	}
 	return dims
 }()
+
+// scopeDimBits derives each filter dimension's grouping bit from the canonical
+// dimensionNames order, so the scope matcher and planner cannot drift from the
+// dimension vocabulary.
+var scopeDimBits = func() map[string]uint32 {
+	bits := make(map[string]uint32, len(dimensionNames))
+	for i, name := range dimensionNames {
+		bits[name] = 1 << i
+	}
+	return bits
+}()
+
+func scopeDimBit(dim string) uint32 { return scopeDimBits[dim] }
 
 // A row may belong to multiple groups, including repeated tool/error
 // occurrences. Spans index one flat membership list without per-row slices.
@@ -2130,6 +2182,9 @@ func (e *explorerFold) errorTotal() int64 {
 }
 
 func (e *explorerFold) payload() explorerPayload {
+	// Every lineage read below happens before the pooled resolution workspace
+	// is returned; a later payload build on this view re-resolves.
+	defer e.lineage.releaseScratch()
 	conversations := e.lineage.summary()
 	top := e.rankedGroups()
 	// Resolve compact selected-group membership once, then both metrics read
@@ -2313,41 +2368,68 @@ type logPagePlan struct {
 // authoritative Go matcher and is matched against the narrow candidate read.
 func planLogPage(fs []scopeFilter, statusCode string) logPagePlan {
 	plan := logPagePlan{allPushed: true}
-	for _, f := range fs {
-		pushed := true
-		switch f.dim {
+	// Group by dimension first: OR within one dimension's values, AND across
+	// groups. A group that cannot be represented exactly in SQL (canonical
+	// models, status classes, tools, errors, time buckets) stays wholly
+	// Go-owned; pushing a subset as AND would narrow the candidate set below
+	// the group's union.
+	var done uint32
+	for i := range fs {
+		bit := fs[i].bit
+		if bit == 0 {
+			bit = scopeDimBit(fs[i].dim)
+		}
+		if done&bit != 0 {
+			continue
+		}
+		done |= bit
+		group := make([]scopeFilter, 0, 1)
+		for j := i; j < len(fs); j++ {
+			if fs[j].dim == fs[i].dim {
+				group = append(group, fs[j])
+			}
+		}
+		var field storage.LogField
+		pushable := true
+		switch fs[i].dim {
 		case "client":
-			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
+			field = storage.LogClient
 		case "provider":
-			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
+			field = storage.LogProvider
 		case "key":
-			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
+			field = storage.LogKeyHash
 		case "conversation":
-			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
+			field = storage.LogConversation
 		case "model":
 			// The canonical matcher trims the stored spelling even with no
 			// rules, so raw SQL equality would silently drop a stored
 			// " gpt-4 " that canonically equals "gpt-4". Keep every model
 			// filter Go-owned; a growing scan is the correct cost.
-			pushed = false
+			pushable = false
 		default:
-			pushed = false
+			pushable = false
 		}
-		if !pushed {
-			plan.goFilters = append(plan.goFilters, f)
+		if !pushable {
+			plan.goFilters = append(plan.goFilters, group...)
 			plan.allPushed = false
+			continue
 		}
+		if len(group) == 1 {
+			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: field, Value: group[0].id})
+			continue
+		}
+		// One dimension's repeated values stay one alternative group. Separate
+		// dimensions must remain separate groups so the SQL planner intersects
+		// them instead of flattening every value into one broad OR.
+		predicates := make([]storage.LogPredicate, 0, len(group))
+		for _, f := range group {
+			predicates = append(predicates, storage.LogPredicate{Field: field, Value: f.id})
+		}
+		plan.filter.Any = append(plan.filter.Any, predicates)
 	}
 	if statusCode != "" {
-		if n, err := strconv.Atoi(statusCode); err == nil {
-			canonical := strconv.Itoa(n)
+		if canonical, ok := canonicalStatusSelector(statusCode); ok && !liveStatusFilter(canonical) {
 			plan.filter.All = append(plan.filter.All, storage.LogPredicate{Field: storage.LogStatus, Value: canonical})
-			// A non-canonical spelling ("0200") still narrows SQL to the same
-			// code, but the Go matcher rejects it, so scanning must grow.
-			if canonical != statusCode {
-				plan.goStatus = statusCode
-				plan.allPushed = false
-			}
 		} else {
 			plan.goStatus = statusCode
 			plan.allPushed = false

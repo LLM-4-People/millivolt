@@ -43,7 +43,7 @@ func TestLogPageQueryClassification(t *testing.T) {
 		{"tool", []scopeFilter{{dim: "tool", id: "search"}}, "", false, 0},
 		{"error", []scopeFilter{{dim: "error", id: "x|y|z"}}, "", false, 0},
 		{"numeric status", nil, "429", true, 1},
-		{"noncanonical status", nil, "0429", false, 1},
+		{"noncanonical status canonicalized", nil, "0429", true, 1},
 		{"sql and go", []scopeFilter{{dim: "provider", id: "p"}, {dim: "tool", id: "search"}}, "", false, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

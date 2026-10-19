@@ -86,20 +86,33 @@ func validateScopeFilter(filter string) error {
 }
 
 func validateScopeStatus(status string) error {
-	if status == "" {
+	_, ok := canonicalScopeStatus(status)
+	if ok {
 		return nil
+	}
+	return fmt.Errorf("status %q must be an exact HTTP status code (%d..%d) or one of %s",
+		status, statusCodeMin, statusCodeMax, strings.Join(LiveStatusClasses, ", "))
+}
+
+// canonicalScopeStatus applies the same canonicalization the proxy's parseScope
+// applies: a live class stays verbatim, and a numeric code is rendered in
+// canonical decimal form ("0200" and "+200" become "200"). Accepting a
+// non-canonical spelling and forwarding it unchanged made the selector match
+// zero records with no error. ok is false only for input outside the grammar.
+func canonicalScopeStatus(status string) (string, bool) {
+	if status == "" {
+		return "", true
 	}
 	for _, class := range LiveStatusClasses {
 		if status == class {
-			return nil
+			return status, true
 		}
 	}
 	code, err := strconv.Atoi(status)
 	if err != nil || code < statusCodeMin || code > statusCodeMax {
-		return fmt.Errorf("status %q must be an exact HTTP status code (%d..%d) or one of %s",
-			status, statusCodeMin, statusCodeMax, strings.Join(LiveStatusClasses, ", "))
+		return "", false
 	}
-	return nil
+	return strconv.Itoa(code), true
 }
 
 // query renders the scope into the proxy's query parameters. It is the only
@@ -110,7 +123,11 @@ func (s Scope) query() url.Values {
 		values.Add("f", filter)
 	}
 	if s.Status != "" {
-		values.Set("s", s.Status)
+		if canonical, ok := canonicalScopeStatus(s.Status); ok {
+			values.Set("s", canonical)
+		} else {
+			values.Set("s", s.Status)
+		}
 	}
 	return values
 }
