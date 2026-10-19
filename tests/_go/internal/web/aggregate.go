@@ -130,8 +130,10 @@ func TestKPIStoredPlusRingMerge(t *testing.T) {
 	buf.Record(mkRec("d", now, 200, "", nil, 100, 500, 50, 30, 0, 0.001))
 	// "e" is in BOTH ring and store - must be counted exactly once.
 	ee := mkRec("e", now.Add(-3*time.Hour), 200, "", nil, 600, 1200, 300, 200, 300, 0.05)
-	s.Record(ee)
+	// Production ownership order: the ring applies retention in place before
+	// the durable writer can read the same record.
 	buf.Record(ee)
+	s.Record(ee)
 	waitTotals(t, s, 4)
 
 	api := NewAggAPI(buf, s, time.Second)
@@ -1255,11 +1257,13 @@ func TestExplorerScopeCrossFilterAndDedupe(t *testing.T) {
 	settling.Provider, settling.Stream = "new.example", true
 	buf.PublishLive("begin", settling)
 	settling.StatusCode, settling.ErrorType = 500, "boom"
-	for _, rec := range []*metrics.Record{stored, archived, settling} {
-		s.Record(rec)
-	}
+	// Production ownership order: ring retention runs before the durable
+	// writer can read a record this test also stores.
 	for _, rec := range []*metrics.Record{stored, unflushed, settling} {
 		buf.Record(rec)
+	}
+	for _, rec := range []*metrics.Record{stored, archived, settling} {
+		s.Record(rec)
 	}
 	waitTotals(t, s, 3)
 	api := NewAggAPI(buf, s, time.Second)
@@ -1627,8 +1631,8 @@ func TestBootstrapSnapshotAndState(t *testing.T) {
 		mkRec("b", now.Add(-2*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0.5),
 		mkRec("c", now.Add(-1*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0.5),
 	} {
-		s.Record(rec)
 		buf.Record(rec)
+		s.Record(rec)
 	}
 	waitTotals(t, s, 3)
 	agg := NewAggAPI(buf, s, time.Second)
@@ -1721,8 +1725,8 @@ func TestBootstrapUnscopedShowsEverything(t *testing.T) {
 		mkRec("a", now.Add(-2*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0),
 		mkRec("b", now.Add(-1*time.Second), 500, "upstream", nil, 10, 100, 10, 5, 0, 0),
 	} {
-		s.Record(rec)
 		buf.Record(rec)
+		s.Record(rec)
 	}
 	waitTotals(t, s, 2)
 	agg := NewAggAPI(buf, s, time.Second)
@@ -1866,8 +1870,8 @@ func TestCanonicalModelScopeAppliesEverywhere(t *testing.T) {
 	for i, m := range raw {
 		rec := mkRec(fmt.Sprintf("r%d", i), now.Add(-time.Duration(i+1)*time.Second), 200, "", nil, 10, 100, 10, 5, 0, 0)
 		rec.Model = m
-		s.Record(rec)
 		buf.Record(rec)
+		s.Record(rec)
 	}
 	waitTotals(t, s, 4)
 	agg := NewAggAPI(buf, s, time.Second)
