@@ -590,7 +590,10 @@ function fetchOlderLog() {
     if (!applyModelCanon(p?.model_canon)) return;
     logFailures = 0;
     logFetchFailed = false;
-    const next = p && Number.isSafeInteger(p.cursor_ms) && typeof p.cursor_id === 'string' && p.cursor_id
+    // Presence is explicit: cursor_id may be the empty string, which is a real
+    // boundary key. `next` must exist for that row even though its own row is
+    // not rendered, or pagination stops and every older page is dropped.
+    const next = p && Number.isSafeInteger(p.cursor_ms) && typeof p.cursor_id === 'string'
       ? {ms: p.cursor_ms, id: p.cursor_id} : null;
     const advanced = next && (!before || next.ms < before.ms || next.ms === before.ms && next.id !== before.id);
     if (next) logCursor = next;

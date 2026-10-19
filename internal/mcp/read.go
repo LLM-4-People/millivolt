@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
@@ -382,25 +383,34 @@ func (c *Client) throttleLimit(ctx context.Context, provider string) (throttleLi
 
 // captureRecords lists captured request records, newest first. The proxy has no
 // listing endpoint for captures, so the record ids come from a SQL probe over
-// the requests table: `debug = 1` marks a captured request and
-// `debug_session_id` names the session. beforeMs/beforeID are the same paired
-// keyset cursor the durable log page uses, so both or neither.
-func (c *Client) captureRecords(ctx context.Context, sessionID string, beforeMs int64, beforeID string, limit int) (rows, error) {
-	statement := "SELECT id, started_at, status_code, provider, model, client, debug_session_id, cost FROM requests WHERE debug = 1"
-	if sessionID != "" {
-		statement += " AND debug_session_id = " + sqlString(sessionID)
-	}
-	if beforeID != "" {
-		statement += " AND (started_at, id) < (" + strconv.FormatInt(beforeMs, 10) + ", " + sqlString(beforeID) + ")"
-	}
-	statement += " ORDER BY started_at DESC, id DESC LIMIT " + strconv.Itoa(limit)
+// the requests table: `debug = 1` marks a captured request,
+// `debug_session_id` names the session, and the request_debug sidecar must
+// still exist and not have expired. A NULL before is the same paired keyset
+// cursor the durable log page uses; a non-NULL before is sent even when its
+// record id is empty, because that empty id is a real boundary key.
+func (c *Client) captureRecords(ctx context.Context, sessionID string, before *pageCursor, limit int) (rows, error) {
+	statement := captureListingStatement(sessionID, before, limit, time.Now().UnixMilli())
 	return c.querySQL(ctx, statement)
 }
 
-// sqlString quotes a string literal for the read-only SQL surface. Single
-// quotes are doubled; the result is always a literal, never an expression.
-func sqlString(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
+// captureListingStatement is the one owner of the capture listing SQL. It
+// filters to rows whose request_debug sidecar exists and is still readable, so
+// the listing never advertises a capture document audit_capture_get would 404.
+// Session and cursor text are byte-exact hex TEXT expressions rather than
+// quoted literals: a schema-valid value such as "a;b" or "attach" would
+// otherwise trip the proxy's statement gate even though SQLite would parse it.
+func captureListingStatement(sessionID string, before *pageCursor, limit int, nowMs int64) string {
+	statement := "SELECT id, started_at, status_code, provider, model, client, debug_session_id, cost FROM requests" +
+		" WHERE debug = 1 AND EXISTS (SELECT 1 FROM request_debug AS d WHERE d.id = requests.id AND (d.expires_at = 0 OR d.expires_at > " +
+		strconv.FormatInt(nowMs, 10) + "))"
+	if sessionID != "" {
+		statement += " AND debug_session_id = " + sqlHexText(sessionID)
+	}
+	if before != nil {
+		statement += " AND (started_at, id) < (" + strconv.FormatInt(before.StartMs, 10) + ", " + sqlHexText(before.ID) + ")"
+	}
+	statement += " ORDER BY started_at DESC, id DESC LIMIT " + strconv.Itoa(limit)
+	return statement
 }
 
 // sqlHexText renders arbitrary client-controlled text as a SQLite TEXT

@@ -2,9 +2,14 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 // liveDebugStatus has one session already live, so a create has a prior set to
@@ -258,40 +263,261 @@ func TestAuditCapturesListPagesThroughSQL(t *testing.T) {
 	if out.Returned != 2 || !out.More {
 		t.Fatalf("a full page means more may exist: %+v", out)
 	}
-	if out.NextBeforeID != "c1" || out.NextBeforeMs != 1600 {
+	if out.NextBeforeID == nil || *out.NextBeforeID != "c1" || out.NextBeforeMs == nil || *out.NextBeforeMs != 1600 {
 		t.Fatalf("cursor = %+v", out)
 	}
-	if !strings.Contains(out.Note, "no capture listing endpoint") {
-		t.Fatalf("the mechanism must be stated: %q", out.Note)
+	if !strings.Contains(out.Note, "no capture listing endpoint") ||
+		!strings.Contains(out.Note, "request_debug sidecar exists and has not expired") {
+		t.Fatalf("the mechanism must be stated truthfully: %q", out.Note)
 	}
 
 	probe := proxy.requestsFor(http.MethodGet, schemaPath)[0]
 	assertAuth(t, probe)
 	statement := probe.Query.Get("q")
-	for _, needle := range []string{"FROM requests", "WHERE debug = 1", "debug_session_id = 's1'", "ORDER BY started_at DESC, id DESC", "LIMIT 2"} {
+	for _, needle := range []string{
+		"FROM requests", "WHERE debug = 1", "request_debug AS d", "d.id = requests.id",
+		"d.expires_at = 0 OR d.expires_at > ", "debug_session_id = CAST(X'7331' AS TEXT)",
+		"ORDER BY started_at DESC, id DESC", "LIMIT 2",
+	} {
 		if !strings.Contains(statement, needle) {
 			t.Fatalf("capture listing statement %q must contain %q", statement, needle)
 		}
 	}
 
-	// A session id with a quote is a literal, never an expression.
+	// A session id with a quote is a hex TEXT expression, never a raw literal.
 	if _, err := service.auditCapturesList(context.Background(), AuditCapturesListInput{SessionID: "s'1"}); err != nil {
 		t.Fatal(err)
 	}
 	quoted := proxy.requestsFor(http.MethodGet, schemaPath)[1].Query.Get("q")
-	if !strings.Contains(quoted, "debug_session_id = 's''1'") {
-		t.Fatalf("a quoted session id must be escaped as a literal: %q", quoted)
+	if !strings.Contains(quoted, "debug_session_id = CAST(X'732731' AS TEXT)") || strings.Contains(quoted, "s'1") {
+		t.Fatalf("a quoted session id must be hex encoded as exact text: %q", quoted)
 	}
 
-	// The cursor pages keyset-style.
+	// The cursor pages keyset-style; the id is exact text, not SQL source.
 	if _, err := service.auditCapturesList(context.Background(), AuditCapturesListInput{
-		BeforeMs: 1600, BeforeID: "c1", Limit: 2,
+		BeforeMs: cursorMs(1600), BeforeID: cursorID("c1"), Limit: 2,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	paged := proxy.requestsFor(http.MethodGet, schemaPath)[2].Query.Get("q")
-	if !strings.Contains(paged, "(started_at, id) < (1600, 'c1')") {
+	if !strings.Contains(paged, "(started_at, id) < (1600, CAST(X'6331' AS TEXT))") {
 		t.Fatalf("paged statement = %q", paged)
+	}
+}
+
+// TestAuditCapturesListCursorPresence pins the boundaries a value sentinel
+// cannot express: a request record id may be empty and a cursor timestamp may
+// be zero, so absence is a nil pointer and nothing else. The old value-based
+// check refused both, and a page whose oldest id was empty published neither
+// next_before field while claiming both more and exhaustion.
+func TestAuditCapturesListCursorPresence(t *testing.T) {
+	proxy := newFakeProxy(t)
+	proxy.json(http.MethodGet, bootstrapPath, minimalBootstrap)
+	proxy.json(http.MethodGet, schemaPath, `[{"id":"c2","started_at":2000},{"id":"","started_at":1000}]`)
+	service := newTestService(t, proxy, Limits{})
+	ctx := context.Background()
+
+	first, err := service.auditCapturesList(ctx, AuditCapturesListInput{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Exhausted {
+		t.Fatalf("a page whose cursor advanced to an empty id must not be exhausted: %+v", first)
+	}
+	if first.NextBeforeMs == nil || *first.NextBeforeMs != 1000 ||
+		first.NextBeforeID == nil || *first.NextBeforeID != "" {
+		t.Fatalf("empty-id cursor = %+v, want ms 1000 and an explicit empty id", first)
+	}
+	encoded, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"next_before_ms":1000`) ||
+		!strings.Contains(string(encoded), `"next_before_id":""`) {
+		t.Fatalf("the empty-id cursor must be published, not omitted: %s", encoded)
+	}
+
+	proxy.json(http.MethodGet, schemaPath, `[{"id":"c1","started_at":500}]`)
+	second, err := service.auditCapturesList(ctx, AuditCapturesListInput{
+		BeforeMs: first.NextBeforeMs, BeforeID: first.NextBeforeID, Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("the empty-id cursor must be resumable: %v", err)
+	}
+	if second.Returned != 1 {
+		t.Fatalf("continuation = %+v, want the older row", second)
+	}
+	continuation := proxy.last(t).Query.Get("q")
+	if !strings.Contains(continuation, "(started_at, id) < (1000, CAST(X'' AS TEXT))") {
+		t.Fatalf("the empty id must stay an exact keyset value: %q", continuation)
+	}
+
+	// A zero timestamp is a cursor value too, both when it is published and
+	// when it is sent back.
+	proxy.json(http.MethodGet, schemaPath, `[{"id":"c1","started_at":0}]`)
+	zeroPage, err := service.auditCapturesList(ctx, AuditCapturesListInput{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zeroPage.NextBeforeMs == nil || *zeroPage.NextBeforeMs != 0 ||
+		zeroPage.NextBeforeID == nil || *zeroPage.NextBeforeID != "c1" {
+		t.Fatalf("zero-ms cursor = %+v, want ms 0 and c1", zeroPage)
+	}
+	encoded, err = json.Marshal(zeroPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"next_before_ms":0`) {
+		t.Fatalf("the zero-ms cursor must be published, not omitted: %s", encoded)
+	}
+	proxy.json(http.MethodGet, schemaPath, `[]`)
+	if _, err := service.auditCapturesList(ctx, AuditCapturesListInput{
+		BeforeMs: cursorMs(0), BeforeID: cursorID("c1"), Limit: 2,
+	}); err != nil {
+		t.Fatalf("a zero-ms cursor must be accepted: %v", err)
+	}
+	zero := proxy.last(t).Query.Get("q")
+	if !strings.Contains(zero, "(started_at, id) < (0, CAST(X'6331' AS TEXT))") {
+		t.Fatalf("zero-ms cursor statement = %q", zero)
+	}
+
+	// Presence, not truthiness, is the pairing rule.
+	before := len(proxy.requests())
+	for _, in := range []AuditCapturesListInput{
+		{BeforeMs: cursorMs(100)},
+		{BeforeID: cursorID("c1")},
+	} {
+		if _, err := service.auditCapturesList(ctx, in); err == nil {
+			t.Fatalf("an unpaired cursor must be refused: %+v", in)
+		}
+	}
+	if got := len(proxy.requests()); got != before {
+		t.Fatalf("an unpaired cursor must not reach the proxy, got %d extra requests", got-before)
+	}
+}
+
+// TestCaptureListingStatementFiltersReadableCaptures executes the generated
+// statement against a real SQLite schema. It pins the sidecar contract: only a
+// request whose request_debug document still exists and has not expired may be
+// listed, so every returned id is readable by audit_capture_get. It also proves
+// the hex-encoded session and cursor values compare exactly while carrying no
+// ';' or statement-gate keyword in the SQL source.
+func TestCaptureListingStatementFiltersReadableCaptures(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`
+		CREATE TABLE requests (
+			id TEXT PRIMARY KEY,
+			started_at INTEGER NOT NULL,
+			status_code INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			model TEXT NOT NULL,
+			client TEXT NOT NULL,
+			debug INTEGER NOT NULL,
+			debug_session_id TEXT NOT NULL,
+			cost REAL NOT NULL
+		);
+		CREATE TABLE request_debug (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			captured_at INTEGER NOT NULL,
+			expires_at INTEGER NOT NULL,
+			payload TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	type capture struct {
+		id        string
+		startedAt int64
+		session   string
+		expiresAt int64
+		sidecar   bool
+	}
+	for _, c := range []capture{
+		{id: "r-new", startedAt: 3000, session: "s", expiresAt: 2000, sidecar: true},
+		{id: "", startedAt: 2000, session: "s", expiresAt: 2000, sidecar: true},
+		{id: "r-expired", startedAt: 2500, session: "s", expiresAt: 500, sidecar: true},
+		{id: "r-missing", startedAt: 2400, session: "s"},
+		{id: "r-old", startedAt: 1000, session: "s", expiresAt: 2000, sidecar: true},
+		{id: "r-semi", startedAt: 900, session: "a;b", expiresAt: 2000, sidecar: true},
+		{id: "r-attach", startedAt: 800, session: "attach", expiresAt: 2000, sidecar: true},
+		{id: "r-zero", startedAt: 0, session: "s", expiresAt: 0, sidecar: true},
+	} {
+		if _, err := db.Exec(`INSERT INTO requests
+			(id, started_at, status_code, provider, model, client, debug, debug_session_id, cost)
+			VALUES (?, ?, 200, 'local', 'demo', 'dev', 1, ?, 0.1)`,
+			c.id, c.startedAt, c.session); err != nil {
+			t.Fatalf("insert request %q: %v", c.id, err)
+		}
+		if !c.sidecar {
+			continue
+		}
+		if _, err := db.Exec(`INSERT INTO request_debug
+			(id, session_id, captured_at, expires_at, payload)
+			VALUES (?, ?, ?, ?, '{}')`, c.id, c.session, c.startedAt, c.expiresAt); err != nil {
+			t.Fatalf("insert sidecar %q: %v", c.id, err)
+		}
+	}
+	query := func(statement string) []string {
+		t.Helper()
+		result, err := db.Query(statement)
+		if err != nil {
+			t.Fatalf("execute %q: %v", statement, err)
+		}
+		defer result.Close()
+		var ids []string
+		for result.Next() {
+			var id, provider, model, client, session string
+			var startedAt int64
+			var status int
+			var cost float64
+			if err := result.Scan(&id, &startedAt, &status, &provider, &model, &client, &session, &cost); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, id)
+		}
+		if err := result.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return ids
+	}
+
+	const nowMs = 1000
+	all := captureListingStatement("", nil, 10, nowMs)
+	if ids := query(all); !slices.Equal(ids, []string{"r-new", "", "r-old", "r-semi", "r-attach", "r-zero"}) {
+		t.Fatalf("readable captures = %q, want the stored, unexpired sidecars newest first", ids)
+	}
+	if strings.Contains(all, ";") || strings.Contains(strings.ToUpper(all), "ATTACH") {
+		t.Fatalf("the statement must carry no statement-gate spelling: %q", all)
+	}
+
+	// The keyset predicate accepts an empty id as an exact boundary.
+	older := captureListingStatement("", &pageCursor{StartMs: 2000, ID: ""}, 10, nowMs)
+	if ids := query(older); !slices.Equal(ids, []string{"r-old", "r-semi", "r-attach", "r-zero"}) {
+		t.Fatalf("empty-id continuation = %q, want every older readable row", ids)
+	}
+	// A zero timestamp is a real key as well.
+	zeroCursor := captureListingStatement("", &pageCursor{StartMs: 0, ID: "r-zero"}, 10, nowMs)
+	if ids := query(zeroCursor); len(ids) != 0 {
+		t.Fatalf("zero-ms continuation = %q, want no row older than the zero key", ids)
+	}
+
+	// Schema-valid session spellings compare exactly without tripping the gate.
+	for _, tc := range []struct{ session, want string }{
+		{"a;b", "r-semi"},
+		{"attach", "r-attach"},
+	} {
+		statement := captureListingStatement(tc.session, nil, 10, nowMs)
+		if strings.Contains(statement, tc.session) || strings.Contains(strings.ToUpper(statement), "ATTACH") {
+			t.Fatalf("session %q must be hex encoded, not raw SQL source: %q", tc.session, statement)
+		}
+		if ids := query(statement); !slices.Equal(ids, []string{tc.want}) {
+			t.Fatalf("session %q statement returned %q, want exactly %q", tc.session, ids, tc.want)
+		}
 	}
 }
 
@@ -316,7 +542,7 @@ func TestAuditCapturesListExhaustion(t *testing.T) {
 	// A full page whose oldest row repeats the cursor that was sent cannot
 	// advance: the next call would return the same rows forever.
 	proxy.json(http.MethodGet, schemaPath, `[{"id":"c2","started_at":10},{"id":"c1","started_at":10}]`)
-	stuck, err := service.auditCapturesList(ctx, AuditCapturesListInput{BeforeMs: 10, BeforeID: "c1", Limit: 2})
+	stuck, err := service.auditCapturesList(ctx, AuditCapturesListInput{BeforeMs: cursorMs(10), BeforeID: cursorID("c1"), Limit: 2})
 	if err != nil {
 		t.Fatal(err)
 	}

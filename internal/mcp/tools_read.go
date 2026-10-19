@@ -324,17 +324,6 @@ func cursorAdvancedAt(sent *pageCursor, gotMs int64, gotID string) bool {
 	return gotMs != sent.StartMs || gotID != sent.ID
 }
 
-// cursorAdvanced is the value-based form for callers whose cursor presence is
-// already implied by a non-empty id. It keeps the pre-existing behavior for
-// those callers: an empty sent id means no cursor was sent. Records paging
-// uses cursorAdvancedAt directly so an empty record id stays representable.
-func cursorAdvanced(sentMs int64, sentID string, gotMs int64, gotID string) bool {
-	if sentID == "" {
-		return gotID != ""
-	}
-	return cursorAdvancedAt(&pageCursor{StartMs: sentMs, ID: sentID}, gotMs, gotID)
-}
-
 // exhausted is the one owner of the paging-stop rule: a page whose cursor does
 // not advance is the end of what this scan budget can reach, whatever `more`
 // claims, and so is a page the proxy says is the last one.

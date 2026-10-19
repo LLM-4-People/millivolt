@@ -262,28 +262,37 @@ func (s *Service) auditStop(ctx context.Context, in AuditStopInput) (*AuditStopO
 type AuditCapturesListInput struct {
 	// SessionID narrows the listing to one session.
 	SessionID string `json:"session_id,omitempty" jsonschema:"list only captures from this session"`
-	BeforeMs  int64  `json:"before_ms,omitempty" jsonschema:"cursor timestamp in unix milliseconds; send with before_id"`
-	BeforeID  string `json:"before_id,omitempty" jsonschema:"cursor record id; send with before_ms"`
-	Limit     int    `json:"limit,omitempty" jsonschema:"page size; smaller than this server's default is usually better"`
+	// BeforeMs and BeforeID are the paired keyset cursor from a previous page.
+	// Pointers make presence explicit: a stored record id may be empty and a
+	// timestamp may be zero, so neither value can stand in for absence.
+	BeforeMs *int64  `json:"before_ms,omitempty" jsonschema:"cursor timestamp in unix milliseconds; must be sent together with before_id"`
+	BeforeID *string `json:"before_id,omitempty" jsonschema:"cursor record id; must be sent together with before_ms"`
+	Limit    int     `json:"limit,omitempty" jsonschema:"page size; smaller than this server's default is usually better"`
 }
 
 // AuditCapturesListOutput is one page of captured records.
 type AuditCapturesListOutput struct {
-	Records      []map[string]any `json:"records" jsonschema:"captured requests, newest first, with the record id to pass to audit_capture_get"`
-	Returned     int              `json:"returned" jsonschema:"records in this page"`
-	More         bool             `json:"more" jsonschema:"older rows are believed to exist"`
-	Exhausted    bool             `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
-	NextBeforeMs int64            `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
-	NextBeforeID string           `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
-	Storage      StorageInfo      `json:"storage" jsonschema:"durable storage signal"`
-	Truncation   Truncation       `json:"truncation" jsonschema:"whether records were withheld"`
-	Note         string           `json:"note" jsonschema:"how this listing is produced and what it does not show"`
+	Records   []map[string]any `json:"records" jsonschema:"captured requests, newest first, with the record id to pass to audit_capture_get"`
+	Returned  int              `json:"returned" jsonschema:"records in this page"`
+	More      bool             `json:"more" jsonschema:"older rows are believed to exist"`
+	Exhausted bool             `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
+	// NextBeforeMs and NextBeforeID are the next cursor pair. They are pointers
+	// so an empty record id and a zero timestamp are still published: omitting
+	// either would make the returned boundary impossible to send back.
+	NextBeforeMs *int64      `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
+	NextBeforeID *string     `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
+	Storage      StorageInfo `json:"storage" jsonschema:"durable storage signal"`
+	Truncation   Truncation  `json:"truncation" jsonschema:"whether records were withheld"`
+	Note         string      `json:"note" jsonschema:"how this listing is produced and what it does not show"`
 }
 
 // auditListNote states the mechanism so the model does not assume a listing
-// endpoint exists.
-const auditListNote = "the proxy has no capture listing endpoint: this list is a bounded SELECT over requests WHERE debug = 1, " +
-	"so it shows records whose capture document is stored, and nothing that expired or was never captured"
+// endpoint exists. The request_debug sidecar predicate is part of that
+// mechanism: debug = 1 alone marks a matched request, whose document can still
+// be absent after a failed save or expired past debug_capture_ttl.
+const auditListNote = "the proxy has no capture listing endpoint: this list is a bounded SELECT over requests WHERE debug = 1 " +
+	"whose request_debug sidecar exists and has not expired, so every listed id has a readable capture document and nothing " +
+	"that expired or was never captured appears"
 
 // AuditCapturesList pages captured requests through a bounded SQL probe.
 func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInput) (*AuditCapturesListOutput, error) {
@@ -291,8 +300,12 @@ func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInp
 	if err != nil {
 		return nil, err
 	}
-	if (in.BeforeMs == 0) != (in.BeforeID == "") {
+	if (in.BeforeMs == nil) != (in.BeforeID == nil) {
 		return nil, fmt.Errorf("before_ms and before_id must be sent together, exactly once each")
+	}
+	var cursor *pageCursor
+	if in.BeforeMs != nil {
+		cursor = &pageCursor{StartMs: *in.BeforeMs, ID: *in.BeforeID}
 	}
 	storage, err := s.client.storageSignal(ctx)
 	if err != nil {
@@ -301,31 +314,38 @@ func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInp
 	if !storage.Enabled {
 		return nil, fmt.Errorf("durable storage is disabled on this proxy (db_path is empty): no capture document can exist")
 	}
-	found, err := s.client.captureRecords(ctx, in.SessionID, in.BeforeMs, in.BeforeID, limit)
+	found, err := s.client.captureRecords(ctx, in.SessionID, cursor, limit)
 	if err != nil {
 		return nil, err
 	}
 	kept, truncation := clamp(found, limit, "records", cursorAdvice)
 	more := len(kept) == limit
-	nextMs, nextID := captureCursor(kept)
-	return &AuditCapturesListOutput{
-		Records:      kept,
-		Returned:     len(kept),
-		More:         more,
-		Exhausted:    exhausted(more, cursorAdvanced(in.BeforeMs, in.BeforeID, nextMs, nextID)),
-		NextBeforeMs: nextMs,
-		NextBeforeID: nextID,
-		Storage:      storage,
-		Truncation:   truncation,
-		Note:         auditListNote,
-	}, nil
+	next := captureCursor(kept)
+	advanced := false
+	if next != nil {
+		advanced = cursorAdvancedAt(cursor, next.StartMs, next.ID)
+	}
+	out := &AuditCapturesListOutput{
+		Records:    kept,
+		Returned:   len(kept),
+		More:       more,
+		Exhausted:  exhausted(more, advanced),
+		Storage:    storage,
+		Truncation: truncation,
+		Note:       auditListNote,
+	}
+	if next != nil {
+		out.NextBeforeMs, out.NextBeforeID = &next.StartMs, &next.ID
+	}
+	return out, nil
 }
 
 // captureCursor returns the keyset position the next older page starts at: the
-// page is newest-first, so that is its LAST (oldest) row.
-func captureCursor(page rows) (int64, string) {
+// page is newest-first, so that is its LAST (oldest) row. A nil page has no
+// boundary to publish; a non-nil cursor carries its id even when empty.
+func captureCursor(page rows) *pageCursor {
 	if len(page) == 0 {
-		return 0, ""
+		return nil
 	}
 	oldest := page[len(page)-1]
 	startedAt := int64(0)
@@ -335,7 +355,7 @@ func captureCursor(page rows) (int64, string) {
 	case int64:
 		startedAt = value
 	}
-	return startedAt, rowString(oldest, "id")
+	return &pageCursor{StartMs: startedAt, ID: rowString(oldest, "id")}
 }
 
 // AuditCaptureGetInput reads one stored capture document.

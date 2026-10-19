@@ -2250,6 +2250,48 @@ async function main() {
     w.scheduleLogFill = savedFill;
   }
 
+  // A durable boundary row may have an EMPTY id. The server still publishes
+  // {ms, id:""} as the next cursor; treating the empty id as absence stopped
+  // pagination and dropped every older page. The row itself may stay hidden,
+  // but the cursor must advance and the continuation must send before_id=.
+  {
+    const savedFetch = w.fetch, savedFill = w.scheduleLogFill;
+    const snapshot = w.eval('lastData');
+    w.scheduleLogFill = () => {};
+    w.resetLogWindow();
+    w.eval('logLimit = lastData.records.length');
+    const boundaryMs = 1800000002000;
+    let pageRequest = 0;
+    const urls = [];
+    w.fetch = async url => {
+      urls.push(String(url));
+      const payload = pageRequest++ === 0
+        ? {records: [mkRec('', 200, boundaryMs)], more: true,
+          cursor_ms: boundaryMs, cursor_id: ''}
+        : {records: [mkRec('older-after-empty', 200, boundaryMs - 1000)], more: false,
+          cursor_ms: boundaryMs - 1000, cursor_id: 'older-after-empty'};
+      return {ok: true, json: async () => payload};
+    };
+    w.fetchOlderLog();
+    await sleep(10);
+    check('an empty-id boundary advances the durable cursor instead of ending pagination',
+      !w.eval('logExhausted') && w.eval('logCursor.ms') === boundaryMs &&
+      w.eval('logCursor.id') === '');
+    w.fetchOlderLog();
+    await sleep(10);
+    const continuationURL = urls[1] || '';
+    check('the continuation sends an explicit empty before_id after an empty-id boundary',
+      continuationURL.includes('before_ms=' + boundaryMs) && continuationURL.includes('before_id=') &&
+      !continuationURL.includes('before_id=undefined'));
+    check('older durable pages load past a hidden empty-id boundary row',
+      w.eval('logArchive.length') === 1 && w.eval('logArchive[0].id') === 'older-after-empty');
+    w.eval('lastData = null');
+    w.resetLogWindow();
+    w.renderAll(snapshot);
+    w.fetch = savedFetch;
+    w.scheduleLogFill = savedFill;
+  }
+
   // ---- test 10a-cap: the durable archive is ascending oldest-to-newest, so
   // the 20,000-row cap must trim its oldest edge and keep the newest archive
   // rows contiguous with the live ring. Trimming the tail used to drop the

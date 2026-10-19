@@ -435,7 +435,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	var recordID string
 	eventually(t, "the fixture request to become durable", func() bool {
 		rows := live.invoke(t, "query", map[string]any{
-			"sql":      "SELECT id FROM requests WHERE client = " + sqlString(fixtureClient),
+			"sql":      "SELECT id FROM requests WHERE client = " + sqlHexText(fixtureClient),
 			"max_rows": 5,
 		})
 		found := array(t, rows, "rows")
@@ -452,7 +452,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 
 	// An aggregate over the same predicate, proving the documented SQL works.
 	aggregate := live.invoke(t, "query", map[string]any{
-		"sql": "SELECT COUNT(*) AS n FROM requests WHERE client = " + sqlString(fixtureClient),
+		"sql": "SELECT COUNT(*) AS n FROM requests WHERE client = " + sqlHexText(fixtureClient),
 	})
 	rows := array(t, aggregate, "rows")
 	if len(rows) != 1 {
@@ -737,7 +737,7 @@ func TestLiveDevInstanceExercisesEveryTool(t *testing.T) {
 	// never fire, because eventually only returns after the probe set it, so
 	// it asserted nothing. A mismatch here fails for real.
 	readable := live.invoke(t, "query", map[string]any{
-		"sql": "SELECT id FROM requests WHERE client = " + sqlString(fixtureClient) + " LIMIT 5",
+		"sql": "SELECT id FROM requests WHERE client = " + sqlHexText(fixtureClient) + " LIMIT 5",
 	})
 	found := false
 	for _, entry := range array(t, readable, "rows") {
