@@ -48,12 +48,24 @@ const PROV_CHEV_SVG = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6
 
 // One focus/visibility owner for the two modal surfaces. Closed dialogs are
 // hidden and inert; active dialogs contain keyboard focus and restore it.
-let activeModal = null, modalReturnFocus = null;
+let activeModal = null, modalReturnFocus = null, modalReturnSelector = null;
+let modalPreempt = null;
 let modalBackground = [];
-function openModal(el) {
+// openModal preempts the current surface. Its owner teardown (veil classes,
+// pressed flags, drawer selection) runs through onPreempt, so a competing
+// dialog (the operator prompt) cannot leave a half-closed modal behind.
+// returnSelector is the owner's stable focus identity for a control the
+// surface may have replaced while it was open (a live request row).
+function openModal(el, {returnSelector = null, onPreempt = null} = {}) {
   if (activeModal === el) return;
-  if (activeModal) closeModal(activeModal);
+  if (activeModal) {
+    const teardown = modalPreempt;
+    closeModal(activeModal);
+    if (teardown) teardown();
+  }
   modalReturnFocus = document.activeElement;
+  modalReturnSelector = returnSelector;
+  modalPreempt = onPreempt;
   activeModal = el;
   el.hidden = false;
   el.removeAttribute('inert');
@@ -68,11 +80,22 @@ function closeModal(el) {
   el.setAttribute('inert', '');
   if (activeModal !== el) return;
   activeModal = null;
+  modalPreempt = null;
   for (const [node, inert] of modalBackground) node.toggleAttribute('inert', inert);
   modalBackground = [];
   const back = modalReturnFocus;
+  const selector = modalReturnSelector;
   modalReturnFocus = null;
-  if (back?.isConnected && !back.closest('[hidden], [inert]')) back.focus();
+  modalReturnSelector = null;
+  const usable = node => node?.isConnected && !node.closest('[hidden], [inert]');
+  let target = usable(back) ? back : null;
+  if (!target && selector) {
+    try {
+      const next = document.querySelector(selector);
+      if (usable(next)) target = next;
+    } catch (e) {} // a stale/malformed selector never blocks the close
+  }
+  if (target) target.focus();
 }
 function modalFocusables(el) {
   return [...el.querySelectorAll('button, input, select, textarea, a[href], [tabindex]')]

@@ -344,58 +344,55 @@ function updateLogStats(d) {
   if (logFetchFailed) el.textContent += ' · history unavailable';
 }
 
+// logWindowSameSet reports whether logHTML's id set is exactly the visible
+// window. The common steady-state frame is O(rows) map probes; only a real
+// membership change pays one DOM traversal.
+function logWindowSameSet(recent) {
+  if (logHTML.size !== recent.length) return false;
+  for (const r of recent) { if (!logHTML.has(r.id)) return false; }
+  return true;
+}
+// dropStaleLogRows removes every row group not in the visible window and
+// forgets its id. One traversal and one direct removal per stale node: the
+// previous per-id rescanned the whole table for every stale row, making a
+// scope change quadratic in the loaded window.
+function dropStaleLogRows(container, recent) {
+  const want = new Set(recent.map(r => r.id));
+  const dropped = new Set();
+  container.querySelectorAll('tr[data-id], tr[data-sep-of], tr.retry-sub[data-retry-of]').forEach(tr => {
+    const id = tr.dataset.id || tr.dataset.sepOf || tr.dataset.retryOf;
+    if (want.has(id)) return;
+    dropped.add(id);
+    tr.remove();
+  });
+  for (const id of dropped) logHTML.delete(id);
+}
+
 function renderRequestsIncremental(recs) {
   const container = $('tbl-requests');
   if (!container) return;
   const tbody = container.querySelector('tbody');
-  const page = logPageSize();
-  const cap = logCap();
-  const total = logWindowLength(recs);
-  let recent = logWindowRows(recs);
-  if (cap > page) {
-    let added = 0;
-    for (const r of recent) { if (r && r.id && !logHTML.has(r.id)) added++; }
-    if (added) {
-      logLimit = Math.min(total, cap + added);
-      recent = logWindowRows(recs);
-    }
-  }
+  const recent = logWindowRows(recs);
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; } // empty-state placeholder in DOM: rebuild properly
   // A row replacement below removes whichever control owned keyboard focus.
   // Capture its record/control identity before any DOM write.
   const focus = captureFocus(container, rowFocusKey);
   // Drop rows that left the window (scope change or dashCfg.log_rows cap
-  // overflow). When logHTML's id set is exactly the visible window - the
-  // steady-state case - no DOM traversal is needed; the check is O(rows) map
-  // probes rather than a querySelectorAll plus Set build.
-  let sameSet = logHTML.size === recent.length;
-  if (sameSet) {
-    for (const r of recent) { if (!logHTML.has(r.id)) { sameSet = false; break; } }
-  }
-  if (!sameSet) {
-    const want = new Set(recent.map(r => r.id));
-    const dropped = new Set();
-    // One traversal and one direct removal per stale node. The previous
-    // per-id removeRowGroup rescanned the whole table for every stale row,
-    // making a scope change quadratic in the loaded window.
-    container.querySelectorAll('tr[data-id], tr[data-sep-of], tr.retry-sub[data-retry-of]').forEach(tr => {
-      const id = tr.dataset.id || tr.dataset.sepOf || tr.dataset.retryOf;
-      if (want.has(id)) return;
-      dropped.add(id);
-      tr.remove();
-    });
-    for (const id of dropped) logHTML.delete(id);
-  }
+  // overflow). The steady-state case is just map probes.
+  if (!logWindowSameSet(recent)) dropStaleLogRows(container, recent);
 
-  // Process oldest→newest, collecting each new or changed group; insertions
-  // land at the top so the final order is newest-first. Day-divider ownership
-  // is part of the diff key: a boundary that appears or moves between passes
+  // Process newest→oldest, collecting each new or changed group. A new row is
+  // positioned against its newer neighbor (which is already in the DOM), so a
+  // grown window appends older rows below existing history while a live row
+  // with no newer neighbor still lands at the top. Day-divider ownership is
+  // part of the diff key: a boundary that appears or moves between passes
   // rebuilds exactly the two rows it touches.
   const seps = dayStartLabels(recent);
   const scrollAtTop = container.scrollTop;
   const ops = [];
-  for (let i = recent.length - 1; i >= 0; i--) {
+  let leadingNew = true;
+  for (let i = 0; i < recent.length; i++) {
     const r = recent[i];
     const sep = seps[i];
     const prev = logHTML.get(r.id);
@@ -404,13 +401,16 @@ function renderRequestsIncremental(recs) {
     // creates a fresh object, so a replay that discards its duplicate never
     // reaches here (upsertRec returns false, the row is unchanged).
     if (!prev) {
-      ops.push({ kind: 'insert', id: r.id, rec: r, sep, html: reqRow(r, sep) });
-    } else if (prev.rec !== r || prev.sep !== sep) {
-      // The record itself changed (in-flight row finalized, retry badge grew),
-      // or its day-divider position moved: replace only this row's group, in
-      // place. Everything else, including any text the user is selecting, is
-      // untouched.
-      ops.push({ kind: 'replace', id: r.id, rec: r, sep, html: reqRow(r, sep) });
+      ops.push({ kind: 'insert', id: r.id, rec: r, sep, html: reqRow(r, sep), newer: i ? recent[i - 1] : null, above: leadingNew });
+    } else {
+      leadingNew = false;
+      if (prev.rec !== r || prev.sep !== sep) {
+        // The record itself changed (in-flight row finalized, retry badge grew),
+        // or its day-divider position moved: replace only this row's group, in
+        // place. Everything else, including any text the user is selecting, is
+        // untouched.
+        ops.push({ kind: 'replace', id: r.id, rec: r, sep, html: reqRow(r, sep) });
+      }
     }
     // else: prev.rec === r && prev.sep === sep → unchanged, skip entirely.
   }
@@ -418,9 +418,10 @@ function renderRequestsIncremental(recs) {
 
   // Scroll anchor: the content under the cursor must not move. Every DOM
   // change above the first pre-existing row contributes to its displacement.
-  // Measure all replaced rows in one read pass BEFORE any mutation, apply all
-  // writes, then measure the results in one read pass: one or two layouts for
-  // the whole frame instead of one forced layout per changed row.
+  // A grown window's older rows land below existing history and contribute
+  // nothing. Measure all replaced rows in one read pass BEFORE any mutation,
+  // apply all writes, then measure the results in one read pass: one or two
+  // layouts for the whole frame instead of one forced layout per changed row.
   let before = null;
   if (scrollAtTop > 0) {
     before = new Map();
@@ -430,7 +431,7 @@ function renderRequestsIncremental(recs) {
   }
   for (const op of ops) {
     if (op.kind === 'insert') {
-      tbody.insertBefore(trGroupNodesHTML(op.html), tbody.firstChild);
+      insertLogGroupHTML(tbody, op.newer, op.html);
     } else {
       replaceRowGroupDOM(container, op.id, op.html);
     }
@@ -439,12 +440,29 @@ function renderRequestsIncremental(recs) {
   if (scrollAtTop > 0) {
     let delta = 0;
     for (const op of ops) {
-      const h = rowGroupHeight(container, op.id);
-      delta += op.kind === 'insert' ? h : h - before.get(op.id);
+      if (op.kind === 'replace') delta += rowGroupHeight(container, op.id) - before.get(op.id);
+      else if (op.above) delta += rowGroupHeight(container, op.id);
     }
     if (delta !== 0) container.scrollTop = scrollAtTop + delta;
   }
   restoreFocus(focus);
+}
+
+// insertLogGroupHTML places a row group in visible (newest-first) order by
+// inserting it after its newer neighbor's whole group (day divider, main row,
+// attempt sub-rows). With no newer neighbor it is the newest row and goes to
+// the top. Never append blindly: a live record that arrived while an older
+// page was in flight is not automatically history.
+function insertLogGroupHTML(tbody, newer, html) {
+  const frag = trGroupNodesHTML(html);
+  if (!newer || !newer.id) { tbody.insertBefore(frag, tbody.firstChild); return; }
+  const id = CSS.escape(newer.id);
+  const subs = tbody.querySelectorAll(`tr.retry-sub[data-retry-of="${id}"]`);
+  let anchor = subs.length ? subs[subs.length - 1] : null;
+  if (!anchor) anchor = tbody.querySelector(`tr.exp-row[data-id="${id}"]`);
+  if (!anchor) anchor = tbody.querySelector(`tr.day-sep[data-sep-of="${id}"]`);
+  if (anchor) anchor.after(frag);
+  else tbody.insertBefore(frag, tbody.firstChild);
 }
 
 // rowGroupHeight sums the rendered heights of one record's whole group
@@ -463,23 +481,50 @@ function appendOlderLogRows(recs) {
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; }
   const focus = captureFocus(container, rowFocusKey);
+  // A live row can take a slot while the page was in flight, pushing the
+  // oldest loaded row out of the bounded window. Drop it like the live path.
+  if (!logWindowSameSet(recent)) dropStaleLogRows(container, recent);
   const seps = dayStartLabels(recent);
+  const scrollAtTop = container.scrollTop;
+  let before = null;
+  if (scrollAtTop > 0) {
+    before = new Map();
+    for (let i = 0; i < recent.length; i++) {
+      const r = recent[i];
+      if (r && logHTML.has(r.id) && logHTML.get(r.id).sep !== seps[i]) {
+        before.set(r.id, rowGroupHeight(container, r.id));
+      }
+    }
+  }
+  let leadingNew = true;
+  const topInserts = [];
   for (let i = 0; i < recent.length; i++) {
     const r = recent[i];
     if (!r) continue;
     const sep = seps[i];
     const prev = logHTML.get(r.id);
     if (!prev) {
-      const html = reqRow(r, sep);
+      insertLogGroupHTML(tbody, i ? recent[i - 1] : null, reqRow(r, sep));
+      if (leadingNew) topInserts.push(r.id);
       logHTML.set(r.id, { rec: r, sep });
-      tbody.appendChild(trGroupNodesHTML(html));
-    } else if (prev.sep !== sep) {
-      // An older page can re-shape the day boundary of the previously-last
-      // row; rebuild just that group in place.
-      const html = reqRow(r, sep);
-      replaceRowGroupDOM(container, r.id, html);
-      logHTML.set(r.id, { rec: r, sep });
+    } else {
+      leadingNew = false;
+      if (prev.sep !== sep) {
+        // An older page can re-shape the day boundary of the previously-last
+        // row; rebuild just that group in place.
+        const html = reqRow(r, sep);
+        replaceRowGroupDOM(container, r.id, html);
+        logHTML.set(r.id, { rec: r, sep });
+      }
     }
+  }
+  if (scrollAtTop > 0) {
+    // A live row that raced the page can land above the viewport; compensate
+    // it. Archive rows below existing history contribute nothing.
+    let delta = 0;
+    for (const id of topInserts) delta += rowGroupHeight(container, id);
+    for (const [id, h] of before) delta += rowGroupHeight(container, id) - h;
+    if (delta !== 0) container.scrollTop = scrollAtTop + delta;
   }
   restoreFocus(focus);
 }
@@ -580,7 +625,11 @@ function fetchOlderLog() {
     } else if (added.length) {
       logArchivePrepend(added);
       const merged = mergeLogArchive(ringScoped);
-      logLimit = Math.min(merged.length, Math.max(logCap() + added.length, logPageSize()));
+      // The fill owner is the only expansion trigger, and it grows in page
+      // units. Reserve that page as capacity: a live arrival then lands inside
+      // the bounded budget instead of both growing the window per record and
+      // evicting the history just loaded.
+      logLimit = Math.max(logCap() + logPageSize(), logPageSize());
       appendOlderLogRows(merged);
     }
     // A successful retry clears "history unavailable" even when the page was a
@@ -1156,11 +1205,15 @@ function escapeHtml(s) {
 // download-status guard stays keyed to the same record).
 function drawerShow(id, attempt) {
   if (settingsIsOpen()) { closeSettings(); if (settingsIsOpen()) return; }
+  // The initiating row control can be replaced by a live update while the
+  // drawer is open; keep its stable selector so close can find the equivalent
+  // control rather than falling back to BODY.
+  const returnSelector = rowFocusKey(document.activeElement);
   drawerId = id;
   drawerAttempt = attempt;
   renderDrawer();
   if (!drawerId) return;
-  openModal($('drawer'));
+  openModal($('drawer'), {returnSelector, onPreempt: closeDrawer});
   $('drawer').classList.add('open');
   $('drawer-veil').classList.add('open');
   highlightRow();

@@ -250,7 +250,57 @@ function renderExplorer() {
 // Clicking a chip's ✕ removes just that filter (others stay); "clear all"
 // empties the whole set. The chips are the scope - always visible, so global
 // vs. scoped is never ambiguous.
+//
+// Every repaint replaces the chips, so removal destroys the focused control.
+// A chip's dimension position parks a stable successor identity: the surviving
+// chip at the same slot, else the previous chip, else "clear all"/the root
+// crumb. Focus is only claimed when the rewrite actually dropped it to BODY.
+let _scopeFocus = null;
+function scopeFocusToken(el) {
+  const scope = $('xp-scope');
+  if (!scope || !el || !scope.contains(el)) return null;
+  const chip = el.closest('.chip-x[data-chip-dim]');
+  if (chip) {
+    const chips = [...scope.querySelectorAll('.chip-x[data-chip-dim]')];
+    return {owner: scope, chipIndex: chips.indexOf(chip)};
+  }
+  if (el.closest('[data-xp-clear]')) return {owner: scope, clear: true};
+  if (el.closest('.bc-root')) return {owner: scope, root: true};
+  return null;
+}
+function restoreScopeFocus(token) {
+  _scopeFocus = null;
+  if (!token || !token.owner.isConnected) return false;
+  const active = document.activeElement;
+  // Never steal focus from an operator who moved it elsewhere; a removed
+  // element (disconnected) and BODY are the drop cases this owner repairs.
+  if (active && active !== document.body && active.isConnected) return false;
+  const scope = token.owner;
+  let next = null;
+  if (token.chipIndex != null) {
+    const chips = [...scope.querySelectorAll('.chip-x[data-chip-dim]')];
+    if (chips.length) next = chips[Math.min(token.chipIndex, chips.length - 1)];
+    if (!next) next = scope.querySelector('[data-xp-clear]');
+  } else if (token.clear) {
+    next = scope.querySelector('.bc-root');
+  } else if (token.root) {
+    next = scope.querySelector('.bc-root');
+  }
+  if (!next) next = scope.querySelector('.bc-root');
+  if (!next) return false;
+  next.focus();
+  return document.activeElement === next;
+}
 function renderScopeBar(st) {
+  const scope = $('xp-scope');
+  const active = document.activeElement;
+  let focus = null;
+  if (scope && active && active !== document.body && active.isConnected && scope.contains(active)) {
+    focus = scopeFocusToken(active);
+  } else if (scope && (!active || active === document.body || !active.isConnected)) {
+    focus = _scopeFocus; // the click-time park survives a blur before hashchange
+  }
+  _scopeFocus = null;
   const parts = [`<a href="#/" class="bc-root">all traffic</a>`];
   if (st.filters.length) parts.push('<span class="bc-sep">·</span><span class="htext">filtered to</span>');
   st.filters.forEach(f => {
@@ -258,7 +308,7 @@ function renderScopeBar(st) {
     parts.push(`<span class="xp-chip" style="--ent:${entityType(f.dim).color}" title="${escapeHtml(entityType(f.dim).label)}: ${escapeHtml(shortId(f.dim, f.id))}">${entityBadge(f.dim, f.id)}<button type="button" class="chip-x" data-chip-dim="${escapeHtml(f.dim)}" aria-label="remove ${escapeHtml(entityType(f.dim).label)} filter">✕</button></span>`);
   });
   if (st.filters.length) parts.push('<button type="button" class="btn xp-clear" data-xp-clear>clear all</button>');
-  updateSection('xp-scope', parts.join(''));
+  if (updateSection('xp-scope', parts.join(''))) restoreScopeFocus(focus);
 }
 
 // renderDimRail: one item per dimension - entityBadge + distinct-value count.
@@ -601,9 +651,13 @@ function xpNodeCard(st, e, payload) {
 $('explorer').addEventListener('click', e => {
   const st = explorerState();
   const clear = e.target.closest('[data-xp-clear]');
-  if (clear) { navigateTo([]); return; }
+  if (clear) { _scopeFocus = scopeFocusToken(clear); navigateTo([]); return; }
   const chipX = e.target.closest('.chip-x[data-chip-dim]');
-  if (chipX) { navigateTo(buildExplorerHash(st.filters.filter(f => f.dim !== chipX.dataset.chipDim), st.activeDim)); return; }
+  if (chipX) {
+    _scopeFocus = scopeFocusToken(chipX);
+    navigateTo(buildExplorerHash(st.filters.filter(f => f.dim !== chipX.dataset.chipDim), st.activeDim));
+    return;
+  }
   if (e.target.closest('#xp-dim-trigger')) { e.stopPropagation(); toggleDimMenu(); return; }
   const rail = e.target.closest('.xp-rail-item[data-xp-dim]');
   if (rail) {

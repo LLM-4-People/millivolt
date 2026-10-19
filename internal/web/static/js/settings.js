@@ -107,7 +107,10 @@ function openSettings() {
   const v = $('settings-veil');
   const b = $('btn-settings');
   if (!s) return;
-  openModal(s);
+  // A competing modal (the operator prompt) preempts the sheet through the
+  // generic close; run this owner's teardown so the veil and pressed state
+  // cannot survive the takeover.
+  openModal(s, {onPreempt: () => settingsClose(true)});
   if (v) v.classList.add('open');
   if (b) b.setAttribute('aria-pressed', 'true');
   requestAnimationFrame(() => s.classList.add('open'));
