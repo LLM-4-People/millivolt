@@ -34,7 +34,14 @@ escapes decode to no more bytes than their spelling, so only raw invalid UTF-8
 can consume the small allowance (the standard decoder writes a three-byte
 U+FFFD per invalid byte). A larger expansion is rejected before materializing;
 malformed JSON keeps its passthrough contract, and small invalid sequences still
-pass through. The Anthropic translator independently requires valid UTF-8 input,
+pass through. `parseLLMRequestFast` is a narrow lexical pre-pass for a minimal
+top-level object: `model`, `stream`, `messages` with printable-ASCII role and
+content strings, and `system`. It extracts the same routing and composition
+fields without the typed decode and delegates every other shape, including all
+parameter collections, escapes, duplicates, content part arrays, and preview
+capture, to the existing decoder and its bounds. Differential tests pin
+byte-for-byte record and rejection equivalence. The Anthropic translator
+independently requires valid UTF-8 input,
 so it cannot materialize the replacement expansion either. The Start stamp
 follows body upload and precedes metadata/translation CPU. Upstream
 whole-document buffers share

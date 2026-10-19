@@ -2430,6 +2430,16 @@ func decodedJSONStringLength(raw []byte) (int, bool) {
 }
 
 func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+	// The common minimal body is fully recognized by a lexical pre-pass. Every
+	// other shape, including preview capture, keeps the typed decode below
+	// unchanged.
+	if !preview && parseLLMRequestFast(body, rec) {
+		return nil
+	}
+	return parseLLMRequestSlow(body, rec, preview)
+}
+
+func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview bool) error {
 	// Reject replacement expansion before the first typed decode so raw
 	// invalid UTF-8 cannot multiply the request in memory.
 	if requestStringExpansionExceeded(body) {
