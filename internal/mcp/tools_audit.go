@@ -263,7 +263,7 @@ type AuditCapturesListInput struct {
 	// SessionID narrows the listing to one session.
 	SessionID string `json:"session_id,omitempty" jsonschema:"list only captures from this session"`
 	// BeforeMs and BeforeID are the paired keyset cursor from a previous page.
-	// Pointers make presence explicit: a stored record id may be empty and a
+	// Pointers make presence explicit: a cursor id may be empty and a
 	// timestamp may be zero, so neither value can stand in for absence.
 	BeforeMs *int64  `json:"before_ms,omitempty" jsonschema:"cursor timestamp in unix milliseconds; must be sent together with before_id"`
 	BeforeID *string `json:"before_id,omitempty" jsonschema:"cursor record id; must be sent together with before_ms"`
@@ -277,8 +277,8 @@ type AuditCapturesListOutput struct {
 	More      bool             `json:"more" jsonschema:"older rows are believed to exist"`
 	Exhausted bool             `json:"exhausted" jsonschema:"true when the cursor did not advance or more is false; stop paging"`
 	// NextBeforeMs and NextBeforeID are the next cursor pair. They are pointers
-	// so an empty record id and a zero timestamp are still published: omitting
-	// either would make the returned boundary impossible to send back.
+	// so a zero timestamp is still published and neither half is omitted; the
+	// listing filters unreadable ids out, so the id half is always canonical.
 	NextBeforeMs *int64      `json:"next_before_ms,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
 	NextBeforeID *string     `json:"next_before_id,omitempty" jsonschema:"copy the pair into before_ms and before_id to fetch the next older page"`
 	Storage      StorageInfo `json:"storage" jsonschema:"durable storage signal"`
@@ -289,10 +289,14 @@ type AuditCapturesListOutput struct {
 // auditListNote states the mechanism so the model does not assume a listing
 // endpoint exists. The request_debug sidecar predicate is part of that
 // mechanism: debug = 1 alone marks a matched request, whose document can still
-// be absent after a failed save or expired past debug_capture_ttl.
+// be absent after a failed save or expired past debug_capture_ttl. The id
+// predicate is the other part: the capture route trims a record id before
+// lookup while the sidecar key is stored verbatim, so an empty or padded id
+// could be listed but never read back.
 const auditListNote = "the proxy has no capture listing endpoint: this list is a bounded SELECT over requests WHERE debug = 1 " +
 	"whose request_debug sidecar exists and has not expired, so every listed id has a readable capture document and nothing " +
-	"that expired or was never captured appears"
+	"that expired or was never captured appears. Record ids are canonical (non-empty, no surrounding whitespace) because the " +
+	"capture route trims an id before lookup, which is the only spelling it can read back"
 
 // AuditCapturesList pages captured requests through a bounded SQL probe.
 func (s *Service) auditCapturesList(ctx context.Context, in AuditCapturesListInput) (*AuditCapturesListOutput, error) {

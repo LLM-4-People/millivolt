@@ -396,12 +396,16 @@ func (c *Client) captureRecords(ctx context.Context, sessionID string, before *p
 // captureListingStatement is the one owner of the capture listing SQL. It
 // filters to rows whose request_debug sidecar exists and is still readable, so
 // the listing never advertises a capture document audit_capture_get would 404.
-// Session and cursor text are byte-exact hex TEXT expressions rather than
+// It also filters to record ids audit_capture_get can address: the capture route
+// trims surrounding whitespace from id before lookup while the sidecar key is
+// stored verbatim, so an empty or padded id could be listed but never read
+// back. Session and cursor text are byte-exact hex TEXT expressions rather than
 // quoted literals: a schema-valid value such as "a;b" or "attach" would
 // otherwise trip the proxy's statement gate even though SQLite would parse it.
 func captureListingStatement(sessionID string, before *pageCursor, limit int, nowMs int64) string {
 	statement := "SELECT id, started_at, status_code, provider, model, client, debug_session_id, cost FROM requests" +
-		" WHERE debug = 1 AND EXISTS (SELECT 1 FROM request_debug AS d WHERE d.id = requests.id AND (d.expires_at = 0 OR d.expires_at > " +
+		" WHERE debug = 1 AND id != '' AND id = trim(id, " + sqlHexText(captureIDTrimSpace) + ")" +
+		" AND EXISTS (SELECT 1 FROM request_debug AS d WHERE d.id = requests.id AND (d.expires_at = 0 OR d.expires_at > " +
 		strconv.FormatInt(nowMs, 10) + "))"
 	if sessionID != "" {
 		statement += " AND debug_session_id = " + sqlHexText(sessionID)
@@ -412,6 +416,13 @@ func captureListingStatement(sessionID string, before *pageCursor, limit int, no
 	statement += " ORDER BY started_at DESC, id DESC LIMIT " + strconv.Itoa(limit)
 	return statement
 }
+
+// captureIDTrimSpace is the SQLite trim() character set that matches
+// strings.TrimSpace, the normalization both audit_capture_get and the capture
+// route apply to a record id. SQLite's one-argument trim() removes only ASCII
+// spaces, so it would let a tab-, newline- or NBSP-padded id through even
+// though the capture route then looks up its trimmed spelling.
+const captureIDTrimSpace = " \t\n\v\f\r\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
 // sqlHexText renders arbitrary client-controlled text as a SQLite TEXT
 // expression built from a hex blob literal, so the statement source contains

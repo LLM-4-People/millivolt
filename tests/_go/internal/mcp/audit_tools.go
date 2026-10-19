@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	_ "modernc.org/sqlite"
 )
@@ -275,7 +276,7 @@ func TestAuditCapturesListPagesThroughSQL(t *testing.T) {
 	assertAuth(t, probe)
 	statement := probe.Query.Get("q")
 	for _, needle := range []string{
-		"FROM requests", "WHERE debug = 1", "request_debug AS d", "d.id = requests.id",
+		"FROM requests", "WHERE debug = 1", "id != ''", "id = trim(id, CAST(X'", "request_debug AS d", "d.id = requests.id",
 		"d.expires_at = 0 OR d.expires_at > ", "debug_session_id = CAST(X'7331' AS TEXT)",
 		"ORDER BY started_at DESC, id DESC", "LIMIT 2",
 	} {
@@ -439,7 +440,14 @@ func TestCaptureListingStatementFiltersReadableCaptures(t *testing.T) {
 	}
 	for _, c := range []capture{
 		{id: "r-new", startedAt: 3000, session: "s", expiresAt: 2000, sidecar: true},
-		{id: "", startedAt: 2000, session: "s", expiresAt: 2000, sidecar: true},
+		// An empty id and ids padded with whitespace can have a sidecar, but
+		// audit_capture_get rejects the empty one and the capture route trims
+		// every lookup while the sidecar key is stored verbatim, so none of
+		// them can be read back. The listing must not advertise them.
+		{id: "", startedAt: 2900, session: "s", expiresAt: 2000, sidecar: true},
+		{id: " r-padded ", startedAt: 2800, session: "s", expiresAt: 2000, sidecar: true},
+		{id: "\tr-tab\t", startedAt: 2700, session: "s", expiresAt: 2000, sidecar: true},
+		{id: "\u00a0r-nbsp\u00a0", startedAt: 2600, session: "s", expiresAt: 2000, sidecar: true},
 		{id: "r-expired", startedAt: 2500, session: "s", expiresAt: 500, sidecar: true},
 		{id: "r-missing", startedAt: 2400, session: "s"},
 		{id: "r-old", startedAt: 1000, session: "s", expiresAt: 2000, sidecar: true},
@@ -488,8 +496,22 @@ func TestCaptureListingStatementFiltersReadableCaptures(t *testing.T) {
 
 	const nowMs = 1000
 	all := captureListingStatement("", nil, 10, nowMs)
-	if ids := query(all); !slices.Equal(ids, []string{"r-new", "", "r-old", "r-semi", "r-attach", "r-zero"}) {
-		t.Fatalf("readable captures = %q, want the stored, unexpired sidecars newest first", ids)
+	ids := query(all)
+	if !slices.Equal(ids, []string{"r-new", "r-old", "r-semi", "r-attach", "r-zero"}) {
+		t.Fatalf("readable captures = %q, want the stored, unexpired sidecars with a fetchable id, newest first", ids)
+	}
+	for _, id := range ids {
+		if id == "" || strings.TrimSpace(id) != id {
+			t.Fatalf("listed id %q is not the canonical spelling audit_capture_get can fetch", id)
+		}
+		var stored int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM request_debug
+			WHERE id = ? AND (expires_at = 0 OR expires_at > ?)`, id, nowMs).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored != 1 {
+			t.Fatalf("listed id %q has no unexpired sidecar", id)
+		}
 	}
 	if strings.Contains(all, ";") || strings.Contains(strings.ToUpper(all), "ATTACH") {
 		t.Fatalf("the statement must carry no statement-gate spelling: %q", all)
@@ -517,6 +539,18 @@ func TestCaptureListingStatementFiltersReadableCaptures(t *testing.T) {
 		}
 		if ids := query(statement); !slices.Equal(ids, []string{tc.want}) {
 			t.Fatalf("session %q statement returned %q, want exactly %q", tc.session, ids, tc.want)
+		}
+	}
+}
+
+// TestCaptureIDTrimSpaceMatchesStrings pins the SQLite trim() character set to
+// the Go rule the capture route and audit_capture_get apply. If the sets drift,
+// a padded id could pass the listing filter and still be unreadable.
+func TestCaptureIDTrimSpaceMatchesStrings(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		contains := strings.ContainsRune(captureIDTrimSpace, r)
+		if space := unicode.IsSpace(r); contains != space {
+			t.Fatalf("trim set mismatch at %U: contains=%v IsSpace=%v", r, contains, space)
 		}
 	}
 }

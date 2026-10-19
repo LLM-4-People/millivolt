@@ -128,7 +128,7 @@ semantics below, correct SQL is guesswork.
 | `audit_status` | Capture sessions, their scope and live capture counts, the scope vocabularies, and the storage prerequisite. |
 | `audit_start` | Start or edit one capture session. Requires `confirm: "start capture"` and refuses when durable storage is off. |
 | `audit_stop` | Stop one session by id, or every session with `stop_all: "stop every capture session"`. |
-| `audit_captures_list` | Page the requests that have a stored capture, through a bounded `SELECT` over `requests WHERE debug = 1` whose `request_debug` sidecar exists and has not expired. |
+| `audit_captures_list` | Page the requests that have a stored capture, through a bounded `SELECT` over `requests WHERE debug = 1` whose `request_debug` sidecar exists and has not expired. Ids are canonical: empty and whitespace-padded record ids are excluded because `audit_capture_get` could not read them back. |
 | `audit_capture_get` | Read one capture document by request record id. |
 | `operator_state` | Pause, limits, quota/storm and restart status in one call. |
 | `set_pause` | Create, edit or resume pause holds. |
@@ -275,7 +275,10 @@ guard cannot be applied at all.
 (`requests.id`), not the session id. There is no listing endpoint, so
 `audit_captures_list` discovers those ids by querying `requests WHERE debug = 1`
 with an existing, unexpired `request_debug` sidecar and reports that it does so.
-Captured documents are sensitive: credentials are
+The listing also excludes an id that is empty or padded with whitespace: the
+capture route trims the id before lookup while the sidecar key is stored
+verbatim, so such an id could be advertised but never fetched. Every listed id
+is therefore readable. Captured documents are sensitive: credentials are
 redacted from headers, but body content is not sanitized.
 
 **Sessions survive a restart.** The proxy restores them from its own state, so a
@@ -415,6 +418,10 @@ runs outside that harness on purpose:
 - the redirect test stands up a second listener as the redirect target and
   asserts it received nothing, so "we refused the redirect" is an observation
   rather than an assertion about an error string.
+- the capture listing test executes the generated `SELECT` against a real
+  SQLite schema with empty, space-padded, tab-padded and NBSP-padded sidecars,
+  and asserts they are excluded while every returned id has an unexpired
+  sidecar and is the exact spelling `audit_capture_get` can fetch.
 
 The live integration test starts a private instance through
 [scripts/dev.sh](../scripts/dev.sh) on a port and scratch database of its own, so
