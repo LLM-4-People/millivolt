@@ -134,53 +134,149 @@ func TestModelsDiscoveryEntryLimitBoundary(t *testing.T) {
 	}
 }
 
-// TestModelsDiscoveryOutputLimitFailsClosed bounds the normalized document:
-// a list under the entry cap can still expand past the output cap when JSON
-// string escaping inflates provider strings. A normal large list passes.
-func TestModelsDiscoveryOutputLimitFailsClosed(t *testing.T) {
-	const entries = 500
-	for _, tc := range []struct {
-		name       string
-		id         string
-		wantStatus int
-	}{
-		{"normal large list", strings.Repeat("x", 8000), http.StatusOK},
-		{"escaped output past cap", strings.Repeat("<", 8000), http.StatusBadGateway},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			raw := compactModelListID(entries, tc.id)
-			if len(raw) > int(config.Default().ModelsDiscoveryMaxBytes) {
-				t.Fatalf("fixture body = %d bytes, want <= the default discovery cap", len(raw))
-			}
-			p := New(config.Default(), metrics.Noop{})
-			p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				return modelHTTPResponse(r, raw), nil
-			})})
-			w := httptest.NewRecorder()
-			p.ServeHTTP(w, modelsLimitRequest("openai"))
-			if w.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body prefix %q)", w.Code, tc.wantStatus, w.Body.String()[:min(len(w.Body.String()), 200)])
-			}
-			if tc.wantStatus != http.StatusOK {
-				if strings.Contains(w.Body.String(), `"object":"list"`) {
-					t.Fatal("output-limit failure returned a partial list")
-				}
-				if !strings.Contains(w.Body.String(), "output exceeds") {
-					t.Fatalf("missing explicit output-limit error: %s", w.Body.String())
-				}
-				return
-			}
-			var doc struct {
-				Data []map[string]any `json:"data"`
-			}
-			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
-				t.Fatal(err)
-			}
-			if len(doc.Data) != entries || doc.Data[0]["id"] != tc.id {
-				t.Fatalf("normal output changed: %d entries", len(doc.Data))
-			}
-		})
+// TestModelsDiscoveryOutputFollowsConfiguredCap pins the rendered-list bound
+// to models_discovery_max_bytes instead of a fixed constant: a list larger
+// than the old fixed 16 MiB cap is served when the configured cap allows it.
+func TestModelsDiscoveryOutputFollowsConfiguredCap(t *testing.T) {
+	const bodyTarget = 17 << 20
+	cfg := config.Default()
+	cfg.ModelsDiscoveryMaxBytes = 20 << 20
+	raw := compactModelListID(1, strings.Repeat("x", bodyTarget-len(`{"data":[{"id":""}]}`)))
+	if len(raw) > int(cfg.ModelsDiscoveryMaxBytes) {
+		t.Fatalf("fixture body = %d bytes, want <= configured %d", len(raw), cfg.ModelsDiscoveryMaxBytes)
 	}
+	p := New(cfg, metrics.Noop{})
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return modelHTTPResponse(r, raw), nil
+	})})
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, modelsLimitRequest("openai"))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body prefix %q)", w.Code, w.Body.String()[:min(len(w.Body.String()), 200)])
+	}
+	if w.Body.Len() <= 16<<20 {
+		t.Fatalf("served output = %d bytes, want past the old fixed 16 MiB cap", w.Body.Len())
+	}
+	var doc struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Data) != 1 || len(doc.Data[0].ID) != bodyTarget-len(`{"data":[{"id":""}]}`) {
+		t.Fatalf("valid large list changed: %d entries", len(doc.Data))
+	}
+}
+
+// TestModelsDiscoveryOutputDoesNotHTMLEscape bounds the rendered document for
+// provider ids full of <, > and &: the wire encoder keeps them literal, so a
+// body under the configured cap renders near its input size instead of
+// materializing a six-fold escaped document and rejecting it.
+func TestModelsDiscoveryOutputDoesNotHTMLEscape(t *testing.T) {
+	const entries = 500
+	id := strings.Repeat("<&>", 8000/3+1)[:8000]
+	raw := compactModelListID(entries, id)
+	if len(raw) > int(config.Default().ModelsDiscoveryMaxBytes) {
+		t.Fatalf("fixture body = %d bytes, want <= the default discovery cap", len(raw))
+	}
+	p := New(config.Default(), metrics.Noop{})
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return modelHTTPResponse(r, raw), nil
+	})})
+	w := httptest.NewRecorder()
+	var alloc uint64
+	alloc = proxyAllocDelta(func() {
+		p.ServeHTTP(w, modelsLimitRequest("openai"))
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body prefix %q)", w.Code, w.Body.String()[:min(len(w.Body.String()), 200)])
+	}
+	if bytes.Contains(w.Body.Bytes(), []byte(`\u003c`)) || bytes.Contains(w.Body.Bytes(), []byte(`\u003e`)) || bytes.Contains(w.Body.Bytes(), []byte(`\u0026`)) {
+		t.Fatal("served model list still HTML-escapes")
+	}
+	if got := bytes.Count(w.Body.Bytes(), []byte("<&>")); got != entries*(len(id)/3) {
+		t.Fatalf("literal ids = %d triples, want %d", got, entries*len(id)/3)
+	}
+	// Old behavior materialized a ~24 MiB escaped document for this ~4 MiB
+	// body before rejecting it and allocated ~200 MiB end to end. The
+	// unescaped render allocates with its input; the bound leaves room for
+	// race instrumentation in CI.
+	const allocBound = 128 << 20
+	if alloc > allocBound {
+		t.Fatalf("unescaped %d-byte body allocated %d bytes, want <= %d", len(raw), alloc, allocBound)
+	}
+	t.Logf("unescaped output: body=%d output=%d alloc=%d", len(raw), w.Body.Len(), alloc)
+}
+
+// TestModelsDiscoveryOutputLimitFailsClosedBeforeCommit keeps the fail-closed
+// contract for a document past the derived bound: malformed UTF-8 expands
+// three-fold when re-encoded, the render is rejected before any response
+// bytes, and no partial list reaches the client.
+func TestModelsDiscoveryOutputLimitFailsClosedBeforeCommit(t *testing.T) {
+	// 5 MiB of invalid UTF-8 bytes decodes to 15 MiB of U+FFFD, past the
+	// default 8 MiB cap plus the 5 MiB normalization allowance.
+	id := strings.Repeat("\xff", 5<<20)
+	raw := compactModelListID(1, id)
+	if len(raw) > int(config.Default().ModelsDiscoveryMaxBytes) {
+		t.Fatalf("fixture body = %d bytes, want <= the default discovery cap", len(raw))
+	}
+	p := New(config.Default(), metrics.Noop{})
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return modelHTTPResponse(r, raw), nil
+	})})
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, modelsLimitRequest("openai"))
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body prefix %q)", w.Code, w.Body.String()[:min(len(w.Body.String()), 200)])
+	}
+	if !strings.Contains(w.Body.String(), "output exceeds") {
+		t.Fatalf("missing explicit output-limit error: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `{"data":[`) {
+		t.Fatal("output-limit failure returned a partial list")
+	}
+}
+
+// TestModelsDiscoveryCursorEntryLimitFailsBeforeMapConstruction pins the Cursor
+// preflight: entries are counted from the decoded slice before CursorModelEntries
+// materializes one map per model, so an over-budget unary response fails with
+// bounded allocation.
+func TestModelsDiscoveryCursorEntryLimitFailsBeforeMapConstruction(t *testing.T) {
+	raw := cursorModelsBody(modelsDiscoveryMaxEntries + 1)
+	p := New(config.Default(), metrics.Noop{})
+	p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return modelHTTPResponse(r, raw), nil
+	})})
+	w := httptest.NewRecorder()
+	var alloc uint64
+	alloc = proxyAllocDelta(func() {
+		p.ServeHTTP(w, modelsLimitRequest("cursor"))
+	})
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (body prefix %q)", w.Code, w.Body.String()[:min(len(w.Body.String()), 200)])
+	}
+	if !strings.Contains(w.Body.String(), "entry limit") {
+		t.Fatalf("missing explicit entry-limit error: %s", w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), `{"data":[`) {
+		t.Fatal("cursor entry-limit failure returned a partial list")
+	}
+	// One ModelDetails per five wire bytes; no model maps are built. Building
+	// the maps costs about 9.6 MiB; the preflight parse stays under 6 MiB.
+	const allocBound = 8 << 20
+	if alloc > allocBound {
+		t.Fatalf("cursor entry-limit rejection allocated %d bytes for %d entries, want <= %d", alloc, modelsDiscoveryMaxEntries+1, allocBound)
+	}
+	t.Logf("cursor entry-limit rejection: entries=%d alloc=%d", modelsDiscoveryMaxEntries+1, alloc)
+}
+
+// cursorModelsBody builds a raw GetUsableModelsResponse carrying n ModelDetails
+// entries, each with model_id "m" (field 1 = models, inner field 1 = model_id).
+func cursorModelsBody(n int) []byte {
+	entry := []byte{0x0a, 0x03, 0x0a, 0x01, 'm'}
+	return bytes.Repeat(entry, n)
 }
 
 // anthropicEntryPage renders one Anthropic models page with n tiny entries.

@@ -1183,6 +1183,14 @@ func (s *Server) serveCursorModels(d *modelsDiscovery, w http.ResponseWriter, r 
 		writeModelsError(w, fmt.Errorf("decode models: %w", err))
 		return
 	}
+	// Count the decoded entries before CursorModelEntries materializes one map
+	// per model. The protobuf frame budget alone admits far more than the
+	// discovery entry budget, and emitModelsList's debit runs only after that
+	// map construction; this preflight is the same budget, checked early.
+	if len(models) > d.entriesLeft {
+		writeModelsError(w, errModelsDiscoveryEntries)
+		return
+	}
 	s.emitModelsList(d, w, r, t, key,
 		providerformat.CursorModelEntries(models, s.cfg().CursorDefaultContextWindow))
 }

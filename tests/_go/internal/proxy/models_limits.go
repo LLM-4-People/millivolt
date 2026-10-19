@@ -257,6 +257,73 @@ func TestModelsDiscoveryEnrichmentSharesBudgetAndDegrades(t *testing.T) {
 	}
 }
 
+// TestModelsDiscoveryEnrichmentSharesEntryBudget proves the metadata source
+// draws from the discovery-wide entry budget after the primary list debited
+// its entries. At the combined limit enrichment applies; one entry past it
+// degrades to the complete base list instead of opening a fresh 10,000-entry
+// allowance or failing the primary discovery.
+func TestModelsDiscoveryEnrichmentSharesEntryBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		primary    int
+		metadata   int
+		wantEnrich bool
+	}{
+		{"combined at limit", 6_000, 4_000, true},
+		{"combined over limit", 6_000, 4_001, false},
+		{"metadata alone over remaining", 9_999, 2, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Default()
+			cfg.Providers = map[string]config.ProviderOverride{"provider.example": {
+				ModelsPath: "/metadata",
+				ModelsKeys: map[string]string{"input_modalities": "detail"},
+			}}
+			p := New(cfg, metrics.Noop{})
+			calls := 0
+			p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				if r.URL.Path == "/metadata" {
+					return modelHTTPResponse(r, openAIModelListIDs(tc.metadata, "m")), nil
+				}
+				return modelHTTPResponse(r, openAIModelListIDs(tc.primary, "m")), nil
+			})})
+			w := httptest.NewRecorder()
+			p.ServeHTTP(w, modelsLimitRequest("openai"))
+			if w.Code != http.StatusOK || calls != 2 {
+				t.Fatalf("status=%d calls=%d body=%s", w.Code, calls, w.Body.String())
+			}
+			hasMeta := strings.Contains(w.Body.String(), "input_modalities")
+			if hasMeta != tc.wantEnrich {
+				t.Fatalf("enriched=%v, want %v (primary=%d metadata=%d)", hasMeta, tc.wantEnrich, tc.primary, tc.metadata)
+			}
+			var doc struct {
+				Data []map[string]any `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if len(doc.Data) != tc.primary {
+				t.Fatalf("base list entries = %d, want %d", len(doc.Data), tc.primary)
+			}
+		})
+	}
+}
+
+// openAIModelListIDs builds a compact OpenAI list with unique ids prefix-N.
+func openAIModelListIDs(n int, prefix string) []byte {
+	var b bytes.Buffer
+	b.WriteString(`{"data":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `{"id":%q,"detail":["text"]}`, fmt.Sprintf("%s-%d", prefix, i))
+	}
+	b.WriteString(`]}`)
+	return b.Bytes()
+}
+
 type modelsWaitBody struct {
 	ctx    context.Context
 	closed atomic.Bool

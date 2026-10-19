@@ -135,7 +135,9 @@ protocol-conformance claim.
 
 Native model discovery translates and completes supported paginated lists under
 the shared discovery time/byte/page budget. Optional enrichment fills missing
-fields without replacing upstream-owned values.
+fields without replacing upstream-owned values; it draws from the same
+discovery entry budget and degrades to the base list when the remainder cannot
+hold its metadata source.
 
 Owners: [format/anthropic.go](../internal/format/anthropic.go),
 [format/models.go](../internal/format/models.go),

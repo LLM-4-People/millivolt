@@ -41,13 +41,25 @@ const (
 	// memory. Internal safety guardrail, not user-tunable; exceeding it fails
 	// closed, never a partial list.
 	modelsDiscoveryMaxEntries = 10_000
-	// modelsDiscoveryMaxOutputBytes bounds the normalized list document
-	// written to the client. Entry normalization only adds fields, but JSON
-	// string escaping can inflate provider strings, so the rendered document
-	// needs its own cap independent of the upstream byte budget. Internal
-	// safety guardrail, not user-tunable; exceeding it fails closed.
-	modelsDiscoveryMaxOutputBytes = 16 << 20 // 16 MiB
+	// modelsDiscoveryOutputEntryAllowance is the per-entry headroom added to
+	// the configured discovery byte cap when deriving the rendered-list bound.
+	// Normalization adds canonical fields that upstream bytes do not carry
+	// (object, created, owned_by, and a mirrored context number), and the
+	// provider label can be longer than a compact entry. 512 bytes per entry
+	// is far above that fixed expansion and covers the envelope separators.
+	// Internal safety guardrail, not user-tunable.
+	modelsDiscoveryOutputEntryAllowance = 512
 )
+
+// modelsDiscoveryOutputLimit derives the rendered-list byte bound from the
+// configured aggregate discovery byte cap. Valid UTF-8 JSON strings re-encode
+// to no more bytes than their escaped upstream spelling, so the configured cap
+// plus the entry-normalization allowance is the authoritative derived bound;
+// malformed UTF-8 can expand during re-encoding and still fails closed here.
+// The limit is captured with the rest of the discovery budget.
+func modelsDiscoveryOutputLimit(maxBytes int64) int {
+	return int(maxBytes) + modelsDiscoveryMaxEntries*modelsDiscoveryOutputEntryAllowance
+}
 
 // errModelsDiscoveryEntries is the stable fail-closed reason for a discovery
 // source carrying more entries than modelsDiscoveryMaxEntries.
@@ -63,6 +75,10 @@ type modelsDiscovery struct {
 	// entriesLeft is the discovery-wide entry budget. Every producer debits it
 	// through consumeEntries before emitting the constructed list.
 	entriesLeft int
+	// outputLimit is the rendered-list byte bound derived from the configured
+	// discovery byte cap (modelsDiscoveryOutputLimit). It is captured once so
+	// a hot reload cannot raise a request that already read its inputs.
+	outputLimit int
 	// releaseResponse holds the process-wide reservation for the page
 	// currently being decoded. Pagination releases it before the next fetch,
 	// so consecutive pages never accumulate reservations.
@@ -93,7 +109,7 @@ func (s *Server) serveModels(w http.ResponseWriter, r *http.Request, t *target, 
 	ctx, cancel := context.WithTimeout(r.Context(), cfg.ModelsDiscoveryTimeout)
 	defer cancel()
 	r = r.WithContext(ctx)
-	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages, entriesLeft: modelsDiscoveryMaxEntries}
+	d := &modelsDiscovery{ctx: ctx, bytesLeft: int64(cfg.ModelsDiscoveryMaxBytes), pagesLeft: cfg.ModelsDiscoveryMaxPages, entriesLeft: modelsDiscoveryMaxEntries, outputLimit: modelsDiscoveryOutputLimit(int64(cfg.ModelsDiscoveryMaxBytes))}
 	defer d.releaseResponseBuffer()
 	key = s.resolveKeyTransparent(r, t, key)
 	switch t.format {
@@ -154,9 +170,9 @@ func (s *Server) emitModelsList(d *modelsDiscovery, w http.ResponseWriter, r *ht
 	}
 	s.enrichModelEntries(d, t, key, entries)
 	entries = normalizeModelEntries(entries, t.provider)
-	out := providerformat.ModelsListJSON(entries)
-	if len(out) > modelsDiscoveryMaxOutputBytes {
-		writeModelsError(w, fmt.Errorf("model discovery output exceeds %d bytes", modelsDiscoveryMaxOutputBytes))
+	out, err := providerformat.ModelsListJSON(entries, d.outputLimit)
+	if err != nil {
+		writeModelsError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -406,9 +422,12 @@ func jsonNumber(v any) (float64, bool) {
 // providers.<label>.models_path + models_keys) into the entries. The
 // enrichment endpoint is fetched with the same auth as the main list; its
 // entries join by "id"; a mapped output field only fills entries that do not
-// already carry it (the upstream's own value always wins). Any failure -
-// fetch, status, shape - degrades to the unenriched list: enrichment is a
-// completeness win, never a hard dependency.
+// already carry it (the upstream's own value always wins). The metadata source
+// draws from the discovery-wide entry budget that the primary list already
+// debited, so it can never hide a second 10,000-entry catalog. Any failure -
+// fetch, status, shape, or an insufficient remaining entry budget - degrades
+// to the unenriched base list: enrichment is a completeness win, never a hard
+// dependency.
 func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, entries []map[string]any) {
 	ov, ok := s.cfg().Providers[t.provider]
 	if !ok || ov.ModelsPath == "" || len(ov.ModelsKeys) == 0 || len(entries) == 0 {
@@ -418,8 +437,14 @@ func (s *Server) enrichModelEntries(d *modelsDiscovery, t *target, key string, e
 	if err != nil {
 		return
 	}
-	src, ok, err := unwrapEntries(body, modelsDiscoveryMaxEntries, "data", "models")
+	src, ok, err := unwrapEntries(body, d.entriesLeft, "data", "models")
 	if err != nil || !ok {
+		return
+	}
+	// Charge the metadata lookups to the same discovery-wide budget before
+	// building their map. unwrapEntries bounded the source by entriesLeft, so
+	// this cannot fail once it returned successfully.
+	if d.consumeEntries(len(src)) != nil {
 		return
 	}
 	byID := make(map[string]map[string]any, len(src))

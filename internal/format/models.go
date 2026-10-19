@@ -16,7 +16,10 @@ package format
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+
+	"github.com/LLM-4-People/millivolt/internal/sse"
 	"time"
 )
 
@@ -100,14 +103,45 @@ func rfc3339ToUnix(s string) int64 {
 	return 0
 }
 
+// ErrModelsListTooLarge reports that rendering a model list would exceed the
+// caller's byte bound. ModelsListJSON fails closed, returning no partial
+// document.
+var ErrModelsListTooLarge = errors.New("model list output exceeds byte limit")
+
 // ModelsListJSON renders merged OpenAI model entries as the final
-// {"object":"list","data":[...]} body.
-func ModelsListJSON(entries []map[string]any) []byte {
+// {"data":[...],"object":"list"} body. Entries are encoded one at a time with
+// the package's wire encoder (SetEscapeHTML(false)), so provider content such
+// as <, > and & keeps its literal one-byte JSON form instead of expanding up to
+// six-fold, and the output never exceeds limit bytes (limit <= 0 is unbounded).
+// A document past the limit fails before anything is returned or written; the
+// caller owns the bound and surfaces the error. Normal output is byte-identical
+// to encoding the same envelope and entries with encoding/json's sorted keys.
+func ModelsListJSON(entries []map[string]any, limit int) ([]byte, error) {
 	if entries == nil {
 		entries = []map[string]any{}
 	}
-	out, _ := json.Marshal(map[string]any{"object": "list", "data": entries})
-	return out
+	const (
+		open   = `{"data":[`
+		suffix = `],"object":"list"}`
+	)
+	out := []byte(open)
+	for i, e := range entries {
+		if i > 0 {
+			out = append(out, ',')
+		}
+		item, err := sse.MarshalWireJSON(e)
+		if err != nil {
+			return nil, err
+		}
+		if limit > 0 && len(out)+len(item)+len(suffix) > limit {
+			return nil, fmt.Errorf("%w (%d bytes)", ErrModelsListTooLarge, limit)
+		}
+		out = append(out, item...)
+	}
+	if limit > 0 && len(out)+len(suffix) > limit {
+		return nil, fmt.Errorf("%w (%d bytes)", ErrModelsListTooLarge, limit)
+	}
+	return append(out, suffix...), nil
 }
 
 // CanonicalModelFields is the fixed vocabulary of model-metadata fields the

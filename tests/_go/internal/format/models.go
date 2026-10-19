@@ -1,7 +1,9 @@
 package format
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -57,7 +59,10 @@ func TestTranslateAnthropicModelsMalformed(t *testing.T) {
 
 func TestModelsListJSONShape(t *testing.T) {
 	entries := []map[string]any{{"id": "x", "object": "model", "owned_by": "o", "created": 1}}
-	out := ModelsListJSON(entries)
+	out, err := ModelsListJSON(entries, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var parsed struct {
 		Object string `json:"object"`
 		Data   []struct {
@@ -72,5 +77,43 @@ func TestModelsListJSONShape(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"object":"list"`) {
 		t.Errorf("missing object:list envelope: %s", out)
+	}
+	// Normal output stays byte-identical to the previous map-marshal form,
+	// including encoding/json's sorted envelope keys.
+	want, err := json.Marshal(map[string]any{"object": "list", "data": entries})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out) != string(want) {
+		t.Errorf("normal output changed:\n got %s\nwant %s", out, want)
+	}
+}
+
+// TestModelsListJSONUsesWireEncodingAndBound pins the two output properties:
+// <, > and & stay literal instead of expanding six-fold, and a document past
+// the caller's bound fails closed without returning partial bytes.
+func TestModelsListJSONUsesWireEncodingAndBound(t *testing.T) {
+	entries := []map[string]any{{"id": strings.Repeat("<&>", 1000)}}
+	out, err := ModelsListJSON(entries, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte(`\u003c`)) || bytes.Contains(out, []byte(`\u003e`)) || bytes.Contains(out, []byte(`\u0026`)) {
+		t.Fatalf("model list still HTML-escapes: first bytes %q", out[:min(len(out), 256)])
+	}
+	if len(out) > len(entries[0]["id"].(string))+128 {
+		t.Fatalf("HTML escaping inflated %d-byte id to a %d-byte document", len(entries[0]["id"].(string)), len(out))
+	}
+
+	limited, err := ModelsListJSON(entries, len(out)-1)
+	if !errors.Is(err, ErrModelsListTooLarge) {
+		t.Fatalf("limit error = %v, want ErrModelsListTooLarge", err)
+	}
+	if limited != nil {
+		t.Fatalf("failed render returned %d partial bytes", len(limited))
+	}
+	exact, err := ModelsListJSON(entries, len(out))
+	if err != nil || len(exact) != len(out) {
+		t.Fatalf("exact bound rejected: len=%d err=%v", len(exact), err)
 	}
 }
