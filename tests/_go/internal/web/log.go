@@ -235,7 +235,18 @@ func TestAggregateQueryContextDeadline(t *testing.T) {
 
 // TestLogPageDecodeBudget pins the page-size request discipline. A SQL-pushed
 // or fully matching Go-only scope must decode only the rows the requested page
-// can use; the old fixed 512-row batch failed this on a 60-row page.
+// can use; the old fixed 512-row batch failed this on a 60-row page. A Go-only
+// scope that rejects the whole scan budget must also match the narrow candidate
+// projection instead of decoding full records.
+//
+// The budget counts allocation objects rather than bytes. Under -race the
+// detector inflates allocated bytes by up to about 2.5x, and the inflated range
+// overlaps the pre-fix full-decode path: a limit-200 page measured 1.97-2.31MB
+// per op with the narrow read and 2.21-2.65MB per op with the fixed 512-row
+// batch restored. Object counts moved by only a few percent under -race
+// (3,117-3,172 for a limit-60 page) and follow the decoded row count: the fixed
+// batch allocated about 16k objects for a 60-row page against about 3.2k now,
+// and about 134k against 58k for a scan-budget miss.
 func TestLogPageDecodeBudget(t *testing.T) {
 	s := testStoreWithQueryTimeout(t, time.Hour)
 	start := time.UnixMilli(1_800_000_000_000)
@@ -253,13 +264,15 @@ func TestLogPageDecodeBudget(t *testing.T) {
 	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
 	for _, tc := range []struct {
 		name, query string
-		maxBytes    int64
 		maxAllocs   int64
 	}{
-		{"empty_limit_60", "/metrics/agg/log?limit=60", 600 << 10, 12_000},
-		{"empty_limit_200", "/metrics/agg/log?limit=200", 2 << 20, 15_000},
-		{"sql_provider_limit_60", "/metrics/agg/log?limit=60&f=provider:provider-03", 600 << 10, 12_000},
-		{"go_status_class_limit_60", "/metrics/agg/log?limit=60&f=status:2xx", 600 << 10, 12_000},
+		{"empty_limit_60", "/metrics/agg/log?limit=60", 6_500},
+		{"empty_limit_200", "/metrics/agg/log?limit=200", 12_000},
+		{"sql_provider_limit_60", "/metrics/agg/log?limit=60&f=provider:provider-03", 6_500},
+		{"go_status_class_limit_60", "/metrics/agg/log?limit=60&f=status:2xx", 6_500},
+		// The fixture is all 200s, so 5xx rejects every scanned row and must
+		// pay only for narrow candidates.
+		{"go_status_class_miss_limit_60", "/metrics/agg/log?limit=60&f=status:5xx", 80_000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res := testing.Benchmark(func(b *testing.B) {
@@ -271,11 +284,8 @@ func TestLogPageDecodeBudget(t *testing.T) {
 					}
 				}
 			})
-			if got := res.AllocedBytesPerOp(); got > tc.maxBytes {
-				t.Fatalf("%s allocated %d bytes/op, want at most %d (decoded rows must follow the page)", tc.query, got, tc.maxBytes)
-			}
-			if got := res.AllocsPerOp(); got > tc.maxAllocs {
-				t.Fatalf("%s allocated %d times/op, want at most %d", tc.query, got, tc.maxAllocs)
+			if got, bytes := res.AllocsPerOp(), res.AllocedBytesPerOp(); got > tc.maxAllocs {
+				t.Fatalf("%s allocated %d objects/op (%d bytes/op), want at most %d (decoded rows must follow the page)", tc.query, got, bytes, tc.maxAllocs)
 			}
 		})
 	}
