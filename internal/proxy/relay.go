@@ -1004,15 +1004,17 @@ func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 // quota429Peek is the single owner of the bounded durable-quota peek on a 429
 // response: it reads at most maxErrBodyBytes+1 bytes of the error body and
 // classifies the in-cap envelope through the canonical parser
-// (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). An in-cap body is
-// closed and reported together with its durable classification and the
-// envelope's protocol tokens (type, code - the quota-pause reason label); an
-// overflowed body (longer than maxErrBodyBytes) is deliberately left OPEN
-// and unclassified (durable=false, leftOpen=true) - the classification stays
-// bounded by the cap. Each transport then applies its own overflow policy at
-// the call site: the generic relay re-serves prefix + live remainder
-// verbatim, the cursor transport closes and re-wraps only the truncated
-// prefix.
+// (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). The caller arms the
+// shared upstream idle guard on resp.Body at receipt (doWithRetry and
+// openCursorHTTP), so a tarpit that sends headers and stalls cannot hold this
+// read past upstreamStreamIdleTimeout. An in-cap body is closed and reported
+// together with its durable classification and the envelope's protocol tokens
+// (type, code - the quota-pause reason label); an overflowed body (longer than
+// maxErrBodyBytes) is deliberately left OPEN and unclassified
+// (durable=false, leftOpen=true) - the classification stays bounded by the
+// cap. Each transport then applies its own overflow policy at the call site:
+// the generic relay re-serves prefix + live remainder verbatim, the cursor
+// transport closes and re-wraps only the truncated prefix.
 func quota429Peek(resp *http.Response) (durable bool, typ, code string, peeked []byte, leftOpen bool) {
 	peeked, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrBodyBytes+1))
 	if len(peeked) > maxErrBodyBytes {
@@ -1028,11 +1030,13 @@ func quota429Peek(resp *http.Response) (durable bool, typ, code string, peeked [
 // body's relay phase), so a fresh deadline anchors at each attempt's Do -
 // waits that precede the send (operator holds, group serialization, backoff,
 // Retry-After windows) run on the base request context and never burn the
-// budget. A non-positive timeout returns the base context with a no-op cancel
-// so callers can always defer the returned func.
+// budget. With no caller deadline the attempt still gets its own cancelable
+// child context: the shared upstream body idle guard cancels that context to
+// unblock a stalled transport read, so the no-timeout path must not degrade to
+// a no-op cancel. Callers always defer the returned func.
 func withSendTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
-		return ctx, func() {}
+		return context.WithCancel(ctx)
 	}
 	return context.WithTimeout(ctx, timeout)
 }
@@ -1335,6 +1339,15 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			continue
 		}
 
+		// Guard the response body at receipt, before any consumer reads it.
+		// The durable-quota peek, the absorbed-attempt error-body drain, and
+		// the caller's capture/relay all read resp.Body; a provider that sends
+		// headers and then goes silent must not pin the handler, the upstream
+		// connection and the inflight reservation outside the shared idle
+		// bound. Cancelling this attempt's context is what aborts a blocked
+		// transport read; Close stops the timer and releases the context.
+		resp.Body = newIdleCancelBody(resp.Body, attemptCancel, upstreamStreamIdleTimeout)
+
 		// A 429 is normally transient flow control, but a 429 can also be the
 		// provider announcing a durable account condition (quota/credits/spend
 		// limits) that waiting can never clear. Only the body's structured
@@ -1420,11 +1433,9 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 					resp.Body = io.NopCloser(bytes.NewReader(errBody))
 				}
 			}
-			// A provider can send headers and then go silent forever. The
-			// attempt context's cancel is the only thing that aborts a blocked
-			// transport body read; arm it when no bytes arrive for the idle
-			// bound. Close stops the timer and releases the context.
-			resp.Body = newIdleCancelBody(resp.Body, attemptCancel, upstreamStreamIdleTimeout)
+			// The body was armed with the shared idle guard when this attempt's
+			// response arrived (and re-served prefixes above retain the live
+			// remainder's guard), so the caller keeps a bounded read.
 			return resp, attemptCancel, nil
 		}
 
