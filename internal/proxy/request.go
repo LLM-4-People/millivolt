@@ -1710,12 +1710,6 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 // normal request.
 const requestMetadataMaxElements = 10_000
 
-// requestContentPartMax bounds one message's content-part array before the
-// best-effort composition decoder materializes it. Multimodal messages do not
-// need thousands of parts; without this bound a tiny array of empty objects in
-// one message expands into a large typed slice.
-const requestContentPartMax = 4096
-
 // boundRequestMetadata is a lexical preflight over the top-level document. It
 // rejects only a JSON document whose messages/tools array or logit_bias object
 // exceeds the bound. Invalid JSON returns nil so the existing passthrough
@@ -1754,7 +1748,7 @@ func boundRequestMetadata(body []byte) error {
 		}
 		switch requestCollectionKey(key) {
 		case "messages", "tools":
-			n, next, ok := countJSONArrayBytes(body, i, requestMetadataMaxElements)
+			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
 				return nil
 			}
@@ -1868,45 +1862,6 @@ func asciiKeyEqual(raw []byte, name string) bool {
 		}
 	}
 	return true
-}
-
-// countJSONArrayBytes counts top-level members of a JSON array. A non-array
-// value is skipped and reported as zero so only actual collection overflows
-// are rejected; lexical traversal never materializes members.
-func countJSONArrayBytes(data []byte, i, max int) (int, int, bool) {
-	i = metrics.SkipSpace(data, i)
-	if i >= len(data) {
-		return 0, 0, false
-	}
-	if data[i] != '[' {
-		next := skipJSONValue(data, i)
-		return 0, next, next >= 0
-	}
-	i = metrics.SkipSpace(data, i+1)
-	n := 0
-	for i < len(data) && data[i] != ']' {
-		next := skipJSONValue(data, i)
-		if next <= i {
-			return 0, 0, false
-		}
-		n++
-		if n > max {
-			return n, next, true
-		}
-		i = metrics.SkipSpace(data, next)
-		if i < len(data) && data[i] == ',' {
-			i = metrics.SkipSpace(data, i+1)
-			continue
-		}
-		if i < len(data) && data[i] == ']' {
-			break
-		}
-		return 0, 0, false
-	}
-	if i >= len(data) || data[i] != ']' {
-		return 0, 0, false
-	}
-	return n, i + 1, true
 }
 
 // countJSONLogitBias accumulates the distinct keys of one logit_bias object
@@ -2170,7 +2125,7 @@ func (c *requestContent) UnmarshalJSON(content []byte) error {
 		return nil
 	}
 	if i := metrics.SkipSpace(content, 0); i < len(content) && content[i] == '[' {
-		if n, _, ok := countJSONArrayBytes(content, i, requestContentPartMax); !ok || n > requestContentPartMax {
+		if n, _, ok := metrics.CountJSONArrayBytes(content, i, metrics.ContentPartMax); !ok || n > metrics.ContentPartMax {
 			return nil // best-effort composition, never a routing/type failure
 		}
 	}

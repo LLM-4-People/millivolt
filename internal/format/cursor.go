@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 // agent.v1 protobuf field numbers (wire contract - do not change without the
@@ -137,8 +139,12 @@ func CursorModelsPath() string { return cursorModelsPath }
 // plain string content, or an array of {type:"text"} parts joined; other part
 // kinds (file/image/audio) degrade to a bracketed placeholder so the message
 // never silently vanishes. Array content is what clients send for multipart
-// messages; dropping it meant the model never saw those turns.
+// messages; dropping it meant the model never saw those turns. An array over
+// metrics.ContentPartMax is skipped rather than decoded.
 func cursorMessageText(m openaiMessage) string {
+	if !metrics.ContentPartsWithinLimit(m.Content) {
+		return ""
+	}
 	if s, ok := m.ContentString(); ok {
 		return s
 	}

@@ -132,7 +132,9 @@ func ClassifyNonStreamBody(body []byte) string {
 // contentPresent reports whether the raw value is a present, non-empty
 // payload: a non-empty string, a non-empty array of parts, or an object part
 // (null and empty values are decoys, never presence). The single presence
-// predicate for the buffered body's answer content and reasoning fields.
+// predicate for the buffered body's answer content and reasoning fields. The
+// array check is lexical: presence only needs to know that a first member
+// exists, so a hostile part array is never materialized.
 func contentPresent(content json.RawMessage) bool {
 	t := bytes.TrimLeft(content, " \t\r\n")
 	if len(t) == 0 {
@@ -145,10 +147,8 @@ func contentPresent(content json.RawMessage) bool {
 			return s != ""
 		}
 	case '[':
-		var parts []json.RawMessage
-		if json.Unmarshal(t, &parts) == nil {
-			return len(parts) > 0
-		}
+		n, _, ok := CountJSONArrayBytes(t, 0, 1)
+		return ok && n > 0
 	case 'n':
 		return false // "null"
 	default:
@@ -161,9 +161,13 @@ func contentPresent(content json.RawMessage) bool {
 // a bare string stays itself, an array of parts joins the string text field of
 // every part (a part that is not an object, or whose text is not a string,
 // fails the whole array), a JSON null decodes as the empty string, and any
-// other shape reports false. The tool-result reader, the input-token estimate
-// and the non-stream analysis share it so the content walks cannot drift.
+// other shape reports false. An array over ContentPartMax is skipped rather
+// than decoded. The tool-result reader, the input-token estimate and the
+// non-stream analysis share it so the content walks cannot drift.
 func FlattenContent(raw json.RawMessage) (string, bool) {
+	if !ContentPartsWithinLimit(raw) {
+		return "", false
+	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
 		return s, true

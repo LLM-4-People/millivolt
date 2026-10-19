@@ -49,6 +49,9 @@ var (
 	// errNativeToolBlocks is the stable fail-closed reason for opening more
 	// concurrent tool blocks than nativeToolBlocksMax.
 	errNativeToolBlocks = errors.New("anthropic: concurrent tool block limit exceeded")
+	// errNativeContentParts is the stable fail-closed reason for a response
+	// content-block array over metrics.ContentPartMax.
+	errNativeContentParts = errors.New("anthropic: content block limit exceeded")
 )
 
 // checkNativeIdentity enforces nativeIdentityMaxBytes on one provider-controlled
@@ -216,7 +219,12 @@ func (m openaiMessage) ContentString() (string, bool) {
 // ContentText accepts both the string form and the OpenAI content-array form,
 // joining text parts in order. Other part types are ignored rather than
 // stringified; callers that require structured content use the raw message.
+// An array over metrics.ContentPartMax is skipped rather than decoded, so one
+// hostile message cannot expand into a body-sized typed slice.
 func (m openaiMessage) ContentText() (string, bool) {
+	if !metrics.ContentPartsWithinLimit(m.Content) {
+		return "", false
+	}
 	if s, ok := m.ContentString(); ok {
 		return s, true
 	}
@@ -396,6 +404,30 @@ func (e anthropicErrorEvent) openAIError() map[string]any {
 	}
 }
 
+// nativeContentBlock is one Anthropic Messages response content block, the
+// only provider response field whose array can expand into a typed slice.
+type nativeContentBlock struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
+// nativeContentBlocks bounds the response block array before materializing it.
+// The request-composition limit is reused because a provider response is the
+// same untrusted-array shape: a body of tiny empty objects must not expand into
+// hundreds of MiB of typed blocks.
+type nativeContentBlocks []nativeContentBlock
+
+func (b *nativeContentBlocks) UnmarshalJSON(raw []byte) error {
+	if !metrics.ContentPartsWithinLimit(raw) {
+		return fmt.Errorf("%w (limit %d parts)", errNativeContentParts, metrics.ContentPartMax)
+	}
+	type blocks []nativeContentBlock
+	return json.Unmarshal(raw, (*blocks)(b))
+}
+
 // TranslateResponse converts an Anthropic Messages (non-streaming) response
 // into an OpenAI Chat Completions response. An Anthropic error body
 // ({"type":"error",...}) is passed through as a JSON object with an error key.
@@ -410,18 +442,12 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 	}
 
 	var in struct {
-		ID      string `json:"id"`
-		Model   string `json:"model"`
-		Role    string `json:"role"`
-		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
-		} `json:"content"`
-		StopReason string      `json:"stop_reason"`
-		Usage      nativeUsage `json:"usage"`
+		ID         string              `json:"id"`
+		Model      string              `json:"model"`
+		Role       string              `json:"role"`
+		Content    nativeContentBlocks `json:"content"`
+		StopReason string              `json:"stop_reason"`
+		Usage      nativeUsage         `json:"usage"`
 	}
 	if err := json.Unmarshal(anthropicBody, &in); err != nil {
 		return nil, fmt.Errorf("parse anthropic body: %w", err)

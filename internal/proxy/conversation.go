@@ -301,74 +301,12 @@ func topLevelJSONKey(data []byte, key string) (tail []byte, duplicate bool) {
 	}
 }
 
-// skipJSONValue advances past one JSON value - a string, a nested object or
-// array tracked as a bracket depth, or a bare number/literal - returning the
-// index just past the value, or -1 when the bytes run out inside an
-// unterminated structure. Lexical only: it never validates the value.
-func skipJSONValue(data []byte, i int) int {
-	if i < 0 || i >= len(data) {
-		return -1
-	}
-	switch data[i] {
-	case '"':
-		return skipJSONString(data, i)
-	case '{', '[':
-		depth := 1
-		i++
-		for i < len(data) && depth > 0 {
-			switch data[i] {
-			case '"':
-				next := skipJSONString(data, i)
-				if next < 0 {
-					return -1
-				}
-				i = next - 1
-			case '{', '[':
-				depth++
-			case '}', ']':
-				depth--
-			}
-			i++
-		}
-		if depth != 0 {
-			return -1
-		}
-		return i
-	default:
-		// A number or literal (on invalid input, garbage): the next member
-		// separator or closing bracket ends the scalar.
-		for i < len(data) && data[i] != ',' && data[i] != '}' && data[i] != ']' {
-			i++
-		}
-		return i
-	}
-}
+// skipJSONValue and skipJSONString are the proxy-side names for the shared
+// lexical scanner in metrics. One implementation owns JSON value/string
+// traversal for the metadata preflight and the content-part bound.
+func skipJSONValue(data []byte, i int) int { return metrics.SkipJSONValue(data, i) }
 
-// skipJSONString returns the index just past the closing quote of the JSON
-// string opening at i, or -1 when the string is unterminated. The common
-// unescaped body is one SIMD IndexByte search; only a string that actually
-// contains a backslash falls back to the escape-aware byte loop.
-func skipJSONString(data []byte, i int) int {
-	if i >= len(data) || data[i] != '"' {
-		return -1
-	}
-	rest := data[i+1:]
-	if j := bytes.IndexByte(rest, '"'); j >= 0 && bytes.IndexByte(rest[:j], '\\') < 0 {
-		return i + 1 + j + 1
-	}
-	i++
-	for i < len(data) {
-		if data[i] == '\\' {
-			i += 2
-			continue
-		}
-		if data[i] == '"' {
-			return i + 1
-		}
-		i++
-	}
-	return -1
-}
+func skipJSONString(data []byte, i int) int { return metrics.SkipJSONString(data, i) }
 
 // conversation.go reconstructs LLM "conversations" (multi-request tasks) from
 // stateless requests, without any client cooperation or hardcoded client rules.

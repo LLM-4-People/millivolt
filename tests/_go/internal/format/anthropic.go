@@ -608,7 +608,7 @@ func TestTranslateResponseContentExactOutput(t *testing.T) {
 }
 
 // TestTranslateResponseContentAllocationLinear mirrors the system join test for
-// non-streaming text blocks.
+// non-streaming text blocks, stopping at the shared composition bound.
 func TestTranslateResponseContentAllocationLinear(t *testing.T) {
 	mk := func(n int) []byte {
 		var b strings.Builder
@@ -623,7 +623,7 @@ func TestTranslateResponseContentAllocationLinear(t *testing.T) {
 		return []byte(b.String())
 	}
 	var prev uint64
-	for _, n := range []int{4000, 8000, 16000} {
+	for _, n := range []int{1024, 2048, 4096} {
 		body := mk(n)
 		var out []byte
 		var err error
