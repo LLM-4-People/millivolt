@@ -437,7 +437,10 @@ func main() {
 	// Rebuild & graceful restart (dashboard Restart button → /admin/restart).
 	// The restarter owns the handoff choreography; see restart.go for the
 	// zero-lost-requests guarantees.
-	rst := newRestarter(&restartDeps{
+	// Declared before the deps literal because the flush closure below fences
+	// reloads through this restarter's handoff/resume state.
+	var rst *restarter
+	rst = newRestarter(&restartDeps{
 		listener: ln,
 		server:   httpSrv,
 		cloneServer: func() *http.Server {
@@ -452,6 +455,13 @@ func main() {
 		},
 		closeFeeds: buf.CloseFeeds,
 		flushStore: func() error {
+			// The flush is the durability barrier: no config reload may
+			// start or commit after it, or a provider-alias rename or
+			// operator persistence could write the store after the child
+			// is told the parent is quiescent. A successful handoff exits
+			// this process with the fence held; a failed one releases it
+			// when serving resumes.
+			fenceReloadsForHandoff(rst)
 			if proxySrv != nil {
 				if err := proxySrv.FlushThrottles(context.Background()); err != nil {
 					return fmt.Errorf("throttle flush: %w", err)
@@ -541,15 +551,17 @@ loop:
 			return
 		case sig := <-sigc:
 			if sig == syscall.SIGHUP {
-				if handoffDone := rst.handoffDone(); handoffDone != nil {
-					log.Printf("received SIGHUP during restart handoff; the handoff owns shutdown")
-					<-handoffDone
-					continue
-				}
 				// Config reload: hot-apply the reloadable subset with zero
 				// dropped requests; report any restart-required field changes.
 				// reloadConfig failure branches own the failure log lines.
-				skipped, err := reloadConfig()
+				// Never wait here: a restart handoff holds the reload fence
+				// through its store flush, and SIGTERM/SIGINT must still reach
+				// this loop. A skipped SIGHUP is logged, not queued.
+				skipped, ran, err := tryReloadConfig()
+				if !ran {
+					log.Printf("received SIGHUP while a config transaction holds the reload lock; reload skipped")
+					continue
+				}
 				if err == nil && len(skipped) > 0 {
 					log.Printf("config reloaded; restart required for: %s", strings.Join(skipped, ", "))
 				} else if err == nil {
@@ -652,6 +664,16 @@ func lastReloadDoc() any {
 	}
 }
 
+// lastReloadDropped is the dropped-key half of lastReloadDoc for the
+// /admin/reload response. The caller holds reloadMu, so this reads the outcome
+// of the transaction it just committed, never a later one; a successful
+// reload always reports an array (empty, never null).
+func lastReloadDropped() []string {
+	reloadStatus.mu.Lock()
+	defer reloadStatus.mu.Unlock()
+	return append([]string{}, reloadStatus.droppedKeys...)
+}
+
 // adminConfigHandler wires the /admin/config handler. Boot and the reload
 // status tests share this one constructor so the ReloadStatus wiring
 // cannot silently drift out of main.
@@ -699,13 +721,13 @@ func reloadHandler() http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		skipped, err := reloadConfig()
+		skipped, dropped, err := reloadConfigWithDropped()
 		if err != nil {
 			adminjson.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		log.Printf("config reloaded from %s (restart-required fields skipped: %s)", liveConfigPath, strings.Join(skipped, ","))
-		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped})
+		enc, _ := json.Marshal(map[string]any{"ok": true, "restart_required": skipped, "dropped_keys": dropped})
 		w.Write(enc)
 	}
 }
@@ -740,6 +762,54 @@ func reloadConfig() ([]string, error) {
 	reloadMu.Lock()
 	defer reloadMu.Unlock()
 	return reloadConfigLocked()
+}
+
+// reloadConfigWithDropped is the /admin/reload transaction: reloadConfig's
+// lock plus the dropped-key report read while that lock is still held, so a
+// concurrent reload cannot swap the status slot between the apply and the
+// response. dropped_keys names only unknown/obsolete debris (invalid values
+// fail the reload); it is never silently omitted from a success response.
+func reloadConfigWithDropped() (skipped, dropped []string, err error) {
+	reloadMu.Lock()
+	defer reloadMu.Unlock()
+	skipped, err = reloadConfigLocked()
+	return skipped, lastReloadDropped(), err
+}
+
+// tryReloadConfig is the signal-loop variant of reloadConfig. It never waits
+// for the reload lock: a restart handoff holds it from the store-flush
+// barrier until the handoff resolves, and a Settings save or backup restore
+// may hold it for its own transaction. Signaling that it did not run lets the
+// signal loop keep serving SIGTERM/SIGINT instead of blocking here.
+func tryReloadConfig() (skipped []string, ran bool, err error) {
+	if !reloadMu.TryLock() {
+		return nil, false, nil
+	}
+	defer reloadMu.Unlock()
+	skipped, err = reloadConfigLocked()
+	return skipped, true, err
+}
+
+// fenceReloadsForHandoff takes the reload lock at the restart handoff's store
+// flush barrier and holds it until the handoff resolves. A successful handoff
+// exits the process with the lock held (nothing else can mutate after the
+// child opens the database). A failed handoff closes the restarter's resume
+// fence, and this watcher releases the lock so the resumed process can reload
+// normally. Must be called only after the restart commit point, where
+// handoffDone is non-nil.
+func fenceReloadsForHandoff(rs *restarter) {
+	reloadMu.Lock()
+	done := rs.handoffDone()
+	if done == nil {
+		// Defensive: not inside a committed handoff, so there is no resume
+		// fence to wait on and holding the lock would deadlock the process.
+		reloadMu.Unlock()
+		return
+	}
+	go func() {
+		<-done
+		reloadMu.Unlock()
+	}()
 }
 
 // reloadConfigLocked is reloadConfig for a caller that already holds reloadMu.

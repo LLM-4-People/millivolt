@@ -254,7 +254,7 @@ func TestAdminReloadEndpointShape(t *testing.T) {
 		if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "" {
 			t.Errorf("X-Content-Type-Options = %q, want unset on success", xcto)
 		}
-		if got, want := w.Body.String(), `{"ok":true,"restart_required":["history_size"]}`; got != want {
+		if got, want := w.Body.String(), `{"dropped_keys":["max_retriez"],"ok":true,"restart_required":["history_size"]}`; got != want {
 			t.Errorf("success body = %q, want %q", got, want)
 		}
 	})

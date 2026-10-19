@@ -1587,7 +1587,12 @@ type configValueError struct {
 	err error
 }
 
-func (e *configValueError) Error() string { return fmt.Sprintf("config key %q: %v", e.key, e.err) }
+func (e *configValueError) Error() string {
+	if e.key == "" {
+		return fmt.Sprintf("invalid config value: %v", e.err)
+	}
+	return fmt.Sprintf("config key %q: %v", e.key, e.err)
+}
 func (e *configValueError) Unwrap() error { return e.err }
 
 // failClosedYAMLKey lists keys whose absence changes a security or bind
@@ -1613,8 +1618,10 @@ func LoadFile(path string) (*Config, error) {
 }
 
 // LoadFileStrict is the reload admission path. Unlike LoadFile it does not
-// salvage a partially valid document: any unparseable, unknown, invalid or
-// extra key fails the reload so the running policy is preserved. Boot repair
+// salvage a recognized key's invalid value: any unparseable document, unknown
+// nested field, extra document, invalid value or cross-field validation
+// failure fails the reload so the running policy is preserved. Unknown
+// top-level keys remain debris and are reported, never applied. Boot repair
 // remains LoadFileRepair's job.
 func LoadFileStrict(path string) (*Config, []string, error) {
 	if path == "" {
@@ -1624,30 +1631,44 @@ func LoadFileStrict(path string) (*Config, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("read config: %w", err)
 	}
-	return loadYAMLBytesStrict(path, b)
+	return loadYAMLBytesFailClosed(path, b, false)
 }
 
-// LoadBytes is LoadFile for an in-memory YAML document. Used by backup
-// restore so a snapshot is admitted through the same overlay/Validate choke
-// as a file, without writing it first.
+// LoadBytes is the backup-restore admission path for an in-memory YAML
+// document. It fails closed on invalid recognized values like boot, while
+// unknown debris is reported and omitted.
 func LoadBytes(b []byte) (*Config, []string, error) {
-	return loadYAMLBytes("backup", b)
+	return loadYAMLBytesFailClosed("backup", b, true)
 }
 
-// LoadFileRepair is LoadFile, then persists a cleaned document when anything
-// was dropped. Unparseable files are moved aside to path+invalidConfigSuffix
-// and replaced with Default(). A duplicate top-level key is ambiguous instead
-// of debris: it is returned as a parse error and the source is left untouched.
-// Healthcheck and print-only paths must not call this.
+// LoadFileRepair is the boot-only repair path: it loads under the fail-closed
+// policy, then persists a cleaned document when unknown keys, unknown nested
+// fields, or extra YAML documents were dropped. A recognized key with an
+// invalid value is not debris and returns an error without rewriting the
+// source. Unparseable files are moved aside to path+invalidConfigSuffix and
+// replaced with Default(). A duplicate top-level key is ambiguous instead of
+// debris: it is returned as a parse error and the source is left untouched.
+// Healthcheck, print-only and reload paths must not call this.
 func LoadFileRepair(path string) (*Config, []string, error) {
-	cfg, skipped, err := loadYAMLFile(path)
+	if path == "" {
+		cfg := Default()
+		return cfg, nil, cfg.Validate()
+	}
+	b, err := readConfigFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Default(), nil, nil
+		}
+		return nil, nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg, skipped, err := loadYAMLBytesFailClosed(path, b, true)
 	if err != nil {
 		var valueErr *configValueError
 		if errors.As(err, &valueErr) {
 			return nil, nil, err
 		}
 		var parseErr *configParseError
-		if path == "" || !errors.As(err, &parseErr) {
+		if !errors.As(err, &parseErr) {
 			return nil, nil, err
 		}
 		// A duplicate key is ambiguous, not debris: leave the document
@@ -1667,7 +1688,7 @@ func LoadFileRepair(path string) (*Config, []string, error) {
 		}
 		return cfg, []string{skippedUnparseable}, nil
 	}
-	if len(skipped) > 0 && path != "" {
+	if len(skipped) > 0 {
 		if err := WriteFile(path, cfg); err != nil {
 			return cfg, skipped, fmt.Errorf("repair config %s: %w", path, err)
 		}
@@ -1775,19 +1796,25 @@ func loadYAMLBytes(path string, b []byte) (*Config, []string, error) {
 	return cfg, skipped, nil
 }
 
-// loadYAMLBytesStrict parses one document with no salvage. Any unsupported or
-// invalid key, unknown field, extra document or cross-field validation failure
-// is returned as an error so a reload cannot silently alter policy.
-func loadYAMLBytesStrict(path string, b []byte) (*Config, []string, error) {
+// loadYAMLBytesFailClosed parses one document for the applying paths (boot
+// repair, reload, backup restore). A recognized key's invalid value is always
+// an error. repairDebris additionally allows boot to drop and rewrite unknown
+// top-level keys, unknown nested fields and extra documents; reload refuses
+// the latter two so only an explicit boot repair can clean a document.
+func loadYAMLBytesFailClosed(path string, b []byte, repairDebris bool) (*Config, []string, error) {
 	def := Default()
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	var first yaml.Node
 	if err := dec.Decode(&first); err != nil && !errors.Is(err, io.EOF) {
 		return nil, nil, parseConfig(path, err)
 	}
+	var skipped []string
 	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, nil, parseConfig(path, errors.New("multiple YAML documents"))
+		if !repairDebris {
+			return nil, nil, parseConfig(path, errors.New("multiple YAML documents"))
+		}
+		skipped = append(skipped, skippedExtraDocument)
 	}
 	mapping, err := yamlDocumentMapping(&first)
 	if err != nil {
@@ -1798,32 +1825,34 @@ func loadYAMLBytesStrict(path string, b []byte) (*Config, []string, error) {
 		return nil, nil, parseConfig(path, err)
 	}
 	if len(present) == 0 {
-		return def, nil, nil
+		return def, skipped, nil
 	}
 	keys := slices.Sorted(maps.Keys(present))
 	accepted := make([]string, 0, len(keys))
-	var dropped []string
 	for _, key := range keys {
 		if FieldByKey(key) == nil {
-			// Unknown keys remain boot-repair debris and are reported so the
-			// reload status shows what the operator's typo did not apply.
-			dropped = append(dropped, key)
+			// Unknown top-level keys are obsolete debris, never policy: both
+			// paths report them without applying them.
+			skipped = append(skipped, key)
 			continue
 		}
 		loose, err := overlayYAMLKey(def.Clone(), key, nodes[key], present[key])
 		if err != nil {
-			return nil, nil, parseConfig(path, &configValueError{key: key, err: err})
+			return nil, nil, &configValueError{key: key, err: err}
 		}
 		if loose {
-			return nil, nil, parseConfig(path, fmt.Errorf("config key %q has unknown fields", key))
+			if !repairDebris {
+				return nil, nil, parseConfig(path, fmt.Errorf("config key %q has unknown fields", key))
+			}
+			skipped = append(skipped, key+" (unknown fields)")
 		}
 		accepted = append(accepted, key)
 	}
 	cfg, err := mergeYAMLKeys(def, present, nodes, accepted)
 	if err != nil {
-		return nil, nil, parseConfig(path, err)
+		return nil, nil, &configValueError{err: err}
 	}
-	return cfg, dropped, nil
+	return cfg, skipped, nil
 }
 
 func yamlResolved(n *yaml.Node) *yaml.Node {
