@@ -12,6 +12,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/sse"
@@ -133,7 +134,22 @@ func MergeTokenCaps(maxCompletion, maxTokens *int) *int {
 // Anthropic's native top-level prompt_cache_key field - the proxy's
 // sub-conversation tracking value, extracted from the client's own spelling
 // before translation (the translator's allowlist would drop that spelling).
+// The whole body must be valid UTF-8: a raw invalid byte is rejected before the
+// typed decode so the standard decoder's three-byte U+FFFD replacement cannot
+// expand a body-sized string in memory.
 func TranslateRequest(openaiBody []byte, defaultMaxTokens int, promptCacheKey string) ([]byte, error) {
+	// Reject raw invalid UTF-8 before the typed decode. Valid UTF-8 is the
+	// decoded-output bound: every decoded string is no larger than its raw
+	// spelling, so the typed decode cannot grow the request. The standard
+	// decoder would instead replace each invalid byte with U+FFFD (three
+	// bytes), tripling a body-sized string here and again while the translated
+	// body is re-encoded. The proxy's metadata boundary rejects the same input
+	// before translation; this keeps direct callers of the translator bounded
+	// too. Escaped lone surrogates stay accepted: their raw bytes are ASCII and
+	// their decoded form is already one replacement rune.
+	if !utf8.Valid(openaiBody) {
+		return nil, errParseOpenAIBody(errors.New("request body is not valid UTF-8"))
+	}
 	var in struct {
 		Model              string          `json:"model"`
 		Messages           []openaiMessage `json:"messages"`

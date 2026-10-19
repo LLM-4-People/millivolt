@@ -355,6 +355,10 @@ func TestRequestMetadataDuplicateMessageArrayReuse(t *testing.T) {
 }
 
 func TestRequestMetadataUnicodeContentAndPreview(t *testing.T) {
+	// Small raw invalid UTF-8 stays accepted here, matching the documented
+	// drop-not-reject passthrough contract. Only a body-sized sequence is
+	// rejected by the expansion boundary (see request_utf8.go); valid UTF-8 and
+	// every JSON escape spelling decode exactly as the standard decoder does.
 	for _, raw := range [][]byte{
 		[]byte(`"ASCII"`), []byte(`"hé😀"`), []byte(`"line\n\r\t\b\f\"\\\/end"`),
 		[]byte(`"\u0061\u00e9\ud83d\ude00"`), []byte(`"\ud800x\udc00"`),

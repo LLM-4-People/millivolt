@@ -144,8 +144,17 @@ still relays unchanged, but composition skips it, so it contributes no
 dashboard composition counts. Separately, the aggregate content-part count over
 every message content array and a top-level `system` array is capped at 16,384;
 a valid request above that aggregate is rejected with HTTP 400 before an
-upstream send. Invalid JSON is passed through on the nontranslated path. The
-proxy can retry transient transport failures, 429 and 5xx before returning the
+upstream send. Invalid JSON is passed through on the nontranslated path.
+Syntactically valid JSON whose strings carry raw invalid UTF-8 is bounded the
+same way: valid UTF-8 and JSON escapes decode to no more bytes than their
+spelling, while the standard decoder replaces each invalid byte with a
+three-byte U+FFFD. A body whose decoded strings would exceed its uploaded size
+by more than a small internal allowance is rejected with HTTP 400 before an
+upstream send; smaller invalid sequences remain accepted on the passthrough
+path, where a tracked value that fails the identity rules is still dropped
+rather than rejected. Anthropic translation requires the whole request body to
+be valid UTF-8 and rejects a raw invalid byte before decoding it. The proxy can
+retry transient transport failures, 429 and 5xx before returning the
 final response, and retryable in-band error events on an open stream before any
 generation content was relayed. Durable
 quota/billing 429s follow `quota_pause_mode` instead of the transient retry

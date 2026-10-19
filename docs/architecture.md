@@ -28,8 +28,16 @@ defines their supported combinations.
 `readRequest` retains bounded original bytes and calls the single metadata
 decoder. Ordinary content is measured without retaining decoded prompt/schema
 trees; opt-in previews stay bounded. Exceptional decoder compatibility belongs
-at that owner, not a second routing parser. The Start stamp follows body upload
-and precedes metadata/translation CPU. Upstream whole-document buffers share
+at that owner, not a second routing parser. Before the typed decode,
+`parseLLMRequest` bounds decoded JSON-string expansion: valid UTF-8 and JSON
+escapes decode to no more bytes than their spelling, so only raw invalid UTF-8
+can consume the small allowance (the standard decoder writes a three-byte
+U+FFFD per invalid byte). A larger expansion is rejected before materializing;
+malformed JSON keeps its passthrough contract, and small invalid sequences still
+pass through. The Anthropic translator independently requires valid UTF-8 input,
+so it cannot materialize the replacement expansion either. The Start stamp
+follows body upload and precedes metadata/translation CPU. Upstream
+whole-document buffers share
 one process-wide `max_inflight_response_bytes` reservation: translated
 non-streaming responses, the non-streaming 200 quality spool, and
 model-discovery pages. Admission reserves the declared Content-Length when it

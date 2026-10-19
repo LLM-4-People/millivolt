@@ -243,8 +243,11 @@ U+FFFD. The drop is conservative: the value's raw spelling is
 scanned inside a bounded window, so a value whose raw span exceeds the window
 (escape sequences spend more raw bytes than they decode to, and trimmable
 edges count before trimming) is dropped even when its trimmed form would
-pass. An absent or dropped identity is never a client error: the body is
-passthrough payload, and the request keeps automatic grouping.
+pass. An absent or dropped identity is never a client error: on the
+passthrough wire the body is payload, and the request keeps automatic
+grouping. A translated target still requires the whole request body to be
+valid UTF-8, as [protocol](protocol.md#relay-retries-and-model-discovery)
+describes.
 
 The kept value groups the request under a `k:` conversation identity.
 Precedence is the explicit `X-Proxy-Session` header first, then the tracked

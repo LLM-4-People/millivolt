@@ -2294,7 +2294,119 @@ func requestMetadataOverflow(body []byte, err error) error {
 	return err
 }
 
+// requestStringExpansionMax is the raw-byte headroom allowed for decoded JSON
+// string bytes beyond the request's own size. Valid UTF-8 and JSON escapes
+// decode to no more bytes than their spelling, so only raw invalid UTF-8 can
+// consume this allowance: encoding/json replaces each invalid byte with
+// U+FFFD (three bytes). 4 KiB keeps the documented drop-not-reject small-value
+// cases bounded (a tracked identity is at most 512 bytes) while rejecting the
+// body-sized replacement expansion. Internal safety guardrail, not
+// user-tunable.
+const requestStringExpansionMax = 4 << 10
+
+// requestStringExpansionExceeded reports whether a syntactically valid JSON
+// document's decoded strings would exceed the body size by more than
+// requestStringExpansionMax. Without this preflight a body-sized string of raw
+// invalid UTF-8 triples across the metadata decode and translation in memory
+// before any configured size bound sees the result. The scan is lexical and
+// allocation-free. Malformed documents return false to keep the established
+// passthrough contract; encoding/json validates their syntax before decoding
+// any string, so they cannot expand either.
+func requestStringExpansionExceeded(body []byte) bool {
+	// Ordinary requests are valid UTF-8, so every JSON string's decoded form
+	// is no larger than its raw spelling and no string scan is needed. Only a
+	// body carrying raw invalid bytes can expand.
+	if utf8.Valid(body) {
+		return false
+	}
+	decoded, ok := decodedJSONStringBytes(body)
+	if !ok || decoded <= len(body)+requestStringExpansionMax {
+		return false
+	}
+	return json.Valid(body)
+}
+
+// decodedJSONStringBytes sums the decoded UTF-8 byte length of every JSON
+// string in data. Escapes are bounded by their raw spelling: a two-byte escape
+// decodes to one byte, and a six-byte \uXXXX escape is counted as at most
+// three, so a valid document's decoded strings never exceed its raw size
+// unless raw invalid UTF-8 is present. An invalid byte is counted as its
+// three-byte U+FFFD replacement.
+func decodedJSONStringBytes(data []byte) (int, bool) {
+	total := 0
+	for i := 0; i < len(data); {
+		if data[i] != '"' {
+			i++
+			continue
+		}
+		end := metrics.SkipJSONString(data, i)
+		if end < 0 {
+			return 0, false
+		}
+		n, ok := decodedJSONStringLength(data[i:end])
+		if !ok {
+			return 0, false
+		}
+		total += n
+		i = end
+	}
+	return total, true
+}
+
+// decodedJSONStringLength returns the decoded UTF-8 byte length of one raw
+// JSON string span. It never allocates and accepts malformed escapes only far
+// enough to keep the caller on its passthrough path.
+func decodedJSONStringLength(raw []byte) (int, bool) {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return 0, false
+	}
+	s := raw[1 : len(raw)-1]
+	n := 0
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c == '\\' {
+			i++
+			if i >= len(s) {
+				return 0, false
+			}
+			if s[i] == 'u' {
+				if i+4 >= len(s) {
+					return 0, false
+				}
+				// Six raw bytes decode to at most three UTF-8 bytes; a
+				// surrogate pair is two escapes (twelve raw bytes) and
+				// decodes to four, still bounded by its spelling.
+				n += 3
+				i += 5
+				continue
+			}
+			n++
+			i++
+			continue
+		}
+		if c < utf8.RuneSelf {
+			n++
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRune(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			n += utf8.RuneLen(utf8.RuneError)
+			i++
+			continue
+		}
+		n += size
+		i += size
+	}
+	return n, true
+}
+
 func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+	// Reject replacement expansion before the first typed decode so raw
+	// invalid UTF-8 cannot multiply the request in memory.
+	if requestStringExpansionExceeded(body) {
+		return fmt.Errorf("request body contains invalid UTF-8 that expands beyond the request size")
+	}
 	if err := boundRequestMetadata(body); err != nil {
 		return err
 	}
