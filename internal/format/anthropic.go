@@ -48,6 +48,39 @@ const (
 	// large arguments stream through input_json_delta. Internal safety
 	// guardrail, not user-tunable.
 	nativeToolInitialBytesMax = 4 << 20
+
+	// wireJSONSourceByteMax is the largest encoded size of one accepted
+	// source byte after translation: a raw invalid UTF-8 byte becomes the
+	// three-byte U+FFFD replacement, U+2028/U+2029 expand from three bytes to
+	// six, and a C0 control only appears in accepted JSON as an escape whose
+	// six-byte output spelling is no larger than its six-byte source spelling.
+	// sse.MarshalWireJSON disables HTML escaping, so <, > and & stay one byte.
+	wireJSONSourceByteMax = 3
+
+	// wireJSONDecodedByteMax is the largest wire encoding of one decoded
+	// identity byte: a C0 control becomes a six-byte \u00XX escape.
+	wireJSONDecodedByteMax = 6
+
+	// nativeStreamFrameEnvelopeMax covers the fixed chunk-envelope text
+	// around one event: the id/object/created/model skeleton, one
+	// choice/delta/finish skeleton, and the largest fixed extra object (usage
+	// or error keys). Provider-controlled text inside those objects is
+	// counted separately.
+	nativeStreamFrameEnvelopeMax = 2 * 1024
+
+	// NativeStreamFrameMaxBytes bounds one SSE data line emitted by
+	// StreamToOpenAI from a source line the translator accepts. The scanner
+	// admits at most sseLineBufMax bytes per source line; re-encoding a
+	// decoded string or retained raw tool input can at most triple each
+	// source byte, and the retained message id/model are echoed into every
+	// chunk, each bounded at nativeIdentityMaxBytes and escaped to at most
+	// wireJSONDecodedByteMax bytes per byte. The envelope headroom covers the
+	// fixed chunk skeleton around those values. The proxy's translated relay
+	// sizes its line scanner from this bound, so every accepted source frame
+	// relays instead of failing as a translation_error. Safety guardrail, not
+	// user-tunable.
+	NativeStreamFrameMaxBytes = wireJSONSourceByteMax*sseLineBufMax +
+		2*wireJSONDecodedByteMax*nativeIdentityMaxBytes + nativeStreamFrameEnvelopeMax
 )
 
 var (

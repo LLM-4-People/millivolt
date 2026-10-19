@@ -89,6 +89,79 @@ func TestTranslatedStreamFrameAtNativeLineCapRelays(t *testing.T) {
 	}
 }
 
+// TestTranslatedStreamWorstCaseFrameExpansionRelays pins the translated SSE
+// frame cap against the two expansions a legitimate source line can carry:
+// a retained control-byte id/model echoed into every chunk, and JSON string
+// re-encoding (a raw U+2028 expands from three bytes to six; an invalid UTF-8
+// byte becomes the three-byte U+FFFD replacement). The fixture keeps every
+// source line inside the translator's accepted 1 MiB bound, so all three
+// cases must relay as ordinary chunks, with the normal frame as the control.
+func TestTranslatedStreamWorstCaseFrameExpansionRelays(t *testing.T) {
+	const prefix = `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`
+	const suffix = `"}}`
+	const identityBytes = 512
+	contentLen := sseScannerBufMax - 1 - len(prefix) - len(suffix)
+	// Source JSON escapes each control identity byte, which the translator
+	// decodes back to 512 control bytes and re-escapes into every chunk.
+	escapedIdentity := strings.Repeat(`\u0001`, identityBytes)
+	identity := strings.Repeat("\x01", identityBytes)
+	messageStart := `data: {"type":"message_start","message":{"id":"` + escapedIdentity +
+		`","model":"` + escapedIdentity + `","usage":{"input_tokens":4}}}`
+
+	for _, tc := range []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{"control identity and separator expansion", strings.Repeat("\u2028", contentLen/3), strings.Repeat("\u2028", contentLen/3)},
+		{"invalid utf8 replacement expansion", strings.Repeat("\xff", contentLen), strings.Repeat("\uFFFD", contentLen)},
+		{"normal large frame", strings.Repeat("x", contentLen), strings.Repeat("x", contentLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sourceLine := prefix + tc.content + suffix
+			if len(sourceLine) > sseScannerBufMax-1 {
+				t.Fatalf("fixture source line = %d bytes, want <= %d", len(sourceLine), sseScannerBufMax-1)
+			}
+			native := strings.Join([]string{
+				messageStart,
+				sourceLine,
+				`data: {"type":"message_stop"}`,
+			}, "\n\n") + "\n\n"
+			upstream, srv, buf := translatedSSEFixture(t, native)
+
+			status, body := translatedSSERequest(t, srv, upstream)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d, want the committed 200", status)
+			}
+			payloads := translatedSSEPayloads(t, body)
+			if got := translatedSSEErrorFrames(payloads); got != 0 {
+				t.Fatalf("accepted source frame emitted %d error frames", got)
+			}
+			if got := strings.Count(body, "data: [DONE]"); got != 1 {
+				t.Fatalf("[DONE] frames = %d, want 1", got)
+			}
+			if got := translatedStreamContent(t, body); got != tc.want {
+				t.Fatalf("translated content changed: got %d bytes, want %d", len(got), len(tc.want))
+			}
+			var first struct {
+				ID    string `json:"id"`
+				Model string `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(payloads[0]), &first); err != nil {
+				t.Fatalf("first translated frame is not JSON: %v", err)
+			}
+			if first.ID != identity || first.Model != identity {
+				t.Fatalf("control identity changed: id=%d bytes, model=%d bytes, want %d control bytes each",
+					len(first.ID), len(first.Model), identityBytes)
+			}
+			rec := waitForRecord(t, buf, 1)[0]
+			if rec.IsError() || rec.ErrorType != "" || !rec.HadAnswerContent {
+				t.Fatalf("record = %+v, want a healthy translated completion", rec)
+			}
+		})
+	}
+}
+
 // translatedStreamContent concatenates every content delta in a translated
 // stream. The translator emits one delta per source chunk today; joining them
 // keeps the assertion about the delivered bytes rather than one frame

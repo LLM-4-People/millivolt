@@ -64,23 +64,20 @@ const (
 	// still relayed to the client in full. Safety guardrail, not user-tunable.
 	maxErrBodyBytes = 64 * 1024
 	// sseScannerBufInit sizes SSE scanner buffers; sseScannerBufMax bounds one
-	// source event line on the passthrough relay (and is the base for the
-	// translated-frame bound below). The small initial buffer fits the
-	// ordinary chunk and grows on demand, so a stream that never exceeds it
-	// retains 4 KiB instead of 64. Safety guardrail, not user-tunable.
+	// source event line on the passthrough relay. The small initial buffer
+	// fits the ordinary chunk and grows on demand, so a stream that never
+	// exceeds it retains 4 KiB instead of 64. Safety guardrail, not
+	// user-tunable.
 	sseScannerBufInit = 4 * 1024
 	sseScannerBufMax  = 1024 * 1024
 	// translatedFrameBufMax bounds one translated SSE frame line. The
-	// translator reads source lines bounded by its own 1 MiB scanner, then
-	// re-encodes the decoded payload inside the OpenAI chunk envelope: the
-	// wrapper adds fixed fields plus provider-controlled id/model (each
-	// bounded at 512 bytes by the translator), and a valid source string can
-	// at most double during JSON re-encoding (U+2028/U+2029 are emitted as
-	// six-byte escapes from three UTF-8 bytes). The headroom keeps every
-	// source line that fits the translator's input bound relayable after
-	// translation instead of failing a legitimate chunk as translation_error.
-	// Safety guardrail, not user-tunable.
-	translatedFrameBufMax = 2*sseScannerBufMax + 2*1024
+	// translated scanner consumes the frames the format translator emits, so
+	// it takes the translator's own output bound: the accepted source-line
+	// bound plus JSON re-encoding and retained-identity expansion. Keeping
+	// that fact with the translator means every source line it accepts has a
+	// relayable frame instead of failing a legitimate chunk as
+	// translation_error. Safety guardrail, not user-tunable.
+	translatedFrameBufMax = providerformat.NativeStreamFrameMaxBytes
 	// nonStreamCaptureMax bounds the prefix of a non-streaming response body
 	// kept for usage/cost parsing. Documents exceeding this capture can have
 	// unavailable accounting; their original bytes are still relayed in full.
