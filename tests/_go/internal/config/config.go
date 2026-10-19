@@ -672,7 +672,6 @@ func TestLoadFileSkipsInvalidValues(t *testing.T) {
 		{"auto token refresh null", "auto_token_refresh: null"},
 		{"auto token refresh yes", "auto_token_refresh: yes"},
 		{"auto token refresh no", "auto_token_refresh: no"},
-		{"listen integer", "listen: 8080"},
 		{"backup too small", "backup_max_bytes: 10"},
 		{"debug store too small", "debug_store_max_bytes: 1MiB"},
 		{"debug store too big", "debug_store_max_bytes: 9GiB"},
@@ -714,21 +713,9 @@ func TestLoadFileKeepsRelatedKeys(t *testing.T) {
 	if c.StorageWriteChanCap != 20000 || c.StorageBatchCap != 10000 {
 		t.Fatalf("storage overlay = %d/%d, want 20000/10000", c.StorageWriteChanCap, c.StorageBatchCap)
 	}
-	c = loadFileOK(t, "listen: 8080\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
-	if c.Listen != Default().Listen || c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
-		t.Fatalf("invalid listen split the pool: listen=%q pool=%d/%d", c.Listen, c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
-	}
 	c = loadFileOK(t, "max_conns_per_host: 10\nmax_idle_conns_per_host: 8\nbase_backoff: 10m\nmax_backoff: 1m\n")
 	if c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
 		t.Fatalf("conflicting backoff split the pool: %d/%d", c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
-	}
-	c = loadFileOK(t, "listen: 8080\nallowed_base_urls:\n  - api.openai.com\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
-	if c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
-		t.Fatalf("two independent invalid keys wiped the pool: %d/%d", c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
-	}
-	c = loadFileOK(t, "listen: 8080\nallowed_base_urls:\n  - api.openai.com\nbase_backoff: 5m\nmax_backoff: 10m\nmax_conns_per_host: 10\nmax_idle_conns_per_host: 8\n")
-	if c.BaseBackoff != 5*time.Minute || c.MaxBackoff != 10*time.Minute || c.MaxConnsPerHost != 10 || c.MaxIdleConnsPerHost != 8 {
-		t.Fatalf("retry pass lost related keys: backoff=%v/%v pool=%d/%d", c.BaseBackoff, c.MaxBackoff, c.MaxConnsPerHost, c.MaxIdleConnsPerHost)
 	}
 }
 
@@ -1342,6 +1329,33 @@ func TestValidateProvidersErrorDeterministic(t *testing.T) {
 // RawQuery/Fragment, so it slipped past the parsed-field checks. All
 // rejected at the load boundary with a clear error; well-formed entries
 // (including path suffixes and IPv6 hosts) load.
+func TestLoadFileStrictFailsClosed(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"invalid allowlist", "allowed_base_urls:\n  - api.openai.com\n"},
+		{"invalid listen", "listen: 8080\n"},
+		{"syntax error", "listen: [\n"},
+		{"nested duplicate", "providers:\n  alpha:\n    models_path: a\n    models_path: b\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "strict.yaml")
+			if err := os.WriteFile(p, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := LoadFileStrict(p); err == nil {
+				t.Fatalf("LoadFileStrict accepted %s", tc.name)
+			}
+		})
+	}
+	p := filepath.Join(t.TempDir(), "strict-good.yaml")
+	if err := os.WriteFile(p, []byte("max_retries: 3\nmax_retriez: 9\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, dropped, err := LoadFileStrict(p)
+	if err != nil || cfg.MaxRetries != 3 || len(dropped) != 1 || dropped[0] != "max_retriez" {
+		t.Fatalf("strict good load = %+v dropped=%v err=%v", cfg.MaxRetries, dropped, err)
+	}
+}
+
 func TestAllowedBaseURLsValidated(t *testing.T) {
 	bad := []struct{ name, entry, wantErr string }{
 		{"missing scheme", "api.openai.com",
@@ -1380,9 +1394,18 @@ func TestAllowedBaseURLsValidated(t *testing.T) {
 			if err := os.WriteFile(p, []byte(yaml), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			c := loadFileOK(t, yaml)
-			if len(c.AllowedBaseURLs) != 0 {
-				t.Fatalf("LoadFile applied bad allowed_base_urls entry %q: %v", tc.entry, c.AllowedBaseURLs)
+			_, err := LoadFile(p)
+			if err == nil {
+				t.Fatalf("LoadFile accepted bad allowed_base_urls entry %q", tc.entry)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("LoadFile error = %q, want %q", err, tc.wantErr)
+			}
+			if _, _, err := LoadFileRepair(p); err == nil {
+				t.Fatalf("LoadFileRepair accepted bad allowed_base_urls entry %q", tc.entry)
+			}
+			if _, statErr := os.Stat(p); statErr != nil {
+				t.Fatalf("invalid allowlist source was rewritten/removed: %v", statErr)
 			}
 		})
 	}

@@ -541,6 +541,11 @@ loop:
 			return
 		case sig := <-sigc:
 			if sig == syscall.SIGHUP {
+				if handoffDone := rst.handoffDone(); handoffDone != nil {
+					log.Printf("received SIGHUP during restart handoff; the handoff owns shutdown")
+					<-handoffDone
+					continue
+				}
 				// Config reload: hot-apply the reloadable subset with zero
 				// dropped requests; report any restart-required field changes.
 				// reloadConfig failure branches own the failure log lines.
@@ -747,7 +752,7 @@ func reloadConfigLocked() ([]string, error) {
 	liveMu.Lock()
 	current, store, srv, buf := liveCfg, liveStore, liveProxy, liveBuf
 	liveMu.Unlock()
-	fresh, dropped, err := config.LoadFileRepair(liveConfigPath)
+	fresh, dropped, err := config.LoadFileStrict(liveConfigPath)
 	if err != nil {
 		// last_reload is a mutable single slot; the process log is the
 		// history, so every failure leaves exactly one record regardless

@@ -22,6 +22,7 @@ func (e *operatorPersistenceError) Error() string { return e.err.Error() }
 func (e *operatorPersistenceError) Unwrap() error { return e.err }
 
 func writeOperatorState(w http.ResponseWriter, state map[string]any, persistErr error) {
+	w.Header().Set("Cache-Control", "no-store")
 	if persistErr != nil {
 		state["warning"] = "State applied in memory, but could not be saved for restart."
 	}

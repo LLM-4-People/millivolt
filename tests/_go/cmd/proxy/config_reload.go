@@ -9,7 +9,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/config"
 )
 
-func TestReloadRepairsDroppedKeys(t *testing.T) {
+func TestReloadReportsDroppedKeysWithoutRewriting(t *testing.T) {
 	liveReloadFixture(t)
 	raw := []byte("max_retries: 3\nmax_retriez: 9\n")
 	if err := os.WriteFile(liveConfigPath, raw, 0o600); err != nil {
@@ -29,8 +29,8 @@ func TestReloadRepairsDroppedKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(body, []byte("max_retriez")) {
-		t.Fatalf("reload did not repair dropped keys:\n%s", body)
+	if !bytes.Contains(body, []byte("max_retriez: 9")) {
+		t.Fatalf("reload rewrote the source instead of preserving it:\n%s", body)
 	}
 	if !bytes.Contains(body, []byte("max_retries: 3\n")) {
 		t.Fatalf("reload lost the valid override:\n%s", body)

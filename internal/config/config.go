@@ -1579,6 +1579,28 @@ func parseConfig(path string, err error) error {
 	return &configParseError{Path: path, Err: err}
 }
 
+// configValueError is a recognized key whose value is invalid. It is not
+// repairable debris: dropping it would silently change policy, so boot and
+// reload must fail closed instead of replacing it with a default.
+type configValueError struct {
+	key string
+	err error
+}
+
+func (e *configValueError) Error() string { return fmt.Sprintf("config key %q: %v", e.key, e.err) }
+func (e *configValueError) Unwrap() error { return e.err }
+
+// failClosedYAMLKey lists keys whose absence changes a security or bind
+// boundary. An invalid value must never be silently dropped.
+func failClosedYAMLKey(key string) bool {
+	switch key {
+	case "allowed_base_urls", "listen":
+		return true
+	default:
+		return false
+	}
+}
+
 // LoadFile reads the YAML config at path (may be empty) and merges recognized,
 // valid keys over the built-in defaults. A missing file yields the defaults.
 // Unknown keys, invalid types/ranges, and extra YAML documents are omitted so
@@ -1588,6 +1610,21 @@ func parseConfig(path string, err error) error {
 func LoadFile(path string) (*Config, error) {
 	cfg, _, err := loadYAMLFile(path)
 	return cfg, err
+}
+
+// LoadFileStrict is the reload admission path. Unlike LoadFile it does not
+// salvage a partially valid document: any unparseable, unknown, invalid or
+// extra key fails the reload so the running policy is preserved. Boot repair
+// remains LoadFileRepair's job.
+func LoadFileStrict(path string) (*Config, []string, error) {
+	if path == "" {
+		return Default(), nil, nil
+	}
+	b, err := readConfigFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read config: %w", err)
+	}
+	return loadYAMLBytesStrict(path, b)
 }
 
 // LoadBytes is LoadFile for an in-memory YAML document. Used by backup
@@ -1605,6 +1642,10 @@ func LoadBytes(b []byte) (*Config, []string, error) {
 func LoadFileRepair(path string) (*Config, []string, error) {
 	cfg, skipped, err := loadYAMLFile(path)
 	if err != nil {
+		var valueErr *configValueError
+		if errors.As(err, &valueErr) {
+			return nil, nil, err
+		}
 		var parseErr *configParseError
 		if path == "" || !errors.As(err, &parseErr) {
 			return nil, nil, err
@@ -1715,6 +1756,9 @@ func loadYAMLBytes(path string, b []byte) (*Config, []string, error) {
 		}
 		loose, err := overlayYAMLKey(def.Clone(), key, nodes[key], present[key])
 		if err != nil {
+			if failClosedYAMLKey(key) {
+				return nil, nil, &configValueError{key: key, err: err}
+			}
 			skipped = append(skipped, key)
 			continue
 		}
@@ -1723,9 +1767,63 @@ func loadYAMLBytes(path string, b []byte) (*Config, []string, error) {
 		}
 		accepted = append(accepted, key)
 	}
-	cfg, dropped := keepYAMLKeys(def, present, nodes, accepted)
+	cfg, dropped, err := keepYAMLKeys(def, present, nodes, accepted)
+	if err != nil {
+		return nil, nil, err
+	}
 	skipped = append(skipped, dropped...)
 	return cfg, skipped, nil
+}
+
+// loadYAMLBytesStrict parses one document with no salvage. Any unsupported or
+// invalid key, unknown field, extra document or cross-field validation failure
+// is returned as an error so a reload cannot silently alter policy.
+func loadYAMLBytesStrict(path string, b []byte) (*Config, []string, error) {
+	def := Default()
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	var first yaml.Node
+	if err := dec.Decode(&first); err != nil && !errors.Is(err, io.EOF) {
+		return nil, nil, parseConfig(path, err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, nil, parseConfig(path, errors.New("multiple YAML documents"))
+	}
+	mapping, err := yamlDocumentMapping(&first)
+	if err != nil {
+		return nil, nil, parseConfig(path, err)
+	}
+	present, nodes, err := yamlMappingValues(mapping)
+	if err != nil {
+		return nil, nil, parseConfig(path, err)
+	}
+	if len(present) == 0 {
+		return def, nil, nil
+	}
+	keys := slices.Sorted(maps.Keys(present))
+	accepted := make([]string, 0, len(keys))
+	var dropped []string
+	for _, key := range keys {
+		if FieldByKey(key) == nil {
+			// Unknown keys remain boot-repair debris and are reported so the
+			// reload status shows what the operator's typo did not apply.
+			dropped = append(dropped, key)
+			continue
+		}
+		loose, err := overlayYAMLKey(def.Clone(), key, nodes[key], present[key])
+		if err != nil {
+			return nil, nil, parseConfig(path, &configValueError{key: key, err: err})
+		}
+		if loose {
+			return nil, nil, parseConfig(path, fmt.Errorf("config key %q has unknown fields", key))
+		}
+		accepted = append(accepted, key)
+	}
+	cfg, err := mergeYAMLKeys(def, present, nodes, accepted)
+	if err != nil {
+		return nil, nil, parseConfig(path, err)
+	}
+	return cfg, dropped, nil
 }
 
 func yamlResolved(n *yaml.Node) *yaml.Node {
@@ -1794,35 +1892,42 @@ func yamlMappingValues(n *yaml.Node) (map[string]any, map[string]*yaml.Node, err
 // for every written file; the greedy per-key salvage loop only runs when
 // whole-set validation fails, so conflicting files keep the existing repair
 // semantics unchanged.
-func keepYAMLKeys(def *Config, present map[string]any, nodes map[string]*yaml.Node, accepted []string) (*Config, []string) {
+func keepYAMLKeys(def *Config, present map[string]any, nodes map[string]*yaml.Node, accepted []string) (*Config, []string, error) {
 	if merged, err := mergeYAMLKeys(def, present, nodes, accepted); err == nil {
-		return merged, nil
-	}
-	kept := make([]string, 0, len(accepted))
-	cfg := def.Clone()
-	try := func(key string) bool {
-		trial := append(append([]string{}, kept...), key)
-		merged, err := mergeYAMLKeys(def, present, nodes, trial)
-		if err != nil {
-			return false
+		return merged, nil, nil
+	} else {
+		validationErr := err
+		kept := make([]string, 0, len(accepted))
+		cfg := def.Clone()
+		try := func(key string) bool {
+			trial := append(append([]string{}, kept...), key)
+			merged, err := mergeYAMLKeys(def, present, nodes, trial)
+			if err != nil {
+				return false
+			}
+			kept = trial
+			cfg = merged
+			return true
 		}
-		kept = trial
-		cfg = merged
-		return true
-	}
-	var deferred []string
-	for _, key := range accepted {
-		if !try(key) {
-			deferred = append(deferred, key)
+		var deferred []string
+		for _, key := range accepted {
+			if !try(key) {
+				deferred = append(deferred, key)
+			}
 		}
-	}
-	var skipped []string
-	for _, key := range deferred {
-		if !try(key) {
-			skipped = append(skipped, key)
+		var skipped []string
+		for _, key := range deferred {
+			if !try(key) {
+				skipped = append(skipped, key)
+			}
 		}
+		for _, key := range skipped {
+			if failClosedYAMLKey(key) {
+				return nil, nil, &configValueError{key: key, err: validationErr}
+			}
+		}
+		return cfg, skipped, nil
 	}
-	return cfg, skipped
 }
 
 func mergeYAMLKeys(base *Config, present map[string]any, nodes map[string]*yaml.Node, keys []string) (*Config, error) {
