@@ -400,6 +400,14 @@ function derive(data) {
 // lastData's records or counters. One owner: every mutator calls this.
 function bumpData() { if (lastData) lastData._rev = (lastData._rev || 0) + 1; }
 
+// recordsRevision is the live-record identity for the request log's archive
+// merge (log.js): it advances only when lastData.records actually changes a
+// row or its membership, never for a counter or KPI refresh. bumpData stays
+// the broader derivation owner; this one keeps counter-only frames from
+// invalidating the merged log window.
+let recordsRevision = 0;
+function bumpRecords() { recordsRevision++; }
+
 // Snapshots and lifecycle events share the same flat counter document. Only
 // real changes invalidate derive; an empty SSE replay after the HTML seed is
 // metadata, not another full-dashboard render. The server's existing pending
@@ -595,6 +603,7 @@ function applySnapshotPayload(data, bootstrapApplied = false) {
         }
       }
     }
+    bumpRecords();
     renderAll(data);
     _rebuildRecIdx();
     // A same-feed stale-cursor resync (ring eviction) does not refetch the
@@ -648,6 +657,7 @@ function upsertRec(rec) {
     _recIdx.set(rec.id, i);
     if (recs.length > dashCfg.history_size) { _evict(recs); }
     bumpData();
+    bumpRecords();
     return true; // pending → finalized: a real transition
   }
   // New record: append + index.
@@ -655,6 +665,7 @@ function upsertRec(rec) {
   _recIdx.set(rec.id, recs.length - 1);
   if (recs.length > dashCfg.history_size) { _evict(recs); }
   bumpData();
+  bumpRecords();
   return true;
 }
 
@@ -674,7 +685,7 @@ function upsertPendingRec(rec, pendingRevision) {
     // the existing row, not another index or a global whole-event gate.
     if (!recs[i].live || pendingRevision < recs[i]._pendingRevision) return recs;
     rec.live = true; rec._pendingRevision = pendingRevision;
-    recs[i] = rec; bumpData();
+    recs[i] = rec; bumpData(); bumpRecords();
     return recs;
   }
   rec.live = true; rec._pendingRevision = pendingRevision;
@@ -682,6 +693,7 @@ function upsertPendingRec(rec, pendingRevision) {
   _recIdx.set(rec.id, recs.length - 1);
   if (recs.length > dashCfg.history_size) { _evict(recs); }
   bumpData();
+  bumpRecords();
   return recs;
 }
 

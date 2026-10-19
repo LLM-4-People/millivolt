@@ -24,8 +24,7 @@ function logCap() { return logLimit > 0 ? logLimit : logPageSize(); }
 function resetLogWindow() {
   logLimit = 0;
   const hadArchive = logArchive.length > 0;
-  logArchive = [];
-  _logMergeMemo = null;
+  logArchiveClear();
   if (hadArchive) pruneModelNames();
   logFetching = false;
   logExhausted = false;
@@ -39,45 +38,185 @@ function resetLogWindow() {
   // layout, so first paint must not measure the empty shell just to reset it.
   if (box && logHTML.size) box.scrollTop = 0; // newest-first on navigation/full resync
 }
-// One-entry memo for the merged window. renderRequestsIncremental and
-// updateLogStats both merge on every live frame, and a deep archive makes that
-// build O(ring+archive) twice. The live data identity and revision, the
-// archive array identity and length, and either the caller's scoped-ring array
-// or the cached merged result (a render fallback passes the merged window
-// back) fully identify a build. Archive replacement/prepend, in-place trim,
-// reset, a live revision bump, a data replacement or a different scoped-ring
-// array all miss. Only the latest result is retained.
+// ---- archive identity and the merged log window ----
+// The durable archive is a keyset-ordered page cache below the live ring, not
+// a second ring: the merge prepends its rows oldest-first and lets the live
+// ring win duplicate ids. Rebuilding that merge from the full 20k archive on
+// every live frame was the dominant log cost, so the archive owns one
+// persistent identity set with a monotonic revision that advances only when
+// the array actually changes. Live frames reconcile ring membership
+// incrementally and materialize at most the visible cap.
+//
+// Archive mutation owners: resetLogWindow clears through logArchiveClear and
+// fetchOlderLog prepends through logArchivePrepend. A direct replacement or
+// length change (tests, future callers) is observed by the identity check and
+// rebuilt once with the same keyset and duplicate-suppression semantics.
+let _logArchiveIndex = null;
+let _logArchiveSeq = 0;
+// Archive traversals are the G6 regression guard: the identity rebuild below
+// and the full materialized merge are the only owners allowed to walk the
+// archive, and steady-state live frames use neither.
+let _logArchiveScans = 0;
+function logArchiveInvalidate() {
+  _logArchiveIndex = null;
+  _logLiveIndex = null;
+  _logMergeMemo = null;
+}
+function logArchiveIndex() {
+  const archive = logArchive;
+  const current = _logArchiveIndex;
+  if (current && current.archive === archive && current.length === archive.length) return current;
+  _logArchiveScans++;
+  const ids = new Set();
+  let unique = 0;
+  let duplicates = false;
+  for (const r of archive) {
+    if (!r || !r.id) continue;
+    if (ids.has(r.id)) { duplicates = true; continue; }
+    ids.add(r.id);
+    unique++;
+  }
+  _logArchiveIndex = {archive, length: archive.length, ids, unique, duplicates, rev: ++_logArchiveSeq};
+  _logLiveIndex = null;
+  _logMergeMemo = null;
+  return _logArchiveIndex;
+}
+function logArchiveClear() {
+  if (logArchive.length) logArchive = [];
+  logArchiveInvalidate();
+}
+function logArchivePrepend(added) {
+  logArchive = added.reverse().concat(logArchive);
+  // Ascending oldest-to-newest: trim the oldest rows so the newest archive
+  // window stays contiguous with the live ring at the top of the merge.
+  const excess = logArchive.length - LOG_ARCHIVE_MAX;
+  if (excess > 0) logArchive.splice(0, excess);
+  logArchiveInvalidate();
+}
+
+// Live membership is the only ring fact the archive merge depends on: a live
+// id shadows its archived copy, while a content-only row replacement changes
+// no id. recordsRevision (live.js) advances on every record mutation; the
+// array identity, length and endpoint ids distinguish a content replacement
+// from an append/evict. The persistent id set updates only the appended tail
+// on growth and rebuilds on eviction or a new scope array.
+let _logLiveIndex = null;
+function buildLogLive(ring, archive, rev) {
+  const ids = new Set();
+  for (const r of ring) { if (r && r.id) ids.add(r.id); }
+  let shadow = 0;
+  if (archive.ids.size) {
+    for (const id of ids) { if (archive.ids.has(id)) shadow++; }
+  }
+  return {ring, archive, rev, ids, shadow, ringLength: ring.length,
+    length: ring.length + archive.unique - shadow,
+    first: ring.length ? ring[0]?.id : undefined,
+    last: ring.length ? ring[ring.length - 1]?.id : undefined};
+}
+function logLiveIndex(ring) {
+  const archive = logArchiveIndex();
+  const prev = _logLiveIndex;
+  const rev = recordsRevision;
+  if (prev && prev.archive === archive && prev.ring === ring && prev.rev === rev) return prev;
+  const first = ring.length ? ring[0]?.id : undefined;
+  const last = ring.length ? ring[ring.length - 1]?.id : undefined;
+  let next;
+  if (prev && prev.archive === archive && prev.ring === ring && prev.ringLength > 0 &&
+      ring.length > prev.ringLength && first === prev.first) {
+    // A grown ring only appends: eviction always brings the length back down.
+    // Reconcile exactly the appended ids and their archive shadowing.
+    const ids = prev.ids;
+    let shadow = prev.shadow;
+    for (let i = prev.ringLength; i < ring.length; i++) {
+      const r = ring[i];
+      if (!r || !r.id || ids.has(r.id)) continue;
+      ids.add(r.id);
+      if (archive.ids.has(r.id)) shadow++;
+    }
+    next = {ring, archive, rev, ids, shadow, ringLength: ring.length,
+      length: ring.length + archive.unique - shadow, first, last};
+  } else if (prev && prev.archive === archive && ring.length === prev.ringLength &&
+      first === prev.first && last === prev.last &&
+      (prev.ring === ring || prev.rev === rev)) {
+    // A replaced record keeps the same array identity and membership. A new
+    // scoped array with an unchanged record revision is a counter-only
+    // re-derivation of the same scope, so its membership is unchanged too.
+    next = {...prev, ring, rev, first, last};
+  } else {
+    next = buildLogLive(ring, archive, rev);
+  }
+  _logLiveIndex = next;
+  return next;
+}
+// One-entry memo for the full materialized merge (full rebuild, page landing,
+// drawer navigation, fill probing). Counter-only frames never reach it, and a
+// record revision alone no longer invalidates it on the live render path.
 let _logMergeMemo = null;
 function mergeLogArchive(scopedRing) {
   if (!logArchive.length) { _logMergeMemo = null; return scopedRing; }
-  const data = lastData;
-  const rev = data?._rev || 0;
+  const archive = logArchiveIndex();
   const memo = _logMergeMemo;
-  if (memo && memo.data === data && memo.rev === rev &&
-      memo.archive === logArchive && memo.archiveLen === logArchive.length &&
+  if (memo && memo.archive === archive && memo.rev === recordsRevision &&
       (memo.ring === scopedRing || memo.merged === scopedRing)) {
     return memo.merged;
   }
-  const seen = new Set();
-  for (const r of scopedRing) { if (r && r.id) seen.add(r.id); }
+  const live = logLiveIndex(scopedRing);
   const extra = [];
-  for (const r of logArchive) {
-    if (r && r.id && !seen.has(r.id)) { extra.push(r); seen.add(r.id); }
+  _logArchiveScans++; // one full traversal for this materialized merge
+  if (live.archive.duplicates) {
+    const seen = new Set();
+    for (const r of logArchive) {
+      if (!r || !r.id || live.ids.has(r.id) || seen.has(r.id)) continue;
+      seen.add(r.id);
+      extra.push(r);
+    }
+  } else {
+    for (const r of logArchive) {
+      if (r && r.id && !live.ids.has(r.id)) extra.push(r);
+    }
   }
   // Durable pages retain their server keyset order and append below the live
   // arrival-ordered ring. Do not sort live rows or derive an archive cutoff
   // from them: a late completion can have a much older start than its peers.
   const merged = extra.concat(scopedRing);
-  _logMergeMemo = {data, rev, archive: logArchive, archiveLen: logArchive.length, ring: scopedRing, merged};
+  _logMergeMemo = {archive, rev: recordsRevision, ring: scopedRing, merged};
   return merged;
 }
 function visibleLog(recs) {
   const n = Math.min(recs.length, logCap());
   return recs.slice(-n).reverse();
 }
+// logWindowLength and logWindowRows are the live-frame owner: the count is
+// O(1) after membership reconciliation, the rows materialize only the visible
+// cap (usually the live-ring tail, otherwise min(cap, ring) plus the newest
+// unshadowed archive rows).
+function logWindowLength(ring) {
+  if (!logArchive.length) return ring.length;
+  return logLiveIndex(ring).length;
+}
+function logWindowRows(ring) {
+  const cap = logCap();
+  if (!logArchive.length) {
+    const n = Math.min(ring.length, cap);
+    const rows = new Array(n);
+    for (let i = 0; i < n; i++) rows[i] = ring[ring.length - 1 - i];
+    return rows;
+  }
+  const live = logLiveIndex(ring);
+  if (live.archive.duplicates) return visibleLog(mergeLogArchive(ring));
+  const rows = [];
+  for (let i = ring.length - 1; i >= 0 && rows.length < cap; i--) {
+    if (ring[i]) rows.push(ring[i]);
+  }
+  for (let i = logArchive.length - 1; i >= 0 && rows.length < cap; i--) {
+    const r = logArchive[i];
+    if (r && r.id && !live.ids.has(r.id)) rows.push(r);
+  }
+  return rows;
+}
 function logVisible() {
   if (!lastData) return [];
-  return visibleLog(mergeLogArchive(derive(lastData).scopedRecs));
+  return logWindowRows(derive(lastData).scopedRecs);
 }
 function recStartMs(r) {
   if (!r || !r.start) return 0;
@@ -193,7 +332,7 @@ function updateLogStats(d) {
   const el = $('f-stats');
   if (!el || !lastData) return;
   if (!d) d = derive(lastData);
-  const loaded = mergeLogArchive(d.scopedRecs).length;
+  const loaded = logWindowLength(d.scopedRecs);
   const shown = logHTML.size;
   if (shown && shown < loaded) el.textContent = fmt(shown) + ' of ' + fmt(loaded) + ' records';
   else el.textContent = fmt(loaded) + ' records';
@@ -203,19 +342,21 @@ function updateLogStats(d) {
 }
 
 function renderRequestsIncremental(recs) {
-  recs = mergeLogArchive(recs);
   const container = $('tbl-requests');
   if (!container) return;
   const tbody = container.querySelector('tbody');
   const page = logPageSize();
   const cap = logCap();
+  const total = logWindowLength(recs);
+  let recent = logWindowRows(recs);
   if (cap > page) {
-    const preview = recs.slice(-cap).reverse();
     let added = 0;
-    for (const r of preview) { if (r && r.id && !logHTML.has(r.id)) added++; }
-    if (added) logLimit = Math.min(recs.length, cap + added);
+    for (const r of recent) { if (r && r.id && !logHTML.has(r.id)) added++; }
+    if (added) {
+      logLimit = Math.min(total, cap + added);
+      recent = logWindowRows(recs);
+    }
   }
-  const recent = visibleLog(recs);
   if (!recent.length) { renderRequests(recs); return; }
   if (!tbody) { renderRequests(recs); return; } // empty-state placeholder in DOM: rebuild properly
   // A row replacement below removes whichever control owned keyboard focus.
@@ -434,11 +575,7 @@ function fetchOlderLog() {
     if (capTerminal) {
       logExhausted = true;
     } else if (added.length) {
-      logArchive = added.reverse().concat(logArchive);
-      // Ascending oldest-to-newest: trim the oldest rows so the newest archive
-      // window stays contiguous with the live ring at the top of the merge.
-      const excess = logArchive.length - LOG_ARCHIVE_MAX;
-      if (excess > 0) logArchive.splice(0, excess);
+      logArchivePrepend(added);
       const merged = mergeLogArchive(ringScoped);
       logLimit = Math.min(merged.length, Math.max(logCap() + added.length, logPageSize()));
       appendOlderLogRows(merged);

@@ -2237,6 +2237,27 @@ async function main() {
     check('newest archive rows stay adjacent to the live ring with no boundary gap',
       merged.length === 20001 && merged[19998].id === 'arc19998' &&
       merged[19999].id === 'arc19999' && merged[20000].id === 'arc-ring');
+    // The archive mutation owner prepends below the retained window and trims
+    // its oldest edge when the cap overflows; the identity set rebuilds exactly
+    // once for each real mutation.
+    w.eval('logArchive.splice(0, 1);'); // 19,999 rows: make room below the window
+    w.logWindowLength(w.eval('derive(lastData).scopedRecs'));
+    const scansBeforePrepend = w.eval('_logArchiveScans');
+    w.logArchivePrepend([mkRec('arc00000', 200, base)]);
+    w.logWindowLength(w.eval('derive(lastData).scopedRecs'));
+    check('an archive prepend keeps server order below the ring and rescans once',
+      w.eval('logArchive.length') === 20000 &&
+      w.eval('logArchive[0].id') === 'arc00000' &&
+      w.eval('logArchive[19999].id') === 'arc19999' &&
+      w.eval('_logArchiveScans') === scansBeforePrepend + 1);
+    const scansBeforeTrim = w.eval('_logArchiveScans');
+    w.logArchivePrepend([mkRec('arc-older', 200, base - 1000)]);
+    w.logWindowLength(w.eval('derive(lastData).scopedRecs'));
+    check('an archive prepend at the cap trims the oldest edge and rescans once',
+      w.eval('logArchive.length') === 20000 &&
+      w.eval('logArchive[0].id') === 'arc00000' &&
+      w.eval('logArchive[19999].id') === 'arc19999' &&
+      w.eval('_logArchiveScans') === scansBeforeTrim + 1);
     w.fetch = saved.fetch;
     w.scheduleLogFill = saved.fill;
     logPage = saved.page;
@@ -2340,7 +2361,8 @@ async function main() {
   check('purge resync bootstrap is cursor-less (no since/feed)',
     bootURL.includes('/metrics/bootstrap') && !bootURL.includes('since=') && !bootURL.includes('feed='));
   check('the empty post-purge snapshot IS the wipe render', rows().length === 0);
-  check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0);
+  check('purge resets the log window state', w.eval('logArchive.length') === 0 && w.eval('logLimit') === 0 &&
+    w.eval('_logArchiveIndex') === null && w.eval('_logLiveIndex') === null);
   check('the settings purge reports completion through the sheet status',
     d.getElementById('settings-count').textContent === 'all metrics history deleted' &&
     d.getElementById('settings-count').classList.contains('ok'));
@@ -2460,12 +2482,11 @@ async function main() {
         !rows().some(tr => tr.dataset.id.startsWith('sa-old')));
   }
 
-  // ---- test 10c-ter: one merged window per unchanged live revision ----
-  // renderRequestsIncremental and updateLogStats each merge the scoped ring
-  // with the durable archive on every live frame. The one-entry memo must
-  // return the same merged array while the live identity/revision, the
-  // archive identity/length and the scoped ring are unchanged, and rebuild on
-  // every real owner mutation.
+  // ---- test 10c-ter: archive revision and incremental live reconciliation ----
+  // The durable archive owns one persistent identity set and a revision that
+  // advances only when older pages actually change. A live frame reconciles
+  // ring membership and materializes only the visible cap: counter-only and
+  // one-record frames must not call the full merge or rescan the archive.
   {
     const savedData = w.eval('lastData');
     const savedArchive = w.eval('logArchive');
@@ -2480,7 +2501,7 @@ async function main() {
     ];
     const data = { records: ring, counters: {}, _rev: 3 };
     w.__memoRing = ring; w.__memoArchive = archive; w.__memoData = data;
-    w.eval('lastData = window.__memoData; logArchive = window.__memoArchive;');
+    w.eval('lastData = window.__memoData; logArchive = window.__memoArchive; logLimit = 0;');
     const ids = list => list.map(r => r.id).join(',');
     const first = w.mergeLogArchive(ring);
     check('the merged window keeps durable order below the live ring and live wins duplicate ids',
@@ -2490,49 +2511,130 @@ async function main() {
       w.mergeLogArchive(ring) === first);
     check('a merged window passed back through the merge reuses itself',
       w.mergeLogArchive(first) === first);
+    // The global derivation revision moves for counters and KPIs too, so it is
+    // no longer a merge identity; only record changes may rebuild the window.
     data._rev = 4;
-    const revved = w.mergeLogArchive(ring);
-    check('a live revision bump rebuilds the merged window',
-      revved !== first && ids(revved) === ids(first));
+    check('a counter-only revision bump reuses the merged window',
+      w.mergeLogArchive(ring) === first);
     const nextData = { records: ring, counters: {}, _rev: 4 };
     w.__memoData = nextData;
     w.eval('lastData = window.__memoData');
-    const dataSwap = w.mergeLogArchive(ring);
-    check('a new live data object rebuilds the merged window',
-      dataSwap !== revved && ids(dataSwap) === ids(revved));
+    check('a new data object with unchanged records reuses the merged window',
+      w.mergeLogArchive(ring) === first);
+    const archiveRev = w.eval('_logArchiveIndex.rev');
+    w.mergeLogArchive(ring);
+    w.logWindowLength(ring);
+    check('counter-only frames do not advance the archive revision',
+      w.eval('_logArchiveIndex.rev') === archiveRev);
+    // A one-record content change rebuilds the live row without invalidating
+    // the archive identity set: the materialized merge walks the archive once,
+    // but the cached id set and revision stay put.
+    const updated = { ...ring[1], status_code: 201 };
+    ring[1] = updated;
+    const scansBeforeContent = w.eval('_logArchiveScans');
+    w.eval('bumpRecords()');
+    const content = w.mergeLogArchive(ring);
+    check('a one-record update rebuilds merged content without rebuilding the archive identity',
+      content !== first && content[3] === updated &&
+      w.eval('_logArchiveIndex.rev') === archiveRev &&
+      w.eval('_logArchiveScans') === scansBeforeContent + 1);
     const nextArchive = archive.slice();
     w.__memoArchive = nextArchive;
     w.eval('logArchive = window.__memoArchive');
     const archiveSwap = w.mergeLogArchive(ring);
     check('a replaced archive array rebuilds the merged window',
-      archiveSwap !== dataSwap && ids(archiveSwap) === ids(dataSwap));
-    nextArchive.length = 1; // an in-place trim, as fetchOlderLog's cap applies
+      archiveSwap !== content && ids(archiveSwap) === ids(content));
+    check('an archive mutation advances the identity revision exactly once',
+      w.eval('_logArchiveIndex.rev') === archiveRev + 1);
+    nextArchive.length = 1; // an in-place trim, as the cap owner applies
     const trimmed = w.mergeLogArchive(ring);
     check('an in-place archive trim rebuilds the merged window with the retained page',
       trimmed !== archiveSwap && ids(trimmed) === 'memo-old1,memo-ring0,memo-ring1');
-    // One live frame merges for the rows and again for the stats. A build
-    // always allocates through concat, so equal result identity across both
-    // calls proves the second call reused the first build.
+    // The live-frame owner is the hot path: rows and stats must materialize
+    // without invoking the full archive merge.
     const calls = [];
     const realMerge = w.mergeLogArchive;
-    w.mergeLogArchive = recs => { const out = realMerge(recs); calls.push(out); return out; };
+    w.mergeLogArchive = recs => { calls.push(recs); return realMerge(recs); };
+    const scansBeforeFrame = w.eval('_logArchiveScans');
     try {
+      w.eval('lastData._rev++'); // a counter-only frame still schedules the log
       w.renderRequestsIncremental(ring);
       w.updateLogStats({ scopedRecs: ring });
     } finally {
       w.mergeLogArchive = realMerge;
     }
-    check('one live frame merges once for rows and stats',
-      calls.length === 2 && calls[0] === calls[1] &&
-      ids(calls[0]) === 'memo-old1,memo-ring0,memo-ring1');
+    check('a counter-only live frame never calls the full archive merge',
+      calls.length === 0 && w.eval('_logArchiveScans') === scansBeforeFrame);
+    // Evicting a live id unshadows its archived copy in place: the merged count
+    // stays coherent (ring -1, shadow -1) and the archive row appears below
+    // the ring in its retained keyset order.
+    w.__memoArchive = archive;
+    w.eval('logArchive = window.__memoArchive');
+    const beforeDrop = w.logWindowLength(ring);
+    ring.splice(0, 1);
+    w.eval('bumpRecords()');
+    check('an evicted live id unshadows its archive copy without losing archive order',
+      w.logWindowLength(ring) === beforeDrop &&
+      ids(w.logWindowRows(ring)) === 'memo-ring1,memo-ring0,memo-old0,memo-old1');
     w.__memoArchive = [];
     w.eval('logArchive = window.__memoArchive');
     check('an empty archive returns the scoped ring array itself',
-      w.mergeLogArchive(ring) === ring);
+      w.mergeLogArchive(ring) === ring && w.logWindowLength(ring) === ring.length);
     // Restore the suite's own data and repaint through the product owners.
     w.__memoSavedData = savedData; w.__memoSavedArchive = savedArchive;
     w.eval('lastData = window.__memoSavedData; logArchive = window.__memoSavedArchive; resetLogWindow(); renderRequests(derive(lastData).scopedRecs); updateLogStats();');
     for (const key of ['__memoRing', '__memoArchive', '__memoData', '__memoSavedData', '__memoSavedArchive']) delete w[key];
+  }
+
+  // ---- test 10c-quater: live frames at the audited archive scale ----
+  // 20k durable rows below a 10k live ring: counter-only frames and one-record
+  // updates stay O(visible cap), never rebuilding the archive merge.
+  {
+    const savedData = w.eval('lastData');
+    const savedArchive = w.eval('logArchive');
+    const bigArchive = Array.from({length: 20000}, (_, i) =>
+      mkRec('biga' + String(i).padStart(5, '0'), 200, 1500000000000 + i * 1000));
+    const bigRing = Array.from({length: 10000}, (_, i) =>
+      mkRec('bigr' + String(i).padStart(5, '0'), 200, 1520000000000 + i * 1000));
+    // An archived copy of a live id is data the live ring must shadow.
+    bigArchive.push({ ...bigRing[9999], status_code: 500 });
+    w.__bigArchive = bigArchive; w.__bigRing = bigRing;
+    w.__bigSavedData = savedData; w.__bigSavedArchive = savedArchive;
+    w.__bigData = { records: bigRing, counters: {}, _rev: 0 };
+    w.eval('lastData = window.__bigData; logArchive = window.__bigArchive; logLimit = 0;');
+    w.logWindowLength(bigRing); // warm the archive identity and live membership
+    const scans = w.eval('_logArchiveScans');
+    const calls = [];
+    const realMerge = w.mergeLogArchive;
+    w.mergeLogArchive = recs => { calls.push(recs); return realMerge(recs); };
+    try {
+      for (let i = 0; i < 10; i++) {
+        w.eval('lastData._rev++');
+        w.renderRequestsIncremental(bigRing);
+        w.updateLogStats({ scopedRecs: bigRing });
+      }
+      bigRing[9999] = { ...bigRing[9999], status_code: 503 };
+      w.eval('bumpRecords()');
+      w.renderRequestsIncremental(bigRing);
+      w.updateLogStats({ scopedRecs: bigRing });
+    } finally {
+      w.mergeLogArchive = realMerge;
+    }
+    check('20k archive + 10k ring: counter-only and one-record frames never merge or rescan',
+      calls.length === 0 && w.eval('_logArchiveScans') === scans);
+    check('20k archive + 10k ring: only the visible cap materializes',
+      w.logWindowRows(bigRing).length === 60 && rows().length === 60 &&
+      rows()[0].dataset.id === 'bigr09999');
+    check('the archived live duplicate adds no merged row',
+      w.logWindowLength(bigRing) === 30000);
+    w.eval('logLimit = 10001');
+    const deep = w.logWindowRows(bigRing);
+    check('the newest archive row sits directly below the live ring at depth',
+      deep.length === 10001 && deep[10000].id === 'biga19999' &&
+      deep[9999].id === 'bigr00000');
+    // Restore and repaint the suite's own state.
+    w.eval('lastData = window.__bigSavedData; logArchive = window.__bigSavedArchive; resetLogWindow(); renderRequests(derive(lastData).scopedRecs); updateLogStats();');
+    for (const key of ['__bigArchive', '__bigRing', '__bigData', '__bigSavedData', '__bigSavedArchive']) delete w[key];
   }
 
   // ---- test 10d: the request log nests by local calendar day - a divider
