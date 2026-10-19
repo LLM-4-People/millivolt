@@ -293,11 +293,11 @@ func TestChartRecentTailSelectionAndFallback(t *testing.T) {
 
 	fastFrom, fastStep, fastCount := chartWindowEdges(now, rows[total-1000].start)
 	fast := fold(total-1000, fastFrom, fastStep, fastCount, false)
-	if !fast.recentCovers() || len(fast.order.ttft) != 0 {
-		t.Fatalf("fast fold did not select the tail: covers=%v allHistory=%d", fast.recentCovers(), len(fast.order.ttft))
+	if !fast.recentCovers() || fast.order.sampleCount() != 0 {
+		t.Fatalf("fast fold did not select the tail: covers=%v allHistory=%d", fast.recentCovers(), fast.order.sampleCount())
 	}
-	if got, want := fast.recent, metrics.recentOrder(); !reflect.DeepEqual(got, want) {
-		t.Fatal("fast fold did not materialize the exact tail order")
+	if got, want := fast.recent, metrics.recentOrderSource(); !reflect.DeepEqual(got, want) {
+		t.Fatal("fast fold did not select the exact tail source")
 	}
 	fastOracle := fold(total-1000, fastFrom, fastStep, fastCount, true)
 	if !reflect.DeepEqual(fast.payload(now), fastOracle.payload(now)) {
@@ -306,11 +306,11 @@ func TestChartRecentTailSelectionAndFallback(t *testing.T) {
 
 	allFrom, allStep, allCount := chartWindowEdges(now, rows[0].start)
 	fallback := fold(metrics.recentFrom-100, allFrom, allStep, allCount, false)
-	if fallback.recentCovers() || len(fallback.recent.ttft) != 0 {
-		t.Fatalf("older window used the tail: covers=%v recent=%d", fallback.recentCovers(), len(fallback.recent.ttft))
+	if fallback.recentCovers() || fallback.recent.sampleCount() != 0 {
+		t.Fatalf("older window used the tail: covers=%v recent=%d", fallback.recentCovers(), fallback.recent.sampleCount())
 	}
-	if got, want := len(fallback.order.ttft), len(metrics.allOrder().ttft); got != want {
-		t.Fatalf("fallback materialized %d all-history samples, want %d", got, want)
+	if got, want := fallback.order.sampleCount(), metrics.allOrderSource().sampleCount(); got != want {
+		t.Fatalf("fallback selected %d all-history samples, want %d", got, want)
 	}
 	fallbackOracle := fold(metrics.recentFrom-100, allFrom, allStep, allCount, true)
 	if !reflect.DeepEqual(fallback.payload(now), fallbackOracle.payload(now)) {

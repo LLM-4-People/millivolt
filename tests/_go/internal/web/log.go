@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -155,6 +156,126 @@ func TestAggregateQueryContextDeadline(t *testing.T) {
 			t.Fatalf("aggregate deadline not enforced: %v", err)
 		}
 	})
+}
+
+// TestLogPageDecodeBudget pins the page-size request discipline. A SQL-pushed
+// or fully matching Go-only scope must decode only the rows the requested page
+// can use; the old fixed 512-row batch failed this on a 60-row page.
+func TestLogPageDecodeBudget(t *testing.T) {
+	s := testStoreWithQueryTimeout(t, time.Hour)
+	start := time.UnixMilli(1_800_000_000_000)
+	for i := range 5_000 {
+		s.Record(&metrics.Record{ID: fmt.Sprintf("row-%05d", i), Provider: fmt.Sprintf("provider-%02d", i%10), Start: start.Add(time.Duration(i) * time.Millisecond), StatusCode: 200})
+		if i%512 == 511 {
+			if err := s.Flush(); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	h := http.HandlerFunc(NewAggAPI(metrics.NewBuffer(1), s, time.Hour).HandleLogPage)
+	for _, tc := range []struct {
+		name, query string
+		maxBytes    int64
+		maxAllocs   int64
+	}{
+		{"empty_limit_60", "/metrics/agg/log?limit=60", 600 << 10, 12_000},
+		{"empty_limit_200", "/metrics/agg/log?limit=200", 2 << 20, 15_000},
+		{"sql_provider_limit_60", "/metrics/agg/log?limit=60&f=provider:provider-03", 600 << 10, 12_000},
+		{"go_status_class_limit_60", "/metrics/agg/log?limit=60&f=status:2xx", 600 << 10, 12_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := testing.Benchmark(func(b *testing.B) {
+				for b.Loop() {
+					w := httptest.NewRecorder()
+					h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.query, nil))
+					if w.Code != http.StatusOK {
+						b.Fatalf("%s status=%d body=%s", tc.query, w.Code, w.Body.String())
+					}
+				}
+			})
+			if got := res.AllocedBytesPerOp(); got > tc.maxBytes {
+				t.Fatalf("%s allocated %d bytes/op, want at most %d (decoded rows must follow the page)", tc.query, got, tc.maxBytes)
+			}
+			if got := res.AllocsPerOp(); got > tc.maxAllocs {
+				t.Fatalf("%s allocated %d times/op, want at most %d", tc.query, got, tc.maxAllocs)
+			}
+		})
+	}
+}
+
+// TestStreamWindowRingCancellation bounds the ring-only visitor: an abandoned
+// fold must observe cancellation at the next block boundary instead of
+// completing every ring row before the final check.
+func TestStreamWindowRingCancellation(t *testing.T) {
+	const rows = 4 * ctxCheckRows
+	buf := metrics.NewBuffer(rows)
+	for i := range rows {
+		buf.Record(&metrics.Record{ID: fmt.Sprintf("ring-%06d", i), Start: time.UnixMilli(int64(1_800_000_000_000 + i)), StatusCode: 200})
+	}
+	api := NewAggAPI(buf, nil, time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
+	visited := 0
+	err := api.streamWindow(ctx, 0, nil, nil, func(*contrib) error {
+		visited++
+		if visited == 100 {
+			cancel()
+		}
+		return nil
+	}, nil)
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled ring fold returned %v", err)
+	}
+	if visited > 100+ctxCheckRows {
+		t.Fatalf("canceled ring fold visited %d rows, want at most %d", visited, 100+ctxCheckRows)
+	}
+	if visited == rows {
+		t.Fatal("canceled ring fold walked the whole ring")
+	}
+}
+
+// cancelAfterErrCalls cancels its wrapped context on the Nth Err observation,
+// making mid-fold cancellation deterministic without timing races.
+type cancelAfterErrCalls struct {
+	context.Context
+	cancel context.CancelFunc
+	limit  int
+	calls  int
+}
+
+func (c *cancelAfterErrCalls) Err() error {
+	c.calls++
+	if c.calls >= c.limit {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// TestStreamAllChartCancellationDoesNotPublish pins the all-window boundary:
+// cancellation observed before the fold completes must skip the ready
+// publication instead of emitting a partial chart.
+func TestStreamAllChartCancellationDoesNotPublish(t *testing.T) {
+	buf := metrics.NewBuffer(8)
+	for i := range 3 {
+		buf.Record(&metrics.Record{ID: fmt.Sprintf("ring-%d", i), Start: time.UnixMilli(int64(1_800_000_000_000 + i)), StatusCode: 200})
+	}
+	api := NewAggAPI(buf, nil, time.Second)
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := &cancelAfterErrCalls{Context: base, cancel: cancel, limit: 3}
+	published := 0
+	err := api.streamAllChart(ctx, nil, "", nil, time.Now().UnixMilli(), func(int64, int64, int64, int, *chartFold) {
+		published++
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled all-window fold returned %v", err)
+	}
+	if published != 0 {
+		t.Fatalf("canceled all-window fold published %d partial charts", published)
+	}
 }
 
 func TestLogPageStartsAtDurableNewestWithoutRing(t *testing.T) {

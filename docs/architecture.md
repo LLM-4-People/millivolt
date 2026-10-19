@@ -169,7 +169,11 @@ has an ordered composite index ending in that key, so a filtered log page,
 count, export or purge scans one index range in cursor order instead of sorting
 or scanning its match set. SQLite uses one index per query and rechecks any
 remaining equality predicates against each row. Canonical model rules and
-status classes still match in Go.
+status classes still match in Go. The page handler classifies active filters:
+when every predicate is SQL-exact it requests exactly the remaining rows, and
+Go-only predicates grow geometrically from the page size to the 512-row batch
+cap within the 4,096-row scan budget. Both preserve the exclusive
+`(started_at, id)` cursor and `more`.
 
 `Store.Clear` serializes administrative purges, captures an accepted-record
 boundary and publishes one command. The writer flushes earlier records, deletes
@@ -209,7 +213,9 @@ interned dimensions and immutable sorted metric row orders. It is not a second
 database or a per-view history cache. Startup preload and incremental catch-up
 share its builder. SQLite transactions capture rowid high-water/destructive
 epoch/schema authority; destructive changes rebuild. Failed or canceled reads
-never publish stale rows or advance authority.
+never publish stale rows or advance authority. Folds check the caller's context
+once per 4,096-row block, and the ring visitors use the same cadence, so an
+abandoned request stops without publishing a partial result.
 
 Materialization runs off the projection lock with one single-flight builder;
 concurrent readers keep serving the previous complete snapshot and wait for
@@ -264,9 +270,10 @@ metric order is no longer walked separately for stats. The all-history order is
 a compacted immutable base plus a bounded value-sorted pending delta (16,384
 samples): a catch-up append folds only its new samples, so it stays
 O(delta log delta) regardless of history, and reaching the bound folds
-base+pending once. Chart and explorer read the exact merged order through one
-view owner, which caches the merge per published snapshot and never mutates
-either input. A full rebuild replaces the base and clears pending. A retained
+base+pending once. Chart and explorer walk the two runs through one merge
+iterator, so a fresh view allocates no history-sized copy; a materialized merge
+stays cached per published snapshot only for consumers that need a slice. A
+full rebuild replaces the base and clears pending. A retained
 last-65,536-row order serves bounded chart windows whose earliest in-window
 durable row is inside that tail. It uses the same compacted base plus bounded
 pending delta design and its own per-snapshot view holder, so a sub-threshold

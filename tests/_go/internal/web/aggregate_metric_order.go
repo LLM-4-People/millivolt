@@ -171,6 +171,87 @@ func TestProjectionMetricAppendImmutable(t *testing.T) {
 	}
 }
 
+// TestMetricOrderSourceMatchesMaterializedMerge pins the two-run reader to the
+// materialized merge on sparse, duplicate and test-size fixtures.
+func TestMetricOrderSourceMatchesMaterializedMerge(t *testing.T) {
+	rng := rand.New(rand.NewPCG(17, 29))
+	for _, size := range []int{0, 1, 2, 31, 4096} {
+		rows := make([]contrib, size)
+		for i := range rows {
+			if rng.IntN(4) == 0 {
+				continue
+			}
+			rows[i] = contrib{
+				ttft: int64(rng.IntN(13) + 1),
+				tps:  float64(rng.IntN(13) + 1),
+				dec:  int64(rng.IntN(13) + 1),
+			}
+		}
+		var m projectionMetrics
+		split := size / 2
+		m.append(rows[:split], 0)
+		m.append(rows, split)
+		source := m.allOrderSource()
+		materialized := m.allOrder()
+		if source.sampleCount() != materialized.sampleCount() {
+			t.Fatalf("size %d: source samples = %d, want %d", size, source.sampleCount(), materialized.sampleCount())
+		}
+		mask := make([]uint8, size)
+		counts := make([]int, 4)
+		for i := range mask {
+			if !validMetricSample(rows[i].ttft) {
+				continue
+			}
+			bucket := uint8(rng.IntN(len(counts)) + 1)
+			mask[i] = bucket
+			counts[bucket-1]++
+		}
+		extras := []int64{3, 7, 7, 11}
+		extraBuckets := []uint8{1, 2, 0, 3}
+		for _, bucket := range extraBuckets {
+			if bucket > 0 {
+				counts[bucket-1]++
+			}
+		}
+		gotBuckets, gotPeriod, gotStats := rankPercentilesStatsMerge(source.base.ttft, source.pending.ttft, mask, counts, extras, extraBuckets)
+		wantBuckets, wantPeriod, wantStats := rankPercentilesStats(materialized.ttft, mask, counts, extras, extraBuckets)
+		if !reflect.DeepEqual(gotBuckets, wantBuckets) || !reflect.DeepEqual(gotPeriod, wantPeriod) || !reflect.DeepEqual(gotStats, wantStats) {
+			t.Fatalf("size %d: ttft ranks differ from the materialized merge", size)
+		}
+		gotDec, gotDecPeriod := rankPercentilesMerge(source.base.dec, source.pending.dec, mask, counts, extras, extraBuckets)
+		wantDec, wantDecPeriod := rankPercentiles(materialized.dec, mask, counts, extras, extraBuckets)
+		if !reflect.DeepEqual(gotDec, wantDec) || !reflect.DeepEqual(gotDecPeriod, wantDecPeriod) {
+			t.Fatalf("size %d: decode ranks differ from the materialized merge", size)
+		}
+	}
+}
+
+// TestMetricOrderSourceReadAllocationBounded pins the unchanged-view read: the
+// rank reader must not allocate a history-sized merge for every fresh view.
+func TestMetricOrderSourceReadAllocationBounded(t *testing.T) {
+	const history = 200_000
+	rows := benchmarkMetricRows(history + 16)
+	var m projectionMetrics
+	m.append(rows[:history], 0)
+	m.append(rows, history)
+	source := m.allOrderSource()
+	mask := make([]uint8, len(rows))
+	counts := []int{len(rows)}
+	for i := range mask {
+		mask[i] = 1
+	}
+	res := testing.Benchmark(func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			_, _, _ = rankPercentilesStatsMerge(source.base.ttft, source.pending.ttft, mask, counts, nil, nil)
+		}
+	})
+	const limit = 1 << 20
+	if got := res.AllocedBytesPerOp(); got > limit {
+		t.Fatalf("unchanged-view rank read allocated %d bytes/op, want at most %d", got, limit)
+	}
+}
+
 func TestRankPercentilesRejectsInconsistentCounts(t *testing.T) {
 	order := []metricSample[int64]{{0, 1}, {1, 2}, {2, 3}, {3, 4}}
 	for _, count := range []int{3, 5} {
@@ -799,8 +880,8 @@ func TestChartRecentTailMatchesAllHistory(t *testing.T) {
 			f.recentFrom = 0
 		} else {
 			// The fast path must select recent; if it falls back to order,
-			// the empty all-history order yields empty ranks.
-			f.order = metricOrders{}
+			// the empty all-history source yields empty ranks.
+			f.order = metricOrderSource{}
 		}
 		for i := first; i < n; i++ {
 			if err := f.fold(&rows[i]); err != nil {
@@ -814,8 +895,8 @@ func TestChartRecentTailMatchesAllHistory(t *testing.T) {
 			t.Fatalf("fast fold did not select the tail: hasMember=%v recentFrom=%d minMemberRow=%d", f.hasMember, f.recentFrom, f.minMemberRow)
 		}
 		f.freezeOrder()
-		if !forceAll && len(f.order.ttft) != 0 {
-			t.Fatal("tail fast path materialized the all-history order")
+		if !forceAll && f.order.sampleCount() != 0 {
+			t.Fatal("tail fast path selected the all-history order")
 		}
 		return f.payload(now)
 	}

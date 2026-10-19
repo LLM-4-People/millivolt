@@ -56,6 +56,11 @@ type historyProjection struct {
 // Internal implementation constant, not a tunable.
 const rowsGrowChunk = 4096
 
+// ctxCheckRows is the cancellation cadence for projection folds and ring
+// visitors. One check per block keeps the hot path allocation-free while
+// bounding abandoned-request work to a few thousand rows.
+const ctxCheckRows = 4096
+
 // growRows appends with chunk-bounded spare capacity. Growth copies the whole
 // retained rows block, so it must stay amortized for the small per-refresh
 // deltas of the query path while never leaving large live slack: batches
@@ -140,15 +145,11 @@ func (d *projectionData) noteChunkStart(rowIndex uint32, start int64) {
 
 // visitSince calls fn for every contribution whose start is at or after since
 // (since <= 0 means all). Whole blocks older than the window are skipped, so a
-// bounded chart window never touches stale history row by row.
-func (d *projectionData) visitSince(since int64, fn func(*contrib) error) error {
+// bounded chart window never touches stale history row by row. Cancellation is
+// observed once per block, so an abandoned fold stops within ctxCheckRows rows.
+func (d *projectionData) visitSince(ctx context.Context, since int64, fn func(*contrib) error) error {
 	if since <= 0 || len(d.chunkMaxStart) == 0 {
-		for i := range d.rows {
-			if err := fn(&d.rows[i]); err != nil {
-				return err
-			}
-		}
-		return nil
+		return d.visitRange(ctx, 0, len(d.rows), 0, fn)
 	}
 	for chunk, maxStart := range d.chunkMaxStart {
 		if maxStart < since {
@@ -156,14 +157,30 @@ func (d *projectionData) visitSince(since int64, fn func(*contrib) error) error 
 		}
 		start := chunk * rowsGrowChunk
 		end := min(start+rowsGrowChunk, len(d.rows))
-		for i := start; i < end; i++ {
-			if d.rows[i].start < since {
+		if err := d.visitRange(ctx, start, end, since, fn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// visitRange walks rows[start:end], skipping starts below since when since > 0.
+// It re-checks the caller's context every ctxCheckRows rows.
+func (d *projectionData) visitRange(ctx context.Context, start, end int, since int64, fn func(*contrib) error) error {
+	for start < end {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		stop := min(start+ctxCheckRows, end)
+		for i := start; i < stop; i++ {
+			if since > 0 && d.rows[i].start < since {
 				continue
 			}
 			if err := fn(&d.rows[i]); err != nil {
 				return err
 			}
 		}
+		start = stop
 	}
 	return nil
 }
@@ -256,7 +273,7 @@ func (p *historyProjection) refresh(ctx context.Context, store *storage.Store, b
 			scanned++
 			// Check cancellation periodically so an abandoned dashboard request
 			// cannot keep a full-history decode running to completion.
-			if scanned%4096 == 0 {
+			if scanned%ctxCheckRows == 0 {
 				return ctx.Err()
 			}
 			return nil

@@ -691,8 +691,8 @@ func explorerPayloadBenchFold(history int, multi bool, baseID uint32) *explorerF
 	f.multiMember = multi
 	f.groups = make(map[uint32]*entAcc, xpNodeCap)
 	rows := make([]int, xpNodeCap)
-	f.order.ttft = make([]metricSample[int64], history)
-	f.order.tps = make([]metricSample[float64], history)
+	f.order.base.ttft = make([]metricSample[int64], history)
+	f.order.base.tps = make([]metricSample[float64], history)
 	if multi {
 		f.memberSpans = make([]explorerMemberSpan, history)
 		f.members = make([]uint32, history)
@@ -703,8 +703,8 @@ func explorerPayloadBenchFold(history int, multi bool, baseID uint32) *explorerF
 		group := row % xpNodeCap
 		rows[group]++
 		id := baseID + uint32(group)
-		f.order.ttft[row] = metricSample[int64]{row: uint32(row), value: int64(row + 1)}
-		f.order.tps[row] = metricSample[float64]{row: uint32(row), value: float64(row + 1)}
+		f.order.base.ttft[row] = metricSample[int64]{row: uint32(row), value: int64(row + 1)}
+		f.order.base.tps[row] = metricSample[float64]{row: uint32(row), value: float64(row + 1)}
 		if multi {
 			f.memberSpans[row] = explorerMemberSpan{start: uint32(row), count: 1}
 			f.members[row] = id

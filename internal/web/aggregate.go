@@ -491,11 +491,16 @@ func (a *AggAPI) streamWindow(ctx context.Context, since int64, mcz *modelCanoni
 			prepare(p)
 		}
 		if p != nil {
-			if err := p.visitSince(since, fn); err != nil {
+			if err := p.visitSince(ctx, since, fn); err != nil {
 				return err
 			}
 		}
-		for _, r := range ring {
+		for i, r := range ring {
+			if i%ctxCheckRows == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if p != nil {
 				if _, dup := p.ids[r.ID]; dup {
 					continue
@@ -749,15 +754,15 @@ type chartFold struct {
 	tpsBucket  []uint8
 	decBucket  []uint8
 	membership []uint8
-	order      metricOrders
+	order      metricOrderSource
 	// orderSource is the projection's metric view, retained only while the
-	// read lease is held. freezeOrder materializes either reader after the fold
+	// read lease is held. freezeOrder selects either source after the fold
 	// knows whether the recent tail can answer the window.
 	orderSource *projectionMetrics
-	// recent is the materialized tail order for bounded windows; recentFrom is
+	// recent is the selected tail source for bounded windows; recentFrom is
 	// its first covered projection row (0-based). minMemberRow is the earliest
 	// in-window durable row, so the tail is safe only when it covers that row.
-	recent       metricOrders
+	recent       metricOrderSource
 	recentFrom   int
 	minMemberRow uint32
 	hasMember    bool
@@ -799,9 +804,10 @@ func (f *chartFold) recentCovers() bool {
 	return f.hasMember && f.recentFrom > 0 && int(f.minMemberRow) > f.recentFrom
 }
 
-// freezeOrder materializes the selected order once the fold knows whether the
-// retained tail covers every member. It must run under the projection lease;
-// the fast path skips the O(history) merge entirely.
+// freezeOrder selects the exact durable order once the fold knows whether the
+// retained tail covers every member. It must run under the projection lease.
+// The fast path skips the tail entirely; neither path materializes a merge, so
+// a fresh view allocates nothing history-sized.
 func (f *chartFold) freezeOrder() {
 	source := f.orderSource
 	f.orderSource = nil
@@ -809,15 +815,13 @@ func (f *chartFold) freezeOrder() {
 		return
 	}
 	if f.recentCovers() {
-		// The exact base+pending tail merge is memoized per published
-		// snapshot; payload runs after the lease, so materialize it here.
-		f.recent = source.recentOrder()
+		f.recent = source.recentOrderSource()
 		return
 	}
 	if !f.hasMember {
 		return
 	}
-	f.order = source.allOrder()
+	f.order = source.allOrderSource()
 }
 
 func (f *chartFold) fold(c *contrib) error {
@@ -907,9 +911,9 @@ func (f *chartFold) payload(now int64) chartPayload {
 	if f.recentCovers() {
 		order = f.recent
 	}
-	ttft, periodTTFT, ttftStat := rankPercentilesStats(order.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
-	tps, periodTPS, tpsStat := rankPercentilesStats(order.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
-	dec, periodDec := rankPercentiles(order.dec, f.membership, decCounts, f.extraDec, f.decBucket)
+	ttft, periodTTFT, ttftStat := rankPercentilesStatsMerge(order.base.ttft, order.pending.ttft, f.membership, ttftCounts, f.extraTTFT, f.ttftBucket)
+	tps, periodTPS, tpsStat := rankPercentilesStatsMerge(order.base.tps, order.pending.tps, f.membership, tpsCounts, f.extraTPS, f.tpsBucket)
+	dec, periodDec := rankPercentilesMerge(order.base.dec, order.pending.dec, f.membership, decCounts, f.extraDec, f.decBucket)
 	for i, b := range f.buckets {
 		o := chartBucketJSON{T: b.t, Req: b.req, Err: b.err, RL: b.rl, In: b.in, Out: b.out,
 			Cache: b.cache, Reason: b.reason, Cost: b.cost}
@@ -1023,11 +1027,21 @@ func minStartScoped(ctx context.Context, a *AggAPI, mcz *modelCanonizer, fs []sc
 				}
 			} else {
 				for i := range p.rows {
+					if i%ctxCheckRows == 0 {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+					}
 					upd(&p.rows[i])
 				}
 			}
 		}
-		for _, r := range ring {
+		for i, r := range ring {
+			if i%ctxCheckRows == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {
 					continue
@@ -1068,11 +1082,21 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 				}
 			} else {
 				for i := range p.rows {
+					if i%ctxCheckRows == 0 {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+					}
 					upd(&p.rows[i])
 				}
 			}
 		}
-		for _, r := range ring {
+		for i, r := range ring {
+			if i%ctxCheckRows == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {
 					continue
@@ -1085,11 +1109,16 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 		fold := newChartFold(from, step, count, statusCode, fs)
 		fold.prepareBound(p)
 		if p != nil {
-			if err := p.visitSince(from, fold.fold); err != nil {
+			if err := p.visitSince(ctx, from, fold.fold); err != nil {
 				return err
 			}
 		}
-		for _, r := range ring {
+		for i, r := range ring {
+			if i%ctxCheckRows == 0 {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+			}
 			if p != nil {
 				if _, duplicate := p.ids[r.ID]; duplicate {
 					continue
@@ -1100,9 +1129,12 @@ func (a *AggAPI) streamAllChart(ctx context.Context, mcz *modelCanonizer, status
 				return err
 			}
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fold.freezeOrder()
 		ready(min, from, step, count, fold)
-		return ctx.Err()
+		return nil
 	})
 }
 
@@ -1591,7 +1623,7 @@ type explorerFold struct {
 	railSeen      [dimCount][]uint64
 	railCount     [dimCount]int
 	groups        map[uint32]*entAcc
-	order         metricOrders
+	order         metricOrderSource
 	rowCount      int
 	// Single-valued dimensions store one group id per projected row (4 bytes).
 	// Only tool/error need the flat multi-membership list + spans.
@@ -1637,7 +1669,7 @@ func (e *explorerFold) prepare(p *projectionData, mcz *modelCanonizer) {
 	e.grpFS = bindScope(e.grpFS, p, mcz)
 	e.lineage.prepare(p, &e.dims)
 	if p != nil {
-		e.order = p.metrics.allOrder()
+		e.order = p.metrics.allOrderSource()
 		// The unfiltered rail is exactly the shared dictionary's occupied
 		// memberships. Only unprojected ring/pending names can add anything;
 		// scoped rails continue to follow the canonical per-row predicate.
@@ -1961,8 +1993,8 @@ func (e *explorerFold) payload() explorerPayload {
 		}
 	}
 	visit := e.selectedVisitor(&selected)
-	wait, _ := rankPercentilesVisit(e.order.ttft, ttftCounts, extraTTFT, ttftBuckets, visit)
-	speed, _ := rankPercentilesVisit(e.order.tps, tpsCounts, extraTPS, tpsBuckets, visit)
+	wait, _ := rankPercentilesVisitMerge(e.order.base.ttft, e.order.pending.ttft, ttftCounts, extraTTFT, ttftBuckets, visit)
+	speed, _ := rankPercentilesVisitMerge(e.order.base.tps, e.order.pending.tps, tpsCounts, extraTPS, tpsBuckets, visit)
 	ents := make([]jsonEnt, 0, len(top))
 	for i, g := range top {
 		ent := jsonEnt{
@@ -2096,6 +2128,57 @@ const (
 	logScanMax   = 4096
 )
 
+// logPageQuery owns the live-log pushdown classification. Exact stored
+// dimensions become SQL predicates; everything the projection derives (status
+// classes, errors, tools, time buckets, canonical models) still needs the
+// authoritative Go matcher. allPushed reports that every active predicate is
+// represented exactly by the filter, so each decoded row is expected to be an
+// output row and the page can request only what it still needs.
+func logPageQuery(fs []scopeFilter, statusCode string, mcz *modelCanonizer) (filter storage.LogFilter, allPushed bool) {
+	allPushed = true
+	for _, f := range fs {
+		switch f.dim {
+		case "client":
+			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
+		case "provider":
+			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
+		case "key":
+			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
+		case "conversation":
+			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
+		case "model":
+			// Canonical equality is pushable only while no rule rewrites the
+			// stored spelling. SQL matches the raw column exactly; the Go
+			// matcher trims even with no rules, so a padded filter value can
+			// still reject decoded rows and must keep the growing scan.
+			if len(mcz.exec) == 0 {
+				filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
+				if strings.TrimSpace(f.id) != f.id {
+					allPushed = false
+				}
+			} else {
+				allPushed = false
+			}
+		default:
+			allPushed = false
+		}
+	}
+	if statusCode != "" {
+		if n, err := strconv.Atoi(statusCode); err == nil {
+			canonical := strconv.Itoa(n)
+			filter.All = append(filter.All, storage.LogPredicate{Field: storage.LogStatus, Value: canonical})
+			// A non-canonical spelling ("0200") still narrows SQL to the same
+			// code, but the Go matcher rejects it, so scanning must grow.
+			if canonical != statusCode {
+				allPushed = false
+			}
+		} else {
+			allPushed = false
+		}
+	}
+	return filter, allPushed
+}
+
 // HandleLogPage starts at durable newest, then pages below an exact (time,id)
 // cursor. The ring is arrival-ordered and cannot supply a safe history cutoff.
 func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
@@ -2164,34 +2247,18 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 	// Push exact, SQL-safe dimensions into the page query. Canonical model
 	// equality is pushable only when no rules rewrite names; class filters,
 	// errors, tools and time buckets stay in the authoritative Go matcher.
-	var logFilter storage.LogFilter
-	for _, f := range fs {
-		switch f.dim {
-		case "client":
-			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogClient, Value: f.id})
-		case "provider":
-			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogProvider, Value: f.id})
-		case "key":
-			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogKeyHash, Value: f.id})
-		case "conversation":
-			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogConversation, Value: f.id})
-		case "model":
-			if len(mcz.exec) == 0 {
-				logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogModel, Value: f.id})
-			}
-		}
-	}
-	if statusCode != "" {
-		if n, err := strconv.Atoi(statusCode); err == nil {
-			logFilter.All = append(logFilter.All, storage.LogPredicate{Field: storage.LogStatus, Value: strconv.Itoa(n)})
-		}
-	}
+	logFilter, allPushed := logPageQuery(fs, statusCode, mcz)
 	out := make([]*metrics.Record, 0, limit)
 	scanned := 0
 	hitEnd := a.store == nil
+	batch := min(limit, logScanBatch)
 	if a.store != nil {
 		for scanned < logScanMax && len(out) < limit {
-			batch := logScanBatch
+			if allPushed {
+				// Every decoded row is an expected output row, so ask for
+				// exactly what the page still needs.
+				batch = limit - len(out)
+			}
 			if remain := logScanMax - scanned; remain < batch {
 				batch = remain
 			}
@@ -2229,6 +2296,12 @@ func (a *AggAPI) HandleLogPage(w http.ResponseWriter, r *http.Request) {
 			if len(rows) < batch {
 				hitEnd = true
 				break
+			}
+			if !allPushed {
+				// Go-only predicates may reject most rows: grow from the page
+				// size towards the per-call batch/scan caps instead of decoding
+				// a full batch on the first request.
+				batch = min(batch*2, logScanBatch)
 			}
 		}
 	}

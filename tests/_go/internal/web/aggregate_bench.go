@@ -2,8 +2,12 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -95,13 +99,85 @@ func BenchmarkAggregateFold(b *testing.B) {
 		for b.Loop() {
 			f := newChartFold(fFrom, fStep, fCount, "", nil)
 			f.prepare(p, nil)
-			if err := p.visitSince(since, func(c *contrib) error { return f.fold(c) }); err != nil {
+			if err := p.visitSince(b.Context(), since, func(c *contrib) error { return f.fold(c) }); err != nil {
 				b.Fatal(err)
 			}
 			f.freezeOrder()
 			_ = f.payload(now)
 		}
 	})
+}
+
+// benchmarkLogStore seeds a private scratch store for live-log page
+// benchmarks. The fixture is deterministic, provider-neutral and never a live
+// deployment database.
+func benchmarkLogStore(b *testing.B, rows int) *storage.Store {
+	b.Helper()
+	d := config.Default()
+	s, err := storage.Open(filepath.Join(b.TempDir(), "log.db"), storage.Options{
+		WriteChanCap:  d.StorageWriteChanCap,
+		BatchCap:      d.StorageBatchCap,
+		FlushInterval: time.Millisecond,
+		QueryTimeout:  30 * time.Second,
+		WriteTrackCap: rows * 2,
+	})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { s.Close() })
+	start := time.UnixMilli(1_700_000_000_000)
+	for i := range rows {
+		s.Record(&metrics.Record{
+			ID: fmt.Sprintf("row-%07d", i), Provider: fmt.Sprintf("provider-%02d", i%10),
+			Model: fmt.Sprintf("model-%02d", i%10), Client: fmt.Sprintf("client-%06d", i),
+			KeyHash: fmt.Sprintf("key-%06d", i), ConversationID: fmt.Sprintf("conv-%06d", i),
+			StatusCode: 200, Start: start.Add(time.Duration(i) * time.Millisecond),
+			DurationMs: 10, TTFTMs: 1, FinishReason: "stop",
+			Usage:  metrics.Usage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+			Method: "POST", Path: "/v1/chat/completions",
+		})
+		if i%2048 == 2047 {
+			if err := s.Flush(); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	if err := s.Flush(); err != nil {
+		b.Fatal(err)
+	}
+	return s
+}
+
+// BenchmarkHandleLogPage measures the two pushdown classes at the page limits
+// the dashboard uses. SQL-pushed scopes request only the remaining rows; Go-only
+// predicates grow geometrically from that page size to the scan cap.
+func BenchmarkHandleLogPage(b *testing.B) {
+	s := benchmarkLogStore(b, 200_000)
+	api := NewAggAPI(metrics.NewBuffer(1), s, 30*time.Second)
+	h := http.HandlerFunc(api.HandleLogPage)
+	cases := []struct {
+		name, query string
+	}{
+		{"empty", "/metrics/agg/log?limit=%d"},
+		{"sql_provider", "/metrics/agg/log?limit=%d&f=provider:provider-03"},
+		{"go_status_class", "/metrics/agg/log?limit=%d&f=status:2xx"},
+		{"go_tool_missing", "/metrics/agg/log?limit=%d&f=tool:missing"},
+	}
+	for _, limit := range []int{60, 200} {
+		for _, tc := range cases {
+			b.Run(fmt.Sprintf("%s/limit_%d", tc.name, limit), func(b *testing.B) {
+				url := fmt.Sprintf(tc.query, limit)
+				b.ReportAllocs()
+				for b.Loop() {
+					w := httptest.NewRecorder()
+					h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, url, nil))
+					if w.Code != http.StatusOK {
+						b.Fatalf("%s status=%d body=%s", url, w.Code, w.Body.String())
+					}
+				}
+			})
+		}
+	}
 }
 
 // benchmarkMetricRows builds oldest-first projection rows with valid metrics
@@ -170,6 +246,76 @@ func benchmarkProjectionCompaction(b *testing.B, history int) {
 // iteration measures the coalesced path: one fold, N-1 waits, then the shared
 // publication. Only the memo slots are reset, so no preload or fixture is
 // involved. Allocations are per coalesced batch of N requests.
+// BenchmarkProjectionVisitSinceCancellation measures how quickly an abandoned
+// fold observes cancellation relative to walking the same history. The canceled
+// sub-benchmark stops at the next ctxCheckRows block boundary instead of
+// completing the 200k-row visit.
+func BenchmarkProjectionVisitSinceCancellation(b *testing.B) {
+	rows := benchmarkMetricRows(200_000)
+	p := &projectionData{rows: rows}
+	b.Run("full_history", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if err := p.visitSince(context.Background(), 0, func(*contrib) error { return nil }); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+	b.Run("canceled_after_1024", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			ctx, cancel := context.WithCancel(context.Background())
+			visited := 0
+			err := p.visitSince(ctx, 0, func(*contrib) error {
+				visited++
+				if visited == 1_024 {
+					cancel()
+				}
+				return nil
+			})
+			cancel()
+			if !errors.Is(err, context.Canceled) {
+				b.Fatalf("canceled fold returned %v", err)
+			}
+			if visited > 1_024+ctxCheckRows {
+				b.Fatalf("canceled fold visited %d rows, want at most %d", visited, 1_024+ctxCheckRows)
+			}
+		}
+	})
+}
+
+// BenchmarkMetricOrderViewRead measures the chart/explorer rank reader over an
+// unchanged published view. It walks base+pending as one exact order; the
+// remaining B/op is the bounded rank state, never a history-sized merge.
+func BenchmarkMetricOrderViewRead(b *testing.B) {
+	for _, history := range []int{50_000, 200_000} {
+		b.Run(fmt.Sprintf("history_%d", history), func(b *testing.B) {
+			rows := benchmarkMetricRows(history + 16)
+			var m projectionMetrics
+			m.append(rows[:history], 0)
+			m.append(rows, history)
+			source := m.allOrderSource()
+			mask := make([]uint8, len(rows))
+			counts := make([]int, 8)
+			for i := range mask {
+				if !validMetricSample(rows[i].ttft) {
+					continue
+				}
+				bucket := uint8(i%len(counts) + 1)
+				mask[i] = bucket
+				counts[bucket-1]++
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				_, _, _ = rankPercentilesStatsMerge(source.base.ttft, source.pending.ttft, mask, counts, nil, nil)
+				_, _, _ = rankPercentilesStatsMerge(source.base.tps, source.pending.tps, mask, counts, nil, nil)
+				_, _ = rankPercentilesMerge(source.base.dec, source.pending.dec, mask, counts, nil, nil)
+			}
+		})
+	}
+}
+
 func BenchmarkAggregateFlightCoalesce(b *testing.B) {
 	const callers = 8
 	now := time.Now()

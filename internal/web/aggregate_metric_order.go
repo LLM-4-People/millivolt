@@ -58,12 +58,56 @@ func (o *metricOrders) sort() {
 	slices.SortFunc(o.dec, func(a, b metricSample[int64]) int { return cmp.Compare(a.value, b.value) })
 }
 
-// metricOrderView memoizes the exact base+pending merge for one published
+// metricOrderView memoizes a materialized base+pending merge for one published
 // projection snapshot. The holder is shared by snapshot copies; a new append
-// installs a fresh holder, so no reader can observe later mutation.
+// installs a fresh holder, so no reader can observe later mutation. Production
+// rank readers use metricOrderSource instead and never materialize; this holder
+// serves consumers that genuinely need a slice.
 type metricOrderView struct {
 	once  sync.Once
 	order metricOrders
+}
+
+// metricOrderSource names the two immutable sorted runs behind one metric
+// order. Reading it allocates nothing and never copies history.
+type metricOrderSource struct {
+	base, pending metricOrders
+}
+
+func (s metricOrderSource) sampleCount() int {
+	return s.base.sampleCount() + s.pending.sampleCount()
+}
+
+// metricOrderSpan iterates base then pending in ascending value order without
+// materializing the merge. Equal values keep the base sample first, exactly
+// like mergeSortedMetricOrder.
+type metricOrderSpan[T ~int64 | ~float64] struct {
+	base, pending []metricSample[T]
+	i, j          int
+}
+
+func (s *metricOrderSpan[T]) next() (metricSample[T], bool) {
+	switch {
+	case s.i >= len(s.base):
+		if s.j >= len(s.pending) {
+			return metricSample[T]{}, false
+		}
+		v := s.pending[s.j]
+		s.j++
+		return v, true
+	case s.j >= len(s.pending):
+		v := s.base[s.i]
+		s.i++
+		return v, true
+	case s.base[s.i].value <= s.pending[s.j].value:
+		v := s.base[s.i]
+		s.i++
+		return v, true
+	default:
+		v := s.pending[s.j]
+		s.j++
+		return v, true
+	}
 }
 
 type projectionMetrics struct {
@@ -85,17 +129,31 @@ type projectionMetrics struct {
 	recentBuiltAt int
 }
 
-// allOrder returns the exact ascending all-history order of base+pending.
-// Chart and explorer share this one reader path. The merge runs once per
-// published snapshot and is cached; it never mutates base or pending.
+// allOrderSource returns the exact ascending all-history source of base+pending.
+// Chart and explorer share this one reader path; the rank reader merges the two
+// sorted runs as it walks them, so a fresh view allocates nothing history-sized.
+func (m *projectionMetrics) allOrderSource() metricOrderSource {
+	return metricOrderSource{base: m.base, pending: m.pending}
+}
+
+// recentOrderSource returns the exact ascending tail source of
+// recentBase+pending. Bounded chart windows whose earliest required row is
+// inside the tail share this one reader path.
+func (m *projectionMetrics) recentOrderSource() metricOrderSource {
+	return metricOrderSource{base: m.recentBase, pending: m.recentPending}
+}
+
+// allOrder materializes the exact ascending all-history order of base+pending.
+// Only callers that genuinely need a slice use it; rank readers take
+// allOrderSource. The merge runs once per published snapshot and is cached; it
+// never mutates base or pending.
 func (m *projectionMetrics) allOrder() metricOrders {
 	return mergeMetricOrderView(m.base, m.pending, m.view)
 }
 
-// recentOrder returns the exact ascending tail order of recentBase+pending.
-// Bounded chart windows whose earliest required row is inside the tail share
-// this one reader path. The merge runs once per published snapshot and is
-// cached; it never mutates either input.
+// recentOrder materializes the exact ascending tail order of recentBase+pending
+// for callers that genuinely need a slice. The merge runs once per published
+// snapshot and is cached; it never mutates either input.
 func (m *projectionMetrics) recentOrder() metricOrders {
 	return mergeMetricOrderView(m.recentBase, m.recentPending, m.recentView)
 }
@@ -331,7 +389,13 @@ func observeMetricRank(sets []metricRankSet, bucket uint8, value float64) {
 // rankPercentiles adapts a chart's one-byte row membership to the shared
 // multi-membership reader. Zero excludes a row; other values are bucket+1.
 func rankPercentiles[T ~int64 | ~float64](order []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64) {
-	return rankPercentilesVisit(order, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
+	return rankPercentilesMerge(order, nil, membership, counts, extraValues, extraBuckets)
+}
+
+// rankPercentilesMerge is rankPercentiles over an exact two-run order. base and
+// pending are merged during the rank walk, never copied into one slice.
+func rankPercentilesMerge[T ~int64 | ~float64](base, pending []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64) {
+	return rankPercentilesVisitMerge(base, pending, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
 		if uint64(row) < uint64(len(membership)) {
 			emit(membership[row])
 		}
@@ -347,7 +411,12 @@ func rankPercentiles[T ~int64 | ~float64](order []metricSample[T], membership []
 // Unsorted ring extras use the same group encoding and are copied locally;
 // all inputs remain immutable. Work is O(history + memberships + extras log extras).
 func rankPercentilesVisit[T ~int64 | ~float64](order []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8))) ([][]*float64, []*float64) {
-	buckets, period, _ := rankPercentilesCore(order, counts, extraValues, extraBuckets, visit, false)
+	return rankPercentilesVisitMerge(order, nil, counts, extraValues, extraBuckets, visit)
+}
+
+// rankPercentilesVisitMerge is rankPercentilesVisit over an exact two-run order.
+func rankPercentilesVisitMerge[T ~int64 | ~float64](base, pending []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8))) ([][]*float64, []*float64) {
+	buckets, period, _ := rankPercentilesCore(base, pending, counts, extraValues, extraBuckets, visit, false)
 	return buckets, period
 }
 
@@ -356,7 +425,12 @@ func rankPercentilesVisit[T ~int64 | ~float64](order []metricSample[T], counts [
 // avg/min/max. The separate metricStats pass walked the same immutable order a
 // second time per metric for no new information.
 func rankPercentilesStats[T ~int64 | ~float64](order []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64, []*float64) {
-	return rankPercentilesCore(order, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
+	return rankPercentilesStatsMerge(order, nil, membership, counts, extraValues, extraBuckets)
+}
+
+// rankPercentilesStatsMerge is rankPercentilesStats over an exact two-run order.
+func rankPercentilesStatsMerge[T ~int64 | ~float64](base, pending []metricSample[T], membership []uint8, counts []int, extraValues []T, extraBuckets []uint8) ([][]*float64, []*float64, []*float64) {
+	return rankPercentilesCore(base, pending, counts, extraValues, extraBuckets, func(row uint32, emit func(uint8)) {
 		if uint64(row) < uint64(len(membership)) {
 			emit(membership[row])
 		}
@@ -393,7 +467,7 @@ func (a *metricAccumulator) result() []*float64 {
 	return []*float64{&avg, &a.lo, &a.hi}
 }
 
-func rankPercentilesCore[T ~int64 | ~float64](order []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8)), wantStats bool) ([][]*float64, []*float64, []*float64) {
+func rankPercentilesCore[T ~int64 | ~float64](base, pending []metricSample[T], counts []int, extraValues []T, extraBuckets []uint8, visit func(row uint32, emit func(bucket uint8)), wantStats bool) ([][]*float64, []*float64, []*float64) {
 	sets := make([]metricRankSet, len(counts)+1)
 	buckets := make([][]*float64, len(counts))
 	out := make([]*float64, 3*len(sets))
@@ -441,7 +515,12 @@ func rankPercentilesCore[T ~int64 | ~float64](order []metricSample[T], counts []
 		}
 	}
 	extra := 0
-	for _, sample := range order {
+	span := metricOrderSpan[T]{base: base, pending: pending}
+	for {
+		sample, ok := span.next()
+		if !ok {
+			break
+		}
 		for extra < len(extras) && extras[extra].value <= sample.value {
 			v := extras[extra]
 			observeMetricRank(sets, uint8(v.row), float64(v.value))

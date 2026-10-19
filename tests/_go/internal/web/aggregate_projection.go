@@ -340,7 +340,7 @@ func TestProjectionVisitSinceChunks(t *testing.T) {
 	p.noteChunkStart(uint32(len(p.rows)), lateStart)
 
 	visited := 0
-	if err := p.visitSince(95000, func(c *contrib) error {
+	if err := p.visitSince(context.Background(), 95000, func(c *contrib) error {
 		if c.start < 95000 {
 			t.Fatalf("visited out-of-window start %d", c.start)
 		}
@@ -361,7 +361,7 @@ func TestProjectionVisitSinceChunks(t *testing.T) {
 
 	// Unbounded (since <= 0) still visits every row.
 	visited = 0
-	if err := p.visitSince(0, func(*contrib) error { visited++; return nil }); err != nil {
+	if err := p.visitSince(context.Background(), 0, func(*contrib) error { visited++; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if visited != len(p.rows) {
@@ -370,10 +370,40 @@ func TestProjectionVisitSinceChunks(t *testing.T) {
 
 	// A window ahead of every row visits nothing.
 	visited = 0
-	if err := p.visitSince(lateStart+1, func(*contrib) error { visited++; return nil }); err != nil {
+	if err := p.visitSince(context.Background(), lateStart+1, func(*contrib) error { visited++; return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if visited != 0 {
 		t.Fatalf("empty window visited %d rows", visited)
+	}
+}
+
+// TestProjectionVisitSinceCancellation bounds how much an abandoned fold runs
+// after its caller cancels: the next block boundary must observe the error
+// instead of walking the retained history to completion.
+func TestProjectionVisitSinceCancellation(t *testing.T) {
+	rows := make([]contrib, 4*ctxCheckRows)
+	for i := range rows {
+		rows[i] = contrib{start: int64(i + 1)}
+	}
+	p := &projectionData{rows: rows}
+	ctx, cancel := context.WithCancel(context.Background())
+	visited := 0
+	err := p.visitSince(ctx, 0, func(*contrib) error {
+		visited++
+		if visited == 100 {
+			cancel()
+		}
+		return nil
+	})
+	cancel()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled fold returned %v", err)
+	}
+	if visited > 100+ctxCheckRows {
+		t.Fatalf("canceled fold visited %d rows, want at most %d", visited, 100+ctxCheckRows)
+	}
+	if visited == len(rows) {
+		t.Fatal("canceled fold walked the whole history")
 	}
 }
