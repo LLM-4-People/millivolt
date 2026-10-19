@@ -1348,7 +1348,9 @@ func readRequestHint(r *http.Request, maxBytes int64, preview bool, hintMax int6
 	// Request timing excludes upload, but includes the unified metadata decode
 	// and any later format translation. This is the sole Start owner.
 	rec.Start = time.Now()
-	parseLLMRequest(body, rec, preview)
+	if err := parseLLMRequest(body, rec, preview); err != nil {
+		return nil, nil, err
+	}
 	return body, rec, nil
 }
 
@@ -1604,7 +1606,196 @@ func (m *requestMetadataKeys) count() int { return len(m.keys) }
 // metadata-only field must not erase valid model/stream routing, and vice
 // versa. Only that exceptional path needs independent decoding; malformed
 // JSON still passes through unchanged with no partially extracted metadata.
-func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
+// requestMetadataMaxElements bounds the decoded top-level collection sizes
+// before the single metadata decode. A 32 MiB body can otherwise expand into
+// hundreds of MiB of empty objects; this is an internal DoS guardrail, not a
+// wire-format limit, and 10k messages/tools/logit_bias entries is far above a
+// normal request.
+const requestMetadataMaxElements = 10_000
+
+// boundRequestMetadata is an allocation-free preflight over the top-level
+// document. It rejects only a JSON document whose messages/tools array or
+// logit_bias object exceeds the bound. Invalid JSON returns nil so the
+// existing passthrough behavior is preserved; no collection, key, or nested
+// value is materialized. Collection members are skipped lexically with the
+// shared byte scanner, so a metadata flood costs one pass over the body.
+func boundRequestMetadata(body []byte) error {
+	i := metrics.SkipSpace(body, 0)
+	if i >= len(body) || body[i] != '{' {
+		return nil
+	}
+	i = metrics.SkipSpace(body, i+1)
+	if i < len(body) && body[i] == '}' {
+		return nil
+	}
+	for i < len(body) {
+		keyStart := i
+		end := skipJSONString(body, i)
+		if end < 0 {
+			return nil
+		}
+		key := body[keyStart:end]
+		i = metrics.SkipSpace(body, end)
+		if i >= len(body) || body[i] != ':' {
+			return nil
+		}
+		i = metrics.SkipSpace(body, i+1)
+		if i >= len(body) {
+			return nil
+		}
+		switch {
+		case jsonKeyIs(key, "messages"), jsonKeyIs(key, "tools"):
+			n, next, ok := countJSONArrayBytes(body, i, requestMetadataMaxElements)
+			if !ok {
+				return nil
+			}
+			if n > requestMetadataMaxElements {
+				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", string(key), requestMetadataMaxElements))
+			}
+			i = next
+		case jsonKeyIs(key, "logit_bias"):
+			n, next, ok := countJSONObjectKeys(body, i, requestMetadataMaxElements)
+			if !ok {
+				return nil
+			}
+			if n > requestMetadataMaxElements {
+				return requestMetadataOverflow(body, fmt.Errorf("request logit_bias exceeds %d entries", requestMetadataMaxElements))
+			}
+			i = next
+		default:
+			next := skipJSONValue(body, i)
+			if next < 0 {
+				return nil
+			}
+			i = next
+		}
+		i = metrics.SkipSpace(body, i)
+		if i >= len(body) {
+			return nil
+		}
+		if body[i] == '}' {
+			return nil
+		}
+		if body[i] != ',' {
+			return nil
+		}
+		i = metrics.SkipSpace(body, i+1)
+	}
+	return nil
+}
+
+// requestMetadataOverflow rejects only a fully valid JSON document. The
+// lexical counter can have seen an over-cap prefix before invalid trailing
+// bytes; malformed input must keep its unchanged passthrough contract, so
+// validation happens only on the rejection path.
+func requestMetadataOverflow(body []byte, err error) error {
+	if !json.Valid(body) {
+		return nil
+	}
+	return err
+}
+
+// jsonKeyIs compares a raw top-level key (including its quotes) without
+// allocating for the common unescaped case. Only an escaped key takes the
+// decoder path, so a flood of ordinary keys remains allocation-free.
+func jsonKeyIs(raw []byte, want string) bool {
+	if len(raw) >= 2 && bytes.IndexByte(raw, '\\') < 0 {
+		return string(raw[1:len(raw)-1]) == want
+	}
+	var s string
+	return json.Unmarshal(raw, &s) == nil && s == want
+}
+
+// countJSONArrayBytes counts top-level members of a JSON array. A non-array
+// value is skipped and reported as zero so only actual collection overflows
+// are rejected; lexical traversal never materializes members.
+func countJSONArrayBytes(data []byte, i, max int) (int, int, bool) {
+	i = metrics.SkipSpace(data, i)
+	if i >= len(data) {
+		return 0, 0, false
+	}
+	if data[i] != '[' {
+		next := skipJSONValue(data, i)
+		return 0, next, next >= 0
+	}
+	i = metrics.SkipSpace(data, i+1)
+	n := 0
+	for i < len(data) && data[i] != ']' {
+		next := skipJSONValue(data, i)
+		if next <= i {
+			return 0, 0, false
+		}
+		n++
+		if n > max {
+			return n, next, true
+		}
+		i = metrics.SkipSpace(data, next)
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			continue
+		}
+		if i < len(data) && data[i] == ']' {
+			break
+		}
+		return 0, 0, false
+	}
+	if i >= len(data) || data[i] != ']' {
+		return 0, 0, false
+	}
+	return n, i + 1, true
+}
+
+// countJSONObjectKeys counts members of a JSON object without materializing
+// them; the same non-object tolerance as countJSONArrayBytes applies.
+func countJSONObjectKeys(data []byte, i, max int) (int, int, bool) {
+	i = metrics.SkipSpace(data, i)
+	if i >= len(data) {
+		return 0, 0, false
+	}
+	if data[i] != '{' {
+		next := skipJSONValue(data, i)
+		return 0, next, next >= 0
+	}
+	i = metrics.SkipSpace(data, i+1)
+	n := 0
+	for i < len(data) && data[i] != '}' {
+		end := skipJSONString(data, i)
+		if end < 0 {
+			return 0, 0, false
+		}
+		i = metrics.SkipSpace(data, end)
+		if i >= len(data) || data[i] != ':' {
+			return 0, 0, false
+		}
+		i = metrics.SkipSpace(data, i+1)
+		next := skipJSONValue(data, i)
+		if next <= i {
+			return 0, 0, false
+		}
+		n++
+		if n > max {
+			return n, next, true
+		}
+		i = metrics.SkipSpace(data, next)
+		if i < len(data) && data[i] == ',' {
+			i = metrics.SkipSpace(data, i+1)
+			continue
+		}
+		if i < len(data) && data[i] == '}' {
+			break
+		}
+		return 0, 0, false
+	}
+	if i >= len(data) || data[i] != '}' {
+		return 0, 0, false
+	}
+	return n, i + 1, true
+}
+
+func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) error {
+	if err := boundRequestMetadata(body); err != nil {
+		return err
+	}
 	var req struct {
 		requestRouting
 		requestParameters
@@ -1612,7 +1803,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 	if err := json.Unmarshal(body, &req); err != nil {
 		var typeErr *json.UnmarshalTypeError
 		if !errors.As(err, &typeErr) {
-			return
+			return nil
 		}
 		req.requestRouting = requestRouting{}
 		if json.Unmarshal(body, &req.requestRouting) != nil {
@@ -1630,7 +1821,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 			// not decode leaves the record's cap untouched).
 			applyTokenCaps(body, rec)
 			rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
-			return
+			return nil
 		}
 	}
 	rec.Model, rec.Stream = retainedText(req.Model, retainedLabelMax), req.Stream
@@ -1724,7 +1915,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 			Messages []requestMessage[requestPreview] `json:"messages"`
 		}
 		if json.Unmarshal(body, &captured) != nil {
-			return
+			return nil
 		}
 		for i := len(captured.Messages) - 1; i >= 0; i-- {
 			if captured.Messages[i].Role == "user" {
@@ -1733,6 +1924,7 @@ func parseLLMRequest(body []byte, rec *metrics.Record, preview bool) {
 			}
 		}
 	}
+	return nil
 }
 
 // configToken accepts a short alphanumeric request-config token (effort,

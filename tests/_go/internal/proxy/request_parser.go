@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -677,5 +678,89 @@ func TestClassifyClientLabelPrecedence(t *testing.T) {
 				t.Fatalf("classifyClient(label=%q ua=%q) = %q, want %q", tc.label, tc.ua, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRequestCollectionElementBounds(t *testing.T) {
+	array := func(n int, elem string) string {
+		if n == 0 {
+			return "[]"
+		}
+		return "[" + strings.TrimSuffix(strings.Repeat(elem+",", n), ",") + "]"
+	}
+	object := func(n int) string {
+		var b strings.Builder
+		b.WriteByte('{')
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, `"k%d":0`, i)
+		}
+		b.WriteByte('}')
+		return b.String()
+	}
+	for _, tc := range []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"messages at cap", `{"model":"m","messages":` + array(requestMetadataMaxElements, `{}`) + `}`, false},
+		{"messages over cap", `{"model":"m","messages":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
+		{"tools over cap", `{"model":"m","tools":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
+		{"logit_bias over cap", `{"model":"m","logit_bias":` + object(requestMetadataMaxElements+1) + `}`, true},
+		{"escaped messages key", `{"mess\u0061ges":` + array(requestMetadataMaxElements+1, `{}`) + `}`, true},
+		{"non-array messages is not an element collection", `{"model":"m","messages":"not-an-array"}`, false},
+		{"malformed JSON stays passthrough", `{"model":"m","messages":[`, false},
+		{"malformed over-cap prefix stays passthrough", `{"model":"m","messages":` + array(requestMetadataMaxElements+1, `{}`) + `,X}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var rec metrics.Record
+			err := parseLLMRequest([]byte(tc.body), &rec, false)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("parseLLMRequest error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRequestElementOverflowReturns400BeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[]}`))
+	}))
+	defer upstream.Close()
+	srv := httptest.NewServer(New(config.Default(), metrics.Noop{}))
+	defer srv.Close()
+
+	var b strings.Builder
+	b.WriteString(`{"model":"m","messages":[`)
+	for i := 0; i <= requestMetadataMaxElements; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{}`)
+	}
+	b.WriteString(`]}`)
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(b.String()))
+	req.Header.Set("Authorization", "Bearer sk-test-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body: %s)", resp.StatusCode, raw)
+	}
+	if !bytes.Contains(raw, []byte("exceeds")) || !bytes.Contains(raw, []byte("invalid_request_error")) {
+		t.Fatalf("body = %q, want bounded invalid_request_error", raw)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("upstream called %d times, want 0", got)
 	}
 }

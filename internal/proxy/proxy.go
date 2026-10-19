@@ -640,7 +640,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Parameter/composition metrics describe the translated upstream body,
 		// while routing keeps the client's original model and stream choice.
 		rec = &metrics.Record{Start: rec.Start}
-		parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview)
+		if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+			return
+		}
 		// Re-apply the token-cap bound at this second trust boundary before
 		// anything consumes the fresh record. A decoy type error can keep the
 		// original decode's ReqMaxTokens nil (the split-decode early return)
