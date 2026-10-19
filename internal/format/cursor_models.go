@@ -62,7 +62,8 @@ type CursorModel struct {
 // unary raw protobuf; if a server ever wraps it in a Connect envelope, the
 // caller strips that before calling here.
 func ParseGetUsableModelsResponse(body []byte) ([]CursorModel, error) {
-	fields, err := parseProtoFields(body)
+	budget := newProtoFieldBudget()
+	fields, err := parseProtoFieldsWire(body, false, budget)
 	if err != nil {
 		return nil, fmt.Errorf("decode GetUsableModelsResponse: %w", err)
 	}
@@ -71,7 +72,7 @@ func ParseGetUsableModelsResponse(body []byte) ([]CursorModel, error) {
 		if f.num != fGetUsableModelsResponseModels {
 			continue
 		}
-		md, err := subFields(&f)
+		md, err := subFields(&f, budget)
 		if err != nil {
 			return nil, fmt.Errorf("decode ModelDetails: %w", err)
 		}

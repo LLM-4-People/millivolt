@@ -308,11 +308,15 @@ func firstField(fields []protoField, num int) *protoField {
 }
 
 // subFields parses an embedded message field's bytes into its fields.
-func subFields(f *protoField) ([]protoField, error) {
+func subFields(f *protoField, budgets ...*protoFieldBudget) ([]protoField, error) {
 	if f == nil || f.wire != wireBytes {
 		return nil, fmt.Errorf("protobuf: field is not an embedded message")
 	}
-	return parseProtoFields(f.raw)
+	budget := newProtoFieldBudget()
+	if len(budgets) > 0 && budgets[0] != nil {
+		budget = budgets[0]
+	}
+	return parseProtoFieldsWire(f.raw, false, budget)
 }
 
 // decodeMapEntry splits one map<string, bytes> entry message: field 1
