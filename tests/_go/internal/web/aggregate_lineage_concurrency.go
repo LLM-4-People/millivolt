@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -103,6 +104,118 @@ func checkExplorerLineageSnapshot(p explorerPayload, base, final int) error {
 		}
 	}
 	return nil
+}
+
+// TestExplorerLineagePayloadBuildsInsideReadLease pins the lease boundary
+// itself instead of relying on appends and payload reads overlapping by luck.
+// The hook runs at the payload's first lineage read. While the fixed explorer
+// still holds streamWindow's projection read lease, the append can only become
+// durable; its projection mutation waits for that lease. If the payload moves
+// outside the lease, the hook observes the released lease, lets the real
+// durable append reach the projection first, and the payload then mixes the
+// old fold with the appended topology deterministically.
+func TestExplorerLineagePayloadBuildsInsideReadLease(t *testing.T) {
+	api, _ := projectionAPI(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	now := time.Now().Add(-time.Hour)
+
+	// The root starts as the only main conversation and the child observes it.
+	for i, turn := range []struct{ id, conv, parent string }{
+		{"root", "s:root", ""},
+		{"child", "s:child", "s:root"},
+	} {
+		api.store.Record(lineageTurn(turn.id, turn.conv, turn.parent, now.Add(time.Duration(i)*time.Millisecond)))
+	}
+	if err := api.store.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	seed, err := api.explorer(ctx, "conversation", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkExplorerLineageSnapshot(seed, 2, 3); err != nil {
+		t.Fatalf("seed payload: %v", err)
+	}
+
+	appendStart := make(chan struct{})
+	appendDurable := make(chan struct{})
+	appendDone := make(chan struct{})
+	appendErr := make(chan error, 1)
+	go func() {
+		defer close(appendDone)
+		<-appendStart
+		// Declaring the child as the root's parent makes the appended topology
+		// a cycle, so the payload summary changes shape without needing a new
+		// parent dictionary slot that the old fold never interned.
+		api.store.Record(lineageTurn("late", "s:root", "s:child", now.Add(2*time.Millisecond)))
+		err := api.store.Flush()
+		close(appendDurable)
+		if err != nil {
+			appendErr <- fmt.Errorf("flush append: %w", err)
+			return
+		}
+		// The appender's own explorer drives the real projection catch-up. Its
+		// result is irrelevant here; completion proves the append reached the
+		// shared topology.
+		if _, err := api.explorer(ctx, "conversation", nil, ""); err != nil {
+			appendErr <- fmt.Errorf("explore appended topology: %w", err)
+			return
+		}
+	}()
+
+	var armed atomic.Bool
+	armed.Store(true)
+	api.testHooks = &aggregateTestHooks{lineage: func() {
+		if !armed.CompareAndSwap(true, false) {
+			return
+		}
+		// The payload's first lineage read is inside streamWindow's read lease
+		// on the fixed path and after it when the payload moved outside.
+		leaseHeld := !api.projection.mu.TryLock()
+		if !leaseHeld {
+			api.projection.mu.Unlock()
+		}
+		close(appendStart)
+		<-appendDurable
+		if !leaseHeld {
+			<-appendDone
+		}
+	}}
+	t.Cleanup(func() { api.testHooks = nil })
+
+	// A different scope from the seed request misses the last-result memo and
+	// folds the fixture again over the same projection.
+	scope := []scopeFilter{{dim: "provider", id: "lineage.example"}}
+	p, err := api.explorer(ctx, "conversation", scope, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.Err(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-appendErr:
+		t.Fatal(err)
+	default:
+	}
+	if err := checkExplorerLineageSnapshot(p, 2, 3); err != nil {
+		t.Fatalf("reader payload built against an appended topology: %v", err)
+	}
+	<-appendDone
+
+	final, err := api.explorer(ctx, "conversation", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Total != 3 || final.Conversations != (conversationSummary{Unresolved: 2}) {
+		t.Fatalf("final snapshot = %+v", final)
+	}
+	root := final.Groups[0]
+	if root.Name != "s:root" || root.N != 2 || root.Conversation == nil ||
+		root.Conversation.Role != conversationUnknown || root.Conversation.Issue != "cycle" {
+		t.Fatalf("final root = %+v", root)
+	}
 }
 
 func TestExplorerLineagePayloadStaysCoherentDuringAppend(t *testing.T) {

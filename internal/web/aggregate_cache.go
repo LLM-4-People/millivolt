@@ -45,10 +45,13 @@ type aggregateFlight struct {
 
 // aggregateTestHooks are nil in production. They mark the cold-fold start and
 // a caller joining an in-flight fold so package tests can sequence leader and
-// follower deterministically.
+// follower deterministically. lineage marks the payload's first conversation
+// lineage read, which the fixed explorer builds under the projection read
+// lease; tests use it to sequence an append against that boundary.
 type aggregateTestHooks struct {
-	cold func()
-	wait func()
+	cold    func()
+	wait    func()
+	lineage func()
 }
 
 func (a *AggAPI) testColdHook() {
@@ -309,6 +312,9 @@ func (a *AggAPI) explorer(ctx context.Context, dim string, fs []scopeFilter, sta
 func (a *AggAPI) explorerCold(ctx context.Context, mcz *modelCanonizer, key aggregateKey, cacheable bool, dim string, fs []scopeFilter, status string) (explorerPayload, error) {
 	a.testColdHook()
 	e := newExplorerFold(dim, status, fs)
+	if h := a.testHooks; h != nil && h.lineage != nil {
+		e.lineage.testPayload = h.lineage
+	}
 	pending := a.buf.PendingRecords()
 	e.pendingIDs = make(map[string]struct{}, len(pending))
 	for _, r := range pending {

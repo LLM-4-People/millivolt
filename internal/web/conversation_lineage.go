@@ -290,6 +290,11 @@ type conversationLineage struct {
 	issues    []uint8
 	state     []uint8
 	path      []uint32
+
+	// testPayload is nil in production. Explorer requests copy a package test
+	// hook here so tests can sequence an append against the payload's first
+	// lineage read without replacing the real fold or append paths.
+	testPayload func()
 }
 
 func (l *conversationLineage) prepare(p *projectionData, q *queryDimensions) {
@@ -652,6 +657,9 @@ func (l *conversationLineage) groupRole(group uint32) string {
 }
 
 func (l *conversationLineage) summary() conversationSummary {
+	if l.testPayload != nil {
+		l.testPayload()
+	}
 	l.solve()
 	var summary conversationSummary
 	for group := uint32(0); group < l.groupCount(); group++ {
