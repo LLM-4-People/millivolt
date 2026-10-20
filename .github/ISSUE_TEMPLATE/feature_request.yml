@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a concrete improvement with its problem and scope.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first. A feature that does not name its operator
+        workflow is difficult to evaluate against the project's limits.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what blocks you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: The smallest concrete change that would solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing configuration, operators, or upstream behavior you tried.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and compatibility
+      description: Does this affect the protocol, config schema, storage, dashboard, or release surface?
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Fit
+      options:
+        - label: I checked the documentation and existing configuration for a supported path.
+          required: true

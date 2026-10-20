@@ -1,0 +1,77 @@
+name: Bug report
+description: Report a reproducible defect using sanitized, local fixtures.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private prompts, database files, or local
+        configuration. Redact identifiers and replace secrets with placeholders.
+        Security vulnerabilities belong in the private advisory channel linked
+        on the issue chooser, not in a public issue.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: A concise description of the observed behavior and its impact.
+      placeholder: The dashboard denied a request after...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: The behavior you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Exact commands, configuration shape, and client request. Remove secrets and private data.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: millivolt version or revision
+      description: A release tag, image digest, or source revision.
+      placeholder: v0.3.23 or 0870fc5
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose
+        - Source build
+        - Other or custom
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, container runtime, and relevant versions.
+      placeholder: Linux amd64, Docker Engine 28, Compose 2
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or trace
+      description: Relevant log lines with credentials, prompts, and host-specific paths removed.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private prompts, databases, and local config from this report.
+          required: true
+        - label: This is not a security vulnerability; I know the private reporting channel.
+          required: true

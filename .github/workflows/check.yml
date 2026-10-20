@@ -2,12 +2,28 @@ name: Checks and images
 
 on:
   push:
-    # Docs-only pushes never cut a release or rebuild images. Their Markdown
-    # links, anchors and typography are validated by the unfiltered docs job in
+    # Only the long-lived branches and release tags publish or release. PR
+    # runs cover every feature and Dependabot branch without duplicating the
+    # push run for the same SHA.
+    branches:
+      - main
+      - testing
+    tags:
+      - 'v*'
+    # Docs and site-only pushes never cut a release or rebuild images. Their
+    # Markdown links, anchors, site build and typography are validated by
     # docs.yml instead of rebuilding this whole matrix.
     paths-ignore:
       - 'docs/**'
       - '**/*.md'
+      - 'LICENSE'
+      - 'site-src/**'
+      - 'scripts/build_site.py'
+      - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+      - '.github/workflows/pages.yml'
+      - '.github/workflows/dependency-review.yml'
+      - '.github/workflows/security.yml'
   pull_request:
 
 permissions:
@@ -15,7 +31,9 @@ permissions:
 
 concurrency:
   group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A release run must finish. Superseded PR and testing runs are safe to
+  # cancel; main and tag runs are not.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/testing' }}
 
 jobs:
   checks:
@@ -34,13 +52,15 @@ jobs:
           cache-dependency-path: go.sum
       - name: Validate clean source identity
         env:
-          REVISION: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
-          args=(release -revision "$REVISION")
+          # HEAD is the checked-out commit for both branch and annotated-tag
+          # events. github.sha can name the tag object itself for a tag push.
+          revision="$(git rev-parse HEAD)"
+          args=(release -revision "$revision")
           if [ -n "$RELEASE_TAG" ]; then args+=(-tag "$RELEASE_TAG"); fi
           bash scripts/check.sh "${args[@]}"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
           cache: npm
@@ -53,12 +73,12 @@ jobs:
         # Only the browser download is reusable. The install step below still
         # runs on every job, so OS dependencies are always refreshed and no
         # check can be skipped. requirements-dev.txt owns the Python Playwright
-        # pin that installs Chromium; package-lock.json covers Node tooling, so
-        # both dependency files participate in the key.
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        # pin that installs Chromium; package-lock.json covers unrelated Node
+        # tooling, so it must not invalidate the browser cache.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/ms-playwright
-          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}-${{ hashFiles('requirements-dev.txt') }}
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements-dev.txt') }}
           restore-keys: |
             ${{ runner.os }}-playwright-
       - name: Install development dependencies
@@ -139,17 +159,33 @@ jobs:
           IMAGE_ID: ${{ steps.build.outputs.imageid }}
         run: bash scripts/check.sh container --image "$IMAGE_ID"
 
+  required:
+    name: required
+    # One stable check for branch protection. A skipped matrix leg must fail
+    # the gate rather than silently satisfy it.
+    if: always()
+    needs: [checks, container]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Require every gate
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1
+
   publish:
     needs: [checks, container]
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    concurrency:
+      group: release
+      cancel-in-progress: false
     permissions:
       contents: write
       packages: write
     env:
       GOTOOLCHAIN: local
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,14 +198,13 @@ jobs:
           cache-dependency-path: go.sum
       - name: Cut the next version
         id: cut
-        env:
-          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [ "${{ github.ref_type }}" = "tag" ]; then
-            # A manually pushed release tag ships exactly as tagged.
+            # A manually pushed release tag ships exactly as tagged. HEAD is
+            # the commit even when the tag object is annotated.
             version="${GITHUB_REF_NAME#v}"
-            revision="${{ github.sha }}"
+            revision="$(git rev-parse HEAD)"
           else
             latest="$(git tag -l 'v*' --sort=-v:refname | head -n1 | sed 's/^v//')"
             file_version="$(tr -d '\r\n' < VERSION)"
@@ -197,7 +232,6 @@ jobs:
             fi
             revision="$(git rev-parse HEAD)"
             git tag -a "v$version" -m "millivolt $version" "$revision"
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:main" "v$version"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
@@ -210,28 +244,6 @@ jobs:
         run: |
           args=(release -revision "$REVISION" -tag "$RELEASE_TAG")
           bash scripts/check.sh "${args[@]}" >> "$GITHUB_OUTPUT"
-      - name: Create the GitHub release
-        env:
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          # Notes come from the real commit log since the previous release
-          # tag (push-based work has no PRs for --generate-notes to list).
-          previous="$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')"
-          {
-            echo "## What's included"
-            if [ -n "$previous" ]; then
-              git log --no-decorate --format='- %h %s' "$previous..v$RELEASE_VERSION"
-            else
-              git log --no-decorate --format='- %h %s'
-            fi
-            echo
-            echo "**Image:** \`ghcr.io/${REPO}:${RELEASE_VERSION}\`"
-          } > release-notes.md
-          flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
-          if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
-          gh release view "v$RELEASE_VERSION" >/dev/null 2>&1 || \
-            gh release create "v$RELEASE_VERSION" "${flags[@]}"
       - name: Define image tags and labels
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -239,7 +251,7 @@ jobs:
           images: ghcr.io/llm-4-people/millivolt
           flavor: latest=false
           tags: |
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' && !contains(env.RELEASE_VERSION, '-') }}
             type=raw,value=${{ env.RELEASE_VERSION }},enable=${{ env.RELEASE_VERSION != '' }}
             # Source the sha tag from the cut revision the build and OCI
             # revision label use. The cut step may create a VERSION commit
@@ -259,11 +271,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish verified multi-platform image
+        id: image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: REVISION=${{ steps.cut.outputs.revision }}
@@ -275,6 +290,47 @@ jobs:
             type=gha,scope=millivolt-container-linux-amd64
             type=gha,scope=millivolt-container-linux-arm64
           cache-to: type=gha,mode=min,scope=millivolt-publish-multiarch,ignore-error=true
+      - name: Push verified revision and tag
+        if: github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # The tag and main move only after the image exists. A failed build
+          # must not leave a public release pointing at a missing image.
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:main" "v$RELEASE_VERSION"
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Notes come from the real commit log since the previous release
+          # tag (push-based work has no PRs for --generate-notes to list).
+          previous="$(git tag -l 'v*' --sort=-v:refname | sed -n '2p')"
+          {
+            echo "## What's included"
+            if [ -n "$previous" ]; then
+              git log --no-merges --no-decorate --format='- %h %s' "$previous..v$RELEASE_VERSION" \
+                | awk '{ subject=$0; sub(/^- [0-9a-f]+ /, "", subject); if (subject ~ /^bump version to /) next; if (seen[subject]++) next; print }'
+            else
+              git log --no-merges --no-decorate --format='- %h %s' \
+                | awk '{ subject=$0; sub(/^- [0-9a-f]+ /, "", subject); if (subject ~ /^bump version to /) next; if (seen[subject]++) next; print }'
+            fi
+            echo
+            echo "**Image:** \`ghcr.io/llm-4-people/millivolt:${RELEASE_VERSION}\`"
+            if [ -n "${{ steps.image.outputs.digest }}" ]; then
+              echo "**Digest:** \`${{ steps.image.outputs.digest }}\`"
+            fi
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full changelog:** https://github.com/LLM-4-People/millivolt/compare/${previous}...v${RELEASE_VERSION}"
+            fi
+          } > release-notes.md
+          flags=(--verify-tag --title "millivolt $RELEASE_VERSION" --notes-file release-notes.md)
+          if [[ "$RELEASE_VERSION" == *-* ]]; then flags+=(--prerelease); fi
+          gh release view "v$RELEASE_VERSION" >/dev/null 2>&1 || \
+            gh release create "v$RELEASE_VERSION" "${flags[@]}"
 
   publish-testing:
     needs: [checks, container]
@@ -284,6 +340,9 @@ jobs:
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && github.ref == 'refs/heads/testing'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    concurrency:
+      group: publish-testing
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -291,6 +350,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Read the testing version
+        id: version
+        run: echo "version=$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -305,6 +367,7 @@ jobs:
           push: true
           tags: ghcr.io/llm-4-people/millivolt:testing
           labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.source=https://github.com/LLM-4-People/millivolt
             org.opencontainers.image.licenses=MIT

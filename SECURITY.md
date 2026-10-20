@@ -82,11 +82,30 @@ details in a public issue.
 
 Use the repository's enabled
 [private vulnerability reporting](https://github.com/LLM-4-People/millivolt/security/advisories/new)
-channel. No supported release matrix or response-time commitment has been
-established here.
+channel.
 
 Include the affected revision, deployment assumptions, impact, and a minimal
 reproduction using neutral local fixtures. Test only systems you own or are
 explicitly authorized to assess.
+
+## Supported versions
+
+Security fixes target the latest published release. The `0.x` series is in
+active development; older releases are not backported.
+
+| Version | Supported |
+| --- | --- |
+| Latest published 0.x release | Yes |
+| Older releases | No |
+
+## Disclosure process
+
+Reports are acknowledged on a best-effort basis; no response-time SLA is
+promised. Maintainers will validate the report, prepare a fix, publish a GitHub
+security advisory, and credit the reporter unless they prefer otherwise. Please
+allow time for a coordinated fix before public disclosure.
+
+Dependency review and a scheduled Go vulnerability scan run in CI. A clean scan
+is not a security guarantee, and neither replaces a private report.
 
 GitHub documents [private vulnerability reporting](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository).

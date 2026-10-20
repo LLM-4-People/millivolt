@@ -18,9 +18,15 @@ or push a completed, checked feature directly there when that is authorized.
 
 Promotion from `testing` to `main` is a separate deliberate integration after
 validation, not part of an ordinary feature push. Do not push release tags as a
-side effect of feature work: CI cuts releases itself. CI checks every branch;
-production image publishing remains restricted to `main` and version tags,
-and `testing`-branch pushes publish only the moving development alias.
+side effect of feature work: CI cuts releases itself. Pull requests and pushes
+to `main` and `testing` run the full gate; docs and site-only pushes run the
+smaller documentation gate. Production image publishing remains restricted to
+`main` and version tags, and `testing`-branch pushes publish only the moving
+development alias.
+
+Dependabot version updates target `testing`. Dependabot security updates target
+the default branch, so merge a security PR into `main`, cut the patch release,
+then merge `main` back into `testing` before continuing feature work.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -34,9 +40,11 @@ Linux is supported. Version sources are:
 - Node: [.node-version](.node-version).
 - Python: [.python-version](.python-version).
 - Browser tooling: [requirements-dev.txt](requirements-dev.txt).
+- Documentation site: [requirements-docs.txt](requirements-docs.txt).
 
 The proxy embeds its vanilla JavaScript/CSS and needs no frontend build or Node
-runtime in deployment. Node/jsdom and Python/Playwright are development tools.
+runtime in deployment. Node/jsdom, Python/Playwright, Python-Markdown and PyYAML
+are development and documentation tools.
 
 ```sh
 npm ci --ignore-scripts
@@ -58,8 +66,9 @@ scripts/check.sh
 ```
 
 The shared script owns the core verification commands, including offline
-documentation-link, publication-ignore and typography regressions (Git is required).
-`npm test` runs the jsdom suite separately. All tests and disposable harnesses
+documentation-link, publication-ignore and typography regressions (Git is required),
+the generated-site contract, and the workflow/automation policy. `npm test` runs
+the jsdom suite separately. All tests and disposable harnesses
 live in [tests/](tests/README.md), with suffix-free physical filenames. Go's
 temporary overlay adds its required virtual `_test.go` names; Python unit
 modules live in `tests/python/`. Use `scripts/check.sh go test` for targeted Go
@@ -68,6 +77,27 @@ test code and dependencies. Raw `go test ./...` does not discover the relocated
 tests and can report success without running them. Re-run checks after your
 last edit. Concurrency changes need race coverage. JavaScript unit checks do
 not establish real canvas rendering, layout, focus or viewport behavior.
+
+### Documentation site
+
+The public site is generated from the existing Markdown, not maintained as a
+second documentation tree. `site-src/` owns the layout, styles, and brand
+assets; `scripts/build_site.py` renders the pages, rewrites repository links,
+and emits the search index, sitemap, and 404 page. The generated `site/`
+directory is ignored and never committed.
+
+```sh
+python3 -m pip install -r requirements-docs.txt
+python3 -B -O -m tests.python.site
+python3 scripts/build_site.py --output site
+```
+
+For a local preview, serve `site/` from a separate terminal with
+`python3 -m http.server --directory site 8082`; do not point it at the proxy or
+use the main `:8080` instance. The `docs.yml` workflow builds the site for
+documentation changes, and `pages.yml` deploys from `main` through the official
+GitHub Pages Actions flow. Repository-level Pages enablement and the
+`github-pages` environment are one-time administrator settings.
 
 ### Push gate
 
@@ -283,29 +313,33 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 ```
 
 Publication is automatic. After the checks and both container architectures
-pass, every push to `main` that touches anything besides documentation
-(`docs/**`, `**/*.md`) cuts a release:
+pass, every code-bearing push to `main` cuts a release:
 
 1. The next version is the higher of VERSION and the newest `v*` tag. If that
    version is already tagged, the patch number increments; an untagged VERSION
    (a manual bump or one carried by a promotion merge) ships as-is.
-2. The workflow commits the VERSION change, pushes an annotated `v<version>`
-   tag and creates the GitHub release with the commit log since the previous
-   tag as notes.
-3. It then builds and publishes the multi-arch image with `main`, `sha-*`,
-   `version` and (for non-prereleases) `latest` tags on ghcr.io. The `sha-*`
-   tag and the OCI revision label name the cut revision that was built, which
-   can include the workflow's own VERSION-bump commit. `latest` moves with each
-   non-prerelease release cut by a main push or a manual tag; prereleases and
-   the testing alias never update it.
+2. The workflow creates the local VERSION commit and annotated `v<version>`
+   tag, builds and publishes the multi-arch image with `main`, `sha-*`,
+   `version` and (for non-prereleases) `latest` tags, including an SBOM and
+   max-mode provenance. The `sha-*` tag and OCI revision label name the cut
+   revision that was built, which can include the workflow's VERSION-bump commit.
+3. Only after the image exists does it push the branch and tag and create the
+   GitHub release. Release notes filter merge and version-bump commits, dedupe
+   subjects, use the lowercase image path, include the digest, and link the
+   compare range. A failed image build leaves no public release pointing at a
+   missing image. `main` and `latest` exclude prereleases; the `testing` alias
+   never moves them.
 
-Docs-only pushes never cut a release or rebuild images. A manually pushed
-`v*` tag still ships exactly as tagged through the same pipeline. VERSION is
-recomputed from the higher of the file and the newest tag on every release, so
-a promotion merge that resolves a VERSION conflict to either side is safe.
+Docs and site-only pushes never cut a release or rebuild images. They validate
+Markdown and the generated site; a main-branch docs/site push deploys Pages
+instead. A manually pushed `v*` tag still ships exactly as tagged through the
+same pipeline, with the image published before the release is created. VERSION
+is recomputed from the higher of the file and the newest tag on every release,
+so a promotion merge that resolves a VERSION conflict to either side is safe.
 Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
-container builds, without cutting a release or any version tag.
+container builds, without cutting a release or any version tag. Its OCI version
+label reports the embedded VERSION, which can lag the latest release.
 Manual validation of a candidate remains available:
 
 ```sh
@@ -357,8 +391,11 @@ preserve exact protocol names, identifiers, user data and license wording.
 - Preserve dependency licenses. Report vulnerabilities using [SECURITY.md](SECURITY.md),
   not a public issue containing sensitive reproduction data.
 
-Dependabot checks Go, npm, Python, Docker and GitHub Actions dependencies weekly when
-enabled by the hosting repository. Review dependency changes and re-run checks;
-the runtime version files still require deliberate updates and verification.
-Advisory scans such as `go run golang.org/x/vuln/cmd/govulncheck@latest ./...`
-and `npm audit` complement tests; a clean scan is not a security guarantee.
+Dependabot checks Go, npm, Python, Docker and GitHub Actions dependencies weekly
+with grouped minor and patch updates. Review dependency changes and re-run
+checks; runtime version files still require deliberate updates and verification.
+The Docker `golang` base is deliberately left manual because its tag must move
+with go.mod; distroless updates remain automated. Security updates target
+`main` as described in the branch workflow. Dependency review runs on pull
+requests, and a scheduled `govulncheck` workflow covers the Go module graph.
+These scans complement tests; a clean scan is not a security guarantee.

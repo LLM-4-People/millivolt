@@ -5,23 +5,108 @@ updates:
     target-branch: testing
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps(go)
+    groups:
+      go-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: npm
     directory: /
     target-branch: testing
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps(js)
+    groups:
+      npm-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: pip
     directory: /
     target-branch: testing
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps(py)
+    groups:
+      pip-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: github-actions
     directory: /
     target-branch: testing
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps(actions)
+    groups:
+      actions-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+
   - package-ecosystem: docker
     directory: /
     target-branch: testing
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+    commit-message:
+      prefix: deps(docker)
+    groups:
+      docker-minor-patch:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The Go toolchain tag in Dockerfile must move together with go.mod.
+      # Dependabot cannot update the go directive, so it opened a PR that the
+      # container-version guard correctly rejected. Keep this coordinated by
+      # hand; distroless and other base images remain automated.
+      - dependency-name: golang

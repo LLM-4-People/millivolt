@@ -641,11 +641,17 @@ images.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving production image for the released current `main` revision; updated by every code-bearing main-branch push. |
-| `testing` | Moving development image after a successful testing-branch push; never a release. |
+| `main` | Moving production image for the released current `main` revision; updated by non-prerelease code-bearing main-branch pushes. A prerelease does not move it. |
+| `testing` | Moving development image after a successful testing-branch push; never a release. Its OCI version label reports the embedded `VERSION`, which can lag the latest release. |
 | `sha-<full commit>` | Release tag for the exact cut revision built and published. The cut revision can include the workflow's `VERSION`-bump commit, so it can differ from the push trigger SHA. Testing pushes do not publish it. |
 | Version from `VERSION` | Created by the matching `v`-prefixed release tag, whether cut by a main-branch push or pushed manually. |
 | `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a main-branch push. Prereleases and testing pushes do not update it. |
+
+Release builds request an SBOM and max-mode provenance. The image and its
+attestations are published before the branch and release are updated; a failed
+image build does not leave a public release pointing at a missing image. Verify
+the published manifest and attestations with `docker buildx imagetools inspect`
+and pin the digest for deployment. A tag name alone is not an integrity check.
 
 Set `MILLIVOLT_IMAGE` to the desired full image reference or published digest
 before the Compose pull/up commands. The `0.x` version series is initial

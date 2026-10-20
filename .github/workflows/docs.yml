@@ -2,13 +2,29 @@ name: Docs checks
 
 on:
   push:
-    # The main checks workflow skips docs-only pushes so they never cut a
-    # release or rebuild images. This small unfiltered job still validates
-    # Markdown links, anchors and typography, plus the docs contract tests
-    # that pin hand-written documentation to its code owners, on those pushes.
+    tags-ignore:
+      - '**'
+    # The main checks workflow skips docs and site-only pushes so they never
+    # cut a release or rebuild images. This small job still validates Markdown
+    # links, anchors, typography, the generated site, and the docs contract
+    # tests that pin hand-written documentation to its code owners.
     paths:
       - 'docs/**'
       - '**/*.md'
+      - 'LICENSE'
+      - 'site-src/**'
+      - 'scripts/build_site.py'
+      - 'requirements-docs.txt'
+      - '.github/workflows/*.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE'
+      - 'site-src/**'
+      - 'scripts/build_site.py'
+      - 'requirements-docs.txt'
+      - '.github/workflows/*.yml'
 
 permissions:
   contents: read
@@ -35,7 +51,15 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - name: Install docs dependencies
+        run: python3 -m pip install -r requirements-docs.txt
       - name: Check Markdown links, anchors and typography
         run: python3 -B -m tests.repository_check
+      - name: Build and validate the static site
+        run: python3 -B -O -m tests.python.site
+      - name: Check workflow and automation policy
+        run: python3 -B -O -m tests.python.workflows
       - name: Check documentation contracts
         run: python3 -B -m tests.go test -mod=readonly ./internal/mcp -count=1

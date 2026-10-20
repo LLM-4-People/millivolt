@@ -2,6 +2,8 @@ name: millivolt
 
 services:
   millivolt:
+    # main is the moving stable alias and excludes prereleases. Pin a version
+    # tag or digest with MILLIVOLT_IMAGE for a reproducible deployment.
     image: ${MILLIVOLT_IMAGE:-ghcr.io/llm-4-people/millivolt:main}
     container_name: millivolt
     ports:

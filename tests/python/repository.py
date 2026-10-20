@@ -518,10 +518,9 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("built", rows["sha-<full commit>"])
 
         contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
-        self.assertIn("every push to `main`", contributing)
+        self.assertIn("every code-bearing push to `main`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
-        self.assertIn("`latest` moves with each non-prerelease release cut by a main push or a manual tag",
-                      contributing)
+        self.assertIn("`main` and `latest` exclude prereleases", contributing)
 
     def prose_paragraphs(self, text, needle, label):
         paragraphs = [re.sub(r"\s+", " ", paragraph) for paragraph in text.split("\n\n")]
