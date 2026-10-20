@@ -58,6 +58,20 @@ These behaviors are verified against the Go version in the root module. See
 the official [Go command documentation](https://pkg.go.dev/cmd/go) for overlay
 and package-pattern limitations.
 
+## Parallel race shards
+
+`scripts/check.sh core` builds one race test binary per package, then runs
+disjoint top-level test groups through `tests/shard.py`. Temp-isolated packages
+split across several processes; fixed-port packages such as `cmd/proxy` stay
+single-process. Every name returned by `go test -list` is assigned exactly once,
+so a new test cannot silently fall outside the selected shards. The runner
+keeps the overlay, `-race`, `-count=1`, package working directory, and the
+bounded `-benchtime=200ms` for the allocation tests that call
+`testing.Benchmark` internally. Set `MILLIVOLT_TEST_WORKERS` to cap local
+parallelism, or use `python3 -B -O -m tests.shard --shard INDEX/TOTAL` for a CI
+matrix. The fixed-port packages remain serial because separate processes would
+collide on the same loopback fixture port.
+
 The MCP server's live test is opt-in, because it starts a private dev instance
 and generates loopback fixture traffic. It never targets port 8080, and it owns
 its instance through `scripts/dev.sh`:

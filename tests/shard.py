@@ -62,7 +62,7 @@ WEIGHTS = {
     "internal/web": {
         "TestLogPageDecodeBudget": 6.0,
         "TestLogPageNarrowScanMatchesFullDecode": 10,
-        "TestLineageDirtyExplorerAllocationIsPooled": 2.5,
+        "TestLineageDirtyExplorerAllocationIsPooled": 1000,
         "TestProjectionRecentOrderMatchesFullRebuild": 1.5,
         "TestChartUnchangedViewAllocationBounded": 1.3,
         "TestProjectionRecentAppendAllocationBounded": 1.3,
@@ -261,7 +261,12 @@ def run_one(task: Task, binary: str, directory: str) -> tuple[Task, int, float, 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--workers", type=int, default=min(12, os.cpu_count() or 1))
+    default_workers = os.environ.get("MILLIVOLT_TEST_WORKERS")
+    try:
+        workers = int(default_workers) if default_workers is not None else min(12, os.cpu_count() or 1)
+    except ValueError:
+        workers = 0
+    parser.add_argument("--workers", type=int, default=workers)
     parser.add_argument("--shard", default="0/1", help="select one CI shard as INDEX/TOTAL")
     args = parser.parse_args(argv)
     try:
