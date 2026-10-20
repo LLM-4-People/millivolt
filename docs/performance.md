@@ -8,11 +8,14 @@ behavior.
 
 These are scoped local measurements of the native proxy process, not deployment
 guarantees. They were taken on 2026-10-20 UTC. The footprint, fast-response,
-streaming, writer, storage and query tables used source revision
+streaming concurrency, writer, storage and query tables used source revision
 [`facb699`](https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2);
-the sustained-capacity table used revision `54d1276`. Measurements used Go 1.27.2 on Linux/amd64 under WSL2. The host was a shared Intel Core Ultra
-9 285H with 12 visible logical CPUs and 62 GiB of visible RAM. Builds and tests
-finished before measurement. The public example configuration was used, with
+the sustained-capacity table used revision `54d1276`; the streaming throughput
+table used revision `ca6ead9` on branch `perf/e2e-streaming`. Measurements used
+Go 1.27.2 on Linux/amd64 under WSL2. The host was a shared Intel Core Ultra
+9 285H with 12 visible logical CPUs and 62 GiB of visible RAM. The earlier tables
+were measured with builds and tests finished; the streaming throughput ramp ran
+under variable background load. The public example configuration was used, with
 private listen and database paths supplied by `scripts/dev.sh`. Debug captures
 and body previews were off. No browser or live observer was attached during the
 load stages. CPU and RSS describe the native Go process, not Docker's
@@ -26,6 +29,8 @@ container-wide accounting. Percentiles are nearest-rank; RSS was sampled every
 | Date | 2026-10-20 UTC |
 | Source revision, footprint and ramps | `facb69900ac64c19ec3262fcb88b6428d33a68d2` |
 | Source revision, sustained capacity | `54d1276` |
+| Source revision, streaming throughput | `ca6ead9` (`perf/e2e-streaming`) |
+| Streaming throughput load | Shared host, 1-minute load average 2.6 to 13.1 |
 | Go toolchain | 1.27.2, `CGO_ENABLED=0` |
 | Platform | Linux/amd64 under WSL2 |
 | CPU | Intel Core Ultra 9 285H, 12 visible logical CPUs |
@@ -139,6 +144,70 @@ ceiling. The 512 level also matches the example configuration's
 saturation sweep was run; see [Limitations](#limitations). The generator and
 upstream used 69.9% CPU and 65.8 MiB peak RSS at that stage.
 
+## Streaming throughput
+
+`scripts/perf.sh streaming` runs the longer end-to-end throughput ramp. Each
+level starts a fresh private `scripts/dev.sh` instance and sends requests
+through the real proxy to a local synthetic SSE upstream. The defaults are 1, 8,
+32, 64, 128, 256, 512 and 1024 clients for 60 seconds per level, with 100 content
+frames over a roughly one-second stream.
+
+Each result line reports requests/s, SSE events/s, response bytes/s, output
+tokens/s, end-to-end latency, first-byte p95, proxy CPU/RSS and durable rows.
+The event, byte and token counts come from responses the client compared
+byte-for-byte with the fixture, so they describe what the client received; a
+failed response does not contribute. The ramp stops at the first failed stage or
+durable drop. The per-level JSON carries `sse_events_per_second`,
+`stream_bytes_per_second` and `output_tokens_per_second` alongside the existing
+request and latency fields.
+
+This fixture emits 100 content frames per one-second stream, ten times the
+ten-frame concurrency fixture above, so its CPU and byte rates are not directly
+comparable to that table. The 2026-10-20 run measured:
+
+| Workers | HTTP requests | Requests/s | SSE events/s | Output tokens/s | Response KiB/s | p50 | p95 | p99 | First-byte p95 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 56 | 0.9 | 95 | 93 | 4.7 | 1,073 ms | 1,083 ms | 1,085 ms | 3.15 ms |
+| 8 | 456 | 7.5 | 767 | 752 | 38.2 | 1,063 ms | 1,074 ms | 1,083 ms | 2.59 ms |
+| 32 | 1,824 | 30.2 | 3,076 | 3,016 | 153.3 | 1,061 ms | 1,067 ms | 1,073 ms | 3.89 ms |
+| 64 | 3,648 | 60.1 | 6,130 | 6,010 | 305.4 | 1,064 ms | 1,074 ms | 1,096 ms | 4.58 ms |
+| 128 | 7,296 | 120.2 | 12,256 | 12,016 | 610.5 | 1,064 ms | 1,071 ms | 1,105 ms | 5.29 ms |
+| 256 | 14,080 | 231.6 | 23,620 | 23,157 | 1,176.6 | 1,066 ms | 1,267 ms | 1,447 ms | 19.13 ms |
+| 512 | 29,184 | 479.3 | 48,884 | 47,925 | 2,435.1 | 1,064 ms | 1,078 ms | 1,165 ms | 9.17 ms |
+| 1024 | 29,381 | 473.0 | 48,243 | 47,297 | 2,403.2 | 2,135 ms | 2,183 ms | 2,241 ms | 1,097.42 ms |
+
+| Workers | Proxy CPU | Peak proxy RSS | Upstream peak | Durable rows | Drops |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 1 | 1.4% | 28.3 MiB | 1 | Exact, 56 | 0 |
+| 8 | 6.2% | 32.7 MiB | 8 | Exact, 456 | 0 |
+| 32 | 15.9% | 42.7 MiB | 32 | Exact, 1,824 | 0 |
+| 64 | 26.8% | 54.6 MiB | 64 | Exact, 3,648 | 0 |
+| 128 | 54.3% | 76.8 MiB | 128 | Exact, 7,296 | 0 |
+| 256 | 94.2% | 109.3 MiB | 256 | Exact, 14,080 | 0 |
+| 512 | 220.0% | 147.4 MiB | 512 | Exact, 29,184 | 0 |
+| 1024 | 217.5% | 183.4 MiB | 512 | Exact, 29,381 | 0 |
+
+At 512 clients the proxy reached 479.3 requests/s, 48,884 SSE events/s,
+2,435.1 KiB/s (about 2.4 MiB/s) and 47,925 output tokens/s with exact accounting
+and no drops. At 1024 clients the upstream peak stayed at 512, throughput
+stayed flat (473.0 requests/s, 48,243 events/s), and p50 latency doubled from
+about 1.06 s to 2.14 s; first-byte p95 rose from 9.17 ms to 1,097.42 ms. The
+extra clients queued behind the configured 512 upstream connections. The proxy
+used about 2.2 CPU cores at both levels, so this plateau is the configured
+connection cap, not a demonstrated proxy CPU ceiling. Every level completed with
+exact durable accounting and zero drops.
+
+This run was taken under variable background load (1-minute load average 2.6 at
+the start and 13.1 at the end), so its absolute rates are lower and noisier than
+a quiet-host run. The plateau and the doubled 1024-client latency are the
+same-host comparison; do not compare the absolute numbers across hosts.
+
+The 1024-client level is deliberately above the example configuration's
+`max_conns_per_host` of 512. It measures queueing and the throughput plateau,
+not 1024 simultaneous upstream connections. This is a fixed-level ramp, not an
+automatic saturation search; override the levels with
+`PERF_STREAMING_LEVELS` when a different range is needed.
+
 ## Durable writer and overload
 
 These are isolated Go benchmarks from the test overlay, not HTTP runs. Every
@@ -218,9 +287,15 @@ that time.
 
 ## Reproduce
 
-`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `sustained`,
-`image`, or `all`. It uses a fresh private `scripts/dev.sh` instance for each
-stress mode and stops it through the script's own lifecycle owner.
+`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `streaming`,
+`sustained`, `image`, or `all`. It uses a fresh private `scripts/dev.sh` instance
+for each stress mode and stops it through the script's own lifecycle owner.
+
+`streaming` runs the end-to-end SSE throughput ramp: levels 1, 8, 32, 64, 128,
+256, 512 and 1024 for 60 seconds each, with 100 content frames over a one-second
+stream. `PERF_STREAMING_LEVELS`, `PERF_STREAMING_DURATION`,
+`PERF_STREAMING_HOLD`, `PERF_STREAMING_CHUNKS` and `PERF_STREAMING_TIMEOUT`
+override those defaults.
 
 `sustained` runs the fast-response fixture for five minutes at each level in
 `PERF_SUSTAINED_LEVELS` (default `128`), with `PERF_SUSTAINED_DURATION`
@@ -289,17 +364,20 @@ only through `scripts/dev.sh`.
   payload shape, and real identity cardinality are not represented.
 - These are short closed-loop bursts, not sustained production capacity. No
   result here is a capacity ceiling or a guarantee.
-- The streaming table is one fixed fixture, not a throughput sweep: ten content
-  frames over about one second, five-second stages, and worker levels 1, 8, 32,
-  128 and 512. It reports requests/s, end-to-end latency, first-byte p95, CPU/RSS
-  and durable rows. It does not measure SSE event rate, bytes/s, token
-  throughput, TTFT, chunk-size or hold-duration effects, sustained streaming,
-  or a saturation point. The 512-worker level matches the example
-  `max_conns_per_host`, so it is a configured concurrency point, not a maximum.
+- The streaming concurrency table is a five-second ramp on a ten-frame, roughly
+  one-second fixture at 1, 8, 32, 128 and 512 workers. The streaming throughput
+  table is a 60-second-per-level ramp on a 100-frame, roughly one-second fixture
+  at 1, 8, 32, 64, 128, 256, 512 and 1024 workers. Both are synthetic-fixture
+  measurements, not universal maxima. The throughput table's 1024 level is
+  above the example `max_conns_per_host` of 512 and measures queueing; it is a
+  fixed level list, not an automatic saturation search. Its token rate is the
+  fixture's usage count, not provider-token throughput, and the run was taken
+  under variable background load.
 - The five-minute sustained sweep uses the fast-response fixture with no
   intentional stream hold (`-stream-duration 0`) at 32, 48, 64 and 128 workers.
   Its 64-worker durable-drop boundary is a writer/accounting boundary, not a
-  maximum streaming rate. No sustained streaming run or level above 512 exists.
+  maximum streaming rate. The streaming throughput ramp is the only sustained
+  held-stream run; it stops at its fixed levels and does not search beyond 1024.
 - Performance checks are manual (`scripts/perf.sh`), not CI. Each level is one
   run per invocation on one host; there is no repetition or variance study.
 - Durable accounting is best-effort. The fast stages happened to remain exact;

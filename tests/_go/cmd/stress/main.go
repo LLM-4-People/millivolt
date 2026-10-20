@@ -99,6 +99,30 @@ func TestNearestRank(t *testing.T) {
 	}
 }
 
+// TestStreamRatesCountExactAcceptedBytes pins the throughput derivation to the
+// fixture's exact event, byte and usage counts. stage only counts a response as
+// successful after comparing the whole body byte-for-byte, so no second stream
+// parse is needed and a failed response never inflates the rates.
+func TestStreamRatesCountExactAcceptedBytes(t *testing.T) {
+	f := newFixture(options{chunks: 3})
+	if f.events != 5 {
+		t.Fatalf("events = %d, want 5 (3 content + usage + DONE)", f.events)
+	}
+	got := streamRatesFor(f, 2, 4)
+	if got.Events != 10 || got.Bytes != int64(2*len(f.expected)) || got.Tokens != 6 {
+		t.Fatalf("rates = %+v, want 10 events, 2x%d bytes, 6 tokens", got, len(f.expected))
+	}
+	if got.EventsPerSecond != 2.5 || got.BytesPerSecond != float64(2*len(f.expected))/4 || got.TokensPerSecond != 1.5 {
+		t.Fatalf("per-second rates = %+v", got)
+	}
+	if zero := streamRatesFor(nil, 2, 4); zero != (streamRates{}) {
+		t.Fatalf("nil fixture rates = %+v, want zero", zero)
+	}
+	if zero := streamRatesFor(f, 0, 4); zero != (streamRates{}) {
+		t.Fatalf("zero-success rates = %+v, want zero", zero)
+	}
+}
+
 func TestStorageDropDeltaRequiresOneEnabledEpoch(t *testing.T) {
 	before := storageState{FeedID: "same-process"}
 	before.Storage.Enabled, before.Storage.Dropped = true, 7

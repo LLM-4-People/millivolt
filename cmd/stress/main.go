@@ -406,6 +406,7 @@ type fixture struct {
 	current, peak, accepted atomic.Int64
 	frames                  []string
 	expected                string
+	events                  int
 }
 
 func newFixture(o options) *fixture {
@@ -415,6 +416,7 @@ func newFixture(o options) *fixture {
 	}
 	f.frames = append(f.frames, fmt.Sprintf("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":%d,\"completion_tokens\":%d,\"cost\":%g}}\n\ndata: [DONE]\n\n", fixtureInputTokens, o.chunks, fixtureCost))
 	f.expected = strings.Join(f.frames, "")
+	f.events = strings.Count(f.expected, "data: ")
 	return f
 }
 
@@ -462,6 +464,12 @@ type result struct {
 	Requests, HTTPResponses, Successes, Failures int
 	UpstreamAccepted                             int64
 	Seconds, RequestsPerSecond                   float64
+	SSEEvents                                    int64   `json:"sse_events"`
+	StreamBytes                                  int64   `json:"stream_bytes"`
+	OutputTokens                                 int64   `json:"output_tokens"`
+	SSEEventsPerSecond                           float64 `json:"sse_events_per_second"`
+	StreamBytesPerSecond                         float64 `json:"stream_bytes_per_second"`
+	OutputTokensPerSecond                        float64 `json:"output_tokens_per_second"`
 	P50Ms, P95Ms, P99Ms, FirstByteP95Ms          float64
 	CPUPercent, PeakRSSMiB                       float64
 	GeneratorCPUPercent, GeneratorPeakRSSMiB     float64
@@ -473,6 +481,32 @@ type result struct {
 	AccountingOK                                 bool
 	AccountingComparable                         bool
 	Errors                                       []string `json:"errors,omitempty"`
+}
+
+// streamRates is the wire and token throughput of the exact responses the
+// client accepted. The fixture is small and every success was compared
+// byte-for-byte in stage, so these counts describe what the client actually
+// received; the stream is not parsed a second time.
+type streamRates struct {
+	Events, Bytes, Tokens                            int64
+	EventsPerSecond, BytesPerSecond, TokensPerSecond float64
+}
+
+func streamRatesFor(f *fixture, successes int, seconds float64) streamRates {
+	if f == nil || successes <= 0 || seconds <= 0 {
+		return streamRates{}
+	}
+	events := int64(successes) * int64(f.events)
+	bytes := int64(successes) * int64(len(f.expected))
+	tokens := int64(successes) * int64(f.o.chunks)
+	return streamRates{
+		Events:          events,
+		Bytes:           bytes,
+		Tokens:          tokens,
+		EventsPerSecond: float64(events) / seconds,
+		BytesPerSecond:  float64(bytes) / seconds,
+		TokensPerSecond: float64(tokens) / seconds,
+	}
 }
 
 func percentileMs(v []int64, pct float64) float64 {
@@ -607,6 +641,11 @@ loop:
 	res.UpstreamPeak = f.peak.Load()
 	res.UpstreamAccepted = f.accepted.Load()
 	res.RequestsPerSecond = float64(res.Successes) / res.Seconds
+	rates := streamRatesFor(f, res.Successes, res.Seconds)
+	res.SSEEvents, res.StreamBytes, res.OutputTokens = rates.Events, rates.Bytes, rates.Tokens
+	res.SSEEventsPerSecond = rates.EventsPerSecond
+	res.StreamBytesPerSecond = rates.BytesPerSecond
+	res.OutputTokensPerSecond = rates.TokensPerSecond
 	res.P50Ms = percentileMs(latency, 50)
 	res.P95Ms = percentileMs(latency, 95)
 	res.P99Ms = percentileMs(latency, 99)

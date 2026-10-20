@@ -113,8 +113,8 @@ scripts/check.sh
 CI always runs isolated browser fixtures as well (desktop and mobile). Use
 `scripts/dev.sh` plus `scripts/check.sh browser` as below, with
 `MILLIVOLT_OPERATOR_TOKEN` set. Re-run both after the last commit. A red
-GitHub check after a push means the gate was skipped or stale: fix, re-run,
-and push only a passing tree.
+GitHub check after a push means the gate was skipped, stale, or unmonitored:
+fix, re-run, and push only a passing tree, then watch the new run to completion.
 
 The browser-fixtures job also runs the live MCP integration test, which
 `scripts/check.sh browser` alone does not run. It is mandatory on the same
@@ -127,6 +127,23 @@ MILLIVOLT_MCP_INTEGRATION=1 scripts/check.sh go test -count=1 ./internal/mcp/...
 The test starts a private dev instance through `scripts/dev.sh` on its own
 loopback port and scratch database, drives every registered tool, and stops the
 instance again, so it does not touch the instance the browser check uses.
+
+Before every push, check open pull requests and report any that are awaiting
+the user's review or approval. Do not approve or merge them without explicit
+authorization. Use:
+
+```sh
+gh pr list --state open --json number,title,author,isDraft,reviewDecision,mergeable,statusCheckRollup,url
+```
+
+After pushing, monitor the GitHub Actions run for the pushed commit until every
+required job completes successfully. The local gate cannot see the browser,
+MCP integration, container, CodeQL, or dependency-review jobs. Find the run with
+`gh run list --branch <branch> --limit 1`, then wait for it with
+`gh run watch <run-id> --exit-status`. A queued or in-progress run is not green.
+If any job fails, treat the push as incomplete: fix the root cause, rerun this
+gate, and push the fix. Do not leave `testing` or `main` red or start unrelated
+work on top of a failing run.
 
 For changes to configuration, update the Config/default/validation/schema owners
 and regenerate the example as described in [operations](docs/operations.md).
@@ -279,10 +296,16 @@ them through `scripts/dev.sh`:
 ```sh
 scripts/perf.sh bench     # isolated Go benchmarks
 scripts/perf.sh stress    # private fast and streaming ramps
+scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
 scripts/perf.sh sustained # five-minute fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
 scripts/perf.sh all       # bench, stress and image, in that order
 ```
+
+For request, SSE-event, response-byte and output-token rates, use the
+`streaming` mode. It derives those rates from responses the client accepted
+byte-for-byte, and it is still a synthetic-fixture measurement, not a universal
+capacity claim.
 
 For an individual stress run with the private dev instance already running:
 
