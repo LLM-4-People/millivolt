@@ -540,8 +540,8 @@ class PublishedContracts(unittest.TestCase):
         meta = publish.split("- name: Define image tags and labels", 1)[1].split("- uses:", 1)[0]
         tags = meta.split("tags: |", 1)[1].split("labels:", 1)[0]
         # The sha tag and OCI revision label must name the revision this run
-        # actually built, not the triggering SHA that predates a VERSION-bump
-        # commit created by the cut step.
+        # actually built. The version bump belongs to the promotion PR, so the
+        # cut step never creates a commit after the triggering SHA.
         self.assertIn("type=raw,value=sha-${{ steps.cut.outputs.revision }}", tags)
         self.assertNotRegex(tags, r"(?m)^\s*type=sha\b")
         self.assertIn("org.opencontainers.image.revision=${{ steps.cut.outputs.revision }}", meta)
@@ -558,7 +558,7 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("built", rows["sha-<full commit>"])
 
         contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
-        self.assertIn("every code-bearing push to `main`", contributing)
+        self.assertIn("a versioned push to `main`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
         self.assertIn("`main` and `latest` exclude prereleases", contributing)
 

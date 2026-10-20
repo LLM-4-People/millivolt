@@ -33,6 +33,31 @@ func TestReleaseCommand(t *testing.T) {
 	}
 }
 
+func TestReleaseCommandNewerThan(t *testing.T) {
+	for _, newer := range []string{"0.0.0", "0.0.0-alpha"} {
+		var out, diagnostics bytes.Buffer
+		if err := run([]string{"-newer-than", newer}, &out, &diagnostics); err != nil {
+			t.Fatal(err)
+		}
+		want := fmt.Sprintf("version=%s\nnewer_than=%s\n", millivolt.Version(), newer)
+		if out.String() != want || diagnostics.Len() != 0 {
+			t.Fatalf("output %q; diagnostics %q", &out, &diagnostics)
+		}
+	}
+	for _, args := range [][]string{
+		{"-newer-than", "bad"},
+		{"-newer-than", millivolt.Version()},
+		{"-newer-than", "999.0.0"},
+		{"-newer-than", "0.0.0", "-revision", strings.Repeat("a", 40)},
+		{"-newer-than", "0.0.0", "-tag", "v" + millivolt.Version()},
+	} {
+		var out, diagnostics bytes.Buffer
+		if err := run(args, &out, &diagnostics); err == nil || out.Len() != 0 {
+			t.Fatalf("invalid args %q: err %v, output %q", args, err, &out)
+		}
+	}
+}
+
 var errWrite = errors.New("fixture write failure")
 
 type failingWriter struct{}

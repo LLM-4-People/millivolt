@@ -97,14 +97,24 @@ def check_workflows(errors: list[str]) -> None:
     if "git rev-parse HEAD" not in str(identity.get("run", "")):
         errors.append("check.yml: tag identity must use the checked-out commit")
 
+    required_steps = steps(required_job)
+    version_step = next((step for step in required_steps
+                         if step.get("name") == "Require an unreleased version for main promotions"), {})
+    if not version_step:
+        errors.append("check.yml: main promotions must require an unreleased version")
+    elif "git fetch --tags" not in str(version_step.get("run", "")):
+        errors.append("check.yml: version promotion check must fetch release tags")
+    elif "-newer-than" not in str(version_step.get("run", "")):
+        errors.append("check.yml: version promotion check must compare SemVer precedence")
+
     publish = jobs.get("publish") or {}
     image_index = named_step(publish, "Publish verified multi-platform image")
-    push_index = named_step(publish, "Push verified revision and tag")
+    push_index = named_step(publish, "Push verified tag")
     release_index = named_step(publish, "Create the GitHub release")
     if min(image_index, push_index, release_index) < 0:
-        errors.append("check.yml: publish image, revision push and release steps must all exist")
+        errors.append("check.yml: publish image, tag push and release steps must all exist")
     elif not (image_index < push_index < release_index):
-        errors.append("check.yml: image must be published before the branch/tag and release")
+        errors.append("check.yml: image must be published before the tag and release")
     image = steps(publish)[image_index] if image_index >= 0 else {}
     if image.get("with", {}).get("sbom") is not True:
         errors.append("check.yml: release image must include an SBOM")
@@ -113,7 +123,19 @@ def check_workflows(errors: list[str]) -> None:
     cut = next((step for step in steps(publish) if step.get("name") == "Cut the next version"), {})
     if "git push" in str(cut.get("run", "")):
         errors.append("check.yml: the cut step must not push before the image exists")
+    if "git commit" in str(cut.get("run", "")):
+        errors.append("check.yml: the release workflow must not create version commits")
+    push = steps(publish)[push_index] if push_index >= 0 else {}
+    push_run = str(push.get("run", ""))
+    if "HEAD:main" in push_run:
+        errors.append("check.yml: the release workflow must never push main")
+    if '"v$RELEASE_VERSION"' not in push_run:
+        errors.append("check.yml: the release workflow must push the verified tag")
+    if "skip != 'true'" not in str(push.get("if", "")):
+        errors.append("check.yml: the tag push must honor the no-release guard")
     publish_text = (WORKFLOWS / "check.yml").read_text(encoding="utf-8")
+    if "HEAD:main" in publish_text:
+        errors.append("check.yml: the release workflow must never push main")
     if "ghcr.io/${REPO}" in publish_text or "ghcr.io/LLM-4-People" in publish_text:
         errors.append("check.yml: release image references must use lowercase GHCR paths")
     if "value=main,enable=${{ github.ref == 'refs/heads/main' }}" in publish_text:
