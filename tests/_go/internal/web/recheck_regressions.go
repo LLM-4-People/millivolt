@@ -3,6 +3,8 @@ package web
 import (
 	"fmt"
 	"net/http"
+	"runtime"
+	"runtime/debug"
 	"strconv"
 	"testing"
 	"time"
@@ -326,32 +328,48 @@ func TestLineageDirtyExplorerAllocationIsPooled(t *testing.T) {
 	dirty := lineageRow("s:dirty", "s:0")
 	rowLabels(&dirty).prov = "fixture.example"
 
-	measure := func(extra *contrib) testing.BenchmarkResult {
-		return testing.Benchmark(func(b *testing.B) {
-			for b.Loop() {
-				f := newExplorerFold("provider", "", nil)
-				f.prepare(p, nil)
-				for i := range p.rows {
-					if err := f.fold(&p.rows[i]); err != nil {
-						b.Fatal(err)
-					}
+	// A manual warm run and a bounded, GC-disabled sample avoid the
+	// testing.Benchmark calibration floor and keep sync.Pool reuse stable even
+	// when the gate runs with a short -benchtime under concurrent load.
+	measure := func(extra *contrib) (bytesPerOp, allocsPerOp uint64) {
+		fold := func() {
+			f := newExplorerFold("provider", "", nil)
+			f.prepare(p, nil)
+			for i := range p.rows {
+				if err := f.fold(&p.rows[i]); err != nil {
+					t.Fatal(err)
 				}
-				if extra != nil {
-					if err := f.fold(extra); err != nil {
-						b.Fatal(err)
-					}
-				}
-				_ = f.payload()
 			}
-		})
+			if extra != nil {
+				if err := f.fold(extra); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lineagePayloadSink = f.payload()
+		}
+		fold()
+		runtime.GC()
+		previous := debug.SetGCPercent(-1)
+		defer debug.SetGCPercent(previous)
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		const runs = 4
+		for range runs {
+			fold()
+		}
+		runtime.ReadMemStats(&after)
+		return (after.TotalAlloc - before.TotalAlloc) / runs,
+			(after.Mallocs - before.Mallocs) / runs
 	}
-	withClean := measure(&clean)
-	withDirty := measure(&dirty)
-	delta := int64(withDirty.AllocedBytesPerOp()) - int64(withClean.AllocedBytesPerOp())
+	cleanBytes, _ := measure(&clean)
+	dirtyBytes, _ := measure(&dirty)
+	delta := int64(dirtyBytes) - int64(cleanBytes)
 	t.Logf("dirty lineage adds %d B/op at %d nodes (clean=%d dirty=%d)",
-		delta, n, withClean.AllocedBytesPerOp(), withDirty.AllocedBytesPerOp())
+		delta, n, cleanBytes, dirtyBytes)
 	if delta > 512<<10 {
 		t.Fatalf("dirty lineage adds %d B/op at %d nodes (clean=%d dirty=%d), want a pooled bound",
-			delta, n, withClean.AllocedBytesPerOp(), withDirty.AllocedBytesPerOp())
+			delta, n, cleanBytes, dirtyBytes)
 	}
 }
+
+var lineagePayloadSink any

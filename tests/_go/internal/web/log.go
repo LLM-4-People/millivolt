@@ -418,10 +418,18 @@ func logPageRegressionRecord(i int, base time.Time) *metrics.Record {
 	}
 }
 
-// logPageRegressionStore seeds the 200k-row fixture into a private scratch
+// logPageRegressionStore seeds the benchmark fixture into a private scratch
 // store. The write cadence intentionally matches the page benchmark so test
 // and benchmark exercise the same committed shape.
 func logPageRegressionStore(tb testing.TB) *storage.Store {
+	tb.Helper()
+	return logPageRegressionStoreN(tb, logPageRegressionRows)
+}
+
+// logPageRegressionStoreN seeds the same committed shape at a chosen row
+// count. Tests that only need a page beyond one scan batch use a smaller
+// fixture instead of paying for the full benchmark corpus.
+func logPageRegressionStoreN(tb testing.TB, rows int) *storage.Store {
 	tb.Helper()
 	d := config.Default()
 	s, err := storage.Open(filepath.Join(tb.TempDir(), "log-page.db"), storage.Options{
@@ -429,14 +437,14 @@ func logPageRegressionStore(tb testing.TB) *storage.Store {
 		BatchCap:      d.StorageBatchCap,
 		FlushInterval: time.Millisecond,
 		QueryTimeout:  time.Minute,
-		WriteTrackCap: logPageRegressionRows * 2,
+		WriteTrackCap: rows * 2,
 	})
 	if err != nil {
 		tb.Fatal(err)
 	}
 	tb.Cleanup(func() { _ = s.Close() })
 	base := logPageRegressionStart()
-	for i := 0; i < logPageRegressionRows; i++ {
+	for i := 0; i < rows; i++ {
 		s.Record(logPageRegressionRecord(i, base))
 		if i%2048 == 2047 {
 			if err := s.Flush(); err != nil {
@@ -538,7 +546,8 @@ func logPageWire(t *testing.T, v any) any {
 // measured about 55-72ms and 8.1MB per limit-60 miss on this shape; the
 // ceilings below sit well under that while leaving headroom for drivers.
 func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
-	s := logPageRegressionStore(t)
+	const rows = 20_000
+	s := logPageRegressionStoreN(t, rows)
 	api := NewAggAPI(metrics.NewBuffer(1), s, time.Minute)
 	h := http.HandlerFunc(api.HandleLogPage)
 	mcz := api.canonizer()
@@ -551,19 +560,19 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 	}{
 		{
 			name: "tool_missing", query: "f=tool:missing",
-			fs: []scopeFilter{{dim: "tool", id: "missing"}}, wantRows: 0, wantCursorID: "row-195904",
+			fs: []scopeFilter{{dim: "tool", id: "missing"}}, wantRows: 0, wantCursorID: fmt.Sprintf("row-%06d", rows-4096),
 		},
 		{
 			name: "status_class_5xx", query: "f=status:5xx",
-			fs: []scopeFilter{{dim: "status", id: "5xx"}}, wantRows: 8, wantCursorID: "row-195904",
+			fs: []scopeFilter{{dim: "status", id: "5xx"}}, wantRows: 8, wantCursorID: fmt.Sprintf("row-%06d", rows-4096),
 		},
 		{
 			name: "error_predicate", query: "f=error:" + url.QueryEscape("upstream|500|upstream failed"),
-			fs: []scopeFilter{{dim: "error", id: "upstream|500|upstream failed"}}, wantRows: 8, wantCursorID: "row-195904",
+			fs: []scopeFilter{{dim: "error", id: "upstream|500|upstream failed"}}, wantRows: 8, wantCursorID: fmt.Sprintf("row-%06d", rows-4096),
 		},
 		{
 			name: "time_window", query: "f=time:work",
-			fs: []scopeFilter{{dim: "time", id: "work"}}, wantRows: 60, wantCursorID: "row-199940",
+			fs: []scopeFilter{{dim: "time", id: "work"}}, wantRows: 60, wantCursorID: fmt.Sprintf("row-%06d", rows-60),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

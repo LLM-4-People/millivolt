@@ -16,29 +16,57 @@ case "$mode" in
     node --version
     npm --version
     python3 --version
-    python3 -B -O -m tests.python.repository
-    python3 -B -m tests.repository_check
-    python3 -B -O -m tests.python.site
-    python3 -B -O -m tests.python.workflows
-    python3 -B -O -m tests.python.release
-    python3 -B -O -m tests.python.backup_db
-    python3 -B -O -m tests.python.go
+    check_dir="$(mktemp -d /tmp/millivolt-check.XXXXXX)"
+    trap 'rm -rf -- "$check_dir"' EXIT
+    background_pids=()
+    background_names=()
+    run_background() {
+      local name=$1
+      shift
+      "$@" >"$check_dir/$name.log" 2>&1 &
+      background_pids+=("$!")
+      background_names+=("$name")
+    }
+    python_suites() {
+      python3 -B -O -m tests.python.repository
+      python3 -B -m tests.repository_check
+      python3 -B -O -m tests.python.site
+      python3 -B -O -m tests.python.workflows
+      python3 -B -O -m tests.python.release
+      python3 -B -O -m tests.python.backup_db
+      python3 -B -O -m tests.python.go
+      python3 -B -O -m tests.python.shard
+    }
+    wait_background() {
+      local failed=0 index
+      for index in "${!background_pids[@]}"; do
+        if ! wait "${background_pids[$index]}"; then
+          echo "check: ${background_names[$index]} failed" >&2
+          cat "$check_dir/${background_names[$index]}.log" >&2
+          failed=1
+        fi
+      done
+      (( failed == 0 )) || exit 1
+    }
     unformatted="$(gofmt -l version.go cmd internal scripts/licenses tests)"
     [ -z "$unformatted" ] || die "gofmt required: $unformatted"
     for script in scripts/*.sh; do bash -n "$script"; done
     go mod verify
     # Explicit command paths make missing command source fail on a fresh checkout.
     go list ./cmd/proxy ./cmd/stress ./cmd/release
-    check_dir="$(mktemp -d /tmp/millivolt-check.XXXXXX)"
-    trap 'rm -rf -- "$check_dir"' EXIT
     go build -mod=readonly -o "$check_dir/" ./...
     python3 -B -m tests.go vet -mod=readonly ./...
+    # Independent suites do not share source state. Start them while the race
+    # shards use the cores; collect failures after the gate.
+    run_background python python_suites
+    run_background npm npm test
     # One race-enabled pass proves everything the plain pass used to: the
     # same tests run under the same overlay (no build tags, no
     # race-conditional skips), with the race detector as a strict superset
-    # of the plain instrumentation.
-    python3 -B -m tests.go test -mod=readonly -race ./... -count=1
-    npm test
+    # of the plain instrumentation. The sharder keeps fixed-port packages
+    # serial and gives temp-isolated packages disjoint test shards.
+    python3 -B -O -m tests.shard
+    wait_background
     ;;
   go)
     (( $# >= 2 )) || die "$usage"
