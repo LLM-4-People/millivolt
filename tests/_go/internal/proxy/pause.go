@@ -984,6 +984,7 @@ func TestPauseStreamSendsSSEKeepalive(t *testing.T) {
 // upstream-header deadline, not a hold deadline: a 50ms timeout must not
 // abort a request that is still parked.
 func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
+	const proxyTimeout = 200 * time.Millisecond
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -1003,7 +1004,7 @@ func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
 			strings.NewReader(`{"model":"m"}`))
 		req.Header.Set("Authorization", "Bearer sk-test")
 		req.Header.Set("X-Proxy-Base-URL", upstream.URL)
-		req.Header.Set("X-Proxy-Timeout-Ms", "50")
+		req.Header.Set("X-Proxy-Timeout-Ms", "200")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Error(err)
@@ -1014,9 +1015,23 @@ func TestPauseIgnoresProxyTimeoutUntilUnpause(t *testing.T) {
 		resp.Body.Close()
 		done <- resp.StatusCode
 	}()
-	// The fixed window IS the negative proof: it lets the 50ms header timeout
-	// deadline pass while parked, so a buggy arming would have fired by now.
-	time.Sleep(80 * time.Millisecond)
+	// Parked IS observable. A fixed sleep is not: under suite load the request
+	// can still be in flight to the proxy when the sleep ends, which would
+	// unpause before the hold ever applied and let the 200ms send deadline
+	// govern the local upstream exchange. Poll the scheduler queue first.
+	parkDeadline := time.Now().Add(2 * time.Second)
+	for p.scheduler.Stats().Queued < 1 && time.Now().Before(parkDeadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if q := p.scheduler.Stats().Queued; q != 1 {
+		t.Fatalf("request never parked (queued=%d, upstream hits=%d)", q, hits.Load())
+	}
+	if hits.Load() != 0 {
+		t.Fatal("paused request reached upstream")
+	}
+	// The window is the negative proof: the 200ms send budget expires while
+	// the request is still parked, so a buggy arming would have fired by now.
+	time.Sleep(proxyTimeout + 100*time.Millisecond)
 	if hits.Load() != 0 {
 		t.Fatal("X-Proxy-Timeout-Ms fired during pause")
 	}
