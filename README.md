@@ -185,13 +185,13 @@ It is not a multi-tenant gateway, a billing system, or a compliance audit log.
 ## Performance and footprint
 
 The [performance and resource usage](docs/performance.md) page is the single
-source for current image and binary size, idle and loaded footprints, fast and
-streaming throughput, durable writer rates, SQLite growth, projection cost, and
-query/metadata latency. It carries the exact revision, host, method, reproduce
-commands and limitations. Small images do not imply fixed RAM or negligible
-CPU. Active streams, configured buffers, stored-history projections, and
-identity cardinality contribute separate costs. Short local bursts are
-regressions, not deployment guarantees.
+source for current image and binary size, idle and loaded footprints,
+fast-response and streaming request throughput and latency, durable writer
+rates, SQLite growth, projection cost, and query/metadata latency. It carries
+the exact revision, host, method, reproduce commands and limitations. Small
+images do not imply fixed RAM or negligible CPU. Active streams, configured
+buffers, stored-history projections, and identity cardinality contribute
+separate costs. Short local bursts are regressions, not deployment guarantees.
 
 ## Configuration and documentation
 

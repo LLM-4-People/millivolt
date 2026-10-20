@@ -277,10 +277,11 @@ main instance. It starts fresh private instances on a disposable port and stops
 them through `scripts/dev.sh`:
 
 ```sh
-scripts/perf.sh bench    # isolated Go benchmarks
-scripts/perf.sh stress   # private fast and streaming ramps
-scripts/perf.sh image    # disposable image content and compressed size
-scripts/perf.sh all      # all three, in that order
+scripts/perf.sh bench     # isolated Go benchmarks
+scripts/perf.sh stress    # private fast and streaming ramps
+scripts/perf.sh sustained # five-minute fast-response capacity levels
+scripts/perf.sh image     # disposable image content and compressed size
+scripts/perf.sh all       # bench, stress and image, in that order
 ```
 
 For an individual stress run with the private dev instance already running:

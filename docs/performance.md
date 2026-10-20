@@ -118,6 +118,12 @@ second, followed by usage and a terminator. Each stage started requests for five
 seconds and then drained. Latency includes the intentional upstream delay, so
 these numbers are not proxy-only overhead.
 
+These stages measure concurrency and end-to-end latency for that fixed fixture.
+They do not measure SSE event rate, bytes per second, token throughput, TTFT,
+chunk-size or hold-duration effects, sustained streaming, or the point where
+streaming saturates. First-byte p95 is the first response byte, not the first
+generated token.
+
 | Client workers | HTTP requests | Requests/s | p50 | p95 | p99 | First-byte p95 | Proxy CPU | Peak proxy RSS | Durable rows |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | 1 | 5 | 1.0 | 1,009 ms | 1,010 ms | 1,010 ms | 2.86 ms | 0.6% | 27.9 MiB | Exact, 5 |
@@ -128,8 +134,10 @@ these numbers are not proxy-only overhead.
 
 The 512-worker stage reached 512 upstream connections and remained exact. This
 is a configured concurrency result on one host, not a universal request-capacity
-ceiling. The generator and upstream used 69.9% CPU and 65.8 MiB peak RSS at that
-stage.
+ceiling. The 512 level also matches the example configuration's
+`max_conns_per_host`. No higher level, sustained streaming stage, or automatic
+saturation sweep was run; see [Limitations](#limitations). The generator and
+upstream used 69.9% CPU and 65.8 MiB peak RSS at that stage.
 
 ## Durable writer and overload
 
@@ -210,9 +218,13 @@ that time.
 
 ## Reproduce
 
-`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `image`, or
-`all`. It uses a fresh private `scripts/dev.sh` instance for each stress mode and
-stops it through the script's own lifecycle owner.
+`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `sustained`,
+`image`, or `all`. It uses a fresh private `scripts/dev.sh` instance for each
+stress mode and stops it through the script's own lifecycle owner.
+
+`sustained` runs the fast-response fixture for five minutes at each level in
+`PERF_SUSTAINED_LEVELS` (default `128`), with `PERF_SUSTAINED_DURATION`
+defaulting to `300s`. It does not run the held streaming fixture.
 
 The individual commands below are the same evidence path. Use a fresh
 `DEV_COPY_DB=0` instance for each workload. Never target the main instance on
@@ -277,6 +289,19 @@ only through `scripts/dev.sh`.
   payload shape, and real identity cardinality are not represented.
 - These are short closed-loop bursts, not sustained production capacity. No
   result here is a capacity ceiling or a guarantee.
+- The streaming table is one fixed fixture, not a throughput sweep: ten content
+  frames over about one second, five-second stages, and worker levels 1, 8, 32,
+  128 and 512. It reports requests/s, end-to-end latency, first-byte p95, CPU/RSS
+  and durable rows. It does not measure SSE event rate, bytes/s, token
+  throughput, TTFT, chunk-size or hold-duration effects, sustained streaming,
+  or a saturation point. The 512-worker level matches the example
+  `max_conns_per_host`, so it is a configured concurrency point, not a maximum.
+- The five-minute sustained sweep uses the fast-response fixture with no
+  intentional stream hold (`-stream-duration 0`) at 32, 48, 64 and 128 workers.
+  Its 64-worker durable-drop boundary is a writer/accounting boundary, not a
+  maximum streaming rate. No sustained streaming run or level above 512 exists.
+- Performance checks are manual (`scripts/perf.sh`), not CI. Each level is one
+  run per invocation on one host; there is no repetition or variance study.
 - Durable accounting is best-effort. The fast stages happened to remain exact;
   the overload benchmark intentionally does not.
 - Container-wide CPU/RSS, cold-start time, browser rendering, arm64 image size,
