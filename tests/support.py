@@ -109,8 +109,10 @@ async def operator_signin(context, base):
 STATIC_CSS = ('internal/web/static/css/',)
 STATIC_EMITTERS = ('internal/web/static/js/', 'internal/web/static/index.html',
                    'internal/web/static/sw.js')
+SITE_STYLESHEET = 'site-src/assets/site.css'
 STATIC_SCAN = STATIC_CSS + STATIC_EMITTERS + ('internal/web/static/favicon.svg',
-                                              'internal/web/static/manifest.webmanifest',)
+                                              'internal/web/static/manifest.webmanifest',
+                                              SITE_STYLESHEET, 'cmd/proxy/operator.go')
 
 
 def static_pairs(names, prefixes=STATIC_SCAN, skip_vendor=True):
@@ -483,16 +485,26 @@ def spark_height_mirror_errors(pairs):
 
 PALETTE_OWNER = 'internal/web/static/css/dashboard.css'
 PALETTE_MIRRORS = ('internal/web/static/favicon.svg', 'internal/web/static/index.html',
-                   'internal/web/static/manifest.webmanifest', 'internal/web/static/sw.js')
+                   'internal/web/static/manifest.webmanifest', 'internal/web/static/sw.js',
+                   'cmd/proxy/operator.go')
+# The static site only owns values with no dashboard equivalent: a stronger
+# control edge, a second-level text tone, elevation, panel radius and content
+# width. Everything else comes from tokens.css.
+SITE_TOKENS = frozenset({
+    '--border-control', '--muted-strong', '--shadow', '--radius', '--max',
+})
 _HEX_LITERAL = re.compile(r'#[0-9a-fA-F]{3,8}(?![0-9a-fA-F])')
 
 
-def _root_palette_hexes(css_text):
-    """Hex literals from :root custom-property values - the palette owner.
-    The stylesheets legitimately carry other hexes outside :root, so only
-    this block is authoritative."""
+def root_custom_properties(css_text):
+    """Return normalized custom-property declarations from every :root block.
+
+    Comments are stripped first, later duplicate declarations win, and
+    whitespace is collapsed so a generated copy can compare byte-for-byte
+    with the owner without inheriting source indentation.
+    """
     stripped = re.sub(r'/\*.*?\*/', '', css_text, flags=re.S)
-    hexes = set()
+    properties = {}
     for match in re.finditer(r':root\s*\{', stripped):
         end = match.end()
         depth = 1
@@ -503,9 +515,65 @@ def _root_palette_hexes(css_text):
                 depth -= 1
             end += 1
         block = stripped[match.end():end - 1]
-        for _, value in re.findall(r'(--[A-Za-z0-9-]+)\s*:\s*([^;]+);', block):
-            hexes.update(literal.lower() for literal in _HEX_LITERAL.findall(value))
+        for name, value in re.findall(r'(--[A-Za-z0-9-]+)\s*:\s*([^;]+);', block):
+            properties[name] = re.sub(r'\s+', ' ', value).strip()
+    return properties
+
+
+def _root_palette_hexes(css_text):
+    """Hex literals from :root custom-property values - the palette owner.
+    The stylesheets legitimately carry other hexes outside :root, so only
+    this block is authoritative."""
+    hexes = set()
+    for value in root_custom_properties(css_text).values():
+        hexes.update(literal.lower() for literal in _HEX_LITERAL.findall(value))
     return hexes
+
+
+def site_palette_errors(pairs):
+    """The static site consumes tokens.css from the dashboard owner. Its own
+    :root block may only carry the site-only tokens: redeclaring a canonical
+    token creates a second value table, and an unlisted token would silently
+    grow one."""
+    canonical = None
+    site = None
+    for name, text in pairs:
+        if name == PALETTE_OWNER:
+            canonical = root_custom_properties(text)
+        elif name == SITE_STYLESHEET:
+            site = root_custom_properties(text)
+    errors = []
+    if canonical is None:
+        errors.append(PALETTE_OWNER + ': the :root custom-property palette is missing')
+    if site is None:
+        errors.append(SITE_STYLESHEET + ': not in the static corpus')
+    if canonical is None or site is None:
+        return errors
+    for token in sorted(set(site) & set(canonical)):
+        errors.append(f"{SITE_STYLESHEET}: redeclares canonical token {token} "
+                      f"from {PALETTE_OWNER}")
+    for token in sorted(set(site) - SITE_TOKENS - set(canonical)):
+        errors.append(f"{SITE_STYLESHEET}: site-only token {token} is not in the "
+                      "site token allowlist")
+    return errors
+
+
+def token_drift_errors(canonical_text, generated_text, generated_name):
+    """Generated tokens.css must be the canonical :root block, no additions,
+    omissions or value changes. The comparison reuses the palette owner's
+    parser, so generated markup formatting cannot hide drift."""
+    canonical = root_custom_properties(canonical_text)
+    generated = root_custom_properties(generated_text)
+    errors = []
+    for token in sorted(set(canonical) - set(generated)):
+        errors.append(f"{generated_name}: missing canonical token {token}")
+    for token in sorted(set(generated) - set(canonical)):
+        errors.append(f"{generated_name}: token {token} is not declared in {PALETTE_OWNER}")
+    for token in sorted(set(canonical) & set(generated)):
+        if canonical[token] != generated[token]:
+            errors.append(f"{generated_name}: {token} = {generated[token]} does not match "
+                          f"{PALETTE_OWNER} {canonical[token]}")
+    return errors
 
 
 def palette_mirror_errors(pairs):

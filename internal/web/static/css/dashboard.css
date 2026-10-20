@@ -11,6 +11,9 @@
     --text: #e8e4de;
     --muted: #97907e;
     --accent: #5b8cff;
+    /* Accent-filled controls lighten one step on hover. The static site
+       consumes this same token through the generated tokens.css. */
+    --accent-hover: #7aa0ff;
     --accent2: #9a6bff;
     --cyan: #38d5c0;
     --ok: #2fd186;
@@ -65,19 +68,17 @@
        literal where they sit (the storm dialog's heavier urgent scrim, the
        drawer's lighter pass-through). */
     --veil: rgba(16,14,11,.72);
-    /* The four one-off tints that also stay literal: for each, no
+    /* The three one-off tints that also stay literal: for each, no
        color-mix(in srgb, var(--token) P%, white or transparent) equals the
        hand-picked hex byte-for-byte at any percentage (channel arithmetic,
        not rounding). The solid danger hover's #ff7d7d needs red at 255,
        above --err's 240, while its green and blue already match an 80.2%
        mix of --err toward white - the 0% mix that reaches red 255 is pure
-       white. The accent hover's #7aa0ff would need 81.1% of --accent for
-       its red but 82.6% for its green. The model-rules error line's
-       #ff7d72 splits green (125) from blue (114), while --err and white
-       keep them equal at every mix. The model-rules warn line's #d9a343
-       is darker than --warn on every channel, and mixing toward white
-       only lightens while transparent only fades alpha. A palette rebrand
-       retunes these four by hand. */
+       white. The model-rules error line's #ff7d72 splits green (125) from
+       blue (114), while --err and white keep them equal at every mix. The
+       model-rules warn line's #d9a343 is darker than --warn on every
+       channel, and mixing toward white only lightens while transparent
+       only fades alpha. A palette rebrand retunes these three by hand. */
     /* Chart gridline alpha: core.js blends this onto --border2 for the
        axes' faint warm grid. */
     --chart-grid-a: 0.5;
@@ -297,7 +298,7 @@
   /* Accent-filled primary action (settings Apply, restart Restart now) -
      after .btn so the cascade beats the neutral base skin. */
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
-  .btn-accent:not(:disabled):hover { background: #7aa0ff; border-color: #7aa0ff; color: var(--bg); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
+  .btn-accent:not(:disabled):hover { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--bg); box-shadow: 0 0 0 3px var(--focus-ring-strong); }
   .btn:disabled, .btn:disabled:hover {
     opacity: .45; cursor: default; color: var(--muted);
     border-color: var(--border2); background: var(--panel2); box-shadow: none;

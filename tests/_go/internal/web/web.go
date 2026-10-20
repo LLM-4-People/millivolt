@@ -6,7 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	_ "image/png"
+	"image/color"
+	"image/png"
 	"io"
 	"io/fs"
 	"math"
@@ -311,6 +312,81 @@ func TestPWAInstallability(t *testing.T) {
 			t.Errorf("service worker offline page missing %s", needle)
 		}
 	}
+}
+
+// TestBrandIconCorners locks the install-icon corner contract: any-purpose
+// icons keep transparent corners for rounded launchers, while maskable and
+// Apple icons fill every corner with the canonical dark well so no white
+// square appears after masking. The expected well comes from dashboard.css's
+// --well-lo token, never a second palette table.
+func TestBrandIconCorners(t *testing.T) {
+	css, err := staticFS.ReadFile("static/css/dashboard.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	well := brandTokenColor(t, css, "--well-lo")
+	cases := []struct {
+		name        string
+		transparent bool
+	}{
+		{"icon-192.png", true},
+		{"icon-512.png", true},
+		{"icon-192-maskable.png", false},
+		{"icon-512-maskable.png", false},
+		{"apple-touch-icon.png", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := staticFS.ReadFile("static/" + tc.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			img, err := png.Decode(bytes.NewReader(raw))
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			b := img.Bounds()
+			for _, point := range []image.Point{
+				{X: b.Min.X, Y: b.Min.Y},
+				{X: b.Max.X - 1, Y: b.Min.Y},
+				{X: b.Min.X, Y: b.Max.Y - 1},
+				{X: b.Max.X - 1, Y: b.Max.Y - 1},
+			} {
+				r, g, bl, a := img.At(point.X, point.Y).RGBA()
+				if tc.transparent {
+					if a != 0 {
+						t.Errorf("corner %v alpha=%d, want fully transparent", point, a)
+					}
+					continue
+				}
+				if a != 0xffff {
+					t.Errorf("corner %v alpha=%d, want opaque", point, a)
+					continue
+				}
+				got := color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(bl >> 8), A: 255}
+				if r>>8 >= 0xf0 && g>>8 >= 0xf0 && bl>>8 >= 0xf0 {
+					t.Errorf("corner %v is opaque near-white %v", point, got)
+				}
+				if got != well {
+					t.Errorf("corner %v = %v, want canonical --well-lo %v", point, got, well)
+				}
+			}
+		})
+	}
+}
+
+func brandTokenColor(t *testing.T, css []byte, token string) color.RGBA {
+	t.Helper()
+	match := regexp.MustCompile(`(?m)^[ \t]*` + regexp.QuoteMeta(token) + `\s*:\s*#([0-9a-fA-F]{6})\s*;`).
+		FindSubmatch(css)
+	if match == nil {
+		t.Fatalf("dashboard.css has no %s hex token", token)
+	}
+	value, err := strconv.ParseUint(string(match[1]), 16, 32)
+	if err != nil {
+		t.Fatalf("%s value: %v", token, err)
+	}
+	return color.RGBA{R: uint8(value >> 16), G: uint8(value >> 8), B: uint8(value), A: 255}
 }
 
 func assertChromiumInstallManifest(t *testing.T, raw []byte) {

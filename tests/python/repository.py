@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 
 from .. import repository_check as check
-from ..support import RETIRED_TOKENS, _template_comment_spans
+from ..support import (PALETTE_OWNER, RETIRED_TOKENS, SITE_STYLESHEET, _template_comment_spans,
+                       root_custom_properties, site_palette_errors, token_drift_errors)
 
 
 class RepositoryChecks(unittest.TestCase):
@@ -362,6 +363,45 @@ class RepositoryChecks(unittest.TestCase):
         self.assertEqual(check.palette_mirror_errors(good[1:]),
                          ["internal/web/static/css/dashboard.css: "
                           "the :root custom-property palette is missing"])
+
+    def test_site_palette_ownership_and_token_drift(self):
+        owner = ':root { --bg: #141210; --rail: #100e0b; --accent-hover: #7aa0ff; }\n'
+        site = (':root {\n'
+                '  --border-control: #6b655d;\n'
+                '  --shadow: 0 12px 28px rgba(0, 0, 0, .24);\n'
+                '}\n')
+        self.assertEqual(root_custom_properties(
+            ':root { --multi: one\n two; }')['--multi'], 'one two')
+        self.assertEqual(site_palette_errors([
+            (PALETTE_OWNER, owner), (SITE_STYLESHEET, site)]), [])
+        self.assertEqual(site_palette_errors([
+            (PALETTE_OWNER, owner),
+            (SITE_STYLESHEET, site + ':root { --accent-hover: #7aa0ff; }\n')]), [
+                f"{SITE_STYLESHEET}: redeclares canonical token --accent-hover "
+                f"from {PALETTE_OWNER}"])
+        self.assertEqual(site_palette_errors([
+            (PALETTE_OWNER, owner),
+            (SITE_STYLESHEET, ':root { --ghost: red; }\n')]), [
+                f"{SITE_STYLESHEET}: site-only token --ghost is not in the "
+                "site token allowlist"])
+        self.assertEqual(site_palette_errors([(PALETTE_OWNER, owner)]),
+                         [SITE_STYLESHEET + ': not in the static corpus'])
+        self.assertEqual(site_palette_errors([(SITE_STYLESHEET, site)]),
+                         [PALETTE_OWNER + ': the :root custom-property palette is missing'])
+
+        generated = ':root { --bg: #141210; --rail: #100e0b; --accent-hover: #7aa0ff; }\n'
+        self.assertEqual(token_drift_errors(owner, generated, 'assets/tokens.css'), [])
+        self.assertEqual(token_drift_errors(
+            owner, generated.replace('#7aa0ff', '#7aa1ff'), 'assets/tokens.css'), [
+                'assets/tokens.css: --accent-hover = #7aa1ff does not match '
+                f'{PALETTE_OWNER} #7aa0ff'])
+        self.assertEqual(token_drift_errors(
+            owner, ':root { --bg: #141210; }\n', 'assets/tokens.css'), [
+                'assets/tokens.css: missing canonical token --accent-hover',
+                'assets/tokens.css: missing canonical token --rail'])
+        self.assertEqual(token_drift_errors(
+            owner, generated + ':root { --extra: blue; }\n', 'assets/tokens.css'), [
+                f'assets/tokens.css: token --extra is not declared in {PALETTE_OWNER}'])
 
     def test_gzip_corpus_assembly_reaches_root_and_deploy(self):
         """The perimeter's corpus half, pinned: gzip_corpus must feed the

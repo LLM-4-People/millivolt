@@ -9,8 +9,8 @@ from .support import (ROOT,
                        artifact_gzip_choke_point_errors,
                        dead_css_class_errors, duplicate_js_function_errors,
                        git_environment, js_template_comment_errors, palette_mirror_errors,
-                       removed_vocabulary_errors, source_inventory, spark_height_mirror_errors,
-                       static_pairs, test_layout_errors)
+                       removed_vocabulary_errors, site_palette_errors, source_inventory,
+                       spark_height_mirror_errors, static_pairs, test_layout_errors)
 
 IGNORED_PATHS = (
     "AGENTS.md", "agents.md", "internal/AGENTS.md",
@@ -219,6 +219,7 @@ def check(root):
             + js_template_comment_errors(pairs)
             + spark_height_mirror_errors(pairs)
             + palette_mirror_errors(pairs)
+            + site_palette_errors(pairs)
             + artifact_gzip_choke_point_errors(gzip_pairs))
 
 
@@ -231,8 +232,8 @@ def main():
         raise SystemExit("\n".join(errors))
     print("repository checks passed: local Markdown targets, publication ignore rules, "
           "typography, dead stylesheet classes, duplicated helpers, retired vocabulary, "
-          "template comments, spark height mirror, static palette mirror, "
-          "artifact gzip choke point")
+          "template comments, spark height mirror, static palette mirror, site palette "
+          "ownership, artifact gzip choke point")
 
 
 if __name__ == "__main__":

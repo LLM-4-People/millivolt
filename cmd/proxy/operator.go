@@ -668,7 +668,7 @@ button {
 }
 button:hover { background: #7aa0ff; border-color: #7aa0ff; }
 button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
-.notice { color: #e8a35c; margin: 0 0 10px; font-size: 13px; }
+.notice { color: #f4c14d; margin: 0 0 10px; font-size: 13px; }
 </style>
 </head>
 <body>
