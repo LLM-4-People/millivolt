@@ -1,0 +1,6 @@
+# The docs build is a small static renderer. Keep the parser exact so a
+# dependency update cannot silently change heading anchors or HTML output.
+Markdown==3.11.2
+
+# Workflow policy checks use the same pinned parser in docs CI.
+PyYAML==6.0.3

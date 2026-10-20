@@ -18,6 +18,7 @@ case "$mode" in
     python3 --version
     python3 -B -O -m tests.python.repository
     python3 -B -m tests.repository_check
+    python3 -B -O -m tests.python.site
     python3 -B -O -m tests.python.release
     python3 -B -O -m tests.python.backup_db
     python3 -B -O -m tests.python.go

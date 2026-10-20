@@ -1,3 +1,4 @@
+-r requirements-docs.txt
 # Browser fixtures use the direct Python API, not pytest.
 # Chromium is installed by this Playwright version's own installer.
 playwright==1.63.0

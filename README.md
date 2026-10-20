@@ -1,322 +1,217 @@
 # millivolt
 
-AI requests should not be a black box. When an agent feels slow, retries pile up,
-or token usage climbs, millivolt helps you see what is happening and where to
-look next. It is a self-hosted inference proxy that brings
-live requests and retained history from your apps and agents into one dashboard.
-Compare response speed, latency, token usage and provider-reported costs, then
-drill down by client, provider, model or conversation.
+See every AI request. Keep your own routing.
 
-One client interface, multiple upstream protocols. Your apps and agents talk
-to millivolt through an OpenAI-compatible API. On the provider side, millivolt
-connects to OpenAI, xAI/Grok and other hosted or local OpenAI-compatible APIs,
-with optional adapters translating supported chat and tool workflows to
-Anthropic Messages and Cursor's native Connect protocol. See
-[upstream compatibility and adapter limits](docs/adapters.md#client-and-upstream-compatibility).
+A self-hosted, OpenAI-compatible proxy with a live dashboard, SQLite history,
+and controls to pause, limit, or debug traffic. Request metadata, timing,
+tokens, cost, and outcomes; body capture is opt-in.
 
-Keep your choice of upstreams and credentials. Clients that support custom
-routing headers choose the upstream URL and credentials on each request, so
-there is no separate endpoint or API-key registry to maintain in the proxy.
+[![Checks and images](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml/badge.svg?branch=main)](https://github.com/LLM-4-People/millivolt/actions/workflows/check.yml)
 
-Go from observation to action in the same place: inspect retries and rate
-limits, hold new work from a busy client, adjust provider rate and concurrency
-limits, or turn on scoped debugging when you need a closer look. You get
-visibility and traffic controls together.
+[Run it locally](#quickstart) · [Documentation site](https://llm-4-people.github.io/millivolt/) ·
+[Dashboard guide](docs/dashboard.md) · [Documentation](docs/README.md) · [Security](SECURITY.md)
 
-Run it on your own infrastructure as one Go service with an embedded dashboard
-and SQLite history. The lightweight, non-root Docker image needs no separate
-database server or frontend runtime, and the project is MIT licensed. It is
-built for people who want to understand and manage their AI traffic without
-operating a separate monitoring stack.
-
-[Quickstart](#quickstart) · [What you get](#what-you-get) ·
-[Visual guide](docs/dashboard.md) · [Documentation](docs/README.md)
-
-## Dashboard overview
-
-Global totals, scoped exploration, timelines and the request log share one view.
-See the [visual dashboard guide](docs/dashboard.md) for focused screenshots of
-tokens, speed/latency, cost, providers, models and Settings.
-
-![Dashboard showing request charts, usage and a request log](docs/images/overview/dashboard.png)
-
-This static capture retains recorded metrics from an authorized history snapshot
-with replaced identifiers. The guide explains its capture limitations.
-
-## Before you run
-
-millivolt has **no user isolation**: one shared operator credential protects
-the whole dashboard, and inference shares the same listener. Set
-`MILLIVOLT_OPERATOR_TOKEN` before exposing the listener beyond loopback:
-with it unset the dashboard denies every request. There are no per-user
-accounts. An upstream API key does not secure the dashboard. Read
-[Security](SECURITY.md) before network exposure.
-
-Durable metrics are **best-effort**: sustained overload can drop records even
-when inference succeeds. The dashboard warns about process-local storage drops.
-See [storage and accounting](docs/operations.md#storage-and-accounting) for
-capacity, memory and backup limitations.
+millivolt is pre-1.0. Linux is the supported deployment target. The 0.x series
+can change configuration and API details between releases.
 
 ## Quickstart
 
-Linux is supported. Normal Docker deployment needs only the Compose file,
-not Go, Node, a source checkout or an image build. Use an unused host port;
-for development alongside an existing instance, use
-[isolated development](CONTRIBUTING.md#isolated-development).
+Linux with Docker Engine and the Compose plugin. No Go, Node, or source
+checkout is needed for the container path.
 
 ### Docker Compose
 
-With Docker Engine and the Compose plugin installed, run these commands from
-a new, empty deployment directory:
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/LLM-4-People/millivolt/main/compose.yaml -o compose.yaml
-export MILLIVOLT_OPERATOR_TOKEN='choose-a-long-random-credential'
-docker compose pull
+export MILLIVOLT_OPERATOR_TOKEN='replace-with-a-long-random-value'
 docker compose up -d
-docker compose logs --tail 50
 ```
 
-[compose.yaml](compose.yaml) publishes only on host loopback and forwards
-`MILLIVOLT_OPERATOR_TOKEN` into the container. Set
-`MILLIVOLT_PORT` to an unused host port if needed. Its named volumes retain
-history and private Settings configuration when the container is replaced.
-Fresh config volumes receive the bundled [configuration example](proxy.example.yaml),
-including enabled [Grok, OpenCode Zen and Cursor compatibility profiles](docs/adapters.md#bundled-compatibility-profiles)
-and the opencode sub-conversation tracking exemplar (the `promptCacheKey`
-tracked param, strip on). No separate config download is needed; existing saved
-settings are not overwritten.
-The runtime is non-root with a read-only root filesystem. Dashboard rebuild is
-unavailable in an image. If you replace the named volumes with host bind
-mounts, pre-create those directories writable by UID/GID `65532:65532`; see
+Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) and sign in with that
+token. If the container exits, run `docker compose logs --tail 50`.
+
+> [!IMPORTANT]
+> One shared operator credential protects the dashboard and inference listener.
+> There are no user accounts. Keep it on loopback, or put an authenticated proxy
+> in front. With the token unset, the dashboard denies every request. Read
+> [Security](SECURITY.md) before network exposure.
+
+[compose.yaml](compose.yaml) publishes only on host loopback. Set
+`MILLIVOLT_PORT` for an unused host port. Named volumes retain history and
+private Settings configuration; existing saved settings are not overwritten.
+The runtime is non-root with a read-only root filesystem. For bind mounts,
+pre-create directories writable by UID/GID `65532:65532`; see
 [persistent state](docs/operations.md#persistent-state-and-configuration).
 
-See [container operation](docs/operations.md#containers) for image selection,
-configuration, updates, backups and shutdown, or the
-[reverse-proxy guide](docs/reverse-proxy.md) for NGINX and protected ingress.
-Stop with `docker compose stop`. Local image builds use a separate
-[development Compose](CONTRIBUTING.md#container-development).
+Stop with `docker compose stop`. For image selection, configuration, backups,
+updates, shutdown, or protected ingress, see
+[container operation](docs/operations.md#containers) and the
+[reverse-proxy guide](docs/reverse-proxy.md).
 
 ### From source
 
-Install the Go toolchain required by [go.mod](go.mod):
+Install the Go toolchain required by [go.mod](go.mod), then:
 
 ```sh
 git clone https://github.com/LLM-4-People/millivolt.git
 cd millivolt
-# Create a local config only if one does not already exist.
 test -e proxy.yaml || cp proxy.example.yaml proxy.yaml
-export MILLIVOLT_OPERATOR_TOKEN='choose-a-long-random-credential'
+export MILLIVOLT_OPERATOR_TOKEN='replace-with-a-long-random-value'
 go run ./cmd/proxy -config proxy.yaml -listen 127.0.0.1:8080
 ```
 
+For isolated development and checks, see [Contributing](CONTRIBUTING.md).
+
 ### Connect a client
 
-Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) for the dashboard. With
-`MILLIVOLT_OPERATOR_TOKEN` set, the sign-in page (or the dashboard's one-time
-prompt) asks for that value; with it unset, the dashboard stays denied and
-only `/healthz`, brand/PWA files and inference respond. Then set
-your OpenAI-compatible client's connection options. The host URLs below assume
-port 8080; replace it with your chosen `MILLIVOLT_PORT` or source listen port:
+Point an OpenAI-compatible client at the proxy. The upstream URL and key stay
+yours; the proxy does not register providers or keys.
 
-| Client setting | Value |
-| --- | --- |
-| API base URL | `http://127.0.0.1:8080/v1` |
-| API key | Your actual upstream key, forwarded through `Authorization`; it does not authenticate dashboard access. |
-| Custom header `X-Proxy-Base-URL` | Your upstream API base URL, including its path, such as `/v1`. |
-| Optional header `X-Proxy-Client` | A label for this client in the dashboard; one that only repeats the user agent's product name keeps the fuller user-agent identity. |
-
-The client must support custom headers, or middleware that adds them. Select a
-model supported by your upstream; millivolt does not register providers or keys.
-The settings above use the default OpenAI-compatible upstream relay, including
-for xAI/Grok. For native Anthropic Messages or Cursor Connect, keep the client's
-OpenAI-compatible interface and select the appropriate `X-Proxy-Format` adapter
-plus its required upstream headers; see the
-[compatibility guide](docs/adapters.md#client-and-upstream-compatibility).
-If the client is another container, its `localhost` is not the proxy: on a shared
-Compose network, use the proxy service URL `http://millivolt:8080/v1` instead.
-For protected remote access, follow the
-[reverse-proxy authentication guidance](docs/reverse-proxy.md#credentials-and-access-control).
-For the optional Grok or Cursor account-login helpers, follow
-[first-login setup](docs/adapters.md#first-login-helpers) before configuring tokens.
-
-For example, with your own upstream URL, key, and supported model:
+- **API base URL:** `http://127.0.0.1:8080/v1`
+- **API key:** your upstream key. It is forwarded through `Authorization`; it
+  does not authenticate dashboard access.
+- **`X-Proxy-Base-URL`:** your upstream API base URL, including its path, such
+  as `/v1`.
+- **`X-Proxy-Client`:** optional label for this client in the dashboard.
 
 ```sh
-curl http://127.0.0.1:8080/v1/chat/completions \
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
   -H "X-Proxy-Base-URL: $UPSTREAM_BASE_URL" \
   -H "Authorization: Bearer $UPSTREAM_API_KEY" \
   -H 'Content-Type: application/json' \
   -d "{\"model\":\"$UPSTREAM_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}"
 ```
 
-The URL variables above are supplied by you, not millivolt settings. For a model
-name containing JSON-special characters, use your client's JSON encoder.
-The [protocol guide](docs/protocol.md) covers path joining, all routing headers,
-native-format adapters, and model listing.
+A JSON response means the relay worked. The request should appear in the
+dashboard within a second or two. On a shared Compose network, use
+`http://millivolt:8080/v1` instead of loopback. For Anthropic Messages, Cursor
+Connect, and other adapters, read
+[upstream compatibility](docs/adapters.md#client-and-upstream-compatibility).
 
-Normal relay paths preserve request content and upstream response content, with
-documented exceptions: bounded request/quality buffering, retries, SSE keepalive
-comments and failure signaling, mid-thinking rescues that append a fresh
-attempt after reasoning-only output, optional format translation,
-operator-configured request overrides (a matching body rule rewrites the
-upstream request bytes), operator-configured sub-conversation strip (a matching
-client entry removes its tracked fields from the top level of the relayed
-bytes), and
-constructed model lists. This is not an
-unconditional byte-for-byte or exactly-once contract.
+Normal relay paths preserve request and response content, with documented
+exceptions for buffering, retries, SSE keepalives, format translation, and
+configured overrides. This is not an unconditional byte-for-byte or
+exactly-once contract. See [protocol](docs/protocol.md).
+
+## What it looks like
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/brand/readme-cover-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/brand/readme-cover-light.png">
+  <img src="docs/images/brand/readme-cover-dark.png" alt="millivolt cover showing clients routing through the proxy to upstream APIs, with SQLite metadata below" width="1600" height="640">
+</picture>
+
+The instrument panel is a dense, dark operator surface, not a marketing
+dashboard. The product screenshots below are static captures from an authorized
+redacted history snapshot; identifiers are replaced.
+
+## Dashboard overview
+
+Global totals, scoped explorer cards, timelines, and the request log share one
+selected scope. See the [visual guide](docs/dashboard.md) for focused captures
+of tokens, speed and latency, cost, providers, models, conversations, and
+Settings.
+
+![Dashboard showing request charts, usage and a request log](docs/images/overview/dashboard.png)
+
+This capture retains recorded metrics from an authorized history snapshot with
+replaced identifiers. The offline indicator reflects the capture session, not
+service health. The guide explains the capture limitations.
 
 ## What you get
 
-### Route requests without a provider registry
+### See the request, not just the total.
 
-- Choose the upstream base URL, credentials, authentication header/prefix,
-  path and query on each request. Optional client-supplied header overrides
-  (the `X-Proxy-Headers` request header) support custom integrations
-  without adding a provider-specific relay branch.
-- Constrain accepted upstream URL prefixes through configuration. This helps
-  control destinations but does not replace network access or egress controls.
-- Forward ordinary HTTP bodies, including streaming responses, with bounded
-  request inspection, connection pooling and configurable SSE keepalives.
-- Coordinate provider-plus-key concurrency and queues; retry eligible transport,
-  transient 429 and server failures with provider hints and configurable backoff.
-  Provider-wide concurrency, request-rate and token-rate limits are separate.
-- Opt into error storm protection: queue affected provider/model traffic with
-  exponential recovery probes and a dashboard incident banner. Provider-wide
-  protection requires elevated errors on every model active in the detection
-  window; all thresholds and retry/queue bounds are editable in Settings.
-- Discover models through the standard model-list routes, with recognized-list
-  normalization, supported pagination and optional metadata enrichment.
-- Opt into Anthropic Messages translation or the Cursor Connect text/tool
-  bridge. Supported inference-token refresh returns credentials through a shared
-  handback response; clients adopt them and retry. Model discovery refreshes
-  transparently. Clients remain responsible for their own authorization.
+Watch in-flight requests next to global request, token, and cost totals. Open a
+row for TTFT, throughput, retries, queue wait, token mix, and provider-reported
+cost. History stays in SQLite; an in-memory ring is available when you do not
+need retention. Scope by client, provider, model, conversation, tool, status,
+error, time, or key without losing the selected filter.
+
+[Data interpretation](docs/operations.md#dashboard-data-and-request-inspection)
+explains timing, scope, and missing measurements.
+
+### Act before the retry storm.
+
+Pause new sends and retries by client, provider, or all traffic. Set
+provider-wide concurrency, request-rate, and token-rate limits. Capture scoped
+debug bodies, export exactly the records you filtered, and turn on error-storm
+protection with recovery probes. These are operator actions, not per-user
+permissions.
+
+Read [operator workflows](docs/operations.md#operator-and-data-routes) before
+changing state. Dashboard access is protected by the same operator token as
+inference.
+
+### Keep your routing and your keys.
+
+Choose the upstream base URL, credentials, authentication header or prefix,
+path, and query on each request. Constrain accepted URL prefixes in
+configuration. Optional adapters translate supported chat and tool workflows to
+Anthropic Messages and Cursor Connect; coverage and limits are documented, not
+implied. There is no separate provider registry or API-key vault in the proxy.
 
 See [routing, timing and discovery](docs/protocol.md) and
-[adapter support and limitations](docs/adapters.md). Compatibility profiles are
-editable configuration, not a guarantee of provider access or protocol coverage.
+[adapter support and limitations](docs/adapters.md).
 
-### Explore live traffic and retained history
+### Run one small service.
 
-- View global request/token/cost totals and timing averages alongside event-driven
-  in-flight rows. Initial HTML embeds server-computed state; live SSE and polling
-  maintain the same observation model across reconnects and successful restarts.
-- Drill into Providers, Models, Client, Conversations, Tools, Time, Status,
-  Errors and Keys. Entity links and browser navigation preserve the selected
-  scope; chart and request-log filters work together.
-- Use automatic conversation grouping for stateless clients, or explicit
-  session/parent headers for main/sub-conversation relationships. Missing or
-  conflicting ancestry remains unresolved instead of being guessed.
-- Compare all six timelines: Overview, Traffic, Tokens, Speed + latency, Errors
-  and Cost. Overview is the summary: it carries no plot, and its tiles take the
-  whole card - requests over the blended token volume, tokens in/out/cached
-  with their shares, spend with the blended per-Mtok price, the errors / 429
-  pair, and average latency / speed over every measured request with each
-  metric's low-high sample range - one multi-line sparkline per tile spanning
-  only traffic-bearing buckets. The metrics picker in the card head chooses
-  what shows; the selection persists per browser. Choose windows from minutes
-  through All time, toggle individual series on the plotted presets, and
-  select one percentile for both speed and first-token latency.
-- Inspect provider-reported input/output, cache and reasoning usage. Costs below
-  $1 display in cents everywhere; data/API values remain USD. Error and HTTP 429
-  counts are distinct, zero badges disappear, and a 429 alone is not an error.
-- Browse the newest request rows and scroll into durable history. Expand retry
-  attempts or open a request drawer for timing, usage, cost, request parameters,
-  conversation sizes, tools, queue waits and available outcome metadata.
+One Go service with embedded dashboard assets and SQLite. The non-root image
+needs no separate database server, frontend runtime, or monitoring stack. The
+same 22-tool MCP server is at `/mcp` behind the operator token, so an LLM client
+needs only the endpoint URL and its Bearer credential. See the
+[MCP server guide](docs/mcp.md).
 
-The [visual guide](docs/dashboard.md) shows the controls.
-[Data interpretation](docs/operations.md#dashboard-data-and-request-inspection)
-explains timing, scope and missing measurements. This is observability, not
-independent billing or a complete compliance audit log.
+[Operations](docs/operations.md) owns configuration, persistence, exports, and
+upgrades; [architecture](docs/architecture.md) maps the implementation.
 
-### Control traffic from the dashboard
+## Limits and scope
 
-| Control | What it does |
-| --- | --- |
-| Pause | Hold matching new sends/retries by client/provider, all requests or previously unseen clients; choose duration and queue cap, then resume one hold or all holds. |
-| Limits | Set provider-wide concurrency, requests-per-window and tokens-per-window policies; inspect their source and remaining budgets. |
-| Debug | Start a scoped capture session with timed or manual stop. Captured bodies are opt-in, bounded, retained separately and still sensitive. |
-| Logs | Download all or exactly filtered finalized records as a gzip artifact of JSON (the compressed export; no uncompressed fallback). |
-| Restart | On supported source deployments, rebuild and hand off after draining active work. Busy controls and progress reflect the actual restart state. |
-| Settings | Configure error storm protection, search configuration, edit typed fields/maps/rules, review restart markers, apply revision-checked changes and run the storage category's database deletes: Delete matching with a live count preview, and the whole-database Delete everything. Newer completions are protected by the deletion fence. |
+millivolt is built for a single operator or small team that controls the host.
+It is not a multi-tenant gateway, a billing system, or a compliance audit log.
 
-See the [operator workflows and API routes](docs/operations.md#operator-and-data-routes)
-before changing state. A protected listener is essential: these are operator
-actions, not per-user permissions.
+- **No multi-tenant isolation.** One operator credential protects the dashboard
+  and inference listener; there are no per-user accounts.
+- **Durable accounting is best-effort.** Sustained overload can drop records
+  even when inference succeeds. Backups, capacity, and storage drops are in
+  [storage and accounting](docs/operations.md#storage-and-accounting).
+- **The relay is not a byte-for-byte or exactly-once contract.** Normal paths
+  preserve content, with documented exceptions. See [protocol](docs/protocol.md).
+- **Observability, not billing or compliance.** Cost is provider-reported; this
+  is not an independent invoice or a complete audit log.
+- **Linux is the supported deployment target.** See
+  [containers](docs/operations.md#containers) for image and volume details.
 
-To let an LLM run these same analyses and drive the same controls, the proxy
-serves the same 22-tool MCP server at its operator-gated `/mcp` endpoint, so a
-client needs only the endpoint URL and the operator token as a Bearer header:
-see the [MCP server guide](docs/mcp.md).
+## Performance and footprint
 
-### Customize and deploy
+In documented local measurements, the amd64 image was **26.5 MB**; idle RAM was
+**20.5 MiB** with empty history and **217 MiB** with 99,304 retained records.
+A five-second fast-response stage reached **11,073 requests/s** with exact
+stored accounting; a higher-load stage dropped records. These are scoped
+examples, not deployment guarantees. See
+[method and tradeoffs](docs/operations.md#performance-and-footprint).
 
-- One generated configuration reference covers request limits, upstream pools,
-  queue/retry policy, conversation grouping and per-client tracked body params,
-  adapters, SQLite, dashboard cadence,
-  model rules, provider field mappings, aliases, templated upstream headers and
-  scoped request overrides. Settings and the CLI use the same defaults,
-  validation and reload metadata.
-- Use SQLite for retained history and consistent online backups, or run with
-  the in-memory ring only. Storage drops are visible; asynchronous accounting
-  remains best-effort under overload or write failure.
-- Integrate with JSON snapshots, scoped aggregates, export, restricted SQL and
-  Prometheus. Their history scopes differ and are documented explicitly.
-- Run the lightweight, non-root image with ordinary Docker Compose, without a
-  source build or frontend runtime. Separate source/development workflows,
-  persistent volumes and the protected NGINX example cover other deployments.
-- Track source identity through the version CLI and published image tags/digests.
-  GitHub checks source, browser and native-container behavior before publishing
-  multi-platform images. The application is MIT licensed.
-
-[Operations](docs/operations.md) owns configuration, persistence and upgrades;
-[reverse proxy](docs/reverse-proxy.md) owns remote access;
-[Contributing](CONTRIBUTING.md) owns isolated development and verification.
-
-### Performance and footprint
-
-The runtime is one Go service with embedded dashboard assets, a stripped binary
-and a minimal container base; it needs no Node, Python, compiler or shell in the
-image. Request inspection is bounded, connections are reused and metrics enqueue
-does not wait for SQLite. Shared history aggregation and embedded bootstrap state
-reduce repeated dashboard work.
-
-In the [documented local measurements](docs/operations.md#measured-example), the
-amd64 image was **26.5 MB**, idle RAM was **20.5 MiB** with empty history and
-**217 MiB** with 99,304 retained records. A five-second fast-response stage reached
-**11,073 HTTP requests/s** with exact stored accounting afterward. A higher-load
-stage dropped records, and the report includes that failure. A separate streaming
-test completed at 1,024 client workers, with upstream concurrency capped at 512
-by configuration. These are scoped examples, not deployment guarantees.
-
-Small images do not imply fixed RAM or negligible CPU. Active streams, configured
-buffers, stored-history projections and identity cardinality contribute separate
-costs. See [performance and footprint](docs/operations.md#performance-and-footprint)
-for measurement scope and resource tradeoffs; no universal latency or capacity
-ceiling is promised.
+Small images do not imply fixed RAM or negligible CPU. Active streams,
+configured buffers, stored-history projections, and identity cardinality
+contribute separate costs.
 
 ## Configuration and documentation
 
 [proxy.example.yaml](proxy.example.yaml) is the generated, documented example.
 It includes enabled compatibility profiles without registering provider keys or
-upstream URLs. `proxy.yaml` is your ignored local configuration; do not commit it.
-Defaults, example profiles and validation are defined in `internal/config`, and
-Settings uses that same schema.
-See [operations](docs/operations.md) for overrides, reloads, backups, and restart
-requirements.
+upstream URLs. `proxy.yaml` is your ignored local configuration; do not commit
+it. Defaults, example profiles, and validation are defined in `internal/config`;
+Settings uses that same schema. See [operations](docs/operations.md) for
+overrides, reloads, backups, and restart requirements.
 
 [VERSION](VERSION) owns the application version. See
 [image and release usage](docs/operations.md#versions-and-images) and
 [contribution guidelines](CONTRIBUTING.md) before publishing a change.
 
-- [Documentation index](docs/README.md)
-- [Protocol and client integration](docs/protocol.md)
-- [MCP server for LLM-driven analysis](docs/mcp.md)
-- [Operations and limitations](docs/operations.md)
-- [Architecture and ownership](docs/architecture.md)
-- [Upstream compatibility, adapters and token refresh](docs/adapters.md)
-- [Contributing and verification](CONTRIBUTING.md)
-- [Security](SECURITY.md)
+- **Start:** [documentation index](docs/README.md), [protocol](docs/protocol.md)
+- **Operate:** [operations](docs/operations.md), [reverse proxy](docs/reverse-proxy.md)
+- **Integrate:** [adapters](docs/adapters.md), [MCP server](docs/mcp.md)
+- **Project:** [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md)
 
 The application is [MIT licensed](LICENSE). Dependency notices are listed in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

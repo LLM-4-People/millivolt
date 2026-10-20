@@ -21,7 +21,10 @@ Update the version, assets and notice together when changing this dependency.
 module distributions carry their own licenses. [package-lock.json](package-lock.json)
 pins development-only jsdom dependencies. [requirements-dev.txt](requirements-dev.txt)
 pins Python browser tooling; Playwright selects its corresponding Chromium build.
-Node, Python and these test dependencies are not required to run the proxy.
+[requirements-docs.txt](requirements-docs.txt) pins the Python-Markdown renderer
+(BSD-3-Clause) used to build the static documentation site; PyYAML (MIT) is a
+development dependency used by the workflow policy checks. Node, Python and
+these build/test dependencies are not required to run the proxy.
 
 ## Container distribution
 

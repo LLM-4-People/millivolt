@@ -1,0 +1,275 @@
+<main id="main">
+  <section class="hero wrap">
+    <div class="hero-copy">
+      <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>self-hosted · openai-compatible · MIT</p>
+      <h1>See every AI request.<br>Keep your own routing.</h1>
+      <p class="lead">A self-hosted, OpenAI-compatible proxy with a live dashboard, SQLite history, and controls to pause, limit, or debug traffic. Request metadata, timing, tokens, cost, and outcomes; body capture is opt-in.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#quickstart">Run it locally</a>
+        <a class="btn btn-ghost" href="docs/dashboard.html">Tour the dashboard</a>
+      </div>
+      <p class="proof-line"><span>MIT licensed</span><span>one Go binary</span><span>SQLite or in-memory</span></p>
+    </div>
+
+    <figure class="signal-panel" aria-labelledby="signal-title">
+      <div class="signal-head">
+        <span class="mono-label" id="signal-title">request path</span>
+        <span class="signal-state"><span class="signal-dot" aria-hidden="true"></span>self-hosted</span>
+      </div>
+      <div class="signal-map">
+        <div class="signal-column">
+          <span class="entity-label">clients</span>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#56b4e9" aria-hidden="true"></span>apps</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#009e73" aria-hidden="true"></span>agents</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#e69f00" aria-hidden="true"></span>IDE</div>
+        </div>
+        <div class="signal-arrow" aria-hidden="true"></div>
+        <div class="signal-core">
+          <img src="assets/mark.svg" alt="" width="64" height="64">
+          <strong>millivolt</strong>
+          <span>route · observe · control</span>
+          <small>openai-compatible API</small>
+        </div>
+        <div class="signal-arrow" aria-hidden="true"></div>
+        <div class="signal-column">
+          <span class="entity-label">upstreams</span>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#0072b2" aria-hidden="true"></span>OpenAI</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#cc79a7" aria-hidden="true"></span>Anthropic</div>
+          <div class="entity-chip"><span class="entity-line" style="--entity:#8a8f98" aria-hidden="true"></span>compatible</div>
+        </div>
+      </div>
+      <div class="signal-store">
+        <span>SQLite / in-memory</span>
+        <span>metadata and metrics</span>
+      </div>
+      <figcaption class="sr-only">Clients send OpenAI-compatible requests to millivolt. millivolt routes them to upstream APIs and records request metadata and metrics in SQLite or an in-memory ring.</figcaption>
+    </figure>
+  </section>
+
+  <div class="tick-rule" aria-hidden="true"></div>
+
+  <section class="section wrap" id="what-you-get">
+    <div class="section-head">
+      <p class="eyebrow">the short version</p>
+      <h2>Route, observe, control.</h2>
+      <p>One request path, one operator surface. The proxy stays out of your provider contracts and the dashboard stays close to the traffic.</p>
+    </div>
+    <div class="feature-grid">
+      <article class="feature">
+        <span class="feature-kicker">01 / route</span>
+        <h3>Keep your own routing.</h3>
+        <p>Choose the upstream base URL, credentials, and path on each request. Constrain accepted prefixes. There is no separate provider registry or key vault to maintain.</p>
+        <a href="docs/protocol.html">Read the protocol guide</a>
+      </article>
+      <article class="feature">
+        <span class="feature-kicker">02 / observe</span>
+        <h3>See the request, not just the total.</h3>
+        <p>Live rows, durable history, and scoped timelines for clients, providers, models, conversations, tools, status, and keys. Open a row for timing, tokens, cost, and retries.</p>
+        <a href="docs/dashboard.html">Tour the dashboard</a>
+      </article>
+      <article class="feature">
+        <span class="feature-kicker">03 / control</span>
+        <h3>Act before the retry storm.</h3>
+        <p>Pause new work by scope, set provider limits, capture bounded debug bodies, export exactly the records you filtered, and protect against error storms.</p>
+        <a href="docs/operations.html#operator-and-data-routes">Operator workflows</a>
+      </article>
+    </div>
+  </section>
+
+  <section class="section section-instrument" id="dashboard-overview">
+    <div class="wrap">
+      <div class="section-head split-head">
+        <div>
+          <p class="eyebrow">the instrument</p>
+          <h2>One view from total to request.</h2>
+        </div>
+        <p class="section-note">Global totals, scoped explorer cards, timelines, and the request log share one selected scope. The dashboard is dense because the traffic is.</p>
+      </div>
+      <figure class="instrument-plate">
+        <div class="plate-bar"><span class="mono-label">overview</span><span class="plate-caption">static capture · redacted fixture</span></div>
+        <img src="assets/images/overview/dashboard.png" alt="millivolt dashboard with KPI tiles, provider explorer cards, a traffic timeline, and a request log" width="1440" height="1000" fetchpriority="high" decoding="async">
+        <figcaption>Static capture from an authorized redacted history snapshot. The offline indicator reflects the capture session, not service health. <a href="docs/dashboard.html">Open the visual guide</a>.</figcaption>
+      </figure>
+      <div class="readout-grid">
+        <div class="readout"><span class="readout-num">01</span><div><strong>KPI band</strong><p>Requests, tokens, spend, cache hit rate, errors, and speed, with their ranges.</p></div></div>
+        <div class="readout"><span class="readout-num">02</span><div><strong>Scoped explorer</strong><p>Drill into providers, models, clients, conversations, tools, time, status, and keys.</p></div></div>
+        <div class="readout"><span class="readout-num">03</span><div><strong>Timelines</strong><p>Six chart presets share one time window and one selected scope.</p></div></div>
+        <div class="readout"><span class="readout-num">04</span><div><strong>Request log</strong><p>Live rows plus retained history, with a drawer for timing and outcome metadata.</p></div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section wrap">
+    <div class="section-head">
+      <p class="eyebrow">signal</p>
+      <h2>The shape of the traffic.</h2>
+      <p>See requests, tokens, errors, and cost as separate questions. A 429 is a throttle, not an error; the charts keep that distinction.</p>
+    </div>
+    <div class="chart-grid">
+      <figure class="chart-plate">
+        <img src="assets/images/charts/traffic.png" alt="Traffic chart with request and error timelines" width="1124" height="428" loading="lazy" decoding="async">
+        <figcaption><strong>Traffic.</strong> Requests and errors over the selected window and scope.</figcaption>
+      </figure>
+      <figure class="chart-plate">
+        <img src="assets/images/charts/tokens.png" alt="Token chart with input, output, reasoning, cached tokens, and cache hit rate" width="1124" height="428" loading="lazy" decoding="async">
+        <figcaption><strong>Tokens.</strong> Input, output, reasoning, cached tokens, and cache hit rate.</figcaption>
+      </figure>
+      <figure class="chart-plate">
+        <img src="assets/images/charts/errors.png" alt="Errors chart separating errors from HTTP 429 rate limits" width="1124" height="428" loading="lazy" decoding="async">
+        <figcaption><strong>Errors.</strong> Errors and HTTP 429 throttles stay separate.</figcaption>
+      </figure>
+      <figure class="chart-plate">
+        <img src="assets/images/charts/cost.png" alt="Cost chart with spend and request volume" width="1124" height="428" loading="lazy" decoding="async">
+        <figcaption><strong>Cost.</strong> Provider-reported spend beside request volume.</figcaption>
+      </figure>
+    </div>
+    <p class="scroll-hint">Swipe to compare charts.</p>
+  </section>
+
+  <section class="section section-control">
+    <div class="wrap control-layout">
+      <div class="control-copy">
+        <p class="eyebrow">operator surface</p>
+        <h2>Control from the same surface.</h2>
+        <p>These are operator actions, not per-user permissions. The same shared token protects the dashboard and the inference listener.</p>
+        <ul class="control-list">
+          <li><span>Pause</span>Hold new sends and retries by client, provider, or all traffic.</li>
+          <li><span>Limits</span>Set provider-wide concurrency, request-rate, and token-rate policies.</li>
+          <li><span>Debug</span>Capture scoped bodies with a timed or manual stop; captured bodies stay sensitive.</li>
+          <li><span>Export</span>Download exactly the finalized records you filtered as gzip JSON.</li>
+          <li><span>Restart</span>Drain and hand off supported source deployments.</li>
+          <li><span>Settings</span>Edit typed fields and rules with revision-checked changes.</li>
+        </ul>
+        <a class="text-link" href="docs/operations.html#operator-and-data-routes">Read operator workflows</a>
+      </div>
+      <div class="control-plates">
+        <figure class="menu-plate"><img src="assets/images/menus/pause.png" alt="Pause menu with scope, duration, and queue cap controls" width="360" height="363" loading="lazy" decoding="async"><figcaption>pause</figcaption></figure>
+        <figure class="menu-plate"><img src="assets/images/menus/limits.png" alt="Limits menu with provider concurrency and request-rate fields" width="380" height="275" loading="lazy" decoding="async"><figcaption>limits</figcaption></figure>
+        <figure class="menu-plate"><img src="assets/images/menus/debug.png" alt="Debug capture menu with scope and duration controls" width="360" height="447" loading="lazy" decoding="async"><figcaption>debug</figcaption></figure>
+      </div>
+    </div>
+  </section>
+
+  <section class="section wrap quickstart" id="quickstart">
+    <div class="section-head">
+      <p class="eyebrow">run it</p>
+      <h2>Three commands and a browser tab.</h2>
+      <p>Linux with Docker Engine and the Compose plugin. No Go, Node, or source checkout is needed for the container path.</p>
+    </div>
+    <div class="quickstart-grid">
+      <div class="code-window" id="docker-compose">
+        <div class="code-head"><span>sh</span><button class="copy-btn" type="button" data-copy>copy</button></div>
+        <pre><code>curl -fsSL \
+  https://raw.githubusercontent.com/LLM-4-People/millivolt/main/compose.yaml \
+  -o compose.yaml
+export MILLIVOLT_OPERATOR_TOKEN='replace-with-a-long-random-value'
+docker compose up -d</code></pre>
+        <p class="code-note">Open <a href="http://127.0.0.1:8080/">http://127.0.0.1:8080/</a> and sign in with that token.</p>
+      </div>
+      <ol class="steps">
+        <li><strong>Fetch the deployment file.</strong><span>The image is published for amd64 and arm64. Named volumes retain history and saved settings.</span></li>
+        <li><strong>Set the operator token.</strong><span>One shared credential protects the dashboard and inference listener. With it unset, the dashboard denies every request.</span></li>
+        <li><strong>Connect your client.</strong><span>Use <code>http://127.0.0.1:8080/v1</code> as the API base URL. Your upstream key is forwarded; it does not authenticate the dashboard.</span></li>
+      </ol>
+    </div>
+    <div class="callout" role="note">
+      <strong>Exposure is the boundary.</strong>
+      <p>Keep the listener on loopback, or put an authenticated proxy in front. There are no user accounts. Read <a href="security.html">security</a> before network exposure.</p>
+    </div>
+    <div class="connect" id="connect-a-client">
+      <h3>Connect a client.</h3>
+      <p>Point an OpenAI-compatible client at <code>http://127.0.0.1:8080/v1</code>. Send your upstream base URL in <code>X-Proxy-Base-URL</code>, your upstream key in <code>Authorization</code>, and an optional label in <code>X-Proxy-Client</code>. The proxy does not register providers or keys.</p>
+      <p><a class="text-link" href="docs/protocol.html">Protocol and client integration</a> · <a class="text-link" href="docs/adapters.html">Adapters and compatibility</a></p>
+    </div>
+  </section>
+
+  <section class="section section-architecture">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">under the hood</p>
+        <h2>One service, not a stack.</h2>
+        <p>The proxy, dashboard, retained history, and operator API ship together. There is no separate database server, frontend runtime, or monitoring pipeline.</p>
+      </div>
+      <div class="architecture" aria-label="Architecture: clients connect to the Go service, which routes to upstream APIs; the service contains the embedded dashboard and writes to SQLite or an in-memory ring.">
+        <div class="arch-column">
+          <span class="mono-label">clients</span>
+          <div class="arch-box">apps</div>
+          <div class="arch-box">agents</div>
+          <div class="arch-box">IDE</div>
+        </div>
+        <div class="arch-arrow" aria-hidden="true"></div>
+        <div class="arch-service">
+          <span class="mono-label">one Go service</span>
+          <div class="arch-service-grid">
+            <div><strong>routing</strong><span>per-request upstream URL, credentials, and path</span></div>
+            <div><strong>adapters</strong><span>OpenAI-compatible, Anthropic Messages, Cursor Connect</span></div>
+            <div><strong>dashboard</strong><span>embedded assets, live SSE, retained views</span></div>
+            <div><strong>operator API</strong><span>MCP tools and scoped controls</span></div>
+          </div>
+        </div>
+        <div class="arch-arrow" aria-hidden="true"></div>
+        <div class="arch-column">
+          <span class="mono-label">upstreams</span>
+          <div class="arch-box">OpenAI</div>
+          <div class="arch-box">Anthropic</div>
+          <div class="arch-box">compatible</div>
+        </div>
+        <div class="arch-store"><span class="mono-label">state</span><strong>SQLite or in-memory ring</strong><span>metadata, metrics, settings</span></div>
+      </div>
+      <div class="fact-grid">
+        <div><strong>one binary</strong><span>Go service with embedded dashboard assets</span></div>
+        <div><strong>one credential</strong><span>dashboard and inference share the operator boundary</span></div>
+        <div><strong>two storage modes</strong><span>SQLite history or an in-memory ring</span></div>
+        <div><strong>MIT</strong><span>source available, no hosted dependency</span></div>
+      </div>
+      <p class="section-foot"><a class="text-link" href="docs/architecture.html">Architecture and ownership</a> · <a class="text-link" href="docs/mcp.html">MCP server</a></p>
+    </div>
+  </section>
+
+  <section class="section wrap" id="limits">
+    <div class="section-head">
+      <p class="eyebrow">fit and limits</p>
+      <h2>What it is not.</h2>
+      <p>millivolt is built for a single operator or small team that controls the host. The limits are part of the contract, not a footnote.</p>
+    </div>
+    <div class="limit-grid">
+      <article class="limit"><span class="limit-label">tenancy</span><h3>One operator, no user isolation.</h3><p>A single credential protects the dashboard and inference listener. There are no per-user accounts or tenant boundaries.</p></article>
+      <article class="limit"><span class="limit-label">durability</span><h3>Best-effort accounting.</h3><p>Sustained overload can drop records even when inference succeeds. The dashboard warns about process-local storage drops.</p></article>
+      <article class="limit"><span class="limit-label">scope</span><h3>Observability, not billing.</h3><p>Cost is provider-reported. This is not an independent invoice, a complete audit log, or a compliance system.</p></article>
+    </div>
+    <p class="section-foot"><a class="text-link" href="security.html">Security boundary</a> · <a class="text-link" href="docs/operations.html#storage-and-accounting">Storage and accounting</a></p>
+  </section>
+
+  <section class="section section-proof" id="performance-and-footprint">
+    <div class="wrap">
+      <div class="section-head split-head">
+        <div>
+          <p class="eyebrow">measured</p>
+          <h2>Measured, not promised.</h2>
+        </div>
+        <p class="section-note">A documented local example, including the higher-load stage that dropped records. These are scoped measurements, not deployment guarantees.</p>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><strong>26.5 MB</strong><span>amd64 image</span></div>
+        <div class="stat"><strong>20.5 MiB</strong><span>idle RAM, empty history</span></div>
+        <div class="stat"><strong>217 MiB</strong><span>with 99,304 retained records</span></div>
+        <div class="stat"><strong>11,073</strong><span>requests/s at 32 workers for five seconds</span></div>
+      </div>
+      <p class="measurement-note">Measured 2026-09-06 at <a href="https://github.com/LLM-4-People/millivolt/commit/495464c5b485a4b8d021e5b36dcecc9f291f5a2c" target="_blank" rel="noopener noreferrer">495464c</a> on a shared WSL2 workstation. A higher-load stage dropped records. See <a href="docs/operations.html#performance-and-footprint">method and scope</a>.</p>
+    </div>
+  </section>
+
+  <section class="final-cta">
+    <div class="wrap final-inner">
+      <div>
+        <p class="eyebrow">start here</p>
+        <h2>Run it on your machine.</h2>
+        <p>Three commands, one binary, your keys. Keep the traffic where you can see it.</p>
+      </div>
+      <div class="final-actions">
+        <a class="btn btn-primary" href="#quickstart">Run it locally</a>
+        <a class="btn btn-ghost" href="docs/index.html">Read the docs</a>
+      </div>
+    </div>
+  </section>
+</main>

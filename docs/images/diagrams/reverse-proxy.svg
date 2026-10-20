@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">Reverse proxy topology</title>
+  <desc id="desc">An API client and a dashboard browser connect to NGINX over TLS with access control. NGINX forwards over loopback HTTP to millivolt. millivolt sends requests to the selected upstream API with its own upstream credentials.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 10 5 0 10z" fill="#5b8cff"/>
+    </marker>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#5b8cff"/><stop offset="1" stop-color="#9a6bff"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="420" rx="16" fill="#141210"/>
+  <g stroke="#3a342b" stroke-width="1" opacity=".55">
+    <path d="M0 24h1200M0 96h1200M0 168h1200M0 240h1200M0 312h1200M0 384h1200"/>
+  </g>
+  <rect x="16" y="16" width="1168" height="388" rx="12" fill="none" stroke="#3a342b"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+    <text x="40" y="60" fill="#97907e" font-size="14" letter-spacing="2">REVERSE PROXY TOPOLOGY</text>
+    <rect x="40" y="96" width="230" height="112" rx="10" fill="#1a1714" stroke="#3a342b"/>
+    <text x="60" y="128" fill="#e8e4de" font-size="17" font-weight="600">API client</text>
+    <text x="60" y="154" fill="#97907e" font-size="13">OpenAI-compatible</text>
+    <text x="60" y="176" fill="#97907e" font-size="13">base URL: /v1</text>
+
+    <rect x="40" y="236" width="230" height="112" rx="10" fill="#1a1714" stroke="#3a342b"/>
+    <text x="60" y="268" fill="#e8e4de" font-size="17" font-weight="600">Dashboard browser</text>
+    <text x="60" y="294" fill="#97907e" font-size="13">operator session</text>
+    <text x="60" y="316" fill="#97907e" font-size="13">Settings, live feed, MCP</text>
+
+    <rect x="370" y="134" width="250" height="176" rx="12" fill="#1a1714" stroke="#5b8cff"/>
+    <text x="390" y="168" fill="#5b8cff" font-size="13" letter-spacing="1">EDGE</text>
+    <text x="390" y="198" fill="#e8e4de" font-size="21" font-weight="600">NGINX</text>
+    <text x="390" y="226" fill="#97907e" font-size="13">TLS termination</text>
+    <text x="390" y="248" fill="#97907e" font-size="13">access allowlists</text>
+    <text x="390" y="270" fill="#97907e" font-size="13">streaming, no buffering</text>
+
+    <rect x="720" y="134" width="220" height="176" rx="12" fill="#1a1714" stroke="#9a6bff"/>
+    <text x="740" y="168" fill="#9a6bff" font-size="13" letter-spacing="1">APPLICATION</text>
+    <text x="740" y="198" fill="#e8e4de" font-size="21" font-weight="600">millivolt</text>
+    <text x="740" y="226" fill="#97907e" font-size="13">one operator credential</text>
+    <text x="740" y="248" fill="#97907e" font-size="13">routing, dashboard, history</text>
+    <text x="740" y="270" fill="#97907e" font-size="13">loopback host port</text>
+
+    <rect x="1030" y="134" width="130" height="176" rx="12" fill="#1a1714" stroke="#3a342b"/>
+    <text x="1048" y="168" fill="#e8e4de" font-size="15" font-weight="600">Upstream</text>
+    <text x="1048" y="196" fill="#97907e" font-size="13">selected</text>
+    <text x="1048" y="218" fill="#97907e" font-size="13">base URL</text>
+    <text x="1048" y="240" fill="#97907e" font-size="13">credentials</text>
+    <text x="1048" y="262" fill="#97907e" font-size="13">provider API</text>
+
+    <g stroke="url(#edge)" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M270 152h84"/>
+      <path d="M270 292h84"/>
+      <path d="M620 222h84"/>
+      <path d="M940 222h74"/>
+    </g>
+    <text x="320" y="142" fill="#97907e" font-size="12">443</text>
+    <text x="320" y="282" fill="#97907e" font-size="12">443</text>
+    <text x="642" y="212" fill="#97907e" font-size="12">loopback</text>
+    <text x="952" y="212" fill="#97907e" font-size="12">HTTP(S)</text>
+  </g>
+</svg>

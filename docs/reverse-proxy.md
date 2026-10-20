@@ -10,13 +10,11 @@ credential and a browser can reach the login handshake. The canonical
 open-path list is in [operator access](operations.md#operator-access); this
 guide only adds the ingress boundary. Read [Security](../SECURITY.md) first.
 
-```mermaid
-flowchart LR
-  client["API client"] --> edge["NGINX: TLS and access control"]
-  browser["Dashboard browser"] --> edge
-  edge -->|"HTTP over loopback"| proxy["millivolt"]
-  proxy -->|"HTTP(S) and upstream credentials"| upstream["Selected upstream"]
-```
+![Reverse proxy topology: the API client and dashboard browser reach NGINX over TLS, NGINX forwards over loopback to millivolt, and millivolt sends requests to the selected upstream](images/diagrams/reverse-proxy.svg)
+
+The diagram is a text-equivalent summary of the example below: NGINX terminates
+TLS and enforces access; millivolt owns routing, the operator session, and the
+history; the upstream receives the selected credentials.
 
 ## NGINX setup
 
