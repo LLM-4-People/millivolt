@@ -235,6 +235,9 @@ not the streaming body.
 `X-Proxy-Timeout-Ms` instead gives each upstream send a fresh deadline covering
 headers and body. Neither is a total end-to-end deadline across queueing, holds,
 retries and backoff; client cancellation is the way to stop the whole request.
+The request-body progress bound applies only while the body is being read.
+Reaching EOF or closing the body clears the connection read deadline, so a
+long-lived response stream is never cut by the upload guard.
 The [Cursor bridge](adapters.md#cursor-connect-bridge) instead applies the tighter
 configured/per-request timeout only until send headers arrive, without a body
 deadline on its parked run. Model discovery ignores the per-request timeout

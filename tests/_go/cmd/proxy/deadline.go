@@ -166,6 +166,49 @@ func TestProgressBodyRearmsIdleAndAbsoluteBounds(t *testing.T) {
 	}
 }
 
+// TestProgressBodyClearsDeadlineAfterBody pins the lifetime of the body guard:
+// EOF and Close end the body phase, so the connection read deadline must be
+// cleared. A stale idle deadline otherwise expires while the handler is still
+// streaming a response and tears down a healthy long-lived SSE connection.
+func TestProgressBodyClearsDeadlineAfterBody(t *testing.T) {
+	body := func(w *deadlineWriter) *progressReadCloser {
+		return &progressReadCloser{
+			body:            io.NopCloser(strings.NewReader("abc")),
+			setReadDeadline: http.NewResponseController(w).SetReadDeadline,
+			idle:            30 * time.Second,
+			absolute:        time.Now().Add(time.Hour),
+		}
+	}
+
+	w := &deadlineWriter{}
+	p := body(w)
+	buf := make([]byte, 8)
+	if n, err := p.Read(buf); err != nil || n != 3 {
+		t.Fatalf("first read = %d, %v; want 3, nil", n, err)
+	}
+	if w.readDeadline.IsZero() {
+		t.Fatal("body read did not arm a deadline")
+	}
+	if _, err := p.Read(buf); err != io.EOF {
+		t.Fatalf("second read = %v, want EOF", err)
+	}
+	if !w.readDeadline.IsZero() {
+		t.Fatalf("read deadline = %v after EOF, want cleared", w.readDeadline)
+	}
+
+	w = &deadlineWriter{}
+	p = body(w)
+	if _, err := p.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !w.readDeadline.IsZero() {
+		t.Fatalf("read deadline = %v after Close, want cleared", w.readDeadline)
+	}
+}
+
 // TestDeadlineHandlerStalledBodyFailsWithinIdleBound reproduces the admission
 // H6 case: a declared body that never sends bytes must fail within the idle
 // bound, not the ten-minute absolute bound, and release both the request slot
@@ -331,5 +374,66 @@ func TestDeadlineHandlerNormalUploadUnchanged(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || string(body) != payload {
 		t.Fatalf("normal upload status=%d len=%d, want 200 and %d bytes", resp.StatusCode, len(body), len(payload))
+	}
+}
+
+// TestDeadlineHandlerStreamAfterBodySurvivesIdleBound reproduces the long-SSE
+// failure: once the request body has been consumed, a response may remain open
+// far longer than the body idle bound. The body guard must not leak into the
+// response phase and cut a healthy stream at the idle timeout.
+func TestDeadlineHandlerStreamAfterBodySurvivesIdleBound(t *testing.T) {
+	oldIdle := requestBodyIdleTimeout
+	requestBodyIdleTimeout = 200 * time.Millisecond
+	defer func() { requestBodyIdleTimeout = oldIdle }()
+
+	const events = 20
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		f, ok := w.(http.Flusher)
+		if !ok {
+			t.Error("upstream writer is not a Flusher")
+			return
+		}
+		for i := 0; i < events; i++ {
+			fmt.Fprintf(w, "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"x\"},\"finish_reason\":null}]}\n\n")
+			f.Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+		fmt.Fprint(w, "data: {\"id\":\"x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer upstream.Close()
+
+	cfg := config.Default()
+	srv := httptest.NewServer(deadlineHandler{next: proxy.New(cfg, metrics.Noop{})})
+	defer srv.Close()
+
+	const reqBody = `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/chat/completions", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer fixture-key")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("stream after body read: %v", err)
+	}
+	if got := strings.Count(string(body), "data: "); got < events+1 {
+		t.Fatalf("events = %d, want at least %d (stream cut at the body idle bound)", got, events+1)
+	}
+	if !strings.Contains(string(body), "data: [DONE]") {
+		t.Fatalf("stream ended without [DONE]: %q", string(body))
 	}
 }

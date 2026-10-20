@@ -30,8 +30,10 @@ const (
 // re-armed before every read, inside the absolute requestBodyReadDeadline, so
 // a stalled upload fails long before the absolute cap and releases its
 // admission reservation while a slow but progressing upload still completes.
-// A package variable is the deterministic test seam; production never
-// changes it.
+// It applies only while the body is being read: EOF or Close clears the
+// connection read deadline, because otherwise the final idle bound would
+// outlive the body and could abort a long-lived response stream. A package
+// variable is the deterministic test seam; production never changes it.
 var requestBodyIdleTimeout = 30 * time.Second
 
 // deadlineHandler arms the request-body progress deadline at the outermost
@@ -79,10 +81,21 @@ func (b *progressReadCloser) Read(p []byte) (int, error) {
 	// A writer without deadline support (httptest.ResponseRecorder) leaves the
 	// body readable; the real server always supports it.
 	_ = b.setReadDeadline(deadline)
-	return b.body.Read(p)
+	n, err := b.body.Read(p)
+	if err != nil {
+		// The body phase is over. Clear the connection read deadline so it
+		// cannot expire later while the handler is still streaming a response
+		// (common for an idle body bound that is much shorter than a stream).
+		// The next body read, if any, re-arms the bound.
+		_ = b.setReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
-func (b *progressReadCloser) Close() error { return b.body.Close() }
+func (b *progressReadCloser) Close() error {
+	_ = b.setReadDeadline(time.Time{})
+	return b.body.Close()
+}
 
 // deadlineResponseWriter keeps the optional interfaces handlers rely on
 // (Flusher, Hijacker, ResponseController's Unwrap chain) while re-arming the
