@@ -1,46 +1,68 @@
-// Theme picker: the palette list, its persistence, and the one place that
-// applies a palette to the document.
+// Theme picker: the mode and palette registry, its persistence, and the one
+// place that applies either choice to the document.
 //
-// The stored choice is applied before first paint by the inline guard in
-// index.html (key below); this file owns everything after that: rendering the
-// header menu, keeping aria-checked honest, and recoloring the canvas charts
-// when a palette changes. Palettes themselves live in css/themes.css.
-const THEME_STORAGE_KEY = 'millivolt.theme';
+// The stored pair is applied before first paint by the inline guard in
+// index.html (the meta tag owns the key); this file owns everything after
+// that: rendering the header menu, keeping aria-pressed honest, and
+// recoloring the canvas charts when a surface or palette changes. Palette
+// tokens live in css/themes.css.
+const THEME_STORAGE_KEY = document.querySelector('meta[name="theme-storage-key"]')?.content || '';
 
 const THEMES = [
-  { id: 'instrument', label: 'Instrument', hint: 'Warm near-black, blue and violet' },
-  { id: 'slate', label: 'Slate', hint: 'Cool graphite, blue and violet' },
-  { id: 'midnight', label: 'Midnight', hint: 'Deep navy, sky and periwinkle' },
-  { id: 'nord', label: 'Nord', hint: 'Blue-grey, frost and heather' },
-  { id: 'forest', label: 'Forest', hint: 'Green-black, emerald and lime' },
-  { id: 'rose', label: 'Rose', hint: 'Plum black, pink and lilac' },
-  { id: 'ember', label: 'Ember', hint: 'Warm near-black, amber and coral' },
-  { id: 'paper', label: 'Paper', hint: 'Warm light, indigo and plum' },
-  { id: 'mist', label: 'Mist', hint: 'Cool light, blue and teal' },
-  { id: 'contrast', label: 'Contrast', hint: 'Black, white and signal yellow' },
+  { id: 'instrument', label: 'Instrument', hint: 'Blue, violet and mint' },
+  { id: 'slate', label: 'Slate', hint: 'Steel blue and violet' },
+  { id: 'midnight', label: 'Midnight', hint: 'Sky blue and periwinkle' },
+  { id: 'nord', label: 'Nord', hint: 'Frost blue and heather' },
+  { id: 'forest', label: 'Forest', hint: 'Emerald and lime' },
+  { id: 'rose', label: 'Rose', hint: 'Pink and lilac' },
+  { id: 'ember', label: 'Ember', hint: 'Amber and coral' },
+  { id: 'contrast', label: 'Contrast', hint: 'Maximum separation' },
 ];
 
-function currentTheme() {
-  const id = document.documentElement.dataset.theme;
+const MODES = [
+  { id: 'clear', label: 'Clear' },
+  { id: 'black', label: 'Black' },
+];
+
+function normalizeTheme(id) {
   return THEMES.some(t => t.id === id) ? id : 'instrument';
 }
 
-// applyTheme normalizes the id, writes the document attribute, persists the
-// choice, and repaints what canvas color cannot inherit: the chart palette is
-// read once at boot in core.js, so the charts need an explicit refresh.
-function applyTheme(id, persist) {
-  const theme = THEMES.some(t => t.id === id) ? id : 'instrument';
+function normalizeMode(id) {
+  return MODES.some(m => m.id === id) ? id : 'black';
+}
+
+function currentTheme() {
+  return normalizeTheme(document.documentElement.dataset.theme);
+}
+
+function currentMode() {
+  return normalizeMode(document.documentElement.dataset.mode);
+}
+
+function modeLabel(id) {
+  return MODES.find(m => m.id === id).label;
+}
+
+// applyState is the one mutation path for a theme, a surface, or both. It
+// normalizes first, then persists, recolors the canvas, and resyncs the menu.
+function applyState(theme, mode, persist) {
   const root = document.documentElement;
-  if (theme === 'instrument') delete root.dataset.theme;
-  else root.dataset.theme = theme;
-  if (persist) storage.set(THEME_STORAGE_KEY, theme);
+  root.dataset.theme = normalizeTheme(theme);
+  root.dataset.mode = normalizeMode(mode);
+  if (persist) persistTheme();
   syncThemeColor();
   if (typeof refreshChartColors === 'function') refreshChartColors();
   // The plot captures series colors when it is constructed, so drop it first;
-  // renderChart then rebuilds the canvas against the new palette.
+  // renderChart then rebuilds the canvas against the new tokens.
   if (typeof resetChart === 'function') resetChart();
   if (typeof renderChart === 'function') renderChart();
   syncThemeMenu();
+}
+
+function persistTheme() {
+  if (!THEME_STORAGE_KEY) return;
+  storage.set(THEME_STORAGE_KEY, JSON.stringify({ theme: currentTheme(), mode: currentMode() }));
 }
 
 // The browser paints its own chrome (address bar, scrollbars) from this meta
@@ -55,17 +77,43 @@ function syncThemeColor() {
 function syncThemeMenu() {
   const menu = document.getElementById('theme-menu');
   if (!menu) return;
-  const active = currentTheme();
+  const theme = currentTheme();
+  const mode = currentMode();
   for (const option of menu.querySelectorAll('.theme-opt')) {
-    option.setAttribute('aria-checked', String(option.dataset.themeId === active));
+    option.setAttribute('aria-pressed', String(option.dataset.themeId === theme));
+  }
+  for (const option of menu.querySelectorAll('.theme-mode-opt')) {
+    option.setAttribute('aria-pressed', String(option.dataset.modeId === mode));
+  }
+  for (const swatch of menu.querySelectorAll('.theme-swatch')) {
+    swatch.dataset.mode = mode;
   }
   const button = document.getElementById('btn-theme');
-  if (button) button.setAttribute('aria-label', `Theme: ${THEMES.find(t => t.id === active).label}`);
+  if (button) {
+    button.setAttribute('aria-label',
+      `Theme: ${THEMES.find(t => t.id === theme).label}, ${modeLabel(mode)}`);
+  }
 }
 
-// renderThemeMenu builds the option rows once. Each row previews the palette
-// it selects: the swatch colors come from themes.css, keyed by data-theme-id,
-// so no hex is repeated here.
+// renderModeMenu and renderThemeMenu build their controls once. The mode
+// control changes the surface; the palette rows keep the current surface and
+// preview their accent through the same data attributes the page uses.
+function renderModeMenu() {
+  const list = document.getElementById('theme-mode');
+  if (!list) return;
+  list.textContent = '';
+  for (const mode of MODES) {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'theme-mode-opt';
+    option.dataset.modeId = mode.id;
+    option.setAttribute('aria-pressed', 'false');
+    option.textContent = mode.label;
+    option.onclick = () => chooseMode(mode.id);
+    list.append(option);
+  }
+}
+
 function renderThemeMenu() {
   const list = document.getElementById('theme-list');
   if (!list) return;
@@ -75,12 +123,13 @@ function renderThemeMenu() {
     option.type = 'button';
     option.className = 'theme-opt';
     option.dataset.themeId = theme.id;
-    option.setAttribute('role', 'menuitemradio');
-    option.setAttribute('aria-checked', 'false');
+    option.setAttribute('aria-pressed', 'false');
     option.onclick = () => chooseTheme(theme.id);
 
     const swatch = document.createElement('span');
     swatch.className = 'theme-swatch';
+    swatch.dataset.theme = theme.id;
+    swatch.dataset.mode = currentMode();
     swatch.setAttribute('aria-hidden', 'true');
 
     const copy = document.createElement('span');
@@ -99,9 +148,13 @@ function renderThemeMenu() {
 }
 
 function chooseTheme(id) {
-  applyTheme(id, true);
+  applyState(id, currentMode(), true);
   hideHdrMenu('theme-menu');
   document.getElementById('btn-theme')?.focus();
+}
+
+function chooseMode(id) {
+  applyState(currentTheme(), id, true);
 }
 
 function toggleThemeMenu(e) {
@@ -109,9 +162,21 @@ function toggleThemeMenu(e) {
 }
 
 function initTheme() {
+  const root = document.documentElement;
+  const theme = normalizeTheme(root.dataset.theme);
+  const mode = normalizeMode(root.dataset.mode);
+  const changed = root.dataset.theme !== theme || root.dataset.mode !== mode;
+  root.dataset.theme = theme;
+  root.dataset.mode = mode;
+  renderModeMenu();
   renderThemeMenu();
   syncThemeColor();
   syncThemeMenu();
+  if (changed) {
+    if (typeof refreshChartColors === 'function') refreshChartColors();
+    if (typeof resetChart === 'function') resetChart();
+    if (typeof renderChart === 'function') renderChart();
+  }
 }
 
 if (document.readyState === 'loading') {

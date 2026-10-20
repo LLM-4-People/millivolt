@@ -1,17 +1,30 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="instrument" data-mode="black">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="dashboard-version" content="__DASHBOARD_VERSION__">
 <meta name="theme-color" content="#100e0b">
+<meta name="theme-storage-key" content="millivolt.theme">
 <script>
-// Apply the stored palette before the first paint. js/theme.js owns the list
-// and the writes; this guard only removes the flash of the default theme.
+// Apply the stored theme and surface before the first paint. The meta tag
+// above owns the key; js/theme.js owns the registry, writes and validation.
+// This guard only removes the flash of the default pair.
 try {
-  var storedTheme = localStorage.getItem('millivolt.theme');
-  if (storedTheme && /^[a-z-]+$/.test(storedTheme) && storedTheme !== 'instrument') {
-    document.documentElement.dataset.theme = storedTheme;
+  var key = document.querySelector('meta[name="theme-storage-key"]');
+  var raw = key ? localStorage.getItem(key.content) : '';
+  if (raw) {
+    var saved = raw;
+    try { saved = JSON.parse(raw); } catch (e) {}
+    if (typeof saved === 'string') saved = { theme: saved };
+    if (saved && typeof saved === 'object') {
+      if (typeof saved.theme === 'string' && /^[a-z-]+$/.test(saved.theme)) {
+        document.documentElement.dataset.theme = saved.theme;
+      }
+      if (saved.mode === 'clear' || saved.mode === 'black') {
+        document.documentElement.dataset.mode = saved.mode;
+      }
+    }
   }
 } catch (e) {}
 </script>
@@ -230,13 +243,15 @@ try {
       </div>
     </div>
     <div class="menu-wrap">
-      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
         <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Theme</span>
       </button>
-      <div class="hdr-menu theme-menu" id="theme-menu" hidden role="menu" aria-label="Theme">
-        <div class="clear-menu-hd">Palette</div>
-        <div class="theme-list" id="theme-list" role="none"></div>
+      <div class="hdr-menu theme-menu" id="theme-menu" hidden role="group" aria-label="Theme">
+        <div class="clear-menu-hd">Surface</div>
+        <div class="theme-mode" id="theme-mode" role="group" aria-label="Surface"></div>
+        <div class="clear-menu-hd theme-palette-hd">Palette</div>
+        <div class="theme-list" id="theme-list" role="group" aria-label="Palette"></div>
       </div>
     </div>
     <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">

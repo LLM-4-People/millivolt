@@ -10,12 +10,12 @@
       <stop offset="0.7" stop-color="#1b1826"/>
     </radialGradient>
     <linearGradient id="trace" x1="3" y1="16" x2="29" y2="16" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#5b8cff"/>
-      <stop offset="1" stop-color="#9a6bff"/>
+      <stop stop-color="#7aa0ff"/>
+      <stop offset="1" stop-color="#b18cff"/>
     </linearGradient>
   </defs>
   <rect width="32" height="32" rx="9" fill="url(#well)"/>
-  <rect width="32" height="32" rx="9" fill="none" stroke="#9a6bff" stroke-opacity=".28"/>
+  <rect width="32" height="32" rx="9" fill="none" stroke="#b18cff" stroke-opacity=".28"/>
   <!-- graduated scale -->
   <g stroke="#7a72a0" stroke-width="1.4" opacity=".55" stroke-linecap="round">
     <path d="M6 24v2.4M11.5 24v2.4M17 24v2.4M22.5 24v2.4M28 24v2.4"/>

@@ -1,5 +1,6 @@
-// Theme picker checks: palettes resolve from the served stylesheets, the
-// choice persists before first paint, and a switch recolors the canvas.
+// Theme picker checks: surfaces and palettes resolve from the served
+// stylesheets, the pair persists as one value, a switch recolors the canvas,
+// and every theme/mode combination clears the contrast floor.
 //
 // The dashboard shell is assembled the way ui_check.js assembles it: jsdom
 // does not fetch external assets, so every stylesheet and script referenced by
@@ -10,6 +11,7 @@ const { JSDOM } = require('jsdom');
 
 const STATIC = path.join(__dirname, '..', 'internal/web/static');
 const TEST_DASHBOARD_VERSION = '0000000000000001';
+const STORAGE_KEY = 'millivolt.theme';
 
 function assembleHTML() {
   let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
@@ -25,13 +27,15 @@ function assembleHTML() {
   return html.replace('</body>', () => scripts.join('\n') + '\n</body>');
 }
 
-function boot(storedTheme) {
+function boot(stored) {
   const dom = new JSDOM(assembleHTML(), {
     url: 'http://127.0.0.1:8471/',
     runScripts: 'dangerously',
     pretendToBeVisual: true,
     beforeParse(win) {
-      if (storedTheme) win.localStorage.setItem('millivolt.theme', storedTheme);
+      if (stored) {
+        win.localStorage.setItem(STORAGE_KEY, typeof stored === 'string' ? stored : JSON.stringify(stored));
+      }
       // The browser APIs the dashboard touches but jsdom does not implement.
       win.fetch = () => new Promise(() => {});
       win.console.error = () => {};
@@ -51,6 +55,35 @@ function loaded(dom) {
   return new Promise(resolve => dom.window.addEventListener('load', resolve));
 }
 
+function rgb(value) {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(value.trim());
+  if (!match) return null;
+  return match.slice(1).map(part => parseInt(part, 16) / 255);
+}
+
+function luminance(value) {
+  const channels = rgb(value);
+  if (!channels) return null;
+  const linear = channels.map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
+  return .2126 * linear[0] + .7152 * linear[1] + .0722 * linear[2];
+}
+
+function contrast(a, b) {
+  const la = luminance(a);
+  const lb = luminance(b);
+  if (la == null || lb == null) return 0;
+  const [hi, lo] = la > lb ? [la, lb] : [lb, la];
+  return (hi + .05) / (lo + .05);
+}
+
+function tint(color, surface, alpha) {
+  const fg = rgb(color);
+  const bg = rgb(surface);
+  if (!fg || !bg) return surface;
+  return '#' + fg.map((v, i) => Math.round((v * alpha + bg[i] * (1 - alpha)) * 255)
+    .toString(16).padStart(2, '0')).join('');
+}
+
 let failures = 0;
 const check = (label, cond) => {
   console.log((cond ? 'PASS ' : 'FAIL ') + label);
@@ -64,39 +97,165 @@ const token = (win, name) =>
   await loaded(dom);
   const win = dom.window;
   const d = win.document;
+  const root = d.documentElement;
+  const themes = [...d.querySelectorAll('.theme-opt')].map(option => option.dataset.themeId);
+  const modes = [...d.querySelectorAll('.theme-mode-opt')].map(option => option.dataset.modeId);
 
-  check('the picker offers every palette', d.querySelectorAll('.theme-opt').length === 10);
-  check('the default palette is instrument', !d.documentElement.dataset.theme);
+  check('the picker offers every palette', themes.length === 8);
+  check('the picker offers both surfaces', modes.length === 2);
+  check('palette ids are unique', new Set(themes).size === themes.length);
+  check('surface ids are unique', new Set(modes).size === modes.length);
+  check('the storage key has one owner', d.querySelector('meta[name="theme-storage-key"]')?.content === STORAGE_KEY);
+
+  check('the default palette is instrument', root.dataset.theme === 'instrument');
+  check('the default surface is black', root.dataset.mode === 'black');
   check('the default resolves the canonical surface', token(win, '--bg') === '#141210');
+  check('the default resolves the canonical accent', token(win, '--accent') === '#7aa0ff');
+  check('the default swatch mirrors the default accent',
+    win.getComputedStyle(d.querySelector('[data-theme-id="instrument"] .theme-swatch'))
+      .getPropertyValue('--accent').trim() === '#7aa0ff');
 
   win.toggleThemeMenu({ stopPropagation() {} });
   check('the theme menu opens', !d.getElementById('theme-menu').hidden);
   check('the current palette is marked',
-    d.querySelector('[data-theme-id="instrument"]').getAttribute('aria-checked') === 'true');
+    d.querySelector('[data-theme-id="instrument"]').getAttribute('aria-pressed') === 'true');
+  check('the current surface is marked',
+    d.querySelector('[data-mode-id="black"]').getAttribute('aria-pressed') === 'true');
   check('opening the theme menu sets aria-expanded',
     d.getElementById('btn-theme').getAttribute('aria-expanded') === 'true');
 
-  d.querySelector('[data-theme-id="paper"]').click();
-  check('paper applies to the document', d.documentElement.dataset.theme === 'paper');
-  check('paper persists the choice', win.localStorage.getItem('millivolt.theme') === 'paper');
-  check('paper swaps the surface tokens', token(win, '--bg') === '#f7f2e8');
-  check('paper flips the native color scheme', token(win, 'color-scheme') === 'light');
-  check('the browser theme color follows the palette',
+  d.querySelector('[data-mode-id="clear"]').click();
+  check('clear applies to the document', root.dataset.mode === 'clear');
+  check('choosing a surface leaves the menu open', !d.getElementById('theme-menu').hidden);
+  check('clear swaps the surface tokens', token(win, '--bg') === '#f7f2e8');
+  check('clear flips the native color scheme', token(win, 'color-scheme') === 'light');
+  check('the browser theme color follows the surface',
     d.querySelector('meta[name="theme-color"]').getAttribute('content') === '#efe7d6');
-  check('switching recolors the canvas palette', win.eval('COLORS.accent') === '#3056d3');
-  check('switching closes the menu', d.getElementById('theme-menu').hidden);
+  check('the pair persists as one value',
+    win.localStorage.getItem(STORAGE_KEY) === JSON.stringify({ theme: 'instrument', mode: 'clear' }));
+  check('switching recolors the canvas palette', win.eval('COLORS.accent') === '#1e40af');
+  check('every swatch previews the chosen surface',
+    [...d.querySelectorAll('.theme-swatch')].every(swatch => swatch.dataset.mode === 'clear'));
+  check('the instrument swatch resolves the clear accent',
+    win.getComputedStyle(d.querySelector('[data-theme-id="instrument"] .theme-swatch'))
+      .getPropertyValue('--accent').trim() === '#1e40af');
+  check('a non-active swatch resolves its own accent',
+    win.getComputedStyle(d.querySelector('[data-theme-id="forest"] .theme-swatch'))
+      .getPropertyValue('--accent').trim() === '#065f46');
 
-  const reloaded = boot('midnight');
+  d.querySelector('[data-theme-id="forest"]').click();
+  check('forest applies to the document', root.dataset.theme === 'forest');
+  check('a palette keeps the chosen surface', root.dataset.mode === 'clear');
+  check('forest persists with the surface',
+    win.localStorage.getItem(STORAGE_KEY) === JSON.stringify({ theme: 'forest', mode: 'clear' }));
+  check('forest swaps the accent tokens', token(win, '--accent') === '#065f46');
+  check('a palette switch keeps the surface tokens', token(win, '--bg') === '#f7f2e8');
+  check('the trigger names both choices',
+    d.getElementById('btn-theme').getAttribute('aria-label') === 'Theme: Forest, Clear');
+  check('switching a palette closes the menu', d.getElementById('theme-menu').hidden);
+
+  win.toggleThemeMenu({ stopPropagation() {} });
+  d.querySelector('[data-mode-id="black"]').click();
+  check('black applies without changing the palette',
+    root.dataset.theme === 'forest' && root.dataset.mode === 'black');
+  check('black keeps the menu open', !d.getElementById('theme-menu').hidden);
+  check('black restores the dark surface', token(win, '--bg') === '#141210');
+  check('black resolves the forest accent', token(win, '--accent') === '#34d399');
+  check('black persists with the palette',
+    win.localStorage.getItem(STORAGE_KEY) === JSON.stringify({ theme: 'forest', mode: 'black' }));
+  check('every swatch previews the black surface',
+    [...d.querySelectorAll('.theme-swatch')].every(swatch => swatch.dataset.mode === 'black'));
+
+  const reloaded = boot({ theme: 'midnight', mode: 'clear' });
   await loaded(reloaded);
   const rw = reloaded.window;
-  check('a stored palette applies before first paint',
-    rw.document.documentElement.dataset.theme === 'midnight');
-  check('the stored palette resolves its tokens', token(rw, '--bg') === '#070b14');
-  check('the stored palette marks its picker row',
-    rw.document.querySelector('[data-theme-id="midnight"]').getAttribute('aria-checked') === 'true');
+  const rd = rw.document;
+  check('a stored pair applies before first paint',
+    rd.documentElement.dataset.theme === 'midnight' && rd.documentElement.dataset.mode === 'clear');
+  check('the stored pair resolves its surface', token(rw, '--bg') === '#f7f2e8');
+  check('the stored pair resolves its accent', token(rw, '--accent') === '#075985');
+  check('the stored pair marks the palette row',
+    rd.querySelector('[data-theme-id="midnight"]').getAttribute('aria-pressed') === 'true');
+  check('the stored pair marks the surface row',
+    rd.querySelector('[data-mode-id="clear"]').getAttribute('aria-pressed') === 'true');
+
+  const legacy = boot('ember');
+  await loaded(legacy);
+  check('a legacy string normalizes to the default surface',
+    legacy.window.document.documentElement.dataset.theme === 'ember' &&
+    legacy.window.document.documentElement.dataset.mode === 'black');
+
+  const invalid = boot({ theme: 'bogus', mode: 'sideways' });
+  await loaded(invalid);
+  check('an unknown pair normalizes to instrument and black',
+    invalid.window.document.documentElement.dataset.theme === 'instrument' &&
+    invalid.window.document.documentElement.dataset.mode === 'black');
+
+  // Contract: every theme has a block for both surfaces in the stylesheet.
+  const themeCSS = fs.readFileSync(path.join(STATIC, 'css/themes.css'), 'utf8');
+  const missing = [];
+  for (const theme of themes) {
+    for (const mode of modes) {
+      const selector = `[data-theme="${theme}"][data-mode="${mode}"]`;
+      if (!themeCSS.includes(selector)) missing.push(selector);
+    }
+  }
+  check('every theme defines both surfaces', missing.length === 0);
+  if (missing.length) console.log(missing.join('\n'));
+
+  // Every theme/mode pair is exercised for the same text and status roles.
+  const contrastFailures = [];
+  const words = {
+    bg: '--bg', panel: '--panel', panel2: '--panel2', rail: '--rail',
+    text: '--text', muted: '--muted', accent: '--accent', accentHover: '--accent-hover',
+    accent2: '--accent2', cyan: '--cyan', ok: '--ok', warn: '--warn', err: '--err',
+    rl: '--rl', errText: '--err-text', warnText: '--warn-text', dangerHover: '--danger-hover',
+  };
+  const pair = (fg, bg, minimum = 4.5) => ({ fg, bg, minimum });
+  const pairs = [
+    pair('text', 'bg'), pair('text', 'panel'), pair('text', 'panel2'),
+    pair('muted', 'bg'), pair('muted', 'panel'), pair('muted', 'panel2'),
+    pair('accent', 'panel'), pair('accent', 'panel2'), pair('accent', 'bg'),
+    pair('accentHover', 'bg'), pair('accent2', 'panel'), pair('accent2', 'panel2'),
+    pair('cyan', 'panel'), pair('cyan', 'panel2'),
+    pair('ok', 'panel'), pair('ok', 'panel2'), pair('ok', 'rail'),
+    pair('warn', 'panel'), pair('warn', 'panel2'),
+    pair('err', 'panel'), pair('err', 'panel2'), pair('err', 'bg'),
+    pair('rl', 'panel'), pair('rl', 'panel2'),
+    pair('errText', 'panel2'), pair('warnText', 'panel2'),
+    pair('bg', 'dangerHover'),
+  ];
+  const tintPairs = [
+    ['accent', 15], ['accent2', 16], ['cyan', 16],
+    ['ok', 16], ['warn', 16], ['err', 16], ['rl', 16],
+  ];
+  for (const theme of themes) {
+    for (const mode of modes) {
+      root.dataset.theme = theme;
+      root.dataset.mode = mode;
+      const values = {};
+      for (const [name, css] of Object.entries(words)) values[name] = token(win, css);
+      for (const { fg, bg, minimum } of pairs) {
+        const ratio = contrast(values[fg], values[bg]);
+        if (ratio < minimum) {
+          contrastFailures.push(`${theme}/${mode} ${fg} on ${bg}: ${ratio.toFixed(2)} < ${minimum}`);
+        }
+      }
+      for (const [fg, alpha] of tintPairs) {
+        const ratio = contrast(values[fg], tint(values[fg], values.panel2, alpha / 100));
+        if (ratio < 4.5) {
+          contrastFailures.push(`${theme}/${mode} ${fg} on ${alpha}% tint: ${ratio.toFixed(2)} < 4.5`);
+        }
+      }
+    }
+  }
+  check('every theme and surface clears the contrast floor', contrastFailures.length === 0);
+  if (contrastFailures.length) console.log(contrastFailures.join('\n'));
 
   win.close();
-  rw.close();
+  reloaded.window.close();
+  legacy.window.close();
+  invalid.window.close();
   console.log(failures === 0 ? 'ALL THEME CHECKS PASSED' : `${failures} THEME CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })().catch(error => {

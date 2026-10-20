@@ -260,14 +260,16 @@ restart and failure behavior before using these controls.
 
 ### Theme
 
-Theme switches the dashboard palette: Instrument (the default warm near-black),
-Slate, Midnight, Nord, Forest, Rose, Ember, Paper, Mist and Contrast. Paper and
-Mist are light palettes; Contrast is a high-contrast black, white and yellow
-palette for bright rooms and low-vision use. The choice is stored in this
-browser only and is applied before the first paint, so a reload does not flash
-the default palette. Charts, status colors and the browser's theme color follow
-the selected palette. The setting is presentation only: it does not change proxy
-behavior, stored history or the configuration revision.
+Theme has two surfaces and eight accent palettes. Clear is the warm light
+surface; Black is the warm near-black default. Instrument (the default), Slate,
+Midnight, Nord, Forest, Rose, Ember and Contrast are available on either
+surface, so every palette works in both modes. Contrast is the
+maximum-separation palette for bright rooms and low-vision use. The choice is
+stored in this browser only and is applied before the first paint, so a reload
+does not flash the default. Charts follow the selected palette; status colors
+and the browser's theme color follow the selected surface. The setting is
+presentation only: it does not change proxy behavior, stored history or the
+configuration revision.
 
 ## Settings
 
