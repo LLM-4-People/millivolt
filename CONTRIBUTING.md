@@ -54,9 +54,9 @@ pushes to `testing` run the smaller documentation gate.
    prerelease is lower than the same stable version. Commit the bump
    separately:
    ```sh
-   printf '0.3.31\n' > VERSION
+   printf '0.3.32\n' > VERSION
    git add VERSION
-   git commit -m "bump version to 0.3.31"
+   git commit -m "bump version to 0.3.32"
    git push origin testing
    ```
    A docs/site-only promotion may skip this step. `required` detects that every
