@@ -337,11 +337,11 @@ class RepositoryChecks(unittest.TestCase):
     def test_palette_mirror_detector(self):
         good = [
             ("internal/web/static/css/dashboard.css",
-             ':root { --bg: #1b1826; --accent: #5b8cff; }\n'),
+             ':root { --bg: #141210; --rail: #100e0b; --accent: #5b8cff; }\n'),
             ("internal/web/static/sw.js",
-             '"background:#1b1826;\'><p style="color:#5b8cff">offline</p></body></html>"'),
-            ("internal/web/static/manifest.webmanifest", '{"theme_color": "#1b1826"}'),
-            ("internal/web/static/index.html", '<meta name="theme-color" content="#1b1826">'),
+             '"background:#141210;\'><p style="color:#5b8cff">offline</p></body></html>"'),
+            ("internal/web/static/manifest.webmanifest", '{"theme_color": "#100e0b"}'),
+            ("internal/web/static/index.html", '<meta name="theme-color" content="#100e0b">'),
             ("internal/web/static/favicon.svg", '<stop stop-color="#5B8CFF"/>'),
         ]
         self.assertEqual(check.palette_mirror_errors(good), [])

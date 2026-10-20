@@ -246,7 +246,7 @@ func TestPWAInstallability(t *testing.T) {
 		`rel="apple-touch-icon" href="/apple-touch-icon.png"`,
 		`name="apple-mobile-web-app-capable" content="yes"`,
 		`name="mobile-web-app-capable" content="yes"`,
-		`name="theme-color" content="#1b1826"`,
+		`name="theme-color" content="#100e0b"`,
 		`viewport-fit=cover`,
 	} {
 		if !strings.Contains(html, needle) {
@@ -302,10 +302,10 @@ func TestPWAInstallability(t *testing.T) {
 	}
 	// The offline fallback page is authored inside offlinePage() as raw
 	// string data. Its palette mirrors the dashboard's :root tokens
-	// (#1b1826 = --well-lo, #141210 = --bg, #e8e4de = --text); these pins
+	// (#100e0b = --rail, #141210 = --bg, #e8e4de = --text); these pins
 	// catch a palette drift that a stylesheet can no longer equalize.
 	for _, needle := range []string{
-		`<meta name="theme-color" content="#1b1826">`,
+		`<meta name="theme-color" content="#100e0b">`,
 		"background:#141210",
 	} {
 		if !strings.Contains(sw, needle) {
@@ -407,7 +407,7 @@ func assertChromiumInstallManifest(t *testing.T, raw []byte) {
 	if v, ok := manifest["prefer_related_applications"]; ok && v != false {
 		t.Fatalf("prefer_related_applications=%v, want false or absent", v)
 	}
-	if manifest["theme_color"] != "#1b1826" || manifest["background_color"] != "#1b1826" {
+	if manifest["theme_color"] != "#100e0b" || manifest["background_color"] != "#141210" {
 		t.Fatalf("manifest colors: %v", manifest)
 	}
 	icons, _ := manifest["icons"].([]any)

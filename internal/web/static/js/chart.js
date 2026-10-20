@@ -206,7 +206,7 @@ const CHART_PRESETS = [
     // away) instead of stranding gap points in dead space. TTFT and the
     // decode window are both durations, so they share the right axis.
     id: 'latency', label: 'Speed + latency', requireAll: true,
-    left: { scale: 'ytps', fmt: fmt, label: 'Speed (tok/s)' }, right: { scale: 'yttft', fmt: fmtDur, label: 'Latency / decode (ms)' },
+    left: { scale: 'ytps', fmt: fmt, label: 'Speed (tok/s)' }, right: { scale: 'yttft', fmt: fmtDur, label: 'Latency / decode' },
     series: [['tps', 'ytps'], ['ttft', 'yttft'], ['dec', 'yttft']],
   },
   {

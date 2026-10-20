@@ -3844,7 +3844,7 @@ async function main() {
     // the left, decode latency on the right.
     check('the latency preset names its axes: speed left, decode latency right',
       d.getElementById('chart-axes').textContent.includes('Speed (tok/s)') &&
-      d.getElementById('chart-axes').textContent.includes('Latency / decode (ms)'));
+      d.getElementById('chart-axes').textContent.includes('Latency / decode'));
     // restore: tear the mounted plot down, unspy, clear overrides + state
     w.eval("if (_up) { _up.destroy(); _up = null; } drawBlank = window.__drawBlankOrig; chartAgg = null; chartView = { window: 'all', pct: 95, preset: 'traffic', hidden: {} }");
     for (const c of box.querySelectorAll('canvas.chart-blank')) c.remove();

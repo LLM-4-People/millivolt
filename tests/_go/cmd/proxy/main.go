@@ -178,7 +178,7 @@ func TestOperatorPlaneBoundary(t *testing.T) {
 			`rel="manifest" href="/manifest.webmanifest"`,
 			`rel="apple-touch-icon" href="/apple-touch-icon.png"`,
 			`name="apple-mobile-web-app-capable" content="yes"`,
-			`name="theme-color" content="#1b1826"`,
+			`name="theme-color" content="#100e0b"`,
 			`navigator.serviceWorker.register('/sw.js'`,
 			`action="/session"`,
 		} {

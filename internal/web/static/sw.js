@@ -52,7 +52,7 @@ function exactVersionedDash(url) {
 
 function offlinePage() {
   return new Response(
-    '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#1b1826"><title>millivolt</title><body style="margin:0;min-height:100dvh;display:grid;place-items:center;background:#141210;color:#e8e4de;font:14px/1.5 sans-serif"><p style="max-width:22rem;padding:20px;color:#97907e">millivolt is a live instrument and needs a network to open.</p></body></html>',
+    '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#100e0b"><title>millivolt</title><body style="margin:0;min-height:100dvh;display:grid;place-items:center;background:#141210;color:#e8e4de;font:14px/1.5 sans-serif"><p style="max-width:22rem;padding:20px;color:#97907e">millivolt is a live instrument and needs a network to open.</p></body></html>',
     { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' } }
   );
 }
