@@ -25,40 +25,32 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
-// wholeDocumentReadTimeout is the fallback budget for one whole-document
-// upstream body read (translated non-streaming responses and model-discovery
-// pages) when the caller supplied no deadline of its own. A shorter caller
-// deadline from the per-send X-Proxy-Timeout-Ms or the model-discovery budget
-// wins. Streaming SSE is never buffered, so this guardrail does not apply to
-// it. Internal safety guardrail, not user-tunable.
-const wholeDocumentReadTimeout = 2 * time.Minute
-
-// wholeDocumentReadMax is the absolute ceiling for one whole-document upstream
-// body read, even when the caller's deadline is longer (an arbitrarily large
-// X-Proxy-Timeout-Ms). It bounds how long one buffered read can pin its
-// process-wide response-buffer reservation. The configured model-discovery
-// timeout is at most 5 minutes, so its budgets and every shorter caller
-// deadline are preserved. Internal safety guardrail, not user-tunable.
-const wholeDocumentReadMax = 10 * time.Minute
+// readWholeDocument is the single server-side reader of the whole-document
+// timing settings. Both the translated reply path and model discovery use it,
+// so the fallback and ceiling cannot drift between callers.
+func (s *Server) readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
+	cfg := s.cfg()
+	return readWholeDocument(ctx, body, limit, cfg.WholeDocumentReadTimeout, cfg.WholeDocumentReadMax)
+}
 
 // readWholeDocument reads at most limit bytes, failing closed when the body
-// makes no completion before its deadline. A caller deadline is honored up to
-// wholeDocumentReadMax; a longer one is capped there so it cannot pin the
-// response-buffer reservation indefinitely. With no caller deadline the
-// two-minute fallback applies. Closing the body is what unblocks a transport
-// Read; callers release their response-buffer reservation on return. The
-// partial prefix is returned with the error so byte accounting stays exact.
-func readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64) ([]byte, error) {
+// makes no completion before its deadline. The configured fallback applies
+// when the caller has no deadline; a caller deadline is honored up to the
+// configured ceiling so it cannot pin the response-buffer reservation
+// indefinitely. Closing the body is what unblocks a transport Read; callers
+// release their response-buffer reservation on return. The partial prefix is
+// returned with the error so byte accounting stays exact.
+func readWholeDocument(ctx context.Context, body io.ReadCloser, limit int64, fallback, ceiling time.Duration) ([]byte, error) {
 	readCtx := ctx
 	// bound is the guardrail this read applies, or 0 when a caller deadline
 	// at or below the ceiling already supplies the shorter bound.
 	bound := time.Duration(0)
 	if deadline, ok := ctx.Deadline(); ok {
-		if time.Until(deadline) > wholeDocumentReadMax {
-			bound = wholeDocumentReadMax
+		if ceiling > 0 && time.Until(deadline) > ceiling {
+			bound = ceiling
 		}
-	} else {
-		bound = wholeDocumentReadTimeout
+	} else if fallback > 0 {
+		bound = fallback
 	}
 	if bound > 0 {
 		var cancel context.CancelFunc
@@ -478,7 +470,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			if resp.Request != nil {
 				readCtx = resp.Request.Context()
 			}
-			full, rerr := readWholeDocument(readCtx, resp.Body, maxTranslateBodyBytes+1)
+			full, rerr := s.readWholeDocument(readCtx, resp.Body, maxTranslateBodyBytes+1)
 			if rerr != nil {
 				markStreamErr(ctx, rec, rerr)
 				if rec.ClientDisconnected {
@@ -1029,7 +1021,7 @@ func (b *prefixRemainderBody) Close() error { return b.rest.Close() }
 // (metrics.ParseErrorEnvelope + isNonRetryableQuotaErr). The caller arms the
 // shared upstream idle guard on resp.Body at receipt (doWithRetry and
 // openCursorHTTP), so a tarpit that sends headers and stalls cannot hold this
-// read past upstreamStreamIdleTimeout. An in-cap body is closed and reported
+// read past upstream_stream_idle_timeout. An in-cap body is closed and reported
 // together with its durable classification and the envelope's protocol tokens
 // (type, code - the quota-pause reason label); an overflowed body (longer than
 // maxErrBodyBytes) is deliberately left OPEN and unclassified
@@ -1368,7 +1360,7 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 		// connection and the inflight reservation outside the shared idle
 		// bound. Cancelling this attempt's context is what aborts a blocked
 		// transport read; Close stops the timer and releases the context.
-		resp.Body = newIdleCancelBody(resp.Body, attemptCancel, upstreamStreamIdleTimeout)
+		resp.Body = s.wrapUpstreamBody(resp.Body, attemptCancel)
 
 		// A 429 is normally transient flow control, but a 429 can also be the
 		// provider announcing a durable account condition (quota/credits/spend

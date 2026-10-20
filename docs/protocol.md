@@ -243,10 +243,11 @@ configured/per-request timeout only until send headers arrive, without a body
 deadline on its parked run. Model discovery ignores the per-request timeout
 and uses `models_discovery_timeout` for the whole discovery operation.
 Buffered whole-document reads (translated non-streaming responses and discovery
-pages) apply a two-minute fallback guardrail when the send has no deadline of
-its own and a ten-minute ceiling even against a longer `X-Proxy-Timeout-Ms`.
-A shorter caller deadline still wins, and `models_discovery_timeout` (at most
-five minutes) sits below the ceiling, so its configured budget is untouched.
+pages) use `whole_document_read_timeout` when the send has no deadline of its
+own and `whole_document_read_max` as the ceiling even against a longer
+`X-Proxy-Timeout-Ms`. A shorter caller deadline still wins. Configuration
+validation keeps `models_discovery_timeout` below the ceiling, so its
+configured budget is untouched.
 Provider Retry-After/reset hints are a floor on the wait, not a replacement
 for adaptive exponential backoff. A long hint is not clamped by the ordinary
 adaptive cap and can therefore outlast it. A short hint does not reset the

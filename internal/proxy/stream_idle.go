@@ -7,14 +7,6 @@ import (
 	"time"
 )
 
-// upstreamStreamIdleTimeout bounds silence inside an upstream response body.
-// ResponseHeaderTimeout only covers header arrival: a gateway that returns 200
-// and then emits nothing would otherwise pin the handler, the upstream
-// connection and the scheduler slot forever. Ten minutes is far beyond any
-// documented reasoning gap and remains an internal safety guardrail. A package
-// variable is the deterministic test seam; production never changes it.
-var upstreamStreamIdleTimeout = 10 * time.Minute
-
 // idleCancelBody cancels the request context when a Read makes no progress for
 // the bound. Cancelling the attempt context is what closes the transport body
 // and unblocks a Read; no per-connection deadline is set, so parallel HTTP/2
@@ -37,6 +29,13 @@ func newIdleCancelBody(rc io.ReadCloser, cancel context.CancelFunc, timeout time
 		return rc
 	}
 	return &idleCancelBody{rc: rc, cancel: cancel, timeout: timeout}
+}
+
+// wrapUpstreamBody is the single server-side reader of the upstream stream
+// idle setting. Both the generic relay and the Cursor bridge use it so the
+// configured bound cannot drift between transports.
+func (s *Server) wrapUpstreamBody(rc io.ReadCloser, cancel context.CancelFunc) io.ReadCloser {
+	return newIdleCancelBody(rc, cancel, s.cfg().UpstreamStreamIdleTimeout)
 }
 
 func (b *idleCancelBody) arm() {

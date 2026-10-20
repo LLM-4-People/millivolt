@@ -55,20 +55,49 @@ func (s *Server) cursorClientFor() *http.Client {
 	// TLS is selected by URL scheme, never by the port. Distinct pools also
 	// prevent an http:// connection from satisfying an https:// request to
 	// the same authority. The TLS transport owns certificate/ALPN validation.
+	// Dial and TLS-handshake bounds come from the same config owner as the
+	// shared upstream client.
+	cfg := s.cfg()
+	dialer := upstreamDialer(cfg)
 	plain := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			var dialer net.Dialer
 			return dialer.DialContext(ctx, network, addr)
 		},
 		PingTimeout: cursorH2PingTimeout,
 	}
-	tlsTransport := &http2.Transport{PingTimeout: cursorH2PingTimeout}
+	tlsTransport := &http2.Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, tlsCfg *tls.Config) (net.Conn, error) {
+			if cfg.UpstreamTLSHandshakeTimeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, cfg.UpstreamTLSHandshakeTimeout)
+				defer cancel()
+			}
+			tlsDialer := &tls.Dialer{NetDialer: dialer, Config: tlsCfg}
+			return tlsDialer.DialContext(ctx, network, addr)
+		},
+		PingTimeout: cursorH2PingTimeout,
+	}
 	s.cursorClient = &http.Client{
 		Transport:     &cursorSchemeTransport{plain: plain, tls: tlsTransport},
 		CheckRedirect: preserveUpstreamRedirect,
 	}
 	return s.cursorClient
+}
+
+// resetCursorClient drops the lazily built Cursor transport so a reload's
+// dial/TLS settings apply to the next Cursor request. In-flight requests keep
+// the client they already captured.
+func (s *Server) resetCursorClient() {
+	s.cursorClientMu.Lock()
+	defer s.cursorClientMu.Unlock()
+	if s.cursorClient != nil {
+		if tr, ok := s.cursorClient.Transport.(*cursorSchemeTransport); ok {
+			tr.plain.CloseIdleConnections()
+			tr.tls.CloseIdleConnections()
+		}
+		s.cursorClient = nil
+	}
 }
 
 type cursorSchemeTransport struct{ plain, tls *http2.Transport }
@@ -420,7 +449,7 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 		// Arm the shared idle guard at receipt, exactly like the generic relay:
 		// the peek, the absorbed-attempt drain and the adopted run all read this
 		// body, and a tarpit past the headers must not pin the send forever.
-		resp.Body = newIdleCancelBody(resp.Body, upstreamCancel, upstreamStreamIdleTimeout)
+		resp.Body = s.wrapUpstreamBody(resp.Body, upstreamCancel)
 		stopRead := context.AfterFunc(ctx, upstreamCancel)
 		retryable := cursorSendFailed(resp)
 		active := s.observeStormHTTP(ctx, permit, resp, retryable)

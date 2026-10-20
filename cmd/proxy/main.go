@@ -67,12 +67,12 @@ func rejectUnless(w http.ResponseWriter, r *http.Request, method string) bool {
 // so in-flight SSE streams abort immediately and Shutdown is never gated on
 // their timeout. The main server and the restart handoff's clone share this
 // one constructor.
-func newHTTPServer(handler http.Handler, readHeaderTimeout, idleTimeout time.Duration, srvCtx context.Context) *http.Server {
+func newHTTPServer(handler http.Handler, readHeaderTimeout, idleTimeout time.Duration, policy func() deadlinePolicy, srvCtx context.Context) *http.Server {
 	return &http.Server{
 		// The deadline layer arms a per-request body-read bound and a per-write
 		// progress bound, so no handler can pin a connection forever while the
 		// server keeps its intentional zero ReadTimeout/WriteTimeout policy.
-		Handler:           deadlineHandler{next: handler},
+		Handler:           deadlineHandler{next: handler, policy: policy},
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		// No WriteTimeout: it would cut off long-lived SSE streams.
@@ -430,7 +430,19 @@ func main() {
 	srvCtx, stopServing := context.WithCancel(context.Background())
 	defer stopServing()
 
-	httpSrv := newHTTPServer(handler, cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
+	// The request/response delivery policy is read per request so a config
+	// reload applies to new requests while in-flight requests keep the values
+	// they started with. liveCfg is the single owner of these settings.
+	deadlinePolicyFn := func() deadlinePolicy {
+		liveMu.Lock()
+		defer liveMu.Unlock()
+		return deadlinePolicy{
+			bodyIdle:      liveCfg.RequestBodyIdleTimeout,
+			bodyRead:      liveCfg.RequestBodyReadTimeout,
+			responseWrite: liveCfg.ResponseWriteTimeout,
+		}
+	}
+	httpSrv := newHTTPServer(handler, cfg.ReadHeaderTimeout, cfg.IdleTimeout, deadlinePolicyFn, srvCtx)
 	// Serve in a goroutine; main blocks on the shutdown signal so we can shut
 	// down gracefully and close storage only after in-flight requests finish.
 
@@ -451,7 +463,7 @@ func main() {
 			liveMu.Lock()
 			readHeaderTimeout, idleTimeout := liveCfg.ReadHeaderTimeout, liveCfg.IdleTimeout
 			liveMu.Unlock()
-			return newHTTPServer(handler, readHeaderTimeout, idleTimeout, srvCtx)
+			return newHTTPServer(handler, readHeaderTimeout, idleTimeout, deadlinePolicyFn, srvCtx)
 		},
 		closeFeeds: buf.CloseFeeds,
 		flushStore: func() error {

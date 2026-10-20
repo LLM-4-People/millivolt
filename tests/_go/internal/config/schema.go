@@ -3,6 +3,9 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,6 +56,99 @@ func TestSchemaCoversConfigFields(t *testing.T) {
 			t.Errorf("Schema key %q has no Config yaml field", k)
 		}
 	}
+}
+
+// TestEverySchemaFieldHasDefault mechanically ties Schema() to Default():
+// every registered setting must resolve to a field populated by Default(), and
+// a duration that does not declare zero semantics must have a positive default.
+// This keeps the Settings registry and the defaults owner from drifting.
+func TestEverySchemaFieldHasDefault(t *testing.T) {
+	defaults := Default()
+	for _, f := range Schema() {
+		value := defaults.fieldValue(f.Key)
+		if value == nil {
+			t.Errorf("Default() has no value for schema key %q", f.Key)
+			continue
+		}
+		if f.Kind != KindDuration || f.ZeroMeans != "" {
+			continue
+		}
+		d, ok := value.(time.Duration)
+		if !ok || d <= 0 {
+			t.Errorf("Default().%s = %v, want a positive duration because the schema declares no zero semantics", f.Key, value)
+		}
+	}
+}
+
+// TestDeliveryConsumersDoNotDeclareDefaults enforces the other half of the
+// ownership rule: the request/stream boundary files must not reintroduce
+// package-level duration defaults. Every deadline comes from Config and is
+// passed in at the boundary.
+func TestDeliveryConsumersDoNotDeclareDefaults(t *testing.T) {
+	root := filepath.Join("..", "..")
+	files := []string{
+		filepath.Join(root, "cmd", "proxy", "deadline.go"),
+		filepath.Join(root, "internal", "proxy", "sse_keepalive.go"),
+		filepath.Join(root, "internal", "proxy", "stream_idle.go"),
+		filepath.Join(root, "internal", "proxy", "relay.go"),
+		filepath.Join(root, "internal", "proxy", "proxy.go"),
+	}
+	for _, path := range files {
+		f, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, decl := range f.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || (gen.Tok != token.CONST && gen.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				value, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if durationType(value.Type) || containsDurationLiteral(value.Values) {
+					names := make([]string, 0, len(value.Names))
+					for _, name := range value.Names {
+						names = append(names, name.Name)
+					}
+					t.Errorf("%s declares package-level duration default %s; read it from Config at the boundary instead", path, strings.Join(names, ", "))
+				}
+			}
+		}
+	}
+}
+
+func durationType(expr ast.Expr) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	id, ok := sel.X.(*ast.Ident)
+	return ok && id.Name == "time" && sel.Sel.Name == "Duration"
+}
+
+func containsDurationLiteral(exprs []ast.Expr) bool {
+	for _, expr := range exprs {
+		found := false
+		ast.Inspect(expr, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			id, ok := sel.X.(*ast.Ident)
+			if ok && id.Name == "time" && (sel.Sel.Name == "Second" || sel.Sel.Name == "Minute" || sel.Sel.Name == "Hour") {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 func (f Field) fieldRVCheck() bool {

@@ -898,14 +898,16 @@ for buffered upstream response bodies (default 256 MiB): whole-document
 translation of non-streaming responses, the non-streaming 200 quality spool
 (at most 1 MiB plus one 32 KiB chunk), and model discovery. Requests above
 any bound are refused with `503` and `Retry-After` before the body or upstream
-response is read. Request-body reads must make progress within 30 seconds and
-finish within the 10-minute absolute upload bound, so a stalled peer releases
-its reservation without cutting off a slow but progressing upload. Buffered
-whole-document response reads have a two-minute fallback when the send has no
-deadline and a ten-minute ceiling even when `X-Proxy-Timeout-Ms` is longer, so
-a slow or stalled body releases its response-buffer reservation; a shorter
-caller deadline wins and `models_discovery_timeout` (at most five minutes) is
-preserved. All three budgets accept `0` = unlimited and hot-reload.
+response is read. Request-body reads must make progress within
+`request_body_idle_timeout` and finish within the absolute
+`request_body_read_timeout`, so a stalled peer releases its reservation
+without cutting off a slow but progressing upload. Buffered whole-document
+response reads use `whole_document_read_timeout` when the send has no deadline
+and `whole_document_read_max` as the ceiling even when `X-Proxy-Timeout-Ms` is
+longer, so a slow or stalled body releases its response-buffer reservation; a
+shorter caller deadline wins and configuration validation preserves the
+`models_discovery_timeout` budget below the ceiling. The three admission
+budgets accept `0` = unlimited and hot-reload.
 `max_queue_size` (default 1024
 per group) and `max_queue_wait` (default 10m) bound a held or saturated
 provider's parked work; both accept explicit `0` = unlimited. Independent
@@ -917,9 +919,9 @@ active groups still fails closed. Recent pacing/backoff state for evicted
 groups is kept in a separate 4096-entry bounded LRU. The scheduler also
 retains at most 4096 header-created provider limits, refusing new ones past
 that bound rather than growing process memory without limit. A new request
-body has a ten-minute total read budget, SSE writes have a one-minute
-per-event progress bound, and an upstream body that stops sending for ten
-minutes is canceled.
+body has the `request_body_read_timeout` budget, SSE writes have the
+`sse_write_progress_timeout` per-event progress bound, and an upstream body
+that stops sending for `upstream_stream_idle_timeout` is canceled.
 
 Request and token budgets start full when enabled and refill continuously at
 the configured count/window rate. Request budget is charged once per proxy

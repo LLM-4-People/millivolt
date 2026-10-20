@@ -298,13 +298,14 @@ func TestTranslatedNonStreamReadHonorsLongerDeadline(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				const bodyDelay = wholeDocumentReadTimeout + 30*time.Second
+				cfg := config.Default()
+				bodyDelay := cfg.WholeDocumentReadTimeout + 30*time.Second
 				body := &delayedReadBody{
 					delay:   bodyDelay,
 					data:    []byte(translatedAnthropicReply),
 					unblock: make(chan struct{}),
 				}
-				p := New(config.Default(), metrics.Noop{})
+				p := New(cfg, metrics.Noop{})
 				p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode:    http.StatusOK,
@@ -382,12 +383,13 @@ func (b *trickleThenStallBody) Close() error {
 // a client-supplied one-hour X-Proxy-Timeout-Ms must not pin a whole-document
 // response-buffer reservation for an hour. The body delivers one byte and then
 // stalls, which the shared idle guard would only release well past the ceiling;
-// the whole-document read must answer 502 at wholeDocumentReadMax and release
+// the whole-document read must answer 502 at whole_document_read_max and release
 // the process-wide reservation.
 func TestTranslatedNonStreamReadCapsLongHeaderDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
+		cfg := config.Default()
 		body := &trickleThenStallBody{delay: 6 * time.Minute, unblock: make(chan struct{})}
-		p := New(config.Default(), metrics.Noop{})
+		p := New(cfg, metrics.Noop{})
 		p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode:    http.StatusOK,
@@ -406,8 +408,8 @@ func TestTranslatedNonStreamReadCapsLongHeaderDeadline(t *testing.T) {
 		if w.Code != http.StatusBadGateway {
 			t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
 		}
-		if elapsed != wholeDocumentReadMax {
-			t.Fatalf("elapsed = %s, want the %s whole-document ceiling", elapsed, wholeDocumentReadMax)
+		if elapsed != cfg.WholeDocumentReadMax {
+			t.Fatalf("elapsed = %s, want the %s whole-document ceiling", elapsed, cfg.WholeDocumentReadMax)
 		}
 		if !strings.Contains(w.Body.String(), "upstream document read exceeded") {
 			t.Fatalf("the rejected read must name the whole-document guardrail: %s", w.Body.String())
@@ -425,21 +427,23 @@ func TestTranslatedNonStreamReadCapsLongHeaderDeadline(t *testing.T) {
 
 // TestTranslatedNonStreamReadDeadlineReleasesBudget pins the whole-document
 // fallback deadline: with no X-Proxy-Timeout-Ms, a stalled translated body
-// answers 502 after wholeDocumentReadTimeout and releases the process-wide
+// answers 502 after whole_document_read_timeout and releases the process-wide
 // reservation. A shorter caller deadline wins.
 func TestTranslatedNonStreamReadDeadlineReleasesBudget(t *testing.T) {
+	defaults := config.Default()
 	for _, tc := range []struct {
 		name   string
 		caller time.Duration
 		want   time.Duration
 	}{
-		{"internal default", 0, wholeDocumentReadTimeout},
-		{"caller shorter", wholeDocumentReadTimeout / 4, wholeDocumentReadTimeout / 4},
+		{"internal default", 0, defaults.WholeDocumentReadTimeout},
+		{"caller shorter", defaults.WholeDocumentReadTimeout / 4, defaults.WholeDocumentReadTimeout / 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
+				cfg := config.Default()
 				body := &stalledReadBody{unblock: make(chan struct{})}
-				p := New(config.Default(), metrics.Noop{})
+				p := New(cfg, metrics.Noop{})
 				p.client.Store(&http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode:    http.StatusOK,

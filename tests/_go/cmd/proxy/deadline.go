@@ -17,6 +17,16 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/proxy"
 )
 
+func deliveryPolicyFor(cfg *config.Config) func() deadlinePolicy {
+	return func() deadlinePolicy {
+		return deadlinePolicy{
+			bodyIdle:      cfg.RequestBodyIdleTimeout,
+			bodyRead:      cfg.RequestBodyReadTimeout,
+			responseWrite: cfg.ResponseWriteTimeout,
+		}
+	}
+}
+
 // deadlineWriter records the delivery deadlines the handler layer arms.
 type deadlineWriter struct {
 	header        http.Header
@@ -50,7 +60,7 @@ func TestDeadlineHandlerArmsBodyAndWriteBounds(t *testing.T) {
 		if _, err := w.Write([]byte("ok")); err != nil {
 			t.Fatal(err)
 		}
-	})}
+	}), policy: deliveryPolicyFor(config.Default())}
 	before := time.Now()
 	h.ServeHTTP(w, r)
 	if string(w.body) != "ok" {
@@ -87,7 +97,7 @@ func (w *hijackWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) { return w.
 // while an ordinary write still gets the ten-minute default.
 func TestDeadlineWriterPreservesShorterExplicitDeadline(t *testing.T) {
 	inner := &deadlineWriter{}
-	w := &deadlineResponseWriter{ResponseWriter: inner}
+	w := &deadlineResponseWriter{ResponseWriter: inner, responseWrite: config.Default().ResponseWriteTimeout}
 	explicit := time.Now().Add(time.Minute)
 	if err := http.NewResponseController(w).SetWriteDeadline(explicit); err != nil {
 		t.Fatal(err)
@@ -100,7 +110,7 @@ func TestDeadlineWriterPreservesShorterExplicitDeadline(t *testing.T) {
 	}
 
 	plain := &deadlineWriter{}
-	(&deadlineResponseWriter{ResponseWriter: plain}).Write([]byte("body"))
+	(&deadlineResponseWriter{ResponseWriter: plain, responseWrite: config.Default().ResponseWriteTimeout}).Write([]byte("body"))
 	if remaining := time.Until(plain.writeDeadline); remaining < 9*time.Minute {
 		t.Fatalf("ordinary write deadline = %v, want the ten-minute default", remaining)
 	}
@@ -214,11 +224,8 @@ func TestProgressBodyClearsDeadlineAfterBody(t *testing.T) {
 // bound, not the ten-minute absolute bound, and release both the request slot
 // and its body reservation so the next request is admitted.
 func TestDeadlineHandlerStalledBodyFailsWithinIdleBound(t *testing.T) {
-	oldIdle := requestBodyIdleTimeout
-	requestBodyIdleTimeout = 100 * time.Millisecond
-	defer func() { requestBodyIdleTimeout = oldIdle }()
-
 	cfg := config.Default()
+	cfg.RequestBodyIdleTimeout = 100 * time.Millisecond
 	cfg.MaxInflightRequests = 1
 	cfg.MaxInflightBodyBytes = config.MaxInflightBodyBytesMin
 	cfg.MaxRequestBytes = config.MaxInflightBodyBytesMin
@@ -227,7 +234,7 @@ func TestDeadlineHandlerStalledBodyFailsWithinIdleBound(t *testing.T) {
 		w.Write([]byte(`{"id":"1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))
 	}))
 	defer upstream.Close()
-	srv := httptest.NewServer(deadlineHandler{next: proxy.New(cfg, metrics.Noop{})})
+	srv := httptest.NewServer(deadlineHandler{next: proxy.New(cfg, metrics.Noop{}), policy: deliveryPolicyFor(cfg)})
 	defer srv.Close()
 
 	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
@@ -291,12 +298,11 @@ func TestDeadlineHandlerStalledBodyFailsWithinIdleBound(t *testing.T) {
 // TestDeadlineHandlerSlowProgressingBodyCompletes pins the other half of H6: a
 // slow but progressing upload is not mistaken for a stalled one.
 func TestDeadlineHandlerSlowProgressingBodyCompletes(t *testing.T) {
-	oldIdle := requestBodyIdleTimeout
-	requestBodyIdleTimeout = 500 * time.Millisecond
-	defer func() { requestBodyIdleTimeout = oldIdle }()
+	cfg := config.Default()
+	cfg.RequestBodyIdleTimeout = 500 * time.Millisecond
 
 	lengths := make(chan int, 1)
-	srv := httptest.NewServer(deadlineHandler{next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(deadlineHandler{policy: deliveryPolicyFor(cfg), next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			lengths <- -1
@@ -348,11 +354,10 @@ func TestDeadlineHandlerSlowProgressingBodyCompletes(t *testing.T) {
 // TestDeadlineHandlerNormalUploadUnchanged keeps the ordinary client upload on
 // the same path with no behavior change.
 func TestDeadlineHandlerNormalUploadUnchanged(t *testing.T) {
-	oldIdle := requestBodyIdleTimeout
-	requestBodyIdleTimeout = 250 * time.Millisecond
-	defer func() { requestBodyIdleTimeout = oldIdle }()
+	cfg := config.Default()
+	cfg.RequestBodyIdleTimeout = 250 * time.Millisecond
 
-	srv := httptest.NewServer(deadlineHandler{next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(deadlineHandler{policy: deliveryPolicyFor(cfg), next: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -382,9 +387,8 @@ func TestDeadlineHandlerNormalUploadUnchanged(t *testing.T) {
 // far longer than the body idle bound. The body guard must not leak into the
 // response phase and cut a healthy stream at the idle timeout.
 func TestDeadlineHandlerStreamAfterBodySurvivesIdleBound(t *testing.T) {
-	oldIdle := requestBodyIdleTimeout
-	requestBodyIdleTimeout = 200 * time.Millisecond
-	defer func() { requestBodyIdleTimeout = oldIdle }()
+	cfg := config.Default()
+	cfg.RequestBodyIdleTimeout = 200 * time.Millisecond
 
 	const events = 20
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -408,8 +412,7 @@ func TestDeadlineHandlerStreamAfterBodySurvivesIdleBound(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	cfg := config.Default()
-	srv := httptest.NewServer(deadlineHandler{next: proxy.New(cfg, metrics.Noop{})})
+	srv := httptest.NewServer(deadlineHandler{next: proxy.New(cfg, metrics.Noop{}), policy: deliveryPolicyFor(cfg)})
 	defer srv.Close()
 
 	const reqBody = `{"model":"m","messages":[{"role":"user","content":"hi"}],"stream":true}`

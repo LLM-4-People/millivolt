@@ -1010,7 +1010,7 @@ func TestNewHTTPServerContract(t *testing.T) {
 		w.Header().Set("X-Fixture-Handler", "reached")
 		w.WriteHeader(http.StatusNoContent)
 	})
-	srv := newHTTPServer(next, cfg.ReadHeaderTimeout, cfg.IdleTimeout, srvCtx)
+	srv := newHTTPServer(next, cfg.ReadHeaderTimeout, cfg.IdleTimeout, deliveryPolicyFor(cfg), srvCtx)
 	wrapped, ok := srv.Handler.(deadlineHandler)
 	if !ok {
 		t.Fatalf("Handler = %T, want the deadlineHandler delivery wrapper", srv.Handler)
