@@ -2,7 +2,8 @@
      it cannot resolve CSS variables. The scale greys mirror the scale-tick and
      scale-base tokens, the well gradient mirrors the well-hi and well-lo tokens,
      and the trace gradient mirrors the accent and accent2 tokens from the
-     dashboard. Keep them in sync. -->
+     dashboard. Keep them in sync. The PNG and ICO home-screen assets are
+     rendered from this file; regenerate them with it when these stops change. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
   <defs>
     <radialGradient id="well" cx="30%" cy="22%" r="130%">
