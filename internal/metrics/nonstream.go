@@ -356,15 +356,14 @@ func nonStreamChoicesOverLimit(body []byte) bool {
 }
 
 // containsChoicesKeyToken reports whether body can contain a top-level choices
-// key under the typed decoder's matching rules: ASCII case variants are matched
-// without allocating, and any Unicode escape forces the full traversal because
-// a key letter may be spelled as \uXXXX. Nested keys and string contents still
-// fail the real traversal below.
+// key under the typed decoder's matching rules. Exact ASCII and any Unicode
+// escape force the authoritative traversal; the quote scan below handles ASCII
+// case variants and the raw U+017F long-s fold. Nested keys and string contents
+// still fail that traversal.
 func containsChoicesKeyToken(body []byte) bool {
 	const token = `choices`
-	// The overwhelmingly common exact spelling keeps the vectorized whole-body
-	// search instead of paying the quote-by-quote scan below. Any Unicode escape
-	// may spell a key letter, so it also forces the full traversal.
+	// The exact spelling and any Unicode escape keep the vectorized whole-body
+	// search instead of paying the quote-by-quote scan below.
 	if bytes.Contains(body, []byte(`"choices"`)) || bytes.Contains(body, []byte(`\u`)) {
 		return true
 	}
@@ -374,55 +373,57 @@ func containsChoicesKeyToken(body []byte) bool {
 			return false
 		}
 		quote += offset
-		closing := quote + len(token) + 1
-		if closing < len(body) && body[closing] == '"' && choicesKeyFold(body[quote+1:closing]) {
+		// Seven-byte candidates cover ASCII case variants. The extra eight-byte
+		// width covers the two-byte raw U+017F spelling ("choiceſ"), which is the
+		// only non-ASCII rune encoding/json actually folds to a letter here.
+		closing7 := quote + len(token) + 1
+		if closing7 < len(body) && body[closing7] == '"' && choicesKeyFold(body[quote+1:closing7]) {
 			return true
 		}
-		// A raw non-ASCII spelling can be longer than seven bytes ("choiceſ"
-		// is eight), so the fixed-width candidate above cannot find its closing
-		// quote. Decode only strings that actually carry a high byte; ordinary
-		// ASCII keys keep the allocation-free path.
-		rest := body[quote+1:]
-		if next := bytes.IndexByte(rest, '"'); next >= 0 {
-			for _, b := range rest[:next] {
-				if b < 0x80 {
-					continue
-				}
-				if end := SkipJSONString(body, quote); end > 0 && choicesKeyFold(body[quote+1:end-1]) {
-					return true
-				}
-				break
-			}
+		closing8 := quote + len(token) + 2
+		if closing8 < len(body) && body[closing8] == '"' && choicesKeyFold(body[quote+1:closing8]) {
+			return true
 		}
 		offset = quote + 1
 	}
 	return false
 }
 
-// choicesKeyFold is the case fold for a JSON key token. All-ASCII candidates
-// use the allocation-free byte fold. Any non-ASCII byte switches to
-// bytes.EqualFold, whose Unicode simple folding matches raw spellings such as
-// "choiceſ" to "choices" exactly like encoding/json's field matching.
+// choicesKeyFold is the allocation-free case fold for a JSON key token.
+// Seven-byte candidates are ASCII case variants; a non-ASCII candidate goes
+// through bytes.EqualFold so raw U+017F matches. Eight-byte candidates are only
+// inspected when their first byte is c/C and a high byte is present, keeping
+// ordinary JSON keys on the cheap length-gated path.
 func choicesKeyFold(candidate []byte) bool {
 	const token = "choices"
-	for _, b := range candidate {
-		if b >= 0x80 {
-			return bytes.EqualFold(candidate, []byte(token))
+	switch len(candidate) {
+	case len(token):
+		for _, b := range candidate {
+			if b >= 0x80 {
+				return bytes.EqualFold(candidate, []byte(token))
+			}
 		}
-	}
-	if len(candidate) != len(token) {
-		return false
-	}
-	for i := range candidate {
-		c := candidate[i]
-		if c >= 'A' && c <= 'Z' {
-			c += 'a' - 'A'
+		for i := range candidate {
+			c := candidate[i]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != token[i] {
+				return false
+			}
 		}
-		if c != token[i] {
+		return true
+	case len(token) + 1:
+		if candidate[0] != 'c' && candidate[0] != 'C' {
 			return false
 		}
+		for _, b := range candidate {
+			if b >= 0x80 {
+				return bytes.EqualFold(candidate, []byte(token))
+			}
+		}
 	}
-	return true
+	return false
 }
 
 // nonStreamChoicesKey compares one quoted top-level key token with "choices".

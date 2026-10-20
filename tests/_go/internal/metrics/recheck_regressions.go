@@ -26,6 +26,8 @@ func choicesBody(key string, n int) []byte {
 // spelling encoding/json honors (ASCII case variants and Unicode escapes) trips
 // the lexical bound before the typed decode materializes the array.
 func TestNonStreamChoicesBoundMatchesTypedDecode(t *testing.T) {
+	// encoding/json's name fold accepts raw U+017F and any \u escape. U+0130
+	// does not match "choices" on this toolchain, so it has no positive case.
 	for _, key := range []string{"choices", "Choices", "CHOICES", `\u0063hoices`, `\u0043hoices`, "choiceſ", `choice\u017F`} {
 		t.Run(key, func(t *testing.T) {
 			over := AnalyzeNonStreamBody(choicesBody(key, nonStreamChoicesMax+1), nil, nil, false)
@@ -56,25 +58,51 @@ func TestNonStreamChoicesBoundFastPath(t *testing.T) {
 			t.Fatalf("%q did not trigger the choices traversal", key)
 		}
 	}
+	// U+0130 does not match "choices" under the current encoding/json fold, so
+	// the gate does not need to force a traversal for a raw choİce spelling.
+	if containsChoicesKeyToken([]byte(`{"choİce":[]}`)) {
+		t.Fatal("raw U+0130 incorrectly forced the choices traversal")
+	}
 }
 
-// legacyChoicesKeyGate is the pre-fast-path gate: a byte-by-byte quote scan
-// with bytes.EqualFold. The benchmark keeps it beside the production gate so
-// the exact-token path can be compared fairly on the same fixtures.
-func legacyChoicesKeyGate(body []byte) bool {
+// parentChoicesKeyGate is the gate as shipped at 0cb4a0d, the immediate parent
+// before the raw-Unicode fallback. The benchmark keeps that exact baseline
+// beside production so the fixed-width scan cannot silently regress against it.
+func parentChoicesKeyGate(body []byte) bool {
 	const token = `choices`
-	if bytes.Contains(body, []byte(`\u`)) {
+	if bytes.Contains(body, []byte(`"choices"`)) || bytes.Contains(body, []byte(`\u`)) {
 		return true
 	}
-	for i := 0; i+len(token)+2 <= len(body); i++ {
-		if body[i] != '"' || body[i+len(token)+1] != '"' {
-			continue
+	for offset := 0; offset < len(body); {
+		quote := bytes.IndexByte(body[offset:], '"')
+		if quote < 0 {
+			return false
 		}
-		if bytes.EqualFold(body[i+1:i+len(token)+1], []byte(token)) {
+		quote += offset
+		closing := quote + len(token) + 1
+		if closing < len(body) && parentChoicesKeyFold(body[quote+1:closing]) && body[closing] == '"' {
 			return true
 		}
+		offset = quote + 1
 	}
 	return false
+}
+
+func parentChoicesKeyFold(candidate []byte) bool {
+	const token = "choices"
+	if len(candidate) != len(token) {
+		return false
+	}
+	for i := range candidate {
+		c := candidate[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != token[i] {
+			return false
+		}
+	}
+	return true
 }
 
 var choicesGateSink bool
@@ -90,18 +118,21 @@ func benchmarkChoicesGate(b *testing.B, name string, body []byte, gate func([]by
 }
 
 func BenchmarkChoicesKeyGate(b *testing.B) {
-	prefix := strings.Repeat("x", 64<<10)
-	bodies := []struct {
-		name string
-		body []byte
-	}{
-		{"exact", []byte(`{"prefix":"` + prefix + `","choices":[]}`)},
-		{"mixed", []byte(`{"prefix":"` + prefix + `","CHOICES":[]}`)},
-		{"absent", []byte(`{"prefix":"` + prefix + `","other":[]}`)},
-	}
-	for _, tc := range bodies {
-		benchmarkChoicesGate(b, tc.name+"/old", tc.body, legacyChoicesKeyGate)
-		benchmarkChoicesGate(b, tc.name+"/new", tc.body, containsChoicesKeyToken)
+	for _, size := range []int{64 << 10, 1 << 20} {
+		prefix := strings.Repeat("x", size)
+		bodies := []struct {
+			name string
+			body []byte
+		}{
+			{"exact", []byte(`{"prefix":"` + prefix + `","choices":[]}`)},
+			{"mixed", []byte(`{"prefix":"` + prefix + `","CHOICES":[]}`)},
+			{"absent", []byte(`{"prefix":"` + prefix + `","other":[]}`)},
+		}
+		for _, tc := range bodies {
+			label := fmt.Sprintf("%dKiB/%s", size>>10, tc.name)
+			benchmarkChoicesGate(b, label+"/parent", tc.body, parentChoicesKeyGate)
+			benchmarkChoicesGate(b, label+"/new", tc.body, containsChoicesKeyToken)
+		}
 	}
 	_ = choicesGateSink
 }
