@@ -279,10 +279,16 @@ them through `scripts/dev.sh`:
 ```sh
 scripts/perf.sh bench     # isolated Go benchmarks
 scripts/perf.sh stress    # private fast and streaming ramps
+scripts/perf.sh streaming # sustained end-to-end SSE throughput ramp
 scripts/perf.sh sustained # five-minute fast-response capacity levels
 scripts/perf.sh image     # disposable image content and compressed size
 scripts/perf.sh all       # bench, stress and image, in that order
 ```
+
+For request, SSE-event, response-byte and output-token rates, use the
+`streaming` mode. It derives those rates from responses the client accepted
+byte-for-byte, and it is still a synthetic-fixture measurement, not a universal
+capacity claim.
 
 For an individual stress run with the private dev instance already running:
 

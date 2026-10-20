@@ -139,6 +139,29 @@ ceiling. The 512 level also matches the example configuration's
 saturation sweep was run; see [Limitations](#limitations). The generator and
 upstream used 69.9% CPU and 65.8 MiB peak RSS at that stage.
 
+## Streaming throughput
+
+`scripts/perf.sh streaming` runs the longer end-to-end throughput ramp. Each
+level starts a fresh private `scripts/dev.sh` instance and sends requests
+through the real proxy to a local synthetic SSE upstream. The defaults are 1, 8,
+32, 64, 128, 256, 512 and 1024 clients for 60 seconds per level, with 100 content
+frames over a roughly one-second stream.
+
+Each result line reports requests/s, SSE events/s, response bytes/s, output
+tokens/s, end-to-end latency, first-byte p95, proxy CPU/RSS and durable rows.
+The event, byte and token counts come from responses the client compared
+byte-for-byte with the fixture, so they describe what the client received; a
+failed response does not contribute. The ramp stops at the first failed stage or
+durable drop. The per-level JSON carries `sse_events_per_second`,
+`stream_bytes_per_second` and `output_tokens_per_second` alongside the existing
+request and latency fields.
+
+The 1024-client level is deliberately above the example configuration's
+`max_conns_per_host` of 512. It measures queueing and the throughput plateau,
+not 1024 simultaneous upstream connections. This is a fixed-level ramp, not an
+automatic saturation search; override the levels with
+`PERF_STREAMING_LEVELS` when a different range is needed.
+
 ## Durable writer and overload
 
 These are isolated Go benchmarks from the test overlay, not HTTP runs. Every
@@ -218,9 +241,15 @@ that time.
 
 ## Reproduce
 
-`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `sustained`,
-`image`, or `all`. It uses a fresh private `scripts/dev.sh` instance for each
-stress mode and stops it through the script's own lifecycle owner.
+`scripts/perf.sh` owns the repeatable local run: `bench`, `stress`, `streaming`,
+`sustained`, `image`, or `all`. It uses a fresh private `scripts/dev.sh` instance
+for each stress mode and stops it through the script's own lifecycle owner.
+
+`streaming` runs the end-to-end SSE throughput ramp: levels 1, 8, 32, 64, 128,
+256, 512 and 1024 for 60 seconds each, with 100 content frames over a one-second
+stream. `PERF_STREAMING_LEVELS`, `PERF_STREAMING_DURATION`,
+`PERF_STREAMING_HOLD`, `PERF_STREAMING_CHUNKS` and `PERF_STREAMING_TIMEOUT`
+override those defaults.
 
 `sustained` runs the fast-response fixture for five minutes at each level in
 `PERF_SUSTAINED_LEVELS` (default `128`), with `PERF_SUSTAINED_DURATION`
@@ -289,13 +318,15 @@ only through `scripts/dev.sh`.
   payload shape, and real identity cardinality are not represented.
 - These are short closed-loop bursts, not sustained production capacity. No
   result here is a capacity ceiling or a guarantee.
-- The streaming table is one fixed fixture, not a throughput sweep: ten content
-  frames over about one second, five-second stages, and worker levels 1, 8, 32,
-  128 and 512. It reports requests/s, end-to-end latency, first-byte p95, CPU/RSS
-  and durable rows. It does not measure SSE event rate, bytes/s, token
-  throughput, TTFT, chunk-size or hold-duration effects, sustained streaming,
-  or a saturation point. The 512-worker level matches the example
-  `max_conns_per_host`, so it is a configured concurrency point, not a maximum.
+- The published streaming table is a five-second concurrency ramp on a fixed
+  ten-frame, roughly one-second fixture at 1, 8, 32, 128 and 512 workers. The
+  separate `streaming` mode adds SSE events/s, bytes/s and output tokens/s over a
+  longer configurable ramp. Both use the same synthetic fixture and neither
+  establishes a universal maximum. The table's 512 level and the throughput
+  ramp's 1024 level span the example `max_conns_per_host` of 512; levels above it
+  measure queueing, not additional upstream concurrency. The ramp is a fixed
+  level list, not an automatic saturation search, and its token rate is the
+  fixture's usage count, not provider-token throughput.
 - The five-minute sustained sweep uses the fast-response fixture with no
   intentional stream hold (`-stream-duration 0`) at 32, 48, 64 and 128 workers.
   Its 64-worker durable-drop boundary is a writer/accounting boundary, not a
