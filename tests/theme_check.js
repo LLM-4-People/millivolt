@@ -203,6 +203,25 @@ const token = (win, name) =>
   check('every theme defines both surfaces', missing.length === 0);
   if (missing.length) console.log(missing.join('\n'));
 
+  // A palette must be identifiable in each surface. This catches the easy
+  // regression where a new theme copies another theme's accent block.
+  const duplicateAccents = [];
+  for (const mode of modes) {
+    const primary = new Map();
+    const secondary = new Map();
+    for (const theme of themes) {
+      root.dataset.theme = theme;
+      root.dataset.mode = mode;
+      for (const [tokenName, seen] of [['--accent', primary], ['--accent2', secondary]]) {
+        const value = token(win, tokenName);
+        if (seen.has(value)) duplicateAccents.push(`${mode} ${tokenName}: ${theme} duplicates ${seen.get(value)}`);
+        else seen.set(value, theme);
+      }
+    }
+  }
+  check('each surface keeps every palette distinct', duplicateAccents.length === 0);
+  if (duplicateAccents.length) console.log(duplicateAccents.join('\n'));
+
   // Every theme/mode pair is exercised for the same text and status roles.
   const contrastFailures = [];
   const words = {

@@ -77,17 +77,17 @@ html[data-mode="clear"] { color-scheme: light; }
   --cyan: #0b5f66;
 }
 
-/* Slate: steel blue and violet on the shared surfaces. */
+/* Slate: steel blue and ice. */
 [data-theme="slate"][data-mode="black"] {
-  --accent: #6ea8ff;
-  --accent-hover: #8cbcff;
-  --accent2: #c4a0ff;
+  --accent: #82b4d6;
+  --accent-hover: #a3c8e0;
+  --accent2: #b8d4ec;
   --cyan: #2dd4bf;
 }
 [data-theme="slate"][data-mode="clear"] {
-  --accent: #1e40af;
-  --accent-hover: #1e3a8a;
-  --accent2: #5b21b6;
+  --accent: #1e5a70;
+  --accent-hover: #164a5c;
+  --accent2: #3f527a;
   --cyan: #0b5f66;
 }
 
@@ -151,13 +151,13 @@ html[data-mode="clear"] { color-scheme: light; }
 [data-theme="ember"][data-mode="black"] {
   --accent: #ff9f43;
   --accent-hover: #ffb568;
-  --accent2: #ff6b6b;
+  --accent2: #ff8fa3;
   --cyan: #4fd1c5;
 }
 [data-theme="ember"][data-mode="clear"] {
   --accent: #9a3412;
   --accent-hover: #7c2d12;
-  --accent2: #991b1b;
+  --accent2: #9f1239;
   --cyan: #0b5f66;
 }
 
