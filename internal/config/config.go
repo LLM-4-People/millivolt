@@ -224,13 +224,50 @@ type Config struct {
 	// output, and a non-streaming reasoning-only body. The fresh attempt
 	// appends to the committed SSE connection after the already-relayed
 	// reasoning (auxiliary display text, never the completion contract) -
-	// never after answer content or tool calls, which are never rescuable.
-	// finish_reason length is the client's own token cap and is never
-	// rescued. The generic OpenAI-compatible relay only; the Cursor bridge
-	// and translated Anthropic streams keep their own signaling. Each rescue
-	// re-sends the full request (the upstream bills every attempt); 0
-	// disables.
+	// never after answer content or a tool call, which is what a client would
+	// treat as the model's final word. finish_reason length is the client's own
+	// token cap and is never rescued. The generic OpenAI-compatible relay only;
+	// the Cursor bridge and translated Anthropic streams keep their own
+	// signaling. Each rescue re-sends the full request (the upstream bills
+	// every attempt); 0 disables.
 	ThinkingRetries int `yaml:"thinking_retries" json:"thinking_retries"`
+
+	// AtomicToolCalls makes a streamed tool call atomic on the wire: the relay
+	// withholds every tool-call-bearing event (a tool_calls delta or a
+	// deprecated function_call delta) until the stream's terminator arrives,
+	// then releases it verbatim. It exists because a client commits a streamed
+	// tool call at the END of the response body, not at finish_reason, so
+	// eager relay can hand it a call no terminator ever committed. Withholding
+	// makes an uncommitted tool call impossible on the wire: no tool can run
+	// from a stream the model never finished.
+	//
+	// The trade, which is why this is opt-in rather than a default: a provider
+	// that ends the body with neither finish_reason nor [DONE] (a real shape -
+	// see metrics.ClassifyOutcome) truncates, and the withheld tool call is
+	// then discarded with the rest of the truncation rather than relayed. That
+	// is safer for execution (no tool runs from a truncated stream) but it does
+	// lose a tool call such a provider completed. It also stops tool-call
+	// delivery from being progressive: the client sees the whole call at the
+	// terminator. The region a tool call opens is bounded by the relay's
+	// toolCallHoldMax (1 MiB) rather than the terminal cap, and past even that
+	// bound the region commits verbatim, restoring eager behavior for that
+	// stream alone - after which no rescue may follow those bytes and the
+	// stream's class is still surfaced in-band behind them.
+	//
+	// Memory: a 1 MiB withhold region retains about 3 MiB per in-flight
+	// stream, not 1 - the region's bytes, the relay's line buffer and the
+	// analyzer's per-event buffer are all live and all the same size. Measured
+	// at 64 and 256 concurrent streams: 193 MiB and 772 MiB, so 1,000 streams
+	// is about 3 GiB. There is no default ceiling on that product and
+	// max_conns_per_host does not provide one: Go's HTTP/2 client ignores that
+	// field, so against any HTTPS upstream that negotiates h2 the real bound is
+	// the provider's own concurrent-stream limit. max_concurrent itself
+	// defaults to 0, meaning UNLIMITED. Size max_concurrent deliberately
+	// before enabling this on a busy deployment.
+	// Hot-reload applies to new streams. The generic OpenAI-wire relay only:
+	// translated Anthropic streams, the Cursor bridge and Responses-API feeds
+	// keep their own framing and are unaffected.
+	AtomicToolCalls bool `yaml:"atomic_tool_calls" json:"atomic_tool_calls"`
 
 	// RetryableErrorClasses extends the built-in retryable in-band error
 	// vocabulary (OpenAI server_error / service_unavailable family,
@@ -256,10 +293,12 @@ type Config struct {
 	// sees the error, so a client-side retry only duplicates upstream work
 	// and billing. No response exists to carry the directive on
 	// transport-level failures, and clients that ignore the header (e.g.
-	// the Vercel AI SDK / opencode stack, whose retry policy is status- and
-	// body-text driven) keep their own policy; mid-stream SSE errors never
-	// auto-retry in official SDKs and cannot carry new headers. Success
-	// responses are untouched. Reload applies to new responses.
+	// the Vercel AI SDK / opencode stack, whose OpenAI adapter classifies an
+	// in-band error by the error's `code` and `type` alone - never its
+	// message - and so cannot be steered by a header) keep their own policy;
+	// mid-stream SSE errors never auto-retry in official SDKs and cannot carry
+	// new headers. Success responses are untouched. Reload applies to new
+	// responses.
 	SuppressClientRetries bool `yaml:"suppress_client_retries" json:"suppress_client_retries"`
 
 	// Error storm protection observes eligible upstream attempts in a bounded
@@ -1017,6 +1056,9 @@ func Default() *Config {
 
 		QualityRetries:  1,
 		ThinkingRetries: 1,
+		// Atomic tool calls are opt-in and OFF by default, so a deployment's
+		// wire is byte-identical until an operator turns them on.
+		AtomicToolCalls: false,
 
 		StormEnabled:           false,
 		StormProviderEnabled:   true,

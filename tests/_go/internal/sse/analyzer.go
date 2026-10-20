@@ -493,12 +493,16 @@ func TestAnalyzerCostFromSiblingPricingObject(t *testing.T) {
 func TestAnalyzerToolCalls(t *testing.T) {
 	var a Analyzer
 
+	now := time.Now()
 	// First delta: has the tool call id.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"search","arguments":""}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"search","arguments":""}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 	// Argument chunk: no id, should not be counted again.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":\"x\"}"}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 	// Second tool call: new id.
-	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_def456","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`), time.Now())
+	a.Feed([]byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_def456","type":"function","function":{"name":"lookup","arguments":""}}]}}]}`), now)
+	a.Feed([]byte(``), now)
 
 	rec := &metrics.Record{}
 	a.Fill(rec)
@@ -521,6 +525,31 @@ func TestAnalyzerToolCalls(t *testing.T) {
 	}
 	if rec.HadAnswerContent {
 		t.Error("HadAnswerContent = true, want false (no content delta ever arrived)")
+	}
+}
+
+// TestAnalyzerToolCallDeltasWithoutEventBoundaries covers the shape the blank
+// lines above deliberately kept out of TestAnalyzerToolCalls: several tool-call
+// deltas delivered with NO event boundary between them, so only the event
+// buffer - flushed once at the end - can reassemble and count them. This is
+// the shape every real provider's tool-call sequence has, so counting it
+// through the per-line producer alone would under-report a stream that made
+// calls.
+func TestAnalyzerToolCallDeltasWithoutEventBoundaries(t *testing.T) {
+	var a Analyzer
+	feedLines(&a,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"search","arguments":""}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"q\":"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"x\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c1","function":{"name":"lookup","arguments":"{}"}}]}}]}`,
+	)
+	rec := &metrics.Record{}
+	a.Fill(rec)
+	if rec.ToolCalls != 2 {
+		t.Fatalf("ToolCalls = %d, want 2: without an event boundary only the reassembled event can see the calls", rec.ToolCalls)
+	}
+	if len(rec.ToolNames) != 2 || rec.ToolNames[0] != "search" || rec.ToolNames[1] != "lookup" {
+		t.Fatalf("ToolNames = %v, want [search lookup]", rec.ToolNames)
 	}
 }
 

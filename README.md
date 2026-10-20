@@ -88,10 +88,20 @@ dashboard within a second or two. On a shared Compose network, use
 Connect, and other adapters, read
 [upstream compatibility](docs/adapters.md#client-and-upstream-compatibility).
 
-Normal relay paths preserve request and response content, with documented
-exceptions for buffering, retries, SSE keepalives, format translation, and
-configured overrides. This is not an unconditional byte-for-byte or
-exactly-once contract. See [protocol](docs/protocol.md).
+Normal relay paths preserve request content and upstream response content, with
+documented exceptions: bounded request/quality buffering, retries, SSE keepalive
+comments and failure signaling, mid-thinking rescues that append a fresh
+attempt after reasoning-only output, opt-in atomic streamed tool calls (a
+tool-call-bearing event is withheld until the stream's terminator, so a
+terminated stream is the only one that can commit a tool call, at the cost of a
+completed call from a provider that sends no terminator, and of a call larger
+than the withhold bound, which commits early and is then reported as the failed
+stream it is - see [atomic tool calls](docs/protocol.md#atomic-tool-calls)),
+optional format translation, operator-configured request overrides (a matching
+body rule rewrites the upstream request bytes), operator-configured
+sub-conversation strip (a matching client entry removes its tracked fields from
+the top level of the relayed bytes), and constructed model lists. This is not an
+unconditional byte-for-byte or exactly-once contract.
 
 ## What it looks like
 

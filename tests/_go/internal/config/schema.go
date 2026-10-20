@@ -209,7 +209,7 @@ func TestWriteYAMLRoundTripEachSchemaKey(t *testing.T) {
 		t.Run(f.Key, func(t *testing.T) {
 			c := Default()
 			sample := alternateSchemaValue(t, f, c)
-			if err := c.Apply(map[string]any{f.Key: sample}); err != nil {
+			if err := c.Apply(sample); err != nil {
 				t.Fatalf("Apply %s: %v", f.Key, err)
 			}
 			if err := c.Validate(); err != nil {
@@ -244,29 +244,39 @@ func TestWriteYAMLRoundTripEachSchemaKey(t *testing.T) {
 	}
 }
 
-func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
+// alternateSchemaValue returns the override map that moves f off its default:
+// a single setting, changed on its own. It is a map rather than a bare value
+// because that is what Apply takes, not because any setting is coupled to
+// another.
+func alternateSchemaValue(t *testing.T, f Field, base *Config) map[string]any {
 	t.Helper()
+	one := func(v any) map[string]any { return map[string]any{f.Key: v} }
 	switch f.Kind {
 	case KindBool:
-		return !base.fieldValue(f.Key).(bool)
+		return one(!base.fieldValue(f.Key).(bool))
 	case KindString:
 		if f.Key == "listen" {
-			return "127.0.0.1:9999"
+			return one("127.0.0.1:9999")
 		}
 		if f.Key == "quota_pause_mode" {
 			// An exact-match enum: alternate with another member.
-			return QuotaPauseRetry
+			return one(QuotaPauseRetry)
 		}
-		return "alt-" + base.fieldValue(f.Key).(string)
+		return one("alt-" + base.fieldValue(f.Key).(string))
 	case KindInt:
 		n := base.fieldValue(f.Key).(int)
 		for _, cand := range []int{n + 1, n - 1} {
 			trial := base.Clone()
 			trial.fieldRV(f.Key).SetInt(int64(cand))
 			if trial.Validate() == nil {
-				return cand
+				return one(cand)
 			}
 		}
+	// No setting is coupled to another today, so a single-key sample must
+	// validate on its own for every kind. The one setting that ever needed a
+	// companion is gone; if a coupled setting returns, the round-trip test
+	// fails here with a clear "sample is still the default" message rather
+	// than this probe quietly searching the bool settings for a fix.
 	case KindBytes:
 		n := int64(base.fieldValue(f.Key).(ByteSize))
 		// The schema band is a candidate too: zero-default fields need a
@@ -283,7 +293,7 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 			trial := base.Clone()
 			trial.fieldRV(f.Key).SetInt(cand)
 			if trial.Validate() == nil {
-				return FormatByteSize(cand)
+				return one(FormatByteSize(cand))
 			}
 		}
 	case KindDuration:
@@ -295,31 +305,30 @@ func alternateSchemaValue(t *testing.T, f Field, base *Config) any {
 			trial := base.Clone()
 			trial.fieldRV(f.Key).SetInt(int64(cand))
 			if trial.Validate() == nil {
-				return FormatDuration(cand)
+				return one(FormatDuration(cand))
 			}
 		}
 	case KindStrings:
 		if f.Key == "allowed_base_urls" {
-			return []any{"https://api.example.invalid"}
+			return one([]any{"https://api.example.invalid"})
 		}
 		if f.Key == "storm_status_codes" {
-			return []any{"500"}
+			return one([]any{"500"})
 		}
 		if f.Key == "retryable_error_classes" {
-			return []any{"model_warming_up"}
+			return one([]any{"model_warming_up"})
 		}
 	case KindProviders:
-		return map[string]any{"neutral.example": map[string]any{"cost_keys": []any{"usage.cost"}}}
+		return one(map[string]any{"neutral.example": map[string]any{"cost_keys": []any{"usage.cost"}}})
 	case KindAliases:
-		return map[string]any{"old.example": "new.example"}
+		return one(map[string]any{"old.example": "new.example"})
 	case KindModelRules:
-		return []any{map[string]any{"mode": "lower"}}
+		return one([]any{map[string]any{"mode": "lower"}})
 	case KindRequestOverrides:
-		return []any{map[string]any{"client": "opencode", "headers": map[string]any{"x-sample-hint": "v1"}}}
+		return one([]any{map[string]any{"client": "opencode", "headers": map[string]any{"x-sample-hint": "v1"}}})
 	case KindSubConversations:
-		return []any{map[string]any{"client": "opencode", "params": []any{"promptCacheKey"}, "strip": true}}
+		return one([]any{map[string]any{"client": "opencode", "params": []any{"promptCacheKey"}, "strip": true}})
 	}
-	t.Fatalf("no valid non-default sample for %s (%s)", f.Key, f.Kind)
 	return nil
 }
 

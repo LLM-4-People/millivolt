@@ -223,6 +223,58 @@ func TestAnalyzerRetryableTruncation(t *testing.T) {
 	}
 }
 
+// TestAnalyzerToolCallRegionOpened gates atomic withholding: the relay must
+// learn that a tool call has begun from the FIRST tool-call byte, not from the
+// counted call. Argument-only continuation deltas carry no id, so a gate keyed
+// on the count would open the withhold region late - after argument bytes
+// already reached the client - and the whole atomicity guarantee would silently
+// not apply. The deprecated function_call shape must open it too.
+func TestAnalyzerToolCallRegionOpened(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"no tool call stays closed", []string{
+			`data: {"id":"1","choices":[{"delta":{"role":"assistant"}}]}`,
+			`data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}`,
+		}, false},
+		{"id-carrying tool call opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash"}}]}}]}`,
+		}, true},
+		{"argument-only continuation opens it (no id)", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"cmd\""}}]}}]}`,
+		}, true},
+		{"empty tool_calls array does not open it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[]}}]}`,
+		}, false},
+		// A bare "[" cannot be told from an empty array until the next data
+		// line, so the region opens conservatively: the only cost is that an
+		// empty array also withholds its (empty) event.
+		{"a bare unclosed bracket opens it (ambiguous until the event closes)", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[`,
+		}, true},
+		{"a tool_calls array this line starts but does not close opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":[{"index":0,`,
+		}, true},
+		{"a tool_calls key with no value on this line opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"tool_calls":`,
+		}, true},
+		{"deprecated function_call opens it", []string{
+			`data: {"id":"1","choices":[{"delta":{"function_call":{"name":"f","arguments":"{}"}}]}`,
+		}, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := &Analyzer{}
+			feedLines(a, c.lines...)
+			if got := a.ToolCallRegionOpened(); got != c.want {
+				t.Fatalf("ToolCallRegionOpened = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // TestAnalyzerRetryableReasoningTruncation gates the mid-thinking rescue: a
 // truncation after reasoning-only output IS re-sendable (the reasoning the
 // client saw is auxiliary display text, not completion contract), but any

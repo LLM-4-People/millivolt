@@ -7,7 +7,18 @@ import (
 	"time"
 )
 
-const sseKeepaliveComment = ": keepalive\n\n"
+// sseKeepaliveComment is the idle-pacer's SSE comment. It is a COMMENT LINE and
+// nothing else: the trailing blank line of the old spelling terminated the
+// client's OPEN event, dispatching whatever partial document the relay had
+// written so far. Per the WHATWG event-stream parsing rules a line starting with
+// a colon is ignored and does not end the event, while a blank line dispatches
+// it - so a keepalive landing between a multi-line event's data lines handed the
+// client a truncated document, invalid JSON for most shapes, which every
+// conforming SDK raises on and fails the whole turn over. The comment without
+// the blank line is inert between events and inside one, on every path: a
+// comment is not data, so a parser that tracks an open event simply ignores it
+// and one that does not is unaffected.
+const sseKeepaliveComment = ": keepalive\n"
 
 // sseKeepaliveInterval is how often a quiet SSE socket gets a comment.
 // Chat Completions is data-only SSE: spec-compliant clients (including the
