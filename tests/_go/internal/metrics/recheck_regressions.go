@@ -26,7 +26,7 @@ func choicesBody(key string, n int) []byte {
 // spelling encoding/json honors (ASCII case variants and Unicode escapes) trips
 // the lexical bound before the typed decode materializes the array.
 func TestNonStreamChoicesBoundMatchesTypedDecode(t *testing.T) {
-	for _, key := range []string{"choices", "Choices", "CHOICES", `\u0063hoices`, `\u0043hoices`} {
+	for _, key := range []string{"choices", "Choices", "CHOICES", `\u0063hoices`, `\u0043hoices`, "choiceſ", `choice\u017F`} {
 		t.Run(key, func(t *testing.T) {
 			over := AnalyzeNonStreamBody(choicesBody(key, nonStreamChoicesMax+1), nil, nil, false)
 			if over.ErrorType != nonStreamChoicesErrorType || over.RecordFieldsOK {
@@ -50,7 +50,7 @@ func TestNonStreamChoicesBoundFastPath(t *testing.T) {
 	if containsChoicesKeyToken([]byte(`{"other":[1,2,3]}`)) {
 		t.Fatal("unrelated key triggered the choices traversal")
 	}
-	for _, key := range []string{"choices", "Choices", "CHOICES", `\u0063hoices`} {
+	for _, key := range []string{"choices", "Choices", "CHOICES", `\u0063hoices`, "choiceſ", `choice\u017F`} {
 		body := []byte(fmt.Sprintf(`{"%s":[]}`, key))
 		if !containsChoicesKeyToken(body) {
 			t.Fatalf("%q did not trigger the choices traversal", key)

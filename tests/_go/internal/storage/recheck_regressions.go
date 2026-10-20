@@ -184,15 +184,15 @@ func TestRestoreRejectsAggregateTotalOverflow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := snapshotFromRecords(t, aggregateRecords(t, 20, tc.apply))
-			requireRejected(t, data, "invalid "+tc.name+" aggregate")
-			requireMergeRejected(t, data, "invalid "+tc.name+" aggregate")
+			requireRejected(t, data, "pending snapshot aggregate totals")
+			requireMergeRejected(t, data, "totals after backup merge")
 		})
 	}
 }
 
-// TestRestoreRejectsIntegerTotalOverflowAndNegative pins the integer half of
-// the aggregate preflight: a SUM promoted to REAL, or a negative per-row
-// count, cannot feed Totals.Add's checked arithmetic.
+// TestRestoreRejectsIntegerTotalOverflowAndNegative pins both integer
+// admission layers: a negative per-row count is rejected by the scan check, and
+// an aggregate above int64 is rejected by the staged/merged Totals.Add scan.
 func TestRestoreRejectsIntegerTotalOverflowAndNegative(t *testing.T) {
 	for _, column := range aggregateCountColumns {
 		t.Run(column, func(t *testing.T) {
@@ -218,9 +218,9 @@ func TestRestoreRejectsIntegerTotalOverflowAndNegative(t *testing.T) {
 					t.Fatalf("no fixture for %s", column)
 				}
 			}))
-			// MaxInt64 plus one overflows int64, so SUM cannot stay an integer.
-			requireRejected(t, overflow, "invalid "+column+" aggregate")
-			requireMergeRejected(t, overflow, "invalid "+column+" aggregate")
+			// MaxInt64 plus one overflows the checked integer total.
+			requireRejected(t, overflow, "pending snapshot aggregate totals")
+			requireMergeRejected(t, overflow, "totals after backup merge")
 
 			negative := snapshotFromRecords(t, aggregateRecords(t, 1, func(r *metrics.Record) {
 				switch column {
@@ -279,6 +279,157 @@ func TestRestoreAcceptsFiniteAggregateTotals(t *testing.T) {
 	}
 }
 
+// TestRestoreAcceptsEmptyAggregateTotals is the empty control: no rows means
+// no aggregate work, and both admission paths stay successful.
+func TestRestoreAcceptsEmptyAggregateTotals(t *testing.T) {
+	data := snapshotFromRecords(t, nil)
+	live, err := replaceSnapshot(t, data)
+	if err != nil {
+		t.Fatalf("empty replace rejected: %v", err)
+	}
+	if live.Totals().Err() != nil || live.Totals().Requests != 0 {
+		t.Fatalf("empty replace totals = %+v err=%v", live.Totals(), live.Totals().Err())
+	}
+
+	merge := mergeTestLive(t)
+	before := merge.Totals()
+	inserted, skipped, err := merge.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatalf("empty merge rejected: %v", err)
+	}
+	if inserted != 0 || skipped != 0 {
+		t.Fatalf("empty merge inserted=%d skipped=%d, want 0/0", inserted, skipped)
+	}
+	after := merge.Totals()
+	if after.Err() != nil || after.Requests != before.Requests || after.Cost != before.Cost || after.InputTok != before.InputTok {
+		t.Fatalf("empty merge changed totals: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestRestoreAcceptsUnusedDecodeTPSOverflow pins D1: Totals.Add uses OverallTPS
+// when it is positive and ignores DecodeTPS, so a huge unused gen_tps must not
+// reject an otherwise representable snapshot.
+func TestRestoreAcceptsUnusedDecodeTPSOverflow(t *testing.T) {
+	data := snapshotFromRecords(t, aggregateRecords(t, 20, func(r *metrics.Record) {
+		r.OverallTPS = 1
+		r.DecodeTPS = 1e307
+	}))
+	live, err := replaceSnapshot(t, data)
+	if err != nil {
+		t.Fatalf("unused gen_tps overflow rejected by replace: %v", err)
+	}
+	if live.Totals().Err() != nil {
+		t.Fatalf("replace totals error: %v", live.Totals().Err())
+	}
+	if got := live.Totals().TPSSum; got != 20 {
+		t.Fatalf("replace TPSSum = %v, want 20 from overall_tps", got)
+	}
+
+	merge := mergeTestLive(t)
+	inserted, skipped, err := merge.MergeSnapshot(t.Context(), data)
+	if err != nil {
+		t.Fatalf("unused gen_tps overflow rejected by merge: %v", err)
+	}
+	if inserted != 20 || skipped != 0 {
+		t.Fatalf("merge inserted=%d skipped=%d, want 20/0", inserted, skipped)
+	}
+	if merge.Totals().Err() != nil {
+		t.Fatalf("merge totals error: %v", merge.Totals().Err())
+	}
+	if got := merge.Totals().TPSSum; got != 20 {
+		t.Fatalf("merge TPSSum = %v, want 20 from overall_tps", got)
+	}
+}
+
+// TestMergeDuplicateOnlyOverflowIsNoOp pins D2: duplicate source rows are not
+// inserted, so an overflowing source-only aggregate must not reject a merge
+// that leaves live history and totals unchanged.
+func TestMergeDuplicateOnlyOverflowIsNoOp(t *testing.T) {
+	source := snapshotFromRecords(t, aggregateRecords(t, 20, func(r *metrics.Record) {
+		r.Cost = 1e307
+	}))
+	live := openTestStore(t)
+	for i := 0; i < 20; i++ {
+		live.Record(&metrics.Record{
+			ID: fmt.Sprintf("aggregate-%02d", i), Provider: "neutral.example",
+			Model: "n", StatusCode: 200, Start: time.UnixMilli(1_800_300_000_000 + int64(i)),
+			Cost: 1.5,
+		})
+	}
+	if err := live.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	before := live.Totals()
+	inserted, skipped, err := live.MergeSnapshot(t.Context(), source)
+	if err != nil {
+		t.Fatalf("duplicate-only merge rejected: %v", err)
+	}
+	if inserted != 0 || skipped != 20 {
+		t.Fatalf("duplicate-only merge inserted=%d skipped=%d, want 0/20", inserted, skipped)
+	}
+	after := live.Totals()
+	if after.Err() != nil || after.Requests != before.Requests || after.Cost != before.Cost || after.InputTok != before.InputTok {
+		t.Fatalf("duplicate-only merge changed totals: before=%+v after=%+v", before, after)
+	}
+}
+
+// TestMergeRejectsCombinedAggregateOverflow pins D3: each side can have a
+// representable total while the live-plus-incoming total is not. The merge must
+// roll back and leave the live rows and totals untouched.
+func TestMergeRejectsCombinedAggregateOverflow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*metrics.Record)
+	}{
+		{"cost", func(r *metrics.Record) { r.Cost = 1e306 }},
+		{"input_tokens", func(r *metrics.Record) { r.Usage.InputTokens = 50_000_000_000_000_000 }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := openTestStore(t)
+			for i := 0; i < 100; i++ {
+				r := &metrics.Record{
+					ID: fmt.Sprintf("live-%03d", i), Provider: "neutral.example",
+					Model: "n", StatusCode: 200, Start: time.UnixMilli(1_800_400_000_000 + int64(i)),
+				}
+				tc.apply(r)
+				live.Record(r)
+			}
+			if err := live.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			before := live.Totals()
+			if before.Err() != nil {
+				t.Fatalf("live control totals error: %v", before.Err())
+			}
+			sourceRecords := make([]*metrics.Record, 100)
+			for i := range sourceRecords {
+				r := &metrics.Record{
+					ID: fmt.Sprintf("incoming-%03d", i), Provider: "neutral.example",
+					Model: "n", StatusCode: 200, Start: time.UnixMilli(1_800_500_000_000 + int64(i)),
+				}
+				tc.apply(r)
+				sourceRecords[i] = r
+			}
+			source := snapshotFromRecords(t, sourceRecords)
+			inserted, skipped, err := live.MergeSnapshot(t.Context(), source)
+			if err == nil || !strings.Contains(err.Error(), "totals after backup merge") {
+				t.Fatalf("combined overflow merge = inserted=%d skipped=%d err=%v, want totals rejection", inserted, skipped, err)
+			}
+			rows, err := live.LoadRecent(t.Context(), 1000)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 100 {
+				t.Fatalf("rejected merge changed live rows: %d", len(rows))
+			}
+			after := live.Totals()
+			if after.Err() != nil || after.Requests != before.Requests || after.Cost != before.Cost || after.InputTok != before.InputTok {
+				t.Fatalf("rejected merge changed live totals: before=%+v after=%+v", before, after)
+			}
+		})
+	}
+}
+
 // TestRestoreRejectsUnrepresentableTimestamps pins STO-2: milliseconds outside
 // the time.Time JSON range are rejected on both admission paths.
 func TestRestoreRejectsUnrepresentableTimestamps(t *testing.T) {
@@ -301,12 +452,51 @@ func TestRestoreRejectsUnrepresentableTimestamps(t *testing.T) {
 	}
 }
 
-// TestRestoreTimestampBoundariesAreUTC pins the race-safe half of the STO-2
-// residual: every scanned time and the derived End stay in UTC, so marshalling
-// does not depend on the process-local zone. The non-race companion sets a
-// fixed non-UTC time.Local and exercises the same boundaries.
+// TestRestoreTimestampBoundariesAreUTC pins STO-2: every scanned time and the
+// derived End stay in UTC, so marshalling at the representable boundaries does
+// not depend on the process-local zone. It is deliberately race-safe: it does
+// not mutate the global time.Local used by concurrent store writers.
 func TestRestoreTimestampBoundariesAreUTC(t *testing.T) {
-	for _, value := range []int64{recordScanMillisMin, recordScanMillisMax, time.Now().UnixMilli()} {
+	fields := map[string]func(*metrics.Record) time.Time{
+		"started_at":      func(r *metrics.Record) time.Time { return r.Start },
+		"first_token_at":  func(r *metrics.Record) time.Time { return r.FirstTokenAt },
+		"last_token_at":   func(r *metrics.Record) time.Time { return r.LastTokenAt },
+		"first_answer_at": func(r *metrics.Record) time.Time { return r.FirstAnswerAt },
+		"final_attempt_at": func(r *metrics.Record) time.Time {
+			return r.FinalAttemptAt
+		},
+	}
+	current := time.Now().UnixMilli()
+	for _, column := range recordScanMillisColumns {
+		field := fields[column]
+		if field == nil {
+			t.Fatalf("no field mapping for scanned time %s", column)
+		}
+		// Non-start timestamps treat zero and negative values as absent, so
+		// exercise their live path with a current positive instant.
+		data := snapshotWithValue(t, column, current)
+		live, err := replaceSnapshot(t, data)
+		if err != nil {
+			t.Fatalf("%s rejected: %v", column, err)
+		}
+		rows, err := live.LoadRecent(t.Context(), 1)
+		if err != nil {
+			t.Fatalf("%s load: %v", column, err)
+		}
+		if len(rows) != 1 {
+			t.Fatalf("%s rows = %d", column, len(rows))
+		}
+		if got := field(rows[0]); got.Location() != time.UTC || got.UnixMilli() != current {
+			t.Fatalf("%s = %v (%v), want UTC at %d", column, got, got.Location(), current)
+		}
+		if column == "started_at" && (rows[0].End.Location() != time.UTC || rows[0].End.UnixMilli() != current) {
+			t.Fatalf("derived End = %v (%v), want UTC at %d", rows[0].End, rows[0].End.Location(), current)
+		}
+		if _, err := json.Marshal(rows[0]); err != nil {
+			t.Fatalf("%s does not marshal: %v", column, err)
+		}
+	}
+	for _, value := range []int64{recordScanMillisMin, recordScanMillisMax} {
 		data := snapshotWithValue(t, "started_at", value)
 		live, err := replaceSnapshot(t, data)
 		if err != nil {
@@ -319,8 +509,12 @@ func TestRestoreTimestampBoundariesAreUTC(t *testing.T) {
 		if len(rows) != 1 {
 			t.Fatalf("started_at %d rows = %d", value, len(rows))
 		}
-		if rows[0].Start.Location() != time.UTC || rows[0].End.Location() != time.UTC {
-			t.Fatalf("started_at %d locations = %v/%v, want UTC", value, rows[0].Start.Location(), rows[0].End.Location())
+		if got := rows[0].Start; got.Location() != time.UTC || got.UnixMilli() != value {
+			t.Fatalf("started_at = %v (%v), want UTC at %d", got, got.Location(), value)
+		}
+		// The fixture has duration_ms=0, so End is the same instant.
+		if got := rows[0].End; got.Location() != time.UTC || got.UnixMilli() != value {
+			t.Fatalf("derived End = %v (%v), want UTC at %d", got, got.Location(), value)
 		}
 		if _, err := json.Marshal(rows[0]); err != nil {
 			t.Fatalf("started_at %d does not marshal: %v", value, err)

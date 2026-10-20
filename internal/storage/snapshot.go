@@ -506,6 +506,19 @@ func preflightPendingSnapshot(path string) error {
 		db.Close()
 		return err
 	}
+	// The derived totals are the real aggregate owner: Totals.Add chooses the
+	// effective TPS source, folds only cost-bearing cost/token denominators and
+	// applies the checked integer arithmetic. Prove the whole staged snapshot
+	// produces representable totals before any live file is touched.
+	totals, err := readTotals(context.Background(), db)
+	if err != nil {
+		db.Close()
+		return fmt.Errorf("pending snapshot aggregate totals: %w", err)
+	}
+	if err := totals.Err(); err != nil {
+		db.Close()
+		return fmt.Errorf("pending snapshot aggregate totals: %w", err)
+	}
 	if err := db.Close(); err != nil {
 		return fmt.Errorf("close preflight database: %w", err)
 	}
@@ -1231,6 +1244,12 @@ func (s *Store) MergeSnapshotFile(ctx context.Context, path string) (inserted, s
 		if err != nil {
 			return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
 		}
+		if err := totals.Err(); err != nil {
+			// The transaction sees live plus incoming rows, so this is the exact
+			// combined total. Reject before saveTotals: the deferred rollback
+			// leaves the live file and its prior totals untouched.
+			return inserted, skipped, fmt.Errorf("totals after backup merge: %w", err)
+		}
 		totalsEpoch, err = projectionEpoch(tctx, tx)
 		if err != nil {
 			return inserted, skipped, fmt.Errorf("projection epoch after backup merge: %w", err)
@@ -1401,9 +1420,9 @@ var recordScanMillisColumns = []string{
 var aggregateMetricColumns = []string{"cost", "gen_tps", "overall_tps"}
 
 // aggregateCountColumns are the INTEGER request fields Totals.Add folds with
-// metrics.SumCounts. A negative row would make the checked fold fail, and a
-// column sum above int64 promotes to a SQLite REAL total that cannot be
-// represented in Totals.
+// metrics.SumCounts. A negative row would make that checked fold fail. The
+// full int64 aggregate bound is owned separately by the staged/merged totals
+// scan, not by a per-column SQL SUM.
 var aggregateCountColumns = []string{
 	"input_tokens", "output_tokens", "cache_read_tokens", "reasoning_tokens", "ttft_ms",
 }
@@ -1468,9 +1487,10 @@ func recordScanChecks() ([]recordScanCheck, error) {
 			if slices.Contains(aggregateMetricColumns, column) {
 				// SQLite stores +Inf/-Inf as REAL and NaN as NULL. The generic
 				// NULL and storage-class checks above already catch NaN; the
-				// finite/nonnegative border below plus the MIN/MAX domain check
-				// in preflightAggregateValues rejects the infinite and negative
-				// values metrics.SumValues refuses.
+				// finite/nonnegative border below rejects the infinite and
+				// negative per-row values metrics.SumValues refuses. The staged
+				// totals check in preflightPendingSnapshot owns the aggregate
+				// result through the real Totals.Add semantics.
 				check.accepted = "a finite nonnegative number"
 				maxValue := strconv.FormatFloat(math.MaxFloat64, 'g', -1, 64)
 				check.reject += fmt.Sprintf(` OR %s < 0 OR %s > %s OR %s < -%s`,
@@ -1540,9 +1560,6 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 		if err := preflightRequestDuration(ctx, db, table, source, present); err != nil {
 			return err
 		}
-		if err := preflightAggregateValues(ctx, db, table, source, present); err != nil {
-			return err
-		}
 		if _, ok := present["attempts"]; ok {
 			var malformed int64
 			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+
@@ -1578,60 +1595,6 @@ func preflightRequestScanValues(ctx context.Context, db mergeConn, schema, sourc
 		return fmt.Errorf("%s requests contains %d rows with an invalid %s value; scanRecord requires %s", source, count, check.column, check.accepted)
 	}
 	return fmt.Errorf("%s requests contains values scanRecord cannot read", source)
-}
-
-// preflightAggregateValues applies the aggregate domain to the actual stored
-// totals of every aggregate-bearing column. Per-row checks prove each value is
-// representable; this check proves the full column sum the rebuild and writer
-// accounting will produce is also representable. REAL totals go through
-// metrics.SumValues, and INTEGER totals must remain a nonnegative int64 through
-// metrics.SumCounts. SQLite returns NULL for an empty column, a REAL for an
-// integer SUM that overflowed int64, and an integer otherwise.
-func preflightAggregateValues(ctx context.Context, db mergeConn, table, source string, present map[string]struct{}) error {
-	for _, column := range aggregateMetricColumns {
-		if _, ok := present[column]; !ok {
-			continue
-		}
-		var total sql.NullFloat64
-		if err := db.QueryRowContext(ctx,
-			`SELECT SUM("`+column+`") FROM `+table).Scan(&total); err != nil {
-			return fmt.Errorf("%s requests.%s total: %w", source, column, err)
-		}
-		if !total.Valid {
-			continue
-		}
-		if _, err := metrics.SumValues(total.Float64); err != nil {
-			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a finite nonnegative sum", source, column)
-		}
-	}
-	for _, column := range aggregateCountColumns {
-		if _, ok := present[column]; !ok {
-			continue
-		}
-		var total any
-		var kind string
-		if err := db.QueryRowContext(ctx,
-			`SELECT SUM("`+column+`"), typeof(SUM("`+column+`")) FROM `+table).Scan(&total, &kind); err != nil {
-			// This SQLite build can report integer overflow from SUM itself
-			// instead of promoting the result to REAL. Both mean the checked
-			// int64 total is unrepresentable, so report the same domain error.
-			if strings.Contains(err.Error(), "integer overflow") {
-				return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
-			}
-			return fmt.Errorf("%s requests.%s total: %w", source, column, err)
-		}
-		if total == nil {
-			continue
-		}
-		value, ok := total.(int64)
-		if !ok || kind != "integer" {
-			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
-		}
-		if _, err := metrics.SumCounts(value); err != nil {
-			return fmt.Errorf("%s requests contains an invalid %s aggregate; totals require a nonnegative int64 sum", source, column)
-		}
-	}
-	return nil
 }
 
 // preflightRequestDuration applies the derived-End domain shared by replace and

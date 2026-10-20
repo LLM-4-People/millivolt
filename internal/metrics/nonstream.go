@@ -375,19 +375,41 @@ func containsChoicesKeyToken(body []byte) bool {
 		}
 		quote += offset
 		closing := quote + len(token) + 1
-		if closing < len(body) && choicesKeyFold(body[quote+1:quote+len(token)+1]) && body[closing] == '"' {
+		if closing < len(body) && body[closing] == '"' && choicesKeyFold(body[quote+1:closing]) {
 			return true
+		}
+		// A raw non-ASCII spelling can be longer than seven bytes ("choiceſ"
+		// is eight), so the fixed-width candidate above cannot find its closing
+		// quote. Decode only strings that actually carry a high byte; ordinary
+		// ASCII keys keep the allocation-free path.
+		rest := body[quote+1:]
+		if next := bytes.IndexByte(rest, '"'); next >= 0 {
+			for _, b := range rest[:next] {
+				if b < 0x80 {
+					continue
+				}
+				if end := SkipJSONString(body, quote); end > 0 && choicesKeyFold(body[quote+1:end-1]) {
+					return true
+				}
+				break
+			}
 		}
 		offset = quote + 1
 	}
 	return false
 }
 
-// choicesKeyFold is the allocation-free ASCII case fold used by the mixed-case
-// key scan. JSON keys are UTF-8; a non-ASCII byte cannot equal an ASCII letter,
-// so the fold is exact for this token.
+// choicesKeyFold is the case fold for a JSON key token. All-ASCII candidates
+// use the allocation-free byte fold. Any non-ASCII byte switches to
+// bytes.EqualFold, whose Unicode simple folding matches raw spellings such as
+// "choiceſ" to "choices" exactly like encoding/json's field matching.
 func choicesKeyFold(candidate []byte) bool {
 	const token = "choices"
+	for _, b := range candidate {
+		if b >= 0x80 {
+			return bytes.EqualFold(candidate, []byte(token))
+		}
+	}
 	if len(candidate) != len(token) {
 		return false
 	}
