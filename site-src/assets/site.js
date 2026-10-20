@@ -33,6 +33,14 @@
     wrapper.appendChild(table);
   });
 
+  const docsNav = document.querySelector(".docs-nav");
+  if (docsNav) {
+    const mobile = window.matchMedia("(max-width: 900px)");
+    const syncDocsNav = () => { docsNav.open = !mobile.matches; };
+    syncDocsNav();
+    mobile.addEventListener("change", syncDocsNav);
+  }
+
   const live = document.createElement("span");
   live.className = "sr-only";
   live.setAttribute("aria-live", "polite");
