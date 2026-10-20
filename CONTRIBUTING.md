@@ -76,8 +76,8 @@ pushes to `testing` run the smaller documentation gate.
    ```
    Squash and rebase are disabled on `main`; they would replace the reviewed
    testing history instead of preserving it.
-5. After the release run finishes, merge `main` back into `testing` so the next
-   promotion is up to date:
+5. After the promotion is on `main` and its release or Pages run finishes,
+   merge `main` back into `testing` so the next promotion is up to date:
    ```sh
    git fetch origin main
    git switch testing
@@ -87,17 +87,17 @@ pushes to `testing` run the smaller documentation gate.
    If `testing` moved after the promotion merge, merge `origin/main` normally
    and resolve conflicts before the next promotion.
 
-CI creates the annotated release tag on the promotion merge and publishes the
-image. It never pushes `main`. Do not push a `v*` tag as part of feature work;
-the manual tag path is only for an explicitly verified release and must match
-`VERSION`.
+For a code-bearing promotion, CI creates the annotated release tag on the merge
+and publishes the image. It never pushes `main`. Do not push a `v*` tag as part
+of feature work; the manual tag path is only for an explicitly verified release
+and must match `VERSION`.
 
 Dependabot version updates target `testing`. Dependabot security updates target
-the default branch and are the only exception to the promotion source and
-version checks; they still run the full gate and the `required` check. A
-security-only merge does not cut a release because `VERSION` is already tagged.
-Merge `main` back into `testing` and include the fix in the next versioned
-promotion.
+the default branch and are the only exception to the testing-ancestry check;
+they also skip the version check. They still run the full gate and the
+`required` check. A security-only merge does not cut a release because `VERSION`
+is already tagged. Merge `main` back into `testing` and include the fix in the
+next versioned promotion.
 
 Docs and site-only pushes to `testing` skip image work. A docs/site-only
 promotion to `main` skips the `VERSION` check; the merged main push remains
