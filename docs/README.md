@@ -21,9 +21,9 @@ that matches what you need to do.
 ## Reference
 
 - [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
+- [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
 - [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
 - [Versions and images](operations.md#versions-and-images) - version identity, tags, and verification.
-- [Measured example](operations.md#measured-example) - the scoped performance report, including its failure case.
 
 ## Project
 
@@ -40,7 +40,8 @@ The generated [configuration example](../proxy.example.yaml) documents settings.
 `proxy.yaml` is not a public reference or a test fixture.
 
 Current commands live in [Contributing](../CONTRIBUTING.md#checks). Runtime
-limits and measurement caveats live in [operations](operations.md#known-limits).
-The [architecture map](architecture.md) connects invariants to their shared
+limits live in [operations](operations.md#known-limits); measurement caveats
+live in [performance](performance.md#limitations). The
+[architecture map](architecture.md) connects invariants to their shared
 implementation and regression coverage. Past development notes are not an
 operating guide or a capacity guarantee.

@@ -247,15 +247,15 @@ docker compose up -d</code></pre>
           <p class="eyebrow">measured</p>
           <h2>Measured, not promised.</h2>
         </div>
-        <p class="section-note">A documented local example, including the higher-load stage that dropped records. These are scoped measurements, not deployment guarantees.</p>
+        <p class="section-note">Current local measurements of the native process, including a deliberate overload fixture. These are scoped examples, not deployment guarantees.</p>
       </div>
       <div class="stat-grid">
-        <div class="stat"><strong>26.5 MB</strong><span>amd64 image</span></div>
-        <div class="stat"><strong>20.5 MiB</strong><span>idle RAM, empty history</span></div>
-        <div class="stat"><strong>217 MiB</strong><span>with 99,304 retained records</span></div>
-        <div class="stat"><strong>11,073</strong><span>requests/s at 32 workers for five seconds</span></div>
+        <div class="stat"><strong>{{perf_image}}</strong><span>amd64 image</span></div>
+        <div class="stat"><strong>{{perf_idle}}</strong><span>idle RAM, empty history</span></div>
+        <div class="stat"><strong>{{perf_loaded}}</strong><span>peak RSS at 128 workers</span></div>
+        <div class="stat"><strong>{{perf_rps}}</strong><span>requests/s at 128 workers for five seconds</span></div>
       </div>
-      <p class="measurement-note">Measured 2026-09-06 at <a href="https://github.com/LLM-4-People/millivolt/commit/495464c5b485a4b8d021e5b36dcecc9f291f5a2c" target="_blank" rel="noopener noreferrer">495464c</a> on a shared WSL2 workstation. A higher-load stage dropped records. See <a href="docs/operations.html#performance-and-footprint">method and scope</a>.</p>
+      <p class="measurement-note">Measured 2026-10-20 at <a href="https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2" target="_blank" rel="noopener noreferrer">facb699</a> on a shared WSL2 workstation. A separate overload fixture records the drop case. See <a href="docs/performance.html">method, tables and scope</a>.</p>
     </div>
   </section>
 

@@ -184,16 +184,14 @@ It is not a multi-tenant gateway, a billing system, or a compliance audit log.
 
 ## Performance and footprint
 
-In documented local measurements, the amd64 image was **26.5 MB**; idle RAM was
-**20.5 MiB** with empty history and **217 MiB** with 99,304 retained records.
-A five-second fast-response stage reached **11,073 requests/s** with exact
-stored accounting; a higher-load stage dropped records. These are scoped
-examples, not deployment guarantees. See
-[method and tradeoffs](docs/operations.md#performance-and-footprint).
-
-Small images do not imply fixed RAM or negligible CPU. Active streams,
-configured buffers, stored-history projections, and identity cardinality
-contribute separate costs.
+The [performance and resource usage](docs/performance.md) page is the single
+source for current image and binary size, idle and loaded footprints, fast and
+streaming throughput, durable writer rates, SQLite growth, projection cost, and
+query/metadata latency. It carries the exact revision, host, method, reproduce
+commands and limitations. Small images do not imply fixed RAM or negligible
+CPU. Active streams, configured buffers, stored-history projections, and
+identity cardinality contribute separate costs. Short local bursts are
+regressions, not deployment guarantees.
 
 ## Configuration and documentation
 
@@ -209,7 +207,7 @@ overrides, reloads, backups, and restart requirements.
 [contribution guidelines](CONTRIBUTING.md) before publishing a change.
 
 - **Start:** [documentation index](docs/README.md), [protocol](docs/protocol.md)
-- **Operate:** [operations](docs/operations.md), [reverse proxy](docs/reverse-proxy.md)
+- **Operate:** [operations](docs/operations.md), [performance](docs/performance.md), [reverse proxy](docs/reverse-proxy.md)
 - **Integrate:** [adapters](docs/adapters.md), [MCP server](docs/mcp.md)
 - **Project:** [architecture](docs/architecture.md), [contributing](CONTRIBUTING.md), [security](SECURITY.md)
 

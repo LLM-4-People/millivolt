@@ -16,7 +16,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-from scripts.build_site import DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size
+from scripts.build_site import (DEFAULT_BASE_URL, README_ANCHORS, build_site, image_size,
+                                performance_headline)
 from tests.repository_check import markdown_anchors
 from tests.support import (PALETTE_OWNER, ROOT, SITE_STYLESHEET, root_custom_properties,
                            site_palette_errors, token_drift_errors)
@@ -124,6 +125,80 @@ def entity_color_errors() -> list[str]:
         return ["entities.js has no entity color registry"]
     return [f"landing.html entity color {value} is not in entities.js"
             for value in sorted(used - canonical)]
+
+
+BRAND_IMAGE_CONTRACTS = {
+    "docs/images/brand/readme-cover-dark.png": (1600, 640),
+    "docs/images/brand/readme-cover-light.png": (1600, 640),
+    "site-src/assets/og.png": (1200, 630),
+    ".github/social-preview.png": (1280, 640),
+}
+
+
+def brand_image_errors() -> list[str]:
+    """Pin the dimensions of artwork that GitHub renders or a maintainer
+    uploads. The PWA icon pixel contracts live in the Go web tests."""
+    errors = []
+    for name, expected in BRAND_IMAGE_CONTRACTS.items():
+        actual = image_size(ROOT / name)
+        if actual != expected:
+            errors.append(f"{name}: dimensions are {actual}, expected {expected[0]}x{expected[1]}")
+    return errors
+
+
+PERFORMANCE_SECTIONS = (
+    "method",
+    "artifact-and-idle-footprint",
+    "fast-response-throughput",
+    "streaming-concurrency",
+    "durable-writer-and-overload",
+    "storage-and-retained-projection",
+    "query-and-metadata-paths",
+    "reproduce",
+    "limitations",
+)
+
+
+def performance_page_errors(site: Path, page_texts: dict[Path, str]) -> list[str]:
+    """The measured page is the single numeric source, and the landing cards
+    are generated from it. Pin the report structure and the generated headline
+    so a docs edit cannot silently drop a table, a method section or a value."""
+    errors = []
+    page = site / "docs/performance.html"
+    if not page.is_file():
+        return ["missing generated performance page: docs/performance.html"]
+    text = page_texts.get(page, "")
+    for section in PERFORMANCE_SECTIONS:
+        if f'id="{section}"' not in text:
+            errors.append(f"performance page is missing section #{section}")
+    if text.count("<table>") < 8:
+        errors.append(f"performance page has {text.count('<table>')} tables, want at least 8")
+    normalized = re.sub(r"\s+", " ", text)
+    for phrase in ("2026-10-20 UTC", "not deployment guarantees", "Reproduce"):
+        if phrase not in normalized:
+            errors.append(f"performance page is missing {phrase!r}")
+    landing = page_texts.get(site / "index.html", "")
+    try:
+        headline = performance_headline()
+    except Exception as exc:
+        errors.append(f"performance headline could not be read: {exc}")
+    else:
+        for key, value in headline.items():
+            if value not in landing:
+                errors.append(f"landing is missing generated {key} value {value!r}")
+    for path, body in page_texts.items():
+        if "{{perf_" in body:
+            errors.append(f"{path.relative_to(site)}: unresolved performance token")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    docs_index = (ROOT / "docs/README.md").read_text(encoding="utf-8")
+    if "docs/performance.md" not in readme:
+        errors.append("README does not link to the canonical performance page")
+    if "performance.md" not in docs_index:
+        errors.append("docs/README.md does not link to the canonical performance page")
+    operations = (ROOT / "docs/operations.md").read_text(encoding="utf-8")
+    if "### Measured example" in operations:
+        errors.append("operations.md still carries a second measured example")
+    return errors
 
 
 def check_site(site: Path) -> list[str]:
@@ -251,6 +326,7 @@ def check_site(site: Path) -> list[str]:
     if missing_readme:
         errors.append("README is missing anchors used by the site: " + ", ".join(missing_readme))
     errors.extend(entity_color_errors())
+    errors.extend(brand_image_errors())
 
     for name in ("docs/index.html", "docs/dashboard.html", "docs/operations.html",
                  "contributing.html", "security.html", "404.html", "search.json",
@@ -321,12 +397,6 @@ def check_site(site: Path) -> list[str]:
             if not entry.get("description"):
                 errors.append(f"search entry has no description: {url!r}")
 
-    og = site / "assets/og.png"
-    if og.exists():
-        og_size = image_size(og)
-        if og_size != (1200, 630):
-            errors.append(f"og.png dimensions are {og_size}, expected 1200x630")
-
     sitemap = (site / "sitemap.xml").read_text(encoding="utf-8") if (site / "sitemap.xml").exists() else ""
     for page in pages:
         if page.name == "404.html":
@@ -336,6 +406,7 @@ def check_site(site: Path) -> list[str]:
             errors.append(f"sitemap missing {rel}")
     if "<loc>" not in sitemap:
         errors.append("sitemap has no URLs")
+    errors.extend(performance_page_errors(site, page_texts))
     return errors
 
 

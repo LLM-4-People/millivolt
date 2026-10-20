@@ -87,6 +87,7 @@ NAV_GROUPS = (
         "Reference",
         (
             ("Operations", "docs/operations.html", "docs/operations.md"),
+            ("Performance", "docs/performance.html", "docs/performance.md"),
             ("Architecture", "docs/architecture.html", "docs/architecture.md"),
         ),
     ),
@@ -494,8 +495,43 @@ def render_base(values: dict[str, str]) -> str:
     return replace_tokens(template, values)
 
 
+def performance_headline() -> dict[str, str]:
+    """Read the landing's four headline values from the canonical measured page.
+
+    The performance page owns every published number. Parsing labelled table
+    rows keeps the landing cards from becoming a second source; a renamed or
+    removed row fails the build instead of silently drifting.
+    """
+    page = DOCS / "performance.md"
+    if not page.is_file():
+        raise BuildError("missing canonical performance page: docs/performance.md")
+    rows = {}
+    for line in page.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("| "):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if cells:
+            rows.setdefault(cells[0], cells)
+    def cells(label: str) -> list[str]:
+        if label not in rows:
+            raise BuildError(f"docs/performance.md has no table row labelled {label!r}")
+        return rows[label]
+    image = cells("amd64 runtime image")
+    idle = cells("Idle process, empty SQLite")
+    fast = cells("128")
+    if len(image) < 3 or len(idle) < 3 or len(fast) < 8:
+        raise BuildError("docs/performance.md table rows are missing headline cells")
+    return {
+        "perf_image": image[2],
+        "perf_idle": idle[2],
+        "perf_loaded": fast[7],
+        "perf_rps": fast[2],
+    }
+
+
 def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
     body = (TEMPLATES / "landing.html").read_text(encoding="utf-8")
+    perf = performance_headline()
     schema = {
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
@@ -519,6 +555,7 @@ def render_landing(*, version: str, base_url: str, theme_color: str) -> str:
         head_extra=head_extra,
         active="overview",
     )
+    values.update(perf)
     return render_base(values)
 
 

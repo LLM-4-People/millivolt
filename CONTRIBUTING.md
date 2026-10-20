@@ -268,7 +268,22 @@ benchmark; do not weaken one mode's admission checks to accommodate the other.
 
 ## Performance evidence
 
-With the private dev instance already running:
+The published tables, method and limitations live in
+[performance and resource usage](docs/performance.md). That page is the single
+source for measured numbers; do not copy them into other documentation.
+
+`scripts/perf.sh` owns a repeatable local measurement run without touching the
+main instance. It starts fresh private instances on a disposable port and stops
+them through `scripts/dev.sh`:
+
+```sh
+scripts/perf.sh bench    # isolated Go benchmarks
+scripts/perf.sh stress   # private fast and streaming ramps
+scripts/perf.sh image    # disposable image content and compressed size
+scripts/perf.sh all      # all three, in that order
+```
+
+For an individual stress run with the private dev instance already running:
 
 ```sh
 go run ./cmd/stress -target http://127.0.0.1:8081 -concurrency 1,8,32,128 -duration 5s
