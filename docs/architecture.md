@@ -471,10 +471,12 @@ routing/cards, `chart` uPlot plans, `log` window/drawer, `chrome` operator shell
 `theme` the surface/palette registry and picker, `settings` the lazily loaded
 Settings sheet, and `live` bootstrap/SSE/derived state. `theme.js` owns the
 mode/palette registry, normalization, the single persistence shape and the one
-canvas recolor path; `css/themes.css` owns the surface tokens and accent
-families both modes resolve. `chrome.js` owns the Settings trigger, loader,
-open-state probe, shared status line and the single close entry point; the
-module owns the sheet's state, editors and apply/revert/backup/purge behavior.
+canvas recolor path; `css/themes.css` owns the Clear surface tokens and the
+eight accent families both modes resolve, while `dashboard.css` owns the
+default Black base and the shared semantic status colors. `chrome.js` owns the
+Settings trigger, loader, open-state probe, shared status line and the single
+close entry point; the module owns the sheet's state, editors and
+apply/revert/backup/purge behavior.
 A clean open at the same document revision and writable state still fetches
 freshness but keeps the
 retained rows and baseline; revision/writable changes, drafts and Revert refill.

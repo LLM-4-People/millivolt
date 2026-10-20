@@ -263,8 +263,8 @@ restart and failure behavior before using these controls.
 Theme has two surfaces and eight accent palettes. Clear is the warm light
 surface; Black is the warm near-black default. Instrument (the default), Slate,
 Midnight, Nord, Forest, Rose, Ember and Contrast are available on either
-surface, so every palette works in both modes. Contrast is the
-maximum-separation palette for bright rooms and low-vision use. The choice is
+surface, so every palette works in both modes. Contrast is the maximum-separation
+palette, using black and signal yellow on either surface. The choice is
 stored in this browser only and is applied before the first paint, so a reload
 does not flash the default. Charts follow the selected palette; status colors
 and the browser's theme color follow the selected surface. The setting is
