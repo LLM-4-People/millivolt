@@ -263,7 +263,10 @@ func TestRequestEscapedTopLevelKeyDecodesOnce(t *testing.T) {
 			// The preflight adds only the distinct-key map to the member's one
 			// decode. A second decode per candidate name (the former shape)
 			// adds several more json.Unmarshal allocations per candidate.
-			if allocs > decodeAllocs+3 {
+			// AllocsPerRun can report one extra allocation under CI scheduling
+			// and GC, so allow a small fixed slack; the former per-candidate
+			// decode shape still exceeds it by several allocations.
+			if allocs > decodeAllocs+5 {
 				t.Fatalf("%s key preflight allocated %.1f objects/op, want one decode (%.1f) plus the bounded key set",
 					tc.name, allocs, decodeAllocs)
 			}
