@@ -20,15 +20,6 @@ import (
 // tests only need to prove the same canonical guard covers error-body reads.
 const tarpitIdleBound = 250 * time.Millisecond
 
-// shortUpstreamIdleBound swaps the shared idle guard for the test bound and
-// restores it after every server and request cleanup has run.
-func shortUpstreamIdleBound(t *testing.T) {
-	t.Helper()
-	old := upstreamStreamIdleTimeout
-	upstreamStreamIdleTimeout = tarpitIdleBound
-	t.Cleanup(func() { upstreamStreamIdleTimeout = old })
-}
-
 // tarpitFixture returns response headers and then stalls without writing a
 // body or EOF, exactly the gateway shape that used to hold an upstream body
 // read forever. The handler is released only by cleanup, so the proxy must
@@ -152,7 +143,7 @@ func postHealthy(t *testing.T, proxyURL, upstreamURL, key string) int {
 // before the adopted-stream idle guard. Chunked requests reserve the full
 // 32 MiB request cap each, so eight stalled requests exhaust the default
 // 256 MiB inflight budget and a healthy request is refused with 503. Every
-// body read must instead honor the shared upstreamStreamIdleTimeout, cancel
+// body read must instead honor the shared upstream_stream_idle_timeout, cancel
 // the attempt, release its reservation, and let the healthy request proceed.
 func TestTarpitErrorBodyReleasesChunkedInflightBudget(t *testing.T) {
 	for _, tc := range []struct {
@@ -163,8 +154,8 @@ func TestTarpitErrorBodyReleasesChunkedInflightBudget(t *testing.T) {
 		{"quota_429_body_peek", http.StatusTooManyRequests},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			shortUpstreamIdleBound(t)
 			cfg := config.Default()
+			cfg.UpstreamStreamIdleTimeout = tarpitIdleBound
 			// One retry guarantees the 5xx drain path runs on the first
 			// attempt; the final attempt's body read is the second guarded
 			// read. A 429 runs quota429Peek on both attempts.
@@ -233,8 +224,8 @@ func TestTarpitErrorBodyReleasesChunkedInflightBudget(t *testing.T) {
 // body used to starve every later request; canceling at the shared idle bound
 // must release the slot so the healthy request proceeds.
 func TestTarpitBodylessErrorReleasesRequestSlot(t *testing.T) {
-	shortUpstreamIdleBound(t)
 	cfg := config.Default()
+	cfg.UpstreamStreamIdleTimeout = tarpitIdleBound
 	cfg.MaxRetries = 1
 	cfg.BaseBackoff = time.Millisecond
 	cfg.MaxBackoff = time.Millisecond

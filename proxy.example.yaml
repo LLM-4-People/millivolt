@@ -73,6 +73,26 @@ read_header_timeout: 10s
 #   type: duration · range >= 0s (0s = no timeout) · default 2m
 idle_timeout: 2m
 
+# How long one inbound body read may wait for progress. Re-armed before every read and
+# cleared at EOF or Close. Must not exceed request_body_read_timeout. Applies to requests
+# started after reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 30s
+request_body_idle_timeout: 30s
+
+# Absolute bound for reading one inbound request body after headers. Must be at least
+# request_body_idle_timeout. Applies to requests started after reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 10m
+request_body_read_timeout: 10m
+
+# Generic per-write bound for buffered responses. Streaming owners may arm a shorter
+# bound. Must be at least sse_write_progress_timeout. Applies to requests started after
+# reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 10m
+response_write_timeout: 10m
+
 # Soft cap on Go runtime managed memory (heap, stacks, runtime), applied once at startup.
 # 0 auto-detects a finite cgroup memory ceiling at 80% (ceilings below 80MiB are ignored)
 # and otherwise leaves the runtime unbounded. GOMEMLIMIT wins when set; GOGC is
@@ -141,6 +161,24 @@ auto_token_refresh: true
 #   type: duration · range >= 0s (0s = no header cap) · default 5m
 upstream_timeout: 5m
 
+# How long establishing a new upstream connection may take. Applies to new connections
+# after reload; in-flight streams keep their transport.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 30s
+upstream_dial_timeout: 30s
+
+# TCP keepalive interval for upstream connections. Applies to new connections after
+# reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 30s
+upstream_dial_keepalive: 30s
+
+# How long the TLS handshake with an upstream may take. Applies to new connections after
+# reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 10s
+upstream_tls_handshake_timeout: 10s
+
 # One upstream metadata budget for transparent key refresh, all model pages and optional
 # enrichment. Never applies to LLM streams. New discoveries use reloaded limits.
 # Hot-reload: yes.
@@ -181,11 +219,36 @@ max_idle_conns_per_host: 512
 #   type: duration · range >= 0s (0s = never expire) · default 90s
 idle_conn_timeout: 90s
 
+# Cancel an upstream response body after this much silence. Releases the handler, upstream
+# connection and scheduler slot. New response bodies use the reloaded value.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 10m
+upstream_stream_idle_timeout: 10m
+
+# Fallback bound for one whole-document upstream read when the caller supplied no
+# deadline. Buffered reads only; streaming SSE is never subject to it.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 2m
+whole_document_read_timeout: 2m
+
+# Ceiling for whole-document upstream reads. Must cover whole_document_read_timeout and
+# models_discovery_timeout.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 10m
+whole_document_read_max: 10m
+
 # How often a quiet streaming socket gets a `: keepalive` comment (queue wait, operator
 # hold, TTFB, mid-stream gaps). Range 1ns..10m. Applies to streams started after reload.
 # Hot-reload: yes.
 #   type: duration · range 1ns..10m · default 15s
 sse_keepalive_interval: 15s
+
+# Per-event and keepalive write bound for a client-facing SSE stream. A stalled reader
+# fails that write instead of pinning shutdown. Must not exceed response_write_timeout.
+# Applies to streams started after reload.
+# Hot-reload: yes.
+#   type: duration · range > 0s · default 1m
+sse_write_progress_timeout: 1m
 
 # ---- Queue & retry ----
 # Per-key concurrency, transparent 429/5xx retry, and quality re-asks.

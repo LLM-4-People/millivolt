@@ -9,41 +9,38 @@ import (
 	"time"
 )
 
-// Delivery deadlines are safety guardrails, not operator tunables. The server
+// Delivery deadlines are operator settings owned by config. The server
 // deliberately has no WriteTimeout (it would cut long-lived SSE streams) and
-// no global ReadTimeout (a legitimate 32 MiB upload can be slow), but neither
-// may be unbounded: a peer that stops reading or dribbles a body would
-// otherwise pin its handler, socket, upstream generation and scheduler slot
-// forever, and shutdown/restart drain could never finish.
-const (
-	// requestBodyReadDeadline is the absolute bound on reading one request
-	// body after headers. At the 32 MiB default body cap this allows about
-	// 55 KiB/s.
-	requestBodyReadDeadline = 10 * time.Minute
-	// responseWriteDeadline bounds any single buffered write (exports,
-	// backups, debug downloads). Streaming surfaces arm a shorter deadline
-	// per event at their own owner.
-	responseWriteDeadline = 10 * time.Minute
-)
-
-// requestBodyIdleTimeout bounds the wait for the next body read. It is
-// re-armed before every read, inside the absolute requestBodyReadDeadline, so
-// a stalled upload fails long before the absolute cap and releases its
-// admission reservation while a slow but progressing upload still completes.
-// A package variable is the deterministic test seam; production never
-// changes it.
-var requestBodyIdleTimeout = 30 * time.Second
+// no global ReadTimeout (a legitimate 32 MiB upload can be slow), but the
+// request and response boundaries still enforce configured progress bounds:
+// a peer that stops reading or dribbles a body would otherwise pin its
+// handler, socket, upstream generation and scheduler slot forever, and
+// shutdown/restart drain could never finish.
+type deadlinePolicy struct {
+	bodyIdle      time.Duration
+	bodyRead      time.Duration
+	responseWrite time.Duration
+}
 
 // deadlineHandler arms the request-body progress deadline at the outermost
 // server boundary and wraps the writer so every write re-arms a progress
 // deadline. It is the one delivery-level choke point, so no handler can bypass
-// it.
-type deadlineHandler struct{ next http.Handler }
+// it. policy is resolved once per request so a reload applies to new requests
+// and in-flight requests keep the values they started with.
+type deadlineHandler struct {
+	next   http.Handler
+	policy func() deadlinePolicy
+}
 
 func (h deadlineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.policy == nil {
+		http.Error(w, "delivery policy unavailable", http.StatusInternalServerError)
+		return
+	}
+	policy := h.policy()
 	if r.Body != nil && r.Body != http.NoBody {
 		rc := http.NewResponseController(w)
-		absolute := time.Now().Add(requestBodyReadDeadline)
+		absolute := time.Now().Add(policy.bodyRead)
 		// Arm the absolute bound before the handler runs (the pre-progress
 		// contract), then let the wrapper replace it with the shorter idle
 		// bound before every read.
@@ -51,17 +48,20 @@ func (h deadlineHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body = &progressReadCloser{
 			body:            r.Body,
 			setReadDeadline: rc.SetReadDeadline,
-			idle:            requestBodyIdleTimeout,
+			idle:            policy.bodyIdle,
 			absolute:        absolute,
 		}
 	}
-	h.next.ServeHTTP(&deadlineResponseWriter{ResponseWriter: w}, r)
+	h.next.ServeHTTP(&deadlineResponseWriter{
+		ResponseWriter: w,
+		responseWrite:  policy.responseWrite,
+	}, r)
 }
 
 // progressReadCloser re-arms the connection read deadline before each body
 // read. net/http's body Read returns the data currently available, so one
 // deadline per call measures progress between reads, not how long the whole
-// upload takes. The absolute bound is the requestBodyReadDeadline value
+// upload takes. The absolute bound is the request_body_read_timeout value
 // captured when the handler started, so a peer that keeps trickling bytes
 // cannot extend delivery forever.
 type progressReadCloser struct {
@@ -79,18 +79,30 @@ func (b *progressReadCloser) Read(p []byte) (int, error) {
 	// A writer without deadline support (httptest.ResponseRecorder) leaves the
 	// body readable; the real server always supports it.
 	_ = b.setReadDeadline(deadline)
-	return b.body.Read(p)
+	n, err := b.body.Read(p)
+	if err != nil {
+		// The body phase is over. Clear the connection read deadline so it
+		// cannot expire later while the handler is still streaming a response
+		// (common for an idle body bound that is much shorter than a stream).
+		// The next body read, if any, re-arms the bound.
+		_ = b.setReadDeadline(time.Time{})
+	}
+	return n, err
 }
 
-func (b *progressReadCloser) Close() error { return b.body.Close() }
+func (b *progressReadCloser) Close() error {
+	_ = b.setReadDeadline(time.Time{})
+	return b.body.Close()
+}
 
 // deadlineResponseWriter keeps the optional interfaces handlers rely on
 // (Flusher, Hijacker, ResponseController's Unwrap chain) while re-arming the
 // write deadline before each write.
 type deadlineResponseWriter struct {
 	http.ResponseWriter
-	explicit    time.Time
-	hasExplicit bool
+	responseWrite time.Duration
+	explicit      time.Time
+	hasExplicit   bool
 }
 
 func (w *deadlineResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -105,7 +117,7 @@ func (w *deadlineResponseWriter) SetWriteDeadline(t time.Time) error {
 }
 
 func (w *deadlineResponseWriter) Write(p []byte) (int, error) {
-	deadline := time.Now().Add(responseWriteDeadline)
+	deadline := time.Now().Add(w.responseWrite)
 	if w.hasExplicit && w.explicit.Before(deadline) {
 		deadline = w.explicit
 	}
