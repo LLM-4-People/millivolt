@@ -49,18 +49,24 @@ pushes to `testing` run the smaller documentation gate.
    ```
    If `main` is not an ancestor of `testing`, merge `origin/main` into
    `testing` first and resolve conflicts before continuing.
-2. Bump `VERSION` on `testing` to a version newer than every existing `v*` tag.
-   Normal SemVer precedence applies; a prerelease is lower than the same stable
-   version. Commit the bump separately:
+2. For a code-bearing promotion, bump `VERSION` on `testing` to a version
+   newer than every existing `v*` tag. Normal SemVer precedence applies; a
+   prerelease is lower than the same stable version. Commit the bump
+   separately:
    ```sh
    printf '0.3.31\n' > VERSION
    git add VERSION
    git commit -m "bump version to 0.3.31"
    git push origin testing
    ```
+   A docs/site-only promotion may skip this step. `required` detects that every
+   changed path is covered by the docs/site filter (for example Markdown,
+   `docs/`, `site-src/`, the docs and Pages workflows, and `LICENSE`), and the
+   merged main push stays docs-only.
 3. Open a pull request from `testing` to `main`. Wait for the `required` check.
    For every non-Dependabot promotion it verifies that the head commit is
-   already on `testing` and that `VERSION` is newer than every release tag.
+   already on `testing`; code-bearing promotions must also have `VERSION` newer
+   than every release tag.
    If it fails with "Main promotions must use commits already on testing",
    merge the feature branch into `testing` first. If it fails with "VERSION
    must be newer", bump `VERSION` above every tag and push the commit.
@@ -93,10 +99,9 @@ security-only merge does not cut a release because `VERSION` is already tagged.
 Merge `main` back into `testing` and include the fix in the next versioned
 promotion.
 
-Docs and site-only pushes to `testing` skip image work. A non-Dependabot
-promotion to `main` always carries a `VERSION` bump, so a docs-only promotion is
-still a versioned main push and will cut a release; Pages deploys from the same
-merge.
+Docs and site-only pushes to `testing` skip image work. A docs/site-only
+promotion to `main` skips the `VERSION` check; the merged main push remains
+docs-only, so Pages deploys without rebuilding images or cutting a release.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -424,11 +429,12 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 Publication is automatic. After the checks and both container architectures
 pass, a versioned push to `main` cuts a release:
 
-1. A promotion PR owns the version bump. `required` compares VERSION against
-   every existing `v*` tag with SemVer precedence and rejects a non-Dependabot
-   main PR unless VERSION is newer. If VERSION is already tagged, no release is
-   cut: this is the Dependabot security-merge case, and the next versioned
-   promotion releases the change.
+1. A code-bearing promotion PR owns the version bump. `required` compares
+   VERSION against every existing `v*` tag with SemVer precedence and rejects a
+   non-Dependabot main PR unless VERSION is newer. Docs/site-only promotions
+   skip that comparison and stay release-free. If VERSION is already tagged, no
+   release is cut: this is the Dependabot security-merge case, and the next
+   versioned promotion releases the change.
 2. The workflow creates the annotated `v<version>` tag on the reviewed
    promotion merge commit and builds and publishes the multi-arch image with
    `main`, `sha-*`, `version` and (for non-prereleases) `latest` tags, including
@@ -442,12 +448,12 @@ pass, a versioned push to `main` cuts a release:
    never moves them.
 
 Docs and site-only pushes to `testing` skip image work. They validate Markdown
-and the generated site. A non-Dependabot main promotion always carries a VERSION
-bump, so it is a versioned main push and cuts a release; Pages deploys from the
-same merge. A manually pushed `v*` tag still ships exactly as tagged through the
-same pipeline, with the image published before the release is created. VERSION
-must be newer than every existing tag for a promotion, and a manual tag must
-match VERSION. Code-bearing pushes to `testing` publish the moving
+and the generated site. A docs/site-only main promotion also skips the VERSION
+gate; the merged main push stays docs-only, so Pages deploys without rebuilding
+images or cutting a release. A code-bearing main promotion must carry a VERSION
+newer than every existing tag and cuts a release. A manually pushed `v*` tag
+still ships exactly as tagged through the same pipeline, with the image
+published before the release is created. A manual tag must match VERSION. Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
 container builds, without cutting a release or any version tag. Its OCI version
 label reports the embedded VERSION, which can lag the latest release.

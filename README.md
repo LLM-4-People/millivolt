@@ -196,12 +196,13 @@ separate costs. Short local bursts are regressions, not deployment guarantees.
 ## Contributing and promotion
 
 Work lands on `testing` first. `main` is promotion-only and protected: open a
-pull request from `testing`, bump [VERSION](VERSION) above every release tag,
-wait for the `required` check, and merge with a merge commit. CI creates the
-release tag and image; never push `main` or a release tag as part of feature
-work. See the [branch workflow](CONTRIBUTING.md#branch-workflow) for the full
-checklist and [versions and images](docs/operations.md#versions-and-images) for
-publication behavior.
+pull request from `testing`, wait for the `required` check, and merge with a
+merge commit. A code-bearing promotion bumps [VERSION](VERSION) above every
+release tag; a docs/site-only promotion skips that check and does not rebuild
+images. CI creates the release tag and image; never push `main` or a release tag
+as part of feature work. See the [branch workflow](CONTRIBUTING.md#branch-workflow)
+for the full checklist and [versions and images](docs/operations.md#versions-and-images)
+for publication behavior.
 
 ## Configuration and documentation
 

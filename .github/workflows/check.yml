@@ -4,7 +4,9 @@ name: Checks and images
 # - `main` accepts pull requests only. The `main-testing-first` ruleset requires
 #   the `required` check and a merge commit, and it has no bypass actors.
 # - A non-Dependabot pull request to `main` must have its head commit already on
-#   `testing` and a VERSION newer than every existing release tag.
+#   `testing`. A code-bearing promotion must also carry a VERSION newer than
+#   every existing release tag; a docs/site-only promotion skips that check and
+#   does not rebuild images or cut a release.
 # - Dependabot security pull requests are the only exception. They still run the
 #   full gate; a security-only merge does not cut a release.
 # - `publish` tags the reviewed promotion merge and never pushes `main`.
@@ -199,18 +201,38 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Require main promotions to come from testing
+        id: promotion
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin testing
+          git fetch --no-tags origin main testing
           if ! git merge-base --is-ancestor "$HEAD_SHA" origin/testing; then
             echo "::error::Main promotions must use commits already on testing."
             exit 1
           fi
+          # Keep these docs/site patterns aligned with the push paths-ignore
+          # filter above. A docs-only promotion skips the VERSION gate and does
+          # not rebuild images or cut a release after merge.
+          is_docs_path() {
+            case "$1" in
+              docs/**|site-src/**|scripts/build_site.py|requirements-docs.txt|LICENSE|*.md|.github/workflows/docs.yml|.github/workflows/pages.yml|.github/workflows/dependency-review.yml|.github/workflows/security.yml) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+          base="$(git merge-base origin/main "$HEAD_SHA")"
+          docs_only=true
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            if ! is_docs_path "$path"; then
+              docs_only=false
+              break
+            fi
+          done < <(git diff --name-only "$base" "$HEAD_SHA")
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
       - name: Require an unreleased version for main promotions
-        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only != 'true'
         run: |
           set -euo pipefail
           git fetch --tags --force origin
@@ -224,7 +246,11 @@ jobs:
           {
             echo "### Main promotion"
             echo "- Head commit is already on testing."
-            echo "- VERSION is newer than every existing release tag."
+            if [ "${{ steps.promotion.outputs.docs_only }}" = "true" ]; then
+              echo "- This is a docs/site-only promotion. The VERSION check is skipped and the merge will not rebuild images or cut a release."
+            else
+              echo "- VERSION is newer than every existing release tag."
+            fi
             echo "- Merge with a merge commit. CI tags this merge and never pushes main."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Summarize the Dependabot exception

@@ -98,6 +98,15 @@ def check_workflows(errors: list[str]) -> None:
         errors.append("check.yml: tag identity must use the checked-out commit")
 
     required_steps = steps(required_job)
+    promotion_step = next((step for step in required_steps
+                           if step.get("name") == "Require main promotions to come from testing"), {})
+    promotion_run = str(promotion_step.get("run", ""))
+    if "docs_only" not in promotion_run or "git diff --name-only" not in promotion_run:
+        errors.append("check.yml: main promotions must classify docs-only changes")
+    for ignored_path in push.get("paths-ignore", []):
+        pattern = ignored_path.replace("**/*.md", "*.md")
+        if pattern not in promotion_run:
+            errors.append(f"check.yml: docs-only promotion check is missing {ignored_path}")
     version_step = next((step for step in required_steps
                          if step.get("name") == "Require an unreleased version for main promotions"), {})
     if not version_step:
@@ -106,6 +115,8 @@ def check_workflows(errors: list[str]) -> None:
         errors.append("check.yml: version promotion check must fetch release tags")
     elif "-newer-than" not in str(version_step.get("run", "")):
         errors.append("check.yml: version promotion check must compare SemVer precedence")
+    elif "steps.promotion.outputs.docs_only" not in str(version_step.get("if", "")):
+        errors.append("check.yml: docs-only promotions must skip the version check")
 
     publish = jobs.get("publish") or {}
     image_index = named_step(publish, "Publish verified multi-platform image")
