@@ -34,6 +34,39 @@ func TestVersionValidation(t *testing.T) {
 	}
 }
 
+func TestVersionComparison(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want int
+	}{
+		{"0.1.0", "0.1.0", 0},
+		{"0.1.1", "0.1.0", 1},
+		{"0.9.9", "0.10.0", -1},
+		{"1.0.0-alpha", "1.0.0", -1},
+		{"1.0.0", "1.0.0-alpha", 1},
+		{"1.0.0-alpha", "1.0.0-alpha.1", -1},
+		{"1.0.0-alpha.1", "1.0.0-alpha.beta", -1},
+		{"1.0.0-beta.2", "1.0.0-beta.11", -1},
+		{"1.0.0-rc.2", "1.0.0-rc.1", 1},
+		{"0.3.30", "0.3.30-rc1", 1},
+		{"0.3.30-rc2", "0.3.30-rc1", 1},
+		{"1.0.0-alpha-1", "1.0.0-alpha-2", -1},
+		{"999999999999999999999.0.0", "999999999999999999998.0.0", 1},
+		{"0.3.30-rc.2", "0.3.30-rc.11", -1},
+	}
+	for _, test := range tests {
+		got, err := CompareVersions(test.a, test.b)
+		if err != nil || got != test.want {
+			t.Errorf("CompareVersions(%q, %q) = %d, %v; want %d", test.a, test.b, got, err, test.want)
+		}
+	}
+	for _, test := range [][2]string{{"bad", "0.1.0"}, {"0.1.0", "bad"}} {
+		if _, err := CompareVersions(test[0], test[1]); err == nil {
+			t.Errorf("accepted invalid version comparison %q, %q", test[0], test[1])
+		}
+	}
+}
+
 func TestRevisionValidation(t *testing.T) {
 	for _, revision := range []string{strings.Repeat("a", 40), strings.Repeat("1f", 32)} {
 		if err := ValidateRevision(revision); err != nil {

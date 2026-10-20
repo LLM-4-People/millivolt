@@ -61,6 +61,93 @@ func ValidateRevision(revision string) error {
 	return nil
 }
 
+// CompareVersions compares two validated release versions using SemVer 2.0.0
+// precedence. It returns -1 when a sorts before b, 0 when they are equal, and
+// 1 when a sorts after b. Build metadata is not accepted.
+func CompareVersions(a, b string) (int, error) {
+	if err := ValidateVersion(a); err != nil {
+		return 0, err
+	}
+	if err := ValidateVersion(b); err != nil {
+		return 0, err
+	}
+	aCore, aPre, _ := strings.Cut(a, "-")
+	bCore, bPre, _ := strings.Cut(b, "-")
+	if comparison := compareVersionCore(aCore, bCore); comparison != 0 {
+		return comparison, nil
+	}
+	switch {
+	case aPre == "" && bPre == "":
+		return 0, nil
+	case aPre == "":
+		return 1, nil
+	case bPre == "":
+		return -1, nil
+	}
+	aIDs := strings.Split(aPre, ".")
+	bIDs := strings.Split(bPre, ".")
+	for index := 0; index < len(aIDs) && index < len(bIDs); index++ {
+		if comparison := comparePrereleaseID(aIDs[index], bIDs[index]); comparison != 0 {
+			return comparison, nil
+		}
+	}
+	switch {
+	case len(aIDs) < len(bIDs):
+		return -1, nil
+	case len(aIDs) > len(bIDs):
+		return 1, nil
+	}
+	return 0, nil
+}
+
+func compareVersionCore(a, b string) int {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	for index := 0; index < 3; index++ {
+		if comparison := compareNumericID(aParts[index], bParts[index]); comparison != 0 {
+			return comparison
+		}
+	}
+	return 0
+}
+
+func comparePrereleaseID(a, b string) int {
+	aNumeric := isNumericID(a)
+	bNumeric := isNumericID(b)
+	switch {
+	case aNumeric && bNumeric:
+		return compareNumericID(a, b)
+	case aNumeric:
+		return -1
+	case bNumeric:
+		return 1
+	default:
+		return strings.Compare(a, b)
+	}
+}
+
+func isNumericID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func compareNumericID(a, b string) int {
+	if len(a) != len(b) {
+		if len(a) < len(b) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
 // BuildInfo identifies the running binary. A nil Modified means the source
 // tree's cleanliness is unknown, not clean. Revision is "unknown" when absent.
 type BuildInfo struct {
