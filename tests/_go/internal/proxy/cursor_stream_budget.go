@@ -57,12 +57,15 @@ func cursorPendingRun(t *testing.T, callID string, argsLen int) (*providerformat
 	return run, pw
 }
 
+// waitCursorClosed is the canonical bounded wait for the pump's asynchronous
+// teardown. RunTurn can consume a terminal event before the pump runs its
+// deferred Close, so reading Closed immediately is a scheduling race.
 func waitCursorClosed(t *testing.T, run *providerformat.CursorRun) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for !run.Closed() {
 		if time.Now().After(deadline) {
-			t.Fatal("run did not fail closed at the aggregate budget")
+			t.Fatal("run did not close within 2s")
 		}
 		time.Sleep(time.Millisecond)
 	}

@@ -427,17 +427,20 @@ func TestCursorUnparkedStalledBodyFailsAtIdleGuard(t *testing.T) {
 	}, time.Hour)
 	run.Start()
 	t.Cleanup(run.Close)
-	done := make(chan struct{})
+	result := make(chan providerformat.TurnResult, 1)
 	go func() {
-		_ = run.RunTurn(t.Context(), func(map[string]any) error { return nil })
-		close(done)
+		result <- run.RunTurn(t.Context(), func(map[string]any) error { return nil })
 	}()
 	select {
-	case <-done:
+	case got := <-result:
+		if got.Outcome != providerformat.TurnErrored || got.Err == nil {
+			t.Fatalf("idle guard result = %v err=%v, want TurnErrored", got.Outcome, got.Err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("unparked stalled body did not fail at the generic idle bound")
 	}
-	if !run.Closed() {
-		t.Fatal("idle guard returned without closing the run")
-	}
+	// RunTurn can consume the terminal event before the pump runs its deferred
+	// Close. The pump owns asynchronous teardown; wait for it rather than
+	// asserting an unsynchronized Closed postcondition.
+	waitCursorClosed(t, run)
 }

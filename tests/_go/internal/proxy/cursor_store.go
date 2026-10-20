@@ -186,13 +186,7 @@ func TestCursorRunPumpExitMarksClosed(t *testing.T) {
 	run := format.NewCursorRun(io.Discard, serverIn, nil, func() { _ = testIn.Close() }, 5*time.Second)
 	run.Start()
 	testIn.Close() // upstream stream dies while parked
-	deadline := time.Now().Add(2 * time.Second)
-	for !run.Closed() {
-		if time.Now().After(deadline) {
-			t.Fatal("pump exit did not mark the run closed")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitCursorClosed(t, run)
 	// A resume against the dead run fails cleanly instead of hitting the pipe.
 	res := run.ResumeTurn(t.Context(), map[string]format.ToolResult{"call-x": {Text: "ok"}}, "", func(map[string]any) error { return nil })
 	if res.Outcome != format.TurnErrored {
