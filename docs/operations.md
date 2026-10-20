@@ -636,20 +636,22 @@ The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64`.
 Publication is limited to this repository's pushes to `main`, matching
 release tags, and `testing`-branch pushes (which publish only the moving
-`testing` tag), and depends on those checks. Pull requests do not publish
-images.
+`testing` tag), and depends on those checks. A main push whose `VERSION` is
+already tagged, such as a Dependabot security merge, does not publish; the next
+versioned promotion includes it. Pull requests do not publish images.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving production image for the released current `main` revision; updated by non-prerelease code-bearing main-branch pushes. A prerelease does not move it. |
+| `main` | Moving production image for the released current `main` revision; updated by non-prerelease versioned main-branch pushes. A prerelease does not move it. |
 | `testing` | Moving development image after a successful testing-branch push; never a release. Its OCI version label reports the embedded `VERSION`, which can lag the latest release. |
-| `sha-<full commit>` | Release tag for the exact cut revision built and published. The cut revision can include the workflow's `VERSION`-bump commit, so it can differ from the push trigger SHA. Testing pushes do not publish it. |
-| Version from `VERSION` | Created by the matching `v`-prefixed release tag, whether cut by a main-branch push or pushed manually. |
+| `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it. |
+| Version from `VERSION` | Created by the matching `v`-prefixed release tag on the promotion merge commit, or by a manually pushed tag. |
 | `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a main-branch push. Prereleases and testing pushes do not update it. |
 
 Release builds request an SBOM and max-mode provenance. The image and its
-attestations are published before the branch and release are updated; a failed
-image build does not leave a public release pointing at a missing image. Verify
+attestations are published before the tag and release are updated; the workflow
+never pushes `main`. A failed image build does not leave a public release
+pointing at a missing image. Verify
 the published manifest and attestations with `docker buildx imagetools inspect`
 and pin the digest for deployment. A tag name alone is not an integrity check.
 

@@ -18,23 +18,25 @@ or push a completed, checked feature directly there when that is authorized.
 
 Promotion from `testing` to `main` is a separate deliberate integration after
 validation, not part of an ordinary feature push. Do not push release tags as a
-side effect of feature work: CI cuts releases itself. Pull requests and pushes
-to `main` and `testing` run the full gate; docs and site-only pushes run the
-smaller documentation gate. Production image publishing remains restricted to
-`main` and version tags, and `testing`-branch pushes publish only the moving
-development alias.
+side effect of feature work: CI tags and publishes releases itself. Pull requests
+and pushes to `main` and `testing` run the full gate; docs and site-only pushes
+run the smaller documentation gate. Production image publishing remains
+restricted to `main` and version tags, and `testing`-branch pushes publish only
+the moving development alias.
 
 Dependabot version updates target `testing`. Dependabot security updates target
-the default branch, so merge a security PR into `main`, cut the patch release,
-then merge `main` back into `testing` before continuing feature work.
+the default branch. They are the documented exception to the testing-first rule:
+merge the security PR into `main`, then merge `main` back into `testing` before
+continuing feature work. A security-only merge does not cut a release; the next
+versioned promotion includes it.
 
 `main` requires a pull request and the `required` check. For every non-Dependabot
-pull request targeting `main`, `required` also verifies that the head commit is
-already an ancestor of `testing`; a feature branch must be merged into `testing`
-first. Dependabot security pull requests are the documented exception because
-GitHub opens them against the default branch. The release workflow's version
-commit is the only direct-push path, and it is limited to the GitHub Actions app;
-people have no bypass.
+pull request targeting `main`, `required` verifies that the head commit is
+already an ancestor of `testing` and that `VERSION` is newer than the latest
+release tag. Merge the feature work into `testing` and bump `VERSION` in the
+promotion before opening the PR. The release workflow only tags and publishes the
+reviewed promotion commit; it never pushes `main`, and no person or app has a
+bypass.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -360,18 +362,20 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 ```
 
 Publication is automatic. After the checks and both container architectures
-pass, every code-bearing push to `main` cuts a release:
+pass, a versioned push to `main` cuts a release:
 
-1. The next version is the higher of VERSION and the newest `v*` tag. If that
-   version is already tagged, the patch number increments; an untagged VERSION
-   (a manual bump or one carried by a promotion merge) ships as-is.
-2. The workflow creates the local VERSION commit and annotated `v<version>`
-   tag, builds and publishes the multi-arch image with `main`, `sha-*`,
-   `version` and (for non-prereleases) `latest` tags, including an SBOM and
-   max-mode provenance. The `sha-*` tag and OCI revision label name the cut
-   revision that was built, which can include the workflow's VERSION-bump commit.
-3. Only after the image exists does it push the branch and tag and create the
-   GitHub release. Release notes filter merge and version-bump commits, dedupe
+1. A promotion PR owns the version bump. `required` compares VERSION against
+   every existing `v*` tag with SemVer precedence and rejects a non-Dependabot
+   main PR unless VERSION is newer. If VERSION is already tagged, no release is
+   cut: this is the Dependabot security-merge case, and the next versioned
+   promotion releases the change.
+2. The workflow creates the annotated `v<version>` tag on the reviewed
+   promotion merge commit and builds and publishes the multi-arch image with
+   `main`, `sha-*`, `version` and (for non-prereleases) `latest` tags, including
+   an SBOM and max-mode provenance. The `sha-*` tag and OCI revision label name
+   the promotion merge commit that was built.
+3. Only after the image exists does it push the tag and create the GitHub
+   release. It never pushes `main`. Release notes filter merge commits, dedupe
    subjects, use the lowercase image path, include the digest, and link the
    compare range. A failed image build leaves no public release pointing at a
    missing image. `main` and `latest` exclude prereleases; the `testing` alias
@@ -381,9 +385,8 @@ Docs and site-only pushes never cut a release or rebuild images. They validate
 Markdown and the generated site; a main-branch docs/site push deploys Pages
 instead. A manually pushed `v*` tag still ships exactly as tagged through the
 same pipeline, with the image published before the release is created. VERSION
-is recomputed from the higher of the file and the newest tag on every release,
-so a promotion merge that resolves a VERSION conflict to either side is safe.
-Code-bearing pushes to `testing` publish the moving
+must be newer than every existing tag for a promotion, and a manual tag must
+match VERSION. Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
 container builds, without cutting a release or any version tag. Its OCI version
 label reports the embedded VERSION, which can lag the latest release.
@@ -402,10 +405,10 @@ Git routing/configuration variables before checking
 source identity, so another worktree or external ignore policy cannot satisfy
 the release checks accidentally.
 
-Only push the intended branch and release tag after that check succeeds. The
-workflow publishes images automatically and creates the release with notes
-generated from the commit log. Native container checks run before the
-multi-platform publish job.
+Only push the intended release tag after that check succeeds. Main changes go
+through the protected pull request path. The workflow publishes images
+automatically and creates the release with notes generated from the commit log.
+Native container checks run before the multi-platform publish job.
 
 For local container verification, build with Docker, resolve the image's
 immutable ID, then use the same fixture as CI:
