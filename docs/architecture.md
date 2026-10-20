@@ -23,6 +23,18 @@ defines their supported combinations.
 | [internal/web](../internal/web/aggregate.go) | Embedded shell/assets, bootstrap, canonical history projection and chart/explorer/log aggregates. |
 | [internal/mcp](../internal/mcp) | The MCP tool server for the operator plane: one HTTP client owner (credential, request building, error extraction), one scope-filter owner, one tool registry served by the proxy's streamable HTTP `/mcp` endpoint, the destructive-call guards, and the streamable HTTP handler the proxy mounts at `/mcp`. It owns no analytical projection of its own. |
 
+## Release identity and promotion
+
+[version.go](../version.go) owns VERSION validation and SemVer precedence. The
+[workflow](../.github/workflows/check.yml) owns the promotion gate and release
+publication: `required` checks testing ancestry and a VERSION newer than every
+tag, and `publish` tags the reviewed promotion merge, publishes the image and
+creates the release without pushing `main`. The `main-testing-first` ruleset
+adds the pull-request and merge-commit requirements with no bypass actors.
+[Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
+checklist; [operations](operations.md#versions-and-images) owns the published
+tag contract.
+
 ## Request and scheduling path
 
 `readRequest` retains bounded original bytes and calls the single metadata

@@ -1,5 +1,14 @@
 name: Checks and images
 
+# Promotion policy:
+# - `main` accepts pull requests only. The `main-testing-first` ruleset requires
+#   the `required` check and a merge commit, and it has no bypass actors.
+# - A non-Dependabot pull request to `main` must have its head commit already on
+#   `testing` and a VERSION newer than every existing release tag.
+# - Dependabot security pull requests are the only exception. They still run the
+#   full gate; a security-only merge does not cut a release.
+# - `publish` tags the reviewed promotion merge and never pushes `main`.
+
 on:
   push:
     # Only the long-lived branches and release tags publish or release. PR
@@ -176,12 +185,15 @@ jobs:
 
       # Main is promoted from testing. Dependabot security updates are the one
       # documented exception because GitHub opens them against the default
-      # branch; they still pass the same checks and are merged back afterwards.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # branch; both promotion checks are skipped for them, but they still pass
+      # the full gate and are merged back afterwards.
+      - name: Check out the promotion merge
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Set up Go for version validation
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         with:
           go-version-file: go.mod
@@ -206,6 +218,23 @@ jobs:
             [ -n "$tag" ] || continue
             go run -mod=readonly ./cmd/release -newer-than "${tag#v}" >/dev/null
           done < <(git tag -l 'v*')
+      - name: Summarize the main promotion
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
+        run: |
+          {
+            echo "### Main promotion"
+            echo "- Head commit is already on testing."
+            echo "- VERSION is newer than every existing release tag."
+            echo "- Merge with a merge commit. CI tags this merge and never pushes main."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarize the Dependabot exception
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login == 'dependabot[bot]'
+        run: |
+          {
+            echo "### Dependabot security promotion"
+            echo "- The testing-ancestry and VERSION checks are skipped for this PR."
+            echo "- A security-only merge does not cut a release. Merge main back into testing; the next versioned promotion releases it."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
     needs: [checks, container]
@@ -220,6 +249,9 @@ jobs:
       packages: write
     env:
       GOTOOLCHAIN: local
+    # A main push whose VERSION is already tagged, normally a Dependabot
+    # security merge, skips the image and release steps. The required check
+    # prevents an ordinary promotion from reaching that state.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

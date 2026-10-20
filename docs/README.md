@@ -28,7 +28,7 @@ that matches what you need to do.
 ## Project
 
 - [What you get](../README.md#what-you-get) - the short feature overview.
-- [Contributing](../CONTRIBUTING.md) - development, checks, screenshots, and release policy.
+- [Contributing](../CONTRIBUTING.md) - development, checks, branch promotion, screenshots, and release policy.
 - [Security](../SECURITY.md) - exposure boundary, reporting, and supported versions.
 - [Releases](https://github.com/LLM-4-People/millivolt/releases) - published versions and notes.
 - [License](../LICENSE) - MIT terms and dependency notices.

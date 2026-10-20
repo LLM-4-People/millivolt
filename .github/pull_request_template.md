@@ -9,7 +9,19 @@ Closes #
 ## Target branch
 
 - [ ] `testing` (default)
-- [ ] `main` promotion, with the `testing` history already merged forward
+- [ ] `main` promotion from `testing`, with `VERSION` bumped above every release tag (Dependabot security pull requests skip the version check)
+
+For a `main` promotion, merge with a merge commit. Squash, rebase, and direct
+pushes are disabled by the `main-testing-first` ruleset, which has no bypass
+actors. The `required` check verifies the testing ancestry and version bump.
+
+## Main promotion
+
+Complete only when targeting `main`:
+
+- [ ] The head commit is already on `testing`.
+- [ ] `VERSION` is newer than every existing `v*` release tag.
+- [ ] I will merge with a merge commit and will not add a ruleset bypass.
 
 ## Type of change
 
