@@ -2,16 +2,29 @@
 // stylesheets, the pair persists as one value, a switch recolors the canvas,
 // and every theme/mode combination clears the contrast floor.
 //
-// The dashboard shell is assembled the way ui_check.js assembles it: jsdom
-// does not fetch external assets, so every stylesheet and script referenced by
-// index.html is inlined in document order.
+// The dashboard shell is assembled the way the browser sees it: stylesheets
+// are inlined because jsdom does not fetch them from disk, while scripts keep
+// their <script src="/dash/..."> tags and are loaded through a local resource
+// loader. Building script elements as strings would make the fixture's own
+// test data an HTML-injection sink, which CodeQL rightly rejects.
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('jsdom');
+const { JSDOM, requestInterceptor } = require('jsdom');
 
 const STATIC = path.join(__dirname, '..', 'internal/web/static');
 const TEST_DASHBOARD_VERSION = '0000000000000001';
 const STORAGE_KEY = 'millivolt.theme';
+
+const dashScripts = requestInterceptor(request => {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith('/dash/')) return undefined;
+  const rel = decodeURIComponent(url.pathname.slice('/dash/'.length));
+  const file = path.resolve(STATIC, rel);
+  if (!file.startsWith(STATIC + path.sep)) return undefined;
+  return new Response(fs.readFileSync(file), {
+    headers: { 'Content-Type': 'application/javascript' },
+  });
+});
 
 function assembleHTML() {
   let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
@@ -19,18 +32,14 @@ function assembleHTML() {
   html = html.replace('__DASHBOARD_BOOTSTRAP__', '{"pending_revision":0}');
   html = html.replace(/<link\s+rel="stylesheet"\s+href="\/dash\/([^"]+)"\s*>/g, (_, ref) =>
     `<style>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</style>`);
-  const scripts = [];
-  html = html.replace(/<script\b[^>]*\bsrc="\/dash\/([^"]+)"[^>]*><\/script>/g, (_, ref) => {
-    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</script>`);
-    return '';
-  });
-  return html.replace('</body>', () => scripts.join('\n') + '\n</body>');
+  return html;
 }
 
 function boot(stored) {
   const dom = new JSDOM(assembleHTML(), {
     url: 'http://127.0.0.1:8471/',
     runScripts: 'dangerously',
+    resources: { interceptors: [dashScripts] },
     pretendToBeVisual: true,
     beforeParse(win) {
       if (stored) {
