@@ -9,20 +9,14 @@ import (
 
 const sseKeepaliveComment = ": keepalive\n\n"
 
-// sseWriteProgressDeadline bounds one client-facing stream write; a stalled
-// reader fails the write and releases the pacer instead of pinning shutdown.
-// A package variable is the deterministic test seam; production never changes
-// it.
-var sseWriteProgressDeadline = time.Minute
-
 // sseKeepaliveInterval is how often a quiet SSE socket gets a comment.
 // Chat Completions is data-only SSE: spec-compliant clients (including the
 // OpenAI SDKs) ignore comment lines. The Responses API also emits typed
 // `{"type":"keepalive","sequence_number":N}` data events during long
 // reasoning; those are Responses-only and would break a Chat Completions
 // parser, so this writer always uses the comment form. The interval comes
-// from config.SSEKeepaliveInterval (default 15s) and is captured per pacer
-// so a reload applies to new streams only.
+// from config.SSEKeepaliveInterval and is captured per pacer so a reload
+// applies to new streams only.
 
 // Compile-time: streamBody / transformResponse / cursor emitters type-assert
 // w.(http.Flusher). The wrapper is assigned to w, so Flush must exist.
@@ -40,21 +34,30 @@ var _ http.Flusher = (*ssePacer)(nil)
 // their sockets stay open on this server (no WriteTimeout) but a client
 // TTFB timeout can still drop them.
 type ssePacer struct {
-	mu         sync.Mutex
-	w          http.ResponseWriter
-	stop       chan struct{}
-	done       chan struct{}
-	armed      bool
-	started    bool
-	sse        bool // true only after commitSSELocked (not a JSON status)
-	stopped    bool
-	stopClosed bool
-	lastWrite  time.Time
-	interval   time.Duration
+	mu            sync.Mutex
+	w             http.ResponseWriter
+	stop          chan struct{}
+	done          chan struct{}
+	armed         bool
+	started       bool
+	sse           bool // true only after commitSSELocked (not a JSON status)
+	stopped       bool
+	stopClosed    bool
+	lastWrite     time.Time
+	interval      time.Duration
+	writeProgress time.Duration
 }
 
-func newSSEPacer(w http.ResponseWriter, interval time.Duration) *ssePacer {
-	return &ssePacer{w: w, lastWrite: time.Now(), interval: interval}
+func newSSEPacer(w http.ResponseWriter, interval, writeProgress time.Duration) *ssePacer {
+	return &ssePacer{w: w, lastWrite: time.Now(), interval: interval, writeProgress: writeProgress}
+}
+
+// newSSEPacerFor is the single server-side reader of the two stream timing
+// settings. Both stream paths construct their pacer here so the config
+// snapshot is taken once and no caller can drift from the other.
+func (s *Server) newSSEPacerFor(w http.ResponseWriter) *ssePacer {
+	cfg := s.cfg()
+	return newSSEPacer(w, cfg.SSEKeepaliveInterval, cfg.SSEWriteProgressTimeout)
 }
 
 func (p *ssePacer) Header() http.Header { return p.w.Header() }
@@ -101,7 +104,9 @@ func (p *ssePacer) Write(b []byte) (int, error) {
 func (p *ssePacer) writeSSELocked(b []byte) (int, error) {
 	// A client that stops reading must not pin the handler (and Stop) inside
 	// the network write forever. Re-armed per write, including keepalives.
-	_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(sseWriteProgressDeadline))
+	if p.writeProgress > 0 {
+		_ = http.NewResponseController(p.w).SetWriteDeadline(time.Now().Add(p.writeProgress))
+	}
 	return p.w.Write(b)
 }
 

@@ -375,9 +375,9 @@ func TestModelsDiscoveryDeadlineCoversBodiesAcrossFormats(t *testing.T) {
 // deadline at all.
 func TestModelsDiscoveryHonorsConfiguredTimeoutBeyondReadFallback(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		const bodyDelay = wholeDocumentReadTimeout + 30*time.Second
 		cfg := config.Default()
 		cfg.ModelsDiscoveryTimeout = 5 * time.Minute
+		bodyDelay := cfg.WholeDocumentReadTimeout + 30*time.Second
 		body := &delayedReadBody{
 			delay:   bodyDelay,
 			data:    []byte(`{"data":[{"id":"model-one"}]}`),

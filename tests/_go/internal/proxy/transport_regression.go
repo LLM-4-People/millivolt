@@ -155,7 +155,7 @@ func TestRegressionResponseConnectionNominated(t *testing.T) {
 
 func TestDebugWrappedPacerKeepsErrorFraming(t *testing.T) {
 	w := httptest.NewRecorder()
-	p := newSSEPacer(w, time.Hour)
+	p := newSSEPacer(w, time.Hour, time.Minute)
 	p.Start()
 	defer p.Stop()
 	tap := &debugTap{respBody: &cappedWriter{limit: 1024}}
@@ -171,6 +171,27 @@ func TestDebugHeaderInjectionRedactsCredentials(t *testing.T) {
 	b, _ := json.Marshal(headersToHAR(h, ""))
 	if bytes.Contains(b, []byte("audit-secret")) {
 		t.Fatalf("debug request capture retained nested credential: %s", b)
+	}
+}
+
+func TestUpstreamTransportReadsConfigTimeouts(t *testing.T) {
+	cfg := config.Default()
+	cfg.UpstreamDialTimeout = 7 * time.Second
+	cfg.UpstreamDialKeepAlive = 11 * time.Second
+	cfg.UpstreamTLSHandshakeTimeout = 13 * time.Second
+
+	dialer := upstreamDialer(cfg)
+	if dialer.Timeout != cfg.UpstreamDialTimeout || dialer.KeepAlive != cfg.UpstreamDialKeepAlive {
+		t.Fatalf("dialer = (%v, %v), want config (%v, %v)",
+			dialer.Timeout, dialer.KeepAlive, cfg.UpstreamDialTimeout, cfg.UpstreamDialKeepAlive)
+	}
+	client := newUpstreamClient(cfg)
+	tr, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport = %T, want *http.Transport", client.Transport)
+	}
+	if tr.TLSHandshakeTimeout != cfg.UpstreamTLSHandshakeTimeout {
+		t.Fatalf("TLS handshake timeout = %v, want config %v", tr.TLSHandshakeTimeout, cfg.UpstreamTLSHandshakeTimeout)
 	}
 }
 

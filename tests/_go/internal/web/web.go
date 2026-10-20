@@ -161,6 +161,24 @@ func TestIndexAndFaviconMethods(t *testing.T) {
 	}
 	if ico := rec.Body.Bytes(); len(ico) < 6 || ico[0] != 0 || ico[1] != 0 || ico[2] != 1 || ico[3] != 0 {
 		t.Fatal("GET /favicon.ico body is not an ICO")
+	} else {
+		count := int(ico[4]) | int(ico[5])<<8
+		if count != 3 {
+			t.Fatalf("GET /favicon.ico has %d frames, want 16/32/48", count)
+		}
+		sizes := map[int]bool{}
+		for i := 0; i < count; i++ {
+			entry := 6 + i*16
+			if entry+16 > len(ico) {
+				t.Fatalf("GET /favicon.ico frame %d is truncated", i)
+			}
+			sizes[int(ico[entry])] = true
+		}
+		for _, size := range []int{16, 32, 48} {
+			if !sizes[size] {
+				t.Fatalf("GET /favicon.ico is missing the %dpx frame", size)
+			}
+		}
 	}
 
 	rec = httptest.NewRecorder()

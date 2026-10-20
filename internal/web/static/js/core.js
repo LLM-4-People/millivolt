@@ -119,9 +119,20 @@ let storageState = null; // accepted bootstrap signal; never locally incremented
 // Canvas colors resolve from :root tokens (chart series + grid). Entity
 // colors live in ENTITY_TYPES - never a second palette here.
 const COLORS = {};
-['accent', 'accent2', 'err', 'cyan', 'ok', 'warn', 'rl', 'muted', 'border2'].forEach(k => {
-  COLORS[k] = getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
-});
+// refreshChartColors re-reads the canvas palette from the document's current
+// tokens. Boot calls it once; the theme picker calls it again after switching
+// palettes, because a CSS variable change does not repaint an existing canvas.
+function refreshChartColors() {
+  ['accent', 'accent2', 'err', 'cyan', 'ok', 'warn', 'rl', 'muted', 'border2'].forEach(k => {
+    COLORS[k] = getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
+  });
+  // Faint warm gridline (translucent panel border) for chart axes. The alpha
+  // is owned by the dashboard token --chart-grid-a; the literal is the
+  // fallback when the token is unreadable (robustness: a failed or stripped
+  // CSS load must not break the axes).
+  const chartGridA = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chart-grid-a'));
+  COLORS.grid = hexA(COLORS.border2, Number.isFinite(chartGridA) ? chartGridA : 0.5);
+}
 // hexA blends a #rrggbb color into an rgba() string (chart bar fills and the
 // gridline below). A value that is not exact 6-digit hex returns unchanged -
 // a malformed CSS var must never become 'rgba(NaN,NaN,NaN,...)'.
@@ -129,12 +140,7 @@ function hexA(hex, a) {
   const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
   return m ? `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})` : hex;
 }
-// Faint warm gridline (translucent panel border) for chart axes. The alpha
-// is owned by the dashboard token --chart-grid-a; the literal is the
-// fallback when the token is unreadable (robustness: a failed or stripped
-// CSS load must not break the axes).
-const chartGridA = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--chart-grid-a'));
-COLORS.grid = hexA(COLORS.border2, Number.isFinite(chartGridA) ? chartGridA : 0.5);
+refreshChartColors();
 
 // localStorage throws in privacy mode - keep the dashboard alive regardless.
 const storage = {

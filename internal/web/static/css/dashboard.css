@@ -10,15 +10,26 @@
     --border2: #3a342b;
     --text: #e8e4de;
     --muted: #97907e;
-    --accent: #5b8cff;
+    /* The default Instrument Black accent family. The matching Instrument
+       Black block in themes.css repeats these values so a picker swatch can
+       reset to Instrument while another palette is active. */
+    --accent: #7aa0ff;
     /* Accent-filled controls lighten one step on hover. The static site
        consumes this same token through the generated tokens.css. */
-    --accent-hover: #7aa0ff;
-    --accent2: #9a6bff;
+    --accent-hover: #9ab8ff;
+    --accent2: #b18cff;
     --cyan: #38d5c0;
     --ok: #2fd186;
     --warn: #f4c14d;
-    --err: #f05d5d;
+    --err: #ff6b6b;
+    /* Error and warning copy sits on tinted or bordered surfaces where a
+       fill token can be too dim. These two own that ink and can be retuned
+       independently of the --err/--warn fills. */
+    --err-text: #ff8a80;
+    --warn-text: #e3b341;
+    /* Solid danger hover needs a touch more red than --err while keeping the
+       page background readable as its label color. */
+    --danger-hover: #ff7d7d;
     /* Rate-limited (HTTP 429) throttle tone: one owner for the chart's
        rate-limit series and the explorer's ×429 badge. Distinct from --err
        (a rate limit is not an error) and --warn (the chart's cost/rate axis
@@ -68,17 +79,6 @@
        literal where they sit (the storm dialog's heavier urgent scrim, the
        drawer's lighter pass-through). */
     --veil: rgba(16,14,11,.72);
-    /* The three one-off tints that also stay literal: for each, no
-       color-mix(in srgb, var(--token) P%, white or transparent) equals the
-       hand-picked hex byte-for-byte at any percentage (channel arithmetic,
-       not rounding). The solid danger hover's #ff7d7d needs red at 255,
-       above --err's 240, while its green and blue already match an 80.2%
-       mix of --err toward white - the 0% mix that reaches red 255 is pure
-       white. The model-rules error line's #ff7d72 splits green (125) from
-       blue (114), while --err and white keep them equal at every mix. The
-       model-rules warn line's #d9a343 is darker than --warn on every
-       channel, and mixing toward white only lightens while transparent
-       only fades alpha. A palette rebrand retunes these three by hand. */
     /* Chart gridline alpha: core.js blends this onto --border2 for the
        axes' faint warm grid. */
     --chart-grid-a: 0.5;
@@ -294,7 +294,7 @@
   .btn-danger-outline { background: color-mix(in srgb, var(--err) 7%, transparent); border-color: var(--err); color: var(--err); }
   .btn-danger-outline:hover { background: color-mix(in srgb, var(--err) 22%, transparent); color: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   .btn-danger-solid { background: var(--err); border-color: var(--err); color: var(--bg); font-weight: 600; }
-  .btn-danger-solid:hover { background: #ff7d7d; border-color: #ff7d7d; color: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
+  .btn-danger-solid:hover { background: var(--danger-hover); border-color: var(--danger-hover); color: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   /* Accent-filled primary action (settings Apply, restart Restart now) -
      after .btn so the cascade beats the neutral base skin. */
   .btn-accent:not(:disabled) { color: var(--bg); background: var(--accent); border-color: var(--accent); font-weight: 600; }
@@ -880,8 +880,8 @@
   .mr-row[data-mr-off="1"] { opacity: .45; }
   .mr-err { grid-column: 1 / -1; font-size: 9.5px; line-height: 1.35; min-height: 0; }
   .mr-err:empty { display: none; }
-  .mr-err[data-level="error"] { color: #ff7d72; }
-  .mr-err[data-level="warn"] { color: #d9a343; }
+  .mr-err[data-level="error"] { color: var(--err-text); }
+  .mr-err[data-level="warn"] { color: var(--warn-text); }
   .mr-hint { font-size: 9.5px; color: var(--muted); line-height: 1.5; margin: 0 0 7px; }
   .mr-tools { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
   .mr-tools select { font-size: 10px; padding: 3px 5px; max-width: 190px; }
@@ -1460,3 +1460,35 @@
   footer .f-live { color: var(--ok); }
   footer .f-live.paused { color: var(--muted); }
   footer b { color: var(--text); font-weight: 600; }
+
+  /* Theme picker: one surface control and one row per palette. Swatches
+     resolve the same data-theme/data-mode tokens as the page, so this block
+     owns layout only and a palette preview cannot drift from the palette it
+     names. The rows are plain buttons; the shared header-menu lifecycle owns
+     open, close and aria-expanded. */
+  .theme-mode {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
+    margin: 0 2px 14px; padding: 2px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px;
+  }
+  .theme-mode-opt {
+    min-height: 28px; border: 1px solid transparent; border-radius: 5px;
+    background: transparent; color: var(--muted);
+    font: 600 11px var(--mono); letter-spacing: .02em; cursor: pointer;
+  }
+  .theme-mode-opt:hover { color: var(--text); }
+  .theme-mode-opt[aria-pressed="true"] {
+    background: var(--panel); border-color: var(--border2); color: var(--text);
+    box-shadow: 0 1px 2px rgba(0,0,0,.18);
+  }
+  .theme-mode-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-palette-hd { margin-bottom: 8px; }
+  .theme-list { display: flex; flex-direction: column; gap: 2px; padding: 2px; min-width: 232px; max-height: min(70vh, 540px); overflow-y: auto; }
+  .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+  .theme-opt:hover { background: var(--panel2); border-color: var(--border2); }
+  .theme-opt[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: var(--accent); }
+  .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .theme-swatch { width: 28px; height: 18px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 62%, var(--accent) 62% 100%); }
+  .theme-copy { display: flex; flex-direction: column; line-height: 1.3; }
+  .theme-name { font-size: 13px; font-weight: 600; }
+  .theme-hint { font-size: 11px; color: var(--muted); }

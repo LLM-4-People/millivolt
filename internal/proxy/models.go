@@ -248,7 +248,7 @@ func (s *Server) fetchModelsResponse(d *modelsDiscovery, req *http.Request, t *t
 		return nil, errResponseBufferBudget
 	}
 	d.releaseResponse = func() { s.respBudget.release(reserve) }
-	body, err := readWholeDocument(d.ctx, resp.Body, remaining+1)
+	body, err := s.readWholeDocument(d.ctx, resp.Body, remaining+1)
 	d.bytesLeft -= int64(len(body))
 	if int64(len(body)) > remaining {
 		return nil, fmt.Errorf("model discovery exceeded aggregate response byte limit")

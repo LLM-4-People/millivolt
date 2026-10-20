@@ -7,11 +7,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 func TestPacerApplyUpstreamAfterStartIsSSE(t *testing.T) {
 	rec := httptest.NewRecorder()
-	p := newSSEPacer(rec, 15*time.Second)
+	p := newSSEPacer(rec, 15*time.Second, time.Minute)
 	p.Start()
 	if !p.applyUpstream(http.Header{"X-A": {"1"}}, http.StatusTooManyRequests) {
 		t.Fatal("applyUpstream after Start must report already SSE")
@@ -23,7 +26,7 @@ func TestPacerApplyUpstreamAfterStartIsSSE(t *testing.T) {
 
 func TestPacerApplyUpstream2xxEnablesComments(t *testing.T) {
 	rec := httptest.NewRecorder()
-	p := newSSEPacer(rec, 15*time.Second)
+	p := newSSEPacer(rec, 15*time.Second, time.Minute)
 	if p.applyUpstream(http.Header{"Content-Type": {"text/event-stream"}}, http.StatusOK) {
 		t.Fatal("first applyUpstream must not report already SSE")
 	}
@@ -37,7 +40,7 @@ func TestPacerApplyUpstream2xxEnablesComments(t *testing.T) {
 
 func TestWriteSSEHeadersOnPacer(t *testing.T) {
 	rec := httptest.NewRecorder()
-	p := newSSEPacer(rec, 15*time.Second)
+	p := newSSEPacer(rec, 15*time.Second, time.Minute)
 	writeSSEHeaders(p, http.StatusOK)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -52,7 +55,7 @@ func TestWriteSSEHeadersOnPacer(t *testing.T) {
 
 func TestPacerWriteHeaderIsNotSSEComment(t *testing.T) {
 	rec := httptest.NewRecorder()
-	p := newSSEPacer(rec, 15*time.Second)
+	p := newSSEPacer(rec, 15*time.Second, time.Minute)
 	p.Arm()
 	p.WriteHeader(http.StatusTooManyRequests)
 	// The started guard is behavioral: a second WriteHeader must be a no-op
@@ -78,13 +81,26 @@ type deadlineRecorder struct {
 
 func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error { r.write = t; return nil }
 
+func TestSSEPacerForReadsConfig(t *testing.T) {
+	cfg := config.Default()
+	cfg.SSEKeepaliveInterval = 7 * time.Second
+	cfg.SSEWriteProgressTimeout = 9 * time.Second
+	s := New(cfg, metrics.Noop{})
+	p := s.newSSEPacerFor(httptest.NewRecorder())
+	if p.interval != cfg.SSEKeepaliveInterval || p.writeProgress != cfg.SSEWriteProgressTimeout {
+		t.Fatalf("pacer = (%v, %v), want config (%v, %v)",
+			p.interval, p.writeProgress, cfg.SSEKeepaliveInterval, cfg.SSEWriteProgressTimeout)
+	}
+}
+
 func TestPacerArmsPerWriteDeadline(t *testing.T) {
+	const writeProgress = time.Minute
 	rec := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
-	p := newSSEPacer(rec, time.Hour)
+	p := newSSEPacer(rec, time.Hour, writeProgress)
 	if _, err := p.Write([]byte("data: x\n\n")); err != nil {
 		t.Fatal(err)
 	}
-	if rec.write.IsZero() || time.Until(rec.write) <= 0 || time.Until(rec.write) > sseWriteProgressDeadline+time.Second {
+	if rec.write.IsZero() || time.Until(rec.write) <= 0 || time.Until(rec.write) > writeProgress+time.Second {
 		t.Fatalf("pacer write deadline = %v, want a near-future progress bound", rec.write)
 	}
 }
@@ -124,12 +140,9 @@ func (w *expiringWriter) WriteString(s string) (int, error) { return w.Write([]b
 // With a shortened bound the idle stream must keep commenting indefinitely;
 // the direct write fails here.
 func TestPacerKeepalivesRearmWriteDeadline(t *testing.T) {
-	old := sseWriteProgressDeadline
-	sseWriteProgressDeadline = 250 * time.Millisecond
-	defer func() { sseWriteProgressDeadline = old }()
-
+	const writeProgress = 250 * time.Millisecond
 	w := &expiringWriter{ResponseRecorder: httptest.NewRecorder()}
-	p := newSSEPacer(w, 10*time.Millisecond)
+	p := newSSEPacer(w, 10*time.Millisecond, writeProgress)
 	defer p.Stop()
 	p.Start()
 	if _, err := p.Write([]byte("data: {\"choices\":[]}\n\n")); err != nil {

@@ -133,6 +133,30 @@ type Config struct {
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host" json:"max_idle_conns_per_host"`
 	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout" json:"idle_conn_timeout"`
 
+	// UpstreamDialTimeout bounds establishing a new upstream connection.
+	// UpstreamDialKeepAlive is the TCP keepalive interval for those
+	// connections. UpstreamTLSHandshakeTimeout bounds the TLS handshake.
+	// All three apply to new connections; reload swaps the transport without
+	// disturbing in-flight streams.
+	UpstreamDialTimeout         time.Duration `yaml:"upstream_dial_timeout" json:"upstream_dial_timeout"`
+	UpstreamDialKeepAlive       time.Duration `yaml:"upstream_dial_keepalive" json:"upstream_dial_keepalive"`
+	UpstreamTLSHandshakeTimeout time.Duration `yaml:"upstream_tls_handshake_timeout" json:"upstream_tls_handshake_timeout"`
+
+	// UpstreamStreamIdleTimeout bounds silence inside an upstream response
+	// body. It releases the handler, upstream connection and scheduler slot
+	// when a gateway returns 200 and then stops sending. New response bodies
+	// use the reloaded value; in-flight bodies keep the value they started
+	// with.
+	UpstreamStreamIdleTimeout time.Duration `yaml:"upstream_stream_idle_timeout" json:"upstream_stream_idle_timeout"`
+
+	// WholeDocumentReadTimeout is the fallback bound for one whole-document
+	// upstream read when the caller supplied no deadline. WholeDocumentReadMax
+	// is the ceiling for caller deadlines and must cover both the fallback and
+	// the configured model-discovery budget. These apply only to buffered
+	// reads, never to streaming SSE.
+	WholeDocumentReadTimeout time.Duration `yaml:"whole_document_read_timeout" json:"whole_document_read_timeout"`
+	WholeDocumentReadMax     time.Duration `yaml:"whole_document_read_max" json:"whole_document_read_max"`
+
 	// ---- queueing / rate-limit handling ----
 	// The proxy transparently queues requests when a provider returns 429, and
 	// transparently retries 429 and any 5xx (transient upstream errors) with
@@ -360,12 +384,27 @@ type Config struct {
 	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout" json:"read_header_timeout"`
 	IdleTimeout       time.Duration `yaml:"idle_timeout" json:"idle_timeout"`
 
+	// RequestBodyIdleTimeout bounds one inbound body read. It is re-armed
+	// before every read and cleared at EOF or Close, so it cannot expire while
+	// the handler is still streaming the response. RequestBodyReadTimeout is
+	// the absolute bound for the whole body; the idle bound must not exceed
+	// it. ResponseWriteTimeout is the generic per-write bound for buffered
+	// responses; streaming owners may arm a shorter explicit bound.
+	RequestBodyIdleTimeout time.Duration `yaml:"request_body_idle_timeout" json:"request_body_idle_timeout"`
+	RequestBodyReadTimeout time.Duration `yaml:"request_body_read_timeout" json:"request_body_read_timeout"`
+	ResponseWriteTimeout   time.Duration `yaml:"response_write_timeout" json:"response_write_timeout"`
+
 	// SSEKeepaliveInterval is how often a quiet streaming socket gets an SSE
 	// comment (`: keepalive`) so proxies and the client do not drop the
 	// connection during queue wait, operator hold, upstream TTFB, or mid-stream
 	// gaps. Chat Completions clients ignore SSE comments. Hot-reloads (new
 	// streams; in-flight pacers keep the interval they started with).
 	SSEKeepaliveInterval time.Duration `yaml:"sse_keepalive_interval" json:"sse_keepalive_interval"`
+	// SSEWriteProgressTimeout bounds one client-facing SSE write. A stalled
+	// reader fails that write instead of pinning shutdown. New streams use the
+	// reloaded value; in-flight pacers keep the value they started with. It
+	// must not exceed response_write_timeout.
+	SSEWriteProgressTimeout time.Duration `yaml:"sse_write_progress_timeout" json:"sse_write_progress_timeout"`
 
 	// ---- dashboard ----
 	// DashLogRows is how many of the most-recent in-scope records the request
@@ -959,6 +998,13 @@ func Default() *Config {
 		MaxIdleConnsPerHost: 512,
 		IdleConnTimeout:     90 * time.Second,
 
+		UpstreamDialTimeout:         30 * time.Second,
+		UpstreamDialKeepAlive:       30 * time.Second,
+		UpstreamTLSHandshakeTimeout: 10 * time.Second,
+		UpstreamStreamIdleTimeout:   10 * time.Minute,
+		WholeDocumentReadTimeout:    2 * time.Minute,
+		WholeDocumentReadMax:        10 * time.Minute,
+
 		MaxRetries:               5,
 		MaxQueueSize:             1024,
 		MaxQueueWait:             10 * time.Minute,
@@ -1038,7 +1084,12 @@ func Default() *Config {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 
-		SSEKeepaliveInterval: 15 * time.Second,
+		RequestBodyIdleTimeout: 30 * time.Second,
+		RequestBodyReadTimeout: 10 * time.Minute,
+		ResponseWriteTimeout:   10 * time.Minute,
+
+		SSEKeepaliveInterval:    15 * time.Second,
+		SSEWriteProgressTimeout: time.Minute,
 
 		DashLogRows:       60,
 		DashPollInterval:  5 * time.Second,
@@ -1365,11 +1416,37 @@ func (c *Config) Validate() error {
 		{"storage_query_timeout", c.StorageQueryTimeout},
 		{"mcp_query_timeout", c.MCPQueryTimeout},
 		{"mcp_timeout", c.MCPTimeout},
+		{"request_body_idle_timeout", c.RequestBodyIdleTimeout},
+		{"request_body_read_timeout", c.RequestBodyReadTimeout},
+		{"response_write_timeout", c.ResponseWriteTimeout},
+		{"sse_write_progress_timeout", c.SSEWriteProgressTimeout},
+		{"upstream_stream_idle_timeout", c.UpstreamStreamIdleTimeout},
+		{"whole_document_read_timeout", c.WholeDocumentReadTimeout},
+		{"whole_document_read_max", c.WholeDocumentReadMax},
+		{"upstream_dial_timeout", c.UpstreamDialTimeout},
+		{"upstream_dial_keepalive", c.UpstreamDialKeepAlive},
+		{"upstream_tls_handshake_timeout", c.UpstreamTLSHandshakeTimeout},
 	}
 	for _, f := range posDurs {
 		if f.d <= 0 {
 			return fmt.Errorf("%s: must be > %s, got %s", f.name, FormatDuration(0), FormatDuration(f.d))
 		}
+	}
+	if c.RequestBodyIdleTimeout > c.RequestBodyReadTimeout {
+		return fmt.Errorf("request_body_idle_timeout (%s) cannot exceed request_body_read_timeout (%s)",
+			FormatDuration(c.RequestBodyIdleTimeout), FormatDuration(c.RequestBodyReadTimeout))
+	}
+	if c.SSEWriteProgressTimeout > c.ResponseWriteTimeout {
+		return fmt.Errorf("sse_write_progress_timeout (%s) cannot exceed response_write_timeout (%s)",
+			FormatDuration(c.SSEWriteProgressTimeout), FormatDuration(c.ResponseWriteTimeout))
+	}
+	if c.WholeDocumentReadMax < c.WholeDocumentReadTimeout {
+		return fmt.Errorf("whole_document_read_max (%s) cannot be shorter than whole_document_read_timeout (%s)",
+			FormatDuration(c.WholeDocumentReadMax), FormatDuration(c.WholeDocumentReadTimeout))
+	}
+	if c.WholeDocumentReadMax < c.ModelsDiscoveryTimeout {
+		return fmt.Errorf("whole_document_read_max (%s) cannot be shorter than models_discovery_timeout (%s)",
+			FormatDuration(c.WholeDocumentReadMax), FormatDuration(c.ModelsDiscoveryTimeout))
 	}
 	// base_backoff must not exceed max_backoff (the retry loop would clamp
 	// immediately, making the base meaningless).

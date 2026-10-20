@@ -90,11 +90,6 @@ const (
 	// maxResponseHeaderBytes is the abusive-upstream header cap on the
 	// outbound client. Safety guardrail, not user-tunable.
 	maxResponseHeaderBytes = 1 << 20 // 1 MiB
-	// Upstream dial and TLS-handshake bounds. Internal guardrails matching
-	// net/http's DefaultTransport; without them both are unbounded.
-	upstreamDialTimeout         = 30 * time.Second
-	upstreamDialKeepAlive       = 30 * time.Second
-	upstreamTLSHandshakeTimeout = 10 * time.Second
 	// qualitySpoolMax bounds the pre-write spool of a non-streaming 200 kept
 	// for degenerate-outcome verification. Degenerate bodies are tiny (empty
 	// JSON shells); a body past this cap is clearly not degenerate and is
@@ -340,6 +335,12 @@ func New(cfg *config.Config, rec metrics.Recorder) *Server {
 	return s
 }
 
+// upstreamDialer is the single reader of the upstream dial timing settings.
+// The shared transport and the Cursor transport both use it.
+func upstreamDialer(cfg *config.Config) *net.Dialer {
+	return &net.Dialer{Timeout: cfg.UpstreamDialTimeout, KeepAlive: cfg.UpstreamDialKeepAlive}
+}
+
 // newUpstreamClient builds the upstream HTTP client/transport from cfg. A
 // reload builds a fresh one so pool sizes and the header timeout hot-apply to
 // new connections without disturbing in-flight streams.
@@ -353,15 +354,8 @@ func newUpstreamClient(cfg *config.Config) *http.Client {
 		IdleConnTimeout:        cfg.IdleConnTimeout,
 		ResponseHeaderTimeout:  cfg.UpstreamTimeout, // 0 = no header-arrival cap
 		MaxResponseHeaderBytes: maxResponseHeaderBytes,
-		// A zero dial/TLS-handshake timeout means no timeout at all: a
-		// blackholed connect or a peer that accepts TCP but never handshakes
-		// would pin a request goroutine and socket indefinitely. These match
-		// net/http's DefaultTransport values.
-		DialContext: (&net.Dialer{
-			Timeout:   upstreamDialTimeout,
-			KeepAlive: upstreamDialKeepAlive,
-		}).DialContext,
-		TLSHandshakeTimeout: upstreamTLSHandshakeTimeout,
+		DialContext:            upstreamDialer(cfg).DialContext,
+		TLSHandshakeTimeout:    cfg.UpstreamTLSHandshakeTimeout,
 		// Without a cache every new HTTPS connection (idle expiry, reload)
 		// pays a full handshake. Capacity follows the live per-host pool.
 		TLSClientConfig: &tls.Config{ClientSessionCache: tls.NewLRUClientSessionCache(cfg.MaxConnsPerHost)},
@@ -422,6 +416,7 @@ func (s *Server) Reload(cfg *config.Config) {
 	s.scheduler.UpdateOptions(schedulerOptions(cfg))
 	s.convos.UpdateLimits(cfg.ConversationIdleGap, cfg.ConversationMaxOpen)
 	s.cursorRuns.UpdateTTL(cfg.CursorParkTTL)
+	s.resetCursorClient()
 }
 
 // clientRetryDirective is the outermost ResponseWriter on the LLM relay
@@ -761,7 +756,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var pacer *ssePacer
 	if stream {
-		pacer = newSSEPacer(w, s.cfg().SSEKeepaliveInterval)
+		pacer = s.newSSEPacerFor(w)
 		w = pacer
 		pacer.Arm()
 	}
@@ -903,7 +898,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A non-streaming request can still receive an event-stream response;
 		// its pacer is created here, unarmed, only to own the status commit.
 		if pacer == nil {
-			pacer = newSSEPacer(w, s.cfg().SSEKeepaliveInterval)
+			pacer = s.newSSEPacerFor(w)
 		}
 		if pacer.applyUpstream(resp.Header, resp.StatusCode) && resp.StatusCode >= 400 {
 			typ, msg := upstreamErrorFields(rec, resp.StatusCode)

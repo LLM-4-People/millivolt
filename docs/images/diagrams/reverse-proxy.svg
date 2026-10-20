@@ -3,10 +3,10 @@
   <desc id="desc">An API client and a dashboard browser connect to NGINX over TLS with access control. NGINX forwards over loopback HTTP to millivolt. millivolt sends requests to the selected upstream API with its own upstream credentials.</desc>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M0 0 10 5 0 10z" fill="#5b8cff"/>
+      <path d="M0 0 10 5 0 10z" fill="#7aa0ff"/>
     </marker>
     <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
-      <stop stop-color="#5b8cff"/><stop offset="1" stop-color="#9a6bff"/>
+      <stop stop-color="#7aa0ff"/><stop offset="1" stop-color="#b18cff"/>
     </linearGradient>
   </defs>
   <rect width="1200" height="420" rx="16" fill="#141210"/>
@@ -26,15 +26,15 @@
     <text x="60" y="294" fill="#97907e" font-size="13">operator session</text>
     <text x="60" y="316" fill="#97907e" font-size="13">Settings, live feed, MCP</text>
 
-    <rect x="370" y="134" width="250" height="176" rx="12" fill="#1a1714" stroke="#5b8cff"/>
-    <text x="390" y="168" fill="#5b8cff" font-size="13" letter-spacing="1">EDGE</text>
+    <rect x="370" y="134" width="250" height="176" rx="12" fill="#1a1714" stroke="#7aa0ff"/>
+    <text x="390" y="168" fill="#7aa0ff" font-size="13" letter-spacing="1">EDGE</text>
     <text x="390" y="198" fill="#e8e4de" font-size="21" font-weight="600">NGINX</text>
     <text x="390" y="226" fill="#97907e" font-size="13">TLS termination</text>
     <text x="390" y="248" fill="#97907e" font-size="13">access allowlists</text>
     <text x="390" y="270" fill="#97907e" font-size="13">streaming, no buffering</text>
 
-    <rect x="720" y="134" width="220" height="176" rx="12" fill="#1a1714" stroke="#9a6bff"/>
-    <text x="740" y="168" fill="#9a6bff" font-size="13" letter-spacing="1">APPLICATION</text>
+    <rect x="720" y="134" width="220" height="176" rx="12" fill="#1a1714" stroke="#b18cff"/>
+    <text x="740" y="168" fill="#b18cff" font-size="13" letter-spacing="1">APPLICATION</text>
     <text x="740" y="198" fill="#e8e4de" font-size="21" font-weight="600">millivolt</text>
     <text x="740" y="226" fill="#97907e" font-size="13">one operator credential</text>
     <text x="740" y="248" fill="#97907e" font-size="13">routing, dashboard, history</text>
