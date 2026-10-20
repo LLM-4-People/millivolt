@@ -84,6 +84,24 @@ function tint(color, surface, alpha) {
     .toString(16).padStart(2, '0')).join('');
 }
 
+function lab(value) {
+  const channels = rgb(value);
+  if (!channels) return null;
+  const linear = channels.map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4);
+  const x = (linear[0] * .4124 + linear[1] * .3576 + linear[2] * .1805) / .95047;
+  const y = linear[0] * .2126 + linear[1] * .7152 + linear[2] * .0722;
+  const z = (linear[0] * .0193 + linear[1] * .1192 + linear[2] * .9505) / 1.08883;
+  const f = v => v > .008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116;
+  return [116 * f(y) - 16, 500 * (f(x) - f(y)), 200 * (f(y) - f(z))];
+}
+
+function deltaE(a, b) {
+  const left = lab(a);
+  const right = lab(b);
+  if (!left || !right) return 0;
+  return Math.hypot(left[0] - right[0], left[1] - right[1], left[2] - right[2]);
+}
+
 let failures = 0;
 const check = (label, cond) => {
   console.log((cond ? 'PASS ' : 'FAIL ') + label);
@@ -111,9 +129,11 @@ const token = (win, name) =>
   check('the default surface is black', root.dataset.mode === 'black');
   check('the default resolves the canonical surface', token(win, '--bg') === '#141210');
   check('the default resolves the canonical accent', token(win, '--accent') === '#7aa0ff');
-  check('the default swatch mirrors the default accent',
-    win.getComputedStyle(d.querySelector('[data-theme-id="instrument"] .theme-swatch'))
-      .getPropertyValue('--accent').trim() === '#7aa0ff');
+  const defaultSwatch = d.querySelector('[data-theme-id="instrument"] .theme-swatch');
+  const swatchMirror = ['--accent', '--accent-hover', '--accent2', '--cyan']
+    .filter(name => win.getComputedStyle(defaultSwatch).getPropertyValue(name).trim() !== token(win, name));
+  check('the default swatch mirrors every canonical accent role', swatchMirror.length === 0);
+  if (swatchMirror.length) console.log(swatchMirror.join('\n'));
 
   win.toggleThemeMenu({ stopPropagation() {} });
   check('the theme menu opens', !d.getElementById('theme-menu').hidden);
@@ -203,24 +223,42 @@ const token = (win, name) =>
   check('every theme defines both surfaces', missing.length === 0);
   if (missing.length) console.log(missing.join('\n'));
 
-  // A palette must be identifiable in each surface. This catches the easy
-  // regression where a new theme copies another theme's accent block.
-  const duplicateAccents = [];
+  // A palette must be identifiable in each surface. Exact equality is not
+  // enough: two accents can differ in hex yet read as the same color. Primary
+  // accents must clear a CIE76 distance floor; secondary accents must at least
+  // not duplicate one another. No accent role may reuse a semantic status hex.
+  const paletteFailures = [];
+  const statusRoles = ['ok', 'warn', 'err', 'rl', 'cyan'];
   for (const mode of modes) {
     const primary = new Map();
     const secondary = new Map();
     for (const theme of themes) {
       root.dataset.theme = theme;
       root.dataset.mode = mode;
-      for (const [tokenName, seen] of [['--accent', primary], ['--accent2', secondary]]) {
-        const value = token(win, tokenName);
-        if (seen.has(value)) duplicateAccents.push(`${mode} ${tokenName}: ${theme} duplicates ${seen.get(value)}`);
-        else seen.set(value, theme);
+      const accent = token(win, '--accent');
+      const accent2 = token(win, '--accent2');
+      for (const role of statusRoles) {
+        const value = token(win, '--' + role);
+        if (accent === value) paletteFailures.push(`${mode} ${theme} --accent equals --${role}`);
+        if (accent2 === value) paletteFailures.push(`${mode} ${theme} --accent2 equals --${role}`);
       }
+      for (const [other, value] of primary) {
+        const distance = deltaE(accent, value);
+        if (distance < 20) paletteFailures.push(`${mode} ${theme} and ${other} are ${distance.toFixed(1)} ΔE apart`);
+      }
+      if (secondary.has(accent2)) {
+        paletteFailures.push(`${mode} ${theme} --accent2 duplicates ${secondary.get(accent2)}`);
+      }
+      for (const role of ['rl', 'err']) {
+        const distance = deltaE(accent, token(win, '--' + role));
+        if (distance < 20) paletteFailures.push(`${mode} ${theme} --accent is ${distance.toFixed(1)} ΔE from --${role}`);
+      }
+      primary.set(theme, accent);
+      secondary.set(accent2, theme);
     }
   }
-  check('each surface keeps every palette distinct', duplicateAccents.length === 0);
-  if (duplicateAccents.length) console.log(duplicateAccents.join('\n'));
+  check('each surface keeps every palette distinct from its peers and status', paletteFailures.length === 0);
+  if (paletteFailures.length) console.log(paletteFailures.join('\n'));
 
   // Every theme/mode pair is exercised for the same text and status roles.
   const contrastFailures = [];

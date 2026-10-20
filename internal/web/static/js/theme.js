@@ -10,12 +10,12 @@ const THEME_STORAGE_KEY = document.querySelector('meta[name="theme-storage-key"]
 
 const THEMES = [
   { id: 'instrument', label: 'Instrument', hint: 'Blue, violet and mint' },
-  { id: 'slate', label: 'Slate', hint: 'Steel blue and ice' },
+  { id: 'slate', label: 'Slate', hint: 'Lilac and stone' },
   { id: 'midnight', label: 'Midnight', hint: 'Sky blue and periwinkle' },
   { id: 'nord', label: 'Nord', hint: 'Frost blue and heather' },
   { id: 'forest', label: 'Forest', hint: 'Emerald and lime' },
   { id: 'rose', label: 'Rose', hint: 'Pink and lilac' },
-  { id: 'ember', label: 'Ember', hint: 'Amber and coral' },
+  { id: 'ember', label: 'Ember', hint: 'Orange and coral' },
   { id: 'contrast', label: 'Contrast', hint: 'Maximum separation' },
 ];
 

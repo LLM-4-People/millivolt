@@ -77,17 +77,17 @@ html[data-mode="clear"] { color-scheme: light; }
   --cyan: #0b5f66;
 }
 
-/* Slate: steel blue and ice. */
+/* Slate: lilac and stone. */
 [data-theme="slate"][data-mode="black"] {
-  --accent: #82b4d6;
-  --accent-hover: #a3c8e0;
-  --accent2: #b8d4ec;
+  --accent: #b8a8c8;
+  --accent-hover: #d0c0e0;
+  --accent2: #c8b8a8;
   --cyan: #2dd4bf;
 }
 [data-theme="slate"][data-mode="clear"] {
-  --accent: #1e5a70;
-  --accent-hover: #164a5c;
-  --accent2: #3f527a;
+  --accent: #5b4b6b;
+  --accent-hover: #4a3b58;
+  --accent2: #5a4a40;
   --cyan: #0b5f66;
 }
 
@@ -149,14 +149,14 @@ html[data-mode="clear"] { color-scheme: light; }
 
 /* Ember: amber and coral. */
 [data-theme="ember"][data-mode="black"] {
-  --accent: #ff9f43;
-  --accent-hover: #ffb568;
+  --accent: #ff6600;
+  --accent-hover: #ff8a3d;
   --accent2: #ff8fa3;
   --cyan: #4fd1c5;
 }
 [data-theme="ember"][data-mode="clear"] {
-  --accent: #9a3412;
-  --accent-hover: #7c2d12;
+  --accent: #5b2710;
+  --accent-hover: #471e0b;
   --accent2: #9f1239;
   --cyan: #0b5f66;
 }
