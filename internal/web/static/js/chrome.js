@@ -500,7 +500,7 @@ function applyThrottleState(st, revision = operatorState.throttle.revision) {
   resyncOperatorSurfaces('throttle', displayOnly);
 }
 
-const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-restart': 'restart-menu' };
+const HEADER_MENUS = { 'btn-pause': 'pause-menu', 'btn-debug': 'debug-menu', 'btn-limits': 'limits-menu', 'btn-logs': 'logs-menu', 'btn-restart': 'restart-menu', 'btn-theme': 'theme-menu' };
 function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
   let closed = false;

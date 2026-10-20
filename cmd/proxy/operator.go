@@ -651,7 +651,7 @@ form {
   width: 28px; height: 28px; border-radius: 9px; flex-shrink: 0;
   background: radial-gradient(130% 130% at 30% 22%, #2a2440 0%, #1b1826 70%);
   display: grid; place-items: center;
-  box-shadow: 0 0 0 1px rgba(154,107,255,.28) inset, 0 4px 16px rgba(154,107,255,.28);
+  box-shadow: 0 0 0 1px rgba(177,140,255,.28) inset, 0 4px 16px rgba(177,140,255,.28);
 }
 h1 { margin: 0; font: 650 15px/1.2 ui-monospace, "SFMono-Regular", Menlo, monospace; letter-spacing: -.01em; }
 p { color: #97907e; margin: 0 0 16px; font-size: 13px; }
@@ -660,14 +660,14 @@ input {
   color: #e8e4de; background: #100e0b; border: 1px solid #2b2620;
   border-radius: 8px; padding: 10px 12px; min-height: 42px;
 }
-input:focus { border-color: #5b8cff; outline: none; box-shadow: 0 0 0 3px rgba(91,140,255,.16); }
+input:focus { border-color: #7aa0ff; outline: none; box-shadow: 0 0 0 3px rgba(122,160,255,.16); }
 button {
   font: 650 13px/1.2 inherit; margin-top: 12px; width: 100%; min-height: 42px;
-  color: #141210; background: #5b8cff; border: 1px solid #5b8cff;
+  color: #141210; background: #7aa0ff; border: 1px solid #7aa0ff;
   border-radius: 8px; padding: 10px 12px; cursor: pointer;
 }
-button:hover { background: #7aa0ff; border-color: #7aa0ff; }
-button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
+button:hover { background: #9ab8ff; border-color: #9ab8ff; }
+button:focus-visible { outline: 2px solid #7aa0ff; outline-offset: 2px; }
 .notice { color: #f4c14d; margin: 0 0 10px; font-size: 13px; }
 </style>
 </head>
@@ -680,7 +680,7 @@ button:focus-visible { outline: 2px solid #5b8cff; outline-offset: 2px; }
 <path d="M2 13.5v1.6M5.5 13.5v1.6M9 13.5v1.6M12.5 13.5v1.6M16 13.5v1.6"/>
 </g>
 <path d="M1.5 12.8H16.5" stroke="#56507a" stroke-width="1" opacity=".5" stroke-linecap="round"/>
-<path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="#9a6bff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+<path d="M1.5 9.5 4 9.5 5.6 4.6 8 13.2 10.4 6.8 12.4 9.5 16.5 9.5" stroke="#b18cff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 </div>
 <h1>millivolt</h1>

@@ -1,0 +1,177 @@
+/* Dashboard surfaces and accent palettes.
+   -------------------------------------------------------------------------
+   dashboard.css owns the default Black surface tokens and the shared semantic
+   status colors. This file adds the Clear surface and maps every theme's
+   accent family onto the four accent roles for both surfaces.
+
+   Rules for a new palette:
+   - Palette blocks set accents only: --accent, --accent-hover, --accent2 and
+     --cyan. The mode block owns surfaces, text and semantic status colors, so
+     status meaning and contrast stay consistent across themes.
+   - Keep --accent and --accent2 six-digit hex: core.js blends them through
+     hexA() for chart fills and gridlines.
+   - A theme block is required for both data-mode values. The picker swatch
+     carries the same data-theme/data-mode pair, so its preview resolves these
+     tokens directly instead of keeping a second hex table.
+   - The default Instrument Black values stay in dashboard.css; the block
+     below mirrors them so its swatch can reset while another palette is
+     active. Keep the pair in step. */
+
+/* Clear is the warm light surface. It changes the base and semantic ink, not
+   the theme accent family, so every palette has an accessible light mode. */
+[data-mode="clear"] {
+  --bg: #f7f2e8;
+  --panel: #fffdf7;
+  --panel2: #f0e8d8;
+  --border: #ddd2bf;
+  --border2: #c6b89f;
+  --text: #2a241a;
+  --muted: #5f574a;
+  --ok: #0c5d33;
+  --warn: #6b4200;
+  --err: #8f1418;
+  --rl: #8f3300;
+  --err-text: #821a1a;
+  --warn-text: #5f3a00;
+  --danger-hover: #8f1418;
+  --rail: #efe7d6;
+  --veil: rgba(58, 44, 24, .38);
+  --scale-tick: #8a7f6a;
+  --scale-base: #b3a68d;
+  --well-hi: #e6dcc8;
+  --well-lo: #d9cdb6;
+  --chart-grid-a: 0.6;
+}
+html[data-mode="clear"] { color-scheme: light; }
+
+/* The default dark-case elevation reads as soot on the Clear page. The large
+   surfaces get a warm, lighter shadow; small controls keep their token
+   shadows. The mobile menu already drops elevation, so keep that rule. */
+[data-mode="clear"] header {
+  box-shadow: 0 8px 20px rgba(74, 60, 38, .14);
+}
+[data-mode="clear"] .hdr-menu,
+[data-mode="clear"] .operator-dialog-panel,
+[data-mode="clear"] .st-sheet,
+[data-mode="clear"] .drawer,
+[data-mode="clear"] #client-tip {
+  box-shadow: 0 14px 34px rgba(74, 60, 38, .18);
+}
+@media (max-width: 800px) {
+  [data-mode="clear"] .hdr-menu { box-shadow: none; }
+}
+
+/* Instrument: the warm default. The Black block mirrors the canonical
+   dashboard.css values so its swatch can reset while another palette is
+   active; the Clear block is the light pair. */
+[data-theme="instrument"][data-mode="black"] {
+  --accent: #7aa0ff;
+  --accent-hover: #9ab8ff;
+  --accent2: #b18cff;
+  --cyan: #38d5c0;
+}
+[data-theme="instrument"][data-mode="clear"] {
+  --accent: #1e40af;
+  --accent-hover: #1e3a8a;
+  --accent2: #5b21b6;
+  --cyan: #0b5f66;
+}
+
+/* Slate: lilac and stone. */
+[data-theme="slate"][data-mode="black"] {
+  --accent: #b8a8c8;
+  --accent-hover: #d0c0e0;
+  --accent2: #c8b8a8;
+  --cyan: #2dd4bf;
+}
+[data-theme="slate"][data-mode="clear"] {
+  --accent: #5b4b6b;
+  --accent-hover: #4a3b58;
+  --accent2: #5a4a40;
+  --cyan: #0b5f66;
+}
+
+/* Midnight: sky blue and periwinkle. */
+[data-theme="midnight"][data-mode="black"] {
+  --accent: #38bdf8;
+  --accent-hover: #67d0fb;
+  --accent2: #9aa4ff;
+  --cyan: #22d3ee;
+}
+[data-theme="midnight"][data-mode="clear"] {
+  --accent: #075985;
+  --accent-hover: #0c4a6e;
+  --accent2: #3730a3;
+  --cyan: #0b5f66;
+}
+
+/* Nord: frost blue, heather and pale teal. */
+[data-theme="nord"][data-mode="black"] {
+  --accent: #88c0d0;
+  --accent-hover: #9fd0dd;
+  --accent2: #c4a0b8;
+  --cyan: #8fbcbb;
+}
+[data-theme="nord"][data-mode="clear"] {
+  --accent: #1f5561;
+  --accent-hover: #16424c;
+  --accent2: #6b3f63;
+  --cyan: #0b5f66;
+}
+
+/* Forest: emerald and lime. */
+[data-theme="forest"][data-mode="black"] {
+  --accent: #34d399;
+  --accent-hover: #6ee7b7;
+  --accent2: #a3e635;
+  --cyan: #2dd4bf;
+}
+[data-theme="forest"][data-mode="clear"] {
+  --accent: #065f46;
+  --accent-hover: #064e3b;
+  --accent2: #3f6212;
+  --cyan: #0b5f66;
+}
+
+/* Rose: pink and lilac. */
+[data-theme="rose"][data-mode="black"] {
+  --accent: #f472b6;
+  --accent-hover: #f9a8d4;
+  --accent2: #c084fc;
+  --cyan: #22d3ee;
+}
+[data-theme="rose"][data-mode="clear"] {
+  --accent: #9d174d;
+  --accent-hover: #831843;
+  --accent2: #6b21a8;
+  --cyan: #0b5f66;
+}
+
+/* Ember: amber and coral. */
+[data-theme="ember"][data-mode="black"] {
+  --accent: #ff6600;
+  --accent-hover: #ff8a3d;
+  --accent2: #ff8fa3;
+  --cyan: #4fd1c5;
+}
+[data-theme="ember"][data-mode="clear"] {
+  --accent: #5b2710;
+  --accent-hover: #471e0b;
+  --accent2: #9f1239;
+  --cyan: #0b5f66;
+}
+
+/* Contrast: maximum separation. The filled accent keeps its own label
+   contrast: black on yellow in Black, cream on black in Clear. */
+[data-theme="contrast"][data-mode="black"] {
+  --accent: #ffe14d;
+  --accent-hover: #fff08a;
+  --accent2: #7cc7ff;
+  --cyan: #4de8e0;
+}
+[data-theme="contrast"][data-mode="clear"] {
+  --accent: #000000;
+  --accent-hover: #1a1a1a;
+  --accent2: #003f8f;
+  --cyan: #004f4f;
+}
