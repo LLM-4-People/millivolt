@@ -562,10 +562,8 @@ func TestStreamToolCallsWithoutCallsReplaced(t *testing.T) {
 // TestStreamTruncatedAppendsInBandError: a stream that dies at clean EOF
 // without any terminator gets an in-band truncated error appended after the
 // already-relayed bytes (content can't be un-relayed - the error tells the
-// client the answer is incomplete). Content-bearing truncation is never
-// proxy-retried under the shipped defaults: the client already saw
-// generation bytes, and every rescue budget guarantees the client received no
-// completion-contract bytes, so re-sending behind them is never available.
+// client the answer is incomplete). Content-bearing truncation is NEVER
+// proxy-retried: the client already saw generation bytes.
 func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -589,7 +587,7 @@ func TestStreamTruncatedAppendsInBandError(t *testing.T) {
 		t.Fatalf("in-band truncated error missing: %s", got)
 	}
 	if n := calls.Load(); n != 1 {
-		t.Fatalf("upstream calls = %d, want 1 (content-bearing truncation is not re-sent under the defaults)", n)
+		t.Fatalf("upstream calls = %d, want 1 (content-bearing truncation is never re-sent)", n)
 	}
 	recs := waitForRecord(t, buf, 1)
 	if recs[0].ErrorCode != metrics.CodeTruncated {
@@ -1415,16 +1413,9 @@ func TestResponsesAPIStreamHealthy(t *testing.T) {
 }
 
 // TestStreamTerminalHoldOverflowCommit: a terminal region grown past the
-// terminalHoldMax guardrail commits to verbatim relay - the hold is abandoned,
-// so every byte the provider sent reaches the client exactly, in order.
-//
-// What the commit does NOT do is erase the stream's class. The size guard is not
-// evidence of health: this region is large only because the provider sent a
-// 70 KiB comment, and the stream itself produced nothing at all. So the class
-// still surfaces - in-band, APPENDED after the committed bytes, which are never
-// replaced - and the record carries it. Measured before that correction: the
-// same wire recorded IsError=false with an empty ErrorCode, so a payload's SIZE
-// alone was enough to turn a void into a clean success.
+// terminalHoldMax guardrail commits to verbatim relay - the hold is abandoned
+// (no degenerate stream has a 64KiB+ "terminal" region), so every byte
+// reaches the client exactly.
 func TestStreamTerminalHoldOverflowCommit(t *testing.T) {
 	bigComment := ":" + strings.Repeat("x", 70*1024) + "\n"
 	chunks := []string{
@@ -1442,16 +1433,8 @@ func TestStreamTerminalHoldOverflowCommit(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("overflow-abandoned hold must relay the provider's bytes verbatim and in order:\n got %q\nwant prefix %q",
-			truncateForMsg(got), truncateForMsg(want))
-	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeEmptyCompletion+`"`) {
-		t.Fatalf("the void class must still surface after the committed bytes: %s", truncateForMsg(got))
-	}
-	recs := waitForRecord(t, buf, 1)
-	if rec := recs[0]; !rec.IsError() || rec.ErrorCode != metrics.CodeEmptyCompletion {
-		t.Fatalf("record must carry %s, got IsError=%v code=%q", metrics.CodeEmptyCompletion, rec.IsError(), rec.ErrorCode)
+	if got != want {
+		t.Fatalf("overflow-abandoned hold must relay verbatim:\n got %d bytes\nwant %d bytes", len(got), len(want))
 	}
 }
 
@@ -2762,11 +2745,9 @@ func TestStreamInBandErrorAfterReasoningZeroBudgetVerbatim(t *testing.T) {
 }
 
 // TestStreamTerminalHoldOverflowReasoningOnlyCommitsVerbatim: past the hold
-// bound the stream commits to verbatim relay - a reasoning-only stream with an
-// oversized terminal region is never rescued, and the finish chunk itself
-// reaches the client byte for byte. The class is a separate fact from the size:
-// the region is large only because of the padding chunk, so the reasoning-only
-// void still surfaces in-band after the committed bytes and on the record.
+// bound the stream commits to verbatim relay - a reasoning-only stream with
+// an oversized terminal region is never rescued and never substituted; the
+// finish chunk itself reaches the client.
 func TestStreamTerminalHoldOverflowReasoningOnlyCommitsVerbatim(t *testing.T) {
 	chunks := []string{
 		thinkingFrame,
@@ -2783,20 +2764,13 @@ func TestStreamTerminalHoldOverflowReasoningOnlyCommitsVerbatim(t *testing.T) {
 	defer srv.Close()
 
 	_, got := streamRequest(t, srv, upstream)
-	if !strings.HasPrefix(got, want) {
-		t.Fatalf("overflowed stream must relay the provider's bytes verbatim and in order:\n got %q\nwant prefix %q",
-			truncateForMsg(got), truncateForMsg(want))
-	}
-	if !strings.Contains(got, `"code":"`+metrics.CodeReasoningOnly+`"`) {
-		t.Fatalf("the reasoning-only class must surface after the committed bytes: %s", truncateForMsg(got))
+	if got != want {
+		t.Fatalf("overflowed reasoning-only stream must relay byte-for-byte")
 	}
 	recs := waitForRecord(t, buf, 1)
 	rec := recs[0]
-	if rec.ErrorCode != metrics.CodeReasoningOnly {
-		t.Fatalf("record must carry %s, got %q", metrics.CodeReasoningOnly, rec.ErrorCode)
-	}
-	if rec.Retries != 0 || len(rec.Attempts) != 0 {
-		t.Fatalf("a committed region is never rescued: retries=%d attempts=%+v", rec.Retries, rec.Attempts)
+	if rec.IsError() || rec.Retries != 0 || len(rec.Attempts) != 0 {
+		t.Fatalf("commit-to-verbatim stream must stay a clean record: %+v", rec)
 	}
 }
 

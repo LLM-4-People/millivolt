@@ -198,9 +198,7 @@ models_discovery_max_bytes: 8MiB
 #   type: int · range 1..1000 · default 100
 models_discovery_max_pages: 100
 
-# HTTP/1.1 connections per upstream host. Go's HTTP/2 client never reads this, so an h2
-# upstream multiplexes every stream onto one connection; use max_concurrent to bound
-# those.
+# Total connections per upstream host. Sized for concurrent SSE streams, not requests/sec.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 512
 max_conns_per_host: 512
@@ -253,8 +251,7 @@ sse_keepalive_interval: 15s
 sse_write_progress_timeout: 1m
 
 # ---- Queue & retry ----
-# Per-key concurrency, transparent 429/5xx retry, quality/thinking rescues, and atomic
-# tool calls.
+# Per-key concurrency, transparent 429/5xx retry, and quality re-asks.
 # In-flight sends per provider+key. 0 is unlimited.
 # Hot-reload: yes.
 #   type: int · range >= 0 (0 = unlimited) · default 0
@@ -331,27 +328,11 @@ quality_retries: 1
 # stream truncated or reset after reasoning-only output, a cleanly finished reasoning-only
 # completion, a retryable in-band provider error that arrived after reasoning-only output,
 # and a non-streaming reasoning-only body. The fresh attempt appends after the relayed
-# reasoning; by that budget answer content and tool calls are never rescued, and
-# finish_reason length never is. Each rescue re-sends the full request (billed). 0
-# disables.
+# reasoning; answer content and tool calls are never rescued, and finish_reason length
+# never is. Each rescue re-sends the full request (billed). 0 disables.
 # Hot-reload: yes.
 #   type: int · range 0..3 (0 = disabled) · default 1
 thinking_retries: 1
-
-# Withhold every streamed tool call (a tool_calls or deprecated function_call delta) until
-# the stream's terminator, then release it verbatim. An SDK commits a streamed tool call
-# at the END of the response body, not at finish_reason, so eager relay can hand it a call
-# no terminator committed; withholding makes that impossible: no tool can run from a
-# stream the model never finished. The trade: a provider that sends neither finish_reason
-# nor [DONE] truncates, and its completed tool call is then discarded rather than relayed,
-# and tool-call delivery stops being progressive (the client sees the call at the
-# terminator). The withheld region is size-bounded, larger for a region a tool call opened
-# than for a terminal one; past that bound the region commits verbatim, restoring eager
-# relay for that stream alone. Generic OpenAI-wire relay only; translated streams, the
-# Cursor bridge and Responses-API feeds are unaffected.
-# Hot-reload: yes.
-#   type: bool · default false
-atomic_tool_calls: false
 
 # Operator extensions to the built-in retryable in-band error vocabulary: exact type or
 # code strings (case-insensitive) that a provider reports inside a 200 and that authorize

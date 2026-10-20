@@ -597,12 +597,7 @@ loop:
 	log.Printf("received %s, shutting down", shutdownSig)
 
 	// Abort live streams first so Shutdown returns promptly instead of waiting
-	// the full timeout for SSE connections that never finish on their own. The
-	// abort is recorded BEFORE the contexts are canceled: a handler whose read
-	// fails as a result must classify the close as the server's own (a 503 with
-	// a real error class) rather than as the local client's abort, which would
-	// record a flow-event 499 for a request this process failed.
-	proxySrv.MarkAborting()
+	// the full timeout for SSE connections that never finish on their own.
 	stopServing()
 
 	liveMu.Lock()

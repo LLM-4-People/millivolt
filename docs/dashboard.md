@@ -253,13 +253,6 @@ Status updates refresh the dashboard automatically. Container images do not
 contain the source/compiler and require an external container update/restart.
 This screenshot only opens the menu and does not start a restart.
 
-Whether a rebuild can work at all is decided once, at boot, and the dashboard
-learns it from the bootstrap payload's `restart` section
-(`{available, reason}`, a strict subset of `GET /admin/restart`'s status
-document). When it is unavailable the whole control leaves the row rather than
-showing a dead button - and with it the reason, since the menu that would
-explain it is unreachable. Use the API to read the reason on such a build.
-
 ![Restart menu with the operation description and restart action](images/menus/restart.png)
 
 See [operations](operations.md) for exact admission, persistence, filtering,

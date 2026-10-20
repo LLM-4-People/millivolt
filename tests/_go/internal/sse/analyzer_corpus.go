@@ -66,7 +66,7 @@ func classifyCorpus(lines []string) corpusClassification {
 		FirstAnswer:     !a.firstAnswerAt.IsZero(),
 		Chunks:          a.chunkCount,
 		ToolChunks:      a.toolChunks,
-		ToolCalls:       a.toolCalls(),
+		ToolCalls:       a.toolCalls,
 		ToolNames:       a.toolNames,
 		FinishReason:    a.finishReason,
 		Terminated:      a.Terminated(),
@@ -1285,10 +1285,8 @@ const analyzerCorpusGolden = `{
     "first_reasoning": 0,
     "chunks": 0,
     "tool_chunks": 0,
-    "tool_calls": 1,
-    "tool_names": [
-      "f"
-    ],
+    "tool_calls": 0,
+    "tool_names": null,
     "finish_reason": "",
     "terminated": false,
     "chatlike": true,
@@ -1317,10 +1315,8 @@ const analyzerCorpusGolden = `{
     "provider_model": "",
     "provider_id": "",
     "record_preview": "",
-    "record_calls": 1,
-    "record_names": [
-      "f"
-    ],
+    "record_calls": 0,
+    "record_names": null,
     "record_reasoning": 0,
     "record_chunks": 0
   },
@@ -3053,10 +3049,8 @@ const analyzerCorpusGolden = `{
     "first_reasoning": 0,
     "chunks": 1,
     "tool_chunks": 1,
-    "tool_calls": 1,
-    "tool_names": [
-      "search"
-    ],
+    "tool_calls": 0,
+    "tool_names": null,
     "finish_reason": "",
     "terminated": false,
     "chatlike": true,
@@ -3085,10 +3079,8 @@ const analyzerCorpusGolden = `{
     "provider_model": "",
     "provider_id": "",
     "record_preview": "",
-    "record_calls": 1,
-    "record_names": [
-      "search"
-    ],
+    "record_calls": 0,
+    "record_names": null,
     "record_reasoning": 0,
     "record_chunks": 1
   },
@@ -3147,10 +3139,8 @@ const analyzerCorpusGolden = `{
     "first_reasoning": 0,
     "chunks": 1,
     "tool_chunks": 0,
-    "tool_calls": 1,
-    "tool_names": [
-      "y"
-    ],
+    "tool_calls": 0,
+    "tool_names": null,
     "finish_reason": "",
     "terminated": false,
     "chatlike": true,
@@ -3179,10 +3169,8 @@ const analyzerCorpusGolden = `{
     "provider_model": "",
     "provider_id": "x",
     "record_preview": "hi",
-    "record_calls": 1,
-    "record_names": [
-      "y"
-    ],
+    "record_calls": 0,
+    "record_names": null,
     "record_reasoning": 0,
     "record_chunks": 1
   },

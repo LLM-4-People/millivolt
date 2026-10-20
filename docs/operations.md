@@ -86,7 +86,7 @@ unitless numbers with the unit in the schema label when it is not obvious.
 | Server | Listen/database paths, ring depth, shutdown/restart drain and HTTP server timeouts. |
 | Request | Upload bound, allowed upstream prefixes, content preview, debug capture retention/size cap and token refresh. |
 | Upstream | Response-header deadline, connection pools, model-discovery budgets and SSE keepalives. |
-| Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality/thinking retries and atomic tool calls. |
+| Queue & retry | Per-key admission, queue capacity/wait, retry counts/hints, backoff, quality retries and thinking rescues. |
 | Error storm protection | Enable provider/model detection, failure selectors and window/sample thresholds, recovery, queue/scope bounds, additional retries and banner visibility. |
 | Quota pause | Reaction to durable quota/billing 429s: surface, provider-wide recovery gate or indefinite operator-held pause, and the recovery-probe success count. |
 | Conversations | Automatic grouping idle gap, open-conversation cap and per-client tracked body params. |
@@ -688,10 +688,7 @@ that those consumers have not adopted yet. The schema/example identify which
 fields require restart.
 
 Rebuild & restart requires Go on PATH and the original source tree available at
-its compiled-in path. Moved/trimpath builds report it unavailable, and the
-dashboard then omits the Restart control entirely (see
-[Settings and Restart](#settings-and-restart)) rather than offering an action
-that cannot work. It builds
+its compiled-in path. Moved/trimpath builds may report it unavailable. It builds
 first, stops acceptance while retaining the listening socket, drains active
 handlers, flushes storage, then hands the socket to a ready child. Drain timeout
 or flush failure aborts and resumes the old process. Parked native-adapter runs
@@ -725,7 +722,7 @@ both.
 | `POST /session` | The one open operator route: exchanges the credential for the session cookie the dashboard's live feed needs. Throttled like every gated route. Lives outside `/admin` so an external authentication layer can front the admin plane without gating millivolt's own login. |
 | `GET/POST /admin/config` | Schema/file/effective state; save `{revision,values}`. Stale revision returns 409. Saved-but-reload-failed is explicitly reported. GET and save responses carry a `last_reload` section: `ok`, `error`, `dropped_keys`, `restart_required`, `at`. |
 | `POST /admin/reload` | Re-read config and report restart-required keys. |
-| `GET/POST /admin/restart` | Status / rebuild. Carries `available` and `reason` plus the live `phase`, `pid`, `started_at`, `error`, `rank` and drain fields; the bootstrap's `restart` section is the boot-time subset `{available, reason}`. `GET ?watch=1` streams progress; concurrent starts are rejected. |
+| `GET/POST /admin/restart` | Status / rebuild. `GET ?watch=1` streams progress; concurrent starts are rejected. |
 | `GET/POST /admin/pause` | Inspect/add/edit/resume holds. POST requires `paused`; optional ID targets one hold. |
 | `GET/POST /admin/quota` | Inspect storm state (shared with the banner) / `POST {"provider","resume":true}` closes a retry-mode quota gate; parked sends resume immediately. |
 | `GET/POST /admin/debug` | Inspect/add/edit/stop capture sessions. POST requires `enabled`; starting a session requires durable storage (503 `durable storage is disabled` otherwise); optional ID targets one session. |
@@ -1134,13 +1131,8 @@ structured editors work on a local draft; Apply uses the
 [revision-checked save contract](#saving-settings-safely).
 
 Opening Restart reads availability and status. Restart now is disabled while a
-restart is in progress. Availability is decided at boot (Go on PATH plus the
-compiled-in source tree) and rides the bootstrap payload's `restart` section as
-`{available, reason}`; on a build that cannot rebuild, the control and its menu
-leave the row entirely, so the dashboard shows no Restart entry and does not
-render that reason anywhere - read it from `GET /admin/restart` instead.
-Progress reports actual build/drain/flush/handoff phases; it is not a simulated
-timer. After a successful
+restart is in progress or rebuilding is unavailable. Progress reports actual
+build/drain/flush/handoff phases; it is not a simulated timer. After a successful
 handoff, reconnect/bootstrap refreshes history, aggregates, operator state and
 config. Changed embedded frontend assets trigger a page reload through that same
 refresh owner. The [lifecycle section](#reload-restart-and-shutdown) distinguishes
@@ -1230,11 +1222,8 @@ upstream failures. HTTP 429 counts requests that encountered a final or retried
 cancellation is likewise distinct from an upstream failure - except a 499 whose
 record carries a structured error type: that observed the provider's in-band
 stream failure before the client left (typically an error event the client
-received and aborted around), and counts as the provider error it is. A close
-the SERVER initiated is not a client cancellation at all and is never recorded
-as 499: the graceful-shutdown abort carries 503 + `server_shutdown`, so a request
-the proxy itself cut short shows as the failure it is instead of a clean one.
-Zero explorer health badges are hidden independently. Error-dimension card
+received and aborted around), and counts as the provider error it is. Zero
+explorer health badges are hidden independently. Error-dimension card
 headlines count failure events (final plus absorbed), while card N counts
 distinct affected requests. The gallery share denominator `error_total` is the
 union of affected requests represented by the error cards, so a card's share

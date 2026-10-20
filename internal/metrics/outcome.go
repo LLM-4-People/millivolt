@@ -9,23 +9,12 @@ import (
 // Degenerate-outcome detection: a "successful" upstream response that carried
 // nothing usable. These are the canonical error codes surfaced in-band on
 // streams and as HTTP 502s on non-streaming bodies. The strings deliberately
-// avoid the words that make a common client classify the failure as permanent,
-// so an unrecognized code falls through to a retryable 500 - exactly how a
-// degenerate completion must behave (the client retries it, the user retries
-// it, nothing is masked).
-//
-// The Vercel AI SDK is the reference consumer, and its OpenAI adapter reads
-// only the error's `code` and `type` (never its message) to classify an
-// in-band frame, mid-stream included. It maps `insufficient_quota`/`rate_limit`
-// to 429, `authentication` to 401, `permission` to 403, `not_found` to 404 and
-// `invalid`/`bad_request`/`context_length` to 400 - the four that would read as
-// permanent, since 4xx is outside its retryable set (408/409/429/5xx); an
-// `insufficient_quota` code or type is refused outright. So the words to avoid
-// are exactly those five groups. "overload" and "timeout" deliberately do NOT
-// appear in that list: they map to 503 and 504, which are retryable, and
-// CodeTruncated ("truncated") matches no discriminator at all and so takes the
-// retryable 500 default. Verified against @ai-sdk/openai@3.0.118, the
-// generation the ai-sdk/provider-utils@4.x client stack runs.
+// avoid the verbs that downgrade retryability in common clients (Vercel AI
+// SDK's getStatusCode maps codes containing "invalid"/"bad_request"/
+// "context_length"/"authentication"/"permission"/"not_found"/"overload"/
+// "timeout" to non-retryable 4xx classes); an unrecognized code maps to a
+// retryable 500 instead - which is exactly how a degenerate completion must
+// behave (the client retries it, the user retries it, nothing is masked).
 const (
 	// CodeEmptyCompletion: the stream terminated cleanly (terminator seen),
 	// but produced no answer content, no answer-shaped output (a non-empty

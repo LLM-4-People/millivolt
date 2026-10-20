@@ -101,33 +101,6 @@ const (
 	// error. Past the cap the hold is abandoned: no terminal region this large
 	// belongs to a degenerate stream. Safety guardrail, not user-tunable.
 	terminalHoldMax = 64 * 1024
-	// toolCallHoldMax bounds the same withhold region when it was OPENED by a
-	// tool call (config.AtomicToolCalls): tool-call arguments are
-	// provider-authored and routinely dwarf a terminal region, so the region
-	// gets its own, larger cap. Past it the region COMMITS: its bytes reach the
-	// client, the relay records that as a fact of the wire, and from then on
-	// nothing may re-send behind them or replace them. The finished stream's
-	// outcome is still surfaced - the in-band error appends after the committed
-	// bytes, and the record carries the class - so a committed region is a
-	// failed stream that says so, never a silent success and never a rescue.
-	// Safety guardrail, not user-tunable.
-	//
-	// It is set on the byte run that opens the region when that run carries a
-	// tool call, and RAISED if a tool call begins inside a region something else
-	// opened. That second case is real: sse.TerminalLine matches only [DONE] and
-	// Responses terminal events, so a finish_reason chunk opens the region
-	// without resolving it on the same line, and the tool-call deltas that
-	// follow land inside it.
-	//
-	// Sizing it equal to sseScannerBufMax is deliberate, not incidental. The
-	// relay's newline-free guardrail splits any data line longer than that, and
-	// a tool call whose arguments exceed the cap is therefore committed in
-	// fragments - with the region opened on the first of them, so its tail and
-	// the terminator are still withheld and released once. Raising the cap past
-	// the guardrail would buy nothing: the line is already un-reassemblable by
-	// then. Lowering it would commit calls that fit comfortably, which is the
-	// hazard the setting exists to remove.
-	toolCallHoldMax = 1 << 20 // 1 MiB
 	// maxTranslateBodyBytes caps the buffered read of a translated
 	// non-streaming 200 body in serveNonStreaming. Unlike the capture/spool
 	// prefixes above, translation needs the WHOLE document, so this is a
@@ -301,14 +274,6 @@ type Server struct {
 	pause      pauseRuntime
 	throttle   throttleRuntime
 	debug      debugRuntime
-	// aborting records that this process has stopped serving and is aborting
-	// in-flight streams (the graceful-shutdown abort that keeps http.Server
-	// .Shutdown from being gated on streams that never end). Set once, before
-	// the request contexts are canceled, and read on the relay's error
-	// classification path to tell a close this process caused from the local
-	// client's own abort - the two look identical to a handler, and only the
-	// first is a failure (see markServerAbort).
-	aborting atomic.Bool
 	// ModelObserver is wired before serving. Debug state uses the same Go
 	// canonical-name metadata provider as all other dashboard observers.
 	ModelObserver func([]string) any
@@ -322,12 +287,6 @@ type Server struct {
 	// provider + refresh token, holding no credentials after completion.
 	tokenRefresh tokenRefreshCoalescer
 }
-
-// MarkAborting records that this process is stopping serving and aborting
-// in-flight streams. It must be called BEFORE the request contexts are
-// canceled, so a handler that fails its read as a result is classified as the
-// server's own close (errServerShutdown) rather than the client's abort.
-func (s *Server) MarkAborting() { s.aborting.Store(true) }
 
 // cfg returns the current config snapshot. Cheap (atomic load); safe to call
 // on the hot path. The returned *config.Config is immutable - never mutate it.
@@ -407,20 +366,8 @@ func newUpstreamClient(cfg *config.Config) *http.Client {
 		// HTTPS upstreams that speak h2 (e.g. Cursor's Connect-RPC agent.v1,
 		// which REQUIRES h2 for server-streaming) negotiate it via ALPN;
 		// everything else keeps HTTP/1.1 keep-alive, the reliable SSE path.
-		// UnencryptedHTTP2 is declared for completeness but is INERT here: the
-		// stdlib takes the h2c prior-knowledge path only when HTTP1 is NOT in
-		// the set (net/http's transport.go requires !Protocols.HTTP1()), and
-		// HTTP/1.1 is advertised below. So a plaintext http:// upstream gets
-		// HTTP/1.1 whatever it advertises, and HTTP/2 is reachable only over
-		// TLS via ALPN. The Cursor bridge's h2c support is a separate
-		// x/net/http2 transport (cursorClientFor), which is not this one.
-		//
-		// MaxConnsPerHost below bounds only HTTP/1.1 connections. Go's HTTP/2
-		// client pools multiplex every stream onto one connection and never
-		// reads that field, so against an h2 upstream the real ceiling is the
-		// provider's own concurrent-stream limit (Go's own default is 1000 per
-		// connection), not this number; max_concurrent is the setting that
-		// bounds it.
+		// UnencryptedHTTP2 (h2c prior-knowledge) lets plaintext http:// test
+		// servers and h2c gateways also use h2.
 		Protocols: func() *http.Protocols {
 			p := new(http.Protocols)
 			p.SetHTTP1(true)

@@ -22,7 +22,7 @@ func toolNameFeedLines(unique, perChunk int) [][]byte {
 			if i > start {
 				b.WriteByte(',')
 			}
-			fmt.Fprintf(&b, `{"index":%d,"id":"call-%d","type":"function","function":{"name":"tool-%06d","arguments":""}}`, i, i, i)
+			fmt.Fprintf(&b, `{"index":%d,"id":"call-%d","type":"function","function":{"name":"tool-%06d","arguments":""}}`, i-start, i, i)
 		}
 		b.WriteString(`]}}]}`)
 		lines = append(lines, []byte(b.String()))
@@ -32,9 +32,9 @@ func toolNameFeedLines(unique, perChunk int) [][]byte {
 
 // TestAnalyzerToolNameRetentionBounded pins the producer cap: a stream with
 // 100k distinct tool names keeps only the first metrics.RetainedToolNamesMax
-// names in arrival order, while the tool-call accounting saturates at its own
-// shared bound. The retained map/set never grows past that cap, so a hostile
-// stream cannot retain a names-sized allocation until Fill.
+// names in arrival order, while every tool call is still counted. The retained
+// map/set never grows past that cap, so a hostile stream cannot retain a
+// names-sized allocation until Fill.
 func TestAnalyzerToolNameRetentionBounded(t *testing.T) {
 	const unique = 100000
 	lines := toolNameFeedLines(unique, 1000)
@@ -45,8 +45,8 @@ func TestAnalyzerToolNameRetentionBounded(t *testing.T) {
 	}
 	var rec metrics.Record
 	a.Fill(&rec)
-	if rec.ToolCalls != maxTrackedToolCalls {
-		t.Fatalf("ToolCalls = %d, want the bounded count %d", rec.ToolCalls, maxTrackedToolCalls)
+	if rec.ToolCalls != unique {
+		t.Fatalf("ToolCalls = %d, want every one of %d calls", rec.ToolCalls, unique)
 	}
 	if len(rec.ToolNames) != metrics.RetainedToolNamesMax {
 		t.Fatalf("ToolNames = %d, want the shared cap %d", len(rec.ToolNames), metrics.RetainedToolNamesMax)
@@ -65,7 +65,7 @@ func TestAnalyzerToolNamesDeduplicateAndCount(t *testing.T) {
 	now := time.Now()
 	var a Analyzer
 	for i := 0; i < 3; i++ {
-		a.Feed([]byte(fmt.Sprintf(`data: {"choices":[{"delta":{"tool_calls":[{"index":%d,"id":"call-%d","function":{"name":"search"}}]}}]}`, i, i)), now)
+		a.Feed([]byte(fmt.Sprintf(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-%d","function":{"name":"search"}}]}}]}`, i)), now)
 	}
 	var rec metrics.Record
 	a.Fill(&rec)

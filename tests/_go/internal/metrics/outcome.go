@@ -91,29 +91,12 @@ func TestDegenerateMessage(t *testing.T) {
 			t.Fatalf("DegenerateMessage(%q) = %q, want a real message", code, got)
 		}
 	}
-	// Retryability contract, verified against @ai-sdk/openai@3.0.118 (the
-	// generation the ai-sdk/provider-utils@4.x client stack runs): its OpenAI
-	// adapter classifies an in-band error frame by the error's `code` and
-	// `type` only, never its message, and that classification applies
-	// mid-stream as well as before it. getStatusCode maps insufficient_quota /
-	// rate_limit to 429, authentication to 401, permission to 403, not_found
-	// to 404 and invalid / bad_request / context_length to 400; a 4xx other
-	// than 408/409/429 falls outside isRetryableStatusCode, and an
-	// insufficient_quota code or type is refused outright. Those groups are
-	// the only ones a degenerate code may not contain.
-	//
-	// "overload" and "timeout" are deliberately absent from this list: they
-	// map to 503 and 504, which ARE retryable, so forbidding them would
-	// over-constrain the vocabulary for no client benefit. An unrecognized
-	// code takes the retryable 500 default, which is the behavior a
-	// degenerate completion wants.
-	for _, bad := range []string{
-		"insufficient_quota", "rate_limit", "authentication",
-		"permission", "not_found", "invalid", "bad_request", "context_length",
-	} {
+	// Retryability contract: the codes must not contain the substrings that
+	// downgrade client-side retry classification (vercel-ai getStatusCode).
+	for _, bad := range []string{"invalid", "bad_request", "context_length", "authentication", "permission", "not_found", "overload", "timeout"} {
 		for _, code := range []string{CodeEmptyCompletion, CodeEmptyToolCall, CodeTruncated, CodeReasoningOnly} {
 			if contains(code, bad) {
-				t.Fatalf("code %q contains permanently-classified substring %q", code, bad)
+				t.Fatalf("code %q contains non-retryable substring %q", code, bad)
 			}
 		}
 	}

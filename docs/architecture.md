@@ -107,85 +107,6 @@ Capture context error before canceling it for cleanup. Never retry a canceled
 caller or replay meaningful emitted stream content. Quality failure handling is
 explicitly exceptional; see [adapters](adapters.md) and the relay tests.
 
-Opt-in atomic tool calls ([relay.go](../internal/proxy/relay.go) `streamBody`)
-narrow that gap rather than widen it: the relay withholds every tool-call-bearing
-event until the stream's terminator, so an UNCOMMITTED tool call is never on the
-wire. No client generation waits for `finish_reason` to commit a streamed tool
-call: every Vercel AI SDK generation checked finalizes its accumulated calls in
-an end-of-stream `flush()` - `@ai-sdk/openai-compatible` 2.x, whose `hasFinished`
-flag is never assigned, and the `@ai-sdk/provider-utils` 5.x tracker behind
-`ai@7` and `@ai-sdk/openai@4.x`, whose `finishToolCall` is called from `flush()`
-and nowhere else - so those are the only contract bytes a re-send could
-duplicate destructively; with them withheld, every rescue budget keeps its
-guarantee. The region opens on whatever byte run revealed the tool call, and a
-byte run counts wherever it sits: the newline-free line guardrail splits a data
-line longer than 1 MiB and every fragment after the first begins mid-JSON, so
-the call is found by scanning the raw run, not a data line, and the same applies
-to a trailing partial line. Where those bytes are already going to the wire -
-the setting is off, or the line's head went out first - the relay records the
-fact instead, and no rescue may follow it. The region is bounded by
-`toolCallHoldMax` ([proxy.go](../internal/proxy/proxy.go)), and past that bound
-it COMMITS. A commit is a wire fact the relay carries positively: no rescue
-fires behind it and nothing is substituted over it. A commit of a region that
-holds a tool call suppresses every class but the truncation, since the analyzer
-may never have seen a whole call in those bytes; a commit of a region with no
-tool call in it does not, because the size guard is not evidence of health - a
-65,536-byte usage blob alone used to erase the class of a stream that produced
-nothing. Either way the finished stream's class is surfaced in-band after the
-committed bytes, so a committed region is never a silent success. A withheld
-region is also never released by a transport read error, a client that went
-away, or this process shutting the stream down: none of those proves the model
-finished the call, so the region is dropped and the failure surfaced in its
-place. A close this process initiated carries `503` + `server_shutdown` rather
-than the flow-event `499`, which is the client's own abort. The withhold
-decision is independent of the chatlike gate the degenerate classifier uses; a
-non-chatlike feed's tool-call region is dropped and its truncation surfaced
-rather than released.
-
-The count of distinct tool calls has one owner, the index-keyed set on
-[analyzer.go](../internal/sse/analyzer.go): a streamed tool call is keyed by its
-array index, which is how the official `openai` SDKs (node, python, go) key it,
-so two indices are two calls even with one id, an argument-only continuation at a
-seen index is the same call, and an entry with an empty or absent id is still a
-call. `@ai-sdk/provider-utils` 5.x keys by id first and therefore disagrees: two
-entries sharing an id are one call to `ai@7` with concatenated arguments, where
-the `openai` SDKs see two - a divergence the protocol documents rather than
-reconciles, since the relay reports what the wire carried. It is a fixed-size
-bitset plus a bounded id fallback (1024 calls), registration is O(1), and the
-reassembled event owns every byte its buffer kept while the raw data line covers
-only what that buffer dropped, so no array is decoded twice; a byte run with no
-`data:` prefix (a guardrail fragment, a trailing partial) is scanned by the same
-tool-call key vocabulary, so a call split by the relay's own line cap is neither
-missed nor double-counted. A stream whose tool-call bytes were seen but whose
-call is uncountable is never classified as a void. Covered by
-`TestAtomicWithholdingIsBoundedByTheTerminator`,
-`TestAtomicToolCallNeverReachesClientOnTruncation`,
-`TestSplitToolCallIsNotAlsoReportedAsEmptyToolCall`,
-`TestToolCallLargerThanTheTerminalCapIsStillWithheld`,
-`TestOversizedToolCallFramesAreCountedAndRelayed`,
-`TestToolCallFramePastTheRelayGuardrailIsRelayedWholeAndTerminatedOnce`,
-`TestCommittedToolCallRegionIsSurfacedAndNeverResent`,
-`TestToolCallWithNoUsableIdIsStillACall`,
-`TestTwoCallsSharingOneIdAreTwoCalls`,
-`TestAtomicWithholdingAppliesToANonChatlikeFeed`,
-`TestAtomicFunctionCallIsWithheldAndCounted`
-([tests](../tests/_go/internal/proxy/atomic_tool_calls.go),
-[edges](../tests/_go/internal/proxy/atomic_tool_calls_edges.go),
-[regressions](../tests/_go/internal/proxy/atomic_regressions.go)), plus the
-soundness suite this branch's last review added -
-`TestGuardrailSplitToolCallIsNeverResent`,
-`TestWithheldToolCallSurvivesATransportReadError`,
-`TestClientGoneWithAWithheldRegionReleasesNothing`,
-`TestCommittedRegionWithoutAToolCallKeepsItsClass`,
-`TestDefaultsReleaseATrailingTerminalPartial` and
-`TestKeepaliveDoesNotDispatchTheOpenEvent`
-([soundness](../tests/_go/internal/proxy/atomic_soundness.go),
-[keepalive](../tests/_go/internal/proxy/sse_keepalive.go)), plus
-`TestToolCallIdentityIsTheIndex`, `TestTrackedToolCallsAreBounded`,
-`TestUncountableToolCallIsNeverAVoid`, `TestOutcomeCodeAssemblesThePendingEvent`
-and `BenchmarkAnalyzerToolCallArray`
-([sse tests](../tests/_go/internal/sse/toolcalls.go)).
-
 [scheduler/storm.go](../internal/scheduler/storm.go) owns bounded rolling
 attempt counters, active-model evidence, cross-key provider/model gates and
 exclusive recovery permits. Provider activation requires all models with
@@ -441,15 +362,12 @@ counts once per affected request, not via the broad pacing flag. A real failure
 and 429 may overlap. `metrics.IsNonRetryableQuotaErr` is the fixed durable
 quota/billing classification vocabulary: the retry ladder, storm evidence and
 in-band precedence all consult it, so the account condition never counts as a
-rate limit. A plain 499 is the LOCAL client's own abort and is a flow event; a
-499 carrying a structured error observed the upstream's in-band failure before
-the client left and counts like its 200 twin. A close the SERVER initiated (the
-graceful-shutdown abort, `proxy.MarkAborting`) is neither: it carries 503 +
-`server_shutdown` and counts as the failure it is, because marking it as the
-client's own abort reported a request the proxy failed as a clean one. The
-shared first-membership gate keeps duplicate tool/error occurrences from
-duplicating these health counts without changing event/sample multiplicity.
-Tests cover raw/projected/durable/ring/pending parity.
+rate limit. A plain 499 (the local client's own abort) is a flow
+event; a 499 carrying a structured error observed the upstream's in-band
+failure before the client left and counts like its 200 twin. The shared
+first-membership gate keeps duplicate tool/error
+occurrences from duplicating these health counts without changing event/sample
+multiplicity. Tests cover raw/projected/durable/ring/pending parity.
 
 See the files under `tests/_go/internal/web/`: `aggregate_projection.go`,
 `aggregate_dimensions.go`, `aggregate_percentiles.go`, `aggregate_explorer_fold.go`,
@@ -609,23 +527,3 @@ Operators use shared mutation/revision gates, lossless Settings collection,
 stable event-path outside-click handling and a focus/inert dialog lifecycle.
 CSS owns responsive breakpoints. Preserve accessibility, saved state and cheap
 boot; jsdom tests do not replace real desktop/mobile canvas checks.
-
-## Restart eligibility
-
-Whether a graceful self-restart can even be attempted is decided once at boot by
-the [restarter](../cmd/proxy/restart.go) (Go on PATH plus the compiled-in source
-tree) and is immutable for the process. That boot-time verdict is what the
-dashboard renders from, so it travels in the canonical bootstrap builder's
-payload as its own `restart` section: a strict SUBSET of `GET /admin/restart`'s
-status document, carrying `available` and `reason` and none of that document's
-live phase, pid, error, rank or drain state, so it cannot become a second source
-of restart truth. A payload without the section (or without a boolean
-`available`) leaves the current behavior alone. When the verdict is false the
-browser hides the control and its menu together, which also means the
-eligibility `reason` has no reachable surface - it is an API-level fact, and the
-server's own refusal still carries it. Covered by
-`TestEligibilitySnapshotMatchesAvailability`
-([tests](../tests/_go/cmd/proxy/restart.go)) and
-`TestBootstrapCarriesRestartEligibility`
-([tests](../tests/_go/internal/web/aggregate.go)), with the control's
-visibility pinned by the shared UI suite.
