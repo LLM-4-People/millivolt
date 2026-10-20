@@ -1,7 +1,8 @@
-<!-- Brand mark for /favicon.ico. This is a standalone SVG (no stylesheet), so
-     it cannot resolve CSS var() - the scale greys mirror --scale-tick/--scale-base,
-     the well gradient mirrors --well-hi/--well-lo, and the trace gradient mirrors
-     --accent/--accent2 from index.html's :root. Keep them in sync. -->
+<!-- Brand mark for the favicon. This is a standalone SVG (no stylesheet), so
+     it cannot resolve CSS variables. The scale greys mirror the scale-tick and
+     scale-base tokens, the well gradient mirrors the well-hi and well-lo tokens,
+     and the trace gradient mirrors the accent and accent2 tokens from the
+     dashboard. Keep them in sync. -->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
   <defs>
     <radialGradient id="well" cx="30%" cy="22%" r="130%">
