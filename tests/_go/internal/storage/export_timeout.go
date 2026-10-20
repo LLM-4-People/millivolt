@@ -41,8 +41,17 @@ func TestExportWhereTotalTimeoutIsBoundedAndDistinct(t *testing.T) {
 	if err := s.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	// assertReleased proves the read snapshot is usable after a failed export.
+	// It must not inherit the 20ms seam used to force the failure: connection
+	// acquisition and the first SQLite step are part of the export budget, and
+	// under -race plus a loaded suite that path alone can exceed 20ms. Use a
+	// bounded production-scale budget so this assertion tests release, not
+	// scheduler latency, while still failing instead of hanging on a real leak.
 	assertReleased := func(t *testing.T) {
 		t.Helper()
+		seam := s.opts.ExportTimeout
+		s.opts.ExportTimeout = 5 * time.Second
+		defer func() { s.opts.ExportTimeout = seam }()
 		var out bytes.Buffer
 		if n, err := s.ExportWhere(context.Background(), PurgeFilter{}, &out); err != nil || n != 1 {
 			t.Fatalf("export after timeout = %d, %v; want 1, nil (read snapshot not released)", n, err)
