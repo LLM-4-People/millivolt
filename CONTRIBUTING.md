@@ -113,8 +113,8 @@ scripts/check.sh
 CI always runs isolated browser fixtures as well (desktop and mobile). Use
 `scripts/dev.sh` plus `scripts/check.sh browser` as below, with
 `MILLIVOLT_OPERATOR_TOKEN` set. Re-run both after the last commit. A red
-GitHub check after a push means the gate was skipped or stale: fix, re-run,
-and push only a passing tree.
+GitHub check after a push means the gate was skipped, stale, or unmonitored:
+fix, re-run, and push only a passing tree, then watch the new run to completion.
 
 The browser-fixtures job also runs the live MCP integration test, which
 `scripts/check.sh browser` alone does not run. It is mandatory on the same
@@ -127,6 +127,15 @@ MILLIVOLT_MCP_INTEGRATION=1 scripts/check.sh go test -count=1 ./internal/mcp/...
 The test starts a private dev instance through `scripts/dev.sh` on its own
 loopback port and scratch database, drives every registered tool, and stops the
 instance again, so it does not touch the instance the browser check uses.
+
+After pushing, monitor the GitHub Actions run for the pushed commit until every
+required job completes successfully. The local gate cannot see the browser,
+MCP integration, container, CodeQL, or dependency-review jobs. Find the run with
+`gh run list --branch <branch> --limit 1`, then wait for it with
+`gh run watch <run-id> --exit-status`. A queued or in-progress run is not green.
+If any job fails, treat the push as incomplete: fix the root cause, rerun this
+gate, and push the fix. Do not leave `testing` or `main` red or start unrelated
+work on top of a failing run.
 
 For changes to configuration, update the Config/default/validation/schema owners
 and regenerate the example as described in [operations](docs/operations.md).
