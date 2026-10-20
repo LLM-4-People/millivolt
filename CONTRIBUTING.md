@@ -24,9 +24,9 @@ updates. Administrators have no bypass either. When release automation needs new
 behavior, change the workflow in a pull request; never add a bypass actor or use
 an administrator override.
 
-Random pushes to `testing` publish only the moving development image. Pull
-requests and pushes to `testing` run the full gate; docs and site-only pushes to
-`testing` run the smaller documentation gate.
+Completed feature pushes to `testing` publish only the moving development image.
+Pull requests and pushes to `testing` run the full gate; docs and site-only
+pushes to `testing` run the smaller documentation gate.
 
 ### Promote testing to main
 
@@ -37,6 +37,8 @@ requests and pushes to `testing` run the full gate; docs and site-only pushes to
    git switch testing
    git merge --ff-only origin/testing
    ```
+   If `main` is not an ancestor of `testing`, merge `origin/main` into
+   `testing` first and resolve conflicts before continuing.
 2. Bump `VERSION` on `testing` to a version newer than every existing `v*` tag.
    Normal SemVer precedence applies; a prerelease is lower than the same stable
    version. Commit the bump separately:
@@ -81,9 +83,10 @@ security-only merge does not cut a release because `VERSION` is already tagged.
 Merge `main` back into `testing` and include the fix in the next versioned
 promotion.
 
-Docs and site-only pushes to `testing` skip image work. A promotion to `main`
-always carries a `VERSION` bump, so a docs-only promotion is still a versioned
-main push and will cut a release; Pages deploys from the same merge.
+Docs and site-only pushes to `testing` skip image work. A non-Dependabot
+promotion to `main` always carries a `VERSION` bump, so a docs-only promotion is
+still a versioned main push and will cut a release; Pages deploys from the same
+merge.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -429,12 +432,12 @@ pass, a versioned push to `main` cuts a release:
    never moves them.
 
 Docs and site-only pushes to `testing` skip image work. They validate Markdown
-and the generated site. A main promotion always carries a VERSION bump, so it is
-a versioned main push and cuts a release; Pages deploys from the same merge. A
-manually pushed `v*` tag still ships exactly as tagged through the same
-pipeline, with the image published before the release is created. VERSION must be
-newer than every existing tag for a promotion, and a manual tag must match
-VERSION. Code-bearing pushes to `testing` publish the moving
+and the generated site. A non-Dependabot main promotion always carries a VERSION
+bump, so it is a versioned main push and cuts a release; Pages deploys from the
+same merge. A manually pushed `v*` tag still ships exactly as tagged through the
+same pipeline, with the image published before the release is created. VERSION
+must be newer than every existing tag for a promotion, and a manual tag must
+match VERSION. Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
 container builds, without cutting a release or any version tag. Its OCI version
 label reports the embedded VERSION, which can lag the latest release.
@@ -456,7 +459,20 @@ the release checks accidentally.
 Only push the intended release tag after that check succeeds. Main changes go
 through the protected pull request path. The workflow publishes images
 automatically and creates the release with notes generated from the commit log.
-Native container checks run before the multi-platform publish job.
+Native container checks run before the multi-platform publish job. After the
+promotion run, verify the published tag and image:
+```sh
+gh release view "v$millivolt_version"
+docker buildx imagetools inspect "ghcr.io/llm-4-people/millivolt:$millivolt_version"
+```
+
+### If a release fails
+
+- Before the tag is pushed, no public release exists. Fix the failure and rerun
+  the main workflow or promote a new version.
+- After the tag is pushed, the tag-triggered run recreates the missing release.
+  Rerun that run rather than recreating the tag.
+- Do not move or delete a published version tag. Publish a new patch version.
 
 For local container verification, build with Docker, resolve the image's
 immutable ID, then use the same fixture as CI:

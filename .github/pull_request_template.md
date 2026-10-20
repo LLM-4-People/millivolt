@@ -20,7 +20,7 @@ actors. The `required` check verifies the testing ancestry and version bump.
 Complete only when targeting `main`:
 
 - [ ] The head commit is already on `testing`.
-- [ ] `VERSION` is newer than every existing `v*` release tag.
+- [ ] `VERSION` is newer than every existing `v*` release tag (Dependabot security pull requests skip this check).
 - [ ] I will merge with a merge commit and will not add a ruleset bypass.
 
 ## Type of change
