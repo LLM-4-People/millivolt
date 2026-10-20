@@ -16,27 +16,92 @@ and relevant checks in the same change. Fetch the current remote branch before
 starting follow-up work. Use feature branches targeting `testing` for review,
 or push a completed, checked feature directly there when that is authorized.
 
-Promotion from `testing` to `main` is a separate deliberate integration after
-validation, not part of an ordinary feature push. Do not push release tags as a
-side effect of feature work: CI tags and publishes releases itself. Pull requests
-and pushes to `main` and `testing` run the full gate; docs and site-only pushes
-run the smaller documentation gate. Production image publishing remains
-restricted to `main` and version tags, and `testing`-branch pushes publish only
-the moving development alias.
+`main` is promotion-only. Do not develop on it, push it directly, or bypass its
+rules. The `main-testing-first` ruleset requires a pull request and the
+`required` check, allows merge commits only, and has no bypass actors. The
+`long-lived-branch-integrity` ruleset also blocks deletion and non-fast-forward
+updates. Administrators have no bypass either. When release automation needs new
+behavior, change the workflow in a pull request; never add a bypass actor or use
+an administrator override. Inspect the active ruleset with:
+
+```sh
+ruleset_id="$(gh api repos/LLM-4-People/millivolt/rulesets \
+  --jq '.[] | select(.name == "main-testing-first") | .id')"
+gh api "repos/LLM-4-People/millivolt/rulesets/$ruleset_id" \
+  --jq '{name,enforcement,bypass_actors,current_user_can_bypass}'
+```
+
+It must report `enforcement: active`, an empty `bypass_actors`, and
+`current_user_can_bypass: never`.
+
+Completed feature pushes to `testing` publish only the moving development image.
+Pull requests and pushes to `testing` run the full gate; docs and site-only
+pushes to `testing` run the smaller documentation gate.
+
+### Promote testing to main
+
+1. Fetch and align the branches. `testing` must contain the feature work and
+   `main` must be an ancestor:
+   ```sh
+   git fetch origin
+   git switch testing
+   git merge --ff-only origin/testing
+   ```
+   If `main` is not an ancestor of `testing`, merge `origin/main` into
+   `testing` first and resolve conflicts before continuing.
+2. For a code-bearing promotion, bump `VERSION` on `testing` to a version
+   newer than every existing `v*` tag. Normal SemVer precedence applies; a
+   prerelease is lower than the same stable version. Commit the bump
+   separately:
+   ```sh
+   printf '0.3.31\n' > VERSION
+   git add VERSION
+   git commit -m "bump version to 0.3.31"
+   git push origin testing
+   ```
+   A docs/site-only promotion may skip this step. `required` detects that every
+   changed path is covered by the docs/site filter (for example Markdown,
+   `docs/`, `site-src/`, the docs and Pages workflows, and `LICENSE`), and the
+   merged main push stays docs-only.
+3. Open a pull request from `testing` to `main`. Wait for the `required` check.
+   For every non-Dependabot promotion it verifies that the head commit is
+   already on `testing`; code-bearing promotions must also have `VERSION` newer
+   than every release tag.
+   If it fails with "Main promotions must use commits already on testing",
+   merge the feature branch into `testing` first. If it fails with "VERSION
+   must be newer", bump `VERSION` above every tag and push the commit.
+4. Merge with a merge commit:
+   ```sh
+   gh pr merge <number> --merge
+   ```
+   Squash and rebase are disabled on `main`; they would replace the reviewed
+   testing history instead of preserving it.
+5. After the promotion is on `main` and its release or Pages run finishes,
+   merge `main` back into `testing` so the next promotion is up to date:
+   ```sh
+   git fetch origin main
+   git switch testing
+   git merge --ff-only origin/main
+   git push origin testing
+   ```
+   If `testing` moved after the promotion merge, merge `origin/main` normally
+   and resolve conflicts before the next promotion.
+
+For a code-bearing promotion, CI creates the annotated release tag on the merge
+and publishes the image. It never pushes `main`. Do not push a `v*` tag as part
+of feature work; the manual tag path is only for an explicitly verified release
+and must match `VERSION`.
 
 Dependabot version updates target `testing`. Dependabot security updates target
-the default branch. They are the documented exception to the testing-first rule:
-merge the security PR into `main`, then merge `main` back into `testing` before
-continuing feature work. A security-only merge does not cut a release; the next
-versioned promotion includes it.
+the default branch and are the only exception to the testing-ancestry check;
+they also skip the version check. They still run the full gate and the
+`required` check. A security-only merge does not cut a release because `VERSION`
+is already tagged. Merge `main` back into `testing` and include the fix in the
+next versioned promotion.
 
-`main` requires a pull request and the `required` check. For every non-Dependabot
-pull request targeting `main`, `required` verifies that the head commit is
-already an ancestor of `testing` and that `VERSION` is newer than the latest
-release tag. Merge the feature work into `testing` and bump `VERSION` in the
-promotion before opening the PR. The release workflow only tags and publishes the
-reviewed promotion commit; it never pushes `main`, and no person or app has a
-bypass.
+Docs and site-only pushes to `testing` skip image work. A docs/site-only
+promotion to `main` skips the `VERSION` check; the merged main push remains
+docs-only, so Pages deploys without rebuilding images or cutting a release.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -364,11 +429,12 @@ go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version
 Publication is automatic. After the checks and both container architectures
 pass, a versioned push to `main` cuts a release:
 
-1. A promotion PR owns the version bump. `required` compares VERSION against
-   every existing `v*` tag with SemVer precedence and rejects a non-Dependabot
-   main PR unless VERSION is newer. If VERSION is already tagged, no release is
-   cut: this is the Dependabot security-merge case, and the next versioned
-   promotion releases the change.
+1. A code-bearing promotion PR owns the version bump. `required` compares
+   VERSION against every existing `v*` tag with SemVer precedence and rejects a
+   non-Dependabot main PR unless VERSION is newer. Docs/site-only promotions
+   skip that comparison and stay release-free. If VERSION is already tagged, no
+   release is cut: this is the Dependabot security-merge case, and the next
+   versioned promotion releases the change.
 2. The workflow creates the annotated `v<version>` tag on the reviewed
    promotion merge commit and builds and publishes the multi-arch image with
    `main`, `sha-*`, `version` and (for non-prereleases) `latest` tags, including
@@ -381,12 +447,13 @@ pass, a versioned push to `main` cuts a release:
    missing image. `main` and `latest` exclude prereleases; the `testing` alias
    never moves them.
 
-Docs and site-only pushes never cut a release or rebuild images. They validate
-Markdown and the generated site; a main-branch docs/site push deploys Pages
-instead. A manually pushed `v*` tag still ships exactly as tagged through the
-same pipeline, with the image published before the release is created. VERSION
-must be newer than every existing tag for a promotion, and a manual tag must
-match VERSION. Code-bearing pushes to `testing` publish the moving
+Docs and site-only pushes to `testing` skip image work. They validate Markdown
+and the generated site. A docs/site-only main promotion also skips the VERSION
+gate; the merged main push stays docs-only, so Pages deploys without rebuilding
+images or cutting a release. A code-bearing main promotion must carry a VERSION
+newer than every existing tag and cuts a release. A manually pushed `v*` tag
+still ships exactly as tagged through the same pipeline, with the image
+published before the release is created. A manual tag must match VERSION. Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
 container builds, without cutting a release or any version tag. Its OCI version
 label reports the embedded VERSION, which can lag the latest release.
@@ -408,7 +475,21 @@ the release checks accidentally.
 Only push the intended release tag after that check succeeds. Main changes go
 through the protected pull request path. The workflow publishes images
 automatically and creates the release with notes generated from the commit log.
-Native container checks run before the multi-platform publish job.
+Native container checks run before the multi-platform publish job. After the
+promotion run, verify the published tag and image:
+```sh
+gh release view "v$millivolt_version"
+docker buildx imagetools inspect "ghcr.io/llm-4-people/millivolt:$millivolt_version"
+```
+
+### If a release fails
+
+- Before the tag is pushed, no public release exists. Fix the failure and rerun
+  the main workflow or promote a new version.
+- After the tag is pushed, keep the tag in place. If the GitHub release is
+  missing, create it from that tag or publish a new patch version. An automatic
+  tag push does not start a second workflow run.
+- Do not move or delete a published version tag.
 
 For local container verification, build with Docker, resolve the image's
 immutable ID, then use the same fixture as CI:

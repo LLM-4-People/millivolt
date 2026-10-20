@@ -23,12 +23,12 @@ that matches what you need to do.
 - [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
 - [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
 - [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
-- [Versions and images](operations.md#versions-and-images) - version identity, tags, and verification.
+- [Versions and images](operations.md#versions-and-images) - version identity, promotion, tags, and verification.
 
 ## Project
 
 - [What you get](../README.md#what-you-get) - the short feature overview.
-- [Contributing](../CONTRIBUTING.md) - development, checks, screenshots, and release policy.
+- [Contributing](../CONTRIBUTING.md) - development, checks, branch promotion, screenshots, and release policy.
 - [Security](../SECURITY.md) - exposure boundary, reporting, and supported versions.
 - [Releases](https://github.com/LLM-4-People/millivolt/releases) - published versions and notes.
 - [License](../LICENSE) - MIT terms and dependency notices.

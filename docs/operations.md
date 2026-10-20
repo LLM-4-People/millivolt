@@ -621,6 +621,16 @@ container's `/tmp` is a small tmpfs by design and never caps backup size.
 fingerprint is separate: it detects changed embedded frontend bytes, not a
 semantic release or a complete backend change.
 
+`main` is promotion-only. A promotion pull request from `testing` must have a
+head commit already on `testing`. A code-bearing promotion must also have a
+`VERSION` newer than every existing release tag; the `required` check enforces
+both. Docs/site-only promotions skip the version gate and do not rebuild images
+or cut a release. Merge with a merge commit. The release workflow tags that
+reviewed merge commit and publishes the image; it never pushes `main`. Dependabot
+security pull requests are the only other exception and do not cut a release by
+themselves. The full maintainer checklist lives in
+[Contributing](../CONTRIBUTING.md#branch-workflow).
+
 `go run ./cmd/proxy -version` (or `/millivolt -version` in the image) prints
 JSON with `version`, `revision`, `modified`, and `go_version`. Unavailable VCS
 metadata is reported honestly as revision `unknown` or `modified:null`.
