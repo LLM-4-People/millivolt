@@ -10175,7 +10175,7 @@ async function main() {
         const series = el.closest('.leg-item[data-series]')?.dataset.series;
         return series == null ? null : `[data-series="${w.CSS.escape(series)}"]`;
       }) : null;
-      const other = d.getElementById('btn-nav');
+      const other = d.getElementById('btn-pause');
       other.focus();
       const restored = typeof w.restoreFocus === 'function' ? w.restoreFocus(token) : false;
       check('the shared focus restore never steals focus from a moved operator',
