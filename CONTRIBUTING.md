@@ -128,6 +128,14 @@ The test starts a private dev instance through `scripts/dev.sh` on its own
 loopback port and scratch database, drives every registered tool, and stops the
 instance again, so it does not touch the instance the browser check uses.
 
+Before every push, check open pull requests and report any that are awaiting
+the user's review or approval. Do not approve or merge them without explicit
+authorization. Use:
+
+```sh
+gh pr list --state open --json number,title,author,isDraft,reviewDecision,mergeable,statusCheckRollup,url
+```
+
 After pushing, monitor the GitHub Actions run for the pushed commit until every
 required job completes successfully. The local gate cannot see the browser,
 MCP integration, container, CodeQL, or dependency-review jobs. Find the run with
