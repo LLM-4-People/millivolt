@@ -167,11 +167,31 @@ jobs:
     needs: [checks, container]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    permissions: {}
+    permissions:
+      contents: read
     steps:
       - name: Require every gate
         if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
         run: exit 1
+
+      # Main is promoted from testing. Dependabot security updates are the one
+      # documented exception because GitHub opens them against the default
+      # branch; they still pass the same checks and are merged back afterwards.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
+        with:
+          fetch-depth: 0
+      - name: Require main promotions to come from testing
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin testing
+          if ! git merge-base --is-ancestor "$HEAD_SHA" origin/testing; then
+            echo "::error::Main promotions must use commits already on testing."
+            exit 1
+          fi
 
   publish:
     needs: [checks, container]

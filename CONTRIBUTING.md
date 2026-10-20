@@ -28,6 +28,14 @@ Dependabot version updates target `testing`. Dependabot security updates target
 the default branch, so merge a security PR into `main`, cut the patch release,
 then merge `main` back into `testing` before continuing feature work.
 
+`main` requires a pull request and the `required` check. For every non-Dependabot
+pull request targeting `main`, `required` also verifies that the head commit is
+already an ancestor of `testing`; a feature branch must be merged into `testing`
+first. Dependabot security pull requests are the documented exception because
+GitHub opens them against the default branch. The release workflow's version
+commit is the only direct-push path, and it is limited to the GitHub Actions app;
+people have no bypass.
+
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
 instruction files to publish workflow policy.
