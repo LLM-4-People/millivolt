@@ -1,0 +1,315 @@
+/* Dashboard palettes.
+   -------------------------------------------------------------------------
+   dashboard.css owns the canonical :root token block and the default palette
+   ("Instrument", warm near-black). A palette here re-declares the same custom
+   properties under html[data-theme="<id>"], so every surface, chart and state
+   color follows one token set and no component rule changes per theme.
+
+   Rules for a new palette:
+   - Override tokens only. A literal color in a component rule is a bug in the
+     default palette and would need a second rule here.
+   - Keep --accent and --accent2 six-digit hex: core.js blends them through
+     hexA() for chart fills and gridlines.
+   - Paper is the light theme, so it also flips color-scheme and softens the
+     few shadows that dashboard.css hardcodes for a dark case.
+   - The swatch rule at the bottom previews each palette in the picker; it
+     carries the same two hexes beside the palette they describe. */
+
+html[data-theme="slate"] {
+  --bg: #0d1117;
+  --panel: #151b24;
+  --panel2: #1c2431;
+  --border: #252e3b;
+  --border2: #364254;
+  --text: #e6edf3;
+  --muted: #8b98a9;
+  --accent: #4c8dff;
+  --accent-hover: #74a6ff;
+  --accent2: #a371f7;
+  --cyan: #2dd4bf;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --err: #f85149;
+  --rl: #ff9e64;
+  --rail: #080b11;
+  --veil: rgba(5, 8, 13, .72);
+  --scale-tick: #7d8aa6;
+  --scale-base: #5a6480;
+  --well-hi: #232a3d;
+  --well-lo: #151a27;
+  --chart-grid-a: 0.55;
+}
+
+html[data-theme="paper"] {
+  color-scheme: light;
+  --bg: #f7f2e8;
+  --panel: #fffdf7;
+  --panel2: #f0e8d8;
+  --border: #ddd2bf;
+  --border2: #c6b89f;
+  --text: #2a241a;
+  --muted: #6d6353;
+  --accent: #3056d3;
+  --accent-hover: #2445b8;
+  --accent2: #7b4bc4;
+  --cyan: #0f766e;
+  --ok: #16794a;
+  --warn: #9a6200;
+  --err: #b42318;
+  --rl: #b45309;
+  --rail: #efe7d6;
+  --veil: rgba(58, 44, 24, .38);
+  --scale-tick: #8a7f6a;
+  --scale-base: #b3a68d;
+  --well-hi: #e6dcc8;
+  --well-lo: #d9cdb6;
+  --chart-grid-a: 0.6;
+}
+
+/* Paper: the default elevation is a black wash tuned for a dark case. On a
+   cream page it reads as soot, so the large surfaces get a warm, lighter
+   shadow. Small controls keep the shared token shadows. */
+html[data-theme="paper"] header {
+  box-shadow: 0 8px 20px rgba(74, 60, 38, .14);
+}
+html[data-theme="paper"] .hdr-menu,
+html[data-theme="paper"] .operator-dialog,
+html[data-theme="paper"] .st-sheet,
+html[data-theme="paper"] .drawer,
+html[data-theme="paper"] #client-tip {
+  box-shadow: 0 14px 34px rgba(74, 60, 38, .18);
+}
+
+/* Mist carries the same light-page problem with a cool cast. */
+html[data-theme="mist"] header {
+  box-shadow: 0 8px 20px rgba(40, 52, 70, .12);
+}
+html[data-theme="mist"] .hdr-menu,
+html[data-theme="mist"] .operator-dialog,
+html[data-theme="mist"] .st-sheet,
+html[data-theme="mist"] .drawer,
+html[data-theme="mist"] #client-tip {
+  box-shadow: 0 14px 34px rgba(40, 52, 70, .16);
+}
+
+html[data-theme="midnight"] {
+  --bg: #070b14;
+  --panel: #0c1322;
+  --panel2: #121c30;
+  --border: #1a2740;
+  --border2: #26385c;
+  --text: #dbe7ff;
+  --muted: #7f93b8;
+  --accent: #38bdf8;
+  --accent-hover: #67d0fb;
+  --accent2: #818cf8;
+  --cyan: #22d3ee;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #fb7185;
+  --rl: #fb923c;
+  --rail: #04070e;
+  --veil: rgba(2, 5, 12, .78);
+  --scale-tick: #6d7fae;
+  --scale-base: #4b5a85;
+  --well-hi: #1b2645;
+  --well-lo: #101831;
+  --chart-grid-a: 0.5;
+}
+
+html[data-theme="ember"] {
+  --bg: #141010;
+  --panel: #1c1613;
+  --panel2: #261d17;
+  --border: #33261e;
+  --border2: #4a3729;
+  --text: #f0e6da;
+  --muted: #a89684;
+  --accent: #ff9f43;
+  --accent-hover: #ffb568;
+  --accent2: #ff6b6b;
+  --cyan: #4fd1c5;
+  --ok: #2fd186;
+  --warn: #f4c14d;
+  --err: #f05d5d;
+  --rl: #ff7f50;
+  --rail: #100c09;
+  --veil: rgba(20, 12, 8, .72);
+  --scale-tick: #a08a6f;
+  --scale-base: #6e5a45;
+  --well-hi: #3a2a1c;
+  --well-lo: #241a12;
+  --chart-grid-a: 0.5;
+}
+
+html[data-theme="nord"] {
+  --bg: #2e3440;
+  --panel: #353c4a;
+  --panel2: #3f4859;
+  --border: #434c5e;
+  --border2: #556077;
+  --text: #eceff4;
+  --muted: #a3aec2;
+  --accent: #88c0d0;
+  --accent-hover: #9fd0dd;
+  --accent2: #b48ead;
+  --cyan: #8fbcbb;
+  --ok: #a3be8c;
+  --warn: #ebcb8b;
+  --err: #bf616a;
+  --rl: #d08770;
+  --rail: #272c36;
+  --veil: rgba(20, 24, 31, .75);
+  --scale-tick: #8f99ad;
+  --scale-base: #6b7488;
+  --well-hi: #3b4658;
+  --well-lo: #2a3241;
+  --chart-grid-a: 0.5;
+}
+
+html[data-theme="forest"] {
+  --bg: #0c1310;
+  --panel: #111b16;
+  --panel2: #16241d;
+  --border: #1e3027;
+  --border2: #2d463a;
+  --text: #e2efe6;
+  --muted: #8aa596;
+  --accent: #34d399;
+  --accent-hover: #6ee7b7;
+  --accent2: #a3e635;
+  --cyan: #2dd4bf;
+  --ok: #4ade80;
+  --warn: #facc15;
+  --err: #fb7185;
+  --rl: #fb923c;
+  --rail: #070d0a;
+  --veil: rgba(6, 14, 10, .78);
+  --scale-tick: #7d9c8b;
+  --scale-base: #557363;
+  --well-hi: #1c3327;
+  --well-lo: #11211a;
+  --chart-grid-a: 0.5;
+}
+
+html[data-theme="rose"] {
+  --bg: #150f14;
+  --panel: #1d151c;
+  --panel2: #271b26;
+  --border: #352433;
+  --border2: #4d3349;
+  --text: #f3e7f0;
+  --muted: #b091a8;
+  --accent: #f472b6;
+  --accent-hover: #f9a8d4;
+  --accent2: #c084fc;
+  --cyan: #22d3ee;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --err: #fb7185;
+  --rl: #fb923c;
+  --rail: #110b10;
+  --veil: rgba(18, 10, 16, .76);
+  --scale-tick: #a5869c;
+  --scale-base: #6f5268;
+  --well-hi: #3a2236;
+  --well-lo: #241522;
+  --chart-grid-a: 0.5;
+}
+
+html[data-theme="mist"] {
+  color-scheme: light;
+  --bg: #eef1f5;
+  --panel: #fbfcfe;
+  --panel2: #e6eaf1;
+  --border: #d3dae4;
+  --border2: #b8c2d0;
+  --text: #1d2530;
+  --muted: #5d6b7e;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent2: #0f766e;
+  --cyan: #0e7490;
+  --ok: #15803d;
+  --warn: #a16207;
+  --err: #b91c1c;
+  --rl: #c2410c;
+  --rail: #e3e8ef;
+  --veil: rgba(30, 41, 59, .32);
+  --scale-tick: #7c8798;
+  --scale-base: #aab4c2;
+  --well-hi: #dde3ec;
+  --well-lo: #cdd5e0;
+  --chart-grid-a: 0.6;
+}
+
+/* Contrast: a deliberately loud, near-monochrome palette for bright rooms
+   and low-vision use. Accent yellow is paired with black text on filled
+   controls, so it keeps its ratio instead of inheriting a light surface. */
+html[data-theme="contrast"] {
+  --bg: #000000;
+  --panel: #0a0a0a;
+  --panel2: #141414;
+  --border: #3a3a3a;
+  --border2: #6b6b6b;
+  --text: #ffffff;
+  --muted: #c8c8c8;
+  --accent: #ffe14d;
+  --accent-hover: #fff08a;
+  --accent2: #7cc7ff;
+  --cyan: #4de8e0;
+  --ok: #4dff88;
+  --warn: #ffd24d;
+  --err: #ff5c5c;
+  --rl: #ff9d4d;
+  --rail: #000000;
+  --veil: rgba(0, 0, 0, .85);
+  --scale-tick: #bfbfbf;
+  --scale-base: #8a8a8a;
+  --well-hi: #262626;
+  --well-lo: #111111;
+  --chart-grid-a: 0.7;
+}
+
+/* Picker previews: the page background on the left, the accent on the right.
+   Kept beside each palette so a swatch cannot drift from the theme it names. */
+.theme-opt[data-theme-id="instrument"] .theme-swatch {
+  --sw-bg: #141210;
+  --sw-accent: #5b8cff;
+}
+.theme-opt[data-theme-id="slate"] .theme-swatch {
+  --sw-bg: #0d1117;
+  --sw-accent: #4c8dff;
+}
+.theme-opt[data-theme-id="paper"] .theme-swatch {
+  --sw-bg: #f7f2e8;
+  --sw-accent: #3056d3;
+}
+.theme-opt[data-theme-id="midnight"] .theme-swatch {
+  --sw-bg: #070b14;
+  --sw-accent: #38bdf8;
+}
+.theme-opt[data-theme-id="ember"] .theme-swatch {
+  --sw-bg: #141010;
+  --sw-accent: #ff9f43;
+}
+.theme-opt[data-theme-id="nord"] .theme-swatch {
+  --sw-bg: #2e3440;
+  --sw-accent: #88c0d0;
+}
+.theme-opt[data-theme-id="forest"] .theme-swatch {
+  --sw-bg: #0c1310;
+  --sw-accent: #34d399;
+}
+.theme-opt[data-theme-id="rose"] .theme-swatch {
+  --sw-bg: #150f14;
+  --sw-accent: #f472b6;
+}
+.theme-opt[data-theme-id="mist"] .theme-swatch {
+  --sw-bg: #eef1f5;
+  --sw-accent: #2563eb;
+}
+.theme-opt[data-theme-id="contrast"] .theme-swatch {
+  --sw-bg: #000000;
+  --sw-accent: #ffe14d;
+}

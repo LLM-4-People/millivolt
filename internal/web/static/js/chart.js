@@ -949,6 +949,13 @@ function resizeChart() {
   if (_up.width !== w || _up.height !== h) _up.setSize({ width: w, height: h });
 }
 
+// resetChart tears down the mounted plot so the next render rebuilds its
+// options. Series strokes and axis colors are captured at construction, so a
+// palette switch must not keep the previous theme's canvas.
+function resetChart() {
+  if (_up) { _up.destroy(); _up = null; _upKey = ''; }
+}
+
 function renderChart() {
   const box = $('chart-traffic'); // the .chart-wrap div - uPlot mounts INTO it
   if (!box) return;

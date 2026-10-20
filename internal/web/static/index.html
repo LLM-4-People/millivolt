@@ -5,6 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="dashboard-version" content="__DASHBOARD_VERSION__">
 <meta name="theme-color" content="#100e0b">
+<script>
+// Apply the stored palette before the first paint. js/theme.js owns the list
+// and the writes; this guard only removes the flash of the default theme.
+try {
+  var storedTheme = localStorage.getItem('millivolt.theme');
+  if (storedTheme && /^[a-z-]+$/.test(storedTheme) && storedTheme !== 'instrument') {
+    document.documentElement.dataset.theme = storedTheme;
+  }
+} catch (e) {}
+</script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="millivolt">
@@ -15,6 +25,7 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <title>millivolt · precision instrument on the wire</title>
 <link rel="stylesheet" href="/dash/css/dashboard.css?v=__DASHBOARD_VERSION__">
+<link rel="stylesheet" href="/dash/css/themes.css?v=__DASHBOARD_VERSION__">
 <!-- BEGIN vendored uPlot v1.6.32 CSS (MIT - https://github.com/leeoniya/uPlot) -->
 <link rel="stylesheet" href="/dash/vendor/uplot.css?v=__DASHBOARD_VERSION__">
 <!-- BEGIN vendored uPlot v1.6.32 (MIT - https://github.com/leeoniya/uPlot).
@@ -32,6 +43,7 @@
 <script defer src="/dash/js/log.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/explorer.js?v=__DASHBOARD_VERSION__"></script>
 <script defer src="/dash/js/live.js?v=__DASHBOARD_VERSION__"></script>
+<script defer src="/dash/js/theme.js?v=__DASHBOARD_VERSION__"></script>
 </head>
 <body>
 <header>
@@ -215,6 +227,16 @@
             <button class="btn btn-accent" id="btn-restart-now" onclick="restartProxy()" aria-describedby="restart-description">Restart now</button>
           </div>
         </div>
+      </div>
+    </div>
+    <div class="menu-wrap">
+      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" aria-haspopup="menu" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
+        <span class="hdr-btn-label">Theme</span>
+      </button>
+      <div class="hdr-menu theme-menu" id="theme-menu" hidden role="menu" aria-label="Theme">
+        <div class="clear-menu-hd">Palette</div>
+        <div class="theme-list" id="theme-list" role="none"></div>
       </div>
     </div>
     <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
