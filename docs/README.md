@@ -23,7 +23,7 @@ that matches what you need to do.
 - [Operations](operations.md) - configuration, persistence, routes, storage, performance, and limits.
 - [Performance and resource usage](performance.md) - current measured tables, method, commands, and limitations.
 - [Architecture](architecture.md) - ownership, invariants, and where each behavior lives.
-- [Versions and images](operations.md#versions-and-images) - version identity, tags, and verification.
+- [Versions and images](operations.md#versions-and-images) - version identity, promotion, tags, and verification.
 
 ## Project
 

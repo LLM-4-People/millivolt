@@ -28,8 +28,8 @@ defines their supported combinations.
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The
 [workflow](../.github/workflows/check.yml) owns the promotion gate and release
 publication: `required` checks testing ancestry and a VERSION newer than every
-tag, and `publish` tags the reviewed promotion merge, publishes the image and
-creates the release without pushing `main`. The `main-testing-first` ruleset
+tag for non-Dependabot promotions, and `publish` tags the reviewed promotion
+merge, publishes the image and creates the release without pushing `main`. The `main-testing-first` ruleset
 adds the pull-request and merge-commit requirements with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
 checklist; [operations](operations.md#versions-and-images) owns the published

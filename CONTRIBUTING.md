@@ -22,7 +22,17 @@ rules. The `main-testing-first` ruleset requires a pull request and the
 `long-lived-branch-integrity` ruleset also blocks deletion and non-fast-forward
 updates. Administrators have no bypass either. When release automation needs new
 behavior, change the workflow in a pull request; never add a bypass actor or use
-an administrator override.
+an administrator override. Inspect the active ruleset with:
+
+```sh
+ruleset_id="$(gh api repos/LLM-4-People/millivolt/rulesets \
+  --jq '.[] | select(.name == "main-testing-first") | .id')"
+gh api "repos/LLM-4-People/millivolt/rulesets/$ruleset_id" \
+  --jq '{name,enforcement,bypass_actors,current_user_can_bypass}'
+```
+
+It must report `enforcement: active`, an empty `bypass_actors`, and
+`current_user_can_bypass: never`.
 
 Completed feature pushes to `testing` publish only the moving development image.
 Pull requests and pushes to `testing` run the full gate; docs and site-only
