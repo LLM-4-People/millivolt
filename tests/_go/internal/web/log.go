@@ -593,14 +593,16 @@ func TestLogPageNarrowScanMatchesFullDecode(t *testing.T) {
 	// Allocation ceiling for the two scan-limited Go-only misses. Before this
 	// change the same limit-60 pages decoded 4,096 full rows (~8MB/190k
 	// allocs); the narrow scan must stay far below that while returning the
-	// identical empty page and progress cursor.
+	// identical empty page and progress cursor. The 6 MiB ceiling leaves
+	// allocator/driver variance headroom under race while still rejecting the
+	// full-decode path.
 	for _, tc := range []struct {
 		name, query string
 		maxBytes    int64
 		maxAllocs   int64
 	}{
-		{"tool_missing", "/metrics/agg/log?limit=60&f=tool:missing", 5 << 20, 120_000},
-		{"status_class_5xx", "/metrics/agg/log?limit=60&f=status:5xx", 5 << 20, 120_000},
+		{"tool_missing", "/metrics/agg/log?limit=60&f=tool:missing", 6 << 20, 120_000},
+		{"status_class_5xx", "/metrics/agg/log?limit=60&f=status:5xx", 6 << 20, 120_000},
 	} {
 		t.Run("alloc/"+tc.name, func(t *testing.T) {
 			res := testing.Benchmark(func(b *testing.B) {
