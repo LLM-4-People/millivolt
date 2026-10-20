@@ -486,9 +486,10 @@ docker buildx imagetools inspect "ghcr.io/llm-4-people/millivolt:$millivolt_vers
 
 - Before the tag is pushed, no public release exists. Fix the failure and rerun
   the main workflow or promote a new version.
-- After the tag is pushed, the tag-triggered run recreates the missing release.
-  Rerun that run rather than recreating the tag.
-- Do not move or delete a published version tag. Publish a new patch version.
+- After the tag is pushed, keep the tag in place. If the GitHub release is
+  missing, create it from that tag or publish a new patch version. An automatic
+  tag push does not start a second workflow run.
+- Do not move or delete a published version tag.
 
 For local container verification, build with Docker, resolve the image's
 immutable ID, then use the same fixture as CI:
