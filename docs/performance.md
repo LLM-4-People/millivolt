@@ -7,9 +7,10 @@ section in operations owns the implementation cost model and `go_memory_limit`
 behavior.
 
 These are scoped local measurements of the native proxy process, not deployment
-guarantees. They were taken on 2026-10-20 UTC from source revision
-[`facb699`](https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2)
-with Go 1.27.2 on Linux/amd64 under WSL2. The host was a shared Intel Core Ultra
+guarantees. They were taken on 2026-10-20 UTC. The footprint, fast-response,
+streaming, writer, storage and query tables used source revision
+[`facb699`](https://github.com/LLM-4-People/millivolt/commit/facb69900ac64c19ec3262fcb88b6428d33a68d2);
+the sustained-capacity table used revision `54d1276`. Measurements used Go 1.27.2 on Linux/amd64 under WSL2. The host was a shared Intel Core Ultra
 9 285H with 12 visible logical CPUs and 62 GiB of visible RAM. Builds and tests
 finished before measurement. The public example configuration was used, with
 private listen and database paths supplied by `scripts/dev.sh`. Debug captures
@@ -23,7 +24,8 @@ container-wide accounting. Percentiles are nearest-rank; RSS was sampled every
 | Item | Setting |
 | --- | --- |
 | Date | 2026-10-20 UTC |
-| Source revision | `facb69900ac64c19ec3262fcb88b6428d33a68d2` |
+| Source revision, footprint and ramps | `facb69900ac64c19ec3262fcb88b6428d33a68d2` |
+| Source revision, sustained capacity | `54d1276` |
 | Go toolchain | 1.27.2, `CGO_ENABLED=0` |
 | Platform | Linux/amd64 under WSL2 |
 | CPU | Intel Core Ultra 9 285H, 12 visible logical CPUs |
@@ -80,6 +82,34 @@ overload fixture below shows what a drop result looks like.
 At the ten-second 128-worker stage, the separate load generator and synthetic
 upstream process used 218.8% CPU and 31.8 MiB peak RSS. The proxy figure
 excludes that process.
+
+## Sustained capacity
+
+The sustained capacity point is the highest tested closed-loop level that
+completed five minutes with zero durable drops and exact accounting. Each level
+started from a fresh disposable database. The upstream response and client
+shape were the same as the fast-response table: ten content frames, usage
+`100/10`, and fixture cost `0.001`. A level that dropped rows is an overload
+observation, not a capacity result.
+
+| Workers | Duration | HTTP requests | Requests/s | p50 | p95 | p99 | Proxy CPU | Peak proxy RSS | Durable rows | Drops |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| 32 | 300.0 s | 3,745,048 | 12,483.4 | 2.12 ms | 5.13 ms | 11.49 ms | 409.9% | 99.4 MiB | Exact, 3,745,048 | 0 |
+| 48 | 300.0 s | 4,249,881 | 14,166.2 | 2.84 ms | 6.96 ms | 13.14 ms | 475.8% | 113.7 MiB | Exact, 4,249,881 | 0 |
+| 64 | 300.0 s | 4,138,385 | 13,794.5 | 3.89 ms | 9.66 ms | 16.85 ms | 456.9% | 117.4 MiB | 4,088,177 | 50,208 |
+| 128 | 300.0 s | 3,789,537 | 12,631.5 | 8.28 ms | 23.15 ms | 40.91 ms | 415.5% | 134.7 MiB | 3,355,678 | 433,859 |
+
+The separate load generator and synthetic upstream used 249.0% CPU and 230.9
+MiB peak RSS at the 48-worker exact point, and 206.5% CPU and 186.1 MiB at the
+128-worker overload point. The proxy figures exclude that process.
+
+The exact five-minute result is 14,166.2 requests/s at 48 workers, with p95
+6.96 ms and p99 13.14 ms. The 64-worker point produced 50,208 drops (1.2% of
+successful requests) and the 128-worker point produced 433,859 drops (11.4%).
+Those rows show that the bounded durable queue is not a promise of lossless
+storage at every load. They are not evidence of a universal capacity ceiling;
+host, configuration, response size, history growth, and attached observers all
+change the result.
 
 ## Streaming concurrency
 

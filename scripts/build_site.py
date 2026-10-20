@@ -519,13 +519,14 @@ def performance_headline() -> dict[str, str]:
     image = cells("amd64 runtime image")
     idle = cells("Idle process, empty SQLite")
     fast = cells("128")
-    if len(image) < 3 or len(idle) < 3 or len(fast) < 8:
+    sustained = cells("48")
+    if len(image) < 3 or len(idle) < 3 or len(fast) < 8 or len(sustained) < 4:
         raise BuildError("docs/performance.md table rows are missing headline cells")
     return {
         "perf_image": image[2],
         "perf_idle": idle[2],
         "perf_loaded": fast[7],
-        "perf_rps": fast[2],
+        "perf_rps": sustained[3],
     }
 
 

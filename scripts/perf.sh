@@ -22,10 +22,11 @@ case "$PERF_PORT" in ''|*[!0-9]*) die "PERF_PORT must be numeric" ;; esac
 
 usage() {
   cat <<'EOF'
-usage: scripts/perf.sh [bench|stress|image|all]
+usage: scripts/perf.sh [bench|stress|sustained|image|all]
 
   bench   run the isolated Go benchmarks used by docs/performance.md
   stress  start private dev instances and run fast and streaming ramps
+  sustained  run fixed-concurrency five-minute fast-response stages
   image   build a disposable amd64 image and report content/compressed sizes
   all     image, bench, then stress
 
@@ -33,6 +34,8 @@ Environment:
   PERF_PORT   private loopback port (default 8091, never 8080)
   IMAGE_TAG   disposable image tag (default millivolt-perf:local)
   MILLIVOLT_OPERATOR_TOKEN  optional; stress uses a private fixture default
+  PERF_SUSTAINED_LEVELS    comma-separated fixed worker counts (default 128)
+  PERF_SUSTAINED_DURATION  time per sustained level (default 300s)
 EOF
 }
 
@@ -65,26 +68,37 @@ run_image() {
   echo "build log: $PERF_DIR/image-build.log"
 }
 
+run_one() {
+  local name="$1"
+  shift
+  echo "stress: $name (fresh private database)"
+  (
+    set -e
+    export DEV_PORT="$PERF_PORT" DEV_DB="$PERF_DB" DEV_COPY_DB=0
+    export MILLIVOLT_OPERATOR_TOKEN="${MILLIVOLT_OPERATOR_TOKEN:-perf-instance-credential}"
+    trap 'scripts/dev.sh stop' EXIT
+    scripts/dev.sh >"$PERF_DIR/dev-${name}.log" 2>&1
+    "$PERF_DIR/stress" -target "http://${PERF_HOST}:${PERF_PORT}" "$@"
+  ) >"$PERF_DIR/stress-${name}.jsonl"
+  cat "$PERF_DIR/stress-${name}.jsonl"
+}
+
+run_sustained() {
+  go build -trimpath -o "$PERF_DIR/stress" ./cmd/stress
+  command -v curl >/dev/null || die "curl is required for dev lifecycle readiness"
+  local levels="${PERF_SUSTAINED_LEVELS:-128}" duration="${PERF_SUSTAINED_DURATION:-300s}" level
+  local IFS=,
+  for level in $levels; do
+    [[ "$level" =~ ^[1-9][0-9]*$ ]] || die "PERF_SUSTAINED_LEVELS must be positive integers"
+    run_one "sustained-${level}" -concurrency "$level" -duration "$duration" -stream-duration 0 -timeout 60s
+  done
+  echo "raw output: $PERF_DIR"
+}
+
 run_stress() {
   local stress="$PERF_DIR/stress"
   go build -trimpath -o "$stress" ./cmd/stress
   command -v curl >/dev/null || die "curl is required for dev lifecycle readiness"
-
-  local token="${MILLIVOLT_OPERATOR_TOKEN:-perf-instance-credential}"
-  run_one() {
-    local name="$1"
-    shift
-    echo "stress: $name (fresh private database)"
-    (
-      set -e
-      export DEV_PORT="$PERF_PORT" DEV_DB="$PERF_DB" DEV_COPY_DB=0
-      export MILLIVOLT_OPERATOR_TOKEN="$token"
-      trap 'scripts/dev.sh stop' EXIT
-      scripts/dev.sh >"$PERF_DIR/dev-${name}.log" 2>&1
-      "$stress" -target "http://${PERF_HOST}:${PERF_PORT}" "$@"
-    ) >"$PERF_DIR/stress-${name}.jsonl"
-    cat "$PERF_DIR/stress-${name}.jsonl"
-  }
 
   run_one fast -concurrency 1,8,32,128 -duration 5s -stream-duration 0
   run_one streaming -concurrency 1,8,32,128,512 -duration 5s -stream-duration 1s
@@ -95,6 +109,7 @@ mode="${1:-all}"
 case "$mode" in
   bench) run_bench ;;
   stress) run_stress ;;
+  sustained) run_sustained ;;
   image) run_image ;;
   all) run_image; run_bench; run_stress ;;
   -h|--help|help) usage ;;
