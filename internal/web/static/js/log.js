@@ -416,6 +416,15 @@ function renderRequestsIncremental(recs) {
   }
   if (!ops.length) return;
 
+  // Learn any wider column before the rows land: the new floors then apply to
+  // the same layout as the inserted content, and a later shorter value cannot
+  // pull the column back. Streaming-only replacements (tokens/TTFT churn) skip
+  // the probe - their cells cannot outgrow the row already on screen.
+  const widthRows = ops
+    .filter(op => op.kind === 'insert' || reqWidthRelevant(logHTML.get(op.id)?.rec, op.rec))
+    .map(op => op.html);
+  if (reqMeasureRows(widthRows)) applyReqFloors(container);
+
   // Scroll anchor: the content under the cursor must not move. Every DOM
   // change above the first pre-existing row contributes to its displacement.
   // A grown window's older rows land below existing history and contribute
@@ -485,6 +494,15 @@ function appendOlderLogRows(recs) {
   // oldest loaded row out of the bounded window. Drop it like the live path.
   if (!logWindowSameSet(recent)) dropStaleLogRows(container, recent);
   const seps = dayStartLabels(recent);
+  // Build new rows once so the width probe and the insertion share the same
+  // HTML. Measuring before the first insert lets the browser lay the new rows
+  // out under their final floors instead of widening after the fact.
+  const fresh = new Map();
+  for (let i = 0; i < recent.length; i++) {
+    const r = recent[i];
+    if (r && !logHTML.has(r.id)) fresh.set(r.id, reqRow(r, seps[i]));
+  }
+  if (fresh.size && reqMeasureRows([...fresh.values()])) applyReqFloors(container);
   const scrollAtTop = container.scrollTop;
   let before = null;
   if (scrollAtTop > 0) {
@@ -504,7 +522,7 @@ function appendOlderLogRows(recs) {
     const sep = seps[i];
     const prev = logHTML.get(r.id);
     if (!prev) {
-      insertLogGroupHTML(tbody, i ? recent[i - 1] : null, reqRow(r, sep));
+      insertLogGroupHTML(tbody, i ? recent[i - 1] : null, fresh.get(r.id));
       if (leadingNew) topInserts.push(r.id);
       logHTML.set(r.id, { rec: r, sep });
     } else {
@@ -773,6 +791,15 @@ function modelCell(r) {
   return `<span class="req-model">${piv}</span>`;
 }
 
+// reqIdentityText is the one full-value identity string for a request, in the
+// request table's column order. The identity cell carries it as its hover
+// title (the content-sized column shows the whole value; the title keeps it
+// recoverable when the card is horizontally scrolled), and the drawer title
+// reads the same string, so the two surfaces cannot disagree.
+function reqIdentityText(r) {
+  return `${clientLabel(r && r.client) || '?'} · ${(r && r.provider) || '?'} · ${canonicalModel(r && r.model) || '-'}`;
+}
+
 function reqRow(r, sepLabel) {
   const sep = daySepHTML(r.id, sepLabel);
   // In-flight (a "begin" lifecycle record): not yet finalized - no status_code
@@ -793,7 +820,7 @@ function reqRow(r, sepLabel) {
     // other not-yet-known cell.
     return `<tr class="exp-row live-row" data-id="${escapeHtml(r.id)}">
       <td style="color:var(--muted)" title="${escapeHtml(new Date(r.start).toLocaleString())}">${new Date(r.start).toLocaleTimeString()}</td>
-      <td><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
+      <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td>${liveStatusCell(r)}${liveRetry}</td>
       <td title="${r.ttft_ms ? escapeHtml(fmtDur(r.ttft_ms)) : ''}">${r.ttft_ms ? fmtDur(r.ttft_ms) : '…'}</td>
       <td>-</td>
@@ -834,7 +861,7 @@ function reqRow(r, sepLabel) {
   const costText = fmtMoney(r.cost);
   const main = `<tr class="exp-row ${drawerId===r.id ? 'expanding' : ''}" data-id="${escapeHtml(r.id)}">
     <td style="color:var(--muted)" title="${escapeHtml(start.toLocaleString())}">${timeText}</td>
-    <td><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
+    <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
     <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
     <td title="${escapeHtml(r.gen_tps ? tpsText + ' tokens/s' : '')}">${tpsText}</td>
@@ -902,41 +929,124 @@ function renderRequests(recs) {
     rows[i] = reqRow(r, seps[i]);
     logHTML.set(r.id, { rec: r, sep: seps[i] });
   }
-  updateSection('tbl-requests', `<table style="min-width:${REQ_MIN_WIDTH}px">${REQ_THEAD}<tbody>${rows.join('')}</tbody></table>`);
+  // Learn the window's natural column widths before the table paints, so the
+  // first paint already carries every floor this rebuild needs.
+  reqMeasureRows(rows);
+  updateSection('tbl-requests', `<table>${reqThead()}<tbody>${rows.join('')}</tbody></table>`);
   restoreFocus(focus);
   scheduleLogFill();
 }
 
-// REQ_COLUMNS is the single source of truth for request-log column identity
-// and width. Fixed widths keep a live-to-final rewrite from re-measuring every
-// column from the new cell text. REQ_COLS and REQ_MIN_WIDTH derive from it, so
-// the day-divider colspan and the table's horizontal scroll budget cannot
-// drift from the header.
+// REQ_COLUMNS is the single source of truth for request-log column identity.
+// Columns are content-sized, not assigned pixel widths: REQ_FLOORS records the
+// widest value each column has needed this session, so REQ_COLS (the day
+// divider and retry sub-row span) can never drift from the header.
 const REQ_COLUMNS = [
-  ['time', 100],
-  ['client · provider · model', 324],
-  ['status', 134],
-  ['ttft', 82],
-  ['tps', 70],
-  ['in/out', 128],
-  ['cache', 70],
-  ['tools', 52],
-  ['finish', 82],
-  ['dur', 76],
-  ['turns', 76],
-  ['queued', 60],
-  ['cost', 76],
-  ['', 34, 'Request actions'],
+  ['time'],
+  ['client · provider · model'],
+  ['status'],
+  ['ttft'],
+  ['tps'],
+  ['in/out'],
+  ['cache'],
+  ['tools'],
+  ['finish'],
+  ['dur'],
+  ['turns'],
+  ['queued'],
+  ['cost'],
+  ['', 'Request actions'],
 ];
 const REQ_COLS = REQ_COLUMNS.length;
 // Retry sub-rows keep the time cell, one label cell and one message cell. The
 // message span is derived from REQ_COLS so a new log column cannot silently
 // leave the sub-row short.
 const RETRY_LABEL_COLS = 2;
-const REQ_MIN_WIDTH = REQ_COLUMNS.reduce((sum, [, width]) => sum + width, 0);
-const REQ_THEAD =
-  `<colgroup>${REQ_COLUMNS.map(([, width]) => `<col style="width:${width}px">`).join('')}</colgroup>` +
-  `<thead><tr>${REQ_COLUMNS.map(([label, , name]) => `<th${name ? ` aria-label="${name}"` : ''}>${label}</th>`).join('')}</tr></thead>`;
+
+// Request-log columns fit their content and only ever grow. Automatic table
+// layout sizes each column to its widest cell; REQ_FLOORS remembers the widest
+// box a column has needed in this session and reapplies it as the header
+// cell's min-width, which auto layout treats as a hard column floor. A live row
+// finalizing, a shorter neighbour arriving or a new page of history therefore
+// never shrinks a column and shifts every cell to its right.
+//
+// The floors are measured offscreen at natural (max-content) width, so the
+// extra space the card distributes across columns is never mistaken for
+// content. Growth itself needs no measurement: auto layout grows the column in
+// the same paint as the wider value, and the probe only records the new floor
+// for later paints.
+const REQ_FLOORS = new Array(REQ_COLS).fill(0);
+
+// reqThead is the one header builder. The floor rides the header cell because
+// automatic table layout makes a cell's min-width a column floor while a wider
+// body cell can still grow past it - exactly the monotonic fit the log needs.
+function reqThead() {
+  return `<thead><tr>${REQ_COLUMNS.map(([label, name], i) => {
+    const floor = REQ_FLOORS[i] > 0 ? ` style="min-width:${REQ_FLOORS[i]}px"` : '';
+    return `<th${name ? ` aria-label="${name}"` : ''}${floor}>${label}</th>`;
+  }).join('')}</tr></thead>`;
+}
+
+// reqRatchetWidths merges one measurement pass into the session floors. A
+// non-finite or non-positive reading (an unlayouted document, a hidden probe)
+// is ignored rather than resetting a column, and a narrower reading never
+// lowers an existing floor.
+function reqRatchetWidths(measured) {
+  let grew = false;
+  for (let i = 0; i < REQ_COLS; i++) {
+    const w = measured[i];
+    if (!Number.isFinite(w) || w <= 0) continue;
+    // Keep sub-pixel precision: ceilings on fourteen columns add up to a
+    // phantom horizontal scrollbar even when the content itself fits the card.
+    const next = Math.round(w * 100) / 100;
+    if (next > REQ_FLOORS[i]) { REQ_FLOORS[i] = next; grew = true; }
+  }
+  return grew;
+}
+
+// reqMeasureRows measures every column's natural width for the given row HTML
+// and ratchets the floors. The probe lives offscreen at max-content, outside
+// #tbl-requests, so the card's distributed allocation never leaks into a floor.
+// Day dividers and retry sub-rows are removed first: their colspan cells would
+// report one column's width across a span.
+function reqMeasureRows(rows) {
+  if (!rows.length || typeof document === 'undefined' || !document.body) return false;
+  const host = document.createElement('div');
+  host.id = 'req-measure';
+  host.setAttribute('aria-hidden', 'true');
+  host.innerHTML = '<table><thead><tr>' +
+    REQ_COLUMNS.map(([label, name]) => `<th${name ? ` aria-label="${name}"` : ''}>${label}</th>`).join('') +
+    `</tr></thead><tbody>${rows.join('')}</tbody></table>`;
+  document.body.appendChild(host);
+  const table = host.querySelector('table');
+  table.tBodies[0].querySelectorAll('tr.day-sep, tr.retry-sub').forEach(tr => tr.remove());
+  const measured = [...table.tHead.rows[0].cells].map(th => th.getBoundingClientRect().width);
+  host.remove();
+  return reqRatchetWidths(measured);
+}
+
+// applyReqFloors pushes the current floors onto an already-mounted table's
+// header. The incremental paths measure before mutating, so the new floors are
+// in place before the browser lays the inserted row out.
+function applyReqFloors(container) {
+  const ths = container.querySelectorAll('thead th');
+  for (let i = 0; i < ths.length && i < REQ_COLS; i++) {
+    ths[i].style.minWidth = REQ_FLOORS[i] > 0 ? REQ_FLOORS[i] + 'px' : '';
+  }
+}
+
+// reqWidthRelevant reports whether a record change can alter a column's
+// natural width. Streaming updates replace a row many times for token counts;
+// those cells are already bounded by the row on screen, so re-measuring every
+// token would cost a layout for no width change. Identity, status and attempts
+// are the fields whose text can widen a column.
+function reqWidthRelevant(prev, rec) {
+  if (!prev || !rec) return true;
+  return prev.client !== rec.client || prev.provider !== rec.provider ||
+    prev.model !== rec.model || prev.status_code !== rec.status_code ||
+    (prev.attempts?.length || 0) !== (rec.attempts?.length || 0) ||
+    !!prev.live !== !!rec.live;
+}
 
 // Delegated row clicks - no inline onclick interpolating the record id.
 $('tbl-requests').addEventListener('click', e => {
@@ -1348,7 +1458,7 @@ function renderDrawer() {
   const body = $('drawer-body');
   const renderKey = String(drawerId) + '\u0000' + String(drawerAttempt);
   const scroll = body && _drawerRenderKey === renderKey ? body.scrollTop : 0;
-  const base = `${clientLabel(r.client) || '?'} · ${r.provider || '?'} · ${canonicalModel(r.model) || '-'}`;
+  const base = reqIdentityText(r);
   if (a) {
     // The title carries the attempt identity: index, real status (transport
     // for status-less failures) and the provider request id that matches a

@@ -181,13 +181,15 @@ headers and the limits of missing, conflicting or ambiguous declarations.
 The request table combines recent finalized records with current in-flight
 state during ordinary live use. Rows show status, retry information, latency,
 throughput, token/cache usage, tool calls, duration, queue time and reported cost.
-Columns have fixed widths, so a live row finalizing from `streaming` to its
-recorded status never shifts the cells to its right. When the card is narrower
-than its fixed column budget, the table scrolls inside its own region. The
-region is keyboard-scrollable and labelled, and the long text values in its
-fixed columns carry their full value in a hover title; compact status pills and
-the actions button abbreviate by design. Its status selector and older-history paging
-operate on the current scope.
+Columns size to their content and only ever grow during a session: a value wider
+than every value seen before widens its column, and a later shorter value never
+shrinks it back, so a live row finalizing from `streaming` to its recorded
+status does not shift the cells to its right. When the card is narrower than the
+learned columns, the table scrolls inside its own region. The region is
+keyboard-scrollable and labelled, the identity cell carries the full
+`client · provider · model` value in a hover title, and compact status pills and
+the actions button abbreviate by design. Its status selector and older-history
+paging operate on the current scope.
 
 ![Request table with recorded statuses, token usage, latency, throughput and cost](images/requests/table.png)
 

@@ -545,10 +545,12 @@ async def check(base, screenshot):
                     layout_checks.append({'width': viewport['width'], 'height': viewport['height'], **state})
                 if screenshot:
                     await page.locator('.traffic-card').screenshot(path=screenshot)
-                # Replacing a live request with its final values must not
-                # re-measure the real request table. The probe saves and
-                # restores the real tbody (one id, one owner) and also proves
-                # the identity column shrinks without losing its badges.
+                # Request columns are content-sized and monotonic: a column
+                # grows to fit its widest value and keeps that width when a
+                # shorter row replaces it. The probe saves and restores the
+                # real tbody and floors (one id, one owner), then drives the
+                # production probe: a long identity must widen the identity
+                # column, and swapping the short row back must not shrink it.
                 table_shift = []
                 for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
@@ -556,46 +558,22 @@ async def check(base, screenshot):
                         const box = document.getElementById('tbl-requests');
                         const table = box.querySelector('table');
                         const body = table.tBodies[0];
-                        const saved = body.innerHTML;
-                        const base = {
-                            id: 'colshift', start: new Date().toISOString(),
-                            client: 'client-with-a-long-label', provider: 'neutral-provider',
-                            model: 'model-name/with-a-long-suffix',
-                            usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0 },
-                            attempts: [],
-                        };
-                        const live = { ...base, live: true, stream: true, ttft_ms: 0,
-                            gen_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0 };
-                        const final = { ...base, live: false, status_code: 200,
-                            ttft_ms: 999999, gen_tps: 99999.9, duration_ms: 999999999,
-                            queue_wait_ms: 999999999, cost: 999.5,
-                            usage: { input_tokens: 999999999, output_tokens: 999999999,
-                                cache_read_tokens: 999999999 },
-                            finish_reason: 'content_filter', turns_user: 99,
-                            turns_assistant: 99, turns_tool: 99, retries: 0 };
+                        const savedBody = body.innerHTML;
+                        const savedFloors = REQ_FLOORS.slice();
+                        const frames = () => new Promise(r =>
+                            requestAnimationFrame(() => requestAnimationFrame(r)));
                         const measure = () => {
                             const origin = table.getBoundingClientRect().left;
                             return [...table.tHead.rows[0].cells].map(th => {
                                 const r = th.getBoundingClientRect();
-                                return { left: r.left - origin, width: r.width };
+                                return { left: r.left - origin, width: r.width,
+                                    minWidth: parseFloat(th.style.minWidth) || 0 };
                             });
                         };
-                        const measureBody = () => {
-                            const origin = table.getBoundingClientRect().left;
-                            const row = body.querySelector('tr.exp-row');
-                            return row ? [...row.cells].map(td => {
-                                const r = td.getBoundingClientRect();
-                                return { left: r.left - origin, width: r.width };
-                            }) : [];
-                        };
-                        const samePosition = (a, b) => !!a && !!b &&
-                            Math.abs(a.left - b.left) <= 0.5 && Math.abs(a.width - b.width) <= 0.5;
-                        const frames = () => new Promise(r =>
-                            requestAnimationFrame(() => requestAnimationFrame(r)));
                         // visibleWidth intersects an element rect with every
                         // clipping box. A label can report scrollWidth equal to
-                        // clientWidth while an ancestor still cuts it, so short
-                        // badges must prove the whole label stays visible.
+                        // clientWidth while an ancestor still cuts it, so every
+                        // badge must prove the whole label stays visible.
                         const visibleWidth = (el, clips) => {
                             if (!el) return 0;
                             const r = el.getBoundingClientRect();
@@ -608,52 +586,58 @@ async def check(base, screenshot):
                             }
                             return Math.max(0, right - left);
                         };
-                        let result;
-                        try {
-                            body.innerHTML = reqRow(live, null);
-                            await frames();
-                            const before = measure();
-                            const bodyBefore = measureBody();
-                            body.innerHTML = reqRow(final, null);
-                            await frames();
-                            const after = measure();
-                            const bodyAfter = measureBody();
-
-                            modelNames.set('Neutral-Model-With-A-Very-Long-Suffix',
-                                'neutral-model-with-a-very-long-suffix');
-                            const identityRec = { ...final,
-                                client: 'opencode/1.18.32',
-                                provider: 'narrow-provider',
-                                model: 'Neutral-Model-With-A-Very-Long-Suffix' };
-                            body.innerHTML = reqRow(identityRec, null);
-                            await frames();
+                        const readIdentity = () => {
                             const ident = body.querySelector('.req-ident');
-                            const model = ident.querySelector('.req-model');
-                            const modelLabel = model && model.querySelector('.ent-lb');
-                            const links = ident ? [...ident.querySelectorAll('a.ent-link')] : [];
                             const labels = ident ? [...ident.querySelectorAll('.ent-lb')] : [];
-                            const shortLabels = labels
-                                .filter(label => ['opencode/1.18.32', 'narrow-provider']
-                                    .includes(label.textContent.trim()))
-                                .map(label => {
+                            return {
+                                labels: labels.map(label => {
                                     const link = label.closest('a.ent-link');
                                     return {
                                         text: label.textContent.trim(),
                                         width: label.getBoundingClientRect().width,
                                         clientWidth: label.clientWidth,
                                         scrollWidth: label.scrollWidth,
-                                        linkWidth: link
-                                            ? link.getBoundingClientRect().width : 0,
                                         visibleWidth: visibleWidth(label, [link]),
                                     };
-                                });
-                            const modelLink = model ? model.querySelector('a.ent-link') : null;
+                                }),
+                                overflow: ident ? ident.scrollWidth > ident.clientWidth + 1 : true,
+                            };
+                        };
+                        const base = {
+                            id: 'colshift', start: new Date().toISOString(),
+                            stream: true, status_code: 200, ttft_ms: 12, gen_tps: 42,
+                            duration_ms: 34, finish_reason: 'stop', tool_calls: 1,
+                            cost: 0.001, queue_wait_ms: 0,
+                            usage: { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0 },
+                            attempts: [],
+                        };
+                        const shortRec = { ...base,
+                            client: 'opencode/1.18.32', provider: 'narrow-provider',
+                            model: 'Neutral-Model-With-A-Very-Long-Suffix' };
+                        const longRec = { ...base,
+                            client: 'openai/enterprise-client-with-a-very-long-product-suffix',
+                            provider: 'provider-with-a-very-long-tenant-and-region-label',
+                            model: 'Neutral-Model-With-A-Very-Long-Suffix' };
+                        let result;
+                        try {
+                            modelNames.set('Neutral-Model-With-A-Very-Long-Suffix',
+                                'neutral-model-with-a-very-long-suffix');
+                            const shortHtml = reqRow(shortRec, null);
+                            reqMeasureRows([shortHtml]);
+                            applyReqFloors(box);
+                            body.innerHTML = shortHtml;
+                            await frames();
+                            const shortCols = measure();
+                            const shortIdentity = readIdentity();
+                            const shortCell = body.querySelector('tr.exp-row td:nth-child(2)');
+                            const shortTitle = shortCell ? shortCell.getAttribute('title') : '';
+                            const modelLabel = body.querySelector('.req-model .ent-lb');
                             const modelLabelTitle = modelLabel ? modelLabel.getAttribute('title') : '';
                             const modelClosestTitle = modelLabel && modelLabel.closest('[title]')
                                 ? modelLabel.closest('[title]').getAttribute('title') : '';
+                            const modelLink = body.querySelector('.req-model a.ent-link');
                             if (modelLink) modelLink.focus();
                             const modelOutline = modelLink ? getComputedStyle(modelLink) : null;
-                            const modelFocusOffset = modelOutline ? modelOutline.outlineOffset : '';
                             const modelFocus = modelOutline ? {
                                 style: modelOutline.outlineStyle,
                                 width: parseFloat(modelOutline.outlineWidth),
@@ -661,175 +645,90 @@ async def check(base, screenshot):
                                 offset: modelOutline.outlineOffset,
                             } : {};
                             if (modelLink) modelLink.blur();
-                            const identity = {
-                                linkCount: links.length,
-                                minLinkWidth: links.length
-                                    ? Math.min(...links.map(link => link.getBoundingClientRect().width)) : 0,
-                                labelCount: labels.length,
-                                minLabelWidth: labels.length
-                                    ? Math.min(...labels.map(label => label.getBoundingClientRect().width)) : 0,
-                                shortLabels,
-                                overflow: ident ? ident.scrollWidth > ident.clientWidth + 1 : true,
-                                modelClass: !!model && model.classList.contains('req-model'),
-                                modelDisplay: modelLabel ? getComputedStyle(modelLabel).display : '',
-                                modelEllipsis: !!modelLabel &&
-                                    getComputedStyle(modelLabel).textOverflow === 'ellipsis',
-                                modelClipped: !!modelLabel &&
-                                    modelLabel.scrollWidth > modelLabel.clientWidth + 1,
-                                modelTitle: model ? model.getAttribute('title') : '',
-                                modelLabelTitle,
-                                modelClosestTitle,
-                                modelFocusOffset,
-                                modelFocus,
-                            };
-                            // Long client and provider labels must ellipsize too;
-                            // the model stays the flexible remainder and keeps a
-                            // visible share instead of collapsing to nothing.
-                            const longIdentityRec = { ...final,
-                                client: 'openai/enterprise-client-with-a-very-long-product-suffix',
-                                provider: 'provider-with-a-very-long-tenant-and-region-label',
-                                model: 'Neutral-Model-With-A-Very-Long-Suffix' };
-                            body.innerHTML = reqRow(longIdentityRec, null);
+                            const shortFloor = REQ_FLOORS[1];
+                            // A wider identity must grow the column through the
+                            // same probe the live path uses.
+                            const longHtml = reqRow(longRec, null);
+                            body.innerHTML = longHtml;
                             await frames();
-                            const longIdent = body.querySelector('.req-ident');
-                            const longModel = longIdent && longIdent.querySelector('.req-model');
-                            const longModelLabel = longModel && longModel.querySelector('.ent-lb');
-                            const longLabels = longIdent ? [...longIdent.querySelectorAll('.ent-lb')] : [];
-                            // Measure the label's own font so the assertion is in
-                            // characters, not pixels: the inner label must keep a
-                            // readable share even when both neighbours hit their caps.
-                            const labelStyle = longModelLabel
-                                ? getComputedStyle(longModelLabel) : null;
-                            const chProbe = document.createElement('span');
-                            chProbe.style.cssText =
-                                'position:absolute;left:-9999px;visibility:hidden;white-space:pre;width:1ch;';
-                            if (labelStyle) {
-                                chProbe.style.fontFamily = labelStyle.fontFamily;
-                                chProbe.style.fontSize = labelStyle.fontSize;
-                            }
-                            document.body.appendChild(chProbe);
-                            const chWidth = chProbe.getBoundingClientRect().width;
-                            chProbe.remove();
-                            // The label's own box can extend under its clipping
-                            // badge, so intersect it with the link and flexible
-                            // model cell that actually cut the visible share.
-                            const modelLabelVisibleWidth = longModelLabel
-                                ? visibleWidth(longModelLabel, [
-                                    longModelLabel.parentElement,
-                                    longModelLabel.closest('a.ent-link'),
-                                    longModel,
-                                ])
-                                : 0;
-                            const longIdentity = {
-                                labelCount: longLabels.length,
-                                display: longLabels.map(label => getComputedStyle(label).display),
-                                ellipsis: longLabels.map(label =>
-                                    getComputedStyle(label).textOverflow),
-                                clipped: longLabels.map(label =>
-                                    label.scrollWidth > label.clientWidth + 1),
-                                overflow: longIdent
-                                    ? longIdent.scrollWidth > longIdent.clientWidth + 1 : true,
-                                modelWidth: longModel ? longModel.getBoundingClientRect().width : 0,
-                                modelLabelWidth: longModelLabel
-                                    ? longModelLabel.getBoundingClientRect().width : 0,
-                                modelLabelClientWidth: longModelLabel ? longModelLabel.clientWidth : 0,
-                                modelLabelCh: longModelLabel && chWidth > 0
-                                    ? longModelLabel.getBoundingClientRect().width / chWidth : 0,
-                                modelLabelVisibleWidth,
-                                modelLabelVisibleCh: chWidth > 0
-                                    ? modelLabelVisibleWidth / chWidth : 0,
-                                identWidth: longIdent ? longIdent.clientWidth : 0,
-                            };
-                            body.innerHTML = reqRow(identityRec, null);
+                            const longCols = measure();
+                            const longIdentity = readIdentity();
+                            const longCell = body.querySelector('tr.exp-row td:nth-child(2)');
+                            const longTitle = longCell ? longCell.getAttribute('title') : '';
+                            reqMeasureRows([longHtml]);
+                            applyReqFloors(box);
+                            const longFloor = REQ_FLOORS[1];
+                            // Back to the short row: the learned floor must
+                            // hold the wider column, never shrink it.
+                            body.innerHTML = shortHtml;
                             await frames();
-                            const columns = [...table.querySelectorAll('colgroup col')];
-                            const headers = [...table.tHead.rows[0].cells];
+                            const heldCols = measure();
+                            const heldIdentity = readIdentity();
                             const savedScroll = box.scrollLeft;
                             box.scrollLeft = 40;
                             const movedScroll = box.scrollLeft;
                             box.scrollLeft = savedScroll;
                             result = {
-                                before, after, bodyBefore, bodyAfter,
                                 reqCols: REQ_COLS,
-                                reqMinWidth: REQ_MIN_WIDTH,
-                                columns: columns.length,
-                                headerColumns: headers.length,
-                                bodyColumns: bodyBefore.length,
-                                positiveWidths: headers.length > 0 && headers.every(th =>
-                                    th.getBoundingClientRect().width > 0),
-                                positiveBudget: columns.length > 0 && columns.every(col =>
-                                    parseFloat(col.style.width) > 0),
-                                minWidth: parseFloat(getComputedStyle(table).minWidth),
-                                budget: columns.reduce((sum, col) => sum + parseFloat(col.style.width || '0'), 0),
+                                headerColumns: shortCols.length,
+                                bodyColumns: body.querySelector('tr.exp-row')
+                                    ? body.querySelector('tr.exp-row').cells.length : 0,
+                                layout: getComputedStyle(table).tableLayout,
+                                colgroups: table.querySelectorAll('colgroup').length,
+                                floorCount: shortCols.filter(col => col.minWidth > 0).length,
+                                shortIdentityWidth: shortCols[1].width,
+                                longIdentityWidth: longCols[1].width,
+                                heldIdentityWidth: heldCols[1].width,
+                                shortFloor, longFloor,
+                                shortIdentity, longIdentity, heldIdentity,
+                                shortTitle, longTitle,
+                                expectedShortTitle: reqIdentityText(shortRec),
+                                expectedLongTitle: reqIdentityText(longRec),
+                                modelLabelTitle, modelClosestTitle, modelFocus,
                                 scrollBox: {
                                     overflowX: getComputedStyle(box).overflowX,
                                     moved: movedScroll,
                                     saved: savedScroll,
                                 },
-                                stable: before.length === after.length && before.every((v, i) =>
-                                    samePosition(v, after[i])),
-                                bodyStable: bodyBefore.length === bodyAfter.length &&
-                                    bodyBefore.length > 0 && bodyBefore.every((v, i) =>
-                                        samePosition(v, bodyAfter[i])),
-                                costStable: samePosition(bodyBefore[12], bodyAfter[12]),
-                                actionStable: samePosition(bodyBefore[13], bodyAfter[13]),
-                                identity,
-                                longIdentity,
                                 mobileScroll: box.scrollWidth > box.clientWidth + 1,
                                 pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
                             };
                         } finally {
                             modelNames.delete('Neutral-Model-With-A-Very-Long-Suffix');
-                            if (table.isConnected && table.tBodies[0] === body) body.innerHTML = saved;
+                            body.innerHTML = savedBody;
+                            REQ_FLOORS.splice(0, REQ_FLOORS.length, ...savedFloors);
+                            applyReqFloors(box);
                         }
                         return result;
                     }""")
-                    require(state['stable'], state)
-                    require(state['columns'] == state['reqCols'] and state['headerColumns'] == state['reqCols'], state)
-                    require(state['reqCols'] == 14 and state['reqMinWidth'] == 1364, state)
-                    require(state['bodyColumns'] == state['reqCols'] and state['bodyStable'], state)
-                    require(state['costStable'] and state['actionStable'], state)
-                    require(state['positiveWidths'] and state['positiveBudget'], state)
-                    require(abs(state['minWidth'] - 1364) <= 0.5 and abs(state['budget'] - 1364) <= 0.5, state)
-                    identity = state['identity']
-                    require(identity['linkCount'] == 3 and identity['minLinkWidth'] > 0, state)
-                    require(identity['labelCount'] == 3 and identity['minLabelWidth'] > 8, state)
-                    short_labels = identity['shortLabels']
-                    require(len(short_labels) == 2, state)
-                    require(all(label['width'] > 0 and label['clientWidth'] > 0 and
-                                label['scrollWidth'] <= label['clientWidth'] and
-                                label['linkWidth'] > 0 and
-                                label['visibleWidth'] > 0 and
-                                label['visibleWidth'] >= label['width'] - 1
-                                for label in short_labels), state)
-                    require(not identity['overflow'] and identity['modelClass'], state)
-                    require(identity['modelDisplay'] not in ('flex', 'inline-flex'),
-                            {'identity': identity})
-                    require(identity['modelEllipsis'] and identity['modelClipped'], state)
-                    focus = identity['modelFocus']
+                    require(state['reqCols'] == 14 and state['headerColumns'] == 14 and
+                            state['bodyColumns'] == 14, state)
+                    require(state['layout'] == 'auto' and state['colgroups'] == 0, state)
+                    require(state['floorCount'] == 14, state)
+                    require(state['longIdentityWidth'] > state['shortIdentityWidth'] + 1, state)
+                    require(state['longFloor'] > state['shortFloor'], state)
+                    require(state['heldIdentityWidth'] >= state['longFloor'] - 0.5, state)
+                    for ident in (state['shortIdentity'], state['longIdentity'],
+                                  state['heldIdentity']):
+                        require(not ident['overflow'], state)
+                        require(len(ident['labels']) == 3, state)
+                        require(all(label['scrollWidth'] <= label['clientWidth'] + 1 and
+                                    label['visibleWidth'] >= label['width'] - 1
+                                    for label in ident['labels']), state)
+                    require(state['shortTitle'] == state['expectedShortTitle'] and
+                            'opencode/1.18.32' in state['shortTitle'] and
+                            'narrow-provider' in state['shortTitle'], state)
+                    require(state['longTitle'] == state['expectedLongTitle'] and
+                            'provider-with-a-very-long-tenant-and-region-label' in
+                            state['longTitle'], state)
+                    require(state['modelLabelTitle'].startswith(
+                                'original: Neutral-Model-With-A-Very-Long-Suffix'), state)
+                    require('original: Neutral-Model-With-A-Very-Long-Suffix' in
+                            state['modelClosestTitle'], state)
+                    focus = state['modelFocus']
                     require(focus.get('style') == 'solid' and focus.get('width', 0) >= 1 and
                             focus.get('color') not in ('', 'rgba(0, 0, 0, 0)', 'transparent') and
-                            focus.get('offset') == '-1px', {'identity': identity})
-                    require('original: Neutral-Model-With-A-Very-Long-Suffix' in
-                            identity['modelClosestTitle'], {'identity': identity})
-                    require(identity['modelLabelTitle'].startswith(
-                                'original: Neutral-Model-With-A-Very-Long-Suffix'),
-                            {'identity': identity})
-                    long_identity = state['longIdentity']
-                    require(long_identity['labelCount'] == 3, long_identity)
-                    require(all(display == 'block' for display in long_identity['display']),
-                            long_identity)
-                    require(all(ellipsis == 'ellipsis' for ellipsis in long_identity['ellipsis']),
-                            long_identity)
-                    require(all(long_identity['clipped'][:2]), long_identity)
-                    require(not long_identity['overflow'], long_identity)
-                    require(long_identity['modelWidth'] > long_identity['identWidth'] * 0.10,
-                            long_identity)
-                    require(long_identity['modelLabelWidth'] > 0 and
-                            long_identity['modelLabelClientWidth'] > 0,
-                            long_identity)
-                    require(long_identity['modelLabelCh'] >= 3, long_identity)
-                    require(long_identity['modelLabelVisibleCh'] >= 3, long_identity)
+                            focus.get('offset') == '-1px', state)
                     require(state['scrollBox']['overflowX'] in ('auto', 'scroll'), state)
                     require(not state['pageOverflow'], state)
                     if viewport['width'] == 390:
@@ -932,7 +831,8 @@ async def check(base, screenshot):
                 results.append({'content_fit': content_fit})
 
                 # The published docs capture uses 2200x900 so the request
-                # table's 1364px budget fits without horizontal clipping.
+                # table's learned content widths fit without horizontal
+                # clipping. The table is content-sized, not a fixed budget.
                 await page.set_viewport_size({'width': 2200, 'height': 900})
                 await page.evaluate(
                     'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
@@ -942,12 +842,12 @@ async def check(base, screenshot):
                     return {
                         clientWidth: box.clientWidth,
                         scrollWidth: box.scrollWidth,
-                        minWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
+                        tableWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
+                        layout: table ? getComputedStyle(table).tableLayout : '',
                     };
                 }""")
-                require(docs_table['clientWidth'] >= 1364 and
-                        docs_table['scrollWidth'] <= docs_table['clientWidth'] + 2 and
-                        docs_table['minWidth'] >= 1364, docs_table)
+                require(docs_table['layout'] == 'auto' and
+                        docs_table['scrollWidth'] <= docs_table['clientWidth'] + 2, docs_table)
                 results.append({'docs_table': docs_table})
                 await page.set_viewport_size({'width': 1440, 'height': 1000})
 

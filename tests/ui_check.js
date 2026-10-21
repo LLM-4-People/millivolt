@@ -502,36 +502,41 @@ async function main() {
   {
     const table = d.querySelector('#tbl-requests table');
     const cols = [...d.querySelectorAll('#tbl-requests colgroup col')];
-    const labels = [...d.querySelectorAll('#tbl-requests thead th')].map(th => th.textContent);
+    const ths = [...d.querySelectorAll('#tbl-requests thead th')];
+    const labels = ths.map(th => th.textContent);
     const expectedLabels = ['time', 'client · provider · model', 'status', 'ttft', 'tps',
       'in/out', 'cache', 'tools', 'finish', 'dur', 'turns', 'queued', 'cost', ''];
-    const columnBudget = cols.reduce((sum, col) => sum + parseFloat(col.style.width || '0'), 0);
-    const columnWidths = cols.map(col => parseFloat(col.style.width || '0'));
-    const expectedWidths = [100, 324, 134, 82, 70, 128, 70, 52, 82, 76, 76, 60, 76, 34];
     const firstCell = d.querySelector('#tbl-requests tr.exp-row td');
     check('the request table column contract is literal',
-      w.eval('REQ_COLS') === 14 && w.eval('REQ_MIN_WIDTH') === 1364 &&
-      labels.length === 14 && labels.join('|') === expectedLabels.join('|') &&
-      Math.abs(columnBudget - 1364) < 0.5);
-    check('the request table keeps the exact per-column widths',
-      columnWidths.join(',') === expectedWidths.join(','));
+      w.eval('REQ_COLS') === 14 &&
+      labels.length === 14 && labels.join('|') === expectedLabels.join('|'));
+    check('the request table has no hand-tuned column widths',
+      cols.length === 0 && !table.style.minWidth && !table.style.width &&
+      ths.every(th => !th.style.minWidth));
+    check('the request table sizes every column to its content',
+      !!table && w.getComputedStyle(table).tableLayout === 'auto');
     check('the request log is a labelled keyboard-scrollable region', (() => {
       const box = d.getElementById('tbl-requests');
       return box.getAttribute('role') === 'region' &&
         box.getAttribute('aria-label') === 'Request log' && box.tabIndex === 0;
     })());
     check('the actions header has an accessible name',
-      [...d.querySelectorAll('#tbl-requests thead th')][13]?.getAttribute('aria-label') ===
-        'Request actions');
-    check('the request table uses fixed column geometry',
-      !!table && w.getComputedStyle(table).tableLayout === 'fixed');
-    check('the request table owns one positive width per column',
-      cols.length === w.eval('REQ_COLS') && cols.every(col => parseFloat(col.style.width) > 0));
-    check('the request table min-width matches its column budget',
-      Math.abs(parseFloat(table.style.minWidth) - columnBudget) < 0.5);
-    check('request cells clip and ellipsize inside fixed columns',
+      ths[13]?.getAttribute('aria-label') === 'Request actions');
+    check('request cells clip and ellipsize only as a below-floor backstop',
       !!firstCell && w.getComputedStyle(firstCell).overflow === 'hidden' &&
       w.getComputedStyle(firstCell).textOverflow === 'ellipsis');
+    check('the column floors ratchet upward and never shrink', (() => {
+      const saved = w.eval('REQ_FLOORS.slice()');
+      const grew = w.eval('reqRatchetWidths([101, 55, 0, NaN, -4])');
+      const first = w.eval('REQ_FLOORS.slice()');
+      const again = w.eval('reqRatchetWidths([80, 40])');
+      const second = w.eval('REQ_FLOORS.slice()');
+      w.eval('REQ_FLOORS.splice(0, REQ_FLOORS.length, ...' + JSON.stringify(saved) + ')');
+      return grew === true && again === false &&
+        first[0] === 101 && first[1] === 55 &&
+        first.slice(2).join(',') === saved.slice(2).join(',') &&
+        second.join(',') === first.join(',');
+    })());
     check('the header row spans every request column',
       !!table && table.tHead?.rows?.[0]?.cells.length === w.eval('REQ_COLS'));
   }

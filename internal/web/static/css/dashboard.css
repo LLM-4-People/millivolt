@@ -1377,36 +1377,33 @@
 
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  /* Request log: fixed column geometry. A live row rewriting into its final
-     values must never re-measure the table from the new cell text. The
-     colgroup and min-width are generated with the header in log.js. */
-  #tbl-requests table { table-layout: fixed; }
+  /* Request log: content-sized columns. Automatic layout fits each column to
+     its widest cell; log.js ratchets the natural width into a min-width on the
+     header cell (see reqThead), which auto layout treats as a hard column
+     floor. Columns therefore grow with new maxima and never shrink back when a
+     live row finalizes or a shorter value replaces the widest one. */
+  #tbl-requests table { table-layout: auto; }
   #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
-  .req-ident { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; }
-  /* Client and provider badges stay content-sized up to a bounded share, so a
-     short label is never clipped to a sliver. The canonical model is the only
-     flexible remainder and ellipsizes first inside the fixed identity column.
-     The cap reserves the model's 3ch label floor plus 3px rounding slack, its
-     4px link padding, 14px icon and 3px gap; the two 2px identity gaps are
-     excluded from both caps. */
-  .req-ident > .ent {
-    flex: 0 1 auto;
-    max-width: calc((100% - 28px - 3ch) / 2);
-    min-width: 0;
-    overflow: hidden;
-  }
+  /* The identity cell keeps every badge at its natural width: the column floor
+     was measured from the full one-line client · provider · model, so no badge
+     is capped or wrapped. A card narrower than the learned columns scrolls
+     horizontally instead of squeezing a name into an ellipsis. */
+  .req-ident { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0; }
+  .req-ident > .ent { flex: 0 0 auto; }
   .req-ident .ent { gap: 3px; }
-  .req-ident > .req-model { display: inline-flex; align-items: center; min-width: 0; flex: 1 1 0; max-width: 100%; overflow: hidden; }
+  .req-ident > .req-model { display: inline-flex; align-items: center; flex: 0 0 auto; max-width: 100%; overflow: hidden; }
   .req-ident > .req-model > .ent { min-width: 0; max-width: 100%; overflow: hidden; }
-  /* Chromium paints text-overflow dots only on a block-level box, not on the
-     inline-flex label used elsewhere. Inside the identity cell every label is
-     a block, so long client and provider names ellipsize too while the model
-     remains the flexible remainder and keeps a visible share. */
+  /* Backstop only: the measured floor already fits every label, so the dots
+     appear only if a layout without measurement (jsdom, a stubbed viewport)
+     forces a cell below its content. */
   .req-ident .ent-lb { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* The model is the flexible remainder between the capped client and provider
-     badges. Keep at least three characters of its label visible even when both
-     neighbours sit at their caps. */
-  .req-ident > .req-model .ent-lb { min-width: 3ch; }
+  /* Offscreen natural-width probe for the request log's column floors. The
+     probe must not inherit the fixed-card table width or the identity cell's
+     fill behaviour: max-content measures the content itself, and the identity
+     row measures all three badges on one line. */
+  #req-measure { position: absolute; left: -100000px; top: 0; visibility: hidden; pointer-events: none; }
+  #req-measure table { table-layout: auto; width: max-content; border-collapse: collapse; }
+  #req-measure .req-ident { width: max-content; }
   th { color: var(--muted); font-weight: 550; font-size: 10px; text-transform: none; letter-spacing: .07em; position: sticky; top: 0; background: var(--panel); z-index: 2; }
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
