@@ -976,6 +976,64 @@ async def check(base, screenshot):
                         focus_scroll)
                 results.append({'focus_scroll': focus_scroll})
 
+                # The incremental path must learn a wider identity when a live
+                # row changes, then hold that floor when the short record
+                # returns. This drives production renderRequestsIncremental,
+                # not the measurement helper directly: deleting its probe call
+                # leaves the long row visually wider but lets the revert shrink
+                # the column.
+                incremental_width = await page.evaluate("""async () => {
+                    const box = document.getElementById('tbl-requests');
+                    const frames = () => new Promise(r =>
+                        requestAnimationFrame(() => requestAnimationFrame(r)));
+                    const savedFloors = REQ_FLOORS.slice();
+                    const at = new Date(2026, 0, 2, 12, 0, 0).toISOString();
+                    const base = {start: at, end: at, provider: 'p', model: 'm',
+                        client: 'c', stream: true, status_code: 0, live: true,
+                        ttft_ms: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0,
+                        usage: {input_tokens: 0, output_tokens: 0},
+                        retries: 0, attempts: []};
+                    const recs = Array.from({length: 6}, (_, i) => ({...base,
+                        id: 'iw-' + i,
+                        start: new Date(new Date(at).getTime() - i * 60000).toISOString()}));
+                    const identity = () => {
+                        const row = box.querySelector('tr.exp-row[data-id="iw-0"]');
+                        return {width: row?.cells[1]?.getBoundingClientRect().width || 0,
+                                floor: REQ_FLOORS[1],
+                                text: row?.cells[1]?.textContent.trim() || ''};
+                    };
+                    try {
+                        REQ_FLOORS.fill(0);
+                        renderRequests(recs);
+                        await frames();
+                        const short = identity();
+                        const longRecs = recs.map(r => r.id === 'iw-0' ? {...r,
+                            client: 'openai/enterprise-client-with-a-very-long-product-suffix',
+                            provider: 'provider-with-a-very-long-tenant-and-region-label',
+                            model: 'neutral-model-with-a-very-long-suffix'} : r);
+                        renderRequestsIncremental(longRecs);
+                        await frames();
+                        const long = identity();
+                        renderRequestsIncremental(recs);
+                        await frames();
+                        const held = identity();
+                        return {short, long, held};
+                    } finally {
+                        REQ_FLOORS.splice(0, REQ_FLOORS.length, ...savedFloors);
+                        renderRequests(derive(lastData).scopedRecs);
+                        await frames();
+                    }
+                }""")
+                require(incremental_width['long']['floor'] >
+                        incremental_width['short']['floor'] + 1, incremental_width)
+                require(incremental_width['long']['width'] >
+                        incremental_width['short']['width'] + 1, incremental_width)
+                require(incremental_width['held']['floor'] ==
+                        incremental_width['long']['floor'], incremental_width)
+                require(incremental_width['held']['width'] >=
+                        incremental_width['long']['floor'] - 0.5, incremental_width)
+                results.append({'incremental_width': incremental_width})
+
                 # The sticky day divider must sit exactly on the sticky header's
                 # bottom edge: no sliver of scrolling rows between them, and no
                 # overlap.
