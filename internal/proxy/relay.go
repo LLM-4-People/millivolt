@@ -1757,6 +1757,11 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		if len(frame) == 0 {
 			return true
 		}
+		// Capture the upstream-arrival timestamp before the client write:
+		// a slow or backpressured client must not stretch TTFT or the
+		// decode window. The direct relay path anchors its timestamps the
+		// same way at the read site.
+		now := time.Now()
 		if _, err := w.Write(frame); err != nil {
 			markClientGone(rec)
 			return false
@@ -1771,7 +1776,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			} else {
 				rest = nil
 			}
-			a.Feed(line, time.Now())
+			a.Feed(line, now)
 		}
 		terminal = bytes.Equal(frame, []byte(sse.DoneFrame))
 		frame = frame[:0]
