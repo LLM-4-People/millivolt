@@ -33,7 +33,6 @@ func benchmarkEventRecord() *Record {
 		LastTokenAt:    start.Add(1400 * time.Millisecond),
 		FinishReason:   "stop",
 		TTFTMs:         250,
-		OverallTPS:     42.5,
 		DecodeTPS:      60.25,
 		DurationMs:     1500,
 		Usage: Usage{

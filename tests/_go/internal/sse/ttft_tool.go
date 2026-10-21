@@ -17,7 +17,7 @@ func TestToolCallTTFT(t *testing.T) {
 	a.Feed([]byte(`data: {"id":"1","choices":[{"delta":{},"finish_reason":"tool_calls"}]}`), firstChunk.Add(100*time.Millisecond))
 	a.Feed([]byte(`data: [DONE]`), firstChunk.Add(150*time.Millisecond))
 
-	rec := &metrics.Record{Start: start}
+	rec := &metrics.Record{Start: start, FinalAttemptAt: start}
 	a.Fill(rec)
 
 	if rec.TTFT() != 500*time.Millisecond {

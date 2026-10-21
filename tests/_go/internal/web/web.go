@@ -1456,7 +1456,7 @@ func benchmarkDashboardGzipBody(tb testing.TB) []byte {
 		rec.FirstTokenAt, rec.LastTokenAt = at.Add(time.Duration(rec.TTFTMs)*time.Millisecond), rec.End
 		rec.FinalAttemptAt, rec.FirstAnswerAt = at, rec.FirstTokenAt.Add(time.Millisecond)
 		rec.FinishReason = "stop"
-		rec.OverallTPS, rec.DecodeTPS = rng.Float64()*120, rng.Float64()*200
+		rec.DecodeTPS = rng.Float64() * 200
 		rec.Usage.ReasoningTokens = int64(rng.IntN(1000))
 		rec.Usage.TotalTokens = rec.Usage.InputTokens + rec.Usage.OutputTokens
 		rec.AnswerTokens, rec.GenTokens = rec.Usage.OutputTokens-rec.Usage.ReasoningTokens, rec.Usage.OutputTokens

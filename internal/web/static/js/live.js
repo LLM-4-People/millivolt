@@ -346,6 +346,7 @@ function derive(data) {
   const reasonTotal = a.reasoning_tokens || 0;
   const costPerReq = Number.isFinite(a.cost_per_req) ? a.cost_per_req : null;
   const costPerMtok = Number.isFinite(a.cost_per_mtok) ? a.cost_per_mtok : null;
+  const avgTpsText = a.avg_tps != null ? fmt(a.avg_tps) : '';
 
   const kpiKey = [a.requests, a.errors, a.cost, a.input_tokens, a.output_tokens,
     a.cache_read_tokens, a.reasoning_tokens, a.avg_ttft_ms, a.avg_tps,
@@ -359,8 +360,8 @@ function derive(data) {
     <div class="kpi k-cost"><h2>Blended cost</h2><div class="val">${costPerMtok != null ? vt(fmtMoney(costPerMtok)) + '<span class="unit">/Mtok</span>' : '-'}</div><div class="sub2">${costPerMtok != null ? vt('priced in+out', 'blended over cost-reporting requests only') : '-'}</div></div>
     <div class="kpi"><h2>Tokens in/out</h2><div class="val val-duo">${vt(fmt(inTotal), fmtFull(inTotal))}<span class="unit">/</span>${vt(fmt(outTotal), fmtFull(outTotal))}</div><div class="sub2">${reasonTotal > 0 ? vt('reasoning ' + fmt(reasonTotal) + ' tok', 'reasoning ' + fmtFull(reasonTotal) + ' tok') : 'no reasoning'}</div></div>
     <div class="kpi k-cache"><h2>Cache hit</h2><div class="val">${vt(cacheRatio)}</div><div class="sub2">${vt(fmt(cacheTotal) + ' / ' + fmt(inTotal) + ' in', fmtFull(cacheTotal) + ' / ' + fmtFull(inTotal) + ' in')}</div></div>
-    <div class="kpi"><h2>Avg TTFT</h2><div class="val">${a.avg_ttft_ms != null ? vt(fmtDur(a.avg_ttft_ms)) : '-'}</div><div class="sub2">time to first token</div></div>
-    <div class="kpi"><h2>Avg TPS</h2><div class="val">${a.avg_tps != null ? a.avg_tps.toFixed(1) + '<span class="unit">tok/s</span>' : '-'}</div><div class="sub2">throughput</div></div>
+    <div class="kpi"><h2>Avg TTFT</h2><div class="val">${a.avg_ttft_ms != null ? vt(fmtDur(a.avg_ttft_ms)) : '-'}</div><div class="sub2">per attempt, send to first token</div></div>
+    <div class="kpi"><h2>Avg TPS</h2><div class="val">${a.avg_tps != null ? vt(avgTpsText, fmtFull(a.avg_tps) + ' ' + TPS_UNIT) + tpsUnitGap(avgTpsText) + '<span class="unit">' + TPS_UNIT + '</span>' : '-'}</div><div class="sub2">per request, first to last token</div></div>
     <div class="kpi ${a.errors ? 'k-err' : ''}"><h2>Error rate</h2><div class="val">${vt(errRate)}</div><div class="sub2">${vt(fmt(a.errors || 0) + ' of ' + fmt(a.requests))}</div></div>
   `;
     _kpiHtml = kpiHtml;

@@ -1297,17 +1297,13 @@ func (s *Server) doWithRetry(ctx context.Context, groupKey string, r *http.Reque
 			return nil, nil, err
 		}
 		// FinalAttemptAt anchors TTFT at the adopted attempt's send start.
-		// Stamp at admission whenever the record has already absorbed an
-		// attempt - this loop's own retries and the quality re-sends the
-		// callers adopt both arrive with Retries > 0 - and let every later
-		// attempt re-stamp its own start, so the surviving value describes
-		// the attempt whose response is adopted, headers-arrival never. A
-		// record with no absorbed attempt keeps the zero value (TTFT falls
-		// back to Start); the cursor driver stamps the same way in
-		// openCursorHTTP.
-		if rec.Retries > 0 {
-			rec.FinalAttemptAt = attemptStart
-		}
+		// Stamp every attempt, including the first: TTFT is always measured
+		// from the upstream send, never from Start (which also covers
+		// queueing and request parsing). Later attempts re-stamp their own
+		// start, so the surviving value always describes the attempt whose
+		// response is adopted. Only a request that never sent an upstream
+		// attempt keeps the zero value (TTFT is then absent).
+		rec.FinalAttemptAt = attemptStart
 		// Per-send deadline: X-Proxy-Timeout-Ms bounds this ONE send (the
 		// Do below and the returned body), anchored on the attemptStart the
 		// admission helper stamped - a fresh budget per attempt, never eaten
@@ -1761,6 +1757,11 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 		if len(frame) == 0 {
 			return true
 		}
+		// Capture the upstream-arrival timestamp before the client write:
+		// a slow or backpressured client must not stretch TTFT or the
+		// decode window. The direct relay path anchors its timestamps the
+		// same way at the read site.
+		now := time.Now()
 		if _, err := w.Write(frame); err != nil {
 			markClientGone(rec)
 			return false
@@ -1775,7 +1776,7 @@ func (s *Server) streamBodyTranslated(ctx context.Context, w http.ResponseWriter
 			} else {
 				rest = nil
 			}
-			a.Feed(line, time.Now())
+			a.Feed(line, now)
 		}
 		terminal = bytes.Equal(frame, []byte(sse.DoneFrame))
 		frame = frame[:0]

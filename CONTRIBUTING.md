@@ -34,6 +34,16 @@ gh api "repos/LLM-4-People/millivolt/rulesets/$ruleset_id" \
 It must report `enforcement: active`, an empty `bypass_actors`, and
 `current_user_can_bypass: never`.
 
+### Commit as you go
+
+Commit each completed fix locally as soon as its targeted check passes. This
+includes every individual finding from a review, audit, or multi-agent round:
+do not hold those edits in the working tree until the end, and do not squash
+several findings into one final commit. If a fix depends on an earlier
+uncommitted change, commit that coherent change first, then commit the
+dependent fix. Keep unrelated user changes out of the commit. A push still
+waits for the full push gate on the exact commit being pushed.
+
 Completed feature pushes to `testing` publish only the moving development image.
 All pull requests to `testing`, all code-bearing pushes to `testing`, and
 manually pushed `v*` tags run the full gate; docs and site-only pushes to

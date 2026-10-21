@@ -142,7 +142,7 @@ func TestRestoreRejectsAggregateUnsafeValues(t *testing.T) {
 		{"cost", math.Inf(-1)},
 		{"cost", -1.0},
 		{"gen_tps", math.Inf(1)},
-		{"overall_tps", -0.5},
+		{"gen_tps", -0.5},
 	} {
 		t.Run(tc.column, func(t *testing.T) {
 			data := snapshotWithValue(t, tc.column, tc.value)
@@ -180,7 +180,6 @@ func TestRestoreRejectsAggregateTotalOverflow(t *testing.T) {
 	}{
 		{"cost", func(r *metrics.Record) { r.Cost = 1e307 }},
 		{"gen_tps", func(r *metrics.Record) { r.DecodeTPS = 1e307 }},
-		{"overall_tps", func(r *metrics.Record) { r.OverallTPS = 1e307 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			data := snapshotFromRecords(t, aggregateRecords(t, 20, tc.apply))
@@ -248,7 +247,6 @@ func TestRestoreAcceptsFiniteAggregateTotals(t *testing.T) {
 	data := snapshotFromRecords(t, aggregateRecords(t, 20, func(r *metrics.Record) {
 		r.Cost = 1.5
 		r.DecodeTPS = 20
-		r.OverallTPS = 20
 		r.TTFTMs = 100
 		r.Usage.InputTokens = 10
 		r.Usage.OutputTokens = 5
@@ -303,41 +301,6 @@ func TestRestoreAcceptsEmptyAggregateTotals(t *testing.T) {
 	after := merge.Totals()
 	if after.Err() != nil || after.Requests != before.Requests || after.Cost != before.Cost || after.InputTok != before.InputTok {
 		t.Fatalf("empty merge changed totals: before=%+v after=%+v", before, after)
-	}
-}
-
-// TestRestoreAcceptsUnusedDecodeTPSOverflow pins D1: Totals.Add uses OverallTPS
-// when it is positive and ignores DecodeTPS, so a huge unused gen_tps must not
-// reject an otherwise representable snapshot.
-func TestRestoreAcceptsUnusedDecodeTPSOverflow(t *testing.T) {
-	data := snapshotFromRecords(t, aggregateRecords(t, 20, func(r *metrics.Record) {
-		r.OverallTPS = 1
-		r.DecodeTPS = 1e307
-	}))
-	live, err := replaceSnapshot(t, data)
-	if err != nil {
-		t.Fatalf("unused gen_tps overflow rejected by replace: %v", err)
-	}
-	if live.Totals().Err() != nil {
-		t.Fatalf("replace totals error: %v", live.Totals().Err())
-	}
-	if got := live.Totals().TPSSum; got != 20 {
-		t.Fatalf("replace TPSSum = %v, want 20 from overall_tps", got)
-	}
-
-	merge := mergeTestLive(t)
-	inserted, skipped, err := merge.MergeSnapshot(t.Context(), data)
-	if err != nil {
-		t.Fatalf("unused gen_tps overflow rejected by merge: %v", err)
-	}
-	if inserted != 20 || skipped != 0 {
-		t.Fatalf("merge inserted=%d skipped=%d, want 20/0", inserted, skipped)
-	}
-	if merge.Totals().Err() != nil {
-		t.Fatalf("merge totals error: %v", merge.Totals().Err())
-	}
-	if got := merge.Totals().TPSSum; got != 20 {
-		t.Fatalf("merge TPSSum = %v, want 20 from overall_tps", got)
 	}
 }
 

@@ -502,38 +502,58 @@ async function main() {
   {
     const table = d.querySelector('#tbl-requests table');
     const cols = [...d.querySelectorAll('#tbl-requests colgroup col')];
-    const labels = [...d.querySelectorAll('#tbl-requests thead th')].map(th => th.textContent);
+    const ths = [...d.querySelectorAll('#tbl-requests thead th')];
+    const labels = ths.map(th => th.textContent);
     const expectedLabels = ['time', 'client · provider · model', 'status', 'ttft', 'tps',
       'in/out', 'cache', 'tools', 'finish', 'dur', 'turns', 'queued', 'cost', ''];
-    const columnBudget = cols.reduce((sum, col) => sum + parseFloat(col.style.width || '0'), 0);
-    const columnWidths = cols.map(col => parseFloat(col.style.width || '0'));
-    const expectedWidths = [100, 324, 134, 82, 70, 128, 70, 52, 82, 76, 76, 60, 76, 34];
     const firstCell = d.querySelector('#tbl-requests tr.exp-row td');
     check('the request table column contract is literal',
-      w.eval('REQ_COLS') === 14 && w.eval('REQ_MIN_WIDTH') === 1364 &&
-      labels.length === 14 && labels.join('|') === expectedLabels.join('|') &&
-      Math.abs(columnBudget - 1364) < 0.5);
-    check('the request table keeps the exact per-column widths',
-      columnWidths.join(',') === expectedWidths.join(','));
+      w.eval('REQ_COLS') === 14 &&
+      labels.length === 14 && labels.join('|') === expectedLabels.join('|'));
+    check('the request table has no hand-tuned column widths',
+      cols.length === 0 && !table.style.minWidth && !table.style.width &&
+      ths.every(th => !th.style.minWidth));
+    check('the request table sizes every column to its content',
+      !!table && w.getComputedStyle(table).tableLayout === 'auto');
     check('the request log is a labelled keyboard-scrollable region', (() => {
       const box = d.getElementById('tbl-requests');
       return box.getAttribute('role') === 'region' &&
         box.getAttribute('aria-label') === 'Request log' && box.tabIndex === 0;
     })());
     check('the actions header has an accessible name',
-      [...d.querySelectorAll('#tbl-requests thead th')][13]?.getAttribute('aria-label') ===
-        'Request actions');
-    check('the request table uses fixed column geometry',
-      !!table && w.getComputedStyle(table).tableLayout === 'fixed');
-    check('the request table owns one positive width per column',
-      cols.length === w.eval('REQ_COLS') && cols.every(col => parseFloat(col.style.width) > 0));
-    check('the request table min-width matches its column budget',
-      Math.abs(parseFloat(table.style.minWidth) - columnBudget) < 0.5);
-    check('request cells clip and ellipsize inside fixed columns',
+      ths[13]?.getAttribute('aria-label') === 'Request actions');
+    check('request cells clip and ellipsize only as a below-floor backstop',
       !!firstCell && w.getComputedStyle(firstCell).overflow === 'hidden' &&
       w.getComputedStyle(firstCell).textOverflow === 'ellipsis');
+    check('the column floors ratchet upward and never shrink', (() => {
+      const saved = w.eval('REQ_FLOORS.slice()');
+      const grew = w.eval('reqRatchetWidths([101, 55, 0, NaN, -4])');
+      const first = w.eval('REQ_FLOORS.slice()');
+      const again = w.eval('reqRatchetWidths([80, 40])');
+      const second = w.eval('REQ_FLOORS.slice()');
+      w.eval('REQ_FLOORS.splice(0, REQ_FLOORS.length, ...' + JSON.stringify(saved) + ')');
+      return grew === true && again === false &&
+        first[0] === 101 && first[1] === 55 &&
+        first.slice(2).join(',') === saved.slice(2).join(',') &&
+        second.join(',') === first.join(',');
+    })());
     check('the header row spans every request column',
       !!table && table.tHead?.rows?.[0]?.cells.length === w.eval('REQ_COLS'));
+    check('every live status transition is width-relevant', (() => {
+      const live = {client: 'c', provider: 'p', model: 'm', status_code: 0,
+        attempts: [], live: true, paused: true, throttled: false, stream: true,
+        debug: false};
+      const cases = [
+        ['pause release', {...live, paused: false}, true],
+        ['throttle on', {...live, paused: false, throttled: true}, true],
+        ['stream stop', {...live, stream: false}, true],
+        ['debug on', {...live, debug: true}, true],
+        ['token churn alone', {...live, usage: {input_tokens: 1}}, false],
+      ];
+      return cases.every(([, next, expected]) =>
+        w.eval('reqWidthRelevant(' + JSON.stringify(live) + ', ' +
+          JSON.stringify(next) + ')') === expected);
+    })());
   }
   check('dimension picker trigger exists', !!d.getElementById('xp-dim-trigger'));
   check('dimension rail still has nine dims', d.querySelectorAll('#xp-rail .xp-rail-item').length === 9);
@@ -981,6 +1001,34 @@ async function main() {
     check('KPI band skeleton matches the first-rendered tile structure',
       skel.length === live.length && JSON.stringify(skel) === JSON.stringify(live) &&
       JSON.stringify(live));
+  }
+
+  // The Avg TPS KPI uses the same compact unit as the Overview timing tile.
+  // TPS_UNIT is the single owner; the chart axis, legend and tooltips keep the
+  // full tok/s label where there is room.
+  {
+    const kpiHtml = w.eval(`(() => {
+      const saved = kpiAgg;
+      kpiAgg = { requests: 1, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
+        avg_ttft_ms: null, avg_tps: 1234.56 };
+      const out = derive({ records: [], counters: { in_flight: 0 }, _rev: 1 }).kpiHtml;
+      kpiAgg = saved;
+      return out;
+    })()`);
+    const tpsValue = w.eval('fmt(1234.56)');
+    const tpsFull = w.eval('fmtFull(1234.56)');
+    check('the Avg TPS KPI uses the compact t/s unit with a full-value title',
+      kpiHtml.includes('title="' + tpsFull + ' t/s">' + tpsValue +
+        '</span> <span class="unit">t/s</span>') &&
+      !kpiHtml.includes('tok/s') && w.eval('TPS_UNIT') === 't/s');
+    check('compact speed values keep their magnitude suffix apart from the unit', (() => {
+      const plain = w.eval('fmt(148.239)');
+      const compact = w.eval('fmt(1234.56)');
+      return w.eval('fmtTPSCompact(148.239)') === plain + 't/s' &&
+        w.eval('fmtTPSCompact(1234.56)') === compact + ' t/s' &&
+        w.eval('fmtTPSCompact(null)') === '-';
+    })());
   }
 
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
@@ -3279,15 +3327,17 @@ async function main() {
     chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5]; chartAgg.dec_p = [440, 550, 660];
   `);
   const latTotals = w.eval('chartTotals()');
+  const tps202Full = w.eval('fmtTPS(202.75)');
   check('speed + latency totals show only selected period values',
-    latTotals.includes('202.75 tok/s') && latTotals.includes('220ms') && latTotals.includes('550ms') &&
+    latTotals.includes(tps202Full) && latTotals.includes('220ms') && latTotals.includes('550ms') &&
     !latTotals.includes('101.25') && !latTotals.includes('110ms') && !latTotals.includes('440ms') && !/p(?:50|95|99)/.test(latTotals));
   for (const [pct, speed, ttft, dec, totalSpeed, totalTTFT, totalDec, kept] of [[50, 100.25, 10, 40, 101.25, 110, 440, 1], [99, 300.5, 30, 120, 303.5, 330, 660, 1]]) {
     w.setChartPct(String(pct));
     const data = w.eval('chartData()'), totals = w.eval('chartTotals()');
+    const totalSpeedText = w.eval('fmtTPS(' + totalSpeed + ')');
     check(`percentile dropdown chooses every series and period total at ${pct}`,
       data.length === 4 && data[0].length === kept && data[1][0] === speed && data[2][0] === ttft && data[3][0] === dec &&
-      totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms') && totals.includes(totalDec + 'ms'));
+      totals.includes(totalSpeedText) && totals.includes(totalTTFT + 'ms') && totals.includes(totalDec + 'ms'));
   }
   w.setChartPct('95');
   // blank state: zero merged traffic reads as empty
@@ -3653,6 +3703,66 @@ async function main() {
   check('single-bucket range ignores uPlot timestamp expansion and keeps the actual bucket edges',
     singleRange[0] === CHART_FROM && singleRange[1] === CHART_FROM + BUCKET_MS);
 
+  // A line-only preset must fill the plot edge to edge: the domain is the
+  // first and last sample, with no half-bucket inset. A four-point
+  // speed+latency window used to strand 12.5% of dead space on each side.
+  // Bars keep their half slot (pinned above) so edge bars stay full width, and
+  // a mixed preset keeps it too because one of its rows still draws bars.
+  w.eval(`
+    chartAgg.buckets.forEach(b => {
+      b.req = 1;
+      b.tps = [100, 120, 140]; b.ttft = [20, 30, 40]; b.dec = [60, 80, 100];
+    });
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
+  const lineOpts = w.eval('upOpts(600, 180)');
+  const lineXs = w.eval('chartData()[0]');
+  const lineRange = lineOpts.scales.x.range({ data: [lineXs] }, lineXs[0], lineXs[lineXs.length - 1]);
+  check('line-only x fills the plot from the first sample to the last',
+    lineRange[0] === lineXs[0] && lineRange[1] === lineXs[lineXs.length - 1] &&
+      lineRange[1] - lineRange[0] === 29 * BUCKET_MS);
+  w.eval("chartView.preset = 'cost'; chartData()");
+  const costOpts = w.eval('upOpts(600, 180)');
+  const costXs = w.eval('chartData()[0]');
+  const costRange = costOpts.scales.x.range({ data: [costXs] }, costXs[0], costXs[costXs.length - 1]);
+  check('mixed bar/line presets keep the half-slot bar padding',
+    costRange[0] === costXs[0] - BUCKET_MS / 2 &&
+      costRange[1] === costXs[costXs.length - 1] + BUCKET_MS / 2);
+  // Hiding the only bar leaves a line-only plot; the range must follow the
+  // visible rows, not the shadowed bar plan.
+  w.eval("chartView.hidden = {cost: ['cost']}; chartView.preset = 'cost'; chartData()");
+  const hiddenBarOpts = w.eval('upOpts(600, 180)');
+  const hiddenBarXs = w.eval('chartData()[0]');
+  const hiddenBarRange = hiddenBarOpts.scales.x.range(
+    {data: [hiddenBarXs]}, hiddenBarXs[0], hiddenBarXs[hiddenBarXs.length - 1]);
+  check('a hidden bar leaves the line-only edge-to-edge range',
+    hiddenBarRange[0] === hiddenBarXs[0] &&
+      hiddenBarRange[1] === hiddenBarXs[hiddenBarXs.length - 1]);
+  w.eval('chartView.hidden = {}');
+  // A compacted line window keeps its slot-center domain: the first and last
+  // measured samples sit on the plot edges, so adding the half-slot bar
+  // padding back would strand dead space.
+  w.eval(`
+    chartAgg.buckets.forEach(b => {
+      b.req = 1;
+      b.tps = [100, 120, 140]; b.ttft = [20, 30, 40]; b.dec = [60, 80, 100];
+    });
+    chartAgg.buckets[3].tps = [null, null, null];
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
+  const compactLineOpts = w.eval('upOpts(600, 180)');
+  const compactLineXs = w.eval('chartData()[0]');
+  const compactLineRange = compactLineOpts.scales.x.range(
+    {data: [compactLineXs]}, compactLineXs[0], compactLineXs[compactLineXs.length - 1]);
+  check('a compacted line window keeps its slot-center edges',
+    compactLineXs[0] === 0.5 &&
+      compactLineRange[0] === compactLineXs[0] &&
+      compactLineRange[1] === compactLineXs[compactLineXs.length - 1]);
+  w.eval(`
+    chartAgg.buckets[3].tps = [100, 120, 140];
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
+
   // A decade ladder alone puts several gridlines within a few pixels near
   // zero. Validate the actual rendered label positions under asinh, including
   // sub-dollar values that can round to identical formatted labels.
@@ -3887,7 +3997,7 @@ async function main() {
     check('latency preset stays blank on zero traffic (compaction and empty gate agree)',
       w.eval('chartData()') === null && !box.querySelector('div.uplot') && w.eval('_up') === null);
     // honest-data rule intact: SOME traffic must still plot - but a sparse
-    // window cannot fill the plot width, so the mount gate holds until the
+    // window is too little to read a trend, so the mount gate holds until the
     // fourth populated bucket. The blank names the sparseness, not the
     // traffic.
     w.eval("chartView.preset = 'cost'; chartAgg.buckets[7].req = 1");
@@ -3972,7 +4082,7 @@ async function main() {
       totalsOv.includes('<span class="chart-sub">input 75.0% of tokens<br>cache hit 40.0% of input</span>') &&
       !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile'));
   check('overview totals annotate the server blended price',
-    totalsOv.includes('$12.5 /Mtok') &&
+    totalsOv.includes('$12.5/Mtok') &&
     !totalsOv.includes('/ req'));
   check('the pair stays tile-bounded and its share never fakes 100%', (() => {
     const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
@@ -4001,14 +4111,14 @@ async function main() {
     // kept buckets 3 and 5: in [10, 60] rises, out [60, 10] falls, cache
     // [30, 30] is flat - each line can only come from its own series.
     return Object.keys(byColor).length === 3 &&
-      byColor[w.eval('COLORS.accent2')] === 'M0.0 14.0L72.0 0.0' &&
-      byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 14.0' &&
-      byColor[w.eval('COLORS.muted')] === 'M0.0 14.0L72.0 14.0';
+      byColor[w.eval('COLORS.accent2')] === 'M0.0 32.0L72.0 0.0' &&
+      byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 32.0' &&
+      byColor[w.eval('COLORS.muted')] === 'M0.0 32.0L72.0 32.0';
   })());
   check('every summary tile is a plain readout carrying one multi-line spark',
     (totalsOv.match(/class="chart-total"/g) || []).length === 5 &&
       totalsOv.split('<svg class="spark"').length === 6 &&
-      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 5 &&
+      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="32"/g) || []).length === 5 &&
       !totalsOv.includes('spark-row') &&
       !totalsOv.includes('role="button"') &&
       !totalsOv.includes('data-tile') &&
@@ -4112,8 +4222,8 @@ async function main() {
   // Uniform-tile pin: every summary tile is ONE fixed size whatever it
   // carries (spark or not, one share line or the tokens tile's two -
   // skeleton or data - the no-jump skeleton swap is exact by construction).
-  // The 100px floor fits the tallest structure (label + value + two share
-  // rows + spark = 95, line-height-1 rows) and the spark refuses to flex-shrink,
+  // The 118px floor fits the tallest structure (label + value + two share
+  // rows + spark = 113, line-height-1 rows) and the spark refuses to flex-shrink,
   // so an oversized tile clips visibly for the browser gate instead of
   // silently crushing the spark - the failure mode the 72px attempt
   // exposed. The band sits at its natural rows height (the old
@@ -4127,7 +4237,7 @@ async function main() {
     const card = firstCSSRule('.traffic-card.tiles-only');
     const spark = firstCSSRule('.traffic-card.tiles-only .chart-total .spark');
     return !!tile && !!strip && !!card && !!spark &&
-      tile.style.getPropertyValue('height') === '100px' &&
+      tile.style.getPropertyValue('height') === '118px' &&
       spark.style.getPropertyValue('flex-shrink') === '0' &&
       strip.style.getPropertyValue('flex') === '' &&
       strip.style.getPropertyValue('min-height') === '' &&
@@ -4216,18 +4326,37 @@ async function main() {
   check('the summary hides the bucket-cadence context row',
     d.getElementById('chart-context').hidden &&
       w.eval('chartView.preset') === 'overview');
+  const tps202 = w.eval('fmtTPSCompact(202.75)');
   check('the merged timing tile reads avg latency / speed with sample ranges',
-    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">202.75</span>') &&
-      totalsOv.includes('<span class="chart-sub">10-330ms · 50-300/s</span>') &&
+    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">' + tps202 + '</span>') &&
+      totalsOv.includes('<span class="chart-sub">10-330ms · 50-300t/s</span>') &&
       !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
       !/p(?:50|95|99)/.test(totalsOv) && !totalsOv.includes('tok/s'));
+  check('mixed-scale timing bounds take a spaced dash and both units', (() => {
+    const savedT = w.eval('JSON.stringify(chartAgg.ttft_stat)');
+    const savedP = w.eval('JSON.stringify(chartAgg.tps_stat)');
+    const tps = w.eval('fmtTPSCompact(148.239)');
+    w.eval('chartAgg.ttft_stat = [1620, 390, 6160]; chartAgg.tps_stat = [148.239, 24, 480]');
+    const t = w.eval('chartTotals()');
+    w.eval('chartAgg.ttft_stat = JSON.parse(' + JSON.stringify(savedT) +
+      '); chartAgg.tps_stat = JSON.parse(' + JSON.stringify(savedP) + ')');
+    return t.includes('1.62s</span><span class="pair-sep">/</span><span class="v-tps">' + tps + '</span>') &&
+      t.includes('<span class="chart-sub">390ms - 6.16s · 24-480t/s</span>');
+  })());
+  check('compact range bounds keep their magnitude suffix apart from the unit', (() => {
+    const savedP = w.eval('JSON.stringify(chartAgg.tps_stat)');
+    w.eval('chartAgg.tps_stat = [2300, 1200, 2400]');
+    const t = w.eval('chartTotals()');
+    w.eval('chartAgg.tps_stat = JSON.parse(' + JSON.stringify(savedP) + ')');
+    return t.includes('· 1.2K-2.4K t/s');
+  })());
   check('the percentile dropdown never re-gates the summary timing tile', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
     w.setChartPct('99');
     w.eval('chartTotals()');
     w.setChartPct('95');
-    return t50.includes('220ms') && t50.includes('202.75') &&
+    return t50.includes('220ms') && t50.includes(w.eval('fmt(202.75)')) &&
       w.eval('chartPlan().meta.length') === 0;
   })());
   // The timing tile's spark lines draw the per-bucket 95TH-percentile series
@@ -4246,7 +4375,7 @@ async function main() {
     // falling lines, while p50 ([5, 30] / [10, 60]) rises and p99 ([5, 5] /
     // [10, 10]) is flat - the drawn shapes can only be the 95th percentile.
     return paths.length === 2 &&
-      paths.every(([, dattr]) => dattr === 'M0.0 0.0L72.0 14.0') &&
+      paths.every(([, dattr]) => dattr === 'M0.0 0.0L72.0 32.0') &&
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.accent')) &&
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.ok'));
   })());
@@ -4443,7 +4572,12 @@ async function main() {
   await settleUntil(() => cfgFetches > cfgBefore);
   check('feed change resets the log to the fresh process snapshot', rows().length === 1 && rows()[0].dataset.id === 'restarted1');
   check('feed change sweeps operator state (config re-fetched in place)', cfgFetches > cfgBefore);
-  check('footer clock carries the weekday', /(mon|tues|wednes|thurs|fri|satur|sun)day/i.test(d.getElementById('f-clock').textContent));
+  check('footer clock carries the weekday', (() => {
+    const text = d.getElementById('f-clock').textContent.toLowerCase();
+    const weekdays = Array.from({length: 7}, (_, i) =>
+      new Date(2024, 0, 7 + i).toLocaleDateString(undefined, {weekday: 'long'}).toLowerCase());
+    return weekdays.some(day => text.includes(day));
+  })());
 
   // ---- test 14: providers field-map editor ----
   // Cards with removable cost-key chips and canonical-dropdown usage rows;

@@ -1134,13 +1134,15 @@
       tiles wrap into as many whole rows as the selection needs, and the
       page scrolls past them, so every selected tile always renders at
       every viewport.
-      Sizing: every tile is ONE fixed height (100px fits the tallest content
-      - label 10 + value 13 + the tokens tile's two share lines 20 + spark
-      14 + three 6px gaps + 20px padding = 95, all line-height-1 rows so
-      the number is typeface-independent - with breathing room), so a tile
-      is the same size whatever it carries: spark or no spark, one share
-      line or
-      two, and the no-data skeleton swaps to data without moving the card.
+      Sizing: every tile is ONE fixed height per window. At the full locked
+      height it is 118px (label 10 + value 13 + the tokens tile's two share
+      lines 20 + spark 32 + three 6px gaps + 20px padding = 113, all
+      line-height-1 rows so the number is typeface-independent, with
+      breathing room); the short-locked media queries below lower the cell
+      and spark together so the card still fits the pair. Either way a tile
+      is the same size whatever it carries - spark or no spark, one share
+      line or two - and the no-data skeleton swaps to data without moving the
+      card.
       The spark is flex-shrink: 0 - it never acts as the overflow shock
       absorber; an oversized tile must clip visibly (the browser gate
       catches it), never silently crush the spark. The band sits
@@ -1176,7 +1178,7 @@
   }
   .traffic-card.tiles-only .chart-total {
     position: relative;
-    justify-content: space-between; gap: 6px; padding: 10px 8px; height: 100px;
+    justify-content: space-between; gap: 6px; padding: 10px 8px; height: 118px;
     background: none; border: 0; border-left: 1px solid var(--border); border-radius: 0; box-shadow: none;
   }
   .traffic-card.tiles-only .chart-total .spark { flex-shrink: 0; }
@@ -1187,6 +1189,29 @@
      clips the same way, and the tile is a summary: exact figures live in
      the KPI band and the request drawer. */
   .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
+     the tile bottom, so the sparks align across the row whatever sub-rows a
+     tile carries. Sparks belong to the summary tiles alone (the plotted
+     presets' strips carry values, no evolution line). At the full locked
+     height the explicit height matches CHART_SPARK_H exactly so the viewBox
+     draws at 1:1 and the line keeps its stroke weight instead of stretching;
+     the short-locked overrides below scale that same viewBox down with the
+     cell. */
+  .chart-total .spark { display: block; width: 100%; height: 32px; margin-top: auto; }
+  /* Locked short windows: the pair's grid row can be shorter than two 118px
+     tile rows (1366x750 gives 284px, 1366x768 302px). Keep every tile's
+     content - label, value, both share lines and a real spark - inside the
+     card by shortening the fixed cell and the spark, never by clipping the
+     card or letting it spill into the footer. The 1440x1000-class windows
+     keep the full 118px / 32px cells. */
+  @media (min-width: 1200px) and (min-height: 750px) and (max-height: 767px) {
+    .traffic-card.tiles-only .chart-total { height: 92px; gap: 2px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 22px; }
+  }
+  @media (min-width: 1200px) and (min-height: 768px) and (max-height: 799px) {
+    .traffic-card.tiles-only .chart-total { height: 102px; gap: 3px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 26px; }
+  }
   /* Merged in/out pair: one wrapped line whose halves mirror the token
      bars' colors (input purple, output green) over a thin muted separator -
      tile and bars read as one story, and the pair fits the narrowest tile
@@ -1215,11 +1240,6 @@
    /* Measured shares ride under the value on their own row (block breaks the
       inline run), so a long suffix can never push a narrow tile sideways. */
    .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
-   /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
-      the tile bottom, so the sparks align across the row whatever sub-rows a
-      tile carries. The strip stays compact: a plotted preset's tiles must
-      never out-grow the plot below them. */
-   .chart-total .spark { display: block; width: 100%; height: 14px; margin-top: auto; padding-top: 3px; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
@@ -1375,36 +1395,33 @@
 
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  /* Request log: fixed column geometry. A live row rewriting into its final
-     values must never re-measure the table from the new cell text. The
-     colgroup and min-width are generated with the header in log.js. */
-  #tbl-requests table { table-layout: fixed; }
+  /* Request log: content-sized columns. Automatic layout fits each column to
+     its widest cell; log.js ratchets the natural width into a min-width on the
+     header cell (see reqThead), which auto layout treats as a hard column
+     floor. Columns therefore grow with new maxima and never shrink back when a
+     live row finalizes or a shorter value replaces the widest one. */
+  #tbl-requests table { table-layout: auto; }
   #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
-  .req-ident { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; }
-  /* Client and provider badges stay content-sized up to a bounded share, so a
-     short label is never clipped to a sliver. The canonical model is the only
-     flexible remainder and ellipsizes first inside the fixed identity column.
-     The cap reserves the model's 3ch label floor plus 3px rounding slack, its
-     4px link padding, 14px icon and 3px gap; the two 2px identity gaps are
-     excluded from both caps. */
-  .req-ident > .ent {
-    flex: 0 1 auto;
-    max-width: calc((100% - 28px - 3ch) / 2);
-    min-width: 0;
-    overflow: hidden;
-  }
+  /* The identity cell keeps every badge at its natural width: the column floor
+     was measured from the full one-line client · provider · model, so no badge
+     is capped or wrapped. A card narrower than the learned columns scrolls
+     horizontally instead of squeezing a name into an ellipsis. */
+  .req-ident { display: flex; align-items: center; gap: 2px; width: 100%; min-width: 0; }
+  .req-ident > .ent { flex: 0 0 auto; }
   .req-ident .ent { gap: 3px; }
-  .req-ident > .req-model { display: inline-flex; align-items: center; min-width: 0; flex: 1 1 0; max-width: 100%; overflow: hidden; }
+  .req-ident > .req-model { display: inline-flex; align-items: center; flex: 0 0 auto; max-width: 100%; overflow: hidden; }
   .req-ident > .req-model > .ent { min-width: 0; max-width: 100%; overflow: hidden; }
-  /* Chromium paints text-overflow dots only on a block-level box, not on the
-     inline-flex label used elsewhere. Inside the identity cell every label is
-     a block, so long client and provider names ellipsize too while the model
-     remains the flexible remainder and keeps a visible share. */
+  /* Backstop only: the measured floor already fits every label, so the dots
+     appear only if a layout without measurement (jsdom, a stubbed viewport)
+     forces a cell below its content. */
   .req-ident .ent-lb { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* The model is the flexible remainder between the capped client and provider
-     badges. Keep at least three characters of its label visible even when both
-     neighbours sit at their caps. */
-  .req-ident > .req-model .ent-lb { min-width: 3ch; }
+  /* Offscreen natural-width probe for the request log's column floors. The
+     probe must not inherit the fixed-card table width or the identity cell's
+     fill behaviour: max-content measures the content itself, and the identity
+     row measures all three badges on one line. */
+  #req-measure { position: absolute; left: -100000px; top: 0; visibility: hidden; pointer-events: none; }
+  #req-measure table { table-layout: auto; width: max-content; border-collapse: collapse; }
+  #req-measure .req-ident { width: max-content; }
   th { color: var(--muted); font-weight: 550; font-size: 10px; text-transform: none; letter-spacing: .07em; position: sticky; top: 0; background: var(--panel); z-index: 2; }
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
@@ -1436,6 +1453,13 @@
   .retry-tick { color: var(--warn); margin-right: 4px; }
   .retry-sub-label { font-size: 10.5px; }
   .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A retry message is retained up to 512 characters. In the table's auto
+     layout a nowrap colspan cell would make the whole table as wide as that
+     message, then collapse it again when the sub-row closes. Cap the inner
+     text below the narrowest learned table (the 14 header cells alone) so
+     the sub-row ellipsizes inside the current width; the full message stays
+     in the cell title and the request drawer. */
+  .retry-sub-text { display: inline-block; max-width: 72ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 
   /* Day dividers - the request log nests by local calendar day. Each divider
      is a major graduation on the instrument scale: a dated chip riding the

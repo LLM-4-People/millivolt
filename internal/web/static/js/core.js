@@ -316,9 +316,26 @@ const fmtDur = ms => {
   return neg + r2(a / 86400000) + 'd';
 };
 // fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived
-// (absent), never a measured zero: sub-ms positives are rounded up to 1ms.
+// or the response did not stream (absent), never a measured zero: sub-ms
+// positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
+// TPS_UNIT is the one compact generation-speed unit for narrow surfaces (the
+// KPI band and the summary timing tile). Chart axes, legends and tooltips keep
+// the full "tok/s" label where there is room.
+const TPS_UNIT = 't/s';
+// A K/M/B magnitude suffix must not fuse with the compact unit ("1.23Kt/s"
+// reads as kilotons per second). tpsUnitGap inserts the one separator both
+// compact surfaces use; below 1000 the requested tight form stays
+// ("148.239t/s"). tpsUnitAfter owns the range's shared trailing unit and
+// fmtTPSCompact the complete value.
+const tpsUnitGap = s => (/[KMB]$/.test(s) ? ' ' : '');
+const tpsUnitAfter = s => tpsUnitGap(s) + TPS_UNIT;
+const fmtTPSCompact = v => {
+  if (v == null || !Number.isFinite(v)) return '-';
+  const s = fmt(v);
+  return s + tpsUnitAfter(s);
+};
 // fmtMoney owns every displayed cost. Values remain USD in data; magnitudes
 // below $1 display as cents (including fractional cents), with at most three
 // decimals in the displayed unit. Dollar amounts retain compact K/M/B units.

@@ -55,12 +55,13 @@ function entityBadge(dim, id, label, rec, labelTitle) {
   const disp = label != null ? label : dimLabel(dim, id);
   // The tooltip shows the obfuscated display form (shortId), never the raw id -
   // for a key that is the full sha256, which must only ever appear as …<8-hex>.
-  // Client badges use the custom #client-tip card instead of native title
-  // (native title would double-fire on hover).
+  // Client badges use the custom #client-tip card instead of a native title
+  // (native title would double-fire on hover). The empty title also suppresses
+  // an ancestor request cell's full-identity title over the badge.
   let ttl = id ? ` title="${t.label}: ${escapeHtml(shortId(dim, id))}"` : ` title="${t.label}"`;
   let extra = '';
   if (dim === 'client' && id) {
-    ttl = ` aria-label="${t.label}: ${escapeHtml(disp)}"`;
+    ttl = ` title="" aria-label="${t.label}: ${escapeHtml(disp)}"`;
     extra = ` data-client="${escapeHtml(id)}"${rec && rec.id ? ` data-rec="${escapeHtml(rec.id)}"` : ''}`;
   }
   // Providers keep their favicon as the icon (falls back to the type icon for
@@ -88,7 +89,8 @@ function entityBadge(dim, id, label, rec, labelTitle) {
 function entityPivot(dim, id, label, rec, labelTitle) {
   if (!id) return entityBadge(dim, id, label, rec, labelTitle);
   const extra = dim === 'client' ? ` data-client="${escapeHtml(id)}"${rec && rec.id ? ` data-rec="${escapeHtml(rec.id)}"` : ''}` : '';
-  return `<a class="ent ent-link" href="${hashFor(dim, id)}"${extra}>${entityBadge(dim, id, label, rec, labelTitle)}</a>`;
+  const noTitle = dim === 'client' ? ' title=""' : '';
+  return `<a class="ent ent-link" href="${hashFor(dim, id)}"${extra}${noTitle}>${entityBadge(dim, id, label, rec, labelTitle)}</a>`;
 }
 
 function latestRecForClient(id) {

@@ -523,7 +523,7 @@ function kpiTail(label, p50, p95, format, title) {
 }
 function kpiTok(e) { return kpiNum('tok', `${fmt(e.in)}/${fmt(e.out)}`); }
 function kpiTtft(e) { return kpiTail('ttft', e.ttft_p50, e.ttft_p95, fmtDur, 'p50 / p95 time-to-first-token (the tail is what users feel)'); }
-function kpiTps(e) { return kpiTail('tps', e.tps_p50, e.tps_p95, v => Number(v).toFixed(0), 'p50 / p95 throughput (tok/s)'); }
+function kpiTps(e) { return kpiTail('tps', e.tps_p50, e.tps_p95, v => Number(v).toFixed(0), 'p50 / p95 generation speed (tok/s, first to last token)'); }
 function kpiCache(e) { return kpiNum('cache', e.in ? pct2(e.cache, e.in) : '-', 'prompt-cache hit rate'); }
 function kpiErrRate(e) { return kpiNum('err rate', pct2(e.err_final || 0, e.n)); }
 // Blended $/Mtok over this entity's cost-reporting tokens (server-computed,

@@ -68,7 +68,7 @@ func footprintRecord(i int) *metrics.Record {
 		StatusCode: 200,
 		DurationMs: int64(100 + i%1500),
 		TTFTMs:     int64(1 + i%3000),
-		OverallTPS: float64(1 + i%500),
+		DecodeTPS:  float64(1 + i%500),
 		Cost:       float64(i%97) * 0.001,
 		Usage: metrics.Usage{InputTokens: int64(100 + i%900), OutputTokens: int64(50 + i%2000),
 			CacheReadTokens: int64(i % 4096), ReasoningTokens: int64(i % 512)},
@@ -77,7 +77,7 @@ func footprintRecord(i int) *metrics.Record {
 	}
 	if i%25 == 0 {
 		// Invalid speed samples must stay out of the sorted metric orders.
-		r.OverallTPS, r.DecodeTPS = 0, 0
+		r.DecodeTPS = 0
 	}
 	if i%5 == 0 {
 		// Five consecutive rows share one conversation label.

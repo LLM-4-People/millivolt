@@ -1417,7 +1417,7 @@ var recordScanMillisColumns = []string{
 // sums. A finite but negative, or non-finite, value here poisons every
 // aggregate and JSON encode, so restore admission applies the same domain the
 // writer's accounting applies.
-var aggregateMetricColumns = []string{"cost", "gen_tps", "overall_tps"}
+var aggregateMetricColumns = []string{"cost", "gen_tps"}
 
 // aggregateCountColumns are the INTEGER request fields Totals.Add folds with
 // metrics.SumCounts. A negative row would make that checked fold fail. The

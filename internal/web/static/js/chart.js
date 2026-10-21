@@ -39,8 +39,10 @@ const CHART_POINT_RING_WIDTH = 1;
 // tile value (uniform rhythm; decorative - the tile value carries the
 // number, the spark carries the shape). The emitted width only sizes the
 // viewBox: each spark stretches with its tile (CSS width:100%), whose
-// tracks floor at 170px in the tiles-only summary grid.
-const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
+// tracks floor at 170px in the tiles-only summary grid. The height is the
+// rendered strip height: tall enough for a real slope, and equal to the CSS
+// content box so the 1.4px stroke keeps its weight.
+const CHART_SPARK_W = 72, CHART_SPARK_H = 32;
 // CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
 // timing tile's value is the server's period average (ttft_stat / tps_stat),
 // never this percentile - it reaches the tile solely as the per-bucket spark
@@ -71,10 +73,12 @@ const PCT_SUFFIX = [
   'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
 ];
 const pctOrdinal = p => p + (PCT_SUFFIX[p % 100] || 'th');
-// A sparse window cannot fill the plot width honestly: one to three plotted
-// buckets strand a lone bar or a short line in dead space on both sides.
-// The big chart waits for a fourth point and paints the blank meanwhile -
-// the totals tiles and their sparklines still carry the story.
+// A sparse window is not worth a plot: one to three plotted buckets show a
+// lone point or a single segment, too little to read as a trend. The big
+// chart waits for a fourth point and paints the blank meanwhile - the totals
+// tiles and their sparklines still carry the story. Line presets span the
+// first-to-last point, so this gate is about reading the trend, not filling
+// the width.
 const CHART_MIN_POINTS = 4;
 // The smallest box (CSS pixels) the big chart measures before it paints:
 // below this the canvas stays untouched. A sub-minimum dashboard cell must
@@ -92,6 +96,9 @@ const CHART_DAY_MS = 86400000;
 // is floored below 100 before rounding.
 const fmtPct = v => pctValue(v, 1, true);
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
+// The summary timing tile uses the compact t/s unit on both its value and its
+// range; the shared trailing unit is stated once so the pair fits one tile.
+// fmtTPSCompact and tpsUnitAfter are the shared owners in core.js.
 
 // hm is the single HH:MM local-time label (x ticks + hover chip).
 const hm = t => {
@@ -164,9 +171,9 @@ const CHART_SERIES = [
   { id: 'cachePct', label: 'cache hit', color: 'warn',   fmt: fmtPct,
     title: 'Cached prompt tokens as a share of input tokens, per bucket.' },
   { id: 'tps',  metric: 'tps',      label: 'speed',   color: 'ok',     fmt: fmtTPS,
-    title: 'Output tokens per second over wall time; decode-window speed when overall throughput is unavailable.' },
+    title: 'Generation speed from the first token (reasoning included) to the last: (tokens - 1) / window. One TPS definition, per request.' },
   { id: 'ttft', metric: 'ttft', label: 'latency', color: 'accent', fmt: fmtDur,
-    title: 'Time to first token, including reasoning or answer content.' },
+    title: 'Time from the upstream attempt send to the first token (reasoning or answer). Every retry has its own TTFT.' },
   { id: 'dec',  metric: 'dec',  label: 'decode',  color: 'accent2', fmt: fmtDur,
     title: 'Token generation window, from the first token to the last - the span decode speed measures.' },
 ];
@@ -425,6 +432,14 @@ function chartXValues(u, splits) {
 function chartXRange(u, min, max) {
   const xs = u.data[0];
   if (!chartAgg || !xs.length) return [0, 1];
+  // A line-only preset (speed + latency) anchors the domain to its first and
+  // last plotted sample, so the series always spans the full plot width: a
+  // half-bucket inset on each side is visible dead space whenever the window
+  // holds only four or five points. Presets that draw bars keep the half slot
+  // so the edge bars render at full width (and a one-point series keeps the
+  // actual bucket edges instead of a zero-width domain).
+  const bars = !!_plan && _plan.meta.some(m => m.bar && !m.hidden);
+  if (!bars && xs.length > 1) return [xs[0], xs[xs.length - 1]];
   const half = (_compacted ? 1 : chartAgg.bucket_ms) / 2;
   // uPlot pre-expands equal min/max before calling range. For a single
   // timestamp that expansion spans years; use the actual bucket edges.
@@ -721,7 +736,7 @@ const TILE_LABELS = {
 const TILE_TITLES = {
   req: 'Request count over the blended token volume (input plus output), as a pair.',
   tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of all tokens and the cache hit share of input underneath.',
-  cost: 'Spend over the viewed period in USD (the same figure the KPI band shows, cost-reporting requests only), with the server\'s blended per-Mtok price underneath.',
+  cost: 'Spend over the viewed period in USD, with the server\'s blended per-Mtok price underneath (cost-reporting requests only).',
   health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.',
   timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
@@ -830,8 +845,9 @@ function chartTotals() {
       // Merged tiles keep the story compact: requests carries the blended
       // token volume as its second half, tokens carries the in/out/cached
       // triple with both shares, the health tile carries both health counts
-      // in the chart's health colors, and cost carries the server's blended
-      // per-Mtok price - the SAME figure the KPI band shows,
+      // in the chart's health colors, and cost carries the period spend with
+      // the server's blended per-Mtok price underneath - the same blended-
+      // price rule as the KPI band, scoped to the viewed period and
       // cost-reporting requests only.
       // The metrics picker at the card head owns what shows (the same
       // dash.chart hidden set the legend uses): hidden metrics leave the
@@ -871,7 +887,7 @@ function chartTotals() {
         tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
       parts.push(tile('cost', costSpec.color,
-        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
+        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)}/Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
       parts.push(tile('health', 'err',
         tilePair([['v-err', fmt(err)], ['v-rl', fmt(rl)]]) +
         (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
@@ -887,17 +903,18 @@ function chartTotals() {
       // for 46.85) reads as a count - the same ambiguity that replaced the
       // old in:out ratio with a bounded share. A shared trailing unit is
       // stated once ('31-32ms', never '31ms-32ms'); bounds on different
-      // scales keep both units ('900ms-2.50s').
+      // scales keep both units and take a spaced range dash ('390ms - 6.16s').
       const unitOf = v => (String(v).match(/[a-zA-Z%]+$/) || [''])[0];
-      const range = (m, fmtFn, unit) => {
+      const range = (m, fmtFn, unitAfter) => {
         if (!m) return '';
         const lo = fmtFn(m[1]), hi = fmtFn(m[2]);
+        if (unitAfter) return `${lo}-${hi}${unitAfter(hi)}`; // one shared trailing unit
         const shared = unitOf(lo) === unitOf(hi) && unitOf(lo) !== '';
-        return `${shared ? String(lo).slice(0, -unitOf(lo).length) : lo}-${hi}${unit}`;
+        return shared ? `${String(lo).slice(0, -unitOf(lo).length)}-${hi}` : `${lo} - ${hi}`;
       };
-      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
+      const ranges = [range(ts, fmtDur, null), range(ps, v => fmt(Math.round(v)), tpsUnitAfter)].filter(Boolean).join(' · ');
       parts.push(tile('timing', 'accent',
-        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', ps ? fmt(ps[0]) : '-']]) +
+        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', fmtTPSCompact(ps?.[0])]]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
         tileSpark(kept, [['v-ttft', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['v-tps', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
       break;

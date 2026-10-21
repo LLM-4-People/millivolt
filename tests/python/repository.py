@@ -309,7 +309,7 @@ class RepositoryChecks(unittest.TestCase):
     def test_template_spans_scan_the_real_shadowed_regions(self):
         """Corpus canaries: the regions the regex-blind lexer lost to quote
         desync must be scanned. fillSettingsLive is the first region the
-        settings.js backup-download regex shadows; renderDrawer and
+        settings.js backup-download regex shadows; reqIdentityText and
         fillDrawerDebug sit behind the escapeHtml regex in log.js."""
         settings = (check.ROOT / "internal/web/static/js/settings.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(settings)
@@ -319,10 +319,10 @@ class RepositoryChecks(unittest.TestCase):
                         "fillSettingsLive template body is not scanned")
         log = (check.ROOT / "internal/web/static/js/log.js").read_text(encoding="utf-8")
         spans = _template_comment_spans(log)
-        expr = log.index("clientLabel(r.client) || '?'")
+        expr = log.index("clientLabel(r && r.client) || '?'")
         sep = log.index(" · ", expr)
         self.assertTrue(any(s <= sep and sep + 3 <= e for s, e in spans),
-                        "renderDrawer template body is not scanned")
+                        "reqIdentityText template body is not scanned")
         for needle in ("<h4>Request body", "<h4>Response body"):
             start = log.index(needle)
             self.assertTrue(any(s <= start and start + len(needle) <= e for s, e in spans),
@@ -648,6 +648,14 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("The `publish-testing` job waits for `checks` and `container`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
         self.assertIn("`main` and `latest` exclude prereleases", contributing)
+
+    def test_contributing_requires_an_immediate_commit_per_fix(self):
+        contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
+        # Review and multi-agent rounds produce fixes, not one deferred commit.
+        self.assertIn("Commit each completed fix locally as soon as its targeted check passes",
+                      contributing)
+        self.assertIn("do not hold those edits in the working tree until the end", contributing)
+        self.assertIn("do not squash several findings into one final commit", contributing)
 
     def test_docs_history_capture_keeps_the_request_table_unclipped(self):
         explorer = self.read("tests/explorer_check.py")
