@@ -3653,6 +3653,32 @@ async function main() {
   check('single-bucket range ignores uPlot timestamp expansion and keeps the actual bucket edges',
     singleRange[0] === CHART_FROM && singleRange[1] === CHART_FROM + BUCKET_MS);
 
+  // A line-only preset must fill the plot edge to edge: the domain is the
+  // first and last sample, with no half-bucket inset. A four-point
+  // speed+latency window used to strand 12.5% of dead space on each side.
+  // Bars keep their half slot (pinned above) so edge bars stay full width, and
+  // a mixed preset keeps it too because one of its rows still draws bars.
+  w.eval(`
+    chartAgg.buckets.forEach(b => {
+      b.req = 1;
+      b.tps = [100, 120, 140]; b.ttft = [20, 30, 40]; b.dec = [60, 80, 100];
+    });
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
+  const lineOpts = w.eval('upOpts(600, 180)');
+  const lineXs = w.eval('chartData()[0]');
+  const lineRange = lineOpts.scales.x.range({ data: [lineXs] }, lineXs[0], lineXs[lineXs.length - 1]);
+  check('line-only x fills the plot from the first sample to the last',
+    lineRange[0] === lineXs[0] && lineRange[1] === lineXs[lineXs.length - 1] &&
+      lineRange[1] - lineRange[0] === 29 * BUCKET_MS);
+  w.eval("chartView.preset = 'cost'; chartData()");
+  const costOpts = w.eval('upOpts(600, 180)');
+  const costXs = w.eval('chartData()[0]');
+  const costRange = costOpts.scales.x.range({ data: [costXs] }, costXs[0], costXs[costXs.length - 1]);
+  check('mixed bar/line presets keep the half-slot bar padding',
+    costRange[0] === costXs[0] - BUCKET_MS / 2 &&
+      costRange[1] === costXs[costXs.length - 1] + BUCKET_MS / 2);
+
   // A decade ladder alone puts several gridlines within a few pixels near
   // zero. Validate the actual rendered label positions under asinh, including
   // sub-dollar values that can round to identical formatted labels.

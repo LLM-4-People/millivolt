@@ -240,12 +240,24 @@ async def check(base, screenshot):
                             }
                             const card=document.querySelector('.traffic-card');
                             const overflow=[...card.querySelectorAll('*')].filter(e=>e.clientWidth && e.scrollWidth>e.clientWidth+2).map(e=>e.id||e.className);
-                            return {sparseBlank, sparseH, mountedH, points:_up.data[0].length, speed, latency, overflow,
+                            // The line-only domain must be the first and last
+                            // sample exactly, so the series touches both plot
+                            // edges instead of stranding a half bucket of dead
+                            // space on each side.
+                            const xs = _up.data[0];
+                            const plotW = _up.bbox.width / (window.devicePixelRatio || 1);
+                            const xMin = _up.scales.x.min, xMax = _up.scales.x.max;
+                            const edge = { first: (xs[0] - xMin) / (xMax - xMin) * plotW,
+                                           last: (xs[xs.length-1] - xMin) / (xMax - xMin) * plotW,
+                                           width: plotW };
+                            return {sparseBlank, sparseH, mountedH, points:_up.data[0].length, speed, latency, overflow, edge,
                                     legend:document.querySelector('#traffic-legend').textContent};
                         }''')
                         require(state['sparseBlank'], state)
                         require(state['sparseH'] == state['mountedH'], state)
                         require(state['points'] == 5 and state['speed'] and state['latency'], state)
+                        require(state['edge']['first'] <= 1 and
+                                state['edge']['width'] - state['edge']['last'] <= 1, state)
                         require(not state['overflow'], state)
                         require(not any(p in state['legend'] for p in ('p50', 'p95', 'p99')), state)
                         results.append({'width': viewport['width'], 'pct': pct, **state})

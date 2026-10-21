@@ -425,6 +425,14 @@ function chartXValues(u, splits) {
 function chartXRange(u, min, max) {
   const xs = u.data[0];
   if (!chartAgg || !xs.length) return [0, 1];
+  // A line-only preset (speed + latency) anchors the domain to its first and
+  // last plotted sample, so the series always spans the full plot width: a
+  // half-bucket inset on each side is visible dead space whenever the window
+  // holds only four or five points. Presets that draw bars keep the half slot
+  // so the edge bars render at full width (and a one-point series keeps the
+  // actual bucket edges instead of a zero-width domain).
+  const bars = !!_plan && _plan.meta.some(m => m.bar && !m.hidden);
+  if (!bars && xs.length > 1) return [xs[0], xs[xs.length - 1]];
   const half = (_compacted ? 1 : chartAgg.bucket_ms) / 2;
   // uPlot pre-expands equal min/max before calling range. For a single
   // timestamp that expansion spans years; use the actual bucket edges.
