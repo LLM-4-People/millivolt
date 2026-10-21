@@ -737,9 +737,10 @@ async def check(base, screenshot):
                     table_shift.append({'width': viewport['width'], **state})
                 results.append({'table_shift': table_shift})
 
-                # Real formatter outputs must fit their fixed columns, or the
-                # cell must carry the full value in its title. The probe renders
-                # through the production reqRow and restores the real tbody.
+                # Real formatter outputs must fit their content-sized columns,
+                # or the cell must carry the full value in its title. The probe
+                # renders through the production reqRow and restores the real
+                # tbody.
                 await page.set_viewport_size({'width': 1440, 'height': 1000})
                 content_fit = await page.evaluate("""async () => {
                     const box = document.getElementById('tbl-requests');
@@ -817,8 +818,8 @@ async def check(base, screenshot):
                             ('123456 user' in row['turns']['title'] if row['long']
                              else '2 user' in row['turns']['title']), row)
                     if row['long']:
-                        # The queued value can clip in its fixed column; its
-                        # full fmtDur text must remain in the title.
+                        # The queued value uses its full fmtDur text; the title
+                        # repeats that same value for assistive technology.
                         require(row['queued']['text'] == row['queued']['title'] and
                                 row['queued']['title'].endswith('d'), row)
                     else:
