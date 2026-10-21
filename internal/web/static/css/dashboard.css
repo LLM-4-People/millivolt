@@ -1189,6 +1189,15 @@
      clips the same way, and the tile is a summary: exact figures live in
      the KPI band and the request drawer. */
   .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
+     the tile bottom, so the sparks align across the row whatever sub-rows a
+     tile carries. Sparks belong to the summary tiles alone (the plotted
+     presets' strips carry values, no evolution line). At the full locked
+     height the explicit height matches CHART_SPARK_H exactly so the viewBox
+     draws at 1:1 and the line keeps its stroke weight instead of stretching;
+     the short-locked overrides below scale that same viewBox down with the
+     cell. */
+  .chart-total .spark { display: block; width: 100%; height: 32px; margin-top: auto; }
   /* Locked short windows: the pair's grid row can be shorter than two 118px
      tile rows (1366x750 gives 284px, 1366x768 302px). Keep every tile's
      content - label, value, both share lines and a real spark - inside the
@@ -1231,13 +1240,6 @@
    /* Measured shares ride under the value on their own row (block breaks the
       inline run), so a long suffix can never push a narrow tile sideways. */
    .chart-totals .chart-sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
-   /* Every tile ends with its evolution sparkline; margin-top:auto pins it to
-      the tile bottom, so the sparks align across the row whatever sub-rows a
-      tile carries. Sparks belong to the summary tiles alone (the plotted
-      presets' strips carry values, no evolution line), and the explicit height
-      matches CHART_SPARK_H exactly so the viewBox draws at 1:1 and the line
-      keeps its stroke weight instead of stretching. */
-   .chart-total .spark { display: block; width: 100%; height: 32px; margin-top: auto; }
   .chart-axes { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font: 10px var(--mono); flex-shrink: 0; }
   .chart-scale { font-size: 9px; }
   .chart-context { color: var(--muted); font: 10px var(--mono); text-align: center; padding-top: 7px; flex-shrink: 0; }
