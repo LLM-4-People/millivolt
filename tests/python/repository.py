@@ -649,6 +649,14 @@ class PublishedContracts(unittest.TestCase):
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
         self.assertIn("`main` and `latest` exclude prereleases", contributing)
 
+    def test_contributing_requires_an_immediate_commit_per_fix(self):
+        contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
+        # Review and multi-agent rounds produce fixes, not one deferred commit.
+        self.assertIn("Commit each completed fix locally as soon as its targeted check passes",
+                      contributing)
+        self.assertIn("do not hold those edits in the working tree until the end", contributing)
+        self.assertIn("do not squash several findings into one final commit", contributing)
+
     def test_docs_history_capture_keeps_the_request_table_unclipped(self):
         explorer = self.read("tests/explorer_check.py")
         start = explorer.index(
