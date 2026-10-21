@@ -418,8 +418,10 @@ function renderRequestsIncremental(recs) {
 
   // Learn any wider column before the rows land: the new floors then apply to
   // the same layout as the inserted content, and a later shorter value cannot
-  // pull the column back. Streaming-only replacements (tokens/TTFT churn) skip
-  // the probe - their cells cannot outgrow the row already on screen.
+  // pull the column back. Numeric streaming churn skips the probe: the same
+  // TTFT, token and tool values are re-measured when the row finalizes, before
+  // its final paint. Identity, a live-pill transition or a new attempt is
+  // measured immediately because that text can disappear before finalization.
   const widthRows = ops
     .filter(op => op.kind === 'insert' || reqWidthRelevant(logHTML.get(op.id)?.rec, op.rec))
     .map(op => op.html);
@@ -977,14 +979,23 @@ const RETRY_LABEL_COLS = 2;
 // for later paints.
 const REQ_FLOORS = new Array(REQ_COLS).fill(0);
 
-// reqThead is the one header builder. The floor rides the header cell because
+// reqHeadCells is the one header-cell builder for the mounted table and the
+// offscreen measurement probe. The floor rides the header cell because
 // automatic table layout makes a cell's min-width a column floor while a wider
 // body cell can still grow past it - exactly the monotonic fit the log needs.
-function reqThead() {
-  return `<thead><tr>${REQ_COLUMNS.map(([label, name], i) => {
-    const floor = REQ_FLOORS[i] > 0 ? ` style="min-width:${REQ_FLOORS[i]}px"` : '';
+// The probe measures natural widths, so it builds the same cells without the
+// learned floors.
+function reqHeadCells(withFloors) {
+  return REQ_COLUMNS.map(([label, name], i) => {
+    const floor = withFloors && REQ_FLOORS[i] > 0
+      ? ` style="min-width:${REQ_FLOORS[i]}px"` : '';
     return `<th${name ? ` aria-label="${name}"` : ''}${floor}>${label}</th>`;
-  }).join('')}</tr></thead>`;
+  }).join('');
+}
+
+// reqThead wraps the mounted table's header cells.
+function reqThead() {
+  return `<thead><tr>${reqHeadCells(true)}</tr></thead>`;
 }
 
 // reqRatchetWidths merges one measurement pass into the session floors. A
@@ -1014,15 +1025,17 @@ function reqMeasureRows(rows) {
   const host = document.createElement('div');
   host.id = 'req-measure';
   host.setAttribute('aria-hidden', 'true');
-  host.innerHTML = '<table><thead><tr>' +
-    REQ_COLUMNS.map(([label, name]) => `<th${name ? ` aria-label="${name}"` : ''}>${label}</th>`).join('') +
+  host.innerHTML = '<table><thead><tr>' + reqHeadCells(false) +
     `</tr></thead><tbody>${rows.join('')}</tbody></table>`;
   document.body.appendChild(host);
-  const table = host.querySelector('table');
-  table.tBodies[0].querySelectorAll('tr.day-sep, tr.retry-sub').forEach(tr => tr.remove());
-  const measured = [...table.tHead.rows[0].cells].map(th => th.getBoundingClientRect().width);
-  host.remove();
-  return reqRatchetWidths(measured);
+  try {
+    const table = host.querySelector('table');
+    table.tBodies[0].querySelectorAll('tr.day-sep, tr.retry-sub').forEach(tr => tr.remove());
+    const measured = [...table.tHead.rows[0].cells].map(th => th.getBoundingClientRect().width);
+    return reqRatchetWidths(measured);
+  } finally {
+    host.remove();
+  }
 }
 
 // applyReqFloors pushes the current floors onto an already-mounted table's
