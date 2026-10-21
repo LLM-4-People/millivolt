@@ -348,6 +348,7 @@ async def check(base, screenshot):
                                 overflow, rlTotal, errTotal,
                                 uniformTiles: tileList.length >= 1 && tileList.every(t => t.offsetHeight === tileList[0].offsetHeight),
                                 noVClip: tileList.every(t => t.scrollHeight <= t.clientHeight + 1),
+                                sparkHeights: tileList.map(t => { const s = t.querySelector('svg.spark'); return s ? s.getBoundingClientRect().height : 0; }),
                                 sparkPinned: tileList.every(t => { const s = t.querySelector('svg.spark'); return !s || (s.getBoundingClientRect().height >= 13 && t.getBoundingClientRect().bottom - s.getBoundingClientRect().bottom >= 9); }),
                                 insideCard: tileList.every(t => t.getBoundingClientRect().bottom <= cardRect.bottom + 1),
                                 errors0:errV && errV.textContent === '0',
@@ -372,6 +373,8 @@ async def check(base, screenshot):
                     require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
                     require(state['uniformTiles'] and state['noVClip'], state)
+                    require(state['sparkHeights'] and
+                            all(h >= 31 for h in state['sparkHeights']), state)
                     require(state['sparkPinned'] and state['insideCard'], state)
                     require(state['pctHidden'] and state['metricsPick'], state)
                     require(state['trackFloor'], state)

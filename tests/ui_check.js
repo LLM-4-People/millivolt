@@ -4027,14 +4027,14 @@ async function main() {
     // kept buckets 3 and 5: in [10, 60] rises, out [60, 10] falls, cache
     // [30, 30] is flat - each line can only come from its own series.
     return Object.keys(byColor).length === 3 &&
-      byColor[w.eval('COLORS.accent2')] === 'M0.0 14.0L72.0 0.0' &&
-      byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 14.0' &&
-      byColor[w.eval('COLORS.muted')] === 'M0.0 14.0L72.0 14.0';
+      byColor[w.eval('COLORS.accent2')] === 'M0.0 32.0L72.0 0.0' &&
+      byColor[w.eval('COLORS.ok')] === 'M0.0 0.0L72.0 32.0' &&
+      byColor[w.eval('COLORS.muted')] === 'M0.0 32.0L72.0 32.0';
   })());
   check('every summary tile is a plain readout carrying one multi-line spark',
     (totalsOv.match(/class="chart-total"/g) || []).length === 5 &&
       totalsOv.split('<svg class="spark"').length === 6 &&
-      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="14"/g) || []).length === 5 &&
+      (totalsOv.match(/<svg class="spark"[^>]*width="72" height="32"/g) || []).length === 5 &&
       !totalsOv.includes('spark-row') &&
       !totalsOv.includes('role="button"') &&
       !totalsOv.includes('data-tile') &&
@@ -4138,8 +4138,8 @@ async function main() {
   // Uniform-tile pin: every summary tile is ONE fixed size whatever it
   // carries (spark or not, one share line or the tokens tile's two -
   // skeleton or data - the no-jump skeleton swap is exact by construction).
-  // The 100px floor fits the tallest structure (label + value + two share
-  // rows + spark = 95, line-height-1 rows) and the spark refuses to flex-shrink,
+  // The 118px floor fits the tallest structure (label + value + two share
+  // rows + spark = 113, line-height-1 rows) and the spark refuses to flex-shrink,
   // so an oversized tile clips visibly for the browser gate instead of
   // silently crushing the spark - the failure mode the 72px attempt
   // exposed. The band sits at its natural rows height (the old
@@ -4153,7 +4153,7 @@ async function main() {
     const card = firstCSSRule('.traffic-card.tiles-only');
     const spark = firstCSSRule('.traffic-card.tiles-only .chart-total .spark');
     return !!tile && !!strip && !!card && !!spark &&
-      tile.style.getPropertyValue('height') === '100px' &&
+      tile.style.getPropertyValue('height') === '118px' &&
       spark.style.getPropertyValue('flex-shrink') === '0' &&
       strip.style.getPropertyValue('flex') === '' &&
       strip.style.getPropertyValue('min-height') === '' &&
@@ -4272,7 +4272,7 @@ async function main() {
     // falling lines, while p50 ([5, 30] / [10, 60]) rises and p99 ([5, 5] /
     // [10, 10]) is flat - the drawn shapes can only be the 95th percentile.
     return paths.length === 2 &&
-      paths.every(([, dattr]) => dattr === 'M0.0 0.0L72.0 14.0') &&
+      paths.every(([, dattr]) => dattr === 'M0.0 0.0L72.0 32.0') &&
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.accent')) &&
       paths.some(([, , stroke]) => stroke === w.eval('COLORS.ok'));
   })());

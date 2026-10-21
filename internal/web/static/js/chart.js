@@ -39,8 +39,10 @@ const CHART_POINT_RING_WIDTH = 1;
 // tile value (uniform rhythm; decorative - the tile value carries the
 // number, the spark carries the shape). The emitted width only sizes the
 // viewBox: each spark stretches with its tile (CSS width:100%), whose
-// tracks floor at 170px in the tiles-only summary grid.
-const CHART_SPARK_W = 72, CHART_SPARK_H = 14;
+// tracks floor at 170px in the tiles-only summary grid. The height is the
+// rendered strip height: tall enough for a real slope, and equal to the CSS
+// content box so the 1.4px stroke keeps its weight.
+const CHART_SPARK_W = 72, CHART_SPARK_H = 32;
 // CHART_TILE_PCT selects the summary tiles' SPARKLINE percentile only: the
 // timing tile's value is the server's period average (ttft_stat / tps_stat),
 // never this percentile - it reaches the tile solely as the per-bucket spark
