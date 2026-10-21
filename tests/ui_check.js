@@ -3728,6 +3728,40 @@ async function main() {
   check('mixed bar/line presets keep the half-slot bar padding',
     costRange[0] === costXs[0] - BUCKET_MS / 2 &&
       costRange[1] === costXs[costXs.length - 1] + BUCKET_MS / 2);
+  // Hiding the only bar leaves a line-only plot; the range must follow the
+  // visible rows, not the shadowed bar plan.
+  w.eval("chartView.hidden = {cost: ['cost']}; chartView.preset = 'cost'; chartData()");
+  const hiddenBarOpts = w.eval('upOpts(600, 180)');
+  const hiddenBarXs = w.eval('chartData()[0]');
+  const hiddenBarRange = hiddenBarOpts.scales.x.range(
+    {data: [hiddenBarXs]}, hiddenBarXs[0], hiddenBarXs[hiddenBarXs.length - 1]);
+  check('a hidden bar leaves the line-only edge-to-edge range',
+    hiddenBarRange[0] === hiddenBarXs[0] &&
+      hiddenBarRange[1] === hiddenBarXs[hiddenBarXs.length - 1]);
+  w.eval('chartView.hidden = {}');
+  // A compacted line window keeps its slot-center domain: the first and last
+  // measured samples sit on the plot edges, so adding the half-slot bar
+  // padding back would strand dead space.
+  w.eval(`
+    chartAgg.buckets.forEach(b => {
+      b.req = 1;
+      b.tps = [100, 120, 140]; b.ttft = [20, 30, 40]; b.dec = [60, 80, 100];
+    });
+    chartAgg.buckets[3].tps = [null, null, null];
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
+  const compactLineOpts = w.eval('upOpts(600, 180)');
+  const compactLineXs = w.eval('chartData()[0]');
+  const compactLineRange = compactLineOpts.scales.x.range(
+    {data: [compactLineXs]}, compactLineXs[0], compactLineXs[compactLineXs.length - 1]);
+  check('a compacted line window keeps its slot-center edges',
+    compactLineXs[0] === 0.5 &&
+      compactLineRange[0] === compactLineXs[0] &&
+      compactLineRange[1] === compactLineXs[compactLineXs.length - 1]);
+  w.eval(`
+    chartAgg.buckets[3].tps = [100, 120, 140];
+    chartView.preset = 'latency'; chartView.hidden = {}; chartData();
+  `);
 
   // A decade ladder alone puts several gridlines within a few pixels near
   // zero. Validate the actual rendered label positions under asinh, including
