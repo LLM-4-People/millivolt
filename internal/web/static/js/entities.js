@@ -50,7 +50,7 @@ function entityType(dim) { return ENTITY_TYPES[dim] || ENTITY_TYPES.request; }
 // 2nd arg so providers resolve their favicon from the full host, not the short
 // label. Always shows the type icon (color-tinted) so the type is recognizable
 // even when color is missed.
-function entityBadge(dim, id, label, rec) {
+function entityBadge(dim, id, label, rec, labelTitle) {
   const t = entityType(dim);
   const disp = label != null ? label : dimLabel(dim, id);
   // The tooltip shows the obfuscated display form (shortId), never the raw id -
@@ -75,16 +75,20 @@ function entityBadge(dim, id, label, rec) {
       icon = `<img class="favicon ent-fav" data-origin="${escapeHtml(origin)}" src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(origin)}&sz=32" alt="" loading="lazy" referrerpolicy="no-referrer"><span class="ent-ic" aria-hidden="true" style="display:none">${t.icon}</span>`;
     }
   }
-  return `<span class="ent" style="--ent:${t.color}"${ttl}${extra}>${icon}<span class="ent-lb">${escapeHtml(disp)}</span></span>`;
+  // A caller-supplied label title belongs on the innermost visible label, the
+  // element a pointer actually hovers, not on a wrapper that never receives
+  // the event.
+  const labelTitleAttr = labelTitle ? ` title="${escapeHtml(labelTitle)}"` : '';
+  return `<span class="ent" style="--ent:${t.color}"${ttl}${extra}>${icon}<span class="ent-lb"${labelTitleAttr}>${escapeHtml(disp)}</span></span>`;
 }
 
 // entityPivot wraps entityBadge in a pivot link so an entity reference is both
 // type-recognizable (icon+color+label) and navigable (adds that dim=id filter
 // in the faceted explorer). Canonical render for a client/provider/model.
-function entityPivot(dim, id, label, rec) {
-  if (!id) return entityBadge(dim, id, label, rec);
+function entityPivot(dim, id, label, rec, labelTitle) {
+  if (!id) return entityBadge(dim, id, label, rec, labelTitle);
   const extra = dim === 'client' ? ` data-client="${escapeHtml(id)}"${rec && rec.id ? ` data-rec="${escapeHtml(rec.id)}"` : ''}` : '';
-  return `<a class="ent ent-link" href="${hashFor(dim, id)}"${extra}>${entityBadge(dim, id, label, rec)}</a>`;
+  return `<a class="ent ent-link" href="${hashFor(dim, id)}"${extra}>${entityBadge(dim, id, label, rec, labelTitle)}</a>`;
 }
 
 function latestRecForClient(id) {

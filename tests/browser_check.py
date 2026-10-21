@@ -530,6 +530,1573 @@ async def check(base, screenshot):
                     layout_checks.append({'width': viewport['width'], 'height': viewport['height'], **state})
                 if screenshot:
                     await page.locator('.traffic-card').screenshot(path=screenshot)
+                # Replacing a live request with its final values must not
+                # re-measure the real request table. The probe saves and
+                # restores the real tbody (one id, one owner) and also proves
+                # the identity column shrinks without losing its badges.
+                table_shift = []
+                for viewport in ({'width': 1440, 'height': 1000}, {'width': 390, 'height': 844}):
+                    await page.set_viewport_size(viewport)
+                    state = await page.evaluate("""async () => {
+                        const box = document.getElementById('tbl-requests');
+                        const table = box.querySelector('table');
+                        const body = table.tBodies[0];
+                        const saved = body.innerHTML;
+                        const base = {
+                            id: 'colshift', start: new Date().toISOString(),
+                            client: 'client-with-a-long-label', provider: 'neutral-provider',
+                            model: 'model-name/with-a-long-suffix',
+                            usage: { input_tokens: 1, output_tokens: 0, cache_read_tokens: 0 },
+                            attempts: [],
+                        };
+                        const live = { ...base, live: true, stream: true, ttft_ms: 0,
+                            overall_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0 };
+                        const final = { ...base, live: false, status_code: 200,
+                            ttft_ms: 999999, overall_tps: 99999.9, duration_ms: 999999999,
+                            queue_wait_ms: 999999999, cost: 999.5,
+                            usage: { input_tokens: 999999999, output_tokens: 999999999,
+                                cache_read_tokens: 999999999 },
+                            finish_reason: 'content_filter', turns_user: 99,
+                            turns_assistant: 99, turns_tool: 99, retries: 0 };
+                        const measure = () => {
+                            const origin = table.getBoundingClientRect().left;
+                            return [...table.tHead.rows[0].cells].map(th => {
+                                const r = th.getBoundingClientRect();
+                                return { left: r.left - origin, width: r.width };
+                            });
+                        };
+                        const measureBody = () => {
+                            const origin = table.getBoundingClientRect().left;
+                            const row = body.querySelector('tr.exp-row');
+                            return row ? [...row.cells].map(td => {
+                                const r = td.getBoundingClientRect();
+                                return { left: r.left - origin, width: r.width };
+                            }) : [];
+                        };
+                        const samePosition = (a, b) => !!a && !!b &&
+                            Math.abs(a.left - b.left) <= 0.5 && Math.abs(a.width - b.width) <= 0.5;
+                        const frames = () => new Promise(r =>
+                            requestAnimationFrame(() => requestAnimationFrame(r)));
+                        // visibleWidth intersects an element rect with every
+                        // clipping box. A label can report scrollWidth equal to
+                        // clientWidth while an ancestor still cuts it, so short
+                        // badges must prove the whole label stays visible.
+                        const visibleWidth = (el, clips) => {
+                            if (!el) return 0;
+                            const r = el.getBoundingClientRect();
+                            let left = r.left, right = r.right;
+                            for (const clip of clips) {
+                                if (!clip) continue;
+                                const c = clip.getBoundingClientRect();
+                                left = Math.max(left, c.left);
+                                right = Math.min(right, c.right);
+                            }
+                            return Math.max(0, right - left);
+                        };
+                        let result;
+                        try {
+                            body.innerHTML = reqRow(live, null);
+                            await frames();
+                            const before = measure();
+                            const bodyBefore = measureBody();
+                            body.innerHTML = reqRow(final, null);
+                            await frames();
+                            const after = measure();
+                            const bodyAfter = measureBody();
+
+                            modelNames.set('Neutral-Model-With-A-Very-Long-Suffix',
+                                'neutral-model-with-a-very-long-suffix');
+                            const identityRec = { ...final,
+                                client: 'opencode/1.18.32',
+                                provider: 'narrow-provider',
+                                model: 'Neutral-Model-With-A-Very-Long-Suffix' };
+                            body.innerHTML = reqRow(identityRec, null);
+                            await frames();
+                            const ident = body.querySelector('.req-ident');
+                            const model = ident.querySelector('.req-model');
+                            const modelLabel = model && model.querySelector('.ent-lb');
+                            const links = ident ? [...ident.querySelectorAll('a.ent-link')] : [];
+                            const labels = ident ? [...ident.querySelectorAll('.ent-lb')] : [];
+                            const shortLabels = labels
+                                .filter(label => ['opencode/1.18.32', 'narrow-provider']
+                                    .includes(label.textContent.trim()))
+                                .map(label => {
+                                    const link = label.closest('a.ent-link');
+                                    return {
+                                        text: label.textContent.trim(),
+                                        width: label.getBoundingClientRect().width,
+                                        clientWidth: label.clientWidth,
+                                        scrollWidth: label.scrollWidth,
+                                        linkWidth: link
+                                            ? link.getBoundingClientRect().width : 0,
+                                        visibleWidth: visibleWidth(label, [link]),
+                                    };
+                                });
+                            const modelLink = model ? model.querySelector('a.ent-link') : null;
+                            const modelLabelTitle = modelLabel ? modelLabel.getAttribute('title') : '';
+                            const modelClosestTitle = modelLabel && modelLabel.closest('[title]')
+                                ? modelLabel.closest('[title]').getAttribute('title') : '';
+                            if (modelLink) modelLink.focus();
+                            const modelOutline = modelLink ? getComputedStyle(modelLink) : null;
+                            const modelFocusOffset = modelOutline ? modelOutline.outlineOffset : '';
+                            const modelFocus = modelOutline ? {
+                                style: modelOutline.outlineStyle,
+                                width: parseFloat(modelOutline.outlineWidth),
+                                color: modelOutline.outlineColor,
+                                offset: modelOutline.outlineOffset,
+                            } : {};
+                            if (modelLink) modelLink.blur();
+                            const identity = {
+                                linkCount: links.length,
+                                minLinkWidth: links.length
+                                    ? Math.min(...links.map(link => link.getBoundingClientRect().width)) : 0,
+                                labelCount: labels.length,
+                                minLabelWidth: labels.length
+                                    ? Math.min(...labels.map(label => label.getBoundingClientRect().width)) : 0,
+                                shortLabels,
+                                overflow: ident ? ident.scrollWidth > ident.clientWidth + 1 : true,
+                                modelClass: !!model && model.classList.contains('req-model'),
+                                modelDisplay: modelLabel ? getComputedStyle(modelLabel).display : '',
+                                modelEllipsis: !!modelLabel &&
+                                    getComputedStyle(modelLabel).textOverflow === 'ellipsis',
+                                modelClipped: !!modelLabel &&
+                                    modelLabel.scrollWidth > modelLabel.clientWidth + 1,
+                                modelTitle: model ? model.getAttribute('title') : '',
+                                modelLabelTitle,
+                                modelClosestTitle,
+                                modelFocusOffset,
+                                modelFocus,
+                            };
+                            // Long client and provider labels must ellipsize too;
+                            // the model stays the flexible remainder and keeps a
+                            // visible share instead of collapsing to nothing.
+                            const longIdentityRec = { ...final,
+                                client: 'openai/enterprise-client-with-a-very-long-product-suffix',
+                                provider: 'provider-with-a-very-long-tenant-and-region-label',
+                                model: 'Neutral-Model-With-A-Very-Long-Suffix' };
+                            body.innerHTML = reqRow(longIdentityRec, null);
+                            await frames();
+                            const longIdent = body.querySelector('.req-ident');
+                            const longModel = longIdent && longIdent.querySelector('.req-model');
+                            const longModelLabel = longModel && longModel.querySelector('.ent-lb');
+                            const longLabels = longIdent ? [...longIdent.querySelectorAll('.ent-lb')] : [];
+                            // Measure the label's own font so the assertion is in
+                            // characters, not pixels: the inner label must keep a
+                            // readable share even when both neighbours hit their caps.
+                            const labelStyle = longModelLabel
+                                ? getComputedStyle(longModelLabel) : null;
+                            const chProbe = document.createElement('span');
+                            chProbe.style.cssText =
+                                'position:absolute;left:-9999px;visibility:hidden;white-space:pre;width:1ch;';
+                            if (labelStyle) {
+                                chProbe.style.fontFamily = labelStyle.fontFamily;
+                                chProbe.style.fontSize = labelStyle.fontSize;
+                            }
+                            document.body.appendChild(chProbe);
+                            const chWidth = chProbe.getBoundingClientRect().width;
+                            chProbe.remove();
+                            // The label's own box can extend under its clipping
+                            // badge, so intersect it with the link and flexible
+                            // model cell that actually cut the visible share.
+                            const modelLabelVisibleWidth = longModelLabel
+                                ? visibleWidth(longModelLabel, [
+                                    longModelLabel.parentElement,
+                                    longModelLabel.closest('a.ent-link'),
+                                    longModel,
+                                ])
+                                : 0;
+                            const longIdentity = {
+                                labelCount: longLabels.length,
+                                display: longLabels.map(label => getComputedStyle(label).display),
+                                ellipsis: longLabels.map(label =>
+                                    getComputedStyle(label).textOverflow),
+                                clipped: longLabels.map(label =>
+                                    label.scrollWidth > label.clientWidth + 1),
+                                overflow: longIdent
+                                    ? longIdent.scrollWidth > longIdent.clientWidth + 1 : true,
+                                modelWidth: longModel ? longModel.getBoundingClientRect().width : 0,
+                                modelLabelWidth: longModelLabel
+                                    ? longModelLabel.getBoundingClientRect().width : 0,
+                                modelLabelClientWidth: longModelLabel ? longModelLabel.clientWidth : 0,
+                                modelLabelCh: longModelLabel && chWidth > 0
+                                    ? longModelLabel.getBoundingClientRect().width / chWidth : 0,
+                                modelLabelVisibleWidth,
+                                modelLabelVisibleCh: chWidth > 0
+                                    ? modelLabelVisibleWidth / chWidth : 0,
+                                identWidth: longIdent ? longIdent.clientWidth : 0,
+                            };
+                            body.innerHTML = reqRow(identityRec, null);
+                            await frames();
+                            const columns = [...table.querySelectorAll('colgroup col')];
+                            const headers = [...table.tHead.rows[0].cells];
+                            const savedScroll = box.scrollLeft;
+                            box.scrollLeft = 40;
+                            const movedScroll = box.scrollLeft;
+                            box.scrollLeft = savedScroll;
+                            result = {
+                                before, after, bodyBefore, bodyAfter,
+                                reqCols: REQ_COLS,
+                                reqMinWidth: REQ_MIN_WIDTH,
+                                columns: columns.length,
+                                headerColumns: headers.length,
+                                bodyColumns: bodyBefore.length,
+                                positiveWidths: headers.length > 0 && headers.every(th =>
+                                    th.getBoundingClientRect().width > 0),
+                                positiveBudget: columns.length > 0 && columns.every(col =>
+                                    parseFloat(col.style.width) > 0),
+                                minWidth: parseFloat(getComputedStyle(table).minWidth),
+                                budget: columns.reduce((sum, col) => sum + parseFloat(col.style.width || '0'), 0),
+                                scrollBox: {
+                                    overflowX: getComputedStyle(box).overflowX,
+                                    moved: movedScroll,
+                                    saved: savedScroll,
+                                },
+                                stable: before.length === after.length && before.every((v, i) =>
+                                    samePosition(v, after[i])),
+                                bodyStable: bodyBefore.length === bodyAfter.length &&
+                                    bodyBefore.length > 0 && bodyBefore.every((v, i) =>
+                                        samePosition(v, bodyAfter[i])),
+                                costStable: samePosition(bodyBefore[12], bodyAfter[12]),
+                                actionStable: samePosition(bodyBefore[13], bodyAfter[13]),
+                                identity,
+                                longIdentity,
+                                mobileScroll: box.scrollWidth > box.clientWidth + 1,
+                                pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+                            };
+                        } finally {
+                            modelNames.delete('Neutral-Model-With-A-Very-Long-Suffix');
+                            if (table.isConnected && table.tBodies[0] === body) body.innerHTML = saved;
+                        }
+                        return result;
+                    }""")
+                    require(state['stable'], state)
+                    require(state['columns'] == state['reqCols'] and state['headerColumns'] == state['reqCols'], state)
+                    require(state['reqCols'] == 14 and state['reqMinWidth'] == 1364, state)
+                    require(state['bodyColumns'] == state['reqCols'] and state['bodyStable'], state)
+                    require(state['costStable'] and state['actionStable'], state)
+                    require(state['positiveWidths'] and state['positiveBudget'], state)
+                    require(abs(state['minWidth'] - 1364) <= 0.5 and abs(state['budget'] - 1364) <= 0.5, state)
+                    identity = state['identity']
+                    require(identity['linkCount'] == 3 and identity['minLinkWidth'] > 0, state)
+                    require(identity['labelCount'] == 3 and identity['minLabelWidth'] > 8, state)
+                    short_labels = identity['shortLabels']
+                    require(len(short_labels) == 2, state)
+                    require(all(label['width'] > 0 and label['clientWidth'] > 0 and
+                                label['scrollWidth'] <= label['clientWidth'] and
+                                label['linkWidth'] > 0 and
+                                label['visibleWidth'] > 0 and
+                                label['visibleWidth'] >= label['width'] - 1
+                                for label in short_labels), state)
+                    require(not identity['overflow'] and identity['modelClass'], state)
+                    require(identity['modelDisplay'] not in ('flex', 'inline-flex'),
+                            {'identity': identity})
+                    require(identity['modelEllipsis'] and identity['modelClipped'], state)
+                    focus = identity['modelFocus']
+                    require(focus.get('style') == 'solid' and focus.get('width', 0) >= 1 and
+                            focus.get('color') not in ('', 'rgba(0, 0, 0, 0)', 'transparent') and
+                            focus.get('offset') == '-1px', {'identity': identity})
+                    require('original: Neutral-Model-With-A-Very-Long-Suffix' in
+                            identity['modelClosestTitle'], {'identity': identity})
+                    require(identity['modelLabelTitle'].startswith(
+                                'original: Neutral-Model-With-A-Very-Long-Suffix'),
+                            {'identity': identity})
+                    long_identity = state['longIdentity']
+                    require(long_identity['labelCount'] == 3, long_identity)
+                    require(all(display == 'block' for display in long_identity['display']),
+                            long_identity)
+                    require(all(ellipsis == 'ellipsis' for ellipsis in long_identity['ellipsis']),
+                            long_identity)
+                    require(all(long_identity['clipped'][:2]), long_identity)
+                    require(not long_identity['overflow'], long_identity)
+                    require(long_identity['modelWidth'] > long_identity['identWidth'] * 0.10,
+                            long_identity)
+                    require(long_identity['modelLabelWidth'] > 0 and
+                            long_identity['modelLabelClientWidth'] > 0,
+                            long_identity)
+                    require(long_identity['modelLabelCh'] >= 3, long_identity)
+                    require(long_identity['modelLabelVisibleCh'] >= 3, long_identity)
+                    require(state['scrollBox']['overflowX'] in ('auto', 'scroll'), state)
+                    require(not state['pageOverflow'], state)
+                    if viewport['width'] == 390:
+                        require(state['mobileScroll'], state)
+                        require(state['scrollBox']['moved'] > 0, state)
+                    table_shift.append({'width': viewport['width'], **state})
+                results.append({'table_shift': table_shift})
+
+                # Real formatter outputs must fit their fixed columns, or the
+                # cell must carry the full value in its title. The probe renders
+                # through the production reqRow and restores the real tbody.
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+                content_fit = await page.evaluate("""async () => {
+                    const box = document.getElementById('tbl-requests');
+                    const table = box.querySelector('table');
+                    const body = table.tBodies[0];
+                    const saved = body.innerHTML;
+                    const frames = () => new Promise(r =>
+                        requestAnimationFrame(() => requestAnimationFrame(r)));
+                    const at = new Date(2020, 0, 1, 12, 34, 56);
+                    const base = {
+                        id: 'fit-probe', start: at.toISOString(), end: at.toISOString(),
+                        provider: 'neutral-provider', model: 'Neutral-Model',
+                        client: 'neutral-client', stream: true, status_code: 200,
+                        ttft_ms: 123, duration_ms: 456, finish_reason: 'content_filter',
+                        tool_calls: 3, turns_user: 2, turns_assistant: 1,
+                        last_turn_role: 'assistant', queue_wait_ms: 0,
+                        usage: {input_tokens: 999990000, output_tokens: 999990000,
+                                cache_read_tokens: 999990000},
+                    };
+                    const long = {...base, ttft_ms: 987654321, duration_ms: 987654321,
+                        tool_calls: 123456, turns_user: 123456,
+                        turns_assistant: 123456, turns_tool: 123456,
+                        last_turn_role: 'assistant', queue_wait_ms: 987654321,
+                        images: 123, attachments: 45};
+                    // Every displayed text cell, including the queued column.
+                    const probes = [0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+                    const rows = [];
+                    try {
+                        for (const [fixture, isLong] of [
+                            [{...base, cost: 0.12346, overall_tps: 99999.9}, false],
+                            [{...base, cost: 999.999, overall_tps: 99999.9}, false],
+                            [{...long, cost: 0.5, overall_tps: 99999.9}, true],
+                        ]) {
+                            body.innerHTML = reqRow(fixture, null);
+                            await frames();
+                            const cells = [...body.querySelector('tr.exp-row').cells];
+                            const read = index => ({
+                                text: cells[index].textContent.trim(),
+                                title: cells[index].getAttribute('title') || '',
+                                fits: cells[index].scrollWidth <= cells[index].clientWidth + 1,
+                            });
+                            rows.push({
+                                cost: fixture.cost, long: isLong,
+                                time: read(0), ttft: read(3), tps: read(4),
+                                inOut: read(5), cache: read(6), tools: read(7),
+                                finish: read(8), dur: read(9), turns: read(10),
+                                queued: read(11), costCell: read(12),
+                                cellsFitOrTitled: probes.every(index =>
+                                    cells[index].scrollWidth <= cells[index].clientWidth + 1 ||
+                                    !!cells[index].getAttribute('title')),
+                                expectedTime: at.toLocaleTimeString(),
+                            });
+                        }
+                    } finally {
+                        if (table.isConnected && table.tBodies[0] === body) body.innerHTML = saved;
+                    }
+                    return rows;
+                }""")
+                for row in content_fit:
+                    require(row['cellsFitOrTitled'], row)
+                    require(row['time']['text'] == row['expectedTime'] and
+                            '12:34:56' in row['time']['text'], row)
+                    require(row['ttft']['text'] == row['ttft']['title'], row)
+                    require(row['tps']['text'] == '99999.9' and
+                            row['tps']['title'].startswith('99999.9'), row)
+                    require(row['inOut']['text'] == '999.99M/999.99M', row)
+                    require(row['cache']['text'] == '100.00%' and
+                            '100.00%' in row['cache']['title'], row)
+                    require(row['tools']['text'] == ('123456' if row['long'] else '3') and
+                            'tool calls' in row['tools']['title'], row)
+                    require(row['finish']['text'] == 'content_filter' and
+                            row['finish']['title'] == 'content_filter', row)
+                    require(row['dur']['text'] == row['dur']['title'], row)
+                    require(row['turns']['title'] and
+                            ('123456 user' in row['turns']['title'] if row['long']
+                             else '2 user' in row['turns']['title']), row)
+                    if row['long']:
+                        # The queued value can clip in its fixed column; its
+                        # full fmtDur text must remain in the title.
+                        require(row['queued']['text'] == row['queued']['title'] and
+                                row['queued']['title'].endswith('d'), row)
+                    else:
+                        require(row['queued']['text'] == '-' and
+                                row['queued']['title'] == '', row)
+                    expected_cost = ('12.346¢' if row['cost'] == 0.12346 else
+                                     '50¢' if row['cost'] == 0.5 else '$999.999')
+                    require(row['costCell']['text'] == expected_cost and
+                            row['costCell']['title'].endswith(expected_cost), row)
+                results.append({'content_fit': content_fit})
+
+                # The published docs capture uses 2200x900 so the request
+                # table's 1364px budget fits without horizontal clipping.
+                await page.set_viewport_size({'width': 2200, 'height': 900})
+                await page.evaluate(
+                    'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                docs_table = await page.evaluate("""() => {
+                    const box = document.getElementById('tbl-requests');
+                    const table = box.querySelector('table');
+                    return {
+                        clientWidth: box.clientWidth,
+                        scrollWidth: box.scrollWidth,
+                        minWidth: table ? Math.round(table.getBoundingClientRect().width) : 0,
+                    };
+                }""")
+                require(docs_table['clientWidth'] >= 1364 and
+                        docs_table['scrollWidth'] <= docs_table['clientWidth'] + 2 and
+                        docs_table['minWidth'] >= 1364, docs_table)
+                results.append({'docs_table': docs_table})
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+
+                # Keyboard focus and both scroll axes must survive a live row's
+                # incremental replacement with its final values.
+                focus_scroll = await page.evaluate("""async () => {
+                    const box = document.getElementById('tbl-requests');
+                    const frames = () => new Promise(r =>
+                        requestAnimationFrame(() => requestAnimationFrame(r)));
+                    const baseStart = new Date(2026, 0, 2, 12, 0, 0);
+                    const recs = Array.from({length: 60}, (_, i) => ({
+                        id: 'keep-' + i,
+                        start: new Date(baseStart.getTime() - i * 60000).toISOString(),
+                        end: new Date(baseStart.getTime() - i * 60000 + 500).toISOString(),
+                        provider: 'p', model: 'm', client: 'c', stream: true,
+                        status_code: 200, ttft_ms: 100, duration_ms: 500,
+                        usage: {input_tokens: 10, output_tokens: 5, total_tokens: 15},
+                        retries: 0, attempts: [],
+                    }));
+                    recs[30] = {...recs[30], live: true, status_code: 0, ttft_ms: 0,
+                                overall_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0};
+                    try {
+                        renderRequests(recs);
+                        await frames();
+                        const target = box.querySelector(
+                            'tr.exp-row[data-id="keep-30"] button[data-open-req]');
+                        target.focus();
+                        box.scrollTop = 120;
+                        box.scrollLeft = 40;
+                        const overflow = {
+                            vertical: box.scrollHeight > box.clientHeight + 1,
+                            horizontal: box.scrollWidth > box.clientWidth + 1,
+                        };
+                        const before = {top: box.scrollTop, left: box.scrollLeft,
+                            focused: document.activeElement === target};
+                        const next = recs.map(rec => rec.id === 'keep-30'
+                            ? {...rec, live: false, status_code: 200, ttft_ms: 100,
+                               duration_ms: 500, overall_tps: 12.5, cost: 0.01}
+                            : rec);
+                        renderRequestsIncremental(next);
+                        await frames();
+                        const active = document.activeElement;
+                        return {overflow, before, after: {
+                            top: box.scrollTop, left: box.scrollLeft,
+                            focusId: active?.closest?.('tr.exp-row[data-id]')?.dataset.id || '',
+                            focusAction: !!active?.hasAttribute?.('data-open-req'),
+                            focusButton: active?.tagName === 'BUTTON',
+                        }};
+                    } finally {
+                        renderRequests(derive(lastData).scopedRecs);
+                        await frames();
+                    }
+                }""")
+                require(focus_scroll['before']['focused'], focus_scroll)
+                require(focus_scroll['overflow']['vertical'] and
+                        focus_scroll['overflow']['horizontal'], focus_scroll)
+                require(focus_scroll['before']['top'] > 0 and
+                        focus_scroll['before']['left'] > 0, focus_scroll)
+                require(focus_scroll['after']['focusId'] == 'keep-30' and
+                        focus_scroll['after']['focusAction'] and
+                        focus_scroll['after']['focusButton'], focus_scroll)
+                require(abs(focus_scroll['after']['top'] - focus_scroll['before']['top']) <= 1 and
+                        focus_scroll['after']['left'] == focus_scroll['before']['left'],
+                        focus_scroll)
+                results.append({'focus_scroll': focus_scroll})
+
+                # The sticky day divider must sit exactly on the sticky header's
+                # bottom edge: no sliver of scrolling rows between them, and no
+                # overlap.
+                day_geometry = await page.evaluate("""async () => {
+                    const box = document.getElementById('tbl-requests');
+                    const frames = () => new Promise(r =>
+                        requestAnimationFrame(() => requestAnimationFrame(r)));
+                    const latest = new Date(2026, 0, 2, 12, 0, 0);
+                    const earlier = new Date(2026, 0, 1, 12, 0, 0);
+                    const recs = Array.from({length: 40}, (_, i) => {
+                        const at = i < 20 ? latest : earlier;
+                        return {
+                            id: 'day-' + i,
+                            start: new Date(at.getTime() - (i % 20) * 60000).toISOString(),
+                            end: new Date(at.getTime() - (i % 20) * 60000 + 500).toISOString(),
+                            provider: 'p', model: 'm', client: 'c', stream: true,
+                            status_code: 200, ttft_ms: 100, duration_ms: 500,
+                            usage: {input_tokens: 10, output_tokens: 5, total_tokens: 15},
+                            retries: 0, attempts: [],
+                        };
+                    });
+                    try {
+                        box.scrollIntoView({block: 'center'});
+                        await frames();
+                        renderRequests(recs);
+                        await frames();
+                        box.scrollTop = box.scrollHeight;
+                        await frames();
+                        const headCells = [...box.querySelectorAll('thead th')]
+                            .map(th => th.getBoundingClientRect());
+                        const headTop = Math.min(...headCells.map(rect => rect.top));
+                        const headBottom = Math.max(...headCells.map(rect => rect.bottom));
+                        const boxRect = box.getBoundingClientRect();
+                        const boxBottom = boxRect.bottom;
+                        const separators = [...box.querySelectorAll('tr.day-sep td')]
+                            .map(td => td.getBoundingClientRect())
+                            .filter(rect => rect.bottom > headBottom - 1 && rect.top < boxBottom);
+                        const overflowY = box.scrollHeight > box.clientHeight + 1;
+                        if (!separators.length) return {separators: 0, headBottom,
+                            boxTop: boxRect.top, headTop, headHeight: headBottom - headTop,
+                            scrollTop: box.scrollTop, overflowY, pageScrollY: scrollY};
+                        const pinned = separators.reduce((a, b) => a.top < b.top ? a : b);
+                        return {separators: separators.length, headBottom,
+                            boxTop: boxRect.top, headTop, headHeight: headBottom - headTop,
+                            scrollTop: box.scrollTop, overflowY, pageScrollY: scrollY,
+                            separatorTop: pinned.top, gap: pinned.top - headBottom};
+                    } finally {
+                        renderRequests(derive(lastData).scopedRecs);
+                        await frames();
+                    }
+                }""")
+                require(day_geometry['separators'] >= 1, day_geometry)
+                require(day_geometry['overflowY'] and day_geometry['scrollTop'] > 0,
+                        day_geometry)
+                require(abs(day_geometry['gap']) <= 0.5, day_geometry)
+                results.append({'day_geometry': day_geometry})
+
+                # A hovered retry sub-row lifts its muted cells to the surface
+                # text token; the warn tint stays the row's state cue.
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+                retry_injected = await page.evaluate("""() => {
+                    const body = document.querySelector('#tbl-requests tbody');
+                    const rec = { id: 'retry-hover-fixture', provider: 'p', model: 'm',
+                        client: 'c', key_hash: 'k-retry', conversation_id: 'cv',
+                        status_code: 200, start: new Date().toISOString(),
+                        end: new Date().toISOString(), stream: true, time_bucket: 'work',
+                        ttft_ms: 100, duration_ms: 500, usage: {},
+                        retries: 1, attempts: [{ status_code: 502,
+                            error_type: 'bad_gateway', error_msg: 'upstream overloaded',
+                            at: new Date().toISOString() }] };
+                    const template = document.createElement('template');
+                    template.innerHTML = reqRow(rec, null);
+                    const rows = [...template.content.querySelectorAll('tr')];
+                    rows.forEach(row => { row.hidden = false; body.append(row); });
+                    return rows.length;
+                }""")
+                require(retry_injected == 2, retry_injected)
+                try:
+                    await page.hover('tr.retry-sub[data-retry-of="retry-hover-fixture"] td')
+                    # The shared color transition must finish before reading the
+                    # hovered computed values.
+                    await page.wait_for_timeout(250)
+                    retry_hover = await page.evaluate("""() => {
+                        const cell = document.querySelector(
+                            'tr.retry-sub[data-retry-of="retry-hover-fixture"] td');
+                        const probe = document.createElement('span');
+                        probe.style.color = 'var(--text)';
+                        document.body.appendChild(probe);
+                        const result = {
+                            color: getComputedStyle(cell).color,
+                            expected: getComputedStyle(probe).color,
+                            background: getComputedStyle(cell).backgroundColor,
+                        };
+                        probe.remove();
+                        return result;
+                    }""")
+                    require(retry_hover['color'] == retry_hover['expected'], retry_hover)
+                    require(retry_hover['background'] != 'rgba(0, 0, 0, 0)', retry_hover)
+                finally:
+                    # The probe rows are not part of lastData, so a failed
+                    # assertion must not leave them behind for later checks.
+                    await page.evaluate("""() => document.querySelectorAll(
+                        'tr[data-id="retry-hover-fixture"], tr[data-retry-of="retry-hover-fixture"]')
+                        .forEach(row => row.remove())""")
+
+                # The theme tray stays open while values are chosen and the
+                # contained preview changes without touching the document root.
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+                await page.evaluate('new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                await page.click('#btn-theme')
+                require(await page.locator('#theme-menu').is_visible(), 'theme tray did not open')
+                tray_state = await page.evaluate("""() => {
+                    const menu = document.getElementById('theme-menu');
+                    const panes = menu.querySelector('.theme-panes');
+                    const list = document.getElementById('theme-list');
+                    const box = list.getBoundingClientRect();
+                    const rows = [...list.querySelectorAll('.theme-opt')].map(row => {
+                        const rect = row.getBoundingClientRect();
+                        return rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1 &&
+                            rect.top >= 0 && rect.bottom <= innerHeight;
+                    });
+                    const mode = document.getElementById('theme-mode');
+                    const legend = [...menu.querySelectorAll('#theme-current .tp-key')]
+                        .map(key => getComputedStyle(key).backgroundColor);
+                    return {
+                        panes: !!panes && panes.getAttribute('aria-hidden') === 'true',
+                        paneCount: panes ? panes.querySelectorAll('.theme-pane').length : 0,
+                        currentPane: document.getElementById('theme-current')?.dataset.theme,
+                        previewPane: document.getElementById('theme-preview')?.dataset.theme,
+                        captionBar: !!mode.closest('.theme-caption-bar'),
+                        surfaceLabel: menu.querySelector('.theme-caption-bar .theme-mode-label')
+                            ?.textContent,
+                        surfaceLabelRef: mode.getAttribute('aria-labelledby'),
+                        currentCaption: document.getElementById('theme-current-label').textContent,
+                        previewCaption: document.getElementById('theme-preview-label').textContent,
+                        previewMuted: !document.getElementById('theme-preview-label')
+                            .classList.contains('has-preview'),
+                        hint: menu.querySelector('.theme-hintbar').textContent,
+                        resetTitle: document.getElementById('theme-reset')?.title,
+                        paletteRows: rows.length,
+                        allRowsVisible: rows.length === 8 && rows.every(Boolean),
+                        listScrolls: list.scrollHeight > list.clientHeight + 1,
+                        listOverflow: getComputedStyle(list).overflowY,
+                        legend,
+                        legendText: document.querySelector('#theme-current .tp-legend').textContent,
+                        pills: menu.querySelectorAll('.tp-pill').length,
+                        closeText: document.getElementById('theme-close')?.textContent,
+                        closeAccent: document.getElementById('theme-close')?.classList.contains('btn-accent'),
+                        done: !!document.getElementById('theme-done'),
+                    };
+                }""")
+                require(tray_state['panes'] and tray_state['paneCount'] == 2, tray_state)
+                require(tray_state['currentPane'] == 'instrument' and tray_state['previewPane'] == 'instrument', tray_state)
+                require(tray_state['captionBar'] and tray_state['surfaceLabel'] == 'Surface' and
+                        tray_state['surfaceLabelRef'] == 'theme-mode-label', tray_state)
+                require(tray_state['currentCaption'] == 'Current: Instrument / Black' and
+                        tray_state['previewCaption'] == 'Preview: same' and
+                        tray_state['previewMuted'], tray_state)
+                require(tray_state['hint'] ==
+                        'Arrows preview. Click or press Enter to apply. Esc closes.', tray_state)
+                require(tray_state['resetTitle'] == 'Restore Instrument Black', tray_state)
+                require(tray_state['allRowsVisible'] and not tray_state['listScrolls'] and
+                        tray_state['listOverflow'] == 'visible', tray_state)
+                require(len(tray_state['legend']) == 3 and
+                        len(set(tray_state['legend'])) == 3 and
+                        tray_state['legendText'] == '' and tray_state['pills'] == 0, tray_state)
+                require(tray_state['closeText'] == 'Close' and not tray_state['closeAccent'] and
+                        not tray_state['done'], tray_state)
+                # A palette hover previews only inside the tray: the preview
+                # pane takes the candidate while the current pane, root,
+                # storage and canvas palette stay on the committed pair. The
+                # polite live region belongs to the keyboard cursor, so hover
+                # must not write it.
+                committed_baseline = await page.evaluate("""() => {
+                    window.themePreviewChart = {
+                        calls: 0, refresh: refreshChartColors, reset: resetChart,
+                    };
+                    window.refreshChartColors = (...args) => {
+                        window.themePreviewChart.calls += 1;
+                        return window.themePreviewChart.refresh(...args);
+                    };
+                    window.resetChart = (...args) => {
+                        window.themePreviewChart.calls += 1;
+                        return window.themePreviewChart.reset(...args);
+                    };
+                    return {
+                        colors: JSON.parse(JSON.stringify(COLORS)),
+                        saved: localStorage.getItem('millivolt.theme'),
+                        status: document.getElementById('theme-status').textContent,
+                    };
+                }""")
+                await page.hover('[data-theme-id="forest"]')
+                preview = await page.evaluate("""() => {
+                    const stage = document.getElementById('theme-preview');
+                    const current = document.getElementById('theme-current');
+                    const style = getComputedStyle(stage);
+                    const currentStyle = getComputedStyle(current);
+                    return {
+                        stage: stage.dataset.theme,
+                        stageMode: stage.dataset.mode,
+                        current: current.dataset.theme,
+                        currentMode: current.dataset.mode,
+                        root: document.documentElement.dataset.theme,
+                        rootMode: document.documentElement.dataset.mode,
+                        caption: document.getElementById('theme-preview-label').textContent,
+                        currentCaption: document.getElementById('theme-current-label').textContent,
+                        open: !document.getElementById('theme-menu').hidden,
+                        saved: localStorage.getItem('millivolt.theme'),
+                        status: document.getElementById('theme-status').textContent,
+                        previewRows: document.querySelectorAll('#theme-menu .is-preview').length,
+                        colors: JSON.parse(JSON.stringify(COLORS)),
+                        chartCalls: window.themePreviewChart.calls,
+                        bg: style.getPropertyValue('--bg').trim(),
+                        accent: style.getPropertyValue('--accent').trim(),
+                        currentBg: currentStyle.getPropertyValue('--bg').trim(),
+                        color: style.color,
+                        colorScheme: style.colorScheme,
+                        legend: [...stage.querySelectorAll('.tp-key')].map(key => ({
+                            bg: getComputedStyle(key).backgroundColor,
+                        })),
+                    };
+                }""")
+                require(preview['stage'] == 'forest' and preview['stageMode'] == 'black' and
+                        preview['current'] == 'instrument' and preview['currentMode'] == 'black' and
+                        preview['root'] == 'instrument' and preview['rootMode'] == 'black' and
+                        preview['open'], preview)
+                require(preview['bg'] == '#0f1713' and preview['accent'] == '#34d399', preview)
+                require(preview['currentBg'] == '#141210' and
+                        preview['currentCaption'] == 'Current: Instrument / Black', preview)
+                require(preview['caption'] == 'Preview: Forest / Black', preview)
+                require(preview['color'] == 'rgb(232, 228, 222)', preview)
+                require(preview['colorScheme'] == 'dark', preview)
+                require(len(preview['legend']) == 3 and
+                        len({key['bg'] for key in preview['legend']}) == 3 and
+                        all(key['bg'] not in ('rgba(0, 0, 0, 0)', 'transparent')
+                            for key in preview['legend']), preview)
+                require(preview['previewRows'] == 1 and
+                        preview['saved'] == committed_baseline['saved'] ==
+                        '{"theme":"instrument","mode":"black"}', preview)
+                require(preview['colors'] == committed_baseline['colors'] and
+                        preview['chartCalls'] == 0, preview)
+                require(preview['status'] == committed_baseline['status'] == '', preview)
+                await page.evaluate("""() => {
+                    const spy = window.themePreviewChart;
+                    window.refreshChartColors = spy.refresh;
+                    window.resetChart = spy.reset;
+                    delete window.themePreviewChart;
+                }""")
+
+                # Leaving the tray with the pointer, not a click, drops the
+                # candidate: the preview pane returns to the committed pair and
+                # says so, while the current pane, root and storage persist.
+                await page.mouse.move(8, 8)
+                left_tray = await page.evaluate("""() => ({
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    stageMode: document.getElementById('theme-preview').dataset.mode,
+                    current: document.getElementById('theme-current').dataset.theme,
+                    currentMode: document.getElementById('theme-current').dataset.mode,
+                    root: document.documentElement.dataset.theme,
+                    rootMode: document.documentElement.dataset.mode,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    currentCaption: document.getElementById('theme-current-label').textContent,
+                    open: !document.getElementById('theme-menu').hidden,
+                    saved: localStorage.getItem('millivolt.theme'),
+                    previewRows: document.querySelectorAll('#theme-menu .is-preview').length,
+                })""")
+                require(left_tray['stage'] == 'instrument' and left_tray['stageMode'] == 'black' and
+                        left_tray['current'] == 'instrument' and left_tray['currentMode'] == 'black',
+                        left_tray)
+                require(left_tray['caption'] == 'Preview: same' and
+                        left_tray['currentCaption'] == 'Current: Instrument / Black', left_tray)
+                require(left_tray['root'] == 'instrument' and left_tray['rootMode'] == 'black' and
+                        left_tray['open'] and left_tray['previewRows'] == 0, left_tray)
+                require(left_tray['saved'] == '{"theme":"instrument","mode":"black"}', left_tray)
+
+                # Hovering then clicking the same palette commits the shown
+                # candidate, updates both panes and leaves the tray open. The
+                # pointer-induced focus must not write the keyboard live
+                # region: the only announcement is the committed Current line.
+                await page.evaluate("""() => {
+                    window.themeStatusLog = [];
+                    const status = document.getElementById('theme-status');
+                    window.themeStatusObserver = new MutationObserver(() => {
+                        if (status.textContent) window.themeStatusLog.push(status.textContent);
+                    });
+                    window.themeStatusObserver.observe(status, {
+                        childList: true, characterData: true, subtree: true,
+                    });
+                }""")
+                await page.hover('[data-theme-id="forest"]')
+                hovered = await page.evaluate("""() => ({
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    root: document.documentElement.dataset.theme,
+                    saved: localStorage.getItem('millivolt.theme'),
+                    statusLog: window.themeStatusLog.slice(),
+                })""")
+                require(hovered['stage'] == 'forest' and hovered['root'] == 'instrument' and
+                        hovered['saved'] == '{"theme":"instrument","mode":"black"}', hovered)
+                require(hovered['statusLog'] == [], hovered)
+                await page.click('[data-theme-id="forest"]')
+                chosen = await page.evaluate("""() => {
+                    const log = window.themeStatusLog.slice();
+                    window.themeStatusObserver.disconnect();
+                    delete window.themeStatusObserver;
+                    delete window.themeStatusLog;
+                    return {
+                        theme: document.documentElement.dataset.theme,
+                        open: !document.getElementById('theme-menu').hidden,
+                        current: document.getElementById('theme-current').dataset.theme,
+                        stage: document.getElementById('theme-preview').dataset.theme,
+                        currentCaption: document.getElementById('theme-current-label').textContent,
+                        previewCaption: document.getElementById('theme-preview-label').textContent,
+                        previewMuted: !document.getElementById('theme-preview-label')
+                            .classList.contains('has-preview'),
+                        saved: localStorage.getItem('millivolt.theme'),
+                        previewRows: document.querySelectorAll('#theme-menu .is-preview').length,
+                        statusLog: log,
+                        focus: document.activeElement?.dataset.themeId,
+                    };
+                }""")
+                require(chosen['theme'] == 'forest' and chosen['open'] and
+                        chosen['current'] == 'forest' and chosen['stage'] == 'forest', chosen)
+                require(chosen['currentCaption'] == 'Current: Forest / Black' and
+                        chosen['previewCaption'] == 'Preview: same' and chosen['previewMuted'], chosen)
+                require(chosen['saved'] == '{"theme":"forest","mode":"black"}' and
+                        chosen['previewRows'] == 0, chosen)
+                require(chosen['focus'] == 'forest', chosen)
+                require(len(chosen['statusLog']) == 1 and
+                        chosen['statusLog'][0] == 'Current: Forest / Black', chosen)
+
+                # A surface hover composes with the committed palette: the
+                # preview pane shows Forest / Clear while the current pane and
+                # the root stay on the committed Forest / Black.
+                await page.hover('[data-mode-id="clear"]')
+                surface_preview = await page.evaluate("""() => {
+                    const stage = document.getElementById('theme-preview');
+                    const current = document.getElementById('theme-current');
+                    const stageStyle = getComputedStyle(stage);
+                    const currentStyle = getComputedStyle(current);
+                    const clear = document.querySelector('[data-mode-id="clear"]');
+                    return {
+                        stage: stage.dataset.theme,
+                        stageMode: stage.dataset.mode,
+                        current: current.dataset.theme,
+                        currentMode: current.dataset.mode,
+                        root: document.documentElement.dataset.theme,
+                        rootMode: document.documentElement.dataset.mode,
+                        caption: document.getElementById('theme-preview-label').textContent,
+                        currentCaption: document.getElementById('theme-current-label').textContent,
+                        stageBg: stageStyle.getPropertyValue('--bg').trim(),
+                        currentBg: currentStyle.getPropertyValue('--bg').trim(),
+                        stageScheme: stageStyle.colorScheme,
+                        currentScheme: currentStyle.colorScheme,
+                        saved: localStorage.getItem('millivolt.theme'),
+                        open: !document.getElementById('theme-menu').hidden,
+                        checked: clear.getAttribute('aria-checked'),
+                        previewed: clear.classList.contains('is-preview'),
+                        previewRows: document.querySelectorAll('#theme-menu .is-preview').length,
+                    };
+                }""")
+                require(surface_preview['stage'] == 'forest' and
+                        surface_preview['stageMode'] == 'clear' and
+                        surface_preview['current'] == 'forest' and
+                        surface_preview['currentMode'] == 'black', surface_preview)
+                require(surface_preview['caption'] == 'Preview: Forest / Clear' and
+                        surface_preview['currentCaption'] == 'Current: Forest / Black', surface_preview)
+                require(surface_preview['stageBg'] == '#eef6ef' and
+                        surface_preview['currentBg'] == '#0f1713' and
+                        surface_preview['stageScheme'] == 'light' and
+                        surface_preview['currentScheme'] == 'dark', surface_preview)
+                require(surface_preview['root'] == 'forest' and
+                        surface_preview['rootMode'] == 'black' and surface_preview['open'],
+                        surface_preview)
+                require(surface_preview['saved'] == '{"theme":"forest","mode":"black"}' and
+                        surface_preview['checked'] == 'false' and
+                        surface_preview['previewed'] and
+                        surface_preview['previewRows'] == 1, surface_preview)
+
+                # Moving the pointer off the surface control restores the
+                # committed preview without committing the candidate.
+                await page.mouse.move(8, 8)
+                surface_left = await page.evaluate("""() => ({
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    stageMode: document.getElementById('theme-preview').dataset.mode,
+                    current: document.getElementById('theme-current').dataset.theme,
+                    currentMode: document.getElementById('theme-current').dataset.mode,
+                    root: document.documentElement.dataset.theme,
+                    rootMode: document.documentElement.dataset.mode,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    currentCaption: document.getElementById('theme-current-label').textContent,
+                    open: !document.getElementById('theme-menu').hidden,
+                    saved: localStorage.getItem('millivolt.theme'),
+                    previewRows: document.querySelectorAll('#theme-menu .is-preview').length,
+                })""")
+                require(surface_left['stage'] == 'forest' and surface_left['stageMode'] == 'black' and
+                        surface_left['current'] == 'forest' and
+                        surface_left['currentMode'] == 'black', surface_left)
+                require(surface_left['caption'] == 'Preview: same' and
+                        surface_left['currentCaption'] == 'Current: Forest / Black', surface_left)
+                require(surface_left['root'] == 'forest' and surface_left['rootMode'] == 'black' and
+                        surface_left['open'] and surface_left['previewRows'] == 0, surface_left)
+                require(surface_left['saved'] == '{"theme":"forest","mode":"black"}', surface_left)
+                await page.click('[data-mode-id="clear"]')
+                await page.wait_for_timeout(220)
+                cleared = await page.evaluate("""() => {
+                    const rootStyle = getComputedStyle(document.documentElement);
+                    return {
+                        theme: document.documentElement.dataset.theme,
+                        mode: document.documentElement.dataset.mode,
+                        open: !document.getElementById('theme-menu').hidden,
+                        headerShadow: getComputedStyle(document.querySelector('header')).boxShadow,
+                        menuShadow: getComputedStyle(document.getElementById('theme-menu')).boxShadow,
+                        shadowRgb: rootStyle.getPropertyValue('--shadow-rgb').trim(),
+                        veilRgb: rootStyle.getPropertyValue('--veil-rgb').trim(),
+                        veilStrong: rootStyle.getPropertyValue('--veil-strong').trim(),
+                        veilSoft: rootStyle.getPropertyValue('--veil-soft').trim(),
+                        stageScheme: getComputedStyle(
+                            document.getElementById('theme-preview')).colorScheme,
+                        currentScheme: getComputedStyle(
+                            document.getElementById('theme-current')).colorScheme,
+                    };
+                }""")
+                require(cleared['theme'] == 'forest' and cleared['mode'] == 'clear' and cleared['open'], cleared)
+                require(cleared['shadowRgb'] == '38, 58, 44' and
+                        cleared['veilRgb'] == '30, 48, 36', cleared)
+                require('38, 58, 44' in cleared['headerShadow'], cleared)
+                require('38, 58, 44' in cleared['menuShadow'], cleared)
+                require('30, 48, 36' in cleared['veilStrong'] and
+                        '30, 48, 36' in cleared['veilSoft'], cleared)
+                require('.6' in cleared['veilStrong'] and '.55' in cleared['veilSoft'], cleared)
+                require(cleared['stageScheme'] == 'light' and cleared['currentScheme'] == 'light', cleared)
+                await page.click('#theme-reset')
+                reset = await page.evaluate("""() => ({
+                    theme: document.documentElement.dataset.theme,
+                    mode: document.documentElement.dataset.mode,
+                    open: !document.getElementById('theme-menu').hidden,
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(reset == {'theme': 'instrument', 'mode': 'black', 'open': True,
+                                  'saved': '{"theme":"instrument","mode":"black"}'}, reset)
+                # The mounted plot can be sparse during the fixture run, so
+                # prove the cascade on the real vendored stylesheet with the
+                # same DOM shape uPlot creates: root uplot/u-hz, u-over child,
+                # u-cursor-x grandchild.
+                uplot = await page.evaluate("""() => {
+                    const fixture = document.createElement('div');
+                    fixture.className = 'uplot u-hz';
+                    fixture.style.position = 'fixed';
+                    fixture.style.left = '-9999px';
+                    const over = document.createElement('div');
+                    over.className = 'u-over';
+                    const cursor = document.createElement('div');
+                    cursor.className = 'u-cursor-x';
+                    over.appendChild(cursor);
+                    fixture.appendChild(over);
+                    document.body.appendChild(fixture);
+                    const probe = document.createElement('span');
+                    probe.style.color = 'var(--muted)';
+                    document.body.appendChild(probe);
+                    const style = getComputedStyle(cursor);
+                    const opts = upOpts(600, 150);
+                    const result = {
+                        color: style.borderRightColor,
+                        expected: getComputedStyle(probe).color,
+                        style: style.borderRightStyle,
+                        disabled: opts.cursor.y === false && opts.select.show === false,
+                    };
+                    probe.remove();
+                    fixture.remove();
+                    return result;
+                }""")
+                require(uplot['color'] == uplot['expected'] and uplot['style'] == 'dashed' and
+                        uplot['disabled'], uplot)
+
+                # Programmatic (assistive-technology) activation commits a row
+                # without moving DOM focus. The committed panes and the polite
+                # status must agree, so no stale candidate line survives.
+                at_activation = await page.evaluate("""() => {
+                    const reset = document.getElementById('theme-reset');
+                    reset.focus();
+                    const forest = document.querySelector('[data-theme-id="forest"]');
+                    forest.dispatchEvent(new MouseEvent('mouseenter', {bubbles: true}));
+                    const before = {
+                        stage: document.getElementById('theme-preview').dataset.theme,
+                        status: document.getElementById('theme-status').textContent,
+                    };
+                    forest.click();
+                    return {
+                        before,
+                        theme: document.documentElement.dataset.theme,
+                        focus: document.activeElement?.id,
+                        stage: document.getElementById('theme-preview').dataset.theme,
+                        status: document.getElementById('theme-status').textContent,
+                        caption: document.getElementById('theme-preview-label').textContent,
+                        previewMuted: !document.getElementById('theme-preview-label')
+                            .classList.contains('has-preview'),
+                    };
+                }""")
+                require(at_activation['before'] == {'stage': 'forest', 'status': ''},
+                        at_activation)
+                require(at_activation['theme'] == 'forest' and
+                        at_activation['focus'] == 'theme-reset' and
+                        at_activation['stage'] == 'forest' and
+                        at_activation['status'] == '' and
+                        at_activation['caption'] == 'Preview: same' and
+                        at_activation['previewMuted'], at_activation)
+                await page.click('#theme-reset')
+
+                # Close, Escape and an outside click share one cleanup. Each is
+                # exercised with a live keyboard candidate: the committed pair,
+                # storage and both panes stay put, the candidate line clears and
+                # focus never remains on a hidden row.
+                await page.focus('[data-theme-id="rose"]')
+                candidate_before_close = await page.evaluate("""() => ({
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    status: document.getElementById('theme-status').textContent,
+                })""")
+                require(candidate_before_close == {'stage': 'rose',
+                        'status': 'Preview: Rose / Black'}, candidate_before_close)
+                await page.evaluate(
+                    "document.getElementById('theme-close').click()")
+                closed = await page.evaluate("""() => ({
+                    open: !document.getElementById('theme-menu').hidden,
+                    focus: document.activeElement?.id,
+                    theme: document.documentElement.dataset.theme,
+                    mode: document.documentElement.dataset.mode,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    stageMode: document.getElementById('theme-preview').dataset.mode,
+                    status: document.getElementById('theme-status').textContent,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    previewMuted: !document.getElementById('theme-preview-label')
+                        .classList.contains('has-preview'),
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(not closed['open'] and closed['focus'] == 'btn-theme', closed)
+                require(closed['theme'] == 'instrument' and closed['mode'] == 'black' and
+                        closed['stage'] == 'instrument' and closed['stageMode'] == 'black', closed)
+                require(closed['status'] == '' and closed['caption'] == 'Preview: same' and
+                        closed['previewMuted'] and
+                        closed['saved'] == '{"theme":"instrument","mode":"black"}', closed)
+                await page.click('#btn-theme')
+                await page.focus('[data-theme-id="ember"]')
+                await page.keyboard.press('Escape')
+                escaped = await page.evaluate("""() => ({
+                    open: !document.getElementById('theme-menu').hidden,
+                    focus: document.activeElement?.id,
+                    theme: document.documentElement.dataset.theme,
+                    mode: document.documentElement.dataset.mode,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    stageMode: document.getElementById('theme-preview').dataset.mode,
+                    status: document.getElementById('theme-status').textContent,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    previewMuted: !document.getElementById('theme-preview-label')
+                        .classList.contains('has-preview'),
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(not escaped['open'] and escaped['focus'] == 'btn-theme', escaped)
+                require(escaped['theme'] == 'instrument' and escaped['mode'] == 'black' and
+                        escaped['stage'] == 'instrument' and escaped['stageMode'] == 'black', escaped)
+                require(escaped['status'] == '' and escaped['caption'] == 'Preview: same' and
+                        escaped['previewMuted'] and
+                        escaped['saved'] == '{"theme":"instrument","mode":"black"}', escaped)
+                await page.click('#btn-theme')
+                await page.focus('[data-theme-id="nord"]')
+                await page.evaluate(
+                    "document.body.dispatchEvent(new MouseEvent('click', {bubbles: true}))")
+                outside = await page.evaluate("""() => ({
+                    open: !document.getElementById('theme-menu').hidden,
+                    focusInside: document.getElementById('theme-menu')
+                        .contains(document.activeElement),
+                    focus: document.activeElement?.id,
+                    theme: document.documentElement.dataset.theme,
+                    mode: document.documentElement.dataset.mode,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    stageMode: document.getElementById('theme-preview').dataset.mode,
+                    status: document.getElementById('theme-status').textContent,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    previewMuted: !document.getElementById('theme-preview-label')
+                        .classList.contains('has-preview'),
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(not outside['open'] and not outside['focusInside'] and
+                        outside['focus'] == 'btn-theme', outside)
+                require(outside['theme'] == 'instrument' and outside['mode'] == 'black' and
+                        outside['stage'] == 'instrument' and outside['stageMode'] == 'black', outside)
+                require(outside['status'] == '' and outside['caption'] == 'Preview: same' and
+                        outside['previewMuted'] and
+                        outside['saved'] == '{"theme":"instrument","mode":"black"}', outside)
+
+                # The trigger's arrows preview without committing. A closed
+                # trigger opens on the checked palette; an open trigger moves
+                # the keyboard cursor so Enter applies the focused candidate.
+                await page.focus('#btn-theme')
+                await page.keyboard.press('ArrowDown')
+                trigger_open = await page.evaluate("""() => ({
+                    theme: document.documentElement.dataset.theme,
+                    open: !document.getElementById('theme-menu').hidden,
+                    focus: document.activeElement?.dataset.themeId,
+                })""")
+                require(trigger_open['theme'] == 'instrument' and trigger_open['open'] and
+                        trigger_open['focus'] == 'instrument', trigger_open)
+                await page.focus('#btn-theme')
+                await page.keyboard.press('ArrowDown')
+                trigger_arrow = await page.evaluate("""() => ({
+                    theme: document.documentElement.dataset.theme,
+                    open: !document.getElementById('theme-menu').hidden,
+                    focus: document.activeElement?.dataset.themeId,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    caption: document.getElementById('theme-preview-label').textContent,
+                    status: document.getElementById('theme-status').textContent,
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(trigger_arrow['theme'] == 'instrument' and trigger_arrow['open'] and
+                        trigger_arrow['focus'] == 'slate' and trigger_arrow['stage'] == 'slate' and
+                        trigger_arrow['caption'] == 'Preview: Slate / Black' and
+                        trigger_arrow['status'] == 'Preview: Slate / Black' and
+                        trigger_arrow['saved'] == '{"theme":"instrument","mode":"black"}', trigger_arrow)
+                await page.keyboard.press('Enter')
+                trigger_commit = await page.evaluate("""() => ({
+                    theme: document.documentElement.dataset.theme,
+                    open: !document.getElementById('theme-menu').hidden,
+                    focus: document.activeElement?.dataset.themeId,
+                    current: document.getElementById('theme-current').dataset.theme,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    currentCaption: document.getElementById('theme-current-label').textContent,
+                    previewCaption: document.getElementById('theme-preview-label').textContent,
+                    saved: localStorage.getItem('millivolt.theme'),
+                })""")
+                require(trigger_commit['theme'] == 'slate' and trigger_commit['open'] and
+                        trigger_commit['focus'] == 'slate' and
+                        trigger_commit['current'] == 'slate' and trigger_commit['stage'] == 'slate' and
+                        trigger_commit['currentCaption'] == 'Current: Slate / Black' and
+                        trigger_commit['previewCaption'] == 'Preview: same', trigger_commit)
+
+                # Roving tabindex: the arrow cursor owns the group's single tab
+                # stop, so Tab out and back returns to the preview row rather
+                # than the committed row.
+                await page.keyboard.press('ArrowDown')
+                roving = await page.evaluate("""() => ({
+                    focus: document.activeElement?.dataset.themeId,
+                    slate: document.querySelector('[data-theme-id="slate"]').tabIndex,
+                    midnight: document.querySelector('[data-theme-id="midnight"]').tabIndex,
+                    stops: [...document.querySelectorAll('[data-theme-id]')]
+                        .filter(option => option.tabIndex === 0).length,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    status: document.getElementById('theme-status').textContent,
+                })""")
+                require(roving == {'focus': 'midnight', 'slate': -1, 'midnight': 0,
+                                   'stops': 1, 'stage': 'midnight',
+                                   'status': 'Preview: Midnight / Black'}, roving)
+                await page.keyboard.press('Tab')
+                left_group = await page.evaluate("""() => ({
+                    inPalette: !!document.activeElement.closest('#theme-list'),
+                    id: document.activeElement?.id,
+                    midnight: document.querySelector('[data-theme-id="midnight"]').tabIndex,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    status: document.getElementById('theme-status').textContent,
+                })""")
+                require(not left_group['inPalette'] and left_group['id'] == 'theme-reset' and
+                        left_group['midnight'] == 0 and left_group['stage'] == 'slate' and
+                        left_group['status'] == '', left_group)
+                await page.keyboard.press('Shift+Tab')
+                returned = await page.evaluate("""() => ({
+                    focus: document.activeElement?.dataset.themeId,
+                    midnight: document.querySelector('[data-theme-id="midnight"]').tabIndex,
+                    stops: [...document.querySelectorAll('[data-theme-id]')]
+                        .filter(option => option.tabIndex === 0).length,
+                    stage: document.getElementById('theme-preview').dataset.theme,
+                    status: document.getElementById('theme-status').textContent,
+                })""")
+                require(returned == {'focus': 'midnight', 'midnight': 0, 'stops': 1,
+                                     'stage': 'midnight',
+                                     'status': 'Preview: Midnight / Black'}, returned)
+                await page.click('#theme-reset')
+                await page.click('#theme-close')
+
+                # A short window hides the comparator, preview line and hint;
+                # above 800px the tray is the single vertical scroller, and a
+                # reopen brings the saved palette into view instead of keeping
+                # an arbitrary previous offset.
+                short_checks = []
+                for viewport in ({'width': 1440, 'height': 650},
+                                 {'width': 1024, 'height': 400}):
+                    await page.set_viewport_size(viewport)
+                    await page.evaluate(
+                        'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                    await page.evaluate("""() => {
+                        const menu = document.getElementById('theme-menu');
+                        if (!menu.hidden) document.getElementById('theme-close').click();
+                    }""")
+                    await page.click('#btn-theme')
+                    short = await page.evaluate("""async () => {
+                        const menu = document.getElementById('theme-menu');
+                        const footer = menu.querySelector('.theme-ft');
+                        const caption = menu.querySelector('.theme-caption-bar');
+                        const mode = document.getElementById('theme-mode');
+                        const list = document.getElementById('theme-list');
+                        const scrollable = menu.scrollHeight > menu.clientHeight + 1;
+                        menu.scrollTop = menu.scrollHeight;
+                        await new Promise(r => requestAnimationFrame(r));
+                        const rect = footer.getBoundingClientRect();
+                        const box = menu.getBoundingClientRect();
+                        return {
+                            open: !menu.hidden,
+                            scrollable,
+                            scrollTop: menu.scrollTop,
+                            footerVisible: rect.top >= box.top - 1 && rect.bottom <= innerHeight + 1,
+                            horizontal: menu.scrollWidth > menu.clientWidth + 1,
+                            panes: getComputedStyle(menu.querySelector('.theme-panes')).display,
+                            previewCaption: getComputedStyle(
+                                document.getElementById('theme-preview-label')).display,
+                            captionVisible: getComputedStyle(caption).display !== 'none',
+                            currentCaption: document.getElementById('theme-current-label').textContent,
+                            surfaceVisible: getComputedStyle(mode).display !== 'none',
+                            hintHidden: getComputedStyle(menu.querySelector('.theme-hintbar')).display === 'none',
+                            listScrolls: list.scrollHeight > list.clientHeight + 1,
+                            listOverflow: getComputedStyle(list).overflowY,
+                        };
+                    }""")
+                    require(short['open'] and short['footerVisible'], short)
+                    require(not short['horizontal'] and short['panes'] == 'none' and
+                            short['previewCaption'] == 'none' and short['captionVisible'] and
+                            short['currentCaption'] == 'Current: Instrument / Black' and
+                            short['surfaceVisible'] and short['hintHidden'] and
+                            not short['listScrolls'] and short['listOverflow'] == 'visible', short)
+                    reopened = None
+                    if short['scrollable']:
+                        await page.evaluate(
+                            "document.getElementById('theme-menu').scrollTop = "
+                            "document.getElementById('theme-menu').scrollHeight")
+                        await page.click('#theme-close')
+                        await page.click('#btn-theme')
+                        reopened = await page.evaluate("""() => {
+                            const menu = document.getElementById('theme-menu');
+                            const checked = menu.querySelector(
+                                '.theme-opt[aria-checked="true"]').getBoundingClientRect();
+                            const box = menu.getBoundingClientRect();
+                            return {
+                                scrollTop: menu.scrollTop,
+                                checkedVisible: checked.top >= box.top - 1 &&
+                                    checked.bottom <= box.bottom + 1,
+                                currentCaption: document.getElementById(
+                                    'theme-current-label').textContent,
+                                panes: getComputedStyle(
+                                    document.querySelector('.theme-panes')).display,
+                            };
+                        }""")
+                        require(reopened['checkedVisible'] and
+                                reopened['currentCaption'] == 'Current: Instrument / Black' and
+                                reopened['panes'] == 'none', reopened)
+                    short_checks.append({'viewport': viewport, **short, 'reopened': reopened})
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+                await page.click('#theme-close')
+
+                # A narrow fine-pointer window is compact too: the width, not
+                # the pointer type, owns the comparator.
+                await page.set_viewport_size({'width': 800, 'height': 1000})
+                await page.evaluate(
+                    'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                await page.click('#btn-nav')
+                await page.click('#btn-theme')
+                narrow = await page.evaluate("""() => {
+                    const menu = document.getElementById('theme-menu');
+                    const list = document.getElementById('theme-list');
+                    const box = list.getBoundingClientRect();
+                    const rows = [...list.querySelectorAll('.theme-opt')].filter(row => {
+                        const rect = row.getBoundingClientRect();
+                        return rect.top >= box.top - 1 && rect.bottom <= box.bottom + 1;
+                    });
+                    return {
+                        fine: matchMedia('(pointer: fine)').matches,
+                        hover: matchMedia('(hover: hover)').matches,
+                        panes: getComputedStyle(menu.querySelector('.theme-panes')).display,
+                        previewCaption: getComputedStyle(
+                            document.getElementById('theme-preview-label')).display,
+                        hint: getComputedStyle(menu.querySelector('.theme-hintbar')).display,
+                        caption: getComputedStyle(menu.querySelector('.theme-caption-bar')).display,
+                        rows: rows.length,
+                        listScrolls: list.scrollHeight > list.clientHeight + 1,
+                    };
+                }""")
+                require(narrow['fine'] and narrow['hover'], narrow)
+                require(narrow['panes'] == 'none' and narrow['previewCaption'] == 'none' and
+                        narrow['hint'] == 'none' and narrow['caption'] != 'none' and
+                        narrow['rows'] == 8 and not narrow['listScrolls'], narrow)
+                await page.click('#theme-close')
+                await page.click('#btn-nav')
+                await page.set_viewport_size({'width': 1440, 'height': 1000})
+
+                # On a phone the tray lives inside the nav flyout's content box:
+                # no horizontal flyout scroll and 44px touch targets.
+                await page.set_viewport_size({'width': 390, 'height': 844})
+                await page.click('#btn-nav')
+                await page.click('#btn-theme')
+                tray_fits = []
+                for width in (390, 360, 320):
+                    await page.set_viewport_size({'width': width, 'height': 844})
+                    state = await page.evaluate("""async () => {
+                        await new Promise(r => requestAnimationFrame(r));
+                        const fly = document.getElementById('hdr-actions');
+                        const menu = document.getElementById('theme-menu');
+                        const captionBar = menu.querySelector('.theme-caption-bar');
+                        const style = getComputedStyle(fly);
+                        const flyRect = fly.getBoundingClientRect();
+                        const menuRect = menu.getBoundingClientRect();
+                        const left = flyRect.left + parseFloat(style.borderLeftWidth) + parseFloat(style.paddingLeft);
+                        const right = flyRect.right - parseFloat(style.borderRightWidth) - parseFloat(style.paddingRight);
+                        const heights = selector => [...menu.querySelectorAll(selector)]
+                            .map(node => node.getBoundingClientRect().height);
+                        const modeHeights = heights('.theme-mode-opt');
+                        const paletteHeights = heights('.theme-opt');
+                        const footerHeights = heights('.theme-ft .btn');
+                        const themeBtn = document.getElementById('btn-theme');
+                        const themeIcon = themeBtn.querySelector('svg.hdr-ico');
+                        const themeLabel = themeBtn.querySelector('.hdr-btn-label');
+                        const themeRect = themeBtn.getBoundingClientRect();
+                        const iconRect = themeIcon.getBoundingClientRect();
+                        const labelRect = themeLabel.getBoundingClientRect();
+                        const modeRect = document.getElementById('theme-mode').getBoundingClientRect();
+                        const barRect = captionBar.getBoundingClientRect();
+                        const barStyle = getComputedStyle(captionBar);
+                        const barInner = barRect.width - parseFloat(barStyle.paddingLeft) -
+                            parseFloat(barStyle.paddingRight) -
+                            parseFloat(barStyle.borderLeftWidth) -
+                            parseFloat(barStyle.borderRightWidth);
+                        const hints = [...menu.querySelectorAll('.theme-hint')];
+                        const names = [...menu.querySelectorAll('.theme-name')];
+                        const swatches = [...menu.querySelectorAll('.theme-swatch')];
+                        return {
+                            open: fly.classList.contains('is-open') && !menu.hidden,
+                            menuWidth: Math.round(menuRect.width),
+                            contentWidth: Math.round(right - left),
+                            inside: menuRect.left >= left - 1 && menuRect.right <= right + 1,
+                            horizontal: fly.scrollWidth > fly.clientWidth + 1 ||
+                                menu.scrollWidth > menu.clientWidth + 1,
+                            modeCount: modeHeights.length,
+                            paletteCount: paletteHeights.length,
+                            footerCount: footerHeights.length,
+                            minMode: Math.min(...modeHeights),
+                            minPalette: Math.min(...paletteHeights),
+                            minFooter: Math.min(...footerHeights),
+                            modeInCaption: document.getElementById('theme-mode')
+                                .closest('.theme-caption-bar') === captionBar,
+                            currentCaption: document.getElementById('theme-current-label').textContent,
+                            previewCaption: getComputedStyle(
+                                document.getElementById('theme-preview-label')).display,
+                            barDirection: getComputedStyle(captionBar).flexDirection,
+                            modeWidth: Math.round(modeRect.width),
+                            barWidth: Math.round(barInner),
+                            hintVisible: hints.some(hint => getComputedStyle(hint).display !== 'none'),
+                            nameCount: names.length,
+                            swatchCount: swatches.length,
+                            namesVisible: names.every(name =>
+                                name.textContent.trim() !== '' &&
+                                name.getBoundingClientRect().width > 0),
+                            themeWidth: themeRect.width,
+                            themeHeight: themeRect.height,
+                            iconWidth: iconRect.width,
+                            labelRight: labelRect.right,
+                            themeRight: themeRect.right,
+                            pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
+                        };
+                    }""")
+                    require(state['open'] and state['inside'] and not state['horizontal'], state)
+                    require(state['menuWidth'] <= state['contentWidth'], state)
+                    require(state['modeCount'] == 2 and state['paletteCount'] == 8 and state['footerCount'] == 2, state)
+                    require(state['minMode'] >= 44 and state['minFooter'] >= 44 and state['minPalette'] >= 44, state)
+                    require(state['modeInCaption'] and state['currentCaption'].startswith('Current: ') and
+                            state['previewCaption'] == 'none', state)
+                    require(state['nameCount'] == 8 and state['swatchCount'] == 8 and
+                            state['namesVisible'], state)
+                    if width <= 360:
+                        require(state['barDirection'] == 'column' and
+                                abs(state['modeWidth'] - state['barWidth']) <= 2 and
+                                not state['hintVisible'], state)
+                    require(state['themeWidth'] > 100 and state['themeHeight'] >= 44, state)
+                    require(15.5 <= state['iconWidth'] <= 16.5, state)
+                    require(state['labelRight'] <= state['themeRight'] + 0.5, state)
+                    require(not state['pageOverflow'], state)
+                    tray_fits.append({'width': width, **state})
+                await page.set_viewport_size({'width': 390, 'height': 844})
+                await page.click('#theme-close')
+                await page.click('#btn-nav')
+                results.append({'theme_tray': {'tray': tray_state, 'preview': preview,
+                    'left_tray': left_tray, 'chosen': chosen,
+                    'surface_preview': surface_preview, 'surface_left': surface_left,
+                    'cleared': cleared, 'reset': reset, 'closed': closed, 'escaped': escaped,
+                    'trigger_open': trigger_open, 'trigger_arrow': trigger_arrow,
+                    'trigger_commit': trigger_commit, 'uplot': uplot,
+                    'at_activation': at_activation, 'roving': roving,
+                    'returned': returned,
+                    'short': short_checks, 'narrow': narrow, 'tray_fits': tray_fits}})
+
+                # A coarse-pointer device has no hover preview, so the tray
+                # must not advertise the hover gesture. On a phone the nav
+                # flyout is the only vertical scroller: a touch pan over the
+                # tray must move #hdr-actions, with Reset/Close reachable.
+                touch_context = await browser.new_context(
+                    viewport={'width': 390, 'height': 844}, has_touch=True,
+                    is_mobile=True, service_workers='block')
+                try:
+                    await touch_context.route(
+                        '**/*', lambda route: browser_route(route, base, errors))
+                    await operator_signin(touch_context, base)
+                    touch_page = await touch_context.new_page()
+                    touch_page.on('pageerror', lambda error: errors.append(str(error)))
+                    await touch_page.goto(base + '/', wait_until='domcontentloaded')
+                    await touch_page.wait_for_function('chartAgg && explorerAgg && lastData')
+                    await touch_page.click('#btn-nav')
+                    await touch_page.click('#btn-theme')
+                    touch_state = await touch_page.evaluate("""() => {
+                        const size = id => {
+                            const rect = document.getElementById(id).getBoundingClientRect();
+                            return { width: rect.width, height: rect.height };
+                        };
+                        const menu = document.getElementById('theme-menu');
+                        return {
+                            coarse: matchMedia('(pointer: coarse)').matches,
+                            hoverNone: matchMedia('(hover: none)').matches,
+                            hint: getComputedStyle(
+                                document.querySelector('.theme-hintbar')).display,
+                            panes: getComputedStyle(menu.querySelector('.theme-panes')).display,
+                            previewCaption: getComputedStyle(
+                                document.getElementById('theme-preview-label')).display,
+                            captionVisible: getComputedStyle(
+                                menu.querySelector('.theme-caption-bar')).display !== 'none',
+                            surfaceLabel: menu.querySelector('.theme-mode-label')?.textContent,
+                            currentCaption: document.getElementById('theme-current-label').textContent,
+                            surfaceInCaption: document.getElementById('theme-mode')
+                                .closest('.theme-caption-bar') !== null,
+                            close: document.getElementById('theme-close')?.textContent,
+                            themeTrigger: size('btn-theme'),
+                            navTrigger: size('btn-nav'),
+                        };
+                    }""")
+                    require(touch_state['coarse'] and touch_state['hoverNone'] and
+                            touch_state['hint'] == 'none' and touch_state['panes'] == 'none',
+                            touch_state)
+                    require(touch_state['previewCaption'] == 'none' and
+                            touch_state['captionVisible'] and touch_state['surfaceInCaption'] and
+                            touch_state['surfaceLabel'] == 'Surface' and
+                            touch_state['currentCaption'].startswith('Current: ') and
+                            touch_state['close'] == 'Close', touch_state)
+                    require(all(touch_state[key][side] >= 44 for key in ('themeTrigger', 'navTrigger')
+                                for side in ('width', 'height')), touch_state)
+                    require(touch_state['themeTrigger']['width'] > 100, touch_state)
+                    touch_cdp = await touch_context.new_cdp_session(touch_page)
+                    touch_checks = []
+                    for height, palette in ((844, 'slate'), (600, 'forest')):
+                        if await touch_page.locator('#theme-menu').is_visible():
+                            await touch_page.click('#theme-close')
+                        nav_open = await touch_page.evaluate(
+                            "document.getElementById('hdr-actions').classList.contains('is-open')")
+                        if nav_open:
+                            await touch_page.click('#btn-nav')
+                        await touch_page.set_viewport_size({'width': 390, 'height': height})
+                        await touch_page.click('#btn-nav')
+                        await touch_page.click('#btn-theme')
+                        await touch_page.evaluate(
+                            'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                        point = await touch_page.evaluate("""async () => {
+                            const fly = document.getElementById('hdr-actions');
+                            const list = document.getElementById('theme-list');
+                            fly.scrollTop = Math.min(120,
+                                Math.max(0, fly.scrollHeight - fly.clientHeight - 1));
+                            await new Promise(r => requestAnimationFrame(r));
+                            const flyRect = fly.getBoundingClientRect();
+                            const option = [...list.querySelectorAll('.theme-opt')].find(node => {
+                                const rect = node.getBoundingClientRect();
+                                return rect.top >= flyRect.top + 8 &&
+                                    rect.bottom <= flyRect.bottom - 8;
+                            });
+                            if (!option) return null;
+                            const rect = option.getBoundingClientRect();
+                            return {
+                                before: fly.scrollTop,
+                                x: rect.left + rect.width / 2,
+                                y: rect.top + rect.height / 2,
+                            };
+                        }""")
+                        require(point is not None, {'height': height})
+                        before = point['before']
+                        # A real CDP touch pan, not a synthetic wheel: the
+                        # phone gesture must move the flyout's own scroller.
+                        end_y = max(8, point['y'] - 160)
+                        await touch_cdp.send('Input.dispatchTouchEvent', {
+                            'type': 'touchStart',
+                            'touchPoints': [{'x': point['x'], 'y': point['y'], 'id': 1,
+                                             'radiusX': 1, 'radiusY': 1, 'force': 1}],
+                        })
+                        for step in range(1, 9):
+                            y = point['y'] + (end_y - point['y']) * step / 8
+                            await touch_cdp.send('Input.dispatchTouchEvent', {
+                                'type': 'touchMove',
+                                'touchPoints': [{'x': point['x'], 'y': y, 'id': 1,
+                                                 'radiusX': 1, 'radiusY': 1, 'force': 1}],
+                            })
+                            await touch_page.wait_for_timeout(16)
+                        await touch_cdp.send('Input.dispatchTouchEvent', {
+                            'type': 'touchEnd', 'touchPoints': [],
+                        })
+                        await touch_page.wait_for_timeout(220)
+                        state = await touch_page.evaluate("""() => {
+                            const fly = document.getElementById('hdr-actions');
+                            const menu = document.getElementById('theme-menu');
+                            const list = document.getElementById('theme-list');
+                            return {
+                                scrollTop: fly.scrollTop,
+                                scrollable: fly.scrollHeight > fly.clientHeight + 1,
+                                menuOverflow: getComputedStyle(menu).overflowY,
+                                listOverflow: getComputedStyle(list).overflowY,
+                                listScrollTop: list.scrollTop,
+                                menuOpen: !menu.hidden,
+                            };
+                        }""")
+                        require(state['menuOpen'] and state['scrollable'], state)
+                        require(state['scrollTop'] > before,
+                                {'height': height, 'before': before, **state})
+                        require(state['menuOverflow'] in ('visible', 'clip') and
+                                state['listOverflow'] == 'visible', state)
+                        footer_state = await touch_page.evaluate("""async () => {
+                            const fly = document.getElementById('hdr-actions');
+                            fly.scrollTop = fly.scrollHeight;
+                            await new Promise(r => requestAnimationFrame(r));
+                            const footer = document.querySelector('#theme-menu .theme-ft')
+                                .getBoundingClientRect();
+                            const box = fly.getBoundingClientRect();
+                            return {
+                                footerVisible: footer.top >= box.top - 1 &&
+                                    footer.bottom <= box.bottom + 1 &&
+                                    footer.bottom <= innerHeight + 1,
+                                resetVisible: document.getElementById('theme-reset')
+                                    .getBoundingClientRect().bottom <= innerHeight + 1,
+                            };
+                        }""")
+                        require(footer_state['footerVisible'] and footer_state['resetVisible'],
+                                {'height': height, **footer_state})
+                        await touch_page.locator(
+                            f'[data-theme-id="{palette}"]').scroll_into_view_if_needed()
+                        await touch_page.locator(f'[data-theme-id="{palette}"]').click()
+                        applied = await touch_page.evaluate(
+                            'document.documentElement.dataset.theme')
+                        require(applied == palette, {'height': height, 'theme': applied})
+                        # A reopened tray (and its flyout) brings the saved
+                        # palette into view even after a deep scroll. Use
+                        # scripted clicks so Playwright's scroll-into-view does
+                        # not move the flyout for us.
+                        reopened = await touch_page.evaluate("""async (palette) => {
+                            const fly = document.getElementById('hdr-actions');
+                            fly.scrollTop = fly.scrollHeight;
+                            await new Promise(r => requestAnimationFrame(r));
+                            document.getElementById('theme-close').click();
+                            document.getElementById('btn-theme').dispatchEvent(
+                                new MouseEvent('click', {bubbles: true, detail: 1}));
+                            await new Promise(r => requestAnimationFrame(r));
+                            const checked = document.querySelector(
+                                `[data-theme-id="${palette}"]`).getBoundingClientRect();
+                            const flyBox = fly.getBoundingClientRect();
+                            return {
+                                flyScrollTop: fly.scrollTop,
+                                menuScrollTop: document.getElementById('theme-menu').scrollTop,
+                                checkedVisible: checked.top >= flyBox.top - 1 &&
+                                    checked.bottom <= flyBox.bottom + 1,
+                            };
+                        }""", palette)
+                        require(reopened['checkedVisible'],
+                                {'height': height, **reopened})
+                        touch_checks.append({'height': height, 'before': before,
+                                             'applied': applied, 'reopened': reopened,
+                                             **state, **footer_state})
+                    await touch_page.set_viewport_size({'width': 1024, 'height': 768})
+                    await touch_page.evaluate(
+                        'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
+                    coarse_desktop = await touch_page.evaluate("""() => {
+                        const rect = document.getElementById('btn-theme').getBoundingClientRect();
+                        return {
+                            coarse: matchMedia('(pointer: coarse)').matches,
+                            width: rect.width,
+                            height: rect.height,
+                            navVisible: getComputedStyle(document.getElementById('btn-nav')).display !== 'none',
+                            panes: getComputedStyle(document.querySelector('.theme-panes')).display,
+                            caption: getComputedStyle(document.querySelector('.theme-caption-bar')).display,
+                            previewCaption: getComputedStyle(
+                                document.getElementById('theme-preview-label')).display,
+                        };
+                    }""")
+                    require(coarse_desktop['coarse'] and
+                            abs(coarse_desktop['width'] - 44) <= 0.5 and
+                            abs(coarse_desktop['height'] - 44) <= 0.5 and
+                            not coarse_desktop['navVisible'], coarse_desktop)
+                    require(coarse_desktop['panes'] == 'none' and
+                            coarse_desktop['previewCaption'] == 'none' and
+                            coarse_desktop['caption'] != 'none', coarse_desktop)
+                    results.append({'theme_touch': {**touch_state,
+                                                   'coarse_desktop': coarse_desktop,
+                                                   'viewport_checks': touch_checks}})
+                finally:
+                    await touch_context.close()
                 await page.reload(wait_until='domcontentloaded')
                 await page.wait_for_function('chartAgg && explorerAgg && lastData')
                 require(await page.locator('#chart-preset').input_value() == 'latency', 'saved chart preset lost')

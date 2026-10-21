@@ -16,6 +16,7 @@ on:
       - 'scripts/build_site.py'
       - 'requirements-docs.txt'
       - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
   pull_request:
     paths:
       - 'docs/**'
@@ -25,6 +26,7 @@ on:
       - 'scripts/build_site.py'
       - 'requirements-docs.txt'
       - '.github/workflows/*.yml'
+      - '.github/workflows/*.yaml'
 
 permissions:
   contents: read
@@ -62,4 +64,6 @@ jobs:
       - name: Check workflow and automation policy
         run: python3 -B -O -m tests.python.workflows
       - name: Check documentation contracts
-        run: python3 -B -m tests.go test -mod=readonly ./internal/mcp -count=1
+        run: |
+          python3 -B -O -m tests.python.repository
+          python3 -B -m tests.go test -mod=readonly ./internal/mcp -count=1

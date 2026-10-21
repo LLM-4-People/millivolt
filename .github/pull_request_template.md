@@ -13,13 +13,19 @@ Closes #
 
 For a `main` promotion, merge with a merge commit. Squash, rebase, and direct
 pushes are disabled by the `main-testing-first` ruleset, which has no bypass
-actors. The `required` check verifies the testing ancestry and version bump.
+actors. The `required` check proves the head is the current `testing` tip, main
+is already merged back into `testing`, and the full gate succeeded for that
+commit or for the closest gated `testing` commit when only docs paths changed
+since it. Pending exact runs get a short bounded wait. It does not rerun the
+suite. Dependabot's `main` security PRs still run the full gate, and docs/site-only
+promotions skip the version and full-gate proofs but validate docs, workflow
+policy and the site.
 
 ## Main promotion
 
 Complete only when targeting `main`:
 
-- [ ] The head commit is already on `testing`.
+- [ ] The head commit is the current `testing` tip and `main` is already merged back into `testing`.
 - [ ] `VERSION` is newer than every existing `v*` release tag (Dependabot security and docs/site-only promotions skip this check).
 - [ ] I will merge with a merge commit and will not add a ruleset bypass.
 

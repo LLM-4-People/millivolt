@@ -179,7 +179,13 @@ headers and the limits of missing, conflicting or ambiguous declarations.
 The request table combines recent finalized records with current in-flight
 state during ordinary live use. Rows show status, retry information, latency,
 throughput, token/cache usage, tool calls, duration, queue time and reported cost.
-Its status selector and older-history paging operate on the current scope.
+Columns have fixed widths, so a live row finalizing from `streaming` to its
+recorded status never shifts the cells to its right. When the card is narrower
+than its fixed column budget, the table scrolls inside its own region. The
+region is keyboard-scrollable and labelled, and the long text values in its
+fixed columns carry their full value in a hover title; compact status pills and
+the actions button abbreviate by design. Its status selector and older-history paging
+operate on the current scope.
 
 ![Request table with recorded statuses, token usage, latency, throughput and cost](images/requests/table.png)
 
@@ -260,16 +266,46 @@ restart and failure behavior before using these controls.
 
 ### Theme
 
-Theme has two surfaces and eight accent palettes. Clear is the warm light
-surface; Black is the warm near-black default. Instrument (the default), Slate,
-Midnight, Nord, Forest, Rose, Ember and Contrast are available on either
-surface, so every palette works in both modes. Contrast is the maximum-separation
-palette, using black and signal yellow on either surface. The choice is
-stored in this browser only and is applied before the first paint, so a reload
-does not flash the default. Charts follow the selected palette; status colors
-and the browser's theme color follow the selected surface. The setting is
-presentation only: it does not change proxy behavior, stored history or the
-configuration revision.
+Theme has two surfaces and eight palettes. Each palette owns a complete
+surface family (base, panels, rail and borders), its accent family, and its
+shadow and veil hue, so a switch changes the shell rather than only a few
+accent edges. Clear is the light family; Black is the near-black family.
+Instrument (the default), Slate, Midnight, Nord, Forest, Rose, Ember and
+Contrast are available in both modes. Contrast is the maximum-separation
+palette: black with signal yellow in Black, white with black in Clear. The
+theme tray stays open while choosing and shows a two-pane comparator: the
+committed pair on the left and the candidate on the right. Both panes use the
+same token-faithful miniature with a three-color series legend; the captions
+outside the decorative panes name the committed and candidate pairs. The
+preview line stays muted while it reads "Preview: same" and takes primary ink
+only for a real candidate. Hovering or focusing a palette or surface updates
+only the preview pane and captions. Clicking, Enter or Space commits
+immediately and persists the pair; there is no apply step. Arrow keys, Home and
+End move focus and the preview cursor without committing, and the focused row
+keeps the group's single tab stop so Tab leaves and returns to it. The current
+surface's Clear/Black radios sit under a visible Surface label in the caption
+bar. Pointer activation commits without writing the polite candidate status;
+only keyboard focus announces a preview. The trigger's arrow keys open the tray
+on the saved palette; while open they move the preview cursor. Reset restores
+Instrument Black; Close only dismisses the tray.
+
+On touch or coarse pointers the comparator, preview line and hover hint are
+hidden, leaving the current caption, the surface control, all eight palette
+rows, Reset and Close. A window 800px wide or narrower uses the same compact
+picker inside the header actions flyout even with a fine pointer, and the
+flyout rather than the tray or palette list is the one vertical scroller. At a
+viewport height of 760px or below the comparator, preview line and hint are
+hidden. In windows wider than 800px the tray scrolls so every action remains
+reachable; narrower windows keep the header flyout as the single scroller. At
+360px or below the caption bar stacks into one column with a full-width surface
+control, and the palette hints are hidden while names and swatches remain.
+Reopening the tray or flyout brings the saved palette row into view instead of
+restoring an arbitrary previous scroll offset. The choice is stored in
+this browser only and is applied before the first paint, so a reload does not
+flash the default. Charts follow the selected palette; status colors follow the
+selected surface, and the browser's theme color follows the selected palette's
+rail. The setting is presentation only: it does not change proxy behavior,
+stored history or the configuration revision.
 
 ## Settings
 

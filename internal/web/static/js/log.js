@@ -684,6 +684,18 @@ function turnsCell(r) {
   return counts + dir + media;
 }
 
+// turnsTitle is the full-value tooltip for the turns cell. The compact cell
+// can clip a long triple or its media badge, so the counts and direction stay
+// recoverable on hover and for assistive technology.
+function turnsTitle(r) {
+  const tool = r.turns_tool > 0 ? `, ${r.turns_tool} tool` : '';
+  const role = r.last_turn_role ? `; responding to the ${r.last_turn_role} turn` : '';
+  const media = (r.images || r.attachments)
+    ? `; ${r.images||0} image${(r.images||0)!==1?'s':''}, ${r.attachments||0} attachment${(r.attachments||0)!==1?'s':''}`
+    : '';
+  return `${r.turns_user||0} user, ${r.turns_assistant||0} assistant${tool}${role}${media}`;
+}
+
 // debugBadge renders the dbg pill marking a request captured by a debug
 // session; liveStatusCell and finalizedStatusPill both concatenate it, so it
 // appears in the log rows and the drawer's status row alike. In the log row
@@ -756,8 +768,9 @@ function attemptPill(a) {
 function modelCell(r) {
   const raw = String((r && r.model) || '').trim();
   const canon = canonicalModel(raw);
-  const piv = entityPivot('model', canon);
-  return raw && canon !== raw ? `<span title="original: ${escapeHtml(raw)}">${piv}</span>` : piv;
+  const piv = entityPivot('model', canon, null, null,
+    raw && canon !== raw ? `original: ${raw}` : '');
+  return `<span class="req-model">${piv}</span>`;
 }
 
 function reqRow(r, sepLabel) {
@@ -779,17 +792,17 @@ function reqRow(r, sepLabel) {
     // "not counted yet", never a real number - show a bare … like every
     // other not-yet-known cell.
     return `<tr class="exp-row live-row" data-id="${escapeHtml(r.id)}">
-      <td style="color:var(--muted)">${new Date(r.start).toLocaleTimeString()}</td>
-      <td>${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</td>
+      <td style="color:var(--muted)" title="${escapeHtml(new Date(r.start).toLocaleString())}">${new Date(r.start).toLocaleTimeString()}</td>
+      <td><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
       <td>${liveStatusCell(r)}${liveRetry}</td>
-      <td>${r.ttft_ms ? fmtDur(r.ttft_ms) : '…'}</td>
+      <td title="${r.ttft_ms ? escapeHtml(fmtDur(r.ttft_ms)) : ''}">${r.ttft_ms ? fmtDur(r.ttft_ms) : '…'}</td>
       <td>-</td>
       <td>${inTok ? fmt(inTok) + '/…' : '…'}</td>
       <td>-</td>
-      <td style="color:var(--cyan)">${r.tool_calls||'-'}</td>
+      <td style="color:var(--cyan)" title="${r.tool_calls ? escapeHtml(String(r.tool_calls)) + ' tool calls' : ''}">${r.tool_calls||'-'}</td>
       <td>-</td>
       <td style="color:var(--muted)">…</td>
-      <td style="color:var(--muted)">${turnsCell(r)}</td>
+      <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
       <td>-</td>
       <td>-</td>
       <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
@@ -806,20 +819,33 @@ function reqRow(r, sepLabel) {
   // Cache as a percentage of input tokens (raw count stays in the drawer).
   const inTok = r.usage?.input_tokens || 0, cacheTok = r.usage?.cache_read_tokens || 0;
   const cachePct = inTok > 0 ? pct2(cacheTok, inTok) : null;
+  // One owner for each displayed cell and its recoverable tooltip. The fixed
+  // column widths can ellipsize a long value, so the cell title carries the
+  // same text (or the exact counts behind a compact one) for hover and
+  // assistive technology.
+  const start = new Date(r.start);
+  const timeText = start.toLocaleTimeString();
+  const tpsText = r.overall_tps ? r.overall_tps.toFixed(1) : '-';
+  const inOutText = `${fmt(r.usage?.input_tokens)}/${fmt(r.usage?.output_tokens)}`;
+  const inOutTitle = `${fmtFull(r.usage?.input_tokens)} input / ` +
+    `${fmtFull(r.usage?.output_tokens)} output tokens`;
+  const cacheTitle = `${cachePct != null ? cachePct + ' cache hit; ' : ''}` +
+    `${cacheTok ? fmt(cacheTok) + ' cached tokens' : 'no cached tokens'}`;
+  const costText = fmtMoney(r.cost);
   const main = `<tr class="exp-row ${drawerId===r.id ? 'expanding' : ''}" data-id="${escapeHtml(r.id)}">
-    <td style="color:var(--muted)">${new Date(r.start).toLocaleTimeString()}</td>
-    <td>${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</td>
+    <td style="color:var(--muted)" title="${escapeHtml(start.toLocaleString())}">${timeText}</td>
+    <td><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
-    <td>${fmtTTFT(r.ttft_ms)}</td>
-    <td>${r.overall_tps ? r.overall_tps.toFixed(1) : '-'}</td>
-    <td>${fmt(r.usage?.input_tokens)}/${fmt(r.usage?.output_tokens)}</td>
-    <td style="color:${cacheTok ? 'var(--accent2)' : 'var(--muted)'}" title="${cacheTok ? fmt(cacheTok) + ' cached tokens' : ''}">${cachePct != null ? cachePct : '-'}</td>
-    <td style="color:var(--cyan)">${r.tool_calls||'-'}</td>
-    <td>${escapeHtml(r.finish_reason||'-')}</td>
-    <td style="color:var(--muted)">${fmtDur(r.duration_ms)}</td>
-    <td style="color:var(--muted)">${turnsCell(r)}</td>
-    <td style="color:${r.queue_wait_ms ? 'var(--warn)' : 'var(--muted)'}">${r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '-'}</td>
-    <td>${fmtMoney(r.cost)}</td>
+    <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
+    <td title="${escapeHtml(r.overall_tps ? tpsText + ' tokens/s' : '')}">${tpsText}</td>
+    <td title="${escapeHtml(inOutTitle)}">${inOutText}</td>
+    <td style="color:${cacheTok ? 'var(--accent2)' : 'var(--muted)'}" title="${escapeHtml(cacheTitle)}">${cachePct != null ? cachePct : '-'}</td>
+    <td style="color:var(--cyan)" title="${r.tool_calls ? escapeHtml(String(r.tool_calls)) + ' tool calls' : ''}">${r.tool_calls||'-'}</td>
+    <td title="${escapeHtml(r.finish_reason||'')}">${escapeHtml(r.finish_reason||'-')}</td>
+    <td style="color:var(--muted)" title="${escapeHtml(fmtDur(r.duration_ms))}">${fmtDur(r.duration_ms)}</td>
+    <td style="color:var(--muted)" title="${escapeHtml(turnsTitle(r))}">${turnsCell(r)}</td>
+    <td style="color:${r.queue_wait_ms ? 'var(--warn)' : 'var(--muted)'}" title="${r.queue_wait_ms ? escapeHtml(fmtDur(r.queue_wait_ms)) : ''}">${r.queue_wait_ms ? fmtDur(r.queue_wait_ms) : '-'}</td>
+    <td title="estimated cost ${escapeHtml(costText)}">${costText}</td>
     <td><button type="button" class="hold-edit" data-open-req="${escapeHtml(r.id)}" aria-label="Open request details">›</button></td>
   </tr>`;
   // One collapsed sub-row per absorbed attempt (hidden until the badge toggle).
@@ -834,9 +860,9 @@ function reqRow(r, sepLabel) {
     const when = a.at ? new Date(a.at).toLocaleTimeString() : '-';
     const label = a.error_type || (a.status_code ? 'http ' + a.status_code : 'transport');
     return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
-      <td style="color:var(--muted)">${when}</td>
-      <td colspan="2" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${i + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span style="color:var(--muted)">${escapeHtml(label)}</span></td>
-      <td colspan="11" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}">${escapeHtml(a.error_msg || '-')}</td>
+      <td>${when}</td>
+      <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${i + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
+      <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}">${escapeHtml(a.error_msg || '-')}</td>
     </tr>`;
   }).join('');
   return sep + main + subs;
@@ -876,16 +902,41 @@ function renderRequests(recs) {
     rows[i] = reqRow(r, seps[i]);
     logHTML.set(r.id, { rec: r, sep: seps[i] });
   }
-  updateSection('tbl-requests', `<table>${REQ_THEAD}<tbody>${rows.join('')}</tbody></table>`);
+  updateSection('tbl-requests', `<table style="min-width:${REQ_MIN_WIDTH}px">${REQ_THEAD}<tbody>${rows.join('')}</tbody></table>`);
   restoreFocus(focus);
   scheduleLogFill();
 }
 
-// REQ_THEAD is the single source of truth for the request log's columns
-// (header row; rows are rendered by reqRow). REQ_COLS is derived from it -
-// the day-divider rows span the full table (one owner, never a second count).
-const REQ_THEAD = `<thead><tr><th>time</th><th>client · provider · model</th><th>status</th><th>ttft</th><th>tps</th><th>in/out</th><th>cache</th><th>tools</th><th>finish</th><th>dur</th><th>turns</th><th>queued</th><th>cost</th><th></th></tr></thead>`;
-const REQ_COLS = (REQ_THEAD.match(/<th>/g) || []).length;
+// REQ_COLUMNS is the single source of truth for request-log column identity
+// and width. Fixed widths keep a live-to-final rewrite from re-measuring every
+// column from the new cell text. REQ_COLS and REQ_MIN_WIDTH derive from it, so
+// the day-divider colspan and the table's horizontal scroll budget cannot
+// drift from the header.
+const REQ_COLUMNS = [
+  ['time', 100],
+  ['client · provider · model', 324],
+  ['status', 134],
+  ['ttft', 82],
+  ['tps', 70],
+  ['in/out', 128],
+  ['cache', 70],
+  ['tools', 52],
+  ['finish', 82],
+  ['dur', 76],
+  ['turns', 76],
+  ['queued', 60],
+  ['cost', 76],
+  ['', 34, 'Request actions'],
+];
+const REQ_COLS = REQ_COLUMNS.length;
+// Retry sub-rows keep the time cell, one label cell and one message cell. The
+// message span is derived from REQ_COLS so a new log column cannot silently
+// leave the sub-row short.
+const RETRY_LABEL_COLS = 2;
+const REQ_MIN_WIDTH = REQ_COLUMNS.reduce((sum, [, width]) => sum + width, 0);
+const REQ_THEAD =
+  `<colgroup>${REQ_COLUMNS.map(([, width]) => `<col style="width:${width}px">`).join('')}</colgroup>` +
+  `<thead><tr>${REQ_COLUMNS.map(([label, , name]) => `<th${name ? ` aria-label="${name}"` : ''}>${label}</th>`).join('')}</tr></thead>`;
 
 // Delegated row clicks - no inline onclick interpolating the record id.
 $('tbl-requests').addEventListener('click', e => {

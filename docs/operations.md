@@ -621,14 +621,34 @@ container's `/tmp` is a small tmpfs by design and never caps backup size.
 fingerprint is separate: it detects changed embedded frontend bytes, not a
 semantic release or a complete backend change.
 
-`main` is promotion-only. A promotion pull request from `testing` must have a
-head commit already on `testing`. A code-bearing promotion must also have a
-`VERSION` newer than every existing release tag; the `required` check enforces
-both. Docs/site-only promotions skip the version gate and do not rebuild images
-or cut a release. Merge with a merge commit. The release workflow tags that
-reviewed merge commit and publishes the image; it never pushes `main`. Dependabot
-security pull requests are the only other exception and do not cut a release by
-themselves. The full maintainer checklist lives in
+`main` is promotion-only. Full source, browser and live MCP integration, and
+native container checks run on all `testing` pull requests, code-bearing
+`testing` pushes, and manually pushed `v*` tags; docs and site-only pushes use
+`docs.yml`. They also run on Dependabot's `main` security PRs. An ordinary
+promotion pull request from `testing` requires its head to be the current
+`testing` tip, `main` to be already merged back into `testing`, and a
+successful full-gate record for that exact commit: the canonical `check.yml`
+push run's own check suite, with `checks` and both native container legs. When
+a final docs-only commit follows the closest gated `testing` commit, it reuses
+that gate if every path since it is docs/site-only; the fallback selects the
+closest gated testing commit from canonical `testing` push runs, with no
+commit-count bound. The proof polls
+pending exact check runs a bounded number of times and fails closed if they are
+still pending. For a code-bearing head, let the `testing` `check.yml` push gate
+finish before opening or re-running a promotion PR. A docs/site-only head has no
+canonical `check.yml` push run of its own, so wait for `docs.yml` or only the
+`required` docs validation. It does not rerun the suite. A code-bearing promotion must also have a `VERSION`
+newer than every existing release tag. Docs/site-only promotions skip the
+version and full-gate proofs, validate docs, workflow policy and the site in
+`required` within its ten-minute budget, and do not rebuild images or cut a
+release. Merge with a merge
+commit. The release
+workflow tags that reviewed merge commit and publishes the image; a code-bearing
+main push only reuses the reviewed merge and publishes. It never pushes
+`main`. Dependabot security pull requests are the only other exception and
+normally do not cut a release by themselves; an untagged pending `VERSION` can
+publish. A manually pushed `v*` tag ships exactly as
+tagged. The full maintainer checklist lives in
 [Contributing](../CONTRIBUTING.md#branch-workflow).
 
 `go run ./cmd/proxy -version` (or `/millivolt -version` in the image) prints
@@ -643,12 +663,23 @@ Use a published digest to pin exact bytes. Version tags identify releases but
 are not intrinsically immutable; moving branch and stable aliases can change.
 
 The [workflow](../.github/workflows/check.yml) runs source, race and browser
-checks, then native container smoke checks on Linux `amd64` and `arm64`.
-Publication is limited to this repository's pushes to `main`, matching
-release tags, and `testing`-branch pushes (which publish only the moving
-`testing` tag), and depends on those checks. A main push whose `VERSION` is
-already tagged, such as a Dependabot security merge, does not publish; the next
-versioned promotion includes it. Pull requests do not publish images.
+checks, then native container smoke checks on Linux `amd64` and `arm64` for all
+`testing` pull requests, code-bearing `testing` pushes, and manually pushed `v*`
+tags, and for Dependabot's `main` security PRs. Docs and site-only pushes use
+`docs.yml` instead. A normal
+promotion PR proves the current testing tip, merged-back main and the full-gate
+record for that commit, or for the closest gated testing commit with only docs
+changes after it; docs-only promotions validate the docs, workflow policy and
+site directly. The following code-bearing `main` push only reuses the reviewed
+merge and publishes.
+Publication is limited to this repository's pushes to `main`, matching release
+tags, and `testing`-branch pushes (which publish only the moving `testing` tag).
+The release `publish` job waits for `required`. The `publish-testing` job waits
+for `checks` and `container` instead, because a testing push has no promotion
+proof to wait for. A main push whose `VERSION` is already tagged, such as a
+Dependabot security merge, normally does not publish; if main carries an
+untagged pending `VERSION`, that push can publish it. Pull requests do not
+publish images.
 
 | Image tag | Meaning |
 | --- | --- |

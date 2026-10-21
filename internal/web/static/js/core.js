@@ -393,7 +393,9 @@ function restoreFocus(token) {
   let next = null;
   try { next = token.owner.querySelector(token.key); } catch (e) { return false; }
   if (!next || next === token.owner || next === active) return false;
-  next.focus();
+  // Focus restoration is a repaint concern, not navigation: a replaced row
+  // must not scroll the log (or the page) to the restored control.
+  next.focus({preventScroll: true});
   return document.activeElement === next;
 }
 

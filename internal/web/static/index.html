@@ -6,28 +6,6 @@
 <meta name="dashboard-version" content="__DASHBOARD_VERSION__">
 <meta name="theme-color" content="#100e0b">
 <meta name="theme-storage-key" content="millivolt.theme">
-<script>
-// Apply the stored theme and surface before the first paint. The meta tag
-// above owns the key; js/theme.js owns the registry, writes and validation.
-// This guard only removes the flash of the default pair.
-try {
-  var key = document.querySelector('meta[name="theme-storage-key"]');
-  var raw = key ? localStorage.getItem(key.content) : '';
-  if (raw) {
-    var saved = raw;
-    try { saved = JSON.parse(raw); } catch (e) {}
-    if (typeof saved === 'string') saved = { theme: saved };
-    if (saved && typeof saved === 'object') {
-      if (typeof saved.theme === 'string' && /^[a-z-]+$/.test(saved.theme)) {
-        document.documentElement.dataset.theme = saved.theme;
-      }
-      if (saved.mode === 'clear' || saved.mode === 'black') {
-        document.documentElement.dataset.mode = saved.mode;
-      }
-    }
-  }
-} catch (e) {}
-</script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="millivolt">
@@ -41,6 +19,34 @@ try {
 <link rel="stylesheet" href="/dash/css/themes.css?v=__DASHBOARD_VERSION__">
 <!-- BEGIN vendored uPlot v1.6.32 CSS (MIT - https://github.com/leeoniya/uPlot) -->
 <link rel="stylesheet" href="/dash/vendor/uplot.css?v=__DASHBOARD_VERSION__">
+<script>
+// Apply the stored theme and surface before the first paint, after the
+// stylesheets so computed palette tokens are available. The meta tag above
+// owns the key; js/theme.js owns the registry, writes and validation. This
+// guard only removes the flash of the default pair and publishes the resolved
+// rail to the browser chrome. The eight ids mirror THEMES in js/theme.js and
+// theme_check pins both sets.
+try {
+  var key = document.querySelector('meta[name="theme-storage-key"]');
+  var raw = key ? localStorage.getItem(key.content) : '';
+  if (raw) {
+    var saved = raw;
+    try { saved = JSON.parse(raw); } catch (e) {}
+    if (typeof saved === 'string') saved = { theme: saved };
+    if (saved && typeof saved === 'object') {
+      if (typeof saved.theme === 'string' && /^(instrument|slate|midnight|nord|forest|rose|ember|contrast)$/.test(saved.theme)) {
+        document.documentElement.dataset.theme = saved.theme;
+      }
+      if (saved.mode === 'clear' || saved.mode === 'black') {
+        document.documentElement.dataset.mode = saved.mode;
+      }
+    }
+  }
+  var themeMeta = document.querySelector('meta[name="theme-color"]');
+  var rail = getComputedStyle(document.documentElement).getPropertyValue('--rail').trim();
+  if (themeMeta && rail) themeMeta.setAttribute('content', rail);
+} catch (e) {}
+</script>
 <!-- BEGIN vendored uPlot v1.6.32 (MIT - https://github.com/leeoniya/uPlot).
      Vendored IIFE build (25k gz): exposes window.uPlot; canvas 2D, zero deps.
      jsdom safety: the IIFE itself runs under jsdom (so a bare typeof guard is
@@ -243,15 +249,53 @@ try {
       </div>
     </div>
     <div class="menu-wrap">
-      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
-        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
+      <button class="btn" id="btn-theme" onclick="toggleThemeMenu(event)" onkeydown="themeTriggerKey(event)" aria-controls="theme-menu" aria-expanded="false" aria-label="Theme" title="Theme">
+        <svg class="hdr-ico" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.6"/><path class="theme-ico-fill" d="M8 2.4a5.6 5.6 0 0 1 0 11.2z" fill="currentColor" stroke="none"/></svg>
         <span class="hdr-btn-label">Theme</span>
       </button>
       <div class="hdr-menu theme-menu" id="theme-menu" hidden role="group" aria-label="Theme">
-        <div class="clear-menu-hd">Surface</div>
-        <div class="theme-mode" id="theme-mode" role="group" aria-label="Surface"></div>
-        <div class="clear-menu-hd theme-palette-hd">Palette</div>
-        <div class="theme-list" id="theme-list" role="group" aria-label="Palette"></div>
+        <div class="theme-tray-hd">
+          <span class="theme-tray-title">Theme</span>
+          <span class="theme-saved" id="theme-saved" role="status" aria-live="polite">Saved in this browser</span>
+        </div>
+        <div class="theme-panes" aria-hidden="true">
+          <div class="theme-pane" id="theme-current" data-theme="instrument" data-mode="black">
+            <div class="tp-label">Current</div>
+            <div class="tp-rail"><span class="tp-brand"></span><span class="tp-dot"></span><span class="tp-dot"></span><span class="tp-rail-line"></span></div>
+            <div class="tp-body">
+              <div class="tp-kpis"><span></span><span></span><span></span></div>
+              <div class="tp-plot"><i style="--h:32%"></i><i style="--h:52%"></i><i style="--h:44%"></i><i style="--h:74%"></i><i style="--h:58%"></i><i style="--h:88%"></i><i style="--h:68%"></i><i style="--h:46%"></i></div>
+              <div class="tp-legend"><span class="tp-key"></span><span class="tp-key"></span><span class="tp-key"></span></div>
+            </div>
+          </div>
+          <div class="theme-pane" id="theme-preview" data-theme="instrument" data-mode="black">
+            <div class="tp-label">Preview</div>
+            <div class="tp-rail"><span class="tp-brand"></span><span class="tp-dot"></span><span class="tp-dot"></span><span class="tp-rail-line"></span></div>
+            <div class="tp-body">
+              <div class="tp-kpis"><span></span><span></span><span></span></div>
+              <div class="tp-plot"><i style="--h:32%"></i><i style="--h:52%"></i><i style="--h:44%"></i><i style="--h:74%"></i><i style="--h:58%"></i><i style="--h:88%"></i><i style="--h:68%"></i><i style="--h:46%"></i></div>
+              <div class="tp-legend"><span class="tp-key"></span><span class="tp-key"></span><span class="tp-key"></span></div>
+            </div>
+          </div>
+        </div>
+        <div class="theme-caption-bar">
+          <div class="theme-captions">
+            <div class="theme-caption" id="theme-current-label">Current: Instrument / Black</div>
+            <div class="theme-caption theme-caption-preview" id="theme-preview-label">Preview: same</div>
+          </div>
+          <div class="theme-mode-field">
+            <span class="theme-mode-label" id="theme-mode-label">Surface</span>
+            <div class="theme-mode" id="theme-mode" role="radiogroup" aria-labelledby="theme-mode-label"></div>
+          </div>
+        </div>
+        <p class="theme-status" id="theme-status" role="status" aria-live="polite" aria-atomic="true"></p>
+        <div class="clear-menu-hd theme-palette-hd" id="theme-palette-hd">Palette</div>
+        <div class="theme-list" id="theme-list" role="radiogroup" aria-orientation="vertical" aria-labelledby="theme-palette-hd"></div>
+        <p class="theme-hintbar">Arrows preview. Click or press Enter to apply. Esc closes.</p>
+        <div class="theme-ft">
+          <button class="btn" type="button" id="theme-reset" onclick="resetTheme()" title="Restore Instrument Black">Reset</button>
+          <button class="btn" type="button" id="theme-close" onclick="closeThemeMenu()">Close</button>
+        </div>
       </div>
     </div>
     <button class="btn" id="btn-settings" onclick="toggleSettings(event)" aria-haspopup="dialog" aria-pressed="false" aria-label="Settings" title="Settings">
@@ -322,7 +366,7 @@ try {
         <span class="htext" id="f-stats">0 records</span>
         <select id="f-status" class="req-status" aria-label="Request status" title="Request status"></select>
       </div>
-      <div class="scroll" id="tbl-requests"></div>
+      <div class="scroll" id="tbl-requests" role="region" aria-label="Request log" tabindex="0"></div>
     </div>
   </div>
 </main>

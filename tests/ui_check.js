@@ -6,7 +6,7 @@
 // not replace, the end-to-end coverage.
 const fs = require('fs');
 const path = require('path');
-const { JSDOM } = require('jsdom');
+const { JSDOM, requestInterceptor } = require('jsdom');
 const {createHash} = require('crypto');
 function modelFixture(rules = [], names = {}) {
   return {rules, revision: createHash('sha256').update(JSON.stringify({rules})).digest('hex'), names};
@@ -32,7 +32,11 @@ function observerFixture(p) {
 // Synthetic observers emit the same metadata contract as the server tests.
 // Tests of pattern semantics provide explicit Go-authored dictionary values.
 function dashboardDOM(html, options) {
-  return new JSDOM(html, {...options, beforeParse(win) {
+  const resources = options.resources || {};
+  return new JSDOM(html, {...options, resources: {
+    ...resources,
+    interceptors: [...(resources.interceptors || []), dashAssets],
+  }, beforeParse(win) {
     options.beforeParse(win);
     const original = win.fetch;
     let wrapped;
@@ -46,11 +50,30 @@ function dashboardDOM(html, options) {
   }});
 }
 
-// jsdom does not fetch <script src> / <link href> from disk. Assemble the
-// dashboard the same way the browser will see it after /dash/* loads: inline
-// every allowlisted asset referenced from index.html.
+// jsdom does not fetch <script src> / <link href> from disk. Stylesheets stay
+// inline for deterministic computed styles; scripts keep their real deferred
+// <script src> tags and load through the same requestInterceptor asset loader
+// theme_check uses. Building script elements as strings would make the fixture
+// an HTML-injection sink, which CodeQL rightly rejects.
 const STATIC = path.join(__dirname, '..', 'internal/web/static');
 const TEST_DASHBOARD_VERSION = '0000000000000001';
+const SETTINGS_SCRIPT = path.join(STATIC, 'js/settings.js');
+const dashAssets = requestInterceptor(request => {
+  const url = new URL(request.url);
+  if (!url.pathname.startsWith('/dash/')) return undefined;
+  const rel = decodeURIComponent(url.pathname.slice('/dash/'.length));
+  const file = path.resolve(STATIC, rel);
+  if (!file.startsWith(STATIC + path.sep)) return undefined;
+  // The lazy loader appends the unmarked production URL; leave that request
+  // pending so the loader tests can drive its onload/onerror contract. The
+  // fixture's includeSettings tag carries the marker and loads the real file.
+  if (file === SETTINGS_SCRIPT && url.searchParams.get('fixture') !== '1') {
+    return new Promise(() => {});
+  }
+  return new Response(fs.readFileSync(file), {
+    headers: { 'Content-Type': 'application/javascript' },
+  });
+});
 function assembleHTML(bootstrap, options = {}) {
   let html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
   html = html.replaceAll('__DASHBOARD_VERSION__', TEST_DASHBOARD_VERSION);
@@ -63,21 +86,21 @@ function assembleHTML(bootstrap, options = {}) {
   html = html.replace(/<link\s+rel="stylesheet"\s+href="\/dash\/([^"]+)"\s*>/g, (_, ref) => {
     return `<style>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</style>`;
   });
-  const scripts = [];
-  html = html.replace(/<script\b[^>]*\bsrc="\/dash\/([^"]+)"[^>]*><\/script>/g, (_, ref) => {
-    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, ref.split('?')[0]), 'utf8')}\n</script>`);
-    return '';
-  });
   // settings.js is lazy in production (the trigger injects it with the shell's
-  // version), so the shell has no script tag to collect. Inline it for the
-  // functional suite so every moved settings surface is exercised; the
-  // lazy-loader tests assemble without it to drive the real trigger path.
+  // version), so the shell has no script tag. Add one only for the functional
+  // suite so every moved settings surface is exercised; the lazy-loader tests
+  // assemble without it to drive the real trigger path.
   if (options.includeSettings !== false) {
-    scripts.push(`<script>\n${fs.readFileSync(path.join(STATIC, 'js/settings.js'), 'utf8')}\n</script>`);
+    html = html.replace('</body>', () =>
+      `<script defer src="/dash/js/settings.js?v=${TEST_DASHBOARD_VERSION}&amp;fixture=1"></script>\n</body>`);
   }
-  // Inline scripts cannot defer. Put the same ordered scripts after the DOM
-  // and data block to mirror the external defer scripts' browser execution.
-  return html.replace('</body>', () => scripts.join('\n') + '\n</body>');
+  return html;
+}
+function loaded(dom) {
+  return new Promise(resolve => {
+    if (dom.window.document.readyState === 'complete') resolve();
+    else dom.window.addEventListener('load', resolve, { once: true });
+  });
 }
 const html = assembleHTML();
 
@@ -330,71 +353,77 @@ dom.virtualConsole.on('jsdomError', error => {
 // hides from a bare label: a refill turns every element reference the
 // tests hold stale while focus and flags stay plausible. Recording is
 // passive - names and one key argument per call, the log capped - so a
-// green run prints nothing and pays almost nothing.
-const diagT0 = Date.now();
-const diagEvents = [];
-const diagNote = entry => {
-  diagEvents.push(((Date.now() - diagT0) / 1000).toFixed(1) + 's ' + entry);
-  if (diagEvents.length > 100) diagEvents.shift();
-};
-for (const [name, describe] of [
-  ['fillSettingsForm', doc => 'settings refill, revision ' + (doc && doc.revision)],
-  ['fetchSettings', () => 'settings fetch'],
-  ['refreshAfterRestart', () => 'reconnect refresh of every server-fed surface'],
-  ['fetchBootstrap', mode => 'bootstrap fetch, mode ' + mode],
-  ['applySnapshotPayload', payload => 'snapshot, feed ' + (payload && payload.feed_id)],
-]) {
-  if (typeof w[name] !== 'function') continue;
-  const orig = w[name];
-  w[name] = function () {
-    diagNote(name + ' (' + describe(...arguments) + ')');
-    return orig.apply(this, arguments);
+// green run prints nothing and pays almost nothing. Installed after the
+// deferred scripts load so every owner exists.
+function installDiagnostics() {
+  const diagT0 = Date.now();
+  const diagEvents = [];
+  const diagNote = entry => {
+    diagEvents.push(((Date.now() - diagT0) / 1000).toFixed(1) + 's ' + entry);
+    if (diagEvents.length > 100) diagEvents.shift();
   };
+  for (const [name, describe] of [
+    ['fillSettingsForm', doc => 'settings refill, revision ' + (doc && doc.revision)],
+    ['fetchSettings', () => 'settings fetch'],
+    ['refreshAfterRestart', () => 'reconnect refresh of every server-fed surface'],
+    ['fetchBootstrap', mode => 'bootstrap fetch, mode ' + mode],
+    ['applySnapshotPayload', payload => 'snapshot, feed ' + (payload && payload.feed_id)],
+  ]) {
+    if (typeof w[name] !== 'function') continue;
+    const orig = w[name];
+    w[name] = function () {
+      diagNote(name + ' (' + describe(...arguments) + ')');
+      return orig.apply(this, arguments);
+    };
+  }
+  // The DOM truth supplements the owner names: any rebuild of the settings
+  // fields (including a load-failure render) and every sheet open or close
+  // are recorded whatever called them, since event listeners capture their
+  // handler references before this wrapper layer existed.
+  const diagFields = d.getElementById('settings-fields');
+  if (diagFields && typeof w.MutationObserver === 'function') {
+    new w.MutationObserver(() => diagNote('settings fields rebuilt')).observe(diagFields, { childList: true });
+    const diagSheet = d.getElementById('settings-sheet');
+    if (diagSheet) new w.MutationObserver(() => diagNote('settings sheet ' + (diagSheet.hidden ? 'closed' : 'opened'))).observe(diagSheet, { attributes: true, attributeFilter: ['hidden'] });
+  }
+  const diagActive = () => {
+    const el = d.activeElement;
+    if (!el) return null;
+    return el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '');
+  };
+  diagDump = why => 'DIAG ' + JSON.stringify({
+    why,
+    activity: diagEvents,
+    activeElement: diagActive(),
+    settingsSheetOpen: (() => { const s = d.getElementById('settings-sheet'); return s ? !s.hidden : null; })(),
+    jsdomReloads,
+    feedId: w.eval('feedId'),
+    lastSeq: w.eval('lastSeq'),
+    cannedFeed: typeof fullPayload !== 'undefined' && fullPayload ? { feed_id: fullPayload.feed_id, seq: fullPayload.seq } : null,
+    settingsDoc: w.eval('typeof settingsDoc !== "undefined" && settingsDoc ? settingsDoc.revision : null'),
+    settingsCat: w.eval('typeof settingsCat !== "undefined" ? settingsCat : null'),
+  });
 }
-// The DOM truth supplements the owner names: any rebuild of the settings
-// fields (including a load-failure render) and every sheet open or close
-// are recorded whatever called them, since event listeners capture their
-// handler references before this wrapper layer existed.
-const diagFields = d.getElementById('settings-fields');
-if (diagFields && typeof w.MutationObserver === 'function') {
-  new w.MutationObserver(() => diagNote('settings fields rebuilt')).observe(diagFields, { childList: true });
-  const diagSheet = d.getElementById('settings-sheet');
-  if (diagSheet) new w.MutationObserver(() => diagNote('settings sheet ' + (diagSheet.hidden ? 'closed' : 'opened'))).observe(diagSheet, { attributes: true, attributeFilter: ['hidden'] });
+
+function checkEntityIdentity() {
+  for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
+    'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
+    'bad_label.example', '-host.example', 'host-.example', 'host..example']) {
+    check('provider favicon rejects non-public host label ' + JSON.stringify(name),
+      w.providerOrigin(name) === '' && !w.entityBadge('provider', name).includes('<img'));
+  }
+  check('qualified provider favicon keeps the canonical host',
+    w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
+    w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
+  check('client labels show the recorded identity verbatim',
+    w.clientLabel('opencode/1.18.32') === 'opencode/1.18.32' &&
+    w.clientLabel('opencode/latest/2.0.26/cli') === 'opencode/latest/2.0.26/cli' &&
+    w.clientLabel('python 1.55') === 'python 1.55' &&
+    w.clientLabel('team/2fa') === 'team/2fa' &&
+    w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
+    w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
+    w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
 }
-const diagActive = () => {
-  const el = d.activeElement;
-  if (!el) return null;
-  return el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + String(el.className).trim().split(/\s+/).join('.') : '');
-};
-diagDump = why => 'DIAG ' + JSON.stringify({
-  why,
-  activity: diagEvents,
-  activeElement: diagActive(),
-  settingsSheetOpen: (() => { const s = d.getElementById('settings-sheet'); return s ? !s.hidden : null; })(),
-  jsdomReloads,
-  feedId: w.eval('feedId'),
-  lastSeq: w.eval('lastSeq'),
-  cannedFeed: typeof fullPayload !== 'undefined' && fullPayload ? { feed_id: fullPayload.feed_id, seq: fullPayload.seq } : null,
-  settingsDoc: w.eval('typeof settingsDoc !== "undefined" && settingsDoc ? settingsDoc.revision : null'),
-  settingsCat: w.eval('typeof settingsCat !== "undefined" ? settingsCat : null'),
-});
-for (const name of ['', 'provider 5', 'private-label', '127.0.0.1', '[::1]', 'localhost',
-  'LOCALHOST', 'gateway.LOCALHOST', 'gateway.internal', 'gateway.local', 'host:443', 'https://host.example',
-  'bad_label.example', '-host.example', 'host-.example', 'host..example']) {
-  check('provider favicon rejects non-public host label ' + JSON.stringify(name),
-    w.providerOrigin(name) === '' && !w.entityBadge('provider', name).includes('<img'));
-}
-check('qualified provider favicon keeps the canonical host',
-  w.providerOrigin('API.vendor.example') === 'api.vendor.example' &&
-  w.entityBadge('provider', 'api.vendor.example').includes('domain=api.vendor.example'));
-check('client labels show the recorded identity verbatim',
-  w.clientLabel('opencode/1.18.32') === 'opencode/1.18.32' &&
-  w.clientLabel('opencode/latest/2.0.26/cli') === 'opencode/latest/2.0.26/cli' &&
-  w.clientLabel('python 1.55') === 'python 1.55' &&
-  w.clientLabel('team/2fa') === 'team/2fa' &&
-  w.dimLabel('client', 'opencode/1.18.32') === 'opencode/1.18.32' &&
-  w.entityBadge('client', 'opencode/1.18.32').includes('>opencode/1.18.32</span>') &&
-  w.clientTipHTML('opencode/1.18.32').includes('>opencode/1.18.32</span>'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Poll the page's own observable state instead of sleeping a fixed time: a
 // loaded runner can stretch a fetch/render round trip past any hard-coded
@@ -426,6 +455,11 @@ const fire = (type, data, lastEventId) => {
 };
 
 async function main() {
+  // Deferred asset scripts load through the interceptor after parsing. Wait
+  // for the load event before inspecting styles or driving the dashboard.
+  await loaded(dom);
+  installDiagnostics();
+  checkEntityIdentity();
   // Shared CSS must preserve sentence case, including protocol acronyms and
   // user-authored names. Inspect every formerly forced-uppercase owner.
   {
@@ -465,6 +499,42 @@ async function main() {
 
   // ---- test 1: full render painted 30 rows ----
   check('full render shows 30 rows', rows().length === 30);
+  {
+    const table = d.querySelector('#tbl-requests table');
+    const cols = [...d.querySelectorAll('#tbl-requests colgroup col')];
+    const labels = [...d.querySelectorAll('#tbl-requests thead th')].map(th => th.textContent);
+    const expectedLabels = ['time', 'client · provider · model', 'status', 'ttft', 'tps',
+      'in/out', 'cache', 'tools', 'finish', 'dur', 'turns', 'queued', 'cost', ''];
+    const columnBudget = cols.reduce((sum, col) => sum + parseFloat(col.style.width || '0'), 0);
+    const columnWidths = cols.map(col => parseFloat(col.style.width || '0'));
+    const expectedWidths = [100, 324, 134, 82, 70, 128, 70, 52, 82, 76, 76, 60, 76, 34];
+    const firstCell = d.querySelector('#tbl-requests tr.exp-row td');
+    check('the request table column contract is literal',
+      w.eval('REQ_COLS') === 14 && w.eval('REQ_MIN_WIDTH') === 1364 &&
+      labels.length === 14 && labels.join('|') === expectedLabels.join('|') &&
+      Math.abs(columnBudget - 1364) < 0.5);
+    check('the request table keeps the exact per-column widths',
+      columnWidths.join(',') === expectedWidths.join(','));
+    check('the request log is a labelled keyboard-scrollable region', (() => {
+      const box = d.getElementById('tbl-requests');
+      return box.getAttribute('role') === 'region' &&
+        box.getAttribute('aria-label') === 'Request log' && box.tabIndex === 0;
+    })());
+    check('the actions header has an accessible name',
+      [...d.querySelectorAll('#tbl-requests thead th')][13]?.getAttribute('aria-label') ===
+        'Request actions');
+    check('the request table uses fixed column geometry',
+      !!table && w.getComputedStyle(table).tableLayout === 'fixed');
+    check('the request table owns one positive width per column',
+      cols.length === w.eval('REQ_COLS') && cols.every(col => parseFloat(col.style.width) > 0));
+    check('the request table min-width matches its column budget',
+      Math.abs(parseFloat(table.style.minWidth) - columnBudget) < 0.5);
+    check('request cells clip and ellipsize inside fixed columns',
+      !!firstCell && w.getComputedStyle(firstCell).overflow === 'hidden' &&
+      w.getComputedStyle(firstCell).textOverflow === 'ellipsis');
+    check('the header row spans every request column',
+      !!table && table.tHead?.rows?.[0]?.cells.length === w.eval('REQ_COLS'));
+  }
   check('dimension picker trigger exists', !!d.getElementById('xp-dim-trigger'));
   check('dimension rail still has nine dims', d.querySelectorAll('#xp-rail .xp-rail-item').length === 9);
   {
@@ -1122,6 +1192,8 @@ async function main() {
     const sub = () => d.querySelector('tr.retry-sub[data-retry-of="att-open"][data-attempt="1"]');
     check('the retry-sub rows carry their attempt index', !!sub() && !sub().hidden);
     const subRow = sub();
+    check('a retry sub-row spans the full request column count',
+      !!subRow && [...subRow.cells].reduce((sum, cell) => sum + cell.colSpan, 0) === w.eval('REQ_COLS'));
     if (subRow) subRow.click();
     check('clicking a retry-sub row opens that attempt in the drawer',
       title().includes('attempt 2 of 2') && title().includes('429') && attemptSel() === 1);
@@ -2815,23 +2887,25 @@ async function main() {
   await sleep(30);
   const seps = () => [...d.querySelectorAll('#tbl-requests tr.day-sep')];
   check('day dividers: exactly one per local day', seps().length === 3);
-  check('newest day divider is stamped TODAY', seps()[0].textContent.includes('TODAY'));
+  check('day dividers span the full request column count',
+    seps()[0]?.querySelector('td')?.colSpan === w.eval('REQ_COLS'));
+  check('newest day divider is stamped TODAY', seps()[0]?.textContent?.includes('TODAY'));
   check('each divider sits directly above its day opener',
-    seps()[0].nextElementSibling.dataset.id === 'day0' &&
-    seps()[1].nextElementSibling.dataset.id === 'day1' &&
-    seps()[2].nextElementSibling.dataset.id === 'day2');
+    seps()[0]?.nextElementSibling?.dataset.id === 'day0' &&
+    seps()[1]?.nextElementSibling?.dataset.id === 'day1' &&
+    seps()[2]?.nextElementSibling?.dataset.id === 'day2');
   fire('record', { ...mkRec('day0b', 200, at(0) + 3600000) }, '4');
   await sleep(20);
   check('same-day live insert moves the divider, never duplicates it',
-    seps().length === 3 && seps()[0].nextElementSibling.dataset.id === 'day0b' &&
-    seps()[0].nextElementSibling.nextElementSibling.dataset.id === 'day0');
+    seps().length === 3 && seps()[0]?.nextElementSibling?.dataset.id === 'day0b' &&
+    seps()[0]?.nextElementSibling?.nextElementSibling?.dataset.id === 'day0');
   fire('record', { ...mkRec('day1b', 200, at(1) + 7200000) }, '5');
   await sleep(20);
   // An out-of-order arrival (a late-finalized older record) opens its own day
   // boundary at its arrival position - the display is arrival-ordered, so the
   // divider tracks the displayed sequence, never a re-sorted one.
   check('late-arriving previous-day record opens its own divider at its arrival position',
-    seps().length === 4 && seps()[0].nextElementSibling.dataset.id === 'day1b');
+    seps().length === 4 && seps()[0]?.nextElementSibling?.dataset.id === 'day1b');
   fire('snapshot', { feed_id: 'feedB', seq: 5, incremental: false,
     records: [ mkRec('day2', 200, at(2)), mkRec('day1', 200, at(1)), mkRec('day0', 200, at(0)),
       mkRec('day0b', 200, at(0) + 3600000), mkRec('day1b', 200, at(1) + 7200000) ],
@@ -2863,9 +2937,9 @@ async function main() {
     const row = w.reqRow({ ...mkRec('no-ttft'), ttft_ms: 0 });
     const detail = w.formatDetail({ ...mkRec('no-ttft'), ttft_ms: 0 });
     return w.eval('fmtTTFT(0) === "-" && fmtTTFT(null) === "-" && fmtTTFT(100) === "100ms"') &&
-      /<td>100ms<\/td>/.test(w.reqRow(mkRec('has-ttft'))) &&
-      /<td>-<\/td>/.test(row) &&
-      !/<td>0ms<\/td>/.test(row) &&
+      /<td title="100ms">100ms<\/td>/.test(w.reqRow(mkRec('has-ttft'))) &&
+      /<td title="-">-<\/td>/.test(row) &&
+      !/<td[^>]*>0ms<\/td>/.test(row) &&
       detail.includes('<span class="k">ttft</span><span class="v">-</span>') &&
       !detail.includes('>0ms<');
   })());
@@ -3997,6 +4071,21 @@ async function main() {
     for (const sheet of d.styleSheets) { const got = visit(sheet.cssRules); if (got) return got; }
     return null;
   };
+  // Cascade owner for pins whose selector can appear again later (media
+  // overrides or a duplicate declaration): the last matching rule in sheet
+  // order wins for the same specificity, so a first-rule read can guard a
+  // declaration the browser never uses.
+  const lastCSSRule = sel => {
+    let found = null;
+    const visit = list => {
+      for (const r of list) {
+        if (r.selectorText === sel) found = r;
+        if (r.cssRules && r.cssRules.length) visit(r.cssRules);
+      }
+    };
+    for (const sheet of d.styleSheets) visit(sheet.cssRules);
+    return found;
+  };
   // Summary-blend pin: the tiles-only preset replaces the boxed tile chrome
   // with the KPI band's cell language (the tiles are plain readouts now -
   // the metrics picker owns what shows - so the old hover lift and toggle
@@ -4076,6 +4165,28 @@ async function main() {
       const r = firstCSSRule(sel);
       return !!r && r.style.getPropertyValue('background') === 'var(--tick-strip)';
     });
+  })());
+  check('the day divider parks exactly on the measured header edge',
+    lastCSSRule('tr.day-sep td')?.style.getPropertyValue('top') === '29.5px');
+  check('the request log declares a visible focus ring',
+    lastCSSRule('#tbl-requests:focus-visible')?.style.getPropertyValue('outline')?.includes('var(--accent)') === true);
+  // Duplicate-rule mutation: a later rule with the same selector owns the
+  // browser's declaration. The pins above must read the last match, not a
+  // stale first occurrence.
+  check('a later duplicate day/focus rule owns the cascade pins', (() => {
+    const style = d.createElement('style');
+    style.textContent = '#tbl-requests:focus-visible { outline: none; } ' +
+      'tr.day-sep td { top: 0px; }';
+    d.head.appendChild(style);
+    try {
+      return firstCSSRule('#tbl-requests:focus-visible')
+          ?.style.getPropertyValue('outline')?.includes('var(--accent)') === true &&
+        lastCSSRule('#tbl-requests:focus-visible')
+          ?.style.getPropertyValue('outline')?.includes('var(--accent)') === false &&
+        lastCSSRule('tr.day-sep td')?.style.getPropertyValue('top') === '0px';
+    } finally {
+      style.remove();
+    }
   })());
   // Focus-contract pin: the focusable editor surfaces - the operator
   // dialog's input, the settings search, the settings rows, the provider
@@ -7896,6 +8007,7 @@ async function main() {
           win.localStorage.setItem('dash.chart', JSON.stringify({window: '10080', preset: 'cost', pct: 99}));
         },
       });
+      await loaded(seeded);
       await sleep(100);
       const sw = seeded.window;
       check(`${label} HTML seed uses ${expectedFetches} bootstrap fetches`, bootstrapFetches === expectedFetches);
@@ -7957,6 +8069,7 @@ async function main() {
           };
         },
       });
+      await loaded(isolated);
       await sleep(100);
       const wrap = isolated.window.document.getElementById('restart-wrap');
       check(`${label} seed decides the Restart control from the payload it already loads`,
@@ -7994,6 +8107,7 @@ async function main() {
         win.EventSource = function() { return {readyState: 1, addEventListener() {}, close() {}}; };
       },
     });
+    await loaded(isolated);
     const sw = isolated.window;
     const stateRows = () => [...sw.document.querySelectorAll('#tbl-requests tr.exp-row[data-id]')];
     try {
@@ -8063,6 +8177,7 @@ async function main() {
         };
       },
     });
+    await loaded(isolated);
     const sw = isolated.window;
     const emit = (stream, type, data, seq) => stream.handlers[type]({type, data: JSON.stringify(observerFixture(data)), lastEventId: seq});
     const IDs = () => sw.eval('lastData.records.map(r => r.id).join(",")');
@@ -8141,6 +8256,7 @@ async function main() {
         };
       },
     });
+    await loaded(isolated);
     const sw = isolated.window;
     const emit = (stream, type, data, seq) => stream.handlers[type]({type, data: JSON.stringify(observerFixture(data)), lastEventId: seq});
     const ids = () => sw.eval('lastData.records.map(r => r.id).join(",")');
@@ -8303,6 +8419,7 @@ async function main() {
   // and pending/confirmed mutations.
   for (const [kind, action] of [['pause','pause-edit'], ['pause','pause-resume'], ['debug','debug-edit'], ['debug','debug-stop'], ['limits','limit-edit']]) {
     const isolated = dashboardDOM(assembleHTML(), pageOptions);
+    await loaded(isolated);
     const sw = isolated.window, sd = sw.document;
     try {
       await sleep(60);
@@ -8367,6 +8484,7 @@ async function main() {
         streams.push(stream); return stream;
       };
     }});
+    await loaded(isolated);
     const sw = isolated.window, sd = sw.document;
     const emit = (type, data, seq) => streams.at(-1).handlers[type]({type, data: JSON.stringify(data), lastEventId: seq});
     const reply = p => requests.shift()({ok: true, json: async () => p});
@@ -8639,6 +8757,55 @@ async function main() {
         check('Escape closes ' + menu.id + ' and restores its trigger focus',
           menu.hidden && button.getAttribute('aria-expanded') === 'false' && sd.activeElement === button);
       }
+      {
+        // Theme tray structure: one current/preview comparator, the surface
+        // radios in the readable caption bar, and honest Reset/Close actions.
+        const menu = sd.getElementById('theme-menu');
+        const panes = menu.querySelector('.theme-panes');
+        const paneList = [...menu.querySelectorAll('.theme-pane')];
+        const captionBar = menu.querySelector('.theme-caption-bar');
+        check('theme comparator is one aria-hidden pair of shared panes',
+          !!panes && panes.getAttribute('aria-hidden') === 'true' && paneList.length === 2 &&
+          paneList[0].id === 'theme-current' && paneList[1].id === 'theme-preview' &&
+          paneList.every(pane => pane.classList.contains('theme-pane') &&
+            pane.querySelector('.tp-label')));
+        check('theme panes carry one neutral series legend, not status pills',
+          paneList.every(pane =>
+            pane.querySelectorAll('.tp-legend .tp-key').length === 3 &&
+            !pane.querySelector('.tp-pill') &&
+            pane.querySelector('.tp-legend').textContent === '' &&
+            !/200|live|429/.test(pane.textContent)));
+        check('theme pane markup is identical apart from id and labels', (() => {
+          const shape = pane => {
+            const clone = pane.cloneNode(true);
+            clone.removeAttribute('id');
+            clone.removeAttribute('data-theme');
+            clone.removeAttribute('data-mode');
+            clone.querySelector('.tp-label').textContent = '';
+            return clone.innerHTML;
+          };
+          return shape(paneList[0]) === shape(paneList[1]);
+        })());
+        check('theme captions stay outside the decorative comparator',
+          !!captionBar && !panes.contains(captionBar) &&
+          captionBar.querySelector('#theme-current-label') &&
+          captionBar.querySelector('#theme-preview-label') &&
+          !captionBar.querySelector('#theme-preview-label').classList.contains('has-preview'));
+        check('theme surface radios sit in the caption bar under a visible label',
+          captionBar.querySelector('#theme-mode[role="radiogroup"]') &&
+          captionBar.querySelectorAll('.theme-mode-opt').length === 2 &&
+          captionBar.querySelector('.theme-mode-label')?.textContent === 'Surface' &&
+          sd.getElementById('theme-mode').getAttribute('aria-labelledby') === 'theme-mode-label');
+        check('theme tray lists all eight palettes and offers Reset and Close',
+          menu.querySelectorAll('.theme-opt').length === 8 &&
+          sd.getElementById('theme-reset')?.textContent === 'Reset' &&
+          sd.getElementById('theme-reset')?.title === 'Restore Instrument Black' &&
+          sd.getElementById('theme-close')?.textContent === 'Close' &&
+          !sd.getElementById('theme-done'));
+        check('theme hint explains preview, pointer activation and Escape',
+          menu.querySelector('.theme-hintbar')?.textContent ===
+            'Arrows preview. Click or press Enter to apply. Esc closes.');
+      }
       const open=sd.querySelector('button[data-open-req]');
       open.focus(); open.click();
       await sleep(20);
@@ -8766,6 +8933,7 @@ async function main() {
         return {url, handlers: {}, readyState: 1, addEventListener() {}, close() {this.readyState = 2;}};
       };
     }});
+    await loaded(isolated);
     const w = isolated.window, d = w.document;
     const submitDialog = value => {
       d.getElementById('operator-dialog-input').value = value;
@@ -8960,6 +9128,7 @@ async function main() {
         },
       }});
     }});
+    await loaded(isolated);
     const w = isolated.window, d = w.document;
     const setHidden = hidden => {
       w.Object.defineProperty(d, 'hidden', {configurable: true, get: () => hidden});
@@ -9093,7 +9262,7 @@ async function main() {
       dash: {},
       storage: { enabled: true, dropped: 0, totals_degraded: false },
     });
-    const isolated = new JSDOM(assembleHTML(seed), {...pageOptions, beforeParse(win) {
+    const isolated = dashboardDOM(assembleHTML(seed), {...pageOptions, beforeParse(win) {
       pageOptions.beforeParse(win);
       const fallback = win.fetch;
       const dlFetches = [];
@@ -9114,6 +9283,7 @@ async function main() {
     }});
     const sw = isolated.window, sd = sw.document;
     try {
+      await loaded(isolated);
       await sleep(60);
 
       // recordIsError mirrors metrics.Record.IsError. The 24 rows mirror the
@@ -9513,7 +9683,7 @@ async function main() {
     check('production index.html has no settings.js script reference',
       !/<script\b[^>]*\bsrc=["'][^"']*\/dash\/js\/settings\.js/.test(shell));
 
-    const lazyShell = () => {
+    const lazyShell = async () => {
       const appended = [];
       const errors = [];
       const dom = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), {
@@ -9532,10 +9702,11 @@ async function main() {
           };
         },
       });
+      await loaded(dom);
       return { dom, sw: dom.window, sd: dom.window.document, appended, errors };
     };
 
-    const ok = lazyShell();
+    const ok = await lazyShell();
     try {
       check('first paint issues no settings.js request', ok.appended.length === 0);
       check('the settings sheet starts closed before the module loads',
@@ -9566,7 +9737,7 @@ async function main() {
 
     // A close while the module is still downloading must cancel the pending
     // open; the loader resolving later must not pop the sheet back up.
-    const cancelled = lazyShell();
+    const cancelled = await lazyShell();
     try {
       let opened = 0;
       cancelled.sw.toggleSettings({ stopPropagation() {} });
@@ -9584,6 +9755,7 @@ async function main() {
     {
       const noSettings = dashboardDOM(assembleHTML(undefined, { includeSettings: false }), pageOptions);
       try {
+        await loaded(noSettings);
         const sd = noSettings.window.document;
         noSettings.window.eval("chartView.preset = 'overview'");
         noSettings.window.summaryPickerSync();
@@ -9594,7 +9766,7 @@ async function main() {
       } finally { noSettings.window.close(); }
     }
 
-    const failed = lazyShell();
+    const failed = await lazyShell();
     try {
       failed.sw.toggleSettings({ stopPropagation() {} });
       check('a settings load attempt starts with the sheet closed',
@@ -9749,9 +9921,9 @@ async function main() {
       const grownSeps = [...d.querySelectorAll('#tbl-requests tr.day-sep')];
       check('window growth: day dividers stay attached to their openers',
         grownSeps.length === 3 &&
-        grownSeps[0].nextElementSibling?.dataset.id === 'grow-today3' &&
-        grownSeps[1].nextElementSibling?.dataset.id === 'grow-yday' &&
-        grownSeps[2].nextElementSibling?.dataset.id === 'grow-old');
+        grownSeps[0]?.nextElementSibling?.dataset.id === 'grow-today3' &&
+        grownSeps[1]?.nextElementSibling?.dataset.id === 'grow-yday' &&
+        grownSeps[2]?.nextElementSibling?.dataset.id === 'grow-old');
       w.resetLogWindow();
       w.eval('dashCfg.log_rows = ' + saved.page + ';');
       w.renderAll(saved.data);
@@ -10312,6 +10484,7 @@ async function main() {
           };
         },
       });
+      await loaded(hiddenDom);
       const hw = hiddenDom.window;
       const hd = hw.document;
       await sleep(300);

@@ -139,15 +139,25 @@ def dead_css_class_errors(pairs):
     css = [pair for pair in pairs if pair[0].startswith(STATIC_CSS)]
     emitters = [pair for pair in pairs if not pair[0].startswith(STATIC_CSS)]
     emitted = '\n'.join(text for _, text in emitters)
+    # uPlot creates these structural and cursor classes on its own DOM; the
+    # dashboard override keeps the remaining vertical cursor on the active
+    # surface tokens. The disabled cursor-y and selection rules are gone.
+    vendor_classes = {'uplot', 'u-over', 'u-cursor-x'}
     class_re = re.compile(r'\.([A-Za-z_][A-Za-z0-9_-]*)')
     errors = []
     for name, text in css:
         stripped = re.sub(r'/\*.*?\*/', '', text, flags=re.S)
-        for selector in re.findall(r'([^{}]+)\{', stripped):
-            for token in class_re.findall(selector):
-                if token in emitted:
-                    continue
-                errors.append(f"{name}: stylesheet class .{token} has no emitter")
+        for selector_list in re.findall(r'([^{}]+)\{', stripped):
+            # The vendor exemption belongs to the uPlot-mounted selector tree.
+            # Split the list: `.u-over, .uplot` would otherwise exempt a bare
+            # dashboard `.u-over` through an unrelated sibling selector in the
+            # same rule. `.uplot` must appear in the same individual selector.
+            for selector in selector_list.split(','):
+                vendor_selector = re.search(r'\.uplot\b', selector) is not None
+                for token in class_re.findall(selector):
+                    if token in emitted or (vendor_selector and token in vendor_classes):
+                        continue
+                    errors.append(f"{name}: stylesheet class .{token} has no emitter")
     return sorted(set(errors))
 
 
