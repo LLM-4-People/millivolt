@@ -26,7 +26,7 @@ from playwright.async_api import async_playwright
 from scripts.backup_db import verify_docs_copy
 from . import browser_check as guards
 from .browser_check import require
-from .support import ROOT, operator_headers, operator_signin
+from .support import DOCS_CAPTURE_VIEWPORT, ROOT, operator_headers, operator_signin
 
 ORDER = ['provider', 'model', 'client', 'conversation', 'tool', 'time', 'status', 'error', 'key']
 KEY = 'local-lineage-fixture-only'
@@ -279,8 +279,8 @@ async def capture_history(args):
 
                 # The request table is content-sized now: give the docs capture
                 # enough width that the learned columns still fit without
-                # horizontal clipping.
-                await page.set_viewport_size({'width': 2200, 'height': 900})
+                # horizontal clipping, including font and subpixel variation.
+                await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)
                 await ready('model')
                 require(await page.locator('#tbl-requests').evaluate('el => el.scrollWidth <= el.clientWidth + 2'),
                         'request-table capture would clip columns')

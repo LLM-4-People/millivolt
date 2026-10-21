@@ -351,8 +351,13 @@ def missing_needles(text: str, needles: tuple[str, ...]) -> list[str]:
 
 PUBLISH_GUARD = (
     "always() && needs.required.result == 'success' && "
-    "github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && "
-    "(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))"
+    "github.repository == 'LLM-4-People/millivolt' && "
+    "((github.event_name == 'push' && "
+    "(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))) || "
+    "(github.event_name == 'pull_request' && github.event.action == 'closed' && "
+    "github.event.pull_request.merged == true && github.base_ref == 'main' && "
+    "github.event.pull_request.head.repo.full_name == github.repository && "
+    "needs.required.outputs.merged_docs_only != 'true'))"
 )
 PUBLISH_TESTING_GUARD = (
     "github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && "
@@ -365,6 +370,12 @@ PUBLISH_GUARD_NEEDLES = (
     "github.repository == 'LLM-4-People/millivolt'",
     "github.ref == 'refs/heads/main'",
     "startsWith(github.ref, 'refs/tags/v')",
+    "github.event_name == 'pull_request'",
+    "github.event.action == 'closed'",
+    "github.event.pull_request.merged == true",
+    "github.base_ref == 'main'",
+    "github.event.pull_request.head.repo.full_name == github.repository",
+    "needs.required.outputs.merged_docs_only != 'true'",
 )
 PUBLISH_TESTING_GUARD_NEEDLES = (
     "github.event_name == 'push'",
@@ -401,19 +412,31 @@ REQUIRED_GATE_IF = (
     "needs.container.result == 'skipped' && "
     "((github.event_name == 'push' && github.ref == 'refs/heads/main') || "
     "(github.event_name == 'pull_request' && github.base_ref == 'main' && "
-    "github.event.pull_request.user.login != 'dependabot[bot]')))))"
+    "(github.event.action == 'closed' && github.event.pull_request.merged == true || "
+    "github.event.pull_request.user.login != 'dependabot[bot]'))))))"
+)
+REQUIRED_JOB_IF = (
+    "always() && (github.event_name != 'workflow_dispatch' || "
+    "github.ref == 'refs/heads/testing') && "
+    "(github.event_name != 'pull_request' || github.event.action != 'closed' || "
+    "(github.event.pull_request.merged == true && github.base_ref == 'main'))"
 )
 FULL_GATE_IF = (
     "success() && github.event_name == 'pull_request' && "
-    "github.base_ref == 'main' && "
+    "github.event.action != 'closed' && github.base_ref == 'main' && "
     "github.event.pull_request.user.login != 'dependabot[bot]' && "
     "steps.promotion.outputs.docs_only != 'true'"
 )
 DOCS_ONLY_VALIDATION_IF = (
     "success() && github.event_name == 'pull_request' && "
-    "github.base_ref == 'main' && "
+    "github.event.action != 'closed' && github.base_ref == 'main' && "
     "github.event.pull_request.user.login != 'dependabot[bot]' && "
     "steps.promotion.outputs.docs_only == 'true'"
+)
+MERGED_VALIDATION_IF = (
+    "success() && github.event_name == 'pull_request' && "
+    "github.event.action == 'closed' && github.base_ref == 'main' && "
+    "github.event.pull_request.merged == true"
 )
 CONTAINER_PLATFORMS = ("linux/amd64", "linux/arm64")
 CONTAINER_RUNNERS = {
@@ -425,7 +448,8 @@ GATE_CHECK_NAMES = ("checks",) + tuple(
 CHECKS_IF = (
     "(github.event_name == 'push' && "
     "(github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) || "
-    "(github.event_name == 'pull_request' && "
+    "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/testing') || "
+    "(github.event_name == 'pull_request' && github.event.action != 'closed' && "
     "(github.base_ref != 'main' || "
     "github.event.pull_request.user.login == 'dependabot[bot]'))"
 )
@@ -940,7 +964,17 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 0,
-            "needle": "canonical check.yml push run",
+            "needle": "canonical testing gate run",
+        },
+        {
+            "label": "dispatched testing gate",
+            "runs": [run_record(head, event="workflow_dispatch")],
+            "branch_runs": [],
+            "checks": {head: gate},
+            "ancestors": [],
+            "delta": [],
+            "code": 0,
+            "needle": "canonical testing gate run",
         },
         {
             "label": "forged workflow",
@@ -950,7 +984,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "pull-request event",
@@ -960,7 +994,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "wrong branch",
@@ -970,7 +1004,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "other suite names",
@@ -1096,7 +1130,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run on testing is a gated ancestor",
+            "needle": "No canonical testing gate run on testing is a gated ancestor",
         },
         {
             "label": "fallback default branch",
@@ -1119,7 +1153,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run on testing is a gated ancestor",
+            "needle": "No canonical testing gate run on testing is a gated ancestor",
         },
         {
             "label": "paginated fallback",
@@ -1384,6 +1418,17 @@ def check_workflows(errors: list[str]) -> None:
         errors.append("check.yml: push must be limited to main and testing")
     if push.get("tags") != ["v*"]:
         errors.append("check.yml: release tags must be limited to v*")
+    pull_request_trigger = on.get("pull_request")
+    if not isinstance(pull_request_trigger, dict):
+        errors.append("check.yml: pull_request must keep the merged-PR release trigger")
+    else:
+        expected_pr_types = ["opened", "synchronize", "reopened", "closed"]
+        if pull_request_trigger.get("types") != expected_pr_types:
+            errors.append("check.yml: pull_request types must be exactly " + str(expected_pr_types))
+        if "closed" not in pull_request_trigger.get("types", []):
+            errors.append("check.yml: pull_request must include the closed release event")
+    if "workflow_dispatch" not in on:
+        errors.append("check.yml: testing gate must have a workflow_dispatch recovery path")
     ignored = set(push.get("paths-ignore", []))
     for path in ("docs/**", "site-src/**", "scripts/build_site.py", "requirements-docs.txt"):
         if path not in ignored:
@@ -1392,14 +1437,31 @@ def check_workflows(errors: list[str]) -> None:
     cancel = str(concurrency.get("cancel-in-progress", ""))
     if "pull_request" not in cancel or "refs/heads/testing" not in cancel:
         errors.append("check.yml: cancel-in-progress must be limited to PRs and testing")
+    if "github.event.action != 'closed'" not in cancel:
+        errors.append("check.yml: a merged-PR release run must not be cancelled")
     jobs = checks.get("jobs") or {}
     required_job = jobs.get("required") or {}
     if required_job.get("name") != "required":
         errors.append("check.yml: branch-protection gate must be named required")
     if required_job.get("needs") != ["checks", "container"]:
         errors.append("check.yml: required gate must wait for checks and container")
-    if required_job.get("if") != "always()":
-        errors.append("check.yml: required gate must run with always()")
+    required_if = " ".join(str(required_job.get("if", "")).split())
+    if required_if != REQUIRED_JOB_IF:
+        errors.append("check.yml: required gate condition must be exactly " + REQUIRED_JOB_IF)
+    for label, mutated_if in (
+        ("dropping the closed-event exception",
+         required_if.replace("github.event.action != 'closed'", "false")),
+        ("dropping the merged check",
+         required_if.replace("github.event.pull_request.merged == true", "true")),
+        ("broadening the closed-event exception to testing",
+         required_if.replace("github.base_ref == 'main'", "true")),
+        ("allowing a main dispatch",
+         required_if.replace("github.ref == 'refs/heads/testing'", "true")),
+    ):
+        if mutated_if == required_if:
+            errors.append(f"workflows self-check: cannot mutate {label}")
+        elif mutated_if == REQUIRED_JOB_IF:
+            errors.append(f"workflows self-check: {label} must not satisfy the exact condition")
     if required_job.get("timeout-minutes") != 10:
         errors.append("check.yml: required gate must keep its ten-minute budget")
     required_permissions = required_job.get("permissions") or {}
@@ -1416,6 +1478,11 @@ def check_workflows(errors: list[str]) -> None:
          check_if.replace("== 'dependabot[bot]'", "!= 'dependabot[bot]'")),
         ("dropping the tag event", check_if.replace("github.ref_type == 'tag'", "false")),
         ("dropping the testing branch", check_if.replace("github.ref == 'refs/heads/testing'", "false")),
+        ("running the full gate on a closed PR",
+         check_if.replace("github.event.action != 'closed' && ", "")),
+        ("dropping the dispatched testing gate",
+         check_if.replace("(github.event_name == 'workflow_dispatch' && "
+                          "github.ref == 'refs/heads/testing') || ", "")),
     ):
         if mutated_if == check_if:
             errors.append(f"workflows self-check: cannot mutate {label}")
@@ -1539,6 +1606,52 @@ def check_workflows(errors: list[str]) -> None:
         errors.append("check.yml: promotion checkout must fetch full history (fetch-depth: 0)")
     if checkout_options.get("persist-credentials") is not False:
         errors.append("check.yml: promotion checkout must set persist-credentials: false")
+
+    merged_step = next((step for step in required_steps
+                        if step.get("name") == "Validate merged promotion"), {})
+    if not merged_step:
+        errors.append("check.yml: merged promotion validation step is missing")
+    else:
+        merged_if = " ".join(str(merged_step.get("if", "")).split())
+        if merged_if != MERGED_VALIDATION_IF:
+            errors.append("check.yml: merged promotion validation condition must be exactly "
+                          + MERGED_VALIDATION_IF)
+        merged_run = str(merged_step.get("run", ""))
+        for needle in (
+            'set -euo pipefail',
+            'gh api "repos/$REPO/git/commits/$MERGE_SHA"',
+            '.parents[].sha',
+            'compare/$MERGE_SHA...main',
+            'check-runs?filter=all&per_page=100',
+            '.name == "required" and .status == "completed"',
+            'latest_required" != "success"',
+            'pulls/$PR_NUMBER/files',
+            '.previous_filename',
+            'echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"',
+        ):
+            if needle not in merged_run:
+                errors.append(f"check.yml: merged promotion validation is missing {needle}")
+        for label, mutated_if in (
+            ("dropping the merged flag", merged_if.replace(
+                "github.event.pull_request.merged == true", "true")),
+            ("broadening to closed testing PRs", merged_if.replace(
+                "github.base_ref == 'main'", "true")),
+        ):
+            if mutated_if == merged_if:
+                errors.append(f"workflows self-check: cannot mutate {label}")
+            elif mutated_if == MERGED_VALIDATION_IF:
+                errors.append(f"workflows self-check: {label} must not satisfy the exact condition")
+    expected_outputs = {"merged_docs_only": "${{ steps.merged.outputs.docs_only }}"}
+    if required_job.get("outputs") != expected_outputs:
+        errors.append("check.yml: required must expose merged_docs_only from the merged validation")
+    for step in required_steps:
+        name = str(step.get("name", ""))
+        step_if = " ".join(str(step.get("if", "")).split())
+        if (name not in ("Require every gate", "Validate merged promotion") and
+                "github.event_name == 'pull_request'" in step_if and
+                "github.event.action != 'closed'" not in step_if):
+            errors.append(f"check.yml: promotion step must not run on a merged PR: {name}")
+
     docs_patterns = " ".join(str((required_job.get("env") or {}).get("DOCS_PATH_PATTERNS", "")).split())
     if not docs_patterns:
         errors.append("check.yml: required must own the docs/site path patterns")
@@ -1643,12 +1756,12 @@ def check_workflows(errors: list[str]) -> None:
             "commits/$1/check-runs?filter=all&per_page=100",
             "git rev-list --count",
             'select(.path == ".github/workflows/check.yml")',
-            'select(.event == "push")',
+            'select(.event == "push" or .event == "workflow_dispatch")',
             'select(.head_branch == "testing")',
             "select(.head_sha == $sha)",
             "select(.check_suite.id == $suite)",
             "sort_by(.created_at, .id)",
-            "branch=testing&event=push",
+            "branch=testing",
             "git merge-base --is-ancestor",
             "git diff --name-only --no-renames",
             "sleep 10",
@@ -1685,11 +1798,11 @@ def check_workflows(errors: list[str]) -> None:
         ):
             if needle not in shell_function(full_gate_run, "suite_outcome"):
                 errors.append(f"check.yml: suite_outcome is missing {needle}")
-        if 'echo "No canonical check.yml push run exists for $HEAD_SHA; checking the closest gated testing ancestor."' not in full_gate_run:
+        if 'echo "No canonical testing gate run exists for $HEAD_SHA; checking the closest gated testing ancestor."' not in full_gate_run:
             errors.append("check.yml: a missing exact canonical run must fall through to the closest gated ancestor")
-        if 'echo "::error::The canonical check.yml push run for $HEAD_SHA succeeded but its check suite is $outcome."' not in full_gate_run:
+        if 'echo "::error::The canonical testing gate run for $HEAD_SHA succeeded but its check suite is $outcome."' not in full_gate_run:
             errors.append("check.yml: a successful run with an incomplete suite must fail the proof")
-        if 'echo "::error::No canonical check.yml push run on testing is a gated ancestor of $HEAD_SHA."' not in full_gate_run:
+        if 'echo "::error::No canonical testing gate run on testing is a gated ancestor of $HEAD_SHA."' not in full_gate_run:
             errors.append("check.yml: no gated ancestor must fail with its exact message")
         errors.extend(suite_outcome_errors(full_gate_run))
         errors.extend(full_gate_behavior_errors(full_gate_run))
@@ -1699,7 +1812,8 @@ def check_workflows(errors: list[str]) -> None:
         for old, new, label in (
             ('select(.path == ".github/workflows/check.yml")', "select(true)",
              "workflow path filter"),
-            ('select(.event == "push")', "select(true)", "push event filter"),
+            ('select(.event == "push" or .event == "workflow_dispatch")', "select(true)",
+             "testing event filter"),
             ('select(.head_branch == "testing")', "select(true)", "testing branch filter"),
             ("select(.check_suite.id == $suite)", "select(true)", "check-suite boundary"),
             ('if ! is_docs_path "$path"; then', "if false; then", "fallback docs delta"),
@@ -1823,6 +1937,20 @@ def check_workflows(errors: list[str]) -> None:
     without_required = publish_if.replace("needs.required.result == 'success' && ", "", 1)
     if not publish_guard_errors(without_required, publish_testing_if):
         errors.append("workflows self-check: dropping the required success check must fail")
+
+    publish_checkout = next((step for step in steps(publish)
+                             if str(step.get("uses", "")).startswith("actions/checkout@")), {})
+    publish_ref = " ".join(str((publish_checkout.get("with") or {}).get("ref", "")).split())
+    if "github.event.pull_request.merge_commit_sha" not in publish_ref:
+        errors.append("check.yml: merged-PR publish checkout must use the event merge commit")
+    if "github.ref" not in publish_ref:
+        errors.append("check.yml: branch and tag publish checkout must keep the pushed ref")
+    verify_target = next((step for step in steps(publish)
+                          if step.get("name") == "Verify release target"), {})
+    verify_run = str(verify_target.get("run", ""))
+    if "git rev-parse HEAD" not in verify_run or '!= "$EXPECTED"' not in verify_run:
+        errors.append("check.yml: merged-PR publish must verify the checked-out merge commit")
+
     image_index = named_step(publish, "Publish verified multi-platform image")
     tag_push_index = named_step(publish, "Push verified tag")
     release_index = named_step(publish, "Create the GitHub release")

@@ -197,8 +197,8 @@ separate costs. Short local bursts are regressions, not deployment guarantees.
 
 Work lands on `testing` first. The full check suite and both native container
 smoke tests run on all `testing` pull requests, code-bearing `testing` pushes,
-and manually pushed `v*` tags; docs and site-only `testing` pushes use `docs.yml`
-instead. They also run on Dependabot's `main` security PRs. An
+manually dispatched `testing` gates, and manually pushed `v*` tags; docs and
+site-only `testing` pushes use `docs.yml` instead. They also run on Dependabot's `main` security PRs. An
 ordinary `main` promotion proves the head is the current `testing` tip, main is
 already merged back into `testing`, and that exact commit passed the full gate,
 or that only docs paths changed since the closest gated `testing` commit (the
@@ -212,7 +212,8 @@ promotion-only and protected: open a pull request from `testing`, wait for
 `required`, and merge with a merge commit. A code-bearing promotion bumps
 [VERSION](VERSION) above every release tag; a docs/site-only promotion skips
 that check, validates docs, workflow policy and the site, and does not rebuild
-images. For a code-bearing promotion, CI creates the release tag and image; a
+images. For a code-bearing promotion, the merged-PR release run creates the
+release tag and image; a delivered main push is an idempotent fallback, and a
 manually pushed `v*` tag still ships exactly as tagged. Never push
 `main` or a release tag as part of feature work. See the
 [branch workflow](CONTRIBUTING.md#branch-workflow) for the full checklist and

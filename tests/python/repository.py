@@ -633,17 +633,17 @@ class PublishedContracts(unittest.TestCase):
         operations = self.read("docs/operations.md")
         section = operations.split("## Versions and images", 1)[1].split("\n## ", 1)[0]
         rows = dict(re.findall(r"^\| `([^`]+)` \| (.*?) \|$", section, re.M))
-        self.assertIn("main-branch", rows["main"])
+        self.assertIn("merged promotion PR", rows["main"])
         self.assertNotIn("development", rows["main"])
         self.assertIn("non-prerelease release", rows["latest"])
-        self.assertIn("main-branch", rows["latest"])
+        self.assertIn("merged promotion PR", rows["latest"])
         self.assertIn("cut revision", rows["sha-<full commit>"])
         self.assertIn("built", rows["sha-<full commit>"])
 
         contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
         # The sentence case guide may start the sentence with "A"; pin the
         # phrase itself rather than its leading article.
-        self.assertIn("code-bearing versioned push to `main`", contributing.lower())
+        self.assertIn("merged-pr event carries the exact merge commit", contributing.lower())
         self.assertIn("The release `publish` job waits for `required`", contributing)
         self.assertIn("The `publish-testing` job waits for `checks` and `container`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
@@ -658,9 +658,13 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("do not squash several findings into one final commit", contributing)
 
     def test_docs_history_capture_keeps_the_request_table_unclipped(self):
+        support = self.read("tests/support.py")
+        self.assertIn("DOCS_CAPTURE_VIEWPORT = {'width': 2208, 'height': 900}", support)
+        for path in ("tests/browser_check.py", "tests/explorer_check.py"):
+            source = self.read(path)
+            self.assertIn("await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)", source)
         explorer = self.read("tests/explorer_check.py")
-        start = explorer.index(
-            "await page.set_viewport_size({'width': 2200, 'height': 900})")
+        start = explorer.index("await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)")
         capture = explorer[start:].split("await capture_image", 1)[0]
         # Both the wider viewport and the non-clipping guard are part of the
         # published request-table capture, not a nearby synthetic run.
