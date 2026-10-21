@@ -642,13 +642,12 @@ newer than every existing release tag. Docs/site-only promotions skip the
 version and full-gate proofs, validate docs, workflow policy and the site in
 `required` within its ten-minute budget, and do not rebuild images or cut a
 release. Merge with a merge
-commit. The release
-workflow tags that reviewed merge commit and publishes the image; a code-bearing
-main push only reuses the reviewed merge and publishes. It never pushes
-`main`. Dependabot security pull requests are the only other exception and
-normally do not cut a release by themselves; an untagged pending `VERSION` can
-publish. A manually pushed `v*` tag ships exactly as
-tagged. The full maintainer checklist lives in
+commit. The merged-PR release workflow tags that reviewed merge commit and
+publishes the image; a delivered code-bearing main push is an idempotent
+fallback. It never pushes `main`. Dependabot security pull requests are the
+only other exception and normally do not cut a release by themselves; an
+untagged pending `VERSION` can publish. A manually pushed `v*` tag ships exactly
+as tagged. The full maintainer checklist lives in
 [Contributing](../CONTRIBUTING.md#branch-workflow).
 
 `go run ./cmd/proxy -version` (or `/millivolt -version` in the image) prints
@@ -670,24 +669,26 @@ tags, and for Dependabot's `main` security PRs. Docs and site-only pushes use
 promotion PR proves the current testing tip, merged-back main and the full-gate
 record for that commit, or for the closest gated testing commit with only docs
 changes after it; docs-only promotions validate the docs, workflow policy and
-site directly. The following code-bearing `main` push only reuses the reviewed
-merge and publishes.
-Publication is limited to this repository's pushes to `main`, matching release
-tags, and `testing`-branch pushes (which publish only the moving `testing` tag).
-The release `publish` job waits for `required`. The `publish-testing` job waits
-for `checks` and `container` instead, because a testing push has no promotion
-proof to wait for. A main push whose `VERSION` is already tagged, such as a
-Dependabot security merge, normally does not publish; if main carries an
-untagged pending `VERSION`, that push can publish it. Pull requests do not
-publish images.
+site directly. The merged promotion PR carries the reviewed merge commit and
+releases it; a delivered code-bearing `main` push only reuses the same reviewed
+merge and is idempotent.
+Publication is limited to this repository's merged promotion pull requests,
+delivered pushes to `main`, matching release tags, and `testing`-branch pushes
+(which publish only the moving `testing` tag). The release `publish` job waits
+for `required`. The `publish-testing` job waits for `checks` and `container`
+instead, because a testing push has no promotion proof to wait for. A release
+run whose `VERSION` is already tagged, such as a Dependabot security merge,
+normally does not publish; if main carries an untagged pending `VERSION`, that
+run can publish it. Open or unmerged pull requests do not publish images; a
+merged promotion PR does.
 
 | Image tag | Meaning |
 | --- | --- |
-| `main` | Moving production image for the released current `main` revision; updated by non-prerelease versioned main-branch pushes. A prerelease does not move it. |
+| `main` | Moving production image for the released current `main` revision; updated by non-prerelease versioned releases from a merged promotion PR, a delivered main push or a release tag. A prerelease does not move it. |
 | `testing` | Moving development image after a successful testing-branch push; never a release. Its OCI version label reports the embedded `VERSION`, which can lag the latest release. |
 | `sha-<full commit>` | Release tag for the exact cut revision built and published; the version bump is part of the reviewed promotion merge, so this is a main commit. Testing pushes do not publish it. |
 | Version from `VERSION` | Created by the matching `v`-prefixed release tag on the promotion merge commit, or by a manually pushed tag. |
-| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a main-branch push. Prereleases and testing pushes do not update it. |
+| `latest` | Moving stable alias updated by every non-prerelease release, including a release cut by a merged promotion PR, a main push or a tag. Prereleases and testing pushes do not update it. |
 
 Release builds request an SBOM and max-mode provenance. The image and its
 attestations are published before the tag and release are updated; the workflow

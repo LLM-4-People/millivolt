@@ -633,17 +633,17 @@ class PublishedContracts(unittest.TestCase):
         operations = self.read("docs/operations.md")
         section = operations.split("## Versions and images", 1)[1].split("\n## ", 1)[0]
         rows = dict(re.findall(r"^\| `([^`]+)` \| (.*?) \|$", section, re.M))
-        self.assertIn("main-branch", rows["main"])
+        self.assertIn("merged promotion PR", rows["main"])
         self.assertNotIn("development", rows["main"])
         self.assertIn("non-prerelease release", rows["latest"])
-        self.assertIn("main-branch", rows["latest"])
+        self.assertIn("merged promotion PR", rows["latest"])
         self.assertIn("cut revision", rows["sha-<full commit>"])
         self.assertIn("built", rows["sha-<full commit>"])
 
         contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
         # The sentence case guide may start the sentence with "A"; pin the
         # phrase itself rather than its leading article.
-        self.assertIn("code-bearing versioned push to `main`", contributing.lower())
+        self.assertIn("merged-pr event carries the exact merge commit", contributing.lower())
         self.assertIn("The release `publish` job waits for `required`", contributing)
         self.assertIn("The `publish-testing` job waits for `checks` and `container`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")

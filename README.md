@@ -212,7 +212,8 @@ promotion-only and protected: open a pull request from `testing`, wait for
 `required`, and merge with a merge commit. A code-bearing promotion bumps
 [VERSION](VERSION) above every release tag; a docs/site-only promotion skips
 that check, validates docs, workflow policy and the site, and does not rebuild
-images. For a code-bearing promotion, CI creates the release tag and image; a
+images. For a code-bearing promotion, the merged-PR release run creates the
+release tag and image; a delivered main push is an idempotent fallback, and a
 manually pushed `v*` tag still ships exactly as tagged. Never push
 `main` or a release tag as part of feature work. See the
 [branch workflow](CONTRIBUTING.md#branch-workflow) for the full checklist and

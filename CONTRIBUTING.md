@@ -113,7 +113,8 @@ directly and therefore still runs the full gate.
    ```
    Squash and rebase are disabled on `main`; they would replace the reviewed
    testing history instead of preserving it.
-5. After the promotion is on `main` and its release or Pages run finishes,
+5. The merged-PR release run starts as soon as the promotion merge lands; wait
+   for its publish job (and the Pages run, when applicable) to finish, then
    merge `main` back into `testing` so the next promotion is up to date:
    ```sh
    git fetch origin main
@@ -124,10 +125,12 @@ directly and therefore still runs the full gate.
    If `testing` moved after the promotion merge, merge `origin/main` normally
    and resolve conflicts before the next promotion.
 
-For a code-bearing promotion, CI creates the annotated release tag on the merge
-and publishes the image. It never pushes `main`. Do not push a `v*` tag as part
-of feature work; the manual tag path is only for an explicitly verified release
-and must match `VERSION`.
+For a code-bearing promotion, the merged-PR release run creates the annotated
+release tag on the reviewed merge commit and publishes the image. It never
+pushes `main`. A delivered `main` push is an idempotent fallback; a manually
+pushed `v*` tag remains the explicit recovery path. Do not push a `v*` tag as
+part of feature work; the manual tag path is only for an explicitly verified
+release and must match `VERSION`.
 
 Dependabot version updates target `testing`. Dependabot security updates target
 the default branch and are the only exception to the testing-ancestry check;
@@ -140,8 +143,10 @@ include the fix in the next versioned promotion.
 Docs and site-only pushes to `testing` skip image work. A docs/site-only
 promotion to `main` skips the `VERSION` and full-gate proofs, validates the
 Markdown, generated site, workflow policy and docs contracts in `required`, and
-leaves the merged main push docs-only, so a Pages-relevant change deploys the
-site without rebuilding images or cutting a release.
+the merged-PR release path records the change as docs-only, so it does not
+rebuild images or cut a release. A Pages-relevant change deploys the site from
+the `main` push, or from the Pages `workflow_dispatch` fallback when that push
+workflow is not delivered.
 
 `AGENTS.md` is intentionally local and ignored by the publication guard. Keep its
 working instructions aligned with this shared guide; do not force-add private
@@ -474,13 +479,15 @@ millivolt_version="$(tr -d '\r\n' < VERSION)"
 go run ./cmd/release -revision "$(git rev-parse HEAD)" -tag "v$millivolt_version"
 ```
 
-Publication is automatic. A code-bearing versioned push to `main` cuts a release
-after the full gate has passed for the promoted commit, or after the closest
-gated `testing` commit plus a docs-only delta. A Dependabot security PR targets
-`main` and runs the full gate itself rather than reusing a `testing` result.
-The release `publish` job waits for `required`. The `publish-testing` job waits
-for `checks` and `container` instead, because a testing push has no promotion
-proof to wait for:
+Publication is automatic. A code-bearing versioned promotion releases when the
+promotion PR merges, after the full gate has passed for the promoted commit, or
+after the closest gated `testing` commit plus a docs-only delta. The merged-PR
+event carries the exact merge commit; a delivered `main` push is an idempotent
+fallback, so a dropped push event cannot leave the release untagged. A
+Dependabot security PR targets `main` and runs the full gate itself rather than
+reusing a `testing` result. The release `publish` job waits for `required`.
+The `publish-testing` job waits for `checks` and `container` instead, because a
+testing push has no promotion proof to wait for:
 
 1. A code-bearing promotion PR owns the version bump. `required` compares
    VERSION against every existing `v*` tag with SemVer precedence and rejects a
@@ -506,9 +513,10 @@ the generated site, workflow policy and docs contracts. A docs/site-only main
 promotion also skips the VERSION and full-gate proofs but runs the same
 Markdown, generated-site, workflow-policy and repository checks in `required`;
 a Pages-relevant merged main push stays docs-only, so Pages deploys without
-rebuilding images or cutting a release. A code-bearing main promotion
-must carry a VERSION newer than every existing tag and cuts a release. A
-manually pushed `v*` tag still ships exactly as tagged through the same
+rebuilding images or cutting a release; the merged-PR release path classifies
+the change and skips publication. A code-bearing promotion must carry a VERSION
+newer than every existing tag and cuts a release. A manually pushed `v*` tag
+still ships exactly as tagged through the same
 pipeline, with the image published before the release is created. A manual tag
 must match VERSION. Code-bearing pushes to `testing` publish the moving
 `ghcr.io/llm-4-people/millivolt:testing` image after the same checks and
