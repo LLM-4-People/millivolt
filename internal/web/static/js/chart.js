@@ -94,6 +94,9 @@ const CHART_DAY_MS = 86400000;
 // is floored below 100 before rounding.
 const fmtPct = v => pctValue(v, 1, true);
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
+// The summary timing tile uses the compact t/s unit on both its value and its
+// range; the shared trailing unit is stated once so the pair fits one tile.
+const fmtTileTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + 't/s';
 
 // hm is the single HH:MM local-time label (x ticks + hover chip).
 const hm = t => {
@@ -881,7 +884,7 @@ function chartTotals() {
         tileSpark(kept, [['v-in', b => b.in], ['v-out', b => b.out], ['v-cache', b => b.cache]])));
       const costSpec = chartSpec('cost');
       parts.push(tile('cost', costSpec.color,
-        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)} /Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
+        fmtMoney(cost) + (chartAgg.cost_per_mtok != null ? `<span class="chart-sub">${fmtMoney(chartAgg.cost_per_mtok)}/Mtok</span>` : '') + sparkLines(kept, [[costSpec.color, b => b.cost]])));
       parts.push(tile('health', 'err',
         tilePair([['v-err', fmt(err)], ['v-rl', fmt(rl)]]) +
         (req ? `<span class="chart-sub">of ${fmt(req)} requests</span>` : '') +
@@ -897,17 +900,18 @@ function chartTotals() {
       // for 46.85) reads as a count - the same ambiguity that replaced the
       // old in:out ratio with a bounded share. A shared trailing unit is
       // stated once ('31-32ms', never '31ms-32ms'); bounds on different
-      // scales keep both units ('900ms-2.50s').
+      // scales keep both units and take a spaced range dash ('390ms - 6.16s').
       const unitOf = v => (String(v).match(/[a-zA-Z%]+$/) || [''])[0];
       const range = (m, fmtFn, unit) => {
         if (!m) return '';
         const lo = fmtFn(m[1]), hi = fmtFn(m[2]);
+        if (unit) return `${lo}-${hi}${unit}`; // one shared trailing unit
         const shared = unitOf(lo) === unitOf(hi) && unitOf(lo) !== '';
-        return `${shared ? String(lo).slice(0, -unitOf(lo).length) : lo}-${hi}${unit}`;
+        return shared ? `${String(lo).slice(0, -unitOf(lo).length)}-${hi}` : `${lo} - ${hi}`;
       };
-      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), '/s')].filter(Boolean).join(' · ');
+      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), 't/s')].filter(Boolean).join(' · ');
       parts.push(tile('timing', 'accent',
-        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', ps ? fmt(ps[0]) : '-']]) +
+        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', fmtTileTPS(ps?.[0])]]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
         tileSpark(kept, [['v-ttft', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['v-tps', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
       break;

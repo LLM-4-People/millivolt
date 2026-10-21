@@ -4003,7 +4003,7 @@ async function main() {
       totalsOv.includes('<span class="chart-sub">input 75.0% of tokens<br>cache hit 40.0% of input</span>') &&
       !totalsOv.includes('in:out ') && !totalsOv.includes('data-tile'));
   check('overview totals annotate the server blended price',
-    totalsOv.includes('$12.5 /Mtok') &&
+    totalsOv.includes('$12.5/Mtok') &&
     !totalsOv.includes('/ req'));
   check('the pair stays tile-bounded and its share never fakes 100%', (() => {
     const saved = w.eval('JSON.stringify(chartAgg.buckets[3])');
@@ -4248,10 +4248,20 @@ async function main() {
     d.getElementById('chart-context').hidden &&
       w.eval('chartView.preset') === 'overview');
   check('the merged timing tile reads avg latency / speed with sample ranges',
-    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">202.75</span>') &&
-      totalsOv.includes('<span class="chart-sub">10-330ms · 50-300/s</span>') &&
+    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">202.75t/s</span>') &&
+      totalsOv.includes('<span class="chart-sub">10-330ms · 50-300t/s</span>') &&
       !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
       !/p(?:50|95|99)/.test(totalsOv) && !totalsOv.includes('tok/s'));
+  check('mixed-scale timing bounds take a spaced dash and both units', (() => {
+    const savedT = w.eval('JSON.stringify(chartAgg.ttft_stat)');
+    const savedP = w.eval('JSON.stringify(chartAgg.tps_stat)');
+    w.eval('chartAgg.ttft_stat = [1620, 390, 6160]; chartAgg.tps_stat = [148.239, 24, 480]');
+    const t = w.eval('chartTotals()');
+    w.eval('chartAgg.ttft_stat = JSON.parse(' + JSON.stringify(savedT) +
+      '); chartAgg.tps_stat = JSON.parse(' + JSON.stringify(savedP) + ')');
+    return t.includes('1.62s</span><span class="pair-sep">/</span><span class="v-tps">148.239t/s</span>') &&
+      t.includes('<span class="chart-sub">390ms - 6.16s · 24-480t/s</span>');
+  })());
   check('the percentile dropdown never re-gates the summary timing tile', (() => {
     w.setChartPct('50');
     const t50 = w.eval('chartTotals()');
