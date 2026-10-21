@@ -3327,15 +3327,17 @@ async function main() {
     chartAgg.ttft_p = [110, 220, 330]; chartAgg.tps_p = [101.25, 202.75, 303.5]; chartAgg.dec_p = [440, 550, 660];
   `);
   const latTotals = w.eval('chartTotals()');
+  const tps202Full = w.eval('fmtTPS(202.75)');
   check('speed + latency totals show only selected period values',
-    latTotals.includes('202.75 tok/s') && latTotals.includes('220ms') && latTotals.includes('550ms') &&
+    latTotals.includes(tps202Full) && latTotals.includes('220ms') && latTotals.includes('550ms') &&
     !latTotals.includes('101.25') && !latTotals.includes('110ms') && !latTotals.includes('440ms') && !/p(?:50|95|99)/.test(latTotals));
   for (const [pct, speed, ttft, dec, totalSpeed, totalTTFT, totalDec, kept] of [[50, 100.25, 10, 40, 101.25, 110, 440, 1], [99, 300.5, 30, 120, 303.5, 330, 660, 1]]) {
     w.setChartPct(String(pct));
     const data = w.eval('chartData()'), totals = w.eval('chartTotals()');
+    const totalSpeedText = w.eval('fmtTPS(' + totalSpeed + ')');
     check(`percentile dropdown chooses every series and period total at ${pct}`,
       data.length === 4 && data[0].length === kept && data[1][0] === speed && data[2][0] === ttft && data[3][0] === dec &&
-      totals.includes(totalSpeed + ' tok/s') && totals.includes(totalTTFT + 'ms') && totals.includes(totalDec + 'ms'));
+      totals.includes(totalSpeedText) && totals.includes(totalTTFT + 'ms') && totals.includes(totalDec + 'ms'));
   }
   w.setChartPct('95');
   // blank state: zero merged traffic reads as empty
@@ -4320,7 +4322,7 @@ async function main() {
     w.setChartPct('99');
     w.eval('chartTotals()');
     w.setChartPct('95');
-    return t50.includes('220ms') && t50.includes('202.75') &&
+    return t50.includes('220ms') && t50.includes(w.eval('fmt(202.75)')) &&
       w.eval('chartPlan().meta.length') === 0;
   })());
   // The timing tile's spark lines draw the per-bucket 95TH-percentile series
@@ -4536,7 +4538,12 @@ async function main() {
   await settleUntil(() => cfgFetches > cfgBefore);
   check('feed change resets the log to the fresh process snapshot', rows().length === 1 && rows()[0].dataset.id === 'restarted1');
   check('feed change sweeps operator state (config re-fetched in place)', cfgFetches > cfgBefore);
-  check('footer clock carries the weekday', /(mon|tues|wednes|thurs|fri|satur|sun)day/i.test(d.getElementById('f-clock').textContent));
+  check('footer clock carries the weekday', (() => {
+    const text = d.getElementById('f-clock').textContent.toLowerCase();
+    const weekdays = Array.from({length: 7}, (_, i) =>
+      new Date(2024, 0, 7 + i).toLocaleDateString(undefined, {weekday: 'long'}).toLowerCase());
+    return weekdays.some(day => text.includes(day));
+  })());
 
   // ---- test 14: providers field-map editor ----
   // Cards with removable cost-key chips and canonical-dropdown usage rows;
