@@ -866,7 +866,7 @@ function reqRow(r, sepLabel) {
     <td title="${escapeHtml(reqIdentityText(r))}"><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
     <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
-    <td title="${escapeHtml(r.gen_tps ? tpsText + ' tokens/s' : '')}">${tpsText}</td>
+    <td title="${escapeHtml(r.gen_tps ? tpsText + ' tok/s' : '')}">${tpsText}</td>
     <td title="${escapeHtml(inOutTitle)}">${inOutText}</td>
     <td style="color:${cacheTok ? 'var(--accent2)' : 'var(--muted)'}" title="${escapeHtml(cacheTitle)}">${cachePct != null ? cachePct : '-'}</td>
     <td style="color:var(--cyan)" title="${r.tool_calls ? escapeHtml(String(r.tool_calls)) + ' tool calls' : ''}">${r.tool_calls||'-'}</td>

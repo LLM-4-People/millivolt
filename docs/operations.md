@@ -1243,6 +1243,8 @@ generation-speed measure: (generation tokens - 1) over the first-token to
 last-token window. Average TTFT and average TPS are the arithmetic means of
 those per-request samples. TPS is absent for fewer than two tokens, a
 non-positive window, or a response that did not stream (no token timestamps).
+The compact surfaces (the KPI band and the Overview timing tile) abbreviate
+this unit as `t/s`; roomier readouts spell it `tok/s`.
 The numerator assumes the first observed content chunk carries one token; a provider that bundles several tokens into that chunk can
 still overstate the rate. These are provider-attempt measurements, not claims
 about total user wait or system-wide throughput.
