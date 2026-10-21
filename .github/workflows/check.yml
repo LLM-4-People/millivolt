@@ -614,7 +614,10 @@ jobs:
     # were deliberately skipped for that event. Docs/site-only main pushes are
     # handled by the docs and Pages workflows and do not publish an image.
     needs: required
-    if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # always() defeats GitHub's implicit success gate, which otherwise skips
+    # this job when checks and container were deliberately skipped for a main
+    # push. The explicit result check still requires the required gate to pass.
+    if: always() && needs.required.result == 'success' && github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:

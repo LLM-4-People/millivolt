@@ -350,6 +350,7 @@ def missing_needles(text: str, needles: tuple[str, ...]) -> list[str]:
 
 
 PUBLISH_GUARD = (
+    "always() && needs.required.result == 'success' && "
     "github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && "
     "(github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))"
 )
@@ -358,6 +359,8 @@ PUBLISH_TESTING_GUARD = (
     "github.ref == 'refs/heads/testing'"
 )
 PUBLISH_GUARD_NEEDLES = (
+    "always()",
+    "needs.required.result == 'success'",
     "github.event_name == 'push'",
     "github.repository == 'LLM-4-People/millivolt'",
     "github.ref == 'refs/heads/main'",
@@ -1783,8 +1786,6 @@ def check_workflows(errors: list[str]) -> None:
     publish = jobs.get("publish") or {}
     if publish.get("needs") not in ("required", ["required"]):
         errors.append("check.yml: publish must depend on the required gate")
-    if "always()" in str(publish.get("if", "")):
-        errors.append("check.yml: publish must use the required gate's success")
     publish_if = " ".join(str(publish.get("if", "")).split())
     publish_missing = missing_needles(publish_if, PUBLISH_GUARD_NEEDLES)
     for needle in publish_missing:
@@ -1813,6 +1814,15 @@ def check_workflows(errors: list[str]) -> None:
     forbidden_testing = publish_testing_if + " || github.ref == 'refs/heads/main'"
     if not publish_guard_errors(publish_if, forbidden_testing):
         errors.append("workflows self-check: adding a forbidden ref to the publish-testing guard must fail")
+    # A main push deliberately skips checks and container. Without always(),
+    # GitHub's implicit success gate also skips publish even though required
+    # passes, so the release never gets tagged.
+    without_always = publish_if.replace("always() && ", "", 1)
+    if not publish_guard_errors(without_always, publish_testing_if):
+        errors.append("workflows self-check: dropping always() from publish must fail")
+    without_required = publish_if.replace("needs.required.result == 'success' && ", "", 1)
+    if not publish_guard_errors(without_required, publish_testing_if):
+        errors.append("workflows self-check: dropping the required success check must fail")
     image_index = named_step(publish, "Publish verified multi-platform image")
     tag_push_index = named_step(publish, "Push verified tag")
     release_index = named_step(publish, "Create the GitHub release")
