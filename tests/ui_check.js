@@ -3961,7 +3961,7 @@ async function main() {
     check('latency preset stays blank on zero traffic (compaction and empty gate agree)',
       w.eval('chartData()') === null && !box.querySelector('div.uplot') && w.eval('_up') === null);
     // honest-data rule intact: SOME traffic must still plot - but a sparse
-    // window cannot fill the plot width, so the mount gate holds until the
+    // window is too little to read a trend, so the mount gate holds until the
     // fourth populated bucket. The blank names the sparseness, not the
     // traffic.
     w.eval("chartView.preset = 'cost'; chartAgg.buckets[7].req = 1");

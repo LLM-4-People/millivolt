@@ -73,10 +73,12 @@ const PCT_SUFFIX = [
   'th', 'st', 'nd', 'rd', 'th', 'th', 'th', 'th', 'th', 'th',
 ];
 const pctOrdinal = p => p + (PCT_SUFFIX[p % 100] || 'th');
-// A sparse window cannot fill the plot width honestly: one to three plotted
-// buckets strand a lone bar or a short line in dead space on both sides.
-// The big chart waits for a fourth point and paints the blank meanwhile -
-// the totals tiles and their sparklines still carry the story.
+// A sparse window is not worth a plot: one to three plotted buckets show a
+// lone point or a single segment, too little to read as a trend. The big
+// chart waits for a fourth point and paints the blank meanwhile - the totals
+// tiles and their sparklines still carry the story. Line presets span the
+// first-to-last point, so this gate is about reading the trend, not filling
+// the width.
 const CHART_MIN_POINTS = 4;
 // The smallest box (CSS pixels) the big chart measures before it paints:
 // below this the canvas stays untouched. A sub-minimum dashboard cell must
@@ -734,7 +736,7 @@ const TILE_LABELS = {
 const TILE_TITLES = {
   req: 'Request count over the blended token volume (input plus output), as a pair.',
   tokens: 'Input, output and cached prompt tokens as one in / out / cached triple, with the input share of all tokens and the cache hit share of input underneath.',
-  cost: 'Spend over the viewed period in USD (the same figure the KPI band shows, cost-reporting requests only), with the server\'s blended per-Mtok price underneath.',
+  cost: 'Spend over the viewed period in USD, with the server\'s blended per-Mtok price underneath (cost-reporting requests only).',
   health: 'Errors and rate-limited requests as a pair (error red / 429 tone), over the request count. A rate limit is not an error: both are distinct affected requests.',
   timing: 'Averages over every measured request in the viewed period, never an average of bucket percentiles, with each metric\'s low-high sample range underneath. Sparks: per-bucket ' + pctOrdinal(CHART_TILE_PCT) + ' percentiles.',
 };
@@ -843,8 +845,9 @@ function chartTotals() {
       // Merged tiles keep the story compact: requests carries the blended
       // token volume as its second half, tokens carries the in/out/cached
       // triple with both shares, the health tile carries both health counts
-      // in the chart's health colors, and cost carries the server's blended
-      // per-Mtok price - the SAME figure the KPI band shows,
+      // in the chart's health colors, and cost carries the period spend with
+      // the server's blended per-Mtok price underneath - the same blended-
+      // price rule as the KPI band, scoped to the viewed period and
       // cost-reporting requests only.
       // The metrics picker at the card head owns what shows (the same
       // dash.chart hidden set the legend uses): hidden metrics leave the

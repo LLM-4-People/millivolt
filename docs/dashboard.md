@@ -36,7 +36,7 @@ together. The time-range dropdown runs from 15 minutes through one year and
 Legend controls show or hide individual series; hover a bucket for its precise
 values and time interval. Counts, sums and percentiles come from the server.
 A window with fewer than four plotted points paints a waiting message instead
-of the chart: one to three buckets cannot fill the plot width, and the totals
+of the chart: one to three buckets are too few to read a trend, and the totals
 strip still tells the story until a fourth point arrives.
 
 ### Overview
@@ -48,9 +48,10 @@ requests / tokens (the request count over the blended token volume), tokens
 in/out/cached (one in / out / cached triple, with the input share of all
 tokens and the cache hit share of input underneath - each share line names
 what it compares), spend with the
-server's blended per-Mtok price (the same figure the KPI band shows,
-cost-reporting requests only), the health pair (errors in the error red /
-rate-limited requests in the 429 tone, over the request denominator), and
+server's blended per-Mtok price (the same blended-price rule as the KPI band,
+scoped to the viewed period and cost-reporting requests only), the health pair
+(errors in the error red / rate-limited requests in the 429 tone, over the
+request denominator), and
 the merged timing tile: average latency / average speed over every measured
 request in the period (server-computed from the same samples the percentiles
 rank, never an average of bucket percentiles), each metric's low-high sample
@@ -181,12 +182,13 @@ headers and the limits of missing, conflicting or ambiguous declarations.
 The request table combines recent finalized records with current in-flight
 state during ordinary live use. Rows show status, retry information, latency,
 throughput, token/cache usage, tool calls, duration, queue time and reported cost.
-Columns size to their content and only ever grow during a session: a value wider
-than every value seen before widens its column, and a later shorter value never
-shrinks it back, so a live row finalizing from `streaming` to its recorded
-status does not shift the cells to its right. When the card is narrower than the
-learned columns, the table scrolls inside its own region. The region is
-keyboard-scrollable and labelled, the identity cell carries the full
+Columns size to their content and keep a per-column floor: a value wider than
+every value seen before grows its column, and a later shorter value never
+shrinks it back. A live row finalizing from `streaming` to its recorded status
+therefore cannot pull the status column back; a final value wider than its
+in-flight placeholder can still grow its own column once. When the card is
+narrower than the learned columns, the table scrolls inside its own region.
+The region is keyboard-scrollable and labelled, the identity cell carries the full
 `client · provider · model` value in a hover title, and compact status pills and
 the actions button abbreviate by design. Its status selector and older-history
 paging operate on the current scope.
