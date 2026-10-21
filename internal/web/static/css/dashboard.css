@@ -1134,13 +1134,15 @@
       tiles wrap into as many whole rows as the selection needs, and the
       page scrolls past them, so every selected tile always renders at
       every viewport.
-      Sizing: every tile is ONE fixed height (118px fits the tallest content
-      - label 10 + value 13 + the tokens tile's two share lines 20 + spark
-      32 + three 6px gaps + 20px padding = 113, all line-height-1 rows so
-      the number is typeface-independent - with breathing room), so a tile
-      is the same size whatever it carries: spark or no spark, one share
-      line or
-      two, and the no-data skeleton swaps to data without moving the card.
+      Sizing: every tile is ONE fixed height per window. At the full locked
+      height it is 118px (label 10 + value 13 + the tokens tile's two share
+      lines 20 + spark 32 + three 6px gaps + 20px padding = 113, all
+      line-height-1 rows so the number is typeface-independent, with
+      breathing room); the short-locked media queries below lower the cell
+      and spark together so the card still fits the pair. Either way a tile
+      is the same size whatever it carries - spark or no spark, one share
+      line or two - and the no-data skeleton swaps to data without moving the
+      card.
       The spark is flex-shrink: 0 - it never acts as the overflow shock
       absorber; an oversized tile must clip visibly (the browser gate
       catches it), never silently crush the spark. The band sits
