@@ -693,6 +693,41 @@ async def check(base, screenshot):
                                 mobileScroll: box.scrollWidth > box.clientWidth + 1,
                                 pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
                             };
+                            // A retry message is retained up to 512 characters.
+                            // In auto layout its nowrap colspan cell must not
+                            // become the table's widest content: opening the
+                            // sub-row must leave every column where it was, and
+                            // the message must ellipsize inside its cell.
+                            const retryRec = { ...base, id: 'retry-width-probe',
+                                retries: 1,
+                                attempts: [{ at: base.start, status_code: 429,
+                                    error_type: 'rate_limit',
+                                    error_msg: 'upstream error: ' + 'x'.repeat(512) }] };
+                            const retryHtml = reqRow(retryRec, null);
+                            body.innerHTML = retryHtml;
+                            await frames();
+                            const retryBefore = {
+                                table: table.getBoundingClientRect().width,
+                                cols: measure().map(col => col.width),
+                            };
+                            const retrySub = body.querySelector('tr.retry-sub');
+                            retrySub.hidden = false;
+                            await frames();
+                            const retryMsg = retrySub.querySelector('.retry-sub-msg');
+                            const retryText = retrySub.querySelector('.retry-sub-text');
+                            const retryAfter = {
+                                table: table.getBoundingClientRect().width,
+                                cols: measure().map(col => col.width),
+                                messageWidth: retryText ? retryText.getBoundingClientRect().width : 0,
+                                messageScrollWidth: retryText ? retryText.scrollWidth : 0,
+                                title: retryMsg ? retryMsg.getAttribute('title') : '',
+                            };
+                            retrySub.hidden = true;
+                            await frames();
+                            result.retrySub = {
+                                before: retryBefore, after: retryAfter,
+                                closedTable: table.getBoundingClientRect().width,
+                            };
                         } finally {
                             modelNames.delete('Neutral-Model-With-A-Very-Long-Suffix');
                             body.innerHTML = savedBody;
@@ -734,6 +769,18 @@ async def check(base, screenshot):
                     if viewport['width'] == 390:
                         require(state['mobileScroll'], state)
                         require(state['scrollBox']['moved'] > 0, state)
+                    retry = state['retrySub']
+                    require(retry['after']['table'] <= retry['before']['table'] + 0.5,
+                            retry)
+                    require(retry['closedTable'] <= retry['before']['table'] + 0.5,
+                            retry)
+                    require(len(retry['after']['cols']) == len(retry['before']['cols']) and
+                            all(abs(after - before) <= 0.5 for after, before in
+                                zip(retry['after']['cols'], retry['before']['cols'])),
+                            retry)
+                    require(retry['after']['messageScrollWidth'] >
+                            retry['after']['messageWidth'] + 1, retry)
+                    require(len(retry['after']['title']) >= 512, retry)
                     table_shift.append({'width': viewport['width'], **state})
                 results.append({'table_shift': table_shift})
 

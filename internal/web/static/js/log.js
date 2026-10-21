@@ -889,7 +889,7 @@ function reqRow(r, sepLabel) {
     return `<tr class="retry-sub exp-row" data-retry-of="${escapeHtml(r.id)}" data-id="${escapeHtml(r.id)}" data-attempt="${i}" title="open request ${escapeHtml(r.id)} (attempt ${i + 1})" hidden>
       <td>${when}</td>
       <td colspan="${RETRY_LABEL_COLS}" class="retry-sub-label"><span class="retry-tick">↳</span> attempt ${i + 1} <span class="pill ${asc}">${a.status_code || '-'}</span> <span>${escapeHtml(label)}</span></td>
-      <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}">${escapeHtml(a.error_msg || '-')}</td>
+      <td colspan="${REQ_COLS - 1 - RETRY_LABEL_COLS}" class="retry-sub-msg" title="${escapeHtml(a.error_msg || '')}"><span class="retry-sub-text">${escapeHtml(a.error_msg || '-')}</span></td>
     </tr>`;
   }).join('');
   return sep + main + subs;

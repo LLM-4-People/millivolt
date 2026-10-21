@@ -1435,6 +1435,13 @@
   .retry-tick { color: var(--warn); margin-right: 4px; }
   .retry-sub-label { font-size: 10.5px; }
   .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* A retry message is retained up to 512 characters. In the table's auto
+     layout a nowrap colspan cell would make the whole table as wide as that
+     message, then collapse it again when the sub-row closes. Cap the inner
+     text below the narrowest learned table (the 14 header cells alone) so
+     the sub-row ellipsizes inside the current width; the full message stays
+     in the cell title and the request drawer. */
+  .retry-sub-text { display: inline-block; max-width: 72ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 
   /* Day dividers - the request log nests by local calendar day. Each divider
      is a major graduation on the instrument scale: a dated chip riding the
