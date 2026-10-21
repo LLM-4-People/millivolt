@@ -965,12 +965,13 @@ const REQ_COLS = REQ_COLUMNS.length;
 // leave the sub-row short.
 const RETRY_LABEL_COLS = 2;
 
-// Request-log columns fit their content and only ever grow. Automatic table
+// Request-log columns fit their content and keep a floor. Automatic table
 // layout sizes each column to its widest cell; REQ_FLOORS remembers the widest
 // box a column has needed in this session and reapplies it as the header
 // cell's min-width, which auto layout treats as a hard column floor. A live row
 // finalizing, a shorter neighbour arriving or a new page of history therefore
-// never shrinks a column and shifts every cell to its right.
+// never shrinks a column below the widest measured value; a new wider value can
+// still grow it once and shift the cells to its right.
 //
 // The floors are measured offscreen at natural (max-content) width, so the
 // extra space the card distributes across columns is never mistaken for
