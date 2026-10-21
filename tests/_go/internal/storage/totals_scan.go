@@ -31,7 +31,7 @@ func TestReadTotalsValueLockstep(t *testing.T) {
 			// A clean priced 200.
 			ID: "clean", Provider: "p", Model: "m", KeyHash: "k",
 			StatusCode: 200, Start: at,
-			TTFTMs: 120, OverallTPS: 50, DecodeTPS: 9, Cost: 0.25,
+			TTFTMs: 120, DecodeTPS: 9, Cost: 0.25,
 			Usage: metrics.Usage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 5},
 		},
 		{
@@ -50,7 +50,7 @@ func TestReadTotalsValueLockstep(t *testing.T) {
 			// mixed attempt log (429 flow control + an absorbed 503).
 			ID: "failed", Provider: "p", Model: "m", KeyHash: "k",
 			StatusCode: 500, ErrorType: "provider_error", ErrorMsg: "boom", Start: at.Add(2 * time.Second),
-			TTFTMs: 300, OverallTPS: 25, Cost: 1.5,
+			TTFTMs: 300, DecodeTPS: 25, Cost: 1.5,
 			Usage: metrics.Usage{InputTokens: 200, OutputTokens: 50, CacheReadTokens: 15, ReasoningTokens: 30},
 			Attempts: []metrics.RetryAttempt{
 				{StatusCode: 429, ErrorType: "rate_limit_error", RetryAfterMs: 250, At: at.Add(time.Second)},
@@ -105,8 +105,8 @@ func TestReadTotalsValueLockstep(t *testing.T) {
 	if got.TTFTSum != 420 || got.TTFTN != 2 {
 		t.Errorf("TTFTSum/N = %d/%d, want 420/2 (120 + 300; the two absent samples never dilute)", got.TTFTSum, got.TTFTN)
 	}
-	if got.TPSSum != 79 || got.TPSN != 3 {
-		t.Errorf("TPSSum/N = %v/%d, want 79/3 (overall 50 and 25, decode fallback 4, no sample on the unpriced row)", got.TPSSum, got.TPSN)
+	if got.TPSSum != 38 || got.TPSN != 3 {
+		t.Errorf("TPSSum/N = %v/%d, want 38/3 (decode 9 + 4 + 25; no sample on the unpriced row)", got.TPSSum, got.TPSN)
 	}
 	if got.CostReqs != 2 || got.CostInOut != 370 {
 		t.Errorf("CostReqs/CostInOut = %d/%v, want 2/370 (the two priced rows' in+out only)", got.CostReqs, got.CostInOut)

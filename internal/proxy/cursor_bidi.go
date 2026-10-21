@@ -397,7 +397,9 @@ func (s *Server) openCursorHTTP(ctx context.Context, t *target, key string, clie
 			return nil, nil, nil, err
 		}
 		state := stormState(ctx)
-		if state != nil && state.rec.Retries > 0 {
+		if state != nil {
+			// Every attempt stamps its own send start so TTFT is always
+			// measured from the upstream send, never from Start.
 			state.rec.FinalAttemptAt = attemptStart
 		}
 		// Each attempt has its own duplex body and cancellation. Closing both

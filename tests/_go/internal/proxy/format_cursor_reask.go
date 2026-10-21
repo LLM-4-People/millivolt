@@ -388,10 +388,10 @@ func TestCursorVoidTokenlessVisibleFragmentIsNotReasked(t *testing.T) {
 // TestCursorVoidReaskFailureKeepsVoidTimeline pins the failed-re-ask contract:
 // when a genuinely empty void turn is followed by a failed re-ask, the surfaced
 // response is still the VOID's, so the record must keep describing the voided
-// attempt. The re-ask's admission stamps FinalAttemptAt (Retries > 0 after the
-// absorb) and its >= 400 response adopts transport timing inside openCursorHTTP;
-// left in place, the record describes an attempt whose response the client never
-// received. Both must roll back to the void's.
+// attempt. Every sent attempt stamps FinalAttemptAt; the re-ask's later
+// admission and its >= 400 response transport timing inside openCursorHTTP must
+// roll back to the void's, or the record describes an attempt whose response
+// the client never received.
 func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 	// voidGap separates the void's send from the re-ask, so a re-ask-anchored
 	// FinalAttemptAt is unambiguously later. reaskDelay delays the failed
@@ -464,10 +464,14 @@ func TestCursorVoidReaskFailureKeepsVoidTimeline(t *testing.T) {
 	if !rec.FirstTokenAt.IsZero() {
 		t.Fatalf("FirstTokenAt = %v, want zero for a genuinely empty void turn", rec.FirstTokenAt)
 	}
-	// FinalAttemptAt was zero before the re-ask; the failed re-ask's admission
-	// stamp must be rolled back. A kept stamp lands at or after reaskStart.
-	if !rec.FinalAttemptAt.IsZero() {
-		t.Fatalf("FinalAttemptAt = %v, want the surfaced void's pre-re-ask value (zero), never the failed re-ask's admission at %v",
+	// Every sent attempt stamps FinalAttemptAt, so before the re-ask the
+	// record carries the void's own send anchor. The failed re-ask's later
+	// admission must be rolled back: a kept stamp lands at or after reaskStart.
+	if rec.FinalAttemptAt.IsZero() {
+		t.Fatal("FinalAttemptAt = 0, want the surfaced void attempt's send anchor")
+	}
+	if !rec.FinalAttemptAt.Before(reaskStart) {
+		t.Fatalf("FinalAttemptAt = %v, want the void's pre-re-ask anchor before %v, never the failed re-ask's admission",
 			rec.FinalAttemptAt, reaskStart)
 	}
 	// The failed re-ask's 500 response adopted its transport timing inside

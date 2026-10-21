@@ -265,7 +265,6 @@ CREATE TABLE IF NOT EXISTS requests (
 	gen_tokens INTEGER NOT NULL DEFAULT 0,
 	had_answer_content INTEGER NOT NULL DEFAULT 0,
 	gen_tps REAL NOT NULL DEFAULT 0,
-	overall_tps REAL NOT NULL DEFAULT 0,
 	method TEXT NOT NULL DEFAULT '',
 	path TEXT NOT NULL DEFAULT '',
 	processing_ms INTEGER NOT NULL DEFAULT 0,
@@ -442,7 +441,7 @@ func (t Totals) AvgTTFT() *float64 {
 	return metrics.ScaledRatio(float64(t.TTFTSum), float64(t.TTFTN), 1)
 }
 
-// AvgTPS returns the mean over captured throughput samples (tps > 0).
+// AvgTPS returns the mean over captured generation-speed samples (tps > 0).
 func (t Totals) AvgTPS() *float64 {
 	if t.TPSN == 0 {
 		return nil
@@ -492,11 +491,11 @@ func (t *Totals) Add(r *metrics.Record) {
 		}
 		t.TTFTN++
 	}
-	if tps := r.OverallTPS; tps > 0 {
+	if tps := r.DecodeTPS; tps > 0 {
 		t.TPSSum, t.err = metrics.SumValues(t.TPSSum, tps)
-		t.TPSN++
-	} else if r.DecodeTPS > 0 {
-		t.TPSSum, t.err = metrics.SumValues(t.TPSSum, r.DecodeTPS)
+		if t.err != nil {
+			return
+		}
 		t.TPSN++
 	}
 }
@@ -1446,9 +1445,12 @@ func (s *Store) TotalsDegraded() bool {
 // same transaction as every insert, full purge, filtered purge and merge, so a
 // reboot loads one row instead of scanning all history. Version gates the
 // document: a semantics change bumps it and forces one rebuilding scan.
+//
+// v3: TPS means the single first-token-to-last-token rate (gen_tps). The old
+// document's tps_sum mixed overall_tps and gen_tps, so it is rebuilt.
 const totalsMetaKey = "totals"
 
-const totalsMetaVersion = 2
+const totalsMetaVersion = 3
 
 // totalsWitness is the projection state the in-memory totals were read or
 // computed against. A batch may only extend a base whose witness is still
@@ -1600,7 +1602,7 @@ func readTotals(ctx context.Context, db interface {
 }) (Totals, error) {
 	rows, err := db.QueryContext(ctx, `SELECT status_code, error_type, attempts,
 		input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
-		cost, ttft_ms, overall_tps, gen_tps
+		cost, ttft_ms, gen_tps
 		FROM requests`)
 	if err != nil {
 		return Totals{}, err
@@ -1612,9 +1614,9 @@ func readTotals(ctx context.Context, db interface {
 		var errorType string
 		var attemptsJSON []byte
 		var in, out, cacheR, reason int64
-		var cost, overall, gen float64
+		var cost, gen float64
 		if err := rows.Scan(&status, &errorType, &attemptsJSON,
-			&in, &out, &cacheR, &reason, &cost, &ttft, &overall, &gen); err != nil {
+			&in, &out, &cacheR, &reason, &cost, &ttft, &gen); err != nil {
 			return Totals{}, err
 		}
 		atts, err := DecodeAttemptsColumn(attemptsJSON)
@@ -1622,7 +1624,7 @@ func readTotals(ctx context.Context, db interface {
 			log.Printf("storage: totals: decode attempts: %v", err)
 		}
 		r := metrics.Record{StatusCode: int(status), ErrorType: errorType, Attempts: atts,
-			TTFTMs: ttft, OverallTPS: overall, DecodeTPS: gen,
+			TTFTMs: ttft, DecodeTPS: gen,
 		}
 		r.Usage.InputTokens = in
 		r.Usage.OutputTokens = out
@@ -1691,7 +1693,6 @@ func migrate(db *sql.DB) error {
 		{"gen_tokens", "ALTER TABLE requests ADD COLUMN gen_tokens INTEGER NOT NULL DEFAULT 0"},
 		{"had_answer_content", "ALTER TABLE requests ADD COLUMN had_answer_content INTEGER NOT NULL DEFAULT 0"},
 		{"gen_tps", "ALTER TABLE requests ADD COLUMN gen_tps REAL NOT NULL DEFAULT 0"},
-		{"overall_tps", "ALTER TABLE requests ADD COLUMN overall_tps REAL NOT NULL DEFAULT 0"},
 		{"method", "ALTER TABLE requests ADD COLUMN method TEXT NOT NULL DEFAULT ''"},
 		{"path", "ALTER TABLE requests ADD COLUMN path TEXT NOT NULL DEFAULT ''"},
 		{"processing_ms", "ALTER TABLE requests ADD COLUMN processing_ms INTEGER NOT NULL DEFAULT 0"},
@@ -1890,7 +1891,7 @@ const recordColumns = `
 		cache_write_tokens, reasoning_tokens, client_disconnected,
 		rate_limit_remaining, rate_limit_limit, cost,
 		turns_user, turns_assistant, turns_tool, response_headers,
-		answer_tokens, first_answer_at, first_reasoning_at, gen_tokens, had_answer_content, gen_tps, overall_tps,
+		answer_tokens, first_answer_at, first_reasoning_at, gen_tokens, had_answer_content, gen_tps,
 		method, path, processing_ms, prompt_preview, response_preview,
 		provider_model, provider_request_id, provider_server,
 		queue_wait_ms, rate_limited, retries, retry_after_ms, tool_names,
@@ -1956,7 +1957,7 @@ func recordScanTargets(r *metrics.Record, s *recordScanScratch) []any {
 		&r.Usage.CacheReadTokens, &r.Usage.CacheWrite, &r.Usage.ReasoningTokens,
 		&r.ClientDisconnected, &r.RateLimitRemaining, &r.RateLimitLimit,
 		&r.Cost, &r.TurnsUser, &r.TurnsAssistant, &r.TurnsTool, &s.respHdr,
-		&r.AnswerTokens, &s.firstAnswerMs, &r.FirstReasoningAt, &r.GenTokens, &s.hadAnswer, &r.DecodeTPS, &r.OverallTPS,
+		&r.AnswerTokens, &s.firstAnswerMs, &r.FirstReasoningAt, &r.GenTokens, &s.hadAnswer, &r.DecodeTPS,
 		&r.Method, &r.Path, &r.ProcessingMs, &r.PromptPreview, &r.ResponsePreview,
 		&r.ProviderModel, &r.ProviderRequestID, &r.ProviderServer,
 		&r.QueueWaitMs, &s.rateLimited, &r.Retries, &r.RetryAfterMs, &s.toolNames,

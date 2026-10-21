@@ -38,7 +38,7 @@ func TestDocumentationCopyUsesCanonicalSchemaAndSurvivesOpen(t *testing.T) {
 			Start: start.Add(time.Duration(i) * time.Minute), StatusCode: status,
 			FirstTokenAt: start.Add(time.Second), LastTokenAt: start.Add(2 * time.Second),
 			FinalAttemptAt: start, FirstAnswerAt: start.Add(time.Second),
-			DurationMs: 2000, TTFTMs: 1000, DecodeTPS: 20, OverallTPS: 10,
+			DurationMs: 2000, TTFTMs: 1000, DecodeTPS: 20,
 			Usage: metrics.Usage{InputTokens: 100, OutputTokens: 20, TotalTokens: 120,
 				CacheReadTokens: 3, CacheWrite: 4, ReasoningTokens: 5},
 			Cost: 0.125, ToolCalls: 2, ToolNames: []string{secret, secret},

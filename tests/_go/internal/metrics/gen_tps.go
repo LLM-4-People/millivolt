@@ -5,13 +5,16 @@ import (
 	"time"
 )
 
-// gen_tps measures GENERATION tokens (reasoning + answer content) over the
-// first-token→last-token window. Two bugs this pins:
+// gen_tps is the single TPS metric: GENERATION tokens (reasoning + answer
+// content) over the first-token→last-token window. Three bugs this pins:
 //  1. The numerator used to be completion_tokens, which counts tool-call
 //     argument tokens (OpenAI bills them; a content:null tool_calls response
 //     still reports completion_tokens) - inflating the rate.
 //  2. The window used to end at End (past the last token, after usage/[DONE]
 //     handling) instead of at the last generation token.
+//  3. The rate used N tokens over an N-1 interval window. The first token is
+//     at the window start, so it is not part of the decode span: the standard
+//     TPOT identity is (N-1) / (last-first).
 func TestGenThroughputToolCallsAndWindow(t *testing.T) {
 	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 
@@ -28,12 +31,13 @@ func TestGenThroughputToolCallsAndWindow(t *testing.T) {
 		}
 	}
 
-	// 60 generation tokens over a 2s window = 30 tok/s (NOT over the 4s
-	// first→end window, which would read 15).
+	// 60 generation tokens span 59 inter-token intervals over 2s = 29.5 tok/s
+	// (NOT 60/2 = 30, and NOT over the 4s first→end window, which would read
+	// 14.75).
 	r := win(60)
 	FinalizeRecord(r)
-	if r.DecodeTPS != 30 {
-		t.Errorf("gen_tps = %v, want 30 (60 gen tokens / 2s first→last window)", r.DecodeTPS)
+	if r.DecodeTPS != 29.5 {
+		t.Errorf("gen_tps = %v, want 29.5 (59 intervals / 2s first→last window)", r.DecodeTPS)
 	}
 
 	// Provider-usage path, no tool calls: numerator = reasoning + answer.
@@ -48,8 +52,8 @@ func TestGenThroughputToolCallsAndWindow(t *testing.T) {
 	if r2.GenTokens != 80 {
 		t.Errorf("GenTokens = %d, want 80 (reasoning 30 + answer 50)", r2.GenTokens)
 	}
-	if r2.DecodeTPS != 40 {
-		t.Errorf("gen_tps = %v, want 40 (80 gen tokens / 2s)", r2.DecodeTPS)
+	if r2.DecodeTPS != 39.5 {
+		t.Errorf("gen_tps = %v, want 39.5 (79 intervals / 2s)", r2.DecodeTPS)
 	}
 
 	// Tool-call-only response (finish_reason=tool_calls, content:null - the
@@ -97,5 +101,36 @@ func TestGenThroughputToolCallsAndWindow(t *testing.T) {
 		if r4.GenTokens != 50 {
 			t.Errorf("mixed content+tool (streaming=%v): GenTokens = %d, want 50 (reasoning 10 + answer 40)", streaming, r4.GenTokens)
 		}
+	}
+}
+
+// TestGenThroughputBoundaries pins the absent-rate domain: fewer than two
+// tokens, a missing last token, or a zero/non-positive window has no
+// measurable decode rate. The old code invented one from End.
+func TestGenThroughputBoundaries(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		rec  *Record
+	}{
+		{"one token", &Record{FirstTokenAt: base, LastTokenAt: base.Add(time.Second), GenTokens: 1}},
+		{"no last token", &Record{FirstTokenAt: base, GenTokens: 10}},
+		{"same instant", &Record{FirstTokenAt: base, LastTokenAt: base, GenTokens: 10}},
+		{"last before first", &Record{FirstTokenAt: base.Add(time.Second), LastTokenAt: base, GenTokens: 10}},
+		{"no tokens", &Record{FirstTokenAt: base, LastTokenAt: base.Add(time.Second)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			FinalizeRecord(tc.rec)
+			if tc.rec.DecodeTPS != 0 {
+				t.Errorf("gen_tps = %v, want 0 (absent, not invented)", tc.rec.DecodeTPS)
+			}
+		})
+	}
+
+	// Two tokens one second apart: exactly one interval, so 1 tok/s.
+	r := &Record{FirstTokenAt: base, LastTokenAt: base.Add(time.Second), GenTokens: 2}
+	FinalizeRecord(r)
+	if r.DecodeTPS != 1 {
+		t.Errorf("gen_tps = %v, want 1 (one interval over one second)", r.DecodeTPS)
 	}
 }

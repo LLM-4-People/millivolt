@@ -550,9 +550,9 @@ async def check(base, screenshot):
                             attempts: [],
                         };
                         const live = { ...base, live: true, stream: true, ttft_ms: 0,
-                            overall_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0 };
+                            gen_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0 };
                         const final = { ...base, live: false, status_code: 200,
-                            ttft_ms: 999999, overall_tps: 99999.9, duration_ms: 999999999,
+                            ttft_ms: 999999, gen_tps: 99999.9, duration_ms: 999999999,
                             queue_wait_ms: 999999999, cost: 999.5,
                             usage: { input_tokens: 999999999, output_tokens: 999999999,
                                 cache_read_tokens: 999999999 },
@@ -855,9 +855,9 @@ async def check(base, screenshot):
                     const rows = [];
                     try {
                         for (const [fixture, isLong] of [
-                            [{...base, cost: 0.12346, overall_tps: 99999.9}, false],
-                            [{...base, cost: 999.999, overall_tps: 99999.9}, false],
-                            [{...long, cost: 0.5, overall_tps: 99999.9}, true],
+                            [{...base, cost: 0.12346, gen_tps: 99999.9}, false],
+                            [{...base, cost: 999.999, gen_tps: 99999.9}, false],
+                            [{...long, cost: 0.5, gen_tps: 99999.9}, true],
                         ]) {
                             body.innerHTML = reqRow(fixture, null);
                             await frames();
@@ -953,7 +953,7 @@ async def check(base, screenshot):
                         retries: 0, attempts: [],
                     }));
                     recs[30] = {...recs[30], live: true, status_code: 0, ttft_ms: 0,
-                                overall_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0};
+                                gen_tps: 0, duration_ms: 0, queue_wait_ms: 0, cost: 0};
                     try {
                         renderRequests(recs);
                         await frames();
@@ -970,7 +970,7 @@ async def check(base, screenshot):
                             focused: document.activeElement === target};
                         const next = recs.map(rec => rec.id === 'keep-30'
                             ? {...rec, live: false, status_code: 200, ttft_ms: 100,
-                               duration_ms: 500, overall_tps: 12.5, cost: 0.01}
+                               duration_ms: 500, gen_tps: 12.5, cost: 0.01}
                             : rec);
                         renderRequestsIncremental(next);
                         await frames();

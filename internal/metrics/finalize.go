@@ -14,7 +14,6 @@ func FinalizeRecord(r *Record) {
 	if ttft > 0 && r.TTFTMs == 0 {
 		r.TTFTMs = 1
 	}
-	r.OverallTPS = r.OverallThroughput()
 	r.DurationMs = r.End.Sub(r.Start).Milliseconds()
 	// Answer tokens = total output - reasoning (thinking) tokens. A tool-call-ONLY
 	// response (finish_reason "tool_calls" with NO answer content - content:null)
@@ -38,7 +37,7 @@ func FinalizeRecord(r *Record) {
 	//     tool-call-only response, so only reasoning counts as generation there).
 	// A mixed content+tool-call response keeps tool-arg tokens in the provider's
 	// inseparable completion_tokens - a documented floor, not separable wire-side.
-	// Derived BEFORE DecodeTPS so GenThroughput reads the final value.
+	// Derived BEFORE the TPS measure so GenThroughput reads the final value.
 	if r.GenTokens == 0 {
 		r.GenTokens = r.Usage.ReasoningTokens + r.AnswerTokens
 	}

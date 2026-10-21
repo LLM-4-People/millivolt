@@ -825,7 +825,7 @@ function reqRow(r, sepLabel) {
   // assistive technology.
   const start = new Date(r.start);
   const timeText = start.toLocaleTimeString();
-  const tpsText = r.overall_tps ? r.overall_tps.toFixed(1) : '-';
+  const tpsText = r.gen_tps ? r.gen_tps.toFixed(1) : '-';
   const inOutText = `${fmt(r.usage?.input_tokens)}/${fmt(r.usage?.output_tokens)}`;
   const inOutTitle = `${fmtFull(r.usage?.input_tokens)} input / ` +
     `${fmtFull(r.usage?.output_tokens)} output tokens`;
@@ -837,7 +837,7 @@ function reqRow(r, sepLabel) {
     <td><span class="req-ident">${entityPivot('client', r.client, null, r)} ${entityPivot('provider', r.provider)} ${modelCell(r)}</span></td>
     <td>${finalizedStatusPill(r)}${retryBadge}</td>
     <td title="${escapeHtml(fmtTTFT(r.ttft_ms))}">${fmtTTFT(r.ttft_ms)}</td>
-    <td title="${escapeHtml(r.overall_tps ? tpsText + ' tokens/s' : '')}">${tpsText}</td>
+    <td title="${escapeHtml(r.gen_tps ? tpsText + ' tokens/s' : '')}">${tpsText}</td>
     <td title="${escapeHtml(inOutTitle)}">${inOutText}</td>
     <td style="color:${cacheTok ? 'var(--accent2)' : 'var(--muted)'}" title="${escapeHtml(cacheTitle)}">${cachePct != null ? cachePct : '-'}</td>
     <td style="color:var(--cyan)" title="${r.tool_calls ? escapeHtml(String(r.tool_calls)) + ' tool calls' : ''}">${r.tool_calls||'-'}</td>
@@ -1115,7 +1115,7 @@ function formatDetail(r) {
 
   S.push(sec('Performance', [
     kv('ttft', fmtTTFT(r.ttft_ms)),
-    kv('tps', r.overall_tps ? r.overall_tps.toFixed(1) + ' tok/s' : ''),
+    kv('tps', r.gen_tps ? r.gen_tps.toFixed(1) + ' tok/s' : ''),
     kv('first token', fmtT(r.first_token_at)),
     kv('last token', fmtT(r.last_token_at)),
     kv('first thinking', fmtT(r.first_reasoning_at)),

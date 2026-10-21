@@ -492,6 +492,54 @@ func TestRetryTTFTIsFinalAttempt(t *testing.T) {
 	}
 }
 
+// TestFirstAttemptTTFTAnchor pins the clean-request half of the one TTFT
+// definition: the first upstream attempt stamps the anchor too, so TTFT is
+// measured from the send and never from Start (queue, parse, upload).
+func TestFirstAttemptTTFTAnchor(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	buf := metrics.NewBuffer(8)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	req, _ := http.NewRequest("POST", srv.URL+"/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true}`))
+	req.Header.Set("Authorization", "Bearer sk-test")
+	req.Header.Set("X-Proxy-Base-URL", upstream.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	snap := waitForRecord(t, buf, 1)
+	if len(snap) != 1 {
+		t.Fatalf("records = %d", len(snap))
+	}
+	rec := snap[0]
+	if rec.Retries != 0 {
+		t.Fatalf("Retries = %d, want 0", rec.Retries)
+	}
+	if rec.FinalAttemptAt.IsZero() {
+		t.Fatal("FinalAttemptAt is zero on a clean first attempt; TTFT would have no send anchor")
+	}
+	if !rec.FinalAttemptAt.After(rec.Start) {
+		t.Errorf("FinalAttemptAt = %v, want after Start %v (the send starts after upload/parse)", rec.FinalAttemptAt, rec.Start)
+	}
+	if rec.TTFTMs < 100 || rec.TTFTMs > 400 {
+		t.Errorf("TTFTMs = %d, want ~120 from the first attempt send", rec.TTFTMs)
+	}
+	if rec.DurationMs < rec.TTFTMs {
+		t.Errorf("DurationMs = %d, want >= TTFT %d", rec.DurationMs, rec.TTFTMs)
+	}
+}
+
 func TestTransparentTransportErrorRetry(t *testing.T) {
 	// First attempt: server accepts the connection then closes it without a
 	// response (a transport error, not an HTTP status). Second attempt succeeds.

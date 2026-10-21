@@ -316,7 +316,8 @@ const fmtDur = ms => {
   return neg + r2(a / 86400000) + 'd';
 };
 // fmtTTFT is TTFT's display owner. Server ttft_ms is 0 when no token arrived
-// (absent), never a measured zero: sub-ms positives are rounded up to 1ms.
+// or the response did not stream (absent), never a measured zero: sub-ms
+// positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
 // fmtMoney owns every displayed cost. Values remain USD in data; magnitudes

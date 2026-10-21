@@ -39,7 +39,7 @@ req_stream_opts final_attempt_at chars_system chars_user chars_assistant chars_t
 images attachments req_param_presence
 '''.split())
 REAL_FIELDS = frozenset('''
-cost gen_tps overall_tps req_temperature req_top_p req_presence_pen req_frequency_pen
+cost gen_tps req_temperature req_top_p req_presence_pen req_frequency_pen
 '''.split())
 ALIASED_FIELDS = {
     'provider': 'provider', 'model': 'model', 'provider_model': 'model',
@@ -422,7 +422,7 @@ def verify_docs_copy(path):
             # aggregate. It is derived from the already-published rows, but its
             # shape and finite arithmetic are revalidated like every other fact.
             totals = _json(metadata['totals'])
-            require(type(totals) is dict and totals.get('v') == 2
+            require(type(totals) is dict and totals.get('v') == 3
                     and type(totals.get('epoch')) is int and totals['epoch'] >= 0
                     and type(totals.get('high_rowid')) is int and totals['high_rowid'] >= 0
                     and not totals.get('invalid', False),

@@ -164,9 +164,9 @@ const CHART_SERIES = [
   { id: 'cachePct', label: 'cache hit', color: 'warn',   fmt: fmtPct,
     title: 'Cached prompt tokens as a share of input tokens, per bucket.' },
   { id: 'tps',  metric: 'tps',      label: 'speed',   color: 'ok',     fmt: fmtTPS,
-    title: 'Output tokens per second over wall time; decode-window speed when overall throughput is unavailable.' },
+    title: 'Generation speed from the first token (reasoning included) to the last: (tokens - 1) / window. One TPS definition, per request.' },
   { id: 'ttft', metric: 'ttft', label: 'latency', color: 'accent', fmt: fmtDur,
-    title: 'Time to first token, including reasoning or answer content.' },
+    title: 'Time from the upstream attempt send to the first token (reasoning or answer). Every retry has its own TTFT.' },
   { id: 'dec',  metric: 'dec',  label: 'decode',  color: 'accent2', fmt: fmtDur,
     title: 'Token generation window, from the first token to the last - the span decode speed measures.' },
 ];

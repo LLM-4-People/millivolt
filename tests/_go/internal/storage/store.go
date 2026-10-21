@@ -220,19 +220,20 @@ func TestStoreRoundTrip(t *testing.T) {
 
 	now := time.Now()
 	rec := &metrics.Record{
-		ID:           "r1",
-		Provider:     "alpha",
-		Model:        "model-a",
-		KeyHash:      "abc",
-		UserAgent:    "test",
-		Stream:       true,
-		StatusCode:   200,
-		Start:        now,
-		End:          now.Add(time.Second),
-		FirstTokenAt: now.Add(100 * time.Millisecond),
-		LastTokenAt:  now.Add(900 * time.Millisecond),
-		FinishReason: "stop",
-		ToolCalls:    2,
+		ID:             "r1",
+		Provider:       "alpha",
+		Model:          "model-a",
+		KeyHash:        "abc",
+		UserAgent:      "test",
+		Stream:         true,
+		StatusCode:     200,
+		Start:          now,
+		FinalAttemptAt: now,
+		End:            now.Add(time.Second),
+		FirstTokenAt:   now.Add(100 * time.Millisecond),
+		LastTokenAt:    now.Add(900 * time.Millisecond),
+		FinishReason:   "stop",
+		ToolCalls:      2,
 		Usage: metrics.Usage{
 			InputTokens:     10,
 			OutputTokens:    20,
@@ -447,8 +448,8 @@ func TestAllFieldsSurviveRestart(t *testing.T) {
 	if !r.UpstreamConnReused {
 		t.Error("UpstreamConnReused = false, want true (the adopted attempt rode a pooled connection)")
 	}
-	if r.DecodeTPS == 0 || r.OverallTPS == 0 {
-		t.Errorf("TPS fields lost: DecodeTPS=%v OverallTPS=%v", r.DecodeTPS, r.OverallTPS)
+	if r.DecodeTPS == 0 {
+		t.Errorf("TPS field lost: DecodeTPS=%v", r.DecodeTPS)
 	}
 	if r.Method != "POST" || r.Path != "/v1/chat/completions" {
 		t.Errorf("Method/Path = %q %q", r.Method, r.Path)

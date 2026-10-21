@@ -288,7 +288,7 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	// bucket's dec p50 = 250, p95 = 385, p99 = 397.
 	for i, v := range []int64{10, 20, 30, 40} {
 		r := mkRec(string(rune('t'+i)), now.Add(-30*time.Minute), 200, "", nil, v, 200, 10, 10, 6, 0)
-		r.OverallTPS, r.DecodeTPS = float64(v)+0.5, 900 // overall wins, floats survive storage
+		r.DecodeTPS = float64(v) + 0.5 // the one TPS metric, floats survive storage
 		r.FirstTokenAt = r.Start.Add(time.Duration(v) * time.Millisecond)
 		r.LastTokenAt = r.FirstTokenAt.Add(time.Duration(100*(i+1)) * time.Millisecond)
 		s.Record(r)
@@ -296,7 +296,7 @@ func TestChartBucketsAndPercentiles(t *testing.T) {
 	// 1 error 10 minutes ago: its bucket has 1 sample < pctMinSamples → the
 	// ttft/tps triples must be all-null (suppression gate).
 	errRec := mkRec("err1", now.Add(-10*time.Minute), 500, "boom", nil, 5, 100, 5, 0, 0, 0)
-	errRec.DecodeTPS = 5.5 // absent overall speed uses the canonical decode fallback
+	errRec.DecodeTPS = 5.5 // the one TPS sample on the error record
 	s.Record(errRec)
 	// 1 recovered 429 10 minutes ago: final 200 with an ABSORBED 429 attempt.
 	// Health counts are distinct affected requests: it folds into the chart's
@@ -689,7 +689,7 @@ func TestChartTimingStats(t *testing.T) {
 	now := time.Now()
 	mk := func(id string, at time.Time, ttft int64, tps float64) *metrics.Record {
 		r := mkRec(id, at, 200, "", nil, ttft, 1000, 10, 10, 0, 0)
-		r.OverallTPS = tps
+		r.DecodeTPS = tps
 		return r
 	}
 	for _, r := range []*metrics.Record{

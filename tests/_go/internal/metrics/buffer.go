@@ -300,7 +300,7 @@ func TestFinalizeRecordSubMillisecondTTFT(t *testing.T) {
 	// A fast upstream can produce a sub-millisecond TTFT; it must not be
 	// truncated to 0 (which would read as "no tokens captured").
 	start := time.Now()
-	r := &Record{Start: start, FirstTokenAt: start.Add(300 * time.Microsecond), End: start.Add(time.Second)}
+	r := &Record{Start: start, FinalAttemptAt: start, FirstTokenAt: start.Add(300 * time.Microsecond), End: start.Add(time.Second)}
 	FinalizeRecord(r)
 	if r.TTFTMs != 1 {
 		t.Errorf("TTFTMs = %d, want 1 (sub-ms TTFT rounded up)", r.TTFTMs)

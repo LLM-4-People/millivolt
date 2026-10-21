@@ -305,7 +305,7 @@ func fromRecord(r *metrics.Record, mcz *modelCanonizer) contrib {
 		reason: r.Usage.ReasoningTokens,
 		tools:  int64(r.ToolCalls),
 		ttft:   r.TTFTMs,
-		tps:    recordTPS(r),
+		tps:    r.DecodeTPS,
 		dec:    recordDecodeMs(r),
 		labels: &contribLabels{
 			client:     r.Client,
@@ -359,16 +359,8 @@ func eachPending(records []*metrics.Record, skip map[string]struct{}, mcz *model
 	return nil
 }
 
-// recordTPS prefers the stored overall_tps, then decode-window gen_tps.
-func recordTPS(r *metrics.Record) float64 {
-	if r.OverallTPS > 0 {
-		return r.OverallTPS
-	}
-	return r.DecodeTPS
-}
-
 // recordDecodeMs is the decode window: last_token_at - first_token_at, the
-// exact span GenThroughput measures tokens over. Both timestamps are truncated
+// exact span GenThroughput measures the generation rate over. Both timestamps are truncated
 // to milliseconds the same way storage's timeToMilli writes them, so a ring
 // record and its stored row always agree. 0 (either timestamp absent, or a
 // non-positive window) is an invalid sample - the same >0 gate validMetricSample
@@ -388,21 +380,21 @@ func recordDecodeMs(r *metrics.Record) int64 {
 const rowColumns = `id, started_at, status_code, error_type, error_code, error_msg, attempts,
 	client, provider, model, key_hash, conversation_id, parent_conversation_id,
 	input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
-	tool_calls, cost, ttft_ms, overall_tps, gen_tps, tool_names,
+	tool_calls, cost, ttft_ms, gen_tps, tool_names,
 	(last_token_at - first_token_at) AS decode_ms`
 
 // scanContrib decodes one scanned row into a contrib (rowColumns order).
 func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	var c contrib
 	var startedAt, status, ttft int64
-	var overall, gen float64
+	var gen float64
 	var errType, errCode, errMsg string
 	var attemptsJSON, toolNamesJSON []byte
 	var client, prov, model, key, conv, parentConv string
 	if err := rows.Scan(&c.id, &startedAt, &status, &errType, &errCode, &errMsg, &attemptsJSON,
 		&client, &prov, &model, &key, &conv, &parentConv,
 		&c.in, &c.out, &c.cacheR, &c.reason,
-		&c.tools, &c.cost, &ttft, &overall, &gen, &toolNamesJSON, &c.dec); err != nil {
+		&c.tools, &c.cost, &ttft, &gen, &toolNamesJSON, &c.dec); err != nil {
 		return c, err
 	}
 	c.labels = &contribLabels{
@@ -412,11 +404,7 @@ func scanContrib(rows *sql.Rows, mcz *modelCanonizer) (contrib, error) {
 	c.start = startedAt
 	c.status = int(status)
 	c.ttft = ttft
-	if overall > 0 {
-		c.tps = overall
-	} else if gen > 0 {
-		c.tps = gen
-	}
+	c.tps = gen
 	atts, attErr := storage.DecodeAttemptsColumn(attemptsJSON)
 	if attErr != nil {
 		log.Printf("aggregate: parse attempts for %s: %v", c.id, attErr)

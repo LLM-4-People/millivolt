@@ -174,7 +174,7 @@ func BenchmarkOpenTotals(b *testing.B) {
 			ID: fmt.Sprintf("bench-%06d", i), Provider: "p", Model: "m", StatusCode: 200,
 			Start:  start.Add(time.Duration(i) * time.Millisecond),
 			Usage:  metrics.Usage{InputTokens: int64(i % 500), OutputTokens: int64(i % 200)},
-			TTFTMs: int64(1 + i%300), OverallTPS: float64(1 + i%100),
+			TTFTMs: int64(1 + i%300), DecodeTPS: float64(1 + i%100),
 		})
 		if len(batch) == cap(batch) {
 			if err := s.insertBatch(batch); err != nil {

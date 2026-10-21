@@ -15,7 +15,7 @@ func seedTotalsRows(t *testing.T, s *Store) {
 	now := time.Now()
 	rows := []*metrics.Record{
 		{ID: "totals-ok", Provider: "p", Model: "m", StatusCode: 200, Start: now,
-			TTFTMs: 100, OverallTPS: 20, Cost: 0.5, Usage: metrics.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, ReasoningTokens: 1}},
+			TTFTMs: 100, Cost: 0.5, Usage: metrics.Usage{InputTokens: 10, OutputTokens: 5, CacheReadTokens: 2, ReasoningTokens: 1}},
 		{ID: "totals-err", Provider: "p", Model: "m", StatusCode: 500, Start: now.Add(time.Millisecond),
 			Usage: metrics.Usage{InputTokens: 3, OutputTokens: 4, ReasoningTokens: 2}},
 	}

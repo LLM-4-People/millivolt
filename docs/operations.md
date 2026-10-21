@@ -1234,12 +1234,18 @@ sensitive; do not publish request drawers from private history without review.
 ### Reading timing, cost and health
 
 Request duration starts after upload and includes metadata work, queue/hold/retry
-waits and response handling. First-token latency uses the final upstream attempt's
-start when recorded, not accumulated retry delay. A request that produced no token
-has no TTFT: the log shows a placeholder, not 0 ms, and aggregates skip it. Overall throughput divides
-output tokens by the full request duration; chart speed can use the measured
-generation window when overall throughput is unavailable. These are different
-measurements, not interchangeable claims about provider speed.
+waits and response handling. TTFT is measured from the upstream attempt's own
+send start to the first token (reasoning or answer), so every retry has its own
+TTFT and the value excludes queueing, request parsing and retry backoff. A
+request that produced no token, and any non-streamed response, has no TTFT: the
+log shows a placeholder, not 0 ms, and aggregates skip it. TPS is the single
+generation-speed measure: (generation tokens - 1) over the first-token to
+last-token window. Average TTFT and average TPS are the arithmetic means of
+those per-request samples. TPS is absent for fewer than two tokens, a
+non-positive window, or a response that did not stream (no token timestamps).
+The numerator assumes the first observed content chunk carries one token; a provider that bundles several tokens into that chunk can
+still overstate the rate. These are provider-attempt measurements, not claims
+about total user wait or system-wide throughput.
 
 Money stays USD in storage and APIs. The shared UI formatter uses cents below
 $1, including fractional cents, and dollars for larger magnitudes. Usage/cost
@@ -1345,11 +1351,11 @@ LIMIT 20
 ```
 
 `pre_token_ms` is the wait the caller felt, including queue and retry waits;
-`ttft_ms` is measured from the final upstream attempt, so a retried request
-shows a small ttft beside a large `pre_token_ms`. `decode_ms` is the
-streaming window and `tail_ms` what remains after the last token, where a
-millisecond of rounding noise is normal. A request that produced no token
-has nothing to decompose, hence the `first_token_at > 0` gate.
+`ttft_ms` is measured from the adopted upstream attempt's send start, so a
+retried request shows a small ttft beside a large `pre_token_ms`. `decode_ms` is
+the streaming window and `tail_ms` what remains after the last token, where a
+millisecond of rounding noise is normal. A request that produced no token, or
+was not streamed, has nothing to decompose, hence the `first_token_at > 0` gate.
 
 **How long did a model think before answering?**
 

@@ -96,15 +96,16 @@ type Record struct {
 	End        time.Time `json:"end"`
 
 	// FirstTokenAt / LastTokenAt are the wall-clock times of the first and last
-	// content-bearing token, used to derive TTFT and decode TPS.
+	// content-bearing token, used to derive TTFT and the single TPS metric.
 	FirstTokenAt time.Time `json:"first_token_at,omitempty"`
 	LastTokenAt  time.Time `json:"last_token_at,omitempty"`
 
 	// FinalAttemptAt is when the upstream attempt that produced the returned
-	// response began. On a request with transparent retries, TTFT is measured
-	// from this point (the successful attempt) rather than from Start, so the
-	// dashboard shows the provider's real responsiveness, not the retry
-	// backlog. Zero when there were no retries (TTFT falls back to Start).
+	// response began. Every sent attempt stamps it, so TTFT is always measured
+	// from the attempt's own send start - the first attempt for a clean
+	// request, the adopted attempt after a retry - and never from Start
+	// (which also covers queueing and request parsing). Zero only when no
+	// upstream attempt was sent.
 	FinalAttemptAt time.Time `json:"final_attempt_at,omitempty"`
 
 	FinishReason       string   `json:"finish_reason,omitempty"`
@@ -144,8 +145,9 @@ type Record struct {
 	Attempts []RetryAttempt `json:"attempts,omitempty"`
 
 	// Derived fields populated at record time for the dashboard/storage.
+	// TTFTMs is the per-attempt time to first content token; DecodeTPS is the
+	// single throughput metric, measured from the first token to the last.
 	TTFTMs     int64   `json:"ttft_ms"`
-	OverallTPS float64 `json:"overall_tps"`
 	DecodeTPS  float64 `json:"gen_tps"`
 	DurationMs int64   `json:"duration_ms"`
 	Cost       float64 `json:"cost,omitempty"`
@@ -175,14 +177,15 @@ type Record struct {
 	HadAnswerContent bool `json:"had_answer_content,omitempty"`
 
 	// GenTokens is the count of GENERATION tokens (reasoning + answer content)
-	// with tool-call argument tokens excluded. It is the numerator for DecodeTPS
-	// (gen_tps): providers count tool-call argument tokens in completion_tokens
-	// (OpenAI does - a content:null tool_calls response still bills them), which
-	// would otherwise inflate the generation rate. When the provider reports a
-	// usage blob, GenTokens = reasoning + answer (== OutputTokens, since the
-	// proxy has no tool-token sub-breakdown and tool args are only separable in
-	// the chunk-count fallback); when it doesn't, GenTokens = content+reasoning
-	// chunks (tool-arg chunks excluded). See Fill / FinalizeRecord.
+	// with tool-call argument tokens excluded. It is the numerator for the
+	// single TPS metric (gen_tps): providers count tool-call argument tokens in
+	// completion_tokens (OpenAI does - a content:null tool_calls response still
+	// bills them), which would otherwise inflate the generation rate. When the
+	// provider reports a usage blob, GenTokens = reasoning + answer
+	// (== OutputTokens, since the proxy has no tool-token sub-breakdown and
+	// tool args are only separable in the chunk-count fallback); when it
+	// doesn't, GenTokens = content+reasoning chunks (tool-arg chunks excluded).
+	// See Fill / FinalizeRecord.
 	GenTokens int64 `json:"gen_tokens,omitempty"`
 
 	// Chunks is the count of content-bearing SSE chunks of the analyzed
@@ -341,39 +344,31 @@ type ClientMeta struct {
 // Empty reports whether m carries any captured fact.
 func (m ClientMeta) Empty() bool { return m == (ClientMeta{}) }
 
-// OverallThroughput returns tokens per second computed from the full request
-// lifetime (start → end). This is the stable, always-correct metric.
-func (r *Record) OverallThroughput() float64 {
-	d := r.End.Sub(r.Start)
-	if d <= 0 || r.Usage.OutputTokens == 0 {
-		return 0
-	}
-	return float64(r.Usage.OutputTokens) / d.Seconds()
-}
-
 // GenThroughput returns generation tokens per second over the generation
 // window - from the FIRST token (reasoning or answer, whichever arrives first)
 // to the LAST token. The numerator is GenTokens (reasoning + answer content,
 // tool-call argument tokens excluded), so a tool-call-heavy request doesn't
-// show an inflated rate. The window ends at the last token, not at End (which
-// includes trailing usage/[DONE] handling), so it measures actual generation.
-// Returns 0 when there were no generation tokens or the window is degenerate.
+// show an inflated rate.
+//
+// A first-to-last window contains N-1 inter-token intervals, not N: the first
+// token is already at the window's start and its generation time belongs to
+// TTFT. Dividing N by the window double-counts that token (twice the true rate
+// for a two-token response). The standard TPOT identity is
+// (e2e - TTFT) / (N-1), so the equivalent rate is (N-1) / window. With fewer
+// than two tokens, or a non-positive window, there is no measurable rate and
+// the metric is absent (0) rather than invented from the post-token tail.
+// The numerator assumes the first observed content chunk carries one token;
+// a provider that bundles several tokens into that chunk still overstates
+// slightly, because the wire carries no per-chunk token count.
 func (r *Record) GenThroughput() float64 {
-	if r.FirstTokenAt.IsZero() || r.GenTokens == 0 {
+	if r.FirstTokenAt.IsZero() || r.LastTokenAt.IsZero() || r.GenTokens < 2 {
 		return 0
 	}
-	end := r.LastTokenAt
-	if end.IsZero() || !end.After(r.FirstTokenAt) {
-		// Single-token (or unmeasured last-token) responses have no measurable
-		// generation window; fall back to the request end so the rate is still
-		// meaningful rather than 0.
-		end = r.End
-	}
-	d := end.Sub(r.FirstTokenAt)
+	d := r.LastTokenAt.Sub(r.FirstTokenAt)
 	if d <= 0 {
 		return 0
 	}
-	return float64(r.GenTokens) / d.Seconds()
+	return float64(r.GenTokens-1) / d.Seconds()
 }
 
 // IsError is the single canonical definition of "this request saw an upstream
@@ -657,18 +652,18 @@ func IsNonRetryableQuotaErr(typ, code string) bool {
 
 // TTFT returns the time to first token, or 0 if the response produced no
 // tokens (e.g. a pure error or empty completion). It is measured from the
-// final (returned) upstream attempt's start when retries occurred - so a
-// request that absorbed retries shows the successful attempt's real TTFT, not
-// the accumulated retry delay. Duration still reflects total wall time.
+// adopted upstream attempt's send start - the first attempt for a clean
+// request, the successful attempt after retries - so every retry has its own
+// TTFT and the value never absorbs queueing, request parsing or retry
+// backoff. Duration still reflects total wall time.
 func (r *Record) TTFT() time.Duration {
-	if r.FirstTokenAt.IsZero() {
+	if r.FirstTokenAt.IsZero() || r.FinalAttemptAt.IsZero() {
 		return 0
 	}
-	start := r.Start
-	if !r.FinalAttemptAt.IsZero() {
-		start = r.FinalAttemptAt
+	if !r.FirstTokenAt.After(r.FinalAttemptAt) {
+		return 0
 	}
-	return r.FirstTokenAt.Sub(start)
+	return r.FirstTokenAt.Sub(r.FinalAttemptAt)
 }
 
 // Recorder is the sink for per-request records. Implementations must be safe

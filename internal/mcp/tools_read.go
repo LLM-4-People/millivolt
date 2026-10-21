@@ -167,8 +167,8 @@ type ChartOutput struct {
 	NowMs       int64            `json:"now_ms" jsonschema:"server clock at render time, unix milliseconds"`
 	FromMs      int64            `json:"from_ms" jsonschema:"clock-aligned window start, unix milliseconds"`
 	BucketMs    int64            `json:"bucket_ms" jsonschema:"exact bucket width in milliseconds"`
-	TTFTp       []*float64       `json:"ttft_p" jsonschema:"period-wide time-to-first-token percentiles [p50, p95, p99]"`
-	TPSp        []*float64       `json:"tps_p" jsonschema:"period-wide generation speed percentiles [p50, p95, p99]"`
+	TTFTp       []*float64       `json:"ttft_p" jsonschema:"period-wide time-to-first-token percentiles [p50, p95, p99], measured from each request's upstream attempt send"`
+	TPSp        []*float64       `json:"tps_p" jsonschema:"period-wide generation-speed percentiles [p50, p95, p99] from first token to last token"`
 	DecP        []*float64       `json:"dec_p" jsonschema:"period-wide decode-window percentiles [p50, p95, p99]"`
 	TTFTStat    []*float64       `json:"ttft_stat" jsonschema:"period-wide time-to-first-token [avg, min, max] over every captured sample"`
 	TPSStat     []*float64       `json:"tps_stat" jsonschema:"period-wide generation speed [avg, min, max] over every captured sample"`

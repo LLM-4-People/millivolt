@@ -26,7 +26,7 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 		KeyHash: "sentinel-key", UserAgent: "sentinel-agent", Client: "sentinel-client",
 		ConversationID: "sentinel-conversation", ParentConversationID: "sentinel-parent",
 		StatusCode: 502, Start: start, End: start.Add(time.Second),
-		TTFTMs: 66, DurationMs: 1000, OverallTPS: 7.7, Cost: 0.55,
+		TTFTMs: 66, DurationMs: 1000, DecodeTPS: 7.7, Cost: 0.55,
 		ErrorType: "sentinel_error_type", ErrorCode: "sentinel_error_code", ErrorMsg: "sentinel error message",
 		ToolCalls: 3, ToolNames: []string{"sentinel-tool-a", "sentinel-tool-b"},
 		Usage: metrics.Usage{InputTokens: 11, OutputTokens: 22, CacheReadTokens: 33, ReasoningTokens: 44},
@@ -106,7 +106,7 @@ func TestRowColumnsScanContribLockstep(t *testing.T) {
 		t.Errorf("ttft = %d, want 66", c.ttft)
 	}
 	if c.tps != 7.7 {
-		t.Errorf("tps = %v, want 7.7 (overall_tps wins the speed pick)", c.tps)
+		t.Errorf("tps = %v, want 7.7 (gen_tps is the one speed metric)", c.tps)
 	}
 	if c.dec != 250 {
 		t.Errorf("dec = %d, want 250 (last_token_at - first_token_at)", c.dec)
