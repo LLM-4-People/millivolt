@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+# The request table's learned floors are content-sized. Leave enough width for
+# font and subpixel variation so the published docs capture never clips.
+DOCS_CAPTURE_VIEWPORT = {'width': 2208, 'height': 900}
 
 
 def require(value, message):

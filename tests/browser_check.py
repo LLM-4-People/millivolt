@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
-from .support import operator_headers, operator_signin, require
+from .support import DOCS_CAPTURE_VIEWPORT, operator_headers, operator_signin, require
 
 DEV_DIR = Path('/tmp/millivolt')  # Reserved dev.sh namespace, never arbitrary data.
 # Two content deltas with a flushed gap between them: the first delta stamps
@@ -899,10 +899,10 @@ async def check(base, screenshot):
                             row['costCell']['title'].endswith(expected_cost), row)
                 results.append({'content_fit': content_fit})
 
-                # The published docs capture uses 2200x900 so the request
-                # table's learned content widths fit without horizontal
-                # clipping. The table is content-sized, not a fixed budget.
-                await page.set_viewport_size({'width': 2200, 'height': 900})
+                # The published docs capture leaves headroom for the request
+                # table's learned content widths and font variation. The table
+                # is content-sized, not a fixed budget.
+                await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)
                 await page.evaluate(
                     'new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
                 docs_table = await page.evaluate("""() => {

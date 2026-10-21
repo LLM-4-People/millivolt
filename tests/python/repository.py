@@ -658,9 +658,13 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("do not squash several findings into one final commit", contributing)
 
     def test_docs_history_capture_keeps_the_request_table_unclipped(self):
+        support = self.read("tests/support.py")
+        self.assertIn("DOCS_CAPTURE_VIEWPORT = {'width': 2208, 'height': 900}", support)
+        for path in ("tests/browser_check.py", "tests/explorer_check.py"):
+            source = self.read(path)
+            self.assertIn("await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)", source)
         explorer = self.read("tests/explorer_check.py")
-        start = explorer.index(
-            "await page.set_viewport_size({'width': 2200, 'height': 900})")
+        start = explorer.index("await page.set_viewport_size(DOCS_CAPTURE_VIEWPORT)")
         capture = explorer[start:].split("await capture_image", 1)[0]
         # Both the wider viewport and the non-clipping guard are part of the
         # published request-table capture, not a nearby synthetic run.
