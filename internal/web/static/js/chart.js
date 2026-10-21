@@ -96,7 +96,7 @@ const fmtPct = v => pctValue(v, 1, true);
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
 // The summary timing tile uses the compact t/s unit on both its value and its
 // range; the shared trailing unit is stated once so the pair fits one tile.
-const fmtTileTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + 't/s';
+const fmtTileTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + TPS_UNIT;
 
 // hm is the single HH:MM local-time label (x ticks + hover chip).
 const hm = t => {
@@ -909,7 +909,7 @@ function chartTotals() {
         const shared = unitOf(lo) === unitOf(hi) && unitOf(lo) !== '';
         return shared ? `${String(lo).slice(0, -unitOf(lo).length)}-${hi}` : `${lo} - ${hi}`;
       };
-      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), 't/s')].filter(Boolean).join(' · ');
+      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), TPS_UNIT)].filter(Boolean).join(' · ');
       parts.push(tile('timing', 'accent',
         tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', fmtTileTPS(ps?.[0])]]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +

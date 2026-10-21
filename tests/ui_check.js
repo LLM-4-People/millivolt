@@ -988,6 +988,24 @@ async function main() {
       JSON.stringify(live));
   }
 
+  // The Avg TPS KPI uses the same compact unit as the Overview timing tile.
+  // TPS_UNIT is the single owner; the chart axis, legend and tooltips keep the
+  // full tok/s label where there is room.
+  {
+    const kpiHtml = w.eval(`(() => {
+      const saved = kpiAgg;
+      kpiAgg = { requests: 1, errors: 0, in_flight: 0, cost: 0, cost_per_req: null, cost_per_mtok: null,
+        input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, reasoning_tokens: 0,
+        avg_ttft_ms: null, avg_tps: 1234.56 };
+      const out = derive({ records: [], counters: { in_flight: 0 }, _rev: 1 }).kpiHtml;
+      kpiAgg = saved;
+      return out;
+    })()`);
+    check('the Avg TPS KPI uses the compact t/s unit',
+      kpiHtml.includes('1234.6<span class="unit">t/s</span>') &&
+      !kpiHtml.includes('tok/s') && w.eval('TPS_UNIT') === 't/s');
+  }
+
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
   // folds missed records exactly like the stream does, and replay-tolerant
   // delivery (the same record twice) must not duplicate the row.

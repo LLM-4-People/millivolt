@@ -360,7 +360,7 @@ function derive(data) {
     <div class="kpi"><h2>Tokens in/out</h2><div class="val val-duo">${vt(fmt(inTotal), fmtFull(inTotal))}<span class="unit">/</span>${vt(fmt(outTotal), fmtFull(outTotal))}</div><div class="sub2">${reasonTotal > 0 ? vt('reasoning ' + fmt(reasonTotal) + ' tok', 'reasoning ' + fmtFull(reasonTotal) + ' tok') : 'no reasoning'}</div></div>
     <div class="kpi k-cache"><h2>Cache hit</h2><div class="val">${vt(cacheRatio)}</div><div class="sub2">${vt(fmt(cacheTotal) + ' / ' + fmt(inTotal) + ' in', fmtFull(cacheTotal) + ' / ' + fmtFull(inTotal) + ' in')}</div></div>
     <div class="kpi"><h2>Avg TTFT</h2><div class="val">${a.avg_ttft_ms != null ? vt(fmtDur(a.avg_ttft_ms)) : '-'}</div><div class="sub2">per attempt, send to first token</div></div>
-    <div class="kpi"><h2>Avg TPS</h2><div class="val">${a.avg_tps != null ? a.avg_tps.toFixed(1) + '<span class="unit">tok/s</span>' : '-'}</div><div class="sub2">per request, first to last token</div></div>
+    <div class="kpi"><h2>Avg TPS</h2><div class="val">${a.avg_tps != null ? a.avg_tps.toFixed(1) + '<span class="unit">' + TPS_UNIT + '</span>' : '-'}</div><div class="sub2">per request, first to last token</div></div>
     <div class="kpi ${a.errors ? 'k-err' : ''}"><h2>Error rate</h2><div class="val">${vt(errRate)}</div><div class="sub2">${vt(fmt(a.errors || 0) + ' of ' + fmt(a.requests))}</div></div>
   `;
     _kpiHtml = kpiHtml;

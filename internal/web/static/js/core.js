@@ -320,6 +320,10 @@ const fmtDur = ms => {
 // positives are rounded up to 1ms.
 // fmtDur(0) stays "0ms" for real durations (axes, elapsed time).
 const fmtTTFT = ms => ms ? fmtDur(ms) : '-';
+// TPS_UNIT is the one compact generation-speed unit for narrow surfaces (the
+// KPI band and the summary timing tile). Chart axes, legends and tooltips keep
+// the full "tok/s" label where there is room.
+const TPS_UNIT = 't/s';
 // fmtMoney owns every displayed cost. Values remain USD in data; magnitudes
 // below $1 display as cents (including fractional cents), with at most three
 // decimals in the displayed unit. Dollar amounts retain compact K/M/B units.
