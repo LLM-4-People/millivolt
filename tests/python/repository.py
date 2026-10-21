@@ -159,6 +159,22 @@ class RepositoryChecks(unittest.TestCase):
         dead = live + [("internal/web/static/css/dash.css", ".ghost { color: blue }\n")]
         self.assertEqual(check.dead_css_class_errors(dead),
                          ["internal/web/static/css/dash.css: stylesheet class .ghost has no emitter"])
+        # The uPlot structural exemption only applies inside a .uplot selector:
+        # a .u-over rule outside it is dashboard styling with no emitter.
+        outside_vendor = live + [
+            ("internal/web/static/css/dash.css", ".u-over { color: red }\n")]
+        self.assertEqual(check.dead_css_class_errors(outside_vendor),
+                         ["internal/web/static/css/dash.css: stylesheet class .u-over has no emitter"])
+        inside_vendor = live + [
+            ("internal/web/static/css/dash.css",
+             ".uplot .u-over > .u-cursor-x { border-color: var(--muted); }\n")]
+        self.assertEqual(check.dead_css_class_errors(inside_vendor), [])
+        # The exemption needs .uplot in the SAME selector. A sibling selector
+        # in the rule's list must not leak it to a bare vendor class.
+        mixed_vendor = live + [
+            ("internal/web/static/css/dash.css", ".uover, .uplot { color: red }\n")]
+        self.assertEqual(check.dead_css_class_errors(mixed_vendor),
+                         ["internal/web/static/css/dash.css: stylesheet class .uover has no emitter"])
 
     def test_duplicate_js_function_detector(self):
         twin = 'function one(box) {\n  return [...document.querySelectorAll("#" + box)].length;\n}\n'
@@ -403,6 +419,73 @@ class RepositoryChecks(unittest.TestCase):
             owner, generated + ':root { --extra: blue; }\n', 'assets/tokens.css'), [
                 f'assets/tokens.css: token --extra is not declared in {PALETTE_OWNER}'])
 
+    def test_theme_palette_materials_and_accent_roles(self):
+        """Every palette block owns its own elevation/scrim hue and its own
+        accent topology. The JavaScript contract test checks perceptual
+        distance; this static row guards ownership and exact uniqueness in the
+        served stylesheet."""
+        css = (check.ROOT / "internal/web/static/css/themes.css").read_text(encoding="utf-8")
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        blocks = {}
+        for theme, mode, body in re.findall(
+                r'\[data-theme="([^"]+)"\]\[data-mode="([^"]+)"\]\s*\{([^}]*)\}', css):
+            blocks[(theme, mode)] = dict(
+                (name, value.strip()) for name, value in
+                re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", body))
+        themes = sorted({theme for theme, _ in blocks})
+        self.assertEqual(len(themes), 8)
+        self.assertEqual(len(blocks), 16)
+        for key, declarations in blocks.items():
+            for name in ("--shadow-rgb", "--veil-rgb"):
+                self.assertIn(name, declarations, key)
+            for name in ("--accent", "--accent2", "--cyan"):
+                self.assertRegex(declarations.get(name, ""), r"^#[0-9a-fA-F]{6}$", key)
+        for mode in ("black", "clear"):
+            for role in ("--accent", "--accent2", "--cyan"):
+                values = [blocks[(theme, mode)][role] for theme in themes]
+                self.assertEqual(len(set(values)), len(themes), (mode, role))
+        # A rail equal to panel2 erases the panel/rail hierarchy. Contrast is
+        # the documented maximum-separation exception.
+        surface_roles = ("--bg", "--panel", "--panel2", "--rail", "--border", "--border2")
+        for mode in ("black", "clear"):
+            for theme in themes:
+                if theme == "contrast":
+                    continue
+                self.assertTrue(all(role in blocks[(theme, mode)] for role in surface_roles),
+                                (theme, mode))
+                values = [blocks[(theme, mode)][role] for role in surface_roles]
+                self.assertEqual(len(set(values)), len(values), (theme, mode))
+        for role in ("--shadow-rgb", "--veil-rgb"):
+            values = [blocks[(theme, "clear")][role] for theme in themes]
+            self.assertEqual(len(set(values)), len(themes), ("clear", role))
+        for mode in ("black", "clear"):
+            fallback = re.search(rf'\[data-mode="{mode}"\]\s*\{{([^}}]*)\}}', css)
+            self.assertIsNotNone(fallback)
+            declarations = dict(
+                (name, value.strip()) for name, value in
+                re.findall(r"(--[a-z0-9-]+)\s*:\s*([^;]+);", fallback.group(1)))
+            self.assertIn("--veil-rgb", declarations)
+            self.assertIn("--shadow-rgb", declarations)
+            if mode == "clear":
+                for name in ("--veil", "--veil-strong", "--veil-soft"):
+                    self.assertRegex(declarations.get(name, ""),
+                                     r"^rgba\(var\(--veil-rgb\),\s*[0-9.]+\)$")
+
+    def test_dashboard_side_tabs_and_nested_retry_ink(self):
+        """Decorative side-tab borders and the nested err pill are design
+        invariants the antipattern detector and the contrast contract also
+        guard. Pin them in the served stylesheet so neither a detector-only
+        pass nor a browser-only pass owns the rule."""
+        css = (check.ROOT / "internal/web/static/css/dashboard.css").read_text(
+            encoding="utf-8")
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        side_tabs = re.findall(
+            r"border-left:\s*([2-9][0-9]*)px\s+solid\s+(?!transparent)([^;]+);", css)
+        self.assertEqual(side_tabs, [])
+        nested = re.search(r"tr\.retry-sub:hover td \.pill\.err\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(nested)
+        self.assertIn("color: var(--err-text);", nested.group(1))
+
     def test_gzip_corpus_assembly_reaches_root_and_deploy(self):
         """The perimeter's corpus half, pinned: gzip_corpus must feed the
         choke-point detector every tracked .go file outside tests, including
@@ -558,9 +641,23 @@ class PublishedContracts(unittest.TestCase):
         self.assertIn("built", rows["sha-<full commit>"])
 
         contributing = re.sub(r"\s+", " ", self.read("CONTRIBUTING.md"))
-        self.assertIn("a versioned push to `main`", contributing)
+        # The sentence case guide may start the sentence with "A"; pin the
+        # phrase itself rather than its leading article.
+        self.assertIn("code-bearing versioned push to `main`", contributing.lower())
+        self.assertIn("The release `publish` job waits for `required`", contributing)
+        self.assertIn("The `publish-testing` job waits for `checks` and `container`", contributing)
         self.assertRegex(contributing, r"`main`, `sha-\*`, `version` and \(for non-prereleases\) `latest`")
         self.assertIn("`main` and `latest` exclude prereleases", contributing)
+
+    def test_docs_history_capture_keeps_the_request_table_unclipped(self):
+        explorer = self.read("tests/explorer_check.py")
+        start = explorer.index(
+            "await page.set_viewport_size({'width': 2200, 'height': 900})")
+        capture = explorer[start:].split("await capture_image", 1)[0]
+        # Both the wider viewport and the non-clipping guard are part of the
+        # published request-table capture, not a nearby synthetic run.
+        self.assertIn("request-table capture would clip columns", capture)
+        self.assertIn("el.scrollWidth <= el.clientWidth + 2", capture)
 
     def prose_paragraphs(self, text, needle, label):
         paragraphs = [re.sub(r"\s+", " ", paragraph) for paragraph in text.split("\n\n")]

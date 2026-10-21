@@ -277,7 +277,11 @@ async def capture_history(args):
                     await ready('model')
                     await capture_image(page, staging / 'charts' / filename, '.traffic-card')
 
-                await page.set_viewport_size({'width': 2000, 'height': 900})
+                # The request table's 1364px column budget needs the extra
+                # width: at 2000px the card's content box is narrower than the
+                # table and the capture would lose columns behind the
+                # deliberate horizontal scroll contract.
+                await page.set_viewport_size({'width': 2200, 'height': 900})
                 await ready('model')
                 require(await page.locator('#tbl-requests').evaluate('el => el.scrollWidth <= el.clientWidth + 2'),
                         'request-table capture would clip columns')

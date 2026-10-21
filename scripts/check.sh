@@ -11,7 +11,7 @@ mode="${1:-core}"
 case "$mode" in
   core)
     (( $# <= 1 )) || die "$usage"
-    for tool in go gofmt node npm python3 git; do need "$tool"; done
+    for tool in go gofmt node npm python3 git jq; do need "$tool"; done
     go version
     node --version
     npm --version

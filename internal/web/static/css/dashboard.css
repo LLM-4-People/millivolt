@@ -21,7 +21,7 @@
     --cyan: #38d5c0;
     --ok: #2fd186;
     --warn: #f4c14d;
-    --err: #ff6b6b;
+    --err: #ff7b7b;
     /* Error and warning copy sits on tinted or bordered surfaces where a
        fill token can be too dim. These two own that ink and can be retuned
        independently of the --err/--warn fills. */
@@ -29,7 +29,7 @@
     --warn-text: #e3b341;
     /* Solid danger hover needs a touch more red than --err while keeping the
        page background readable as its label color. */
-    --danger-hover: #ff7d7d;
+    --danger-hover: #ff8a8a;
     /* Rate-limited (HTTP 429) throttle tone: one owner for the chart's
        rate-limit series and the explorer's ×429 badge. Distinct from --err
        (a rate limit is not an error) and --warn (the chart's cost/rate axis
@@ -74,11 +74,23 @@
     --pill-tint: 13%;
     --pill-tint-strong: 16%;
     --halo: 14%;
+    /* The selected palette row tints its surface with the palette accent.
+       Kept low so the row reads as a tint, not a filled control; the row and
+       its hint are overridden to --text, which carries the 4.5 floor. */
+    --selected-tint: 6%;
     /* Full-screen veils behind modal surfaces: one warm near-black scrim
-       keyed to the palette's base tone. The deliberate exceptions stay
-       literal where they sit (the storm dialog's heavier urgent scrim, the
-       drawer's lighter pass-through). */
-    --veil: rgba(16,14,11,.72);
+       keyed to the palette's base tone, plus the storm scrim and the lighter
+       drawer pass-through. The tokens are named by surface, not by a
+       monotonic alpha ladder: each is tuned independently. */
+    --veil-rgb: 16,14,11;
+    --veil: rgba(var(--veil-rgb),.72);
+    --veil-strong: rgba(var(--veil-rgb),.6);
+    --veil-soft: rgba(var(--veil-rgb),.55);
+    /* Elevation ink is a mode material, not a per-component literal. Clear
+       swaps it for a warm shadow so cards and menus do not read as soot. */
+    --shadow-rgb: 0,0,0;
+    /* The cancelled neutral is distinct from both muted copy and status ink. */
+    --neutral: #a8a096;
     /* Chart gridline alpha: core.js blends this onto --border2 for the
        axes' faint warm grid. */
     --chart-grid-a: 0.5;
@@ -95,7 +107,7 @@
     --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
   * { box-sizing: border-box; }
-  html { color-scheme: dark; overflow-x: clip; }
+  html { color-scheme: dark; accent-color: var(--accent); caret-color: var(--accent); overflow-x: clip; }
   /* Butter-smooth: every interactive surface eases its color/border/background
      changes instead of snapping. Kept off layout properties for perf. */
   *, *::before, *::after {
@@ -126,7 +138,7 @@
     /* A real (but soft) bottom edge so scrolling content never bleeds into the
        rail - a hairline plus a gentle drop shadow, not a harsh rule. */
     border-bottom: 1px solid var(--border2);
-    box-shadow: 0 10px 24px rgba(0,0,0,.30);
+    box-shadow: 0 10px 24px rgba(var(--shadow-rgb),.30);
   }
   header::after {
     content: ''; position: absolute; left: 0; right: 0; top: 100%; height: var(--rail-tick); pointer-events: none;
@@ -173,7 +185,7 @@
   @media (max-width: 800px) {
     header { padding: 0 14px; gap: 10px; }
     header .sub { display: none; }
-    #btn-nav { display: inline-flex; margin-left: auto; }
+    #btn-nav { display: inline-flex; margin-left: auto; min-width: 44px; width: 44px; height: 44px; }
     .refresh-controls {
       display: none; margin-left: 0; position: absolute; z-index: 90;
       top: calc(100% + var(--rail-tick) + 4px); right: 8px; left: 8px;
@@ -181,7 +193,7 @@
       max-height: min(70dvh, calc(100dvh - var(--rail-h) - 16px));
       overflow: auto; overscroll-behavior: contain;
       padding: 8px; border: 1px solid var(--border2); border-radius: 12px;
-      background: var(--panel); box-shadow: 0 18px 40px rgba(0,0,0,.4);
+      background: var(--panel); box-shadow: 0 18px 40px rgba(var(--shadow-rgb),.4);
     }
     .refresh-controls.is-open { display: flex; }
     .refresh-controls > .btn,
@@ -189,11 +201,14 @@
       width: 100%; min-width: 0; height: 44px; justify-content: flex-start;
       padding: 0 12px; gap: 10px;
     }
+    /* The theme trigger keeps the flyout's full width and its 44px target.
+       A later coarse-pointer rule must not shrink it back to an icon square. */
+    #btn-theme { min-height: 44px; }
     .refresh-controls .menu-wrap { width: 100%; }
     .hdr-btn-label { display: inline; font: 650 12px var(--sans); color: var(--text); }
   }
   .pause-check { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text); text-transform: none; letter-spacing: 0; }
-  .pause-check input { accent-color: var(--accent); }
+
   .pause-check.taken { opacity: .45; }
   .pause-known { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
   /* Single-column variant (the debug menu's model checklist): identical
@@ -258,7 +273,7 @@
     top: calc(100% + (var(--rail-h) - var(--hdr-btn)) / 2 + var(--rail-tick) + 4px);
     z-index: 40; width: 320px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.5); padding: 12px; font-family: var(--mono);
+    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 12px; font-family: var(--mono);
   }
   @media (max-width: 800px) {
     .hdr-menu, #pause-menu, #debug-menu, #limits-menu, #restart-menu {
@@ -290,9 +305,11 @@
      companion = red outline; DELETE EVERYTHING = solid red fill (the most
      destructive action on the dashboard wears the heaviest red). */
   .btn-danger { background: color-mix(in srgb, var(--err) 16%, transparent); border-color: var(--err); color: var(--err); }
-  .btn-danger:hover { background: color-mix(in srgb, var(--err) 28%, transparent); color: var(--err); }
+  /* Both danger hovers cap the tint at 20%: the error ink must stay above the
+     4.5 contrast floor on the panel in every palette and surface. */
+  .btn-danger:hover { background: color-mix(in srgb, var(--err) 20%, transparent); color: var(--err); }
   .btn-danger-outline { background: color-mix(in srgb, var(--err) 7%, transparent); border-color: var(--err); color: var(--err); }
-  .btn-danger-outline:hover { background: color-mix(in srgb, var(--err) 22%, transparent); color: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
+  .btn-danger-outline:hover { background: color-mix(in srgb, var(--err) 20%, transparent); color: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   .btn-danger-solid { background: var(--err); border-color: var(--err); color: var(--bg); font-weight: 600; }
   .btn-danger-solid:hover { background: var(--danger-hover); border-color: var(--danger-hover); color: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) var(--halo), transparent); }
   /* Accent-filled primary action (settings Apply, restart Restart now) -
@@ -305,8 +322,8 @@
   }
   .storm-banner {
     flex-shrink: 0; max-height: min(180px, 25vh); overflow-y: auto; overflow-x: hidden;
-    padding: 10px 28px; background: var(--panel); border-bottom: 1px solid var(--border2);
-    border-left: 3px solid var(--warn); font: 11px/1.5 var(--mono); scrollbar-width: thin;
+    padding: 10px 28px; background: var(--panel); border-top: 2px solid var(--warn);
+    border-bottom: 1px solid var(--border2); font: 11px/1.5 var(--mono); scrollbar-width: thin;
   }
   .storm-banner[hidden] { display: none; }
   .storm-banner:focus-visible { outline: 1px solid var(--accent); outline-offset: -2px; }
@@ -323,9 +340,9 @@
   .storm-detail { color: var(--muted); margin-top: 2px; }
   .storm-heading > *, .storm-detail > * { min-width: 0; overflow-wrap: anywhere; }
   .storm-open-hint { margin-left: auto; color: var(--muted); }
-  /* Deliberately NOT --veil: the storm dialog is the one surface that must
-     feel urgent and absolute, so its scrim is a heavier pure black. */
-  .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: rgba(0,0,0,.6); }
+  /* The storm dialog is the one surface that must feel urgent and absolute,
+     so it uses the mode-owned storm scrim rather than the base veil. */
+  .storm-dialog { position: fixed; inset: 0; z-index: 80; display: grid; place-items: center; padding: 20px; background: var(--veil-strong); }
   .storm-dialog[hidden] { display: none; }
   .storm-dialog-panel { width: min(580px, 100%); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; border: 1px solid var(--border2); background: var(--panel); }
   .storm-dialog-body { overflow-y: auto; overscroll-behavior: contain; padding: 6px 18px 18px; font: 11px/1.5 var(--mono); }
@@ -345,7 +362,7 @@
     width: min(22rem, 100%); max-width: 100%;
     border: 1px solid var(--border2); border-radius: 14px; background: var(--panel);
     padding: 22px; color: var(--text);
-    box-shadow: 0 18px 40px rgba(0,0,0,.4);
+    box-shadow: 0 18px 40px rgba(var(--shadow-rgb),.4);
   }
   .operator-dialog-brand { display: flex; align-items: center; gap: 11px; margin: 0 0 12px; }
   .operator-dialog-brand .brand-logo { width: 28px; height: 28px; }
@@ -499,8 +516,9 @@
   .xp-scope .bc-root:hover { color: var(--accent); background: var(--panel2); }
   .xp-scope .bc-sep { color: var(--border2); }
   .xp-chip {
-    display: inline-flex; align-items: center; gap: 6px; background: var(--panel2);
-    border: 1px solid var(--border2); border-left: 2px solid var(--ent, var(--border2));
+    display: inline-flex; align-items: center; gap: 6px;
+    background: color-mix(in srgb, var(--ent, var(--border2)) 9%, var(--panel2));
+    border: 1px solid color-mix(in srgb, var(--ent, var(--border2)) 55%, var(--border2));
     border-radius: 6px; padding: 2px 4px 2px 8px; color: var(--text);
   }
   .xp-chip .chip-x {
@@ -592,8 +610,16 @@
     content: ''; position: absolute; inset: 0; pointer-events: none; opacity: .10;
     background: linear-gradient(90deg, var(--ent, var(--border2)), transparent 45%);
   }
-  .xp-node:hover { border-color: var(--border2); transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,0,0,.26); }
-  .xp-node.selected { border-color: var(--ent); background: color-mix(in srgb, var(--ent) 10%, var(--panel2)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ent) 55%, transparent) inset, 0 8px 22px rgba(0,0,0,.30); }
+  .xp-node:hover { border-color: var(--border2); transform: translateY(-1px); box-shadow: 0 8px 20px rgba(var(--shadow-rgb),.26); }
+  .xp-node.selected { border-color: var(--ent); background: color-mix(in srgb, var(--ent) 10%, var(--panel2)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--ent) 55%, transparent) inset, 0 8px 22px rgba(var(--shadow-rgb),.30); }
+  /* Selection keeps every secondary KPI legible on the tinted surface while
+     the border and tint still carry the selected state. */
+  .xp-node.selected .xp-node-n small,
+  .xp-node.selected .xp-node-kpis,
+  .xp-node.selected .xp-p95,
+  .xp-node.selected .xp-node-signals,
+  .xp-node.selected .share-pct,
+  .xp-node.selected .xp-conversation-role { color: var(--text); }
   .xp-node:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .xp-node-hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .xp-node-hd .ent { flex: 1; min-width: 0; }
@@ -627,8 +653,9 @@
     .xp-dim-trigger {
       display: flex; align-items: center; gap: 8px; width: 100%;
       min-height: 44px; padding: 8px 10px; text-align: left; cursor: pointer;
-      background: var(--panel2); color: var(--text); font: inherit;
-      border: 1px solid var(--border2); border-left: 2px solid var(--ent, var(--border2));
+      background: color-mix(in srgb, var(--ent, var(--border2)) 8%, var(--panel2));
+      color: var(--text); font: inherit;
+      border: 1px solid color-mix(in srgb, var(--ent, var(--border2)) 55%, var(--border2));
       border-radius: 8px;
     }
     .xp-dim-trigger:hover { border-color: var(--accent); }
@@ -642,17 +669,17 @@
       position: absolute; left: 0; right: 0; top: calc(100% + 6px);
       z-index: 13; max-height: min(70vh, 420px); overflow-y: auto;
       background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-      box-shadow: 0 12px 32px rgba(0,0,0,.5); padding: 8px;
+      box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); padding: 8px;
     }
     .xp-rail.open { display: flex; }
     .xp-rail-item { padding: 9px 10px; min-height: 40px; }
   }
 
   /* ---- detail slide-over drawer ---- */
-  /* Deliberately NOT --veil: the drawer sits beside live log rows that must
-     stay readable through the scrim, so it is the lightest of the three. */
+  /* The drawer sits beside live log rows that must stay readable through the
+     scrim, so it uses the lightest mode-owned veil. */
   .drawer-veil {
-    position: fixed; inset: 0; background: rgba(0,0,0,.55); opacity: 0; pointer-events: none;
+    position: fixed; inset: 0; background: var(--veil-soft); opacity: 0; pointer-events: none;
     transition: opacity .18s; z-index: 60;
   }
   .drawer-veil.open { opacity: 1; pointer-events: auto; }
@@ -660,7 +687,7 @@
     position: fixed; top: calc(var(--rail-h) + var(--rail-tick)); right: 0; bottom: 0; width: 560px; max-width: 92vw;
     background: var(--panel); border-left: 1px solid var(--border2); z-index: 61;
     transform: translateX(100%); transition: transform .2s cubic-bezier(.32,.72,.35,1);
-    display: flex; flex-direction: column; box-shadow: -24px 0 60px rgba(0,0,0,.5);
+    display: flex; flex-direction: column; box-shadow: -24px 0 60px rgba(var(--shadow-rgb),.5);
   }
   .drawer.open { transform: none; }
   .drawer-hd {
@@ -684,7 +711,7 @@
     width: min(1080px, calc(100vw - 24px)); height: calc(100vh - var(--rail-h) - var(--rail-tick) - 8px);
     display: flex; flex-direction: column;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 14px;
-    box-shadow: 0 24px 64px rgba(0,0,0,.55), 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset;
+    box-shadow: 0 24px 64px rgba(var(--shadow-rgb),.55), 0 1px 0 color-mix(in srgb, var(--text) 4%, transparent) inset;
     transform: translateX(-50%) translateY(12px); opacity: 0; pointer-events: none;
     transition: transform .2s cubic-bezier(.32,.72,.35,1), opacity .2s ease;
     overflow: hidden;
@@ -805,7 +832,7 @@
   .st-prov {
     display: flex; flex-direction: column; margin-bottom: 14px;
     background: var(--panel2); border: 1px solid var(--border); border-radius: 12px;
-    overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,.2);
+    overflow: hidden; box-shadow: 0 2px 10px rgba(var(--shadow-rgb),.2);
   }
   .prov-hd {
     display: flex; align-items: center; gap: 8px;
@@ -837,13 +864,13 @@
     display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px;
     font-size: 9px; color: var(--muted); text-transform: none; letter-spacing: .05em;
   }
-  .prov-sub { text-transform: none; letter-spacing: 0; opacity: .85; }
+  .prov-sub { text-transform: none; letter-spacing: 0; }
   .prov-sec input, .prov-sec select {
     font: 11px var(--mono); color: var(--text);
     background: var(--rail); border: 1px solid var(--border); border-radius: 7px;
     padding: 5px 9px; width: auto;
   }
-  .prov-sec input::placeholder { color: var(--muted); opacity: .75; }
+  .prov-sec input::placeholder { color: var(--muted); opacity: 1; }
   .prov-sec input:focus, .prov-sec select:focus { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px var(--focus-ring); }
   .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; padding-left: 1px; }
   .prov-chips:empty { display: none; }
@@ -932,7 +959,7 @@
     position: absolute; top: calc(100% + 6px); right: 0; z-index: 40;
     min-width: 290px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.5); font-family: var(--mono);
+    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
   .prov-menu[hidden] { display: none !important; }
   .prov-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 180px; overflow-y: auto; }
@@ -980,7 +1007,7 @@
     width: max-content; max-width: min(290px, calc(100vw - 32px));
     display: flex; flex-direction: column; gap: 2px; padding: 6px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 9px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.5); font-family: var(--mono);
+    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
   .ro-tpl-menu[hidden] { display: none !important; }
   .ro-tpl-item {
@@ -1070,7 +1097,7 @@
   .card {
     background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
     padding: 16px 18px; overflow: hidden; position: relative;
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(0,0,0,.24);
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--text) 3%, transparent) inset, 0 12px 28px rgba(var(--shadow-rgb),.24);
   }
   .card h2 { margin: 0 0 10px; font-size: 11px; font-weight: 650; color: var(--muted); text-transform: none; letter-spacing: .08em; display: flex; align-items: center; gap: 8px; }
 
@@ -1201,7 +1228,7 @@
   #chart-hover {
     position: absolute; top: 8px; right: 8px; z-index: 3;
     background: var(--panel); border: 1px solid var(--border2);
-    box-shadow: 0 6px 20px rgba(0,0,0,.3); border-radius: 7px;
+    box-shadow: 0 6px 20px rgba(var(--shadow-rgb),.3); border-radius: 7px;
     padding: 10px 12px; font-family: var(--mono); font-size: 11px;
     color: var(--text); pointer-events: none; max-width: calc(100% - 16px);
   }
@@ -1251,7 +1278,7 @@
     position: fixed; top: -9999px; right: auto; z-index: 40;
     padding: 8px; display: flex; flex-direction: column; gap: 2px;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 10px;
-    box-shadow: 0 12px 32px rgba(0,0,0,.5); font-family: var(--mono);
+    box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5); font-family: var(--mono);
   }
   .metrics-menu[hidden] { display: none !important; }
   .metrics-row {
@@ -1293,13 +1320,16 @@
   /* entityPivot: an entityBadge wrapped in a navigable link. */
   a.ent-link { text-decoration: none; border-radius: 5px; padding: 1px 2px; }
   a.ent-link:hover { background: var(--panel2); }
+  /* Inset focus ring so .req-model's overflow clip cannot cut the indicator
+     off the last entity in the identity cell. */
+  a.ent-link:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   /* Client hover card: identity + request config. Fixed, never intercepts
      the pointer (the badge stays the hover target). */
   #client-tip {
     position: fixed; z-index: 90;
     background: var(--panel); border: 1px solid var(--border2); border-radius: 8px;
     padding: 8px 10px; font-family: var(--mono); font-size: 11px; color: var(--text);
-    pointer-events: none; box-shadow: 0 12px 32px rgba(0,0,0,.5);
+    pointer-events: none; box-shadow: 0 12px 32px rgba(var(--shadow-rgb),.5);
     max-width: 300px; min-width: 180px; line-height: 1.45;
   }
   #client-tip[hidden] { display: none !important; }
@@ -1345,6 +1375,36 @@
 
   table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 11.5px; }
   th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  /* Request log: fixed column geometry. A live row rewriting into its final
+     values must never re-measure the table from the new cell text. The
+     colgroup and min-width are generated with the header in log.js. */
+  #tbl-requests table { table-layout: fixed; }
+  #tbl-requests th, #tbl-requests td { overflow: hidden; text-overflow: ellipsis; }
+  .req-ident { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; min-width: 0; }
+  /* Client and provider badges stay content-sized up to a bounded share, so a
+     short label is never clipped to a sliver. The canonical model is the only
+     flexible remainder and ellipsizes first inside the fixed identity column.
+     The cap reserves the model's 3ch label floor plus 3px rounding slack, its
+     4px link padding, 14px icon and 3px gap; the two 2px identity gaps are
+     excluded from both caps. */
+  .req-ident > .ent {
+    flex: 0 1 auto;
+    max-width: calc((100% - 28px - 3ch) / 2);
+    min-width: 0;
+    overflow: hidden;
+  }
+  .req-ident .ent { gap: 3px; }
+  .req-ident > .req-model { display: inline-flex; align-items: center; min-width: 0; flex: 1 1 0; max-width: 100%; overflow: hidden; }
+  .req-ident > .req-model > .ent { min-width: 0; max-width: 100%; overflow: hidden; }
+  /* Chromium paints text-overflow dots only on a block-level box, not on the
+     inline-flex label used elsewhere. Inside the identity cell every label is
+     a block, so long client and provider names ellipsize too while the model
+     remains the flexible remainder and keeps a visible share. */
+  .req-ident .ent-lb { display: block; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The model is the flexible remainder between the capped client and provider
+     badges. Keep at least three characters of its label visible even when both
+     neighbours sit at their caps. */
+  .req-ident > .req-model .ent-lb { min-width: 3ch; }
   th { color: var(--muted); font-weight: 550; font-size: 10px; text-transform: none; letter-spacing: .07em; position: sticky; top: 0; background: var(--panel); z-index: 2; }
   tr:hover td { background: var(--panel2); }
   td { color: var(--text); }
@@ -1353,7 +1413,7 @@
   .pill.err { background: color-mix(in srgb, var(--err) var(--pill-tint), transparent); color: var(--err); }
   .pill.warn { background: color-mix(in srgb, var(--warn) var(--pill-tint), transparent); color: var(--warn); }
   /* Client-cancelled row: warm muted gray - an outcome of its own, not a failure. */
-  .pill.cancel { background: color-mix(in srgb, rgb(168,160,150) var(--pill-tint), transparent); color: var(--muted); }
+  .pill.cancel { background: color-mix(in srgb, var(--neutral) var(--pill-tint), transparent); color: var(--text); }
   /* In-flight request pill: the accent "live" pulse for a row still streaming. */
   .pill.live { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); animation: livepulse 1.6s ease-in-out infinite; }
   /* Operator hold: parked, not in flight. Muted, no pulse. Click opens the hold editor. */
@@ -1367,22 +1427,27 @@
   .retry-toggle { border: none; cursor: pointer; font: inherit; }
   .retry-toggle .retry-caret { display: inline-block; margin-left: 2px; }
   .retry-toggle:hover { filter: brightness(1.2); }
-  tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
+  tr.retry-sub td { background: color-mix(in srgb, var(--warn) 4%, transparent); color: var(--muted); border-bottom: 1px solid var(--border); padding-top: 4px; padding-bottom: 4px; }
   tr.retry-sub { cursor: pointer; }
-  tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); }
+  tr.retry-sub:hover td { background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--text); }
+  /* The nested err pill keeps its 13% err tint over the hovered warn row;
+     --err is too dim there, so the proven error-text ink carries the label. */
+  tr.retry-sub:hover td .pill.err { color: var(--err-text); }
   .retry-tick { color: var(--warn); margin-right: 4px; }
-  .retry-sub-label { font-size: 10.5px; color: var(--muted); }
-  .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+  .retry-sub-label { font-size: 10.5px; }
+  .retry-sub-msg { font-size: 10.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* Day dividers - the request log nests by local calendar day. Each divider
      is a major graduation on the instrument scale: a dated chip riding the
      same feathered tick strip as the header/footer rails, pinned below the
      sticky column header while its day is in view. It is a ruler, not a row:
      no hover repaint, and the sticky <td> (not <tr>) stays opaque over the
-     scrolling content. top tracks the th's ~27px so the strip parks directly
-     under the header. */
+     scrolling content. The 10px th line at the inherited 1.5 line-height,
+     its 7px vertical padding and the collapsed 1px rule measure 29.5px, so
+     top parks the strip exactly on the header's bottom edge with no seam for
+     scrolling rows to show through. */
   tr.day-sep td {
-    position: sticky; top: 27px; z-index: 1;
+    position: sticky; top: 29.5px; z-index: 1;
     background: var(--panel);
     padding: 3px 10px 2px;
     border-bottom: none;
@@ -1414,6 +1479,9 @@
   tr.exp-row.expanding td { background: var(--panel2); }   /* request log rows */
 
   .scroll { max-height: 380px; overflow-y: auto; overflow-x: auto; }
+  /* The request log is a keyboard-scrollable region (role="region" in
+     index.html). An inset ring stays visible inside the card's clipped box. */
+  #tbl-requests:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
   /* The requests log keeps ONE stable height in the stacked scrolling
      layout: a definite box means an arriving request only scrolls inside
      it, instead of growing the card row by row and shoving the rest of
@@ -1430,7 +1498,7 @@
     font-size: 11px; font-family: var(--mono);
     color: var(--muted);     background: var(--rail);
     border-top: 1px solid var(--border2);
-    box-shadow: 0 -10px 24px rgba(0,0,0,.28);
+    box-shadow: 0 -10px 24px rgba(var(--shadow-rgb),.28);
   }
   footer::before {
     content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: var(--rail-tick); pointer-events: none;
@@ -1461,34 +1529,157 @@
   footer .f-live.paused { color: var(--muted); }
   footer b { color: var(--text); font-weight: 600; }
 
-  /* Theme picker: one surface control and one row per palette. Swatches
-     resolve the same data-theme/data-mode tokens as the page, so this block
-     owns layout only and a palette preview cannot drift from the palette it
-     names. The rows are plain buttons; the shared header-menu lifecycle owns
-     open, close and aria-expanded. */
+  /* uPlot captures literal cursor colors in its vendored stylesheet, where
+     `.u-hz .u-cursor-x` shades the vertical cursor. The uplot and u-hz
+     classes are the same element, so the override targets the overlay child
+     directly and outranks the vendor rule. Cursor-y and the selection box are
+     disabled by chart.js and have no rule here. */
+  .uplot .u-over > .u-cursor-x { border-color: var(--muted); }
+
+  /* Theme tray: a current-vs-preview comparator, one compact surface radio
+     group in the caption bar, a palette radio group, and Reset/Close actions.
+     Both panes resolve the same data-theme/data-mode tokens as the page, so a
+     preview cannot drift from the palette it names. The shared header-menu
+     lifecycle owns open, close and aria-expanded; choosing a value never
+     closes it. */
+  #theme-menu {
+    width: min(368px, calc(100vw - 24px));
+    max-height: calc(100dvh - var(--rail-h) - 24px);
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .theme-tray-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 2px 8px; }
+  .theme-tray-title { color: var(--text); font: 600 12px var(--mono); letter-spacing: .04em; }
+  .theme-saved { color: var(--muted); font: 10px var(--mono); }
+  /* One pane component, two states: the committed pair and the candidate.
+     Each pane owns its data pair, so the same token declarations paint both. */
+  .theme-panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0 2px 8px; }
+  .theme-pane {
+    min-width: 0; border: 1px solid var(--border); border-radius: 9px;
+    overflow: hidden; background: var(--bg); color: var(--text);
+    box-shadow: 0 6px 16px rgba(var(--shadow-rgb), .16);
+  }
+  /* A pane can show the other surface inside a committed page, so it owns the
+     native form-control and scrollbar scheme for its own pair. */
+  .theme-pane[data-mode="black"] { color-scheme: dark; }
+  .theme-pane[data-mode="clear"] { color-scheme: light; }
+  .tp-label { padding: 4px 7px; border-bottom: 1px solid var(--border); background: var(--panel2); color: var(--muted); font: 600 10px var(--mono); letter-spacing: .06em; }
+  .tp-rail { display: flex; align-items: center; gap: 3px; height: 22px; padding: 0 6px; background: var(--rail); border-bottom: 1px solid var(--border); }
+  .tp-brand { width: 9px; height: 9px; flex: none; border-radius: 50%; background: linear-gradient(135deg, var(--accent), var(--accent2)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 16%, transparent); }
+  .tp-dot { width: 3px; height: 3px; flex: none; border-radius: 50%; background: var(--muted); opacity: .7; }
+  .tp-rail-line { flex: 1; height: 1px; background: linear-gradient(90deg, var(--border2), transparent); }
+  .tp-body { padding: 6px; display: grid; gap: 5px; }
+  .tp-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; }
+  .tp-kpis span { position: relative; height: 16px; border: 1px solid var(--border); border-radius: 3px; background: var(--panel); }
+  .tp-kpis span::before { content: ''; position: absolute; left: 3px; top: 3px; width: 36%; height: 2px; border-radius: 1px; background: var(--muted); opacity: .55; }
+  .tp-kpis span::after { content: ''; position: absolute; left: 3px; bottom: 3px; width: 55%; height: 4px; border-radius: 1px; background: var(--accent); opacity: .8; }
+  .tp-kpis span:nth-child(2)::after { background: var(--accent2); }
+  .tp-kpis span:nth-child(3)::after { background: var(--cyan); }
+  .tp-plot { display: flex; align-items: flex-end; gap: 2px; height: 42px; padding: 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--panel); }
+  .tp-plot i { flex: 1; height: var(--h); min-height: 2px; border-radius: 1px 1px 0 0; background: var(--accent); opacity: .82; }
+  .tp-plot i:nth-child(2n) { background: var(--accent2); }
+  .tp-plot i:nth-child(3n) { background: var(--cyan); opacity: .68; }
+  /* The miniature's series key: accent, accent2 and cyan are the three plot
+     roles in both panes. It is a color legend, not a status row, so it never
+     invents HTTP outcomes or a live state. */
+  .tp-legend { display: flex; align-items: center; gap: 3px; height: 6px; }
+  .tp-key { width: 12px; height: 3px; border-radius: 2px; background: var(--accent); }
+  .tp-key:nth-child(2) { background: var(--accent2); }
+  .tp-key:nth-child(3) { background: var(--cyan); }
+  /* The caption bar stays outside the aria-hidden comparator so assistive
+     technology reads the committed and candidate pairs as ordinary text. */
+  .theme-caption-bar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px;
+    margin: 0 2px 10px; padding: 6px 8px;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .theme-captions { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+  .theme-caption { color: var(--muted); font: 10px/1.35 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* The candidate line stays muted until a real candidate exists; only then
+     does it take the primary ink. Compact modes hide it entirely. */
+  .theme-caption-preview { color: var(--muted); }
+  .theme-caption-preview.has-preview { color: var(--text); }
+  .theme-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+  .theme-mode-field { flex: none; margin-left: auto; display: grid; gap: 3px; justify-items: end; }
+  .theme-mode-label { color: var(--muted); font: 600 9px var(--mono); letter-spacing: .05em; }
   .theme-mode {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 2px;
-    margin: 0 2px 14px; padding: 2px;
-    background: var(--panel2); border: 1px solid var(--border); border-radius: 7px;
+    flex: none; display: inline-grid; grid-template-columns: 1fr 1fr; gap: 2px;
+    padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
   }
   .theme-mode-opt {
-    min-height: 28px; border: 1px solid transparent; border-radius: 5px;
+    min-height: 26px; padding: 0 7px; border: 1px solid transparent; border-radius: 4px;
     background: transparent; color: var(--muted);
-    font: 600 11px var(--mono); letter-spacing: .02em; cursor: pointer;
+    font: 600 10px var(--mono); letter-spacing: .02em; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center; gap: 4px;
   }
   .theme-mode-opt:hover { color: var(--text); }
-  .theme-mode-opt[aria-pressed="true"] {
+  .theme-mode-opt[aria-checked="true"] {
     background: var(--panel); border-color: var(--border2); color: var(--text);
-    box-shadow: 0 1px 2px rgba(0,0,0,.18);
+    box-shadow: 0 1px 2px rgba(var(--shadow-rgb), .18);
   }
+  .theme-mode-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
   .theme-mode-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .theme-palette-hd { margin-bottom: 8px; }
-  .theme-list { display: flex; flex-direction: column; gap: 2px; padding: 2px; min-width: 232px; max-height: min(70vh, 540px); overflow-y: auto; }
-  .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+  .theme-palette-hd { margin: 0 2px 8px; }
+  /* Eight rows fit the normal desktop window. On a short window wider than
+     800px the tray is the one vertical scroller; at 800px or narrower the
+     header flyout owns scrolling. The list never scrolls internally: a nested
+     scrollbar swallows the wheel and hides rows the container could show. */
+  .theme-list { display: flex; flex-direction: column; gap: 2px; padding: 2px; min-width: 232px; }
+  .theme-opt { display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 8px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
   .theme-opt:hover { background: var(--panel2); border-color: var(--border2); }
-  .theme-opt[aria-pressed="true"] { background: color-mix(in srgb, var(--accent) 10%, transparent); border-color: var(--accent); }
+  .theme-opt[aria-checked="true"] { background: color-mix(in srgb, var(--accent) var(--selected-tint), transparent); border-color: var(--accent); color: var(--text); }
+  .theme-opt[aria-checked="true"] .theme-hint { color: var(--text); }
+  .theme-opt.is-preview { border-style: dashed; border-color: var(--accent2); }
   .theme-opt:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  .theme-swatch { width: 28px; height: 18px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 62%, var(--accent) 62% 100%); }
-  .theme-copy { display: flex; flex-direction: column; line-height: 1.3; }
+  .theme-swatch { width: 36px; height: 24px; flex: none; border-radius: 4px; border: 1px solid var(--border2); background: linear-gradient(135deg, var(--bg) 0 25%, var(--panel2) 25% 50%, var(--accent) 50% 75%, var(--accent2) 75% 100%); }
+  .theme-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
   .theme-name { font-size: 13px; font-weight: 600; }
-  .theme-hint { font-size: 11px; color: var(--muted); }
+  .theme-hint { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .theme-check { margin-left: auto; color: var(--accent); font: 700 13px var(--mono); opacity: 0; }
+  .theme-mode-opt .theme-check { margin-left: 0; }
+  .theme-opt[aria-checked="true"] .theme-check,
+  .theme-mode-opt[aria-checked="true"] .theme-check { opacity: 1; }
+  .theme-hintbar { margin: 8px 2px 0; color: var(--muted); font: 10px/1.5 var(--mono); }
+  .theme-ft { display: flex; justify-content: space-between; gap: 8px; margin: 12px 2px 0; padding-top: 10px; border-top: 1px solid var(--border); }
+  .theme-ft .btn { flex: 1; justify-content: center; }
+  .theme-ico-fill { fill: var(--accent); }
+  @media (max-width: 800px) {
+    /* The nav flyout owns vertical scrolling on a narrow window: the tray and
+       its palette list must not become nested scrollers that swallow a wheel
+       or touch swipe before the flyout moves. A narrow fine-pointer window is
+       compact too, so it gets the same picker without the comparator. Width
+       still fits the flyout and every option keeps its 44px target. */
+    #theme-menu {
+      width: min(368px, 100%);
+      max-height: none; overflow: visible; overscroll-behavior: auto;
+    }
+    .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
+    .theme-opt { min-height: 44px; }
+    .theme-mode-opt { min-height: 44px; }
+    .theme-ft .btn { min-height: 44px; }
+  }
+  @media (hover: none), (pointer: coarse) {
+    /* No hover means no candidate to show. Keep the current caption, the
+       surface control and every palette row; the "Preview: same" line and the
+       hover hint would describe a gesture this device cannot make. */
+    .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
+    .theme-mode-opt, .theme-ft .btn { min-height: 44px; }
+  }
+  @media (pointer: coarse) and (min-width: 801px) {
+    #btn-theme { min-width: 44px; width: 44px; height: 44px; }
+  }
+  @media (max-height: 760px) {
+    /* The comparator and hint would push the palette or footer out of a short
+       window. Above 800px width the tray scrolls as the single vertical owner;
+       at 800px or narrower the header flyout already does. */
+    .theme-panes, .theme-caption-preview, .theme-hintbar { display: none; }
+  }
+  @media (max-width: 360px) {
+    /* One column keeps the current caption readable above a full-width
+       surface control; palette names and swatches stay, the ellipsized hints
+       would only clip. */
+    .theme-caption-bar { flex-direction: column; align-items: stretch; gap: 6px; }
+    .theme-captions { flex: none; }
+    .theme-mode-field { margin-left: 0; justify-items: stretch; }
+    .theme-mode { width: 100%; }
+    .theme-hint { display: none; }
+  }

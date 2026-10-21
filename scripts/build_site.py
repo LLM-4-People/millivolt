@@ -2,8 +2,10 @@
 """Build the static millivolt site from the canonical Markdown sources.
 
 The site is deliberately a small, dependency-light static build. Markdown stays
-in its existing owners; this script only renders it, rewrites repository links
-for a browser, and generates the navigation, search index and SEO files.
+in its existing owners; this script renders it, rewrites repository links for a
+browser, copies the canonical brand assets, derives the site token stylesheet
+from the dashboard palette, and generates the navigation, search index and SEO
+files.
 """
 
 from __future__ import annotations

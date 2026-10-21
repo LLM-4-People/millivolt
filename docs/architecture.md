@@ -27,11 +27,24 @@ defines their supported combinations.
 
 [version.go](../version.go) owns VERSION validation and SemVer precedence. The
 [workflow](../.github/workflows/check.yml) owns the promotion gate and release
-publication: `required` checks testing ancestry and a VERSION newer than every
-tag for non-Dependabot code-bearing promotions, and `publish` tags the reviewed
-promotion merge, publishes the image and creates the release without pushing
-`main`. The `main-testing-first` ruleset
-adds the pull-request and merge-commit requirements with no bypass actors.
+publication: `checks` and `container` run the full gate on all `testing` pull
+requests, code-bearing `testing` pushes, and manually pushed `v*` tags, plus
+Dependabot's `main` PRs; docs and site-only pushes use `docs.yml`. `required`
+reuses that gate for ordinary promotions by requiring the head to be the current
+`testing` tip, `main` to be already merged back into it, a successful full-gate
+record for that exact commit or for the closest gated `testing` commit when
+every path since it is docs/site-only, and a VERSION newer than every tag for
+non-Dependabot code-bearing promotions. Pending exact check runs get a short bounded wait and
+the proof fails closed if they are still pending; let the `testing` push gate
+finish before opening or re-running a promotion PR. Docs/site-only promotions
+skip the VERSION and full-gate proofs and validate docs, workflow policy and the
+site in `required`. The `required` job has a ten-minute budget for that path.
+`publish` tags the reviewed promotion merge, publishes the image and creates the
+release without pushing `main`; a manually pushed `v*` tag ships exactly as
+tagged. `publish-testing` instead waits for `checks` and `container` directly,
+because a testing push has no promotion proof to wait for. The
+`main-testing-first` ruleset adds the pull-request and merge-commit requirements
+with no bypass actors.
 [Contributing](../CONTRIBUTING.md#branch-workflow) owns the maintainer
 checklist; [operations](operations.md#versions-and-images) owns the published
 tag contract.
@@ -481,12 +494,23 @@ cached.
 Vanilla modules under [static/js](../internal/web/static/js) have distinct owners:
 `core` formatters/shared state, `entities` identities/record labels, `explorer`
 routing/cards, `chart` uPlot plans, `log` window/drawer, `chrome` operator shell,
-`theme` the surface/palette registry and picker, `settings` the lazily loaded
-Settings sheet, and `live` bootstrap/SSE/derived state. `theme.js` owns the
-mode/palette registry, normalization, the single persistence shape and the one
-canvas recolor path; `css/themes.css` owns the Clear surface tokens and the
-eight accent families both modes resolve, while `dashboard.css` owns the
-default Black base and the shared semantic status colors. `chrome.js` owns the
+`theme` the surface/palette registry and preview tray, `settings` the lazily
+loaded Settings sheet, and `live` bootstrap/SSE/derived state. `theme.js` owns
+the mode/palette registry, normalization, the single persistence shape, the
+current-vs-preview comparator state and the one canvas recolor path. A commit
+changes the live document pair; normalization also repairs storage at load when
+the stored value is invalid. Hover or keyboard focus previews inside the tray
+only, and the polite live region follows the keyboard cursor: pointer-induced
+focus never announces a candidate. Arrow keys, Home and End move the cursor and
+its one tab stop; Enter/Space or a click commits. Compact touch, short and
+narrow layouts hide the comparator, preview line and hint while keeping the
+current caption, surface control and all eight rows.
+`css/themes.css` owns the complete surface, accent and material families every
+palette resolves in both modes and the Black/Clear mode material fallbacks,
+while `dashboard.css` owns the default Instrument Black base, the shared
+semantic status fills and the comparator/caption-bar layout. Each palette owns
+`--shadow-rgb` and `--veil-rgb`, and the mode veil tokens compose that hue, so
+cool Clear palettes get cool elevation and scrims. `chrome.js` owns the
 Settings trigger, loader, open-state probe, shared status line and the single
 close entry point; the module owns the sheet's state, editors and
 apply/revert/backup/purge behavior.

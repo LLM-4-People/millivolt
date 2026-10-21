@@ -1,30 +1,44 @@
 /* Dashboard surfaces and accent palettes.
    -------------------------------------------------------------------------
-   dashboard.css owns the default Black surface tokens and the shared semantic
-   status colors. This file adds the Clear surface and maps every theme's
-   accent family onto the four accent roles for both surfaces.
+   dashboard.css owns the default Instrument Black surface family and the
+   shared semantic status colors. This file gives every palette its own
+   surface, accent and material family for both Black and Clear, so switching
+   a palette changes the whole shell instead of only a few accent edges.
 
    Rules for a new palette:
-   - Palette blocks set accents only: --accent, --accent-hover, --accent2 and
-     --cyan. The mode block owns surfaces, text and semantic status colors, so
-     status meaning and contrast stay consistent across themes.
+   - Every theme block owns the six surface roles (--bg, --panel, --panel2,
+     --rail, --border, --border2), the four accent roles (--accent,
+     --accent-hover, --accent2, --cyan), and the two material roles
+     (--shadow-rgb, --veil-rgb) for both data-mode values.
+   - The mode block owns text, semantic status colors, scrim alpha and
+     elevation composition, and the graduated-scale/well neutrals, so status
+     meaning and contrast stay consistent across themes. It also owns the
+     pre-normalization material fallbacks. Contrast is the one deliberate
+     exception for maximum-separation text.
    - Keep --accent and --accent2 six-digit hex: core.js blends them through
      hexA() for chart fills and gridlines.
-   - A theme block is required for both data-mode values. The picker swatch
-     carries the same data-theme/data-mode pair, so its preview resolves these
-     tokens directly instead of keeping a second hex table.
-   - The default Instrument Black values stay in dashboard.css; the block
-     below mirrors them so its swatch can reset while another palette is
-     active. Keep the pair in step. */
+   - A theme block is required for both data-mode values. The picker swatch and
+     comparator panes carry the same data-theme/data-mode pair, so they resolve
+     these tokens directly instead of keeping a second hex table.
+   - The default Instrument Black values stay in dashboard.css; the block below
+     mirrors them so its swatch can reset while another palette is active. Keep
+     the pair in step. */
 
-/* Clear is the warm light surface. It changes the base and semantic ink, not
-   the theme accent family, so every palette has an accessible light mode. */
+/* Clear is the light mode. Theme blocks own its surface family; this bare
+   block owns the semantic ink and the Instrument Clear material/surface/accent
+   fallback for an unknown stored palette. Theme blocks override all of them
+   once the pair is valid. */
 [data-mode="clear"] {
   --bg: #f7f2e8;
   --panel: #fffdf7;
   --panel2: #f0e8d8;
+  --rail: #efe7d6;
   --border: #ddd2bf;
   --border2: #c6b89f;
+  --accent: #1e40af;
+  --accent-hover: #1e3a8a;
+  --accent2: #5b21b6;
+  --cyan: #0b5f66;
   --text: #2a241a;
   --muted: #5f574a;
   --ok: #0c5d33;
@@ -34,8 +48,12 @@
   --err-text: #821a1a;
   --warn-text: #5f3a00;
   --danger-hover: #8f1418;
-  --rail: #efe7d6;
-  --veil: rgba(58, 44, 24, .38);
+  --shadow-rgb: 74, 60, 38;
+  --veil-rgb: 58, 44, 24;
+  --veil: rgba(var(--veil-rgb), .38);
+  --veil-strong: rgba(var(--veil-rgb), .6);
+  --veil-soft: rgba(var(--veil-rgb), .55);
+  --neutral: #6f6659;
   --scale-tick: #8a7f6a;
   --scale-base: #b3a68d;
   --well-hi: #e6dcc8;
@@ -44,18 +62,58 @@
 }
 html[data-mode="clear"] { color-scheme: light; }
 
+/* Black mirrors the mode-owned dashboard.css defaults so a Black preview
+   inside a Clear page resolves Black ink, status, veils and materials
+   instead of inheriting the committed mode. It also owns the six surface
+   roles and four accent roles as the pre-normalization fallback for an
+   unknown stored palette, using the Instrument Black family. Theme blocks
+   override all of them once the pair is valid. Keep this block in step with
+   the matching :root values. */
+[data-mode="black"] {
+  --bg: #141210;
+  --panel: #1a1714;
+  --panel2: #221e19;
+  --rail: #100e0b;
+  --border: #2b2620;
+  --border2: #3a342b;
+  --accent: #7aa0ff;
+  --accent-hover: #9ab8ff;
+  --accent2: #b18cff;
+  --cyan: #38d5c0;
+  --text: #e8e4de;
+  --muted: #97907e;
+  --ok: #2fd186;
+  --warn: #f4c14d;
+  --err: #ff7b7b;
+  --rl: #ff9346;
+  --err-text: #ff8a80;
+  --warn-text: #e3b341;
+  --danger-hover: #ff8a8a;
+  --veil-rgb: 16,14,11;
+  --veil: rgba(var(--veil-rgb),.72);
+  --veil-strong: rgba(var(--veil-rgb),.6);
+  --veil-soft: rgba(var(--veil-rgb),.55);
+  --shadow-rgb: 0,0,0;
+  --neutral: #a8a096;
+  --scale-tick: #7a72a0;
+  --scale-base: #56507a;
+  --well-hi: #2a2440;
+  --well-lo: #1b1826;
+  --chart-grid-a: 0.5;
+}
+
 /* The default dark-case elevation reads as soot on the Clear page. The large
    surfaces get a warm, lighter shadow; small controls keep their token
    shadows. The mobile menu already drops elevation, so keep that rule. */
 [data-mode="clear"] header {
-  box-shadow: 0 8px 20px rgba(74, 60, 38, .14);
+  box-shadow: 0 8px 20px rgba(var(--shadow-rgb), .14);
 }
 [data-mode="clear"] .hdr-menu,
 [data-mode="clear"] .operator-dialog-panel,
 [data-mode="clear"] .st-sheet,
 [data-mode="clear"] .drawer,
 [data-mode="clear"] #client-tip {
-  box-shadow: 0 14px 34px rgba(74, 60, 38, .18);
+  box-shadow: 0 14px 34px rgba(var(--shadow-rgb), .18);
 }
 @media (max-width: 800px) {
   [data-mode="clear"] .hdr-menu { box-shadow: none; }
@@ -65,113 +123,245 @@ html[data-mode="clear"] { color-scheme: light; }
    dashboard.css values so its swatch can reset while another palette is
    active; the Clear block is the light pair. */
 [data-theme="instrument"][data-mode="black"] {
+  --bg: #141210;
+  --panel: #1a1714;
+  --panel2: #221e19;
+  --border: #2b2620;
+  --border2: #3a342b;
+  --rail: #100e0b;
   --accent: #7aa0ff;
   --accent-hover: #9ab8ff;
   --accent2: #b18cff;
   --cyan: #38d5c0;
+  --shadow-rgb: 0,0,0;
+  --veil-rgb: 16,14,11;
 }
 [data-theme="instrument"][data-mode="clear"] {
+  --bg: #f7f2e8;
+  --panel: #fffdf7;
+  --panel2: #f0e8d8;
+  --border: #ddd2bf;
+  --border2: #c6b89f;
+  --rail: #efe7d6;
   --accent: #1e40af;
   --accent-hover: #1e3a8a;
   --accent2: #5b21b6;
   --cyan: #0b5f66;
+  --shadow-rgb: 74, 60, 38;
+  --veil-rgb: 58, 44, 24;
 }
 
-/* Slate: lilac and stone. */
+/* Slate: cool stone, lilac and sand. */
 [data-theme="slate"][data-mode="black"] {
+  --bg: #17141b;
+  --panel: #1f1b25;
+  --panel2: #28222f;
+  --border: #352d3d;
+  --border2: #473b51;
+  --rail: #121016;
   --accent: #b8a8c8;
   --accent-hover: #d0c0e0;
   --accent2: #c8b8a8;
-  --cyan: #2dd4bf;
+  --cyan: #5eead4;
+  --shadow-rgb: 6, 4, 10;
+  --veil-rgb: 10, 8, 14;
 }
 [data-theme="slate"][data-mode="clear"] {
+  --bg: #f5f1f7;
+  --panel: #fdfbff;
+  --panel2: #eee7f2;
+  --border: #dbd0e2;
+  --border2: #c3b3cd;
+  --rail: #efe8f3;
   --accent: #5b4b6b;
   --accent-hover: #4a3b58;
   --accent2: #5a4a40;
-  --cyan: #0b5f66;
+  --cyan: #3f5f66;
+  --shadow-rgb: 58, 48, 66;
+  --veil-rgb: 48, 38, 56;
 }
 
-/* Midnight: sky blue and periwinkle. */
+/* Midnight: deep navy, sky blue and periwinkle. */
 [data-theme="midnight"][data-mode="black"] {
+  --bg: #0d1420;
+  --panel: #141d2b;
+  --panel2: #1b2738;
+  --border: #26364c;
+  --border2: #344a64;
+  --rail: #09101a;
   --accent: #38bdf8;
   --accent-hover: #67d0fb;
   --accent2: #9aa4ff;
-  --cyan: #22d3ee;
+  --cyan: #67e8f9;
+  --shadow-rgb: 2, 6, 12;
+  --veil-rgb: 6, 10, 16;
 }
 [data-theme="midnight"][data-mode="clear"] {
+  --bg: #eaf1fb;
+  --panel: #f8fcff;
+  --panel2: #e2ebf7;
+  --border: #cad9ea;
+  --border2: #abc1d8;
+  --rail: #e5eef9;
   --accent: #075985;
   --accent-hover: #0c4a6e;
   --accent2: #3730a3;
-  --cyan: #0b5f66;
+  --cyan: #155e75;
+  --shadow-rgb: 38, 52, 72;
+  --veil-rgb: 28, 40, 58;
 }
 
-/* Nord: frost blue, heather and pale teal. */
+/* Nord: arctic slate, frost blue and heather. */
 [data-theme="nord"][data-mode="black"] {
+  --bg: #121820;
+  --panel: #1a222b;
+  --panel2: #202932;
+  --border: #2f3c47;
+  --border2: #40515f;
+  --rail: #0e1319;
   --accent: #88c0d0;
   --accent-hover: #9fd0dd;
   --accent2: #c4a0b8;
-  --cyan: #8fbcbb;
+  --cyan: #99f6e4;
+  --shadow-rgb: 4, 8, 12;
+  --veil-rgb: 8, 12, 16;
 }
 [data-theme="nord"][data-mode="clear"] {
+  --bg: #edf3f1;
+  --panel: #f9fdfa;
+  --panel2: #e2ede8;
+  --border: #cbdad3;
+  --border2: #aec5ba;
+  --rail: #e5efeb;
   --accent: #1f5561;
   --accent-hover: #16424c;
   --accent2: #6b3f63;
-  --cyan: #0b5f66;
+  --cyan: #2f5d5a;
+  --shadow-rgb: 40, 56, 60;
+  --veil-rgb: 32, 46, 50;
 }
 
-/* Forest: emerald and lime. */
+/* Forest: moss, emerald and lime. */
 [data-theme="forest"][data-mode="black"] {
+  --bg: #0f1713;
+  --panel: #16211a;
+  --panel2: #1d2b22;
+  --border: #293c30;
+  --border2: #385240;
+  --rail: #0b100d;
   --accent: #34d399;
   --accent-hover: #6ee7b7;
   --accent2: #a3e635;
   --cyan: #2dd4bf;
+  --shadow-rgb: 3, 8, 6;
+  --veil-rgb: 6, 10, 8;
 }
 [data-theme="forest"][data-mode="clear"] {
+  --bg: #eef6ef;
+  --panel: #fbfdfb;
+  --panel2: #e3efe5;
+  --border: #c9ddcd;
+  --border2: #abc9b2;
+  --rail: #e6f1e8;
   --accent: #065f46;
   --accent-hover: #064e3b;
   --accent2: #3f6212;
-  --cyan: #0b5f66;
+  --cyan: #1f5a4e;
+  --shadow-rgb: 38, 58, 44;
+  --veil-rgb: 30, 48, 36;
 }
 
-/* Rose: pink and lilac. */
+/* Rose: plum, pink and lilac. */
 [data-theme="rose"][data-mode="black"] {
+  --bg: #181016;
+  --panel: #21171e;
+  --panel2: #2a1e27;
+  --border: #3a2a35;
+  --border2: #4d3947;
+  --rail: #130b10;
   --accent: #f472b6;
   --accent-hover: #f9a8d4;
-  --accent2: #c084fc;
+  --accent2: #f0abfc;
   --cyan: #22d3ee;
+  --shadow-rgb: 10, 3, 7;
+  --veil-rgb: 14, 6, 10;
 }
 [data-theme="rose"][data-mode="clear"] {
+  --bg: #fbf0f5;
+  --panel: #fffafd;
+  --panel2: #f6e7ee;
+  --border: #e2ccd6;
+  --border2: #ceadbc;
+  --rail: #f5e3eb;
   --accent: #9d174d;
   --accent-hover: #831843;
-  --accent2: #6b21a8;
-  --cyan: #0b5f66;
+  --accent2: #86198f;
+  --cyan: #5b4a63;
+  --shadow-rgb: 64, 42, 52;
+  --veil-rgb: 54, 32, 44;
 }
 
-/* Ember: amber and coral. */
+/* Ember: charcoal, orange and orchid. */
 [data-theme="ember"][data-mode="black"] {
+  --bg: #18110c;
+  --panel: #211810;
+  --panel2: #281d14;
+  --border: #3d2d20;
+  --border2: #523c2b;
+  --rail: #130c07;
   --accent: #ff6600;
   --accent-hover: #ff8a3d;
-  --accent2: #ff8fa3;
+  --accent2: #e879f9;
   --cyan: #4fd1c5;
+  --shadow-rgb: 8, 5, 2;
+  --veil-rgb: 12, 8, 4;
 }
 [data-theme="ember"][data-mode="clear"] {
+  --bg: #fbeee2;
+  --panel: #fff8f2;
+  --panel2: #f6e4d6;
+  --border: #e2c9b8;
+  --border2: #ceab92;
+  --rail: #f2dbc7;
   --accent: #5b2710;
   --accent-hover: #471e0b;
-  --accent2: #9f1239;
-  --cyan: #0b5f66;
+  --accent2: #7e1a86;
+  --cyan: #6b4a3f;
+  --shadow-rgb: 68, 48, 32;
+  --veil-rgb: 58, 38, 24;
 }
 
 /* Contrast: maximum separation. The filled accent keeps its own label
-   contrast: black on yellow in Black, cream on black in Clear. */
+   contrast: black on yellow in Black, white on black in Clear. */
 [data-theme="contrast"][data-mode="black"] {
+  --bg: #000000;
+  --panel: #0a0a0a;
+  --panel2: #141414;
+  --border: #333333;
+  --border2: #555555;
+  --rail: #000000;
+  --text: #ffffff;
+  --muted: #c9c9c9;
   --accent: #ffe14d;
   --accent-hover: #fff08a;
   --accent2: #7cc7ff;
   --cyan: #4de8e0;
+  --shadow-rgb: 0, 0, 0;
+  --veil-rgb: 0, 0, 0;
 }
 [data-theme="contrast"][data-mode="clear"] {
+  --bg: #ffffff;
+  --panel: #ffffff;
+  --panel2: #f2f2f2;
+  --border: #999999;
+  --border2: #555555;
+  --rail: #f2f2f2;
+  --text: #000000;
+  --muted: #444444;
   --accent: #000000;
   --accent-hover: #1a1a1a;
   --accent2: #003f8f;
   --cyan: #004f4f;
+  --shadow-rgb: 0, 0, 0;
+  --veil-rgb: 0, 0, 0;
 }

@@ -3,13 +3,34 @@ name: Checks and images
 # Promotion policy:
 # - `main` accepts pull requests only. The `main-testing-first` ruleset requires
 #   the `required` check and a merge commit, and it has no bypass actors.
-# - A non-Dependabot pull request to `main` must have its head commit already on
-#   `testing`. A code-bearing promotion must also carry a VERSION newer than
-#   every existing release tag; a docs/site-only promotion skips that check and
-#   does not rebuild images or cut a release.
+# - Full checks and native container smoke tests run on all testing pull
+#   requests and code-bearing testing pushes, manual release tags, and
+#   Dependabot's main PRs. Docs and site-only testing pushes use docs.yml
+#   instead. The full gate does not run again for an ordinary main promotion PR
+#   or a code-bearing main push: those reuse the testing gate. The promotion PR
+#   proves the head is the current testing tip, main is already merged back into
+#   testing, and the canonical check.yml push run's own suite succeeded for that
+#   exact commit or for the closest gated testing commit plus a docs-only delta,
+#   with VERSION unreleased for code. The fallback selects the closest gated
+#   testing commit from canonical push runs with no commit-count bound. The
+#   proof polls a bounded number of times for pending exact runs and fails
+#   closed if they are still pending. This keeps the release path from
+#   re-running the same suite.
+# - A non-Dependabot pull request to `main` must have its head commit be the
+#   current `testing` tip, with `main` already merged back into `testing`. A
+#   code-bearing promotion must also carry a VERSION newer than every existing
+#   release tag; a docs/site-only promotion skips that check and does not
+#   rebuild images or cut a release. Docs-only promotions instead validate
+#   Markdown, the generated site, workflow policy and docs contracts in
+#   `required`, so the docs workflow is not the only validation.
 # - Dependabot security pull requests are the only exception. They still run the
-#   full gate; a security-only merge does not cut a release.
-# - `publish` tags the reviewed promotion merge and never pushes `main`.
+#   full gate. They normally create no release because their VERSION is already
+#   tagged; if main still carries an untagged pending VERSION, that merge can
+#   publish the pending version.
+# - `publish` tags the reviewed promotion merge and never pushes `main`. It
+#   waits for `required`, which is the stable gate on every event. A code-bearing
+#   main push only reuses the reviewed merge and publishes; it does not re-prove
+#   the promotion checks.
 
 on:
   push:
@@ -48,6 +69,15 @@ concurrency:
 
 jobs:
   checks:
+    # Reuse the testing gate for a normal promotion. Dependabot opens its
+    # security PRs against main, so those still need the full gate. Tag pushes
+    # are included because a manually pushed release tag must be gated too.
+    if: >-
+      (github.event_name == 'push' &&
+        (github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) ||
+      (github.event_name == 'pull_request' &&
+        (github.base_ref != 'main' ||
+          github.event.pull_request.user.login == 'dependabot[bot]'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
@@ -124,6 +154,7 @@ jobs:
           MILLIVOLT_MCP_INTEGRATION=1 bash scripts/check.sh go test -count=1 ./internal/mcp/...
 
   container:
+    name: container (${{ matrix.platform }})
     needs: checks
     strategy:
       fail-fast: false
@@ -173,16 +204,46 @@ jobs:
   required:
     name: required
     # One stable check for branch protection. A skipped matrix leg must fail
-    # the gate rather than silently satisfy it.
+    # the gate rather than silently satisfy it, except for the deliberate
+    # main-promotion reuse path where the full gate and its dependent container
+    # job are both skipped together. The ten-minute budget leaves room for the
+    # docs-only validation path (dependency install, site build, repository and
+    # workflow contracts, and the MCP package contracts).
     if: always()
     needs: [checks, container]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
+      checks: read
+      actions: read
+    env:
+      # Single owner of the docs/site filter shared by the promotion
+      # classification and the docs-delta gate proof. These case globs match
+      # the explicit check.yml push paths-ignore family: `**/*.md` becomes
+      # `*.md` because a case `*` also matches `/`, and the four docs/site
+      # workflow entries stay literal. check.yml is intentionally code-bearing
+      # and is never part of this family.
+      DOCS_PATH_PATTERNS: >-
+        docs/** site-src/** scripts/build_site.py requirements-docs.txt LICENSE
+        *.md .github/workflows/docs.yml .github/workflows/pages.yml
+        .github/workflows/dependency-review.yml .github/workflows/security.yml
     steps:
       - name: Require every gate
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        # A skipped matrix leg must fail the gate, except for the deliberate
+        # main-promotion reuse path where both the full gate and its dependent
+        # container job are skipped together. Any failure or cancellation still
+        # fails, and a Dependabot main PR is never allowed to skip the gate.
+        if: >-
+          always() &&
+          (contains(needs.*.result, 'failure') ||
+           contains(needs.*.result, 'cancelled') ||
+           (contains(needs.*.result, 'skipped') &&
+            !(needs.checks.result == 'skipped' &&
+              needs.container.result == 'skipped' &&
+              ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+               (github.event_name == 'pull_request' && github.base_ref == 'main' &&
+                github.event.pull_request.user.login != 'dependabot[bot]')))))
         run: exit 1
 
       # Main is promoted from testing. Dependabot security updates are the one
@@ -193,8 +254,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         with:
+          persist-credentials: false
           fetch-depth: 0
-      - name: Set up Go for version validation
+      - name: Set up Go for promotion validation
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]'
         with:
@@ -208,20 +270,44 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin main testing
-          if ! git merge-base --is-ancestor "$HEAD_SHA" origin/testing; then
-            echo "::error::Main promotions must use commits already on testing."
+          if ! git merge-base --is-ancestor origin/main "$HEAD_SHA"; then
+            echo "::error::Merge main back into testing before promoting; main must be an ancestor of the head commit."
             exit 1
           fi
-          # Keep these docs/site patterns aligned with the push paths-ignore
-          # filter above. A docs-only promotion skips the VERSION gate and does
-          # not rebuild images or cut a release after merge.
+          if [ "$HEAD_SHA" != "$(git rev-parse origin/testing)" ]; then
+            echo "::error::Promote the current testing tip; the pull-request head is not origin/testing."
+            exit 1
+          fi
+          # DOCS_PATH_PATTERNS is the single docs/site filter, aligned with the
+          # push paths-ignore filter above. A docs-only promotion skips the
+          # VERSION gate and does not rebuild images or cut a release after
+          # merge. --no-renames keeps both sides of a code-to-docs rename, so a
+          # rename can never hide a code change from this classification.
+          #
+          # This checkout is candidate code. `required` reviews that code, so
+          # the matcher is defined here instead of sourcing a script from the
+          # candidate tree. The full-gate proof below carries the same copy,
+          # and the workflow tests pin the two declarations byte-identical.
+          # The real protection is the current-tip rule and review, not this
+          # filter.
           is_docs_path() {
-            case "$1" in
-              docs/**|site-src/**|scripts/build_site.py|requirements-docs.txt|LICENSE|*.md|.github/workflows/docs.yml|.github/workflows/pages.yml|.github/workflows/dependency-review.yml|.github/workflows/security.yml) return 0 ;;
-              *) return 1 ;;
-            esac
+            local path="$1" pattern
+            local -a docs_patterns=()
+            if [ -n "${DOCS_PATH_PATTERNS:-}" ]; then
+              read -r -a docs_patterns <<< "$DOCS_PATH_PATTERNS"
+            fi
+            for pattern in "${docs_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
           }
           base="$(git merge-base origin/main "$HEAD_SHA")"
+          # Capture the diff before classifying it. A failing `git diff` must
+          # abort under `set -e`; inside a process substitution its status is
+          # lost and an empty loop would leave docs_only=true.
+          changed="$(git diff --name-only --no-renames "$base" "$HEAD_SHA")"
           docs_only=true
           while IFS= read -r path; do
             [ -n "$path" ] || continue
@@ -229,8 +315,266 @@ jobs:
               docs_only=false
               break
             fi
-          done < <(git diff --name-only "$base" "$HEAD_SHA")
+          done <<< "$changed"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+      - name: Require the full testing gate for the promoted commit
+        # The normal promotion path does not rerun the suite. It proves the
+        # canonical check.yml push run for the exact commit (or the closest
+        # gated testing ancestor) completed successfully and that its own check
+        # suite contains completed, successful `checks` and both native
+        # container legs. The workflow path, push event, testing branch and
+        # suite id are all part of the selector, so a forged workflow, a
+        # pull-request run, or names from another suite can never stand in for
+        # the full gate. A docs-only commit pushed after the closest gated
+        # testing commit reuses that gate when the delta contains only docs
+        # paths, because check.yml deliberately skips docs pushes; the fallback
+        # selects the closest gated commit from canonical push runs, with no
+        # commit bound.
+        # Pending exact runs get six bounded 10-second polls; the proof fails
+        # closed if they are still pending. A successful duplicate wins over
+        # cancelled leftovers from a re-run within the canonical suite.
+        # Dependabot and docs-only promotions are handled by their own
+        # exceptions.
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The candidate checkout is untrusted: `required` reviews candidate
+          # code, so this matcher is duplicated inline instead of sourcing a
+          # script from the checkout. The promotion classification step carries
+          # the same copy; the workflow tests pin them byte-identical.
+          # DOCS_PATH_PATTERNS is the single owner of the glob family.
+          is_docs_path() {
+            local path="$1" pattern
+            local -a docs_patterns=()
+            if [ -n "${DOCS_PATH_PATTERNS:-}" ]; then
+              read -r -a docs_patterns <<< "$DOCS_PATH_PATTERNS"
+            fi
+            for pattern in "${docs_patterns[@]}"; do
+              case "$path" in
+                $pattern) return 0 ;;
+              esac
+            done
+            return 1
+          }
+          fetch_workflow_runs() {
+            gh api --paginate --slurp "repos/$REPO/actions/runs?$1&per_page=100" |
+              jq '{workflow_runs: [.[].workflow_runs[]]}'
+          }
+          fetch_check_runs() {
+            # filter=all returns superseded and duplicate check runs, not only
+            # each name's latest attempt. A re-run that leaves a cancelled
+            # duplicate in the canonical suite would otherwise hide the
+            # successful run this proof needs.
+            gh api --paginate --slurp "repos/$REPO/commits/$1/check-runs?filter=all&per_page=100" |
+              jq '{check_runs: [.[].check_runs[]]}'
+          }
+          # canonical_runs is the one selector for a check.yml testing push run.
+          # The path, event and branch filters are all mandatory, so an extra
+          # workflow or a pull-request run can never satisfy the proof. Newest
+          # first; created_at ties break on the run id.
+          canonical_runs() {
+            printf '%s' "$1" | jq -c '
+              [ .workflow_runs[]
+                | select(.path == ".github/workflows/check.yml")
+                | select(.event == "push")
+                | select(.head_branch == "testing")
+                | {head_sha, status, conclusion, check_suite_id, created_at, id}
+              ]
+              | sort_by(.created_at, .id)
+              | reverse
+              | .[]'
+          }
+          # canonical_run picks the newest canonical run for one exact commit.
+          canonical_run() {
+            printf '%s' "$1" | jq -c --arg sha "$2" '
+              [ .workflow_runs[]
+                | select(.path == ".github/workflows/check.yml")
+                | select(.event == "push")
+                | select(.head_branch == "testing")
+                | select(.head_sha == $sha)
+              ]
+              | sort_by(.created_at, .id)
+              | last
+              | if . == null then empty else {status, conclusion, check_suite_id} end'
+          }
+          # suite_outcome classifies only the check runs that belong to the
+          # canonical workflow run's suite. A successful duplicate wins over
+          # cancelled or failed leftovers from a re-run, and a pending duplicate
+          # is polled before a duplicate failure is considered.
+          suite_outcome() {
+            printf '%s' "$1" | jq -r --argjson suite "$2" '
+              [ (.check_runs // [])[]
+                | select(.check_suite.id == $suite)
+                | select(.name == "checks" or .name == "container (linux/amd64)" or .name == "container (linux/arm64)")
+              ] as $entries
+              | [ $entries[] | select(.status == "completed" and .conclusion == "success") | .name ] | unique as $success
+              | if ($success | length) == 3 then "success"
+                elif ([ $entries[] | select(.status != "completed") ] | length) != 0 then "pending"
+                elif ([ $entries[] | select(.conclusion == "failure" or .conclusion == "cancelled" or .conclusion == "timed_out" or .conclusion == "action_required" or .conclusion == "startup_failure") ] | length) != 0 then "failed"
+                else "incomplete" end'
+          }
+          observed() {
+            printf '%s\n' "$1" | jq -r '(.check_runs // [])[] | "\(.name) [suite \(.check_suite.id // "none")]: \(.status)/\(.conclusion // "pending")"'
+          }
+          runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
+          run="$(canonical_run "$runs" "$HEAD_SHA")"
+          if [ -n "$run" ]; then
+            run_status="$(printf '%s' "$run" | jq -r '.status')"
+            run_conclusion="$(printf '%s' "$run" | jq -r '.conclusion // ""')"
+            suite="$(printf '%s' "$run" | jq -r '.check_suite_id // 0')"
+            payload="$(fetch_check_runs "$HEAD_SHA")"
+            outcome="$(suite_outcome "$payload" "$suite")"
+            for attempt in 1 2 3 4 5 6; do
+              if [ "$run_status" = "completed" ] && [ "$outcome" != "pending" ]; then break; fi
+              echo "The canonical check.yml push run for $HEAD_SHA is still in flight; waiting 10 seconds ($attempt/6)."
+              sleep 10
+              runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
+              run="$(canonical_run "$runs" "$HEAD_SHA")"
+              if [ -z "$run" ]; then
+                run_status="missing"
+                run_conclusion=""
+                break
+              fi
+              run_status="$(printf '%s' "$run" | jq -r '.status')"
+              run_conclusion="$(printf '%s' "$run" | jq -r '.conclusion // ""')"
+              suite="$(printf '%s' "$run" | jq -r '.check_suite_id // 0')"
+              payload="$(fetch_check_runs "$HEAD_SHA")"
+              outcome="$(suite_outcome "$payload" "$suite")"
+            done
+            if [ "$run_status" != "completed" ]; then
+              echo "::error::The canonical check.yml push run for $HEAD_SHA was still pending after the bounded wait."
+              observed "$payload"
+              exit 1
+            fi
+            if [ "$run_conclusion" != "success" ]; then
+              echo "::error::The canonical check.yml push run for $HEAD_SHA completed as ${run_conclusion:-unknown}."
+              observed "$payload"
+              exit 1
+            fi
+            if [ "$outcome" != "success" ]; then
+              echo "::error::The canonical check.yml push run for $HEAD_SHA succeeded but its check suite is $outcome."
+              observed "$payload"
+              exit 1
+            fi
+            echo "The canonical check.yml push run and its gate suite succeeded for $HEAD_SHA."
+            exit 0
+          fi
+
+          # No canonical check.yml push run exists for the exact head. A
+          # docs-only commit pushed to testing does not trigger check.yml, so
+          # reuse the closest canonical gated testing ancestor. The run list is
+          # paginated, so the proof is not bounded by a commit count. "Closest"
+          # is the ancestor with the smallest `git rev-list --count
+          # "$candidate..$HEAD_SHA"` distance, never the most recently created
+          # run: a re-run of an older commit must not outrank a commit that is
+          # nearer the head. Duplicate runs for one commit keep the newest
+          # created run; an equal distance keeps the first in that order.
+          # After selecting the commit, its own suite must have passed. If it
+          # did not, the proof fails closed rather than reaching further back
+          # past an ungated or failed code commit. Every path between that
+          # gated commit and this head must be docs/site-only. --no-renames
+          # keeps both sides of a rename, matching the promotion
+          # classification.
+          echo "No canonical check.yml push run exists for $HEAD_SHA; checking the closest gated testing ancestor."
+          runs="$(fetch_workflow_runs "branch=testing&event=push")"
+          gated=""
+          gated_suite=""
+          gated_status=""
+          gated_conclusion=""
+          gated_distance=""
+          while IFS=$'\t' read -r candidate suite candidate_status candidate_conclusion; do
+            [ -n "$candidate" ] || continue
+            [ "$candidate" != "$HEAD_SHA" ] || continue
+            if ! git merge-base --is-ancestor "$candidate" "$HEAD_SHA"; then
+              continue
+            fi
+            distance="$(git rev-list --count "$candidate..$HEAD_SHA")"
+            case "$distance" in
+              ''|*[!0-9]*)
+                echo "::error::Cannot measure the distance from $candidate to $HEAD_SHA."
+                exit 1
+                ;;
+            esac
+            if [ -n "$gated_distance" ] && [ "$distance" -ge "$gated_distance" ]; then
+              continue
+            fi
+            gated="$candidate"
+            gated_suite="$suite"
+            gated_status="$candidate_status"
+            gated_conclusion="$candidate_conclusion"
+            gated_distance="$distance"
+          done < <(canonical_runs "$runs" | jq -r '[.head_sha, (.check_suite_id // 0), .status, (.conclusion // "")] | @tsv')
+          if [ -z "$gated" ]; then
+            echo "::error::No canonical check.yml push run on testing is a gated ancestor of $HEAD_SHA."
+            exit 1
+          fi
+          if [ "$gated_status" != "completed" ]; then
+            echo "::error::The closest canonical check.yml push run at $gated is still pending; the proof fails closed."
+            exit 1
+          fi
+          if [ "$gated_conclusion" != "success" ]; then
+            echo "::error::The closest canonical check.yml push run at $gated completed as ${gated_conclusion:-unknown}; it cannot gate $HEAD_SHA."
+            exit 1
+          fi
+          payload="$(fetch_check_runs "$gated")"
+          outcome="$(suite_outcome "$payload" "$gated_suite")"
+          case "$outcome" in
+            success)
+              ;;
+            pending)
+              echo "::error::The closest canonical check.yml push run at $gated is still pending; the proof fails closed."
+              observed "$payload"
+              exit 1
+              ;;
+            *)
+              echo "::error::The closest canonical check.yml push run at $gated did not pass ($outcome); it cannot gate $HEAD_SHA."
+              observed "$payload"
+              exit 1
+              ;;
+          esac
+          changed="$(git diff --name-only --no-renames "$gated" "$HEAD_SHA")"
+          non_docs=""
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            if ! is_docs_path "$path"; then
+              non_docs="${non_docs}${path}"$'\n'
+            fi
+          done <<< "$changed"
+          if [ -n "$non_docs" ]; then
+            echo "::error::$HEAD_SHA changes non-docs paths after the gated commit $gated, so it needs its own full gate."
+            printf '%s' "$non_docs"
+            exit 1
+          fi
+          echo "The latest canonical testing gate succeeded for $gated; only docs paths changed through $HEAD_SHA."
+          exit 0
+      - name: Set up Python for docs-only validation
+        # A docs-only promotion skips the full gate, so validate Markdown, the
+        # generated site, workflow policy and docs contracts here; the separate
+        # docs workflow is not the only validation. Dependabot is excluded
+        # because its PR already runs the full gate.
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only == 'true'
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+      - name: Validate the docs-only promotion
+        if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only == 'true'
+        env:
+          GOTOOLCHAIN: local
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -m pip install -r requirements-docs.txt
+          python3 -B -O -m tests.python.site
+          python3 -B -O -m tests.python.repository
+          python3 -B -O -m tests.python.workflows
+          python3 -B -m tests.repository_check
+          python3 -B -m tests.go test -mod=readonly ./internal/mcp -count=1
       - name: Require an unreleased version for main promotions
         if: success() && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.user.login != 'dependabot[bot]' && steps.promotion.outputs.docs_only != 'true'
         run: |
@@ -245,10 +589,11 @@ jobs:
         run: |
           {
             echo "### Main promotion"
-            echo "- Head commit is already on testing."
+            echo "- Head commit is main's merged-back history and the current testing tip."
             if [ "${{ steps.promotion.outputs.docs_only }}" = "true" ]; then
-              echo "- This is a docs/site-only promotion. The VERSION check is skipped and the merge will not rebuild images or cut a release."
+              echo "- This is a docs/site-only promotion. The VERSION and full-gate checks are skipped, docs, workflow policy and site validation ran here, and the merge will not rebuild images or cut a release."
             else
+              echo "- The full testing gate succeeded for this commit, or for the closest gated testing commit with only docs changes after it."
               echo "- VERSION is newer than every existing release tag."
             fi
             echo "- Merge with a merge commit. CI tags this merge and never pushes main."
@@ -259,11 +604,16 @@ jobs:
           {
             echo "### Dependabot security promotion"
             echo "- The testing-ancestry and VERSION checks are skipped for this PR."
-            echo "- A security-only merge does not cut a release. Merge main back into testing; the next versioned promotion releases it."
+            echo "- A security-only merge normally does not cut a release because VERSION is already tagged; an untagged pending VERSION on main can publish. Merge main back into testing; the next versioned promotion releases the change."
           } >> "$GITHUB_STEP_SUMMARY"
 
   publish:
-    needs: [checks, container]
+    # `required` is never skipped and transitively waits for the full gate when
+    # the full gate runs. On a code-bearing main push it reuses the reviewed PR
+    # gate and publishes, so release publication does not depend on jobs that
+    # were deliberately skipped for that event. Docs/site-only main pushes are
+    # handled by the docs and Pages workflows and do not publish an image.
+    needs: required
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -427,8 +777,10 @@ jobs:
   publish-testing:
     needs: [checks, container]
     # A moving development alias, not a release: every code-bearing push to
-    # testing republishes one tag after the same gates as main. No version
-    # is cut and no release is created.
+    # testing republishes one tag after the same checks and native container
+    # gates as main. It waits for those jobs directly because a testing push
+    # has no promotion proof to wait for. No version is cut and no release is
+    # created.
     if: github.event_name == 'push' && github.repository == 'LLM-4-People/millivolt' && github.ref == 'refs/heads/testing'
     runs-on: ubuntu-24.04
     timeout-minutes: 20

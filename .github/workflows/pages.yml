@@ -10,10 +10,17 @@ on:
       - 'scripts/build_site.py'
       - 'requirements-docs.txt'
       - 'VERSION'
+      - 'README.md'
       - 'CONTRIBUTING.md'
       - 'SECURITY.md'
       - 'LICENSE'
       - 'THIRD_PARTY_NOTICES.md'
+      - 'internal/web/static/css/dashboard.css'
+      - 'internal/web/static/favicon.svg'
+      - 'internal/web/static/favicon.ico'
+      - 'internal/web/static/apple-touch-icon.png'
+      - 'tests/repository_check.py'
+      - 'tests/support.py'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -30,7 +37,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      pages: write
+      pages: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -45,8 +52,6 @@ jobs:
       - name: Configure Pages
         id: pages
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-        with:
-          enablement: true
       - name: Build and validate the site
         env:
           SITE_URL: ${{ steps.pages.outputs.base_url || 'https://llm-4-people.github.io/millivolt' }}

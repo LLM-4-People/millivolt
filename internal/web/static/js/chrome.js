@@ -505,9 +505,8 @@ function closeHeaderMenus(except, restoreFocus = false) {
   if (except && except !== 'settings') closeSettings(true);
   let closed = false;
   for (const [button, id] of Object.entries(HEADER_MENUS)) {
-    const el = $(id);
-    if (el && !el.hidden && id !== except) {
-      el.hidden = true;
+    if (id === except) continue;
+    if (hideHdrMenu(id)) {
       closed = true;
       if (restoreFocus) $(button)?.focus();
     }
@@ -576,10 +575,21 @@ function toggleNavMenu(e) {
   // Opening the nav flyout closes the competing header menus first.
   classMenuToggle(NAV_CLASS_MENU, closeHeaderMenus);
 }
+// Header menus may own transient state that a close must discard however the
+// close arrived (Escape, an outside click, another menu, a Close button). The
+// lifecycle owns hiding; each module registers its cleanup once instead of
+// duplicating key or click handlers.
+const HEADER_MENU_CLOSE = new Map();
+function onHeaderMenuClose(id, cleanup) { HEADER_MENU_CLOSE.set(id, cleanup); }
+
 function hideHdrMenu(id) {
   const el = $(id);
-  if (el) el.hidden = true;
+  if (!el) return false;
+  const wasOpen = !el.hidden;
+  el.hidden = true;
+  if (wasOpen) HEADER_MENU_CLOSE.get(id)?.();
   syncHdrMenuExpanded();
+  return wasOpen;
 }
 
 function parseGoDuration(s) {
@@ -808,7 +818,7 @@ function toggleHdrMenu(e, menuId, prepare, after) {
     m.hidden = false;
     if (after) after();
   } else {
-    m.hidden = true;
+    hideHdrMenu(menuId);
   }
   syncHdrMenuExpanded();
 }
