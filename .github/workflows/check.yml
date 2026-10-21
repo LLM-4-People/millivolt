@@ -4,15 +4,16 @@ name: Checks and images
 # - `main` accepts pull requests only. The `main-testing-first` ruleset requires
 #   the `required` check and a merge commit, and it has no bypass actors.
 # - Full checks and native container smoke tests run on all testing pull
-#   requests and code-bearing testing pushes, manual release tags, and
-#   Dependabot's main PRs. Docs and site-only testing pushes use docs.yml
+#   requests, code-bearing testing pushes, manually dispatched testing gates,
+#   manual release tags, and Dependabot's main PRs. Docs and site-only testing
+#   pushes use docs.yml
 #   instead. The full gate does not run again for an ordinary main promotion PR
 #   or a code-bearing main push: those reuse the testing gate. The promotion PR
 #   proves the head is the current testing tip, main is already merged back into
-#   testing, and the canonical check.yml push run's own suite succeeded for that
+#   testing, and the canonical testing gate run's own suite succeeded for that
 #   exact commit or for the closest gated testing commit plus a docs-only delta,
 #   with VERSION unreleased for code. The fallback selects the closest gated
-#   testing commit from canonical push runs with no commit-count bound. The
+#   testing commit from canonical testing gate runs with no commit-count bound. The
 #   proof polls a bounded number of times for pending exact runs and fails
 #   closed if they are still pending. This keeps the release path from
 #   re-running the same suite.
@@ -72,6 +73,10 @@ on:
       - synchronize
       - reopened
       - closed
+  # A dropped webhook must not strand the testing gate. A writer can dispatch
+  # the full gate on the current testing tip; promotion accepts that run as
+  # equivalent to a testing push run when the commit and suite match.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -90,6 +95,7 @@ jobs:
     if: >-
       (github.event_name == 'push' &&
         (github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/testing') ||
       (github.event_name == 'pull_request' && github.event.action != 'closed' &&
         (github.base_ref != 'main' ||
           github.event.pull_request.user.login == 'dependabot[bot]'))
@@ -228,6 +234,7 @@ jobs:
     # testing, and unmerged PRs, do not publish.
     if: >-
       always() &&
+      (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/testing') &&
       (github.event_name != 'pull_request' || github.event.action != 'closed' ||
        (github.event.pull_request.merged == true && github.base_ref == 'main'))
     needs: [checks, container]
@@ -437,17 +444,17 @@ jobs:
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
       - name: Require the full testing gate for the promoted commit
         # The normal promotion path does not rerun the suite. It proves the
-        # canonical check.yml push run for the exact commit (or the closest
+        # canonical testing gate run for the exact commit (or the closest
         # gated testing ancestor) completed successfully and that its own check
         # suite contains completed, successful `checks` and both native
-        # container legs. The workflow path, push event, testing branch and
-        # suite id are all part of the selector, so a forged workflow, a
-        # pull-request run, or names from another suite can never stand in for
-        # the full gate. A docs-only commit pushed after the closest gated
-        # testing commit reuses that gate when the delta contains only docs
-        # paths, because check.yml deliberately skips docs pushes; the fallback
-        # selects the closest gated commit from canonical push runs, with no
-        # commit bound.
+        # container legs. The workflow path, testing event (push or dispatch),
+        # testing branch and suite id are all part of the selector, so a forged
+        # workflow, a pull-request run, or names from another suite can never
+        # stand in for the full gate. A docs-only commit pushed after the
+        # closest gated testing commit reuses that gate when the delta contains
+        # only docs paths, because check.yml deliberately skips docs pushes;
+        # the fallback selects the closest gated commit from canonical testing
+        # gate runs, with no commit bound.
         # Pending exact runs get six bounded 10-second polls; the proof fails
         # closed if they are still pending. A successful duplicate wins over
         # cancelled leftovers from a re-run within the canonical suite.
@@ -498,7 +505,7 @@ jobs:
             printf '%s' "$1" | jq -c '
               [ .workflow_runs[]
                 | select(.path == ".github/workflows/check.yml")
-                | select(.event == "push")
+                | select(.event == "push" or .event == "workflow_dispatch")
                 | select(.head_branch == "testing")
                 | {head_sha, status, conclusion, check_suite_id, created_at, id}
               ]
@@ -511,7 +518,7 @@ jobs:
             printf '%s' "$1" | jq -c --arg sha "$2" '
               [ .workflow_runs[]
                 | select(.path == ".github/workflows/check.yml")
-                | select(.event == "push")
+                | select(.event == "push" or .event == "workflow_dispatch")
                 | select(.head_branch == "testing")
                 | select(.head_sha == $sha)
               ]
@@ -548,7 +555,7 @@ jobs:
             outcome="$(suite_outcome "$payload" "$suite")"
             for attempt in 1 2 3 4 5 6; do
               if [ "$run_status" = "completed" ] && [ "$outcome" != "pending" ]; then break; fi
-              echo "The canonical check.yml push run for $HEAD_SHA is still in flight; waiting 10 seconds ($attempt/6)."
+              echo "The canonical testing gate run for $HEAD_SHA is still in flight; waiting 10 seconds ($attempt/6)."
               sleep 10
               runs="$(fetch_workflow_runs "head_sha=$HEAD_SHA")"
               run="$(canonical_run "$runs" "$HEAD_SHA")"
@@ -564,25 +571,25 @@ jobs:
               outcome="$(suite_outcome "$payload" "$suite")"
             done
             if [ "$run_status" != "completed" ]; then
-              echo "::error::The canonical check.yml push run for $HEAD_SHA was still pending after the bounded wait."
+              echo "::error::The canonical testing gate run for $HEAD_SHA was still pending after the bounded wait."
               observed "$payload"
               exit 1
             fi
             if [ "$run_conclusion" != "success" ]; then
-              echo "::error::The canonical check.yml push run for $HEAD_SHA completed as ${run_conclusion:-unknown}."
+              echo "::error::The canonical testing gate run for $HEAD_SHA completed as ${run_conclusion:-unknown}."
               observed "$payload"
               exit 1
             fi
             if [ "$outcome" != "success" ]; then
-              echo "::error::The canonical check.yml push run for $HEAD_SHA succeeded but its check suite is $outcome."
+              echo "::error::The canonical testing gate run for $HEAD_SHA succeeded but its check suite is $outcome."
               observed "$payload"
               exit 1
             fi
-            echo "The canonical check.yml push run and its gate suite succeeded for $HEAD_SHA."
+            echo "The canonical testing gate run and its gate suite succeeded for $HEAD_SHA."
             exit 0
           fi
 
-          # No canonical check.yml push run exists for the exact head. A
+          # No canonical testing gate run exists for the exact head. A
           # docs-only commit pushed to testing does not trigger check.yml, so
           # reuse the closest canonical gated testing ancestor. The run list is
           # paginated, so the proof is not bounded by a commit count. "Closest"
@@ -597,8 +604,8 @@ jobs:
           # gated commit and this head must be docs/site-only. --no-renames
           # keeps both sides of a rename, matching the promotion
           # classification.
-          echo "No canonical check.yml push run exists for $HEAD_SHA; checking the closest gated testing ancestor."
-          runs="$(fetch_workflow_runs "branch=testing&event=push")"
+          echo "No canonical testing gate run exists for $HEAD_SHA; checking the closest gated testing ancestor."
+          runs="$(fetch_workflow_runs "branch=testing")"
           gated=""
           gated_suite=""
           gated_status=""
@@ -627,15 +634,15 @@ jobs:
             gated_distance="$distance"
           done < <(canonical_runs "$runs" | jq -r '[.head_sha, (.check_suite_id // 0), .status, (.conclusion // "")] | @tsv')
           if [ -z "$gated" ]; then
-            echo "::error::No canonical check.yml push run on testing is a gated ancestor of $HEAD_SHA."
+            echo "::error::No canonical testing gate run on testing is a gated ancestor of $HEAD_SHA."
             exit 1
           fi
           if [ "$gated_status" != "completed" ]; then
-            echo "::error::The closest canonical check.yml push run at $gated is still pending; the proof fails closed."
+            echo "::error::The closest canonical testing gate run at $gated is still pending; the proof fails closed."
             exit 1
           fi
           if [ "$gated_conclusion" != "success" ]; then
-            echo "::error::The closest canonical check.yml push run at $gated completed as ${gated_conclusion:-unknown}; it cannot gate $HEAD_SHA."
+            echo "::error::The closest canonical testing gate run at $gated completed as ${gated_conclusion:-unknown}; it cannot gate $HEAD_SHA."
             exit 1
           fi
           payload="$(fetch_check_runs "$gated")"
@@ -644,12 +651,12 @@ jobs:
             success)
               ;;
             pending)
-              echo "::error::The closest canonical check.yml push run at $gated is still pending; the proof fails closed."
+              echo "::error::The closest canonical testing gate run at $gated is still pending; the proof fails closed."
               observed "$payload"
               exit 1
               ;;
             *)
-              echo "::error::The closest canonical check.yml push run at $gated did not pass ($outcome); it cannot gate $HEAD_SHA."
+              echo "::error::The closest canonical testing gate run at $gated did not pass ($outcome); it cannot gate $HEAD_SHA."
               observed "$payload"
               exit 1
               ;;

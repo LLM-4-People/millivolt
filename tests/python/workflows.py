@@ -416,8 +416,9 @@ REQUIRED_GATE_IF = (
     "github.event.pull_request.user.login != 'dependabot[bot]'))))))"
 )
 REQUIRED_JOB_IF = (
-    "always() && (github.event_name != 'pull_request' || "
-    "github.event.action != 'closed' || "
+    "always() && (github.event_name != 'workflow_dispatch' || "
+    "github.ref == 'refs/heads/testing') && "
+    "(github.event_name != 'pull_request' || github.event.action != 'closed' || "
     "(github.event.pull_request.merged == true && github.base_ref == 'main'))"
 )
 FULL_GATE_IF = (
@@ -447,6 +448,7 @@ GATE_CHECK_NAMES = ("checks",) + tuple(
 CHECKS_IF = (
     "(github.event_name == 'push' && "
     "(github.ref == 'refs/heads/testing' || github.ref_type == 'tag')) || "
+    "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/testing') || "
     "(github.event_name == 'pull_request' && github.event.action != 'closed' && "
     "(github.base_ref != 'main' || "
     "github.event.pull_request.user.login == 'dependabot[bot]'))"
@@ -962,7 +964,17 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 0,
-            "needle": "canonical check.yml push run",
+            "needle": "canonical testing gate run",
+        },
+        {
+            "label": "dispatched testing gate",
+            "runs": [run_record(head, event="workflow_dispatch")],
+            "branch_runs": [],
+            "checks": {head: gate},
+            "ancestors": [],
+            "delta": [],
+            "code": 0,
+            "needle": "canonical testing gate run",
         },
         {
             "label": "forged workflow",
@@ -972,7 +984,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "pull-request event",
@@ -982,7 +994,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "wrong branch",
@@ -992,7 +1004,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run",
+            "needle": "No canonical testing gate run",
         },
         {
             "label": "other suite names",
@@ -1118,7 +1130,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run on testing is a gated ancestor",
+            "needle": "No canonical testing gate run on testing is a gated ancestor",
         },
         {
             "label": "fallback default branch",
@@ -1141,7 +1153,7 @@ sleep() { :; }
             "ancestors": [],
             "delta": [],
             "code": 1,
-            "needle": "No canonical check.yml push run on testing is a gated ancestor",
+            "needle": "No canonical testing gate run on testing is a gated ancestor",
         },
         {
             "label": "paginated fallback",
@@ -1415,6 +1427,8 @@ def check_workflows(errors: list[str]) -> None:
             errors.append("check.yml: pull_request types must be exactly " + str(expected_pr_types))
         if "closed" not in pull_request_trigger.get("types", []):
             errors.append("check.yml: pull_request must include the closed release event")
+    if "workflow_dispatch" not in on:
+        errors.append("check.yml: testing gate must have a workflow_dispatch recovery path")
     ignored = set(push.get("paths-ignore", []))
     for path in ("docs/**", "site-src/**", "scripts/build_site.py", "requirements-docs.txt"):
         if path not in ignored:
@@ -1441,6 +1455,8 @@ def check_workflows(errors: list[str]) -> None:
          required_if.replace("github.event.pull_request.merged == true", "true")),
         ("broadening the closed-event exception to testing",
          required_if.replace("github.base_ref == 'main'", "true")),
+        ("allowing a main dispatch",
+         required_if.replace("github.ref == 'refs/heads/testing'", "true")),
     ):
         if mutated_if == required_if:
             errors.append(f"workflows self-check: cannot mutate {label}")
@@ -1464,6 +1480,9 @@ def check_workflows(errors: list[str]) -> None:
         ("dropping the testing branch", check_if.replace("github.ref == 'refs/heads/testing'", "false")),
         ("running the full gate on a closed PR",
          check_if.replace("github.event.action != 'closed' && ", "")),
+        ("dropping the dispatched testing gate",
+         check_if.replace("(github.event_name == 'workflow_dispatch' && "
+                          "github.ref == 'refs/heads/testing') || ", "")),
     ):
         if mutated_if == check_if:
             errors.append(f"workflows self-check: cannot mutate {label}")
@@ -1737,12 +1756,12 @@ def check_workflows(errors: list[str]) -> None:
             "commits/$1/check-runs?filter=all&per_page=100",
             "git rev-list --count",
             'select(.path == ".github/workflows/check.yml")',
-            'select(.event == "push")',
+            'select(.event == "push" or .event == "workflow_dispatch")',
             'select(.head_branch == "testing")',
             "select(.head_sha == $sha)",
             "select(.check_suite.id == $suite)",
             "sort_by(.created_at, .id)",
-            "branch=testing&event=push",
+            "branch=testing",
             "git merge-base --is-ancestor",
             "git diff --name-only --no-renames",
             "sleep 10",
@@ -1779,11 +1798,11 @@ def check_workflows(errors: list[str]) -> None:
         ):
             if needle not in shell_function(full_gate_run, "suite_outcome"):
                 errors.append(f"check.yml: suite_outcome is missing {needle}")
-        if 'echo "No canonical check.yml push run exists for $HEAD_SHA; checking the closest gated testing ancestor."' not in full_gate_run:
+        if 'echo "No canonical testing gate run exists for $HEAD_SHA; checking the closest gated testing ancestor."' not in full_gate_run:
             errors.append("check.yml: a missing exact canonical run must fall through to the closest gated ancestor")
-        if 'echo "::error::The canonical check.yml push run for $HEAD_SHA succeeded but its check suite is $outcome."' not in full_gate_run:
+        if 'echo "::error::The canonical testing gate run for $HEAD_SHA succeeded but its check suite is $outcome."' not in full_gate_run:
             errors.append("check.yml: a successful run with an incomplete suite must fail the proof")
-        if 'echo "::error::No canonical check.yml push run on testing is a gated ancestor of $HEAD_SHA."' not in full_gate_run:
+        if 'echo "::error::No canonical testing gate run on testing is a gated ancestor of $HEAD_SHA."' not in full_gate_run:
             errors.append("check.yml: no gated ancestor must fail with its exact message")
         errors.extend(suite_outcome_errors(full_gate_run))
         errors.extend(full_gate_behavior_errors(full_gate_run))
@@ -1793,7 +1812,8 @@ def check_workflows(errors: list[str]) -> None:
         for old, new, label in (
             ('select(.path == ".github/workflows/check.yml")', "select(true)",
              "workflow path filter"),
-            ('select(.event == "push")', "select(true)", "push event filter"),
+            ('select(.event == "push" or .event == "workflow_dispatch")', "select(true)",
+             "testing event filter"),
             ('select(.head_branch == "testing")', "select(true)", "testing branch filter"),
             ("select(.check_suite.id == $suite)", "select(true)", "check-suite boundary"),
             ('if ! is_docs_path "$path"; then', "if false; then", "fallback docs delta"),

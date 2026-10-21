@@ -623,8 +623,8 @@ semantic release or a complete backend change.
 
 `main` is promotion-only. Full source, browser and live MCP integration, and
 native container checks run on all `testing` pull requests, code-bearing
-`testing` pushes, and manually pushed `v*` tags; docs and site-only pushes use
-`docs.yml`. They also run on Dependabot's `main` security PRs. An ordinary
+`testing` pushes, manually dispatched `testing` gates, and manually pushed `v*`
+tags; docs and site-only pushes use `docs.yml`. They also run on Dependabot's `main` security PRs. An ordinary
 promotion pull request from `testing` requires its head to be the current
 `testing` tip, `main` to be already merged back into `testing`, and a
 successful full-gate record for that exact commit: the canonical `check.yml`
@@ -663,9 +663,9 @@ are not intrinsically immutable; moving branch and stable aliases can change.
 
 The [workflow](../.github/workflows/check.yml) runs source, race and browser
 checks, then native container smoke checks on Linux `amd64` and `arm64` for all
-`testing` pull requests, code-bearing `testing` pushes, and manually pushed `v*`
-tags, and for Dependabot's `main` security PRs. Docs and site-only pushes use
-`docs.yml` instead. A normal
+`testing` pull requests, code-bearing `testing` pushes, manually dispatched
+`testing` gates, and manually pushed `v*` tags, and for Dependabot's `main`
+security PRs. Docs and site-only pushes use `docs.yml` instead. A normal
 promotion PR proves the current testing tip, merged-back main and the full-gate
 record for that commit, or for the closest gated testing commit with only docs
 changes after it; docs-only promotions validate the docs, workflow policy and

@@ -45,9 +45,10 @@ dependent fix. Keep unrelated user changes out of the commit. A push still
 waits for the full push gate on the exact commit being pushed.
 
 Completed feature pushes to `testing` publish only the moving development image.
-All pull requests to `testing`, all code-bearing pushes to `testing`, and
-manually pushed `v*` tags run the full gate; docs and site-only pushes to
-`testing` run the smaller documentation gate in `docs.yml`. An ordinary promotion
+All pull requests to `testing`, all code-bearing pushes to `testing`, manually
+dispatched `testing` gates, and manually pushed `v*` tags run the full gate;
+docs and site-only pushes to `testing` run the smaller documentation gate in
+`docs.yml`. An ordinary promotion
 pull request to `main` runs only `check.yml`'s lightweight `required` promotion
 gate: it verifies the head is the current `testing` tip, `main` is already
 merged back into `testing`, and the full gate already succeeded for that
@@ -106,7 +107,12 @@ directly and therefore still runs the full gate.
    into testing", merge `origin/main` into `testing` first. If it fails with
    "changes non-docs paths after the gated commit", push the final code commit
    and let its full gate finish. If it fails with "VERSION must be newer", bump
-   `VERSION` above every tag and push the commit.
+   `VERSION` above every tag and push the commit. If GitHub does not create the
+   `testing` push run, dispatch the full gate on the current tip and wait for it
+   to succeed; the proof accepts that run as an equivalent testing gate:
+   ```sh
+   gh workflow run check.yml --ref testing
+   ```
 4. Merge with a merge commit:
    ```sh
    gh pr merge <number> --merge
