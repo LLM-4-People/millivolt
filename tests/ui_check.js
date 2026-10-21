@@ -539,6 +539,21 @@ async function main() {
     })());
     check('the header row spans every request column',
       !!table && table.tHead?.rows?.[0]?.cells.length === w.eval('REQ_COLS'));
+    check('every live status transition is width-relevant', (() => {
+      const live = {client: 'c', provider: 'p', model: 'm', status_code: 0,
+        attempts: [], live: true, paused: true, throttled: false, stream: true,
+        debug: false};
+      const cases = [
+        ['pause release', {...live, paused: false}, true],
+        ['throttle on', {...live, paused: false, throttled: true}, true],
+        ['stream stop', {...live, stream: false}, true],
+        ['debug on', {...live, debug: true}, true],
+        ['token churn alone', {...live, usage: {input_tokens: 1}}, false],
+      ];
+      return cases.every(([, next, expected]) =>
+        w.eval('reqWidthRelevant(' + JSON.stringify(live) + ', ' +
+          JSON.stringify(next) + ')') === expected);
+    })());
   }
   check('dimension picker trigger exists', !!d.getElementById('xp-dim-trigger'));
   check('dimension rail still has nine dims', d.querySelectorAll('#xp-rail .xp-rail-item').length === 9);

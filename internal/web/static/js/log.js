@@ -1037,15 +1037,19 @@ function applyReqFloors(container) {
 
 // reqWidthRelevant reports whether a record change can alter a column's
 // natural width. Streaming updates replace a row many times for token counts;
-// those cells are already bounded by the row on screen, so re-measuring every
-// token would cost a layout for no width change. Identity, status and attempts
-// are the fields whose text can widen a column.
+// those cells carry into the finalized row, which is measured before its final
+// paint, so re-measuring every token would cost a layout for no lasting width
+// change. Identity, status (including every live-pill transition and the debug
+// badge) and attempts are the fields whose text can widen a column and then
+// disappear before finalization.
 function reqWidthRelevant(prev, rec) {
   if (!prev || !rec) return true;
   return prev.client !== rec.client || prev.provider !== rec.provider ||
     prev.model !== rec.model || prev.status_code !== rec.status_code ||
     (prev.attempts?.length || 0) !== (rec.attempts?.length || 0) ||
-    !!prev.live !== !!rec.live;
+    !!prev.live !== !!rec.live || !!prev.paused !== !!rec.paused ||
+    !!prev.throttled !== !!rec.throttled || !!prev.stream !== !!rec.stream ||
+    !!prev.debug !== !!rec.debug;
 }
 
 // Delegated row clicks - no inline onclick interpolating the record id.
