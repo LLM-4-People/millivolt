@@ -984,11 +984,12 @@ async def check(base, screenshot):
                 results.append({'focus_scroll': focus_scroll})
 
                 # The incremental path must learn a wider identity when a live
-                # row changes, then hold that floor when the short record
-                # returns. This drives production renderRequestsIncremental,
-                # not the measurement helper directly: deleting its probe call
-                # leaves the long row visually wider but lets the revert shrink
-                # the column.
+                # row changes or a new live row arrives, then hold that floor
+                # when the short window returns. This drives production
+                # renderRequestsIncremental and the full reqThead rebuild, not
+                # the measurement helper directly: deleting the probe call or
+                # dropping the header floors leaves the long row visually wider
+                # but lets the revert shrink the column.
                 incremental_width = await page.evaluate("""async () => {
                     const box = document.getElementById('tbl-requests');
                     const frames = () => new Promise(r =>
@@ -1003,42 +1004,72 @@ async def check(base, screenshot):
                     const recs = Array.from({length: 6}, (_, i) => ({...base,
                         id: 'iw-' + i,
                         start: new Date(new Date(at).getTime() - i * 60000).toISOString()}));
-                    const identity = () => {
-                        const row = box.querySelector('tr.exp-row[data-id="iw-0"]');
+                    const long = {client: 'openai/enterprise-client-with-a-very-long-product-suffix',
+                        provider: 'provider-with-a-very-long-tenant-and-region-label',
+                        model: 'neutral-model-with-a-very-long-suffix'};
+                    const headerFloor = () => parseFloat(
+                        box.querySelector('thead th:nth-child(2)')?.style.minWidth) || 0;
+                    const identity = id => {
+                        const row = box.querySelector('tr.exp-row[data-id="' + id + '"]');
                         return {width: row?.cells[1]?.getBoundingClientRect().width || 0,
-                                floor: REQ_FLOORS[1],
+                                floor: REQ_FLOORS[1], headerFloor: headerFloor(),
                                 text: row?.cells[1]?.textContent.trim() || ''};
                     };
                     try {
                         REQ_FLOORS.fill(0);
                         renderRequests(recs);
                         await frames();
-                        const short = identity();
-                        const longRecs = recs.map(r => r.id === 'iw-0' ? {...r,
-                            client: 'openai/enterprise-client-with-a-very-long-product-suffix',
-                            provider: 'provider-with-a-very-long-tenant-and-region-label',
-                            model: 'neutral-model-with-a-very-long-suffix'} : r);
+                        const short = identity('iw-0');
+                        const longRecs = recs.map(r => r.id === 'iw-0'
+                            ? {...r, ...long} : r);
                         renderRequestsIncremental(longRecs);
                         await frames();
-                        const long = identity();
+                        const replaced = identity('iw-0');
                         renderRequestsIncremental(recs);
                         await frames();
-                        const held = identity();
-                        return {short, long, held};
+                        const heldReplace = identity('iw-0');
+
+                        // Insert path: zero the floors, paint the short window,
+                        // then add one new live row with the long identity.
+                        REQ_FLOORS.fill(0);
+                        renderRequests(recs);
+                        await frames();
+                        const insertBase = identity('iw-0');
+                        renderRequestsIncremental([...recs, {...base, ...long,
+                            id: 'iw-new'}]);
+                        await frames();
+                        const inserted = identity('iw-new');
+                        renderRequestsIncremental(recs);
+                        await frames();
+                        const heldInsert = identity('iw-0');
+                        return {short, insertBase, replaced, inserted,
+                                heldReplace, heldInsert};
                     } finally {
                         REQ_FLOORS.splice(0, REQ_FLOORS.length, ...savedFloors);
                         renderRequests(derive(lastData).scopedRecs);
                         await frames();
                     }
                 }""")
-                require(incremental_width['long']['floor'] >
-                        incremental_width['short']['floor'] + 1, incremental_width)
-                require(incremental_width['long']['width'] >
-                        incremental_width['short']['width'] + 1, incremental_width)
-                require(incremental_width['held']['floor'] ==
-                        incremental_width['long']['floor'], incremental_width)
-                require(incremental_width['held']['width'] >=
-                        incremental_width['long']['floor'] - 0.5, incremental_width)
+                for before, after in (('short', 'replaced'), ('insertBase', 'inserted')):
+                    require(incremental_width[after]['floor'] >
+                            incremental_width[before]['floor'] + 1, incremental_width)
+                    require(incremental_width[after]['width'] >
+                            incremental_width[before]['width'] + 1, incremental_width)
+                    require(abs(incremental_width[after]['headerFloor'] -
+                                incremental_width[after]['floor']) <= 0.01,
+                            incremental_width)
+                for held, prior in (('heldReplace', 'replaced'),
+                                    ('heldInsert', 'inserted')):
+                    require(incremental_width[held]['floor'] ==
+                            incremental_width[prior]['floor'], incremental_width)
+                    require(incremental_width[held]['width'] >=
+                            incremental_width[prior]['floor'] - 0.5, incremental_width)
+                    require(abs(incremental_width[held]['headerFloor'] -
+                                incremental_width[held]['floor']) <= 0.01,
+                            incremental_width)
+                require(abs(incremental_width['short']['headerFloor'] -
+                            incremental_width['short']['floor']) <= 0.01,
+                        incremental_width)
                 results.append({'incremental_width': incremental_width})
 
                 # The sticky day divider must sit exactly on the sticky header's
