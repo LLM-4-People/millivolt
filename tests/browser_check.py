@@ -649,6 +649,10 @@ async def check(base, screenshot):
                             const modelLabelTitle = modelLabel ? modelLabel.getAttribute('title') : '';
                             const modelClosestTitle = modelLabel && modelLabel.closest('[title]')
                                 ? modelLabel.closest('[title]').getAttribute('title') : '';
+                            const clientLink = body.querySelector('.req-ident a.ent-link[data-client]');
+                            const clientEnt = clientLink ? clientLink.querySelector('.ent') : null;
+                            const clientTitle = clientLink ? clientLink.getAttribute('title') : null;
+                            const clientEntTitle = clientEnt ? clientEnt.getAttribute('title') : null;
                             const modelLink = body.querySelector('.req-model a.ent-link');
                             if (modelLink) modelLink.focus();
                             const modelOutline = modelLink ? getComputedStyle(modelLink) : null;
@@ -698,7 +702,8 @@ async def check(base, screenshot):
                                 shortTitle, longTitle,
                                 expectedShortTitle: reqIdentityText(shortRec),
                                 expectedLongTitle: reqIdentityText(longRec),
-                                modelLabelTitle, modelClosestTitle, modelFocus,
+                                modelLabelTitle, modelClosestTitle,
+                                clientTitle, clientEntTitle, modelFocus,
                                 scrollBox: {
                                     overflowX: getComputedStyle(box).overflowX,
                                     moved: movedScroll,
@@ -774,6 +779,8 @@ async def check(base, screenshot):
                                 'original: Neutral-Model-With-A-Very-Long-Suffix'), state)
                     require('original: Neutral-Model-With-A-Very-Long-Suffix' in
                             state['modelClosestTitle'], state)
+                    require(state['clientTitle'] == '' and state['clientEntTitle'] == '',
+                            state)
                     focus = state['modelFocus']
                     require(focus.get('style') == 'solid' and focus.get('width', 0) >= 1 and
                             focus.get('color') not in ('', 'rgba(0, 0, 0, 0)', 'transparent') and
