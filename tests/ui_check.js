@@ -1016,9 +1016,19 @@ async function main() {
       kpiAgg = saved;
       return out;
     })()`);
-    check('the Avg TPS KPI uses the compact t/s unit',
-      kpiHtml.includes('1234.6<span class="unit">t/s</span>') &&
+    const tpsValue = w.eval('fmt(1234.56)');
+    const tpsFull = w.eval('fmtFull(1234.56)');
+    check('the Avg TPS KPI uses the compact t/s unit with a full-value title',
+      kpiHtml.includes('title="' + tpsFull + ' t/s">' + tpsValue +
+        '</span> <span class="unit">t/s</span>') &&
       !kpiHtml.includes('tok/s') && w.eval('TPS_UNIT') === 't/s');
+    check('compact speed values keep their magnitude suffix apart from the unit', (() => {
+      const plain = w.eval('fmt(148.239)');
+      const compact = w.eval('fmt(1234.56)');
+      return w.eval('fmtTPSCompact(148.239)') === plain + 't/s' &&
+        w.eval('fmtTPSCompact(1234.56)') === compact + ' t/s' &&
+        w.eval('fmtTPSCompact(null)') === '-';
+    })());
   }
 
   // ---- test 7c: the 5s tick IS the SSE fallback - a cursor-resumed bootstrap
@@ -4280,20 +4290,29 @@ async function main() {
   check('the summary hides the bucket-cadence context row',
     d.getElementById('chart-context').hidden &&
       w.eval('chartView.preset') === 'overview');
+  const tps202 = w.eval('fmtTPSCompact(202.75)');
   check('the merged timing tile reads avg latency / speed with sample ranges',
-    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">202.75t/s</span>') &&
+    totalsOv.includes('avg latency / speed</span> <span class="val-pair"><span class="v-ttft">220ms</span><span class="pair-sep">/</span><span class="v-tps">' + tps202 + '</span>') &&
       totalsOv.includes('<span class="chart-sub">10-330ms · 50-300t/s</span>') &&
       !totalsOv.includes('101.25') && !totalsOv.includes('110ms') &&
       !/p(?:50|95|99)/.test(totalsOv) && !totalsOv.includes('tok/s'));
   check('mixed-scale timing bounds take a spaced dash and both units', (() => {
     const savedT = w.eval('JSON.stringify(chartAgg.ttft_stat)');
     const savedP = w.eval('JSON.stringify(chartAgg.tps_stat)');
+    const tps = w.eval('fmtTPSCompact(148.239)');
     w.eval('chartAgg.ttft_stat = [1620, 390, 6160]; chartAgg.tps_stat = [148.239, 24, 480]');
     const t = w.eval('chartTotals()');
     w.eval('chartAgg.ttft_stat = JSON.parse(' + JSON.stringify(savedT) +
       '); chartAgg.tps_stat = JSON.parse(' + JSON.stringify(savedP) + ')');
-    return t.includes('1.62s</span><span class="pair-sep">/</span><span class="v-tps">148.239t/s</span>') &&
+    return t.includes('1.62s</span><span class="pair-sep">/</span><span class="v-tps">' + tps + '</span>') &&
       t.includes('<span class="chart-sub">390ms - 6.16s · 24-480t/s</span>');
+  })());
+  check('compact range bounds keep their magnitude suffix apart from the unit', (() => {
+    const savedP = w.eval('JSON.stringify(chartAgg.tps_stat)');
+    w.eval('chartAgg.tps_stat = [2300, 1200, 2400]');
+    const t = w.eval('chartTotals()');
+    w.eval('chartAgg.tps_stat = JSON.parse(' + JSON.stringify(savedP) + ')');
+    return t.includes('· 1.2K-2.4K t/s');
   })());
   check('the percentile dropdown never re-gates the summary timing tile', (() => {
     w.setChartPct('50');

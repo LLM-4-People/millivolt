@@ -96,7 +96,7 @@ const fmtPct = v => pctValue(v, 1, true);
 const fmtTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + ' tok/s';
 // The summary timing tile uses the compact t/s unit on both its value and its
 // range; the shared trailing unit is stated once so the pair fits one tile.
-const fmtTileTPS = v => v == null || !Number.isFinite(v) ? '-' : fmt(v) + TPS_UNIT;
+// fmtTPSCompact and tpsUnitAfter are the shared owners in core.js.
 
 // hm is the single HH:MM local-time label (x ticks + hover chip).
 const hm = t => {
@@ -902,16 +902,16 @@ function chartTotals() {
       // stated once ('31-32ms', never '31ms-32ms'); bounds on different
       // scales keep both units and take a spaced range dash ('390ms - 6.16s').
       const unitOf = v => (String(v).match(/[a-zA-Z%]+$/) || [''])[0];
-      const range = (m, fmtFn, unit) => {
+      const range = (m, fmtFn, unitAfter) => {
         if (!m) return '';
         const lo = fmtFn(m[1]), hi = fmtFn(m[2]);
-        if (unit) return `${lo}-${hi}${unit}`; // one shared trailing unit
+        if (unitAfter) return `${lo}-${hi}${unitAfter(hi)}`; // one shared trailing unit
         const shared = unitOf(lo) === unitOf(hi) && unitOf(lo) !== '';
         return shared ? `${String(lo).slice(0, -unitOf(lo).length)}-${hi}` : `${lo} - ${hi}`;
       };
-      const ranges = [range(ts, fmtDur, ''), range(ps, v => fmt(Math.round(v)), TPS_UNIT)].filter(Boolean).join(' · ');
+      const ranges = [range(ts, fmtDur, null), range(ps, v => fmt(Math.round(v)), tpsUnitAfter)].filter(Boolean).join(' · ');
       parts.push(tile('timing', 'accent',
-        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', fmtTileTPS(ps?.[0])]]) +
+        tilePair([['v-ttft', ts ? fmtDur(ts[0]) : '-'], ['v-tps', fmtTPSCompact(ps?.[0])]]) +
         (ranges ? `<span class="chart-sub">${ranges}</span>` : '') +
         tileSpark(kept, [['v-ttft', b => b.ttft?.[CHART_TILE_PCT_IDX] ?? null], ['v-tps', b => b.tps?.[CHART_TILE_PCT_IDX] ?? null]])));
       break;
