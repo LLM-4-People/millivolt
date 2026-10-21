@@ -1187,6 +1187,20 @@
      clips the same way, and the tile is a summary: exact figures live in
      the KPI band and the request drawer. */
   .traffic-card.tiles-only .chart-total .val-pair { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  /* Locked short windows: the pair's grid row can be shorter than two 118px
+     tile rows (1366x750 gives 284px, 1366x768 302px). Keep every tile's
+     content - label, value, both share lines and a real spark - inside the
+     card by shortening the fixed cell and the spark, never by clipping the
+     card or letting it spill into the footer. The 1440x1000-class windows
+     keep the full 118px / 32px cells. */
+  @media (min-width: 1200px) and (min-height: 750px) and (max-height: 767px) {
+    .traffic-card.tiles-only .chart-total { height: 92px; gap: 2px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 22px; }
+  }
+  @media (min-width: 1200px) and (min-height: 768px) and (max-height: 799px) {
+    .traffic-card.tiles-only .chart-total { height: 102px; gap: 3px; padding: 9px 8px; }
+    .traffic-card.tiles-only .chart-total .spark { height: 26px; }
+  }
   /* Merged in/out pair: one wrapped line whose halves mirror the token
      bars' colors (input purple, output green) over a thin muted separator -
      tile and bars read as one story, and the pair fits the narrowest tile

@@ -311,10 +311,14 @@ async def check(base, screenshot):
                 # picker owns what shows: a row flip drops the tile from the
                 # band, persists in dash.chart, and a reload restores the
                 # selection. No percentile selector, no visible pXX label.
-                # Viewports: 1440 and 2560 lock one screen, 390 stacks and
-                # scrolls - all show all 5.
+                # Viewports: 1440, 2560 and the 1366x768 laptop (plus the
+                # 750px lock floor) lock one screen - the short windows
+                # shorten the tile and spark, never the card; 390 stacks
+                # and scrolls - all show all 5.
                 await page.select_option('#chart-preset', 'overview')
-                for viewport in ({'width': 1440, 'height': 1000}, {'width': 2560, 'height': 1440}, {'width': 390, 'height': 844}):
+                for viewport in ({'width': 1440, 'height': 1000}, {'width': 2560, 'height': 1440},
+                                 {'width': 1366, 'height': 768}, {'width': 1366, 'height': 750},
+                                 {'width': 390, 'height': 844}):
                     await page.set_viewport_size(viewport)
                     state = await page.evaluate("""async () => {
                         const full = window.__fullChart;
@@ -338,6 +342,8 @@ async def check(base, screenshot):
                         const sparkCmds = reqPath ? (reqPath.getAttribute('d').match(/[ML]/g) || []).length : 0;
                         const tileList = [...document.querySelectorAll('#chart-totals .chart-total')];
                         const cardRect = card.getBoundingClientRect();
+                        const pairRect = document.querySelector('.grid-pair').getBoundingClientRect();
+                        const footerRect = document.querySelector('footer').getBoundingClientRect();
                         const visible = summaryVisibleTiles(activePreset());
                         return {tilesOnly: card.classList.contains('tiles-only'),
                                 plot: !!_up, blank: !!document.querySelector('#chart-traffic canvas.chart-blank'),
@@ -362,6 +368,11 @@ async def check(base, screenshot):
                                 pctHidden:document.getElementById('chart-pct').hidden,
                                 metricsPick:!document.getElementById('chart-metrics').hidden,
                                 contextHidden:document.getElementById('chart-context').hidden,
+                                cardH: Math.round(cardRect.height),
+                                pairH: Math.round(pairRect.height),
+                                footerTop: Math.round(footerRect.top),
+                                cardSpill: cardRect.height > pairRect.height + 1 ||
+                                    cardRect.bottom > footerRect.top + 1,
                                 legend:document.querySelector('#traffic-legend').textContent};
                     }""")
                     require(state['tilesOnly'] and not state['plot'] and not state['blank'] and state['wrapHidden'], state)
@@ -373,9 +384,12 @@ async def check(base, screenshot):
                     require(state['kept'] < 2 or state['sparkCmds'] == state['kept'], state)
                     require(not state['overflow'], state)
                     require(state['uniformTiles'] and state['noVClip'], state)
+                    spark_min = (22 if viewport['height'] == 750 else
+                                 26 if viewport['width'] == 1366 else 31)
                     require(state['sparkHeights'] and
-                            all(h >= 31 for h in state['sparkHeights']), state)
-                    require(state['sparkPinned'] and state['insideCard'], state)
+                            all(h >= spark_min for h in state['sparkHeights']), state)
+                    require(state['sparkPinned'] and state['insideCard'] and
+                            not state['cardSpill'], state)
                     require(state['pctHidden'] and state['metricsPick'], state)
                     require(state['trackFloor'], state)
                     if 'health' in state['visible']:
