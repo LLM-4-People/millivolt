@@ -288,7 +288,10 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 // relay had to release verbatim at its hold bound. It preserves the
 // reassembled data for a later FlushEventWithName, then classifies each line
 // without adding it twice. Later data lines of the same event append normally
-// until the real blank-line boundary.
+// until the real blank-line boundary. A blank line that the relay already
+// released with the event is that boundary, but the relay resolves it through
+// FlushEventWithName (so a remembered terminal name can still classify the
+// document); feeding it here would flush and discard the reassembled data.
 func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
 	data := EventData(raw)
 	if len(data) > eventDataMax {
@@ -302,11 +305,15 @@ func (a *Analyzer) FeedBufferedEvent(raw []byte, now time.Time) {
 		if raw[i] != '\n' {
 			continue
 		}
-		a.Feed(raw[start:i], now)
+		if line := raw[start:i]; !isBlankLine(line) {
+			a.Feed(line, now)
+		}
 		start = i + 1
 	}
 	if start < len(raw) {
-		a.Feed(raw[start:], now)
+		if line := raw[start:]; !isBlankLine(line) {
+			a.Feed(line, now)
+		}
 	}
 	a.eventDataSeen = true
 	a.eventSkipAccum = false

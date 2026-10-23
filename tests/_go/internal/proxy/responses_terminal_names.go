@@ -257,6 +257,62 @@ func TestResponsesOverBoundTerminalResolves(t *testing.T) {
 	}
 }
 
+// TestResponsesTypeLessBlankBoundaryOverBoundTerminalResolves pins F5-2: a
+// type-less terminal document whose own data line fits the hold bound but
+// whose boundary blank line pushes the buffered event past it. The relay
+// releases the bytes verbatim; the analyzer must keep the reassembled document
+// until the remembered terminal name resolves it at the boundary.
+func TestResponsesTypeLessBlankBoundaryOverBoundTerminalResolves(t *testing.T) {
+	const eventName = "event: response.completed\n"
+	const prefix = `{"response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"`
+	const suffix = `"}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}}`
+	pad := 0
+	for {
+		doc := prefix + strings.Repeat("x", pad) + suffix
+		base := len(eventName) + len("data: "+doc+"\n")
+		if base+2 > terminalHoldMax {
+			if base > terminalHoldMax {
+				t.Fatalf("fixture data line = %d bytes, want at most %d", base, terminalHoldMax)
+			}
+			break
+		}
+		pad++
+	}
+	doc := prefix + strings.Repeat("x", pad) + suffix
+	stream := responsesCreatedFrame + eventName + "data: " + doc + "\n\n"
+	upstream := streamUpstream(t, stream)
+	defer upstream.Close()
+	buf := metrics.NewBuffer(8)
+	srv := httptest.NewServer(New(config.Default(), buf))
+	defer srv.Close()
+
+	status, got := streamRequestTo(t, srv, upstream, "/v1/responses",
+		`{"model":"m","stream":true,"input":"hi"}`)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d (body %s)", status, got)
+	}
+	if got != stream {
+		t.Fatalf("blank-boundary wire changed:\nIN =%q\nOUT=%q", stream, got)
+	}
+	if strings.Contains(got, "response.failed") || strings.Contains(got, `"code":"truncated"`) {
+		t.Fatalf("blank-boundary terminal was followed by a synthetic failure: %s", got)
+	}
+	recs := waitForRecord(t, buf, 1)
+	if len(recs) != 1 {
+		t.Fatalf("records = %d, want 1", len(recs))
+	}
+	rec := recs[0]
+	if rec.FinishReason != "stop" || !rec.HadAnswerContent || rec.TTFTMs <= 0 ||
+		rec.ErrorType != "" || rec.ErrorCode != "" {
+		t.Fatalf("record = %+v, want a clean stop with an answer and TTFT", rec)
+	}
+	if rec.Usage.InputTokens != 3 || rec.Usage.OutputTokens != 5 ||
+		rec.AnswerTokens != 5 || rec.GenTokens != 5 {
+		t.Fatalf("usage = %+v answer/gen = %d/%d, want 3 input and 5/5 from the terminal document",
+			rec.Usage, rec.AnswerTokens, rec.GenTokens)
+	}
+}
+
 // TestResponsesLateTerminalEventNameKeepsOrder pins R4-5: SSE field order is
 // data-then-name, so the name arrives after the terminal document. Both lines
 // stay in their original positions and the record still resolves (the typed
