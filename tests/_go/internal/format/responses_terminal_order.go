@@ -107,3 +107,38 @@ func textEmissionOrder(t *testing.T, protocol ir.Protocol, out string) []string 
 	}
 	return order
 }
+
+// TestResponsesEmptyDeltaKeepsDeferredPart pins F5-4: an empty delta carries
+// no bytes and must not start a deferred part. If it did, its target position
+// would be fixed and an earlier terminal-only part would be forced behind it.
+func TestResponsesEmptyDeltaKeepsDeferredPart(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":""}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"alpha"},{"type":"output_text","text":"beta"}]}]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {
+				t.Fatalf("order = %v, want [alpha beta]: %s", got, buf.String())
+			}
+			for _, value := range []string{"alpha", "beta"} {
+				if got := textDeltaCount(t, target.inbound, buf.String(), value); got != 1 {
+					t.Fatalf("%q emitted %d times, want once: %s", value, got, buf.String())
+				}
+			}
+		})
+	}
+}

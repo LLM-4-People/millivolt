@@ -386,18 +386,25 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// document that repeats the prefix contributes only new bytes.
 			d.emittedText[key] = start
 		case "response.output_text.delta", "response.refusal.delta":
+			// An empty delta carries no bytes and must not materialize a
+			// deferred part: doing so would fix its target position before any
+			// content exists, forcing an earlier terminal-only part behind it.
+			if ev.Delta == "" {
+				continue
+			}
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			key := d.keyByPart[pos]
+			if key == "" {
+				continue
+			}
 			idx, ok := d.startPartBlock(key)
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" && key != "" {
-				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-				d.emittedText[key] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
-				}
+			emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
+			d.emittedText[key] = coverage
+			if emit != "" {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
 			}
 		case "response.output_text.done", "response.refusal.done":
 			// The done payload is the authoritative full part value. Emit it
@@ -497,19 +504,23 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
 			// reasoning_summary_text has no content part and stays on the item
-			// block.
+			// block. An empty delta must not materialize a deferred part.
+			if ev.Delta == "" {
+				continue
+			}
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			key := d.keyByPart[pos]
+			if key == "" {
+				continue
+			}
 			idx, ok := d.startPartBlock(key)
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" && key != "" {
-				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-				d.emittedText[key] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-				}
+			emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
+			d.emittedText[key] = coverage
+			if emit != "" {
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 			}
 		case "response.reasoning_text.done":
 			// The done payload is authoritative. Emit it only when no delta
