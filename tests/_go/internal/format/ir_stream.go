@@ -606,3 +606,42 @@ data: [DONE]
 		t.Fatalf("usage = %+v", usage)
 	}
 }
+
+// TestAnthropicCachedUsageAcrossInputDelta pins C2: message_start establishes
+// cache read/write totals, and a later message_delta may repeat only the
+// non-cached input_tokens. The decoder must keep the cache totals, replace the
+// base input, and recompute the full prompt count instead of aborting.
+func TestAnthropicCachedUsageAcrossInputDelta(t *testing.T) {
+	in := `data: {"type":"message_start","message":{"id":"m1","model":"m","usage":{"input_tokens":10,"cache_read_input_tokens":20,"cache_creation_input_tokens":30,"output_tokens":0}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":12,"output_tokens":5}}
+
+data: {"type":"message_stop"}
+
+`
+	dec := NewAnthropicStreamDecoder(strings.NewReader(in), nil)
+	var usage *ir.Usage
+	for {
+		ev, err := dec.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if ev.Usage != nil {
+			usage = ev.Usage
+		}
+	}
+	if usage == nil {
+		t.Fatal("no message_delta usage")
+	}
+	if usage.InputTokens != 62 || usage.CacheReadTokens != 20 || usage.CacheWriteTokens != 30 ||
+		usage.OutputTokens != 5 || usage.TotalTokens != 67 {
+		t.Fatalf("usage = %+v, want input 62 (12 base + 20 read + 30 write), output 5, total 67", usage)
+	}
+}

@@ -56,10 +56,11 @@ type AnthropicStreamDecoder struct {
 	model   string
 	created int64
 
-	usage         ir.Usage
-	skipped       map[int]bool
-	observe       func([]byte)
-	sawStopReason bool
+	usage          ir.Usage
+	usageBaseInput int64
+	skipped        map[int]bool
+	observe        func([]byte)
+	sawStopReason  bool
 
 	openToolBlocks   int
 	toolInitialBytes int
@@ -306,15 +307,18 @@ func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
+// mergeUsage folds one Anthropic usage object into the stream total. The wire
+// reports non-cached input_tokens separately, so the decoder retains the base
+// count and the cache totals independently and recomputes the full prompt
+// count after every event. A message_delta that repeats only input_tokens must
+// update the base without erasing the cache totals established at
+// message_start; otherwise the cached subsets appear to exceed the input and
+// validation aborts the translation.
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
-	usage := d.usage
 	if u.InputTokens != nil {
-		input, err := metrics.SumCounts(*u.InputTokens, valueOrZero(u.CacheReadInputTokens), valueOrZero(u.CacheCreationInputTokens))
-		if err != nil {
-			return fmt.Errorf("usage: %w", err)
-		}
-		usage.InputTokens = input
+		d.usageBaseInput = *u.InputTokens
 	}
+	usage := d.usage
 	if u.OutputTokens != nil {
 		usage.OutputTokens = *u.OutputTokens
 	}
@@ -327,6 +331,11 @@ func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	if u.OutputTokensDetails != nil {
 		usage.ReasoningTokens = u.OutputTokensDetails.ThinkingTokens
 	}
+	input, err := metrics.SumCounts(d.usageBaseInput, usage.CacheReadTokens, usage.CacheWriteTokens)
+	if err != nil {
+		return fmt.Errorf("usage: %w", err)
+	}
+	usage.InputTokens = input
 	total, err := metrics.SumCounts(usage.InputTokens, usage.OutputTokens)
 	if err != nil {
 		return fmt.Errorf("usage: %w", err)
@@ -337,13 +346,6 @@ func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {
 	}
 	d.usage = usage
 	return nil
-}
-
-func valueOrZero(p *int64) int64 {
-	if p == nil {
-		return 0
-	}
-	return *p
 }
 
 func anthropicStreamBlock(b anthropicWireBlock) (ir.Block, bool) {
