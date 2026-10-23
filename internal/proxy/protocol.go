@@ -89,19 +89,34 @@ func protocolPath(p ir.Protocol) string {
 // request cannot turn a response into a header-sized document.
 const warningsHeaderMax = 1024
 
+// sseFrameName returns the event name of one complete encoder write. The
+// translators emit each event as a single frame whose first line is
+// "event: NAME"; a provider-controlled data string is never inspected.
+func sseFrameName(p []byte) string {
+	const prefix = "event: "
+	if !bytes.HasPrefix(p, []byte(prefix)) {
+		return ""
+	}
+	rest := p[len(prefix):]
+	if i := bytes.IndexByte(rest, '\n'); i >= 0 {
+		return string(rest[:i])
+	}
+	return ""
+}
+
 // terminalFrameFor reports whether one complete encoder write is the inbound
 // protocol's terminal frame.
 func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {
 	switch inbound {
 	case ir.Anthropic:
-		return func(p []byte) bool {
-			return bytes.Contains(p, []byte("event: message_stop"))
-		}
+		return func(p []byte) bool { return sseFrameName(p) == "message_stop" }
 	case ir.Responses:
 		return func(p []byte) bool {
-			return bytes.Contains(p, []byte("event: response.completed")) ||
-				bytes.Contains(p, []byte("event: response.incomplete")) ||
-				bytes.Contains(p, []byte("event: response.failed"))
+			switch sseFrameName(p) {
+			case "response.completed", "response.incomplete", "response.failed":
+				return true
+			}
+			return false
 		}
 	default:
 		return func(p []byte) bool { return bytes.Equal(p, []byte(sse.DoneFrame)) }

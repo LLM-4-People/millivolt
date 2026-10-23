@@ -352,6 +352,26 @@ func TestTranslationLossPolicy(t *testing.T) {
 	})
 }
 
+// TestTerminalFrameForOnlyReadsTheEventLine pins the terminal detector against
+// provider-controlled data: a text delta that happens to contain a terminal
+// event name must not suppress the real terminal frame after a failure.
+func TestTerminalFrameForOnlyReadsTheEventLine(t *testing.T) {
+	fake := []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"event: message_stop\"}}\n\n")
+	if terminalFrameFor(ir.Anthropic)(fake) {
+		t.Fatal("content containing message_stop was treated as the terminal event")
+	}
+	if !terminalFrameFor(ir.Anthropic)([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")) {
+		t.Fatal("real message_stop was not detected")
+	}
+	fakeResponses := []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"event: response.completed\"}\n\n")
+	if terminalFrameFor(ir.Responses)(fakeResponses) {
+		t.Fatal("content containing response.completed was treated as terminal")
+	}
+	if !terminalFrameFor(ir.Responses)([]byte("event: response.completed\ndata: {}\n\n")) {
+		t.Fatal("real response.completed was not detected")
+	}
+}
+
 func TestWarningsHeaderMergesAndSanitizes(t *testing.T) {
 	h := http.Header{}
 	setWarningsHeader(h, ir.Warnings{{Kind: ir.WarningDropped, Field: "seed"}})
