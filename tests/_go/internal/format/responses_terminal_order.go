@@ -1,0 +1,109 @@
+package format
+
+// R4-2 regressions: terminal items and parts are collected in terminal
+// document order. An announced-but-empty later part is deferred, so an earlier
+// terminal-only part is not forced behind it. Once a later announced part has
+// streamed bytes its target index is already fixed; the terminal fill can then
+// only append, never reorder visible content.
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
+)
+
+func TestResponsesTerminalOrderForDeferredParts(t *testing.T) {
+	// Part 1 is announced empty; terminal order is part 0 alpha, part 1 beta.
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"alpha"},{"type":"output_text","text":"beta"}]}]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {
+				t.Fatalf("order = %v, want [alpha beta]: %s", got, buf.String())
+			}
+		})
+	}
+}
+
+func TestResponsesTerminalOrderAfterStreamedLaterPart(t *testing.T) {
+	// Part 1 already streamed beta before the terminal document. Its target
+	// block index is fixed, so beta cannot move behind the terminal-only
+	// alpha; both values still arrive exactly once.
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"beta"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"alpha"},{"type":"output_text","text":"beta"}]}]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			order := textEmissionOrder(t, target.inbound, buf.String())
+			if strings.Join(order, " ") != "beta alpha" {
+				t.Fatalf("order = %v, want already-streamed [beta alpha]: %s", order, buf.String())
+			}
+			for _, value := range []string{"alpha", "beta"} {
+				if got := textDeltaCount(t, target.inbound, buf.String(), value); got != 1 {
+					t.Fatalf("%q emitted %d times, want once: %s", value, got, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// textEmissionOrder returns the non-empty answer-text units in emission order.
+func textEmissionOrder(t *testing.T, protocol ir.Protocol, out string) []string {
+	t.Helper()
+	var order []string
+	switch protocol {
+	case ir.Responses:
+		for _, payload := range mustResponsePayloads(t, out) {
+			if payload["type"] != "response.output_text.delta" {
+				continue
+			}
+			if text, _ := payload["delta"].(string); text != "" {
+				order = append(order, text)
+			}
+		}
+	case ir.Anthropic:
+		for _, payload := range mustAnthropicPayloads(t, out) {
+			delta, _ := payload["delta"].(map[string]any)
+			if delta["type"] == "text_delta" {
+				if text, _ := delta["text"].(string); text != "" {
+					order = append(order, text)
+				}
+			}
+		}
+	case ir.Chat:
+		for _, payload := range chatPayloads(t, out) {
+			if text, ok := chatDeltaContent(payload); ok && text != "" {
+				order = append(order, text)
+			}
+		}
+	}
+	return order
+}
