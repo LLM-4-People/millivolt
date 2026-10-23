@@ -338,6 +338,25 @@ data: {"type":"response.completed","sequence_number":5,"response":{"id":"resp_1"
 	}
 }
 
+func TestResponsesStreamRetainedBound(t *testing.T) {
+	var buf bytes.Buffer
+	enc := NewResponsesStreamEncoder(&buf, nil)
+	if err := enc.Write(&ir.Event{Type: ir.EventStart, Response: &ir.Response{ID: "r", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Write(&ir.Event{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText}}); err != nil {
+		t.Fatal(err)
+	}
+	err := enc.Write(&ir.Event{Type: ir.EventBlockDelta, Index: 0,
+		Delta: &ir.Delta{Text: strings.Repeat("x", ResponsesStreamRetainedMaxBytes+1)}})
+	if err == nil {
+		t.Fatalf("a %d-byte item was retained beyond the bound", ResponsesStreamRetainedMaxBytes+1)
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("bound error = %v", err)
+	}
+}
+
 func TestChatStreamUsagePositions(t *testing.T) {
 	const (
 		head   = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}` + "\n\n"

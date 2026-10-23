@@ -14,6 +14,13 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/sse"
 )
 
+// ResponsesStreamRetainedMaxBytes bounds the text, arguments, reasoning and
+// refusal one synthesized Responses item retains for its done and terminal
+// events. The wire requires those events to carry the full value, so the
+// encoder buffers it; the relay sizes its translated-frame scanner from this
+// bound. Internal safety guardrail, not user-tunable.
+const ResponsesStreamRetainedMaxBytes = 8 << 20
+
 // OpenAI Responses streaming codec.
 
 type responsesStreamEvent struct {
@@ -462,12 +469,18 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 		case ev.Delta.Text != "":
 			if item.kind == "message" {
 				if item.partType == "refusal" {
+					if item.refusal.Len()+len(ev.Delta.Text) > ResponsesStreamRetainedMaxBytes {
+						return fmt.Errorf("responses refusal exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+					}
 					item.refusal.WriteString(ev.Delta.Text)
 					return e.emit("response.refusal.delta", map[string]any{
 						"type": "response.refusal.delta", "sequence_number": e.nextSeq(),
 						"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
 						"delta": ev.Delta.Text,
 					})
+				}
+				if item.text.Len()+len(ev.Delta.Text) > ResponsesStreamRetainedMaxBytes {
+					return fmt.Errorf("responses output text exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
 				}
 				item.text.WriteString(ev.Delta.Text)
 				return e.emit("response.output_text.delta", map[string]any{
@@ -478,6 +491,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			}
 		case ev.Delta.Arguments != "":
 			if item.kind == "function_call" {
+				if item.args.Len()+len(ev.Delta.Arguments) > ResponsesStreamRetainedMaxBytes {
+					return fmt.Errorf("responses function arguments exceed %d bytes", ResponsesStreamRetainedMaxBytes)
+				}
 				item.args.WriteString(ev.Delta.Arguments)
 				return e.emit("response.function_call_arguments.delta", map[string]any{
 					"type": "response.function_call_arguments.delta", "sequence_number": e.nextSeq(),
@@ -495,6 +511,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 					}); err != nil {
 						return err
 					}
+				}
+				if item.reasoning.Len()+len(ev.Delta.Reasoning) > ResponsesStreamRetainedMaxBytes {
+					return fmt.Errorf("responses reasoning exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
 				}
 				item.reasoning.WriteString(ev.Delta.Reasoning)
 				return e.emit("response.reasoning_summary_text.delta", map[string]any{
