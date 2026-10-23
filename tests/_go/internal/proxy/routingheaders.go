@@ -23,7 +23,7 @@ func TestRoutingControlConstantsAreStripped(t *testing.T) {
 	for _, h := range []string{
 		hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
 		hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
-		hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
+		hdrTimeout, hdrFormat, hdrInFormat, hdrMaxConcurrency, hdrSession,
 		hdrParentSession, hdrClient,
 		hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
 	} {
@@ -45,6 +45,77 @@ func TestRoutingControlConstantsAreStripped(t *testing.T) {
 	for _, h := range []string{"X-Custom-Header", "User-Agent", "Accept", "X-Stainless-Lang", "X-Request-Id"} {
 		if isProxyControlHeader(h) {
 			t.Errorf("unrelated header %q must not be stripped", h)
+		}
+	}
+}
+
+func TestUnknownPathSameProtocolKeepsPath(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/openai/deployments/foo/chat/completions", nil)
+	r.Header.Set(hdrBaseURL, "https://api.example")
+	r.Header.Set(hdrInFormat, "openai")
+	r.Header.Set(hdrFormat, "openai")
+	tgt, err := resolveTarget(r, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tgt.translate {
+		t.Fatalf("same-protocol request was marked translated: %+v", tgt)
+	}
+	if tgt.path != "" {
+		t.Fatalf("unknown same-protocol path was rewritten to %q", tgt.path)
+	}
+}
+
+func TestUnknownPathTranslatedUsesTargetPath(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "http://proxy/openai/deployments/foo/chat/completions", nil)
+	r.Header.Set(hdrBaseURL, "https://api.example")
+	r.Header.Set(hdrInFormat, "openai")
+	r.Header.Set(hdrFormat, "anthropic")
+	tgt, err := resolveTarget(r, config.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tgt.translate {
+		t.Fatalf("translated request was not marked translated: %+v", tgt)
+	}
+	if tgt.path != "/v1/messages" {
+		t.Fatalf("translated path = %q, want /v1/messages", tgt.path)
+	}
+}
+
+// TestResponsesHostileMaxOutputTokensRejected proves the hostile bound covers
+// the Responses spelling and that mixing cap families fails closed before any
+// upstream send.
+func TestResponsesHostileMaxOutputTokensRejected(t *testing.T) {
+	for name, body := range map[string]string{
+		"hostile max_output_tokens": `{"model":"m","input":"hi","max_output_tokens":1000001}`,
+		"conflicting spellings":     `{"model":"m","input":"hi","max_tokens":1,"max_output_tokens":1000001}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "application/json", 200, `{}`)
+			s := New(config.Default(), metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+			w := proxyRequest(t, s, "/v1/responses", "anthropic", body)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+			}
+			if up.calls.Load() != 0 {
+				t.Fatalf("upstream was called %d times before the cap rejection", up.calls.Load())
+			}
+			if !strings.Contains(w.Body.String(), "max_tokens") {
+				t.Fatalf("rejection does not name a cap field: %s", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestInFormatStripFence pins the client-protocol override in the same strip
+// set as every other routing control header: it selects the inbound wire and
+// must never reach the upstream.
+func TestInFormatStripFence(t *testing.T) {
+	for _, spelling := range []string{hdrInFormat, "x-proxy-in-format", "X-PROXY-IN-FORMAT"} {
+		if !isProxyControlHeader(spelling) {
+			t.Fatalf("client-protocol override %q is not stripped", spelling)
 		}
 	}
 }

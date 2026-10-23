@@ -1560,6 +1560,22 @@ func hostileTokenCap(v *int) bool {
 	return v != nil && *v > maxRequestOutputTokens
 }
 
+// conflictingTokenCapSpellings reports a body that mixes the Responses
+// max_output_tokens spelling with a Chat max_tokens/max_completion_tokens
+// spelling. The wire families are distinct, so accepting both would make the
+// recorded ceiling depend on decode precedence rather than the client's wire.
+func conflictingTokenCapSpellings(body []byte) bool {
+	var caps struct {
+		MaxTokens       *int `json:"max_tokens"`
+		MaxCompTokens   *int `json:"max_completion_tokens"`
+		MaxOutputTokens *int `json:"max_output_tokens"`
+	}
+	if json.Unmarshal(body, &caps) != nil {
+		return false
+	}
+	return caps.MaxOutputTokens != nil && (caps.MaxTokens != nil || caps.MaxCompTokens != nil)
+}
+
 // hostileTokenCapInBody applies the hostile-cap bound to EVERY token-ceiling
 // spelling a body carries, not only the one that wins the record precedence.
 // A Responses body can carry both max_tokens and max_output_tokens; checking

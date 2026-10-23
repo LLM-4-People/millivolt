@@ -640,6 +640,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The Chat and Responses cap spellings are different wire families; a
+	// body carrying both is ambiguous and must not let decode precedence pick
+	// the recorded ceiling.
+	if conflictingTokenCapSpellings(body) {
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+			"max_output_tokens cannot be combined with max_tokens or max_completion_tokens")
+		return
+	}
+
 	// Deny a hostile token cap at the trust boundary: the decoded value
 	// feeds the Acquire-time token estimate with no further range check, so
 	// an unbounded cap could wrap the estimate negative (skipping the
