@@ -16,6 +16,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -33,6 +34,7 @@ const (
 	hdrRefreshToken   = "X-Proxy-Refresh-Token"
 	hdrTimeout        = "X-Proxy-Timeout-Ms"
 	hdrFormat         = "X-Proxy-Format"
+	hdrInFormat       = "X-Proxy-In-Format"
 	hdrMaxConcurrency = "X-Proxy-Max-Concurrency"
 	// hdrSession optionally pins a request to an explicit conversation/session
 	// id supplied by the client. When absent, the proxy auto-groups requests
@@ -200,14 +202,20 @@ func (s *Server) retryableUpstreamErrorClass(typ, code string) bool {
 
 // target is the resolved upstream destination for one request.
 type target struct {
-	baseURL     string
-	authHeader  string
-	authPrefix  string
-	path        string
-	query       string
-	provider    string
-	timeout     time.Duration
-	format      string
+	baseURL    string
+	authHeader string
+	authPrefix string
+	path       string
+	query      string
+	provider   string
+	timeout    time.Duration
+	format     string
+	// inbound is the client's wire protocol (path-derived or overridden);
+	// outbound is the protocol selected by X-Proxy-Format. translate is true
+	// only when both are known and differ.
+	inbound     ir.Protocol
+	outbound    ir.Protocol
+	translate   bool
 	extraHeader http.Header
 	// override is the request_overrides merge resolved for THIS request
 	// (nil when none are configured or nothing matched - the feature-off
@@ -580,13 +588,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// but only on the OpenAI wire: the stubs are chat/completions-shaped, so
 	// a translated-anthropic or cursor body must not receive them. Token
 	// ceilings and strip keep their wider wire reach.
+	// ensure_tools stubs are Chat-shaped and must be injected into a Chat
+	// client body on a Chat outbound wire; any other combination is either
+	// already a different tool schema or not a Chat body at all.
 	var ensureTools []string
-	if isOpenAIWire(t.format) {
+	if isOpenAIWire(t.format) && t.inbound == ir.Chat {
 		if prof, ok := s.cfg().Providers[t.provider]; ok {
 			ensureTools = prof.EnsureTools
 		}
 	}
-	if (overrideBody != nil || len(stripParams) > 0) && overrideBodyWireFormat(t.format) || len(ensureTools) > 0 {
+	// Each rewrite action reads the client body shape, not the upstream one:
+	// token ceilings exist only on a Chat or Anthropic body, while the
+	// sub-conversation strip is a top-level field removal valid on any JSON
+	// body. Cursor's Run translator owns its own envelope, so its body
+	// section stays skipped (header rules still apply).
+	if !overrideBodyInbound(t.inbound) {
+		overrideBody = nil
+	}
+	rewriteBody := (overrideBody != nil || len(stripParams) > 0 || len(ensureTools) > 0) && t.format != "cursor"
+	if rewriteBody {
 		if rewritten, changed, why := overrideRequestBody(body, overrideBody, stripParams, ensureTools, int64(s.cfg().MaxRequestBytes)); why == "" {
 			body = rewritten
 			if changed {
@@ -634,12 +654,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return // handback response already written; nothing proxied
 	}
 
-	// Optional format translation (e.g. OpenAI -> Anthropic). The default is
-	// byte-transparent passthrough. Cursor is excluded here: its Run RPC is
-	// bidirectional, so serveCursorBidi translates the body itself into the
-	// enveloped run_request (and keeps the history blobs for the KV channel).
-	if !isOpenAIWire(t.format) && t.format != "cursor" {
-		translated, err := translateRequest(t.format, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
+	// Optional protocol translation. The default is byte-transparent
+	// passthrough; translation runs only when the client's path protocol and
+	// the X-Proxy-Format target are both known and differ. Cursor is excluded
+	// here: its Run RPC is bidirectional, so serveCursorBidi translates the
+	// body itself into the enveloped run_request (and keeps the history blobs
+	// for the KV channel).
+	if t.translate && t.format != "cursor" {
+		req, translated, warnings, err := providerformat.TranslateRequestBetweenIR(
+			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
 		if err != nil {
 			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
 			return
@@ -654,19 +677,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				http.StatusRequestEntityTooLarge)
 			return
 		}
+		if s.cfg().TranslationLoss == config.TranslationLossReject {
+			if fields := translationLossFields(warnings); len(fields) > 0 {
+				http.Error(w, errJSON(typeInvalidRequestError,
+					"translation cannot represent: "+strings.Join(fields, ", ")), http.StatusBadRequest)
+				return
+			}
+		}
 		body = translated
-		// Parameter/composition metrics describe the translated upstream body,
-		// while routing keeps the client's original model and stream choice.
-		rec = &metrics.Record{Start: rec.Start}
-		if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
-			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
-			return
+		setWarningsHeader(w.Header(), warnings)
+		// Parameter/composition metrics describe the translated upstream body
+		// for the two wire shapes the metadata decoder understands. A
+		// Responses target carries item lists the Chat-oriented decoder does
+		// not model yet; keep the inbound record there and stamp only the
+		// fields the IR owns.
+		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
+			rec = &metrics.Record{Start: rec.Start}
+			if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
+				http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+				return
+			}
+		} else {
+			rec.Model = req.Model
+			rec.Stream = req.Stream
+			if req.MaxOutputTokens != nil {
+				rec.ReqMaxTokens = req.MaxOutputTokens
+			}
 		}
 		// Re-apply the token-cap bound at this second trust boundary before
-		// anything consumes the fresh record. A decoy type error can keep the
-		// original decode's ReqMaxTokens nil (the split-decode early return)
-		// while the translator still carries the hostile cap into the
-		// translated body, so the first check alone does not cover this path.
+		// anything consumes the record. A decoy type error can keep the
+		// original decode's ReqMaxTokens nil while the translator still
+		// carries the hostile cap into the translated body.
 		if hostileTokenCap(rec.ReqMaxTokens) {
 			writeHostileTokenCap(w)
 			return
@@ -917,8 +958,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.serveNonStreaming(ctx, w, resp, r, t, key, body, rec, groupKey, hooks)
 			return
 		}
-		if !isOpenAIWire(t.format) {
-			s.transformResponse(ctx, w, resp, rec, t.format, stream)
+		if t.translate {
+			s.transformResponse(ctx, w, resp, rec, t, stream)
 			return
 		}
 

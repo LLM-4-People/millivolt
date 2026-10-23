@@ -27,6 +27,7 @@ import (
 	"github.com/LLM-4-People/millivolt/internal/adminjson"
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 
 	"golang.org/x/net/publicsuffix"
@@ -236,8 +237,8 @@ type resolvedOverride struct {
 	// one whose last action was a removal is absent from headers.
 	removes []string
 	// body holds the merged token ceilings; nil when no matching rule names
-	// a body field. It is stamped onto the request body only for
-	// OpenAI-wire targets (overrideBodyWireFormat).
+	// a body field. It is stamped onto a Chat or Anthropic client body
+	// before translation (overrideBodyInbound).
 	body *config.OverrideBody
 }
 
@@ -307,14 +308,13 @@ func resolveRequestOverrides(rules []config.RequestOverride, client, provider, m
 	return &ov
 }
 
-// overrideBodyWireFormat reports whether a target's request body is
-// OpenAI-wire JSON - the only shape the request-overrides body fields can
-// edit. Composes the single format predicate with the translated-anthropic
-// target. Cursor's agent.v1 run_request translator reads model, messages,
-// stream and tools only, so token ceilings carry no wire meaning on a
-// cursor target: its body section is skipped (header rules still apply).
-func overrideBodyWireFormat(format string) bool {
-	return isOpenAIWire(format) || format == "anthropic"
+// overrideBodyInbound reports whether the request-overrides body fields can
+// edit a body of this inbound wire shape: Chat and Anthropic both carry a
+// token ceiling at the top level, while a Responses body spells it
+// max_output_tokens and a Cursor run has no such field. The gate reads the
+// CLIENT body because the rewrite runs before translation.
+func overrideBodyInbound(p ir.Protocol) bool {
+	return p == ir.Chat || p == ir.Anthropic
 }
 
 // applyOverrideHeaders applies the resolved request-overrides merge to an
@@ -565,22 +565,34 @@ func ensureToolsInBody(doc map[string]json.RawMessage, ensureTools []string) (ch
 	return true, ""
 }
 
-// applyTokenCaps decodes the request's token-cap pair from body with one
-// minimal unmarshal and stamps the effective ceiling onto the record
-// through MergeTokenCaps' precedence (max_completion_tokens wins, neither
-// present stamps nil). A body whose cap pair does not decode leaves the
-// record untouched. Both cap re-reads share it: restampReqMaxTokens re-reads
+// applyTokenCaps decodes the request's token-ceiling spellings from body with
+// one minimal unmarshal and stamps the effective ceiling onto the record
+// through MergeTokenCaps' precedence (max_completion_tokens over max_tokens
+// over max_output_tokens; none present stamps nil). A body whose cap fields
+// do not decode leaves the record untouched. Both cap re-reads share it: restampReqMaxTokens re-reads
 // a rewritten body, and parseLLMRequest's split-decode recovery re-reads a
 // body whose parameter block failed its strict decode.
+// resolveRequestTokenCap owns the three wire spellings the metadata decoder
+// accepts: the Chat pair (max_completion_tokens over max_tokens) first, then the
+// Responses max_output_tokens spelling. Both metadata decode paths call it, so
+// the hostile-cap trust boundary cannot see a different ceiling per path.
+func resolveRequestTokenCap(maxCompletion, maxTokens, maxOutput *int) *int {
+	if v := providerformat.MergeTokenCaps(maxCompletion, maxTokens); v != nil {
+		return v
+	}
+	return maxOutput
+}
+
 func applyTokenCaps(body []byte, rec *metrics.Record) {
 	var caps struct {
-		MaxTokens     *int `json:"max_tokens"`
-		MaxCompTokens *int `json:"max_completion_tokens"`
+		MaxTokens       *int `json:"max_tokens"`
+		MaxCompTokens   *int `json:"max_completion_tokens"`
+		MaxOutputTokens *int `json:"max_output_tokens"`
 	}
 	if json.Unmarshal(body, &caps) != nil {
 		return
 	}
-	rec.ReqMaxTokens = providerformat.MergeTokenCaps(caps.MaxCompTokens, caps.MaxTokens)
+	rec.ReqMaxTokens = resolveRequestTokenCap(caps.MaxCompTokens, caps.MaxTokens, caps.MaxOutputTokens)
 }
 
 // restampReqMaxTokens re-reads the effective token ceiling from a rewritten
@@ -714,10 +726,36 @@ func resolveTarget(r *http.Request, cfg *config.Config) (*target, error) {
 	if f := strings.TrimSpace(r.Header.Get(hdrFormat)); f != "" {
 		// Validate at the boundary so an unsupported format is rejected
 		// consistently (400), not only when a translation happens to run.
-		if f != "openai" && f != "anthropic" && f != "cursor" {
+		if !validOutboundFormat(f) {
 			return nil, fmt.Errorf("unsupported %s %q", hdrFormat, clientEcho(f))
 		}
 		t.format = f
+	}
+	inbound, err := inboundProtocol(r)
+	if err != nil {
+		return nil, err
+	}
+	t.inbound = inbound
+	t.outbound = outboundProtocol(t.format)
+	t.translate = t.inbound != "" && t.outbound != "" && t.inbound != t.outbound
+	if t.format == "cursor" {
+		// Cursor is an adapter that consumes an OpenAI Chat body and speaks
+		// its own Connect protocol. Any other declared client protocol would
+		// need a response shape the bridge does not emit, so reject it at the
+		// routing boundary instead of forwarding the wrong envelope.
+		if t.inbound != "" && t.inbound != ir.Chat {
+			return nil, fmt.Errorf("cursor target requires an OpenAI Chat client protocol")
+		}
+		t.translate = false
+	}
+	if t.inbound != "" && t.outbound != "" && t.path == "" {
+		// A known client protocol reaches the target protocol's own endpoint.
+		// This matches the client path for a same-protocol request and fixes
+		// two cases: a translated request (the client's path names the inbound
+		// protocol), and an explicit X-Proxy-In-Format override on a path that
+		// names a different protocol. An unknown inbound path keeps the
+		// client's chosen endpoint.
+		t.path = protocolPath(t.outbound)
 	}
 	if ms := r.Header.Get(hdrTimeout); ms != "" {
 		d, err := time.ParseDuration(ms + "ms")
@@ -980,7 +1018,7 @@ func headerPresent(r *http.Request, name string) bool {
 var proxyControlHeaderNames = []string{
 	hdrBaseURL, hdrAuthHeader, hdrAuthPrefix, hdrPath, hdrQuery,
 	hdrHeaders, hdrKey, hdrRefreshToken, hdrProvider, hdrAccessToken,
-	hdrTimeout, hdrFormat, hdrMaxConcurrency, hdrSession,
+	hdrTimeout, hdrFormat, hdrInFormat, hdrMaxConcurrency, hdrSession,
 	hdrParentSession, hdrClient,
 	hdrLimitConcurrency, hdrLimitRequests, hdrLimitTokens,
 	// authorization and cookie are defensive strips without routing
@@ -1550,19 +1588,20 @@ type requestMessage[C any] struct {
 }
 
 type requestParameters struct {
-	MaxTokens      *int              `json:"max_tokens"`
-	MaxCompTokens  *int              `json:"max_completion_tokens"`
-	Temperature    *float64          `json:"temperature"`
-	TopP           *float64          `json:"top_p"`
-	Tools          []discardedJSON   `json:"tools"`
-	ToolChoice     requestToolChoice `json:"tool_choice"`
-	StreamOptions  *struct{}         `json:"stream_options"`
-	N              *int              `json:"n"`
-	Stop           json.RawMessage   `json:"stop"`
-	Logprobs       bool              `json:"logprobs"`
-	PresencePen    *float64          `json:"presence_penalty"`
-	FrequencyPen   *float64          `json:"frequency_penalty"`
-	ResponseFormat *struct {
+	MaxTokens       *int              `json:"max_tokens"`
+	MaxCompTokens   *int              `json:"max_completion_tokens"`
+	MaxOutputTokens *int              `json:"max_output_tokens"`
+	Temperature     *float64          `json:"temperature"`
+	TopP            *float64          `json:"top_p"`
+	Tools           []discardedJSON   `json:"tools"`
+	ToolChoice      requestToolChoice `json:"tool_choice"`
+	StreamOptions   *struct{}         `json:"stream_options"`
+	N               *int              `json:"n"`
+	Stop            json.RawMessage   `json:"stop"`
+	Logprobs        bool              `json:"logprobs"`
+	PresencePen     *float64          `json:"presence_penalty"`
+	FrequencyPen    *float64          `json:"frequency_penalty"`
+	ResponseFormat  *struct {
 		Type string `json:"type"`
 	} `json:"response_format"`
 	Seed            *int64                   `json:"seed"`
@@ -2481,7 +2520,7 @@ func parseLLMRequestSlow(body []byte, rec *metrics.Record, preview bool) error {
 	// pick: the translated body re-decodes through this same
 	// MergeTokenCaps precedence, so the trust-boundary check in ServeHTTP
 	// must see the one field a translated body can actually carry upstream.
-	rec.ReqMaxTokens = providerformat.MergeTokenCaps(req.MaxCompTokens, req.MaxTokens)
+	rec.ReqMaxTokens = resolveRequestTokenCap(req.MaxCompTokens, req.MaxTokens, req.MaxOutputTokens)
 	rec.ReqTemperature = req.Temperature
 	rec.ReqTopP = req.TopP
 	rec.ReqToolsCount = len(req.Tools)

@@ -20,6 +20,7 @@ import (
 
 	"github.com/LLM-4-People/millivolt/internal/config"
 	providerformat "github.com/LLM-4-People/millivolt/internal/format"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 	"github.com/LLM-4-People/millivolt/internal/sse"
@@ -329,6 +330,74 @@ func spoolBody(body io.Reader) (b []byte, overflow bool, err error) {
 // here instead of decoding again. The gates that choose this epilogue (the
 // in-band error envelope passthrough and the healthy commit) stay at their
 // call sites.
+// applyTranslatedStructure stamps the record fields the Chat-oriented
+// non-stream analyzer cannot see when the CLIENT-facing wire is Anthropic or
+// Responses: finish reason, answer presence, preview and tool calls. Usage,
+// model and id remain owned by the shared non-stream analysis of the
+// translated body.
+func applyTranslatedStructure(rec *metrics.Record, resp *ir.Response, preview bool) {
+	if rec == nil || resp == nil {
+		return
+	}
+	rec.FinishReason = providerformat.ChatFinishReason(resp.Finish)
+	if resp.Usage != (ir.Usage{}) {
+		// The canonical usage is already normalized (Anthropic cache counts
+		// folded into input, total derived); the translated wire may omit the
+		// total field entirely.
+		rec.Usage = metrics.Usage{
+			InputTokens:     resp.Usage.InputTokens,
+			OutputTokens:    resp.Usage.OutputTokens,
+			TotalTokens:     resp.Usage.TotalTokens,
+			CacheReadTokens: resp.Usage.CacheReadTokens,
+			CacheWrite:      resp.Usage.CacheWriteTokens,
+			ReasoningTokens: resp.Usage.ReasoningTokens,
+		}
+	}
+	if resp.Model != "" && rec.ProviderModel == "" {
+		rec.ProviderModel = resp.Model
+	}
+	if resp.ID != "" && rec.ProviderRequestID == "" {
+		rec.ProviderRequestID = resp.ID
+	}
+	names := make([]string, 0, metrics.RetainedToolNamesMax)
+	seen := make(map[string]struct{}, metrics.RetainedToolNamesMax)
+	for _, b := range resp.Blocks {
+		switch b.Type {
+		case ir.BlockText:
+			if b.Text != "" {
+				rec.HadAnswerContent = true
+				if preview && rec.ResponsePreview == "" {
+					rec.ResponsePreview = metrics.TruncatePreview(b.Text)
+				}
+			}
+		case ir.BlockRefusal:
+			if b.Refusal != "" {
+				rec.HadAnswerContent = true
+				if preview && rec.ResponsePreview == "" {
+					rec.ResponsePreview = metrics.TruncatePreview(b.Refusal)
+				}
+			}
+		case ir.BlockToolCall:
+			rec.ToolCalls++
+			name := ""
+			if b.ToolCall != nil {
+				name = b.ToolCall.Name
+			}
+			if name == "" || len(names) >= metrics.RetainedToolNamesMax {
+				continue
+			}
+			if _, duplicate := seen[name]; duplicate {
+				continue
+			}
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	if len(names) > 0 {
+		rec.ToolNames = names
+	}
+}
+
 func (s *Server) commitSpooledBody(w http.ResponseWriter, resp *http.Response, spooled []byte, rec *metrics.Record, analysis metrics.NonStreamAnalysis) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
@@ -420,6 +489,28 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// terminal-hold substitution never injects a synthetic in-band error
 		// into an error stream.
 		if resp.StatusCode != http.StatusOK {
+			if t.translate {
+				// The upstream error body is in the target protocol; the
+				// client expects its own. Translate the envelope, keep the
+				// upstream status, and fall back to a bounded generic error
+				// when the body is not a recognizable envelope.
+				full, rerr := s.readWholeDocument(ctx, resp.Body, maxErrBodyBytes)
+				out, terr := providerformat.TranslateErrorBetween(t.inbound, t.outbound, resp.StatusCode, full)
+				if rerr != nil || terr != nil {
+					out, _ = providerformat.EncodeError(t.inbound, &ir.Error{
+						Type: "api_error", Message: fmt.Sprintf("upstream HTTP %d", resp.StatusCode),
+					})
+				}
+				copyResponseHeaders(w.Header(), resp.Header)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(resp.StatusCode)
+				if _, werr := w.Write(out); werr != nil {
+					markClientGone(rec)
+				} else {
+					rec.ResponseBytes += int64(len(out))
+				}
+				return
+			}
 			copyResponseHeaders(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 			if isEventStream(resp.Header.Get("Content-Type")) {
@@ -451,7 +542,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// Format translation is fully buffered by design; the status line is
 		// written only after a successful translation, so a failed translation
 		// carries a real error status instead of a committed 200.
-		if !isOpenAIWire(t.format) {
+		if t.translate {
 			// Reserve the whole-document buffer process-wide before reading.
 			// The reservation is held until this branch has written the
 			// translated body, so concurrent translations cannot multiply the
@@ -498,7 +589,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					rec.ErrorType, rec.ErrorCode, rec.ErrorMsg = typ, code, msg
 				}
 			}
-			out, terr := translateResponse(t.format, full)
+			out, respIR, warnings, terr := providerformat.TranslateResponseBetweenIR(t.inbound, t.outbound, full)
 			if terr != nil {
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "transform_error"
@@ -523,7 +614,15 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			}
 			// The translated response owns completion shape and normalized
 			// usage. Custom cost paths still address the ORIGINAL document.
+			setWarningsHeader(w.Header(), warnings)
 			analyzeNonStreamBytes(out, rec, s.usageKeysFor(rec.Provider), nil, s.cfg().CaptureBodyPreview)
+			if t.inbound != ir.Chat {
+				// The non-stream analyzer reads Chat-shaped choices. For an
+				// Anthropic or Responses client those fields live only in the
+				// canonical response, so stamp the structure the translated
+				// wire no longer exposes in that shape.
+				applyTranslatedStructure(rec, respIR, s.cfg().CaptureBodyPreview)
+			}
 			if cost, ok := metrics.ExtractCost(full, s.costKeysFor(rec.Provider)); ok {
 				rec.Cost = cost
 			}
@@ -1598,12 +1697,13 @@ const translationErrorCode = "translation_error"
 const translationErrorMessage = "stream translation failed"
 
 // translatedStreamWriter observes the translator's writes into the pipe
-// without buffering the stream: it records whether the exact terminal
-// sse.DoneFrame was written and whether an in-band error frame was already
+// without buffering the stream: it records whether the inbound protocol's
+// terminal frame was written and whether an in-band error frame was already
 // forwarded. transformResponse uses that state after the pipe fails so the
 // client receives a terminal signal exactly once.
 type translatedStreamWriter struct {
 	dst        io.Writer
+	terminal   func([]byte) bool
 	done       bool
 	errorFrame bool
 }
@@ -1616,7 +1716,7 @@ func (t *translatedStreamWriter) Write(p []byte) (int, error) {
 	// The translator emits each event as one complete Write through
 	// sse.EmitFrame, so these comparisons observe frame boundaries without
 	// retaining any bytes.
-	if bytes.Equal(p, []byte(sse.DoneFrame)) {
+	if t.terminal != nil && t.terminal(p) {
 		t.done = true
 		return n, nil
 	}
@@ -1630,44 +1730,34 @@ func (t *translatedStreamWriter) Write(p []byte) (int, error) {
 
 // closeFailedTranslation appends the terminal frames a failed translation
 // pipe did not deliver. The status line and any translated content are
-// already on the wire, so an in-band error chunk (unless the translator
-// already forwarded a provider error) followed by [DONE] is the only
-// remaining signal. A failed write means the client is gone: markClientGone
+// already on the wire, so a protocol-native error frame (unless the
+// translator already forwarded a provider error) followed by that protocol's
+// terminal event is the only remaining signal. A failed write means the client is gone: markClientGone
 // keeps the cancellation classification and no further writes are attempted.
-func closeFailedTranslation(w http.ResponseWriter, flusher http.Flusher, rec *metrics.Record, forwardedError bool) {
+func closeFailedTranslation(w http.ResponseWriter, flusher http.Flusher, rec *metrics.Record, inbound ir.Protocol, forwardedError bool) {
 	if !forwardedError {
-		b, err := json.Marshal(sse.Chunk(rec.ID, time.Now().Unix(), rec.Model, []map[string]any{}, map[string]any{
-			"error": sse.ErrorObject(sse.TypeUpstreamError, translationErrorCode, translationErrorMessage),
-		}))
-		if err != nil {
-			return
-		}
-		frame := sse.DataFrame(b)
-		if _, werr := w.Write(frame); werr != nil {
+		if err := writeProtocolError(w, rec, inbound, rec.ID, sse.TypeUpstreamError, translationErrorCode, translationErrorMessage); err != nil {
 			markClientGone(rec)
 			return
 		}
-		rec.ResponseBytes += int64(len(frame))
 	}
-	if _, err := io.WriteString(w, sse.DoneFrame); err != nil {
+	if err := writeProtocolTerminal(w, rec, inbound, rec.ID, rec.Model, sse.TypeUpstreamError, translationErrorCode, translationErrorMessage); err != nil {
 		markClientGone(rec)
 		return
 	}
-	rec.ResponseBytes += int64(len(sse.DoneFrame))
 	if flusher != nil {
 		flusher.Flush()
 	}
 }
 
-// transformResponse relays a format-translated upstream response, translating
-// it back to OpenAI Chat Completions shape on the fly. This handles only the
-// STREAMING branch (the caller routes non-streaming responses through
+// transformResponse relays a format-translated upstream response, encoding it
+// in the client's protocol on the fly. This handles only the STREAMING branch (the caller routes non-streaming responses through
 // serveNonStreaming, which buffers the translation before the status line -
 // transformation errors there carry a real error status instead of a committed
 // 200). A streaming translation failure after the 200 was committed is closed
-// in-band with one upstream_error chunk plus [DONE], so the client never sees
-// an incomplete stream.
-func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record, format string, stream bool) {
+// in-band with one protocol-native error frame and terminal event, so the
+// client never sees an incomplete stream.
+func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record, t *target, stream bool) {
 	if stream || isEventStream(resp.Header.Get("Content-Type")) {
 		var flusher http.Flusher
 		if f, ok := w.(http.Flusher); ok {
@@ -1675,9 +1765,9 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 		}
 		// Stream translation: convert Anthropic SSE -> OpenAI SSE, while
 		// feeding the transformed stream through the metrics analyzer.
-		if format == "anthropic" {
+		if t.translate {
 			pr, pw := io.Pipe()
-			tracked := &translatedStreamWriter{dst: pw}
+			tracked := &translatedStreamWriter{dst: pw, terminal: terminalFrameFor(t.inbound)}
 			costKeys := s.costKeysFor(rec.Provider)
 			var sourceCost float64
 			var sourceCostReported bool
@@ -1693,7 +1783,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				// (translation failure vs client disconnect) itself. The
 				// tracking writer records the translator's terminal frames so
 				// the handler can close an incomplete stream exactly once.
-				translationErr = providerformat.StreamToOpenAI(tracked, resp.Body, nil, func(payload []byte) {
+				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(payload []byte) {
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}
@@ -1715,7 +1805,7 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 			// the analyzer: the record keeps markStreamErr's translation
 			// classification rather than being relabeled a provider error.
 			if translationErr != nil && !tracked.done && !rec.ClientDisconnected {
-				closeFailedTranslation(w, flusher, rec, tracked.errorFrame)
+				closeFailedTranslation(w, flusher, rec, t.inbound, tracked.errorFrame)
 			}
 			if sourceCostReported {
 				rec.Cost = sourceCost

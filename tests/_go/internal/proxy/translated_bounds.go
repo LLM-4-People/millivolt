@@ -130,7 +130,7 @@ func wireHTMLLiteralForProxy(n int) string {
 // though the client's own body fit under the cap.
 func TestTranslatedRequestOutputCapFailsClosed(t *testing.T) {
 	cfg := config.Default()
-	cfg.MaxRequestBytes = 1024
+	cfg.MaxRequestBytes = 850
 	var messages strings.Builder
 	for i := 0; i < 15; i++ {
 		if i > 0 {

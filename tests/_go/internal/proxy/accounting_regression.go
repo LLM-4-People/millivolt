@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 	"github.com/LLM-4-People/millivolt/internal/scheduler"
 )
@@ -32,12 +33,12 @@ func TestBridgeKeepsNativeAccountingAndSourceCost(t *testing.T) {
 					`data: {"type":"message_stop"}`,
 				}, "\n\n") + "\n\n"
 				resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}
-				s.transformResponse(t.Context(), w, resp, rec, "anthropic", true)
+				s.transformResponse(t.Context(), w, resp, rec, anthropicTarget(), true)
 			} else {
 				body := `{"id":"req-a","model":"model-a","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":20,"cache_creation_input_tokens":30},"billing":{"amount":0.02}}`
 				resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 				r := httptest.NewRequest("POST", "http://proxy.example/v1/chat/completions", nil)
-				s.serveNonStreaming(t.Context(), w, resp, r, &target{format: "anthropic"}, "", nil, rec, "", scheduler.WaiterHooks{})
+				s.serveNonStreaming(t.Context(), w, resp, r, anthropicTarget(), "", nil, rec, "", scheduler.WaiterHooks{})
 			}
 			if rec.Usage.InputTokens != 60 || rec.Usage.OutputTokens != 5 || rec.Usage.TotalTokens != 65 || rec.Usage.CacheReadTokens != 20 || rec.Usage.CacheWrite != 30 || rec.Cost != .02 || rec.FinishReason != "stop" || !rec.HadAnswerContent {
 				t.Fatalf("bridge record=%+v body=%s", rec, w.Body.String())
@@ -60,7 +61,7 @@ func TestBridgeToolAccountingCountsIdentityNotFragments(t *testing.T) {
 	rec := &metrics.Record{StatusCode: 200}
 	w := httptest.NewRecorder()
 	resp := &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
-	s.transformResponse(t.Context(), w, resp, rec, "anthropic", true)
+	s.transformResponse(t.Context(), w, resp, rec, anthropicTarget(), true)
 	if rec.ToolCalls != 1 || len(rec.ToolNames) != 1 || rec.ToolNames[0] != "lookup" || rec.HadAnswerContent || rec.FinishReason != "tool_calls" || rec.Usage.TotalTokens != 7 {
 		t.Fatalf("tool accounting=%+v", rec)
 	}
@@ -92,7 +93,7 @@ func TestBridgeClientFailureJoinsSourceObserver(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.transformResponse(t.Context(), bridgeFailureWriter{httptest.NewRecorder()}, &http.Response{Header: make(http.Header), Body: body}, rec, "anthropic", true)
+		s.transformResponse(t.Context(), bridgeFailureWriter{httptest.NewRecorder()}, &http.Response{Header: make(http.Header), Body: body}, rec, anthropicTarget(), true)
 	}()
 	select {
 	case <-done:
@@ -146,5 +147,16 @@ func TestMultilineContentWirePreservation(t *testing.T) {
 	s.streamBody(t.Context(), w, strings.NewReader(wire), rec, false, false, &upstreamErrorRescue{}, true)
 	if w.Body.String() != wire || !rec.HadAnswerContent || rec.ErrorType != "" {
 		t.Fatalf("legal multiline content changed: answer=%v error=%s wire=%s", rec.HadAnswerContent, rec.ErrorType, w.Body.String())
+	}
+}
+
+// anthropicTarget is the translated Chat-to-Anthropic target the bridge tests
+// exercise directly.
+func anthropicTarget() *target {
+	return &target{
+		format:    "anthropic",
+		inbound:   ir.Chat,
+		outbound:  ir.Anthropic,
+		translate: true,
 	}
 }

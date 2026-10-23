@@ -619,7 +619,10 @@ func TestMaxCompletionTokensPrecedence(t *testing.T) {
 		{"both fields: max_completion_tokens wins", `{"model":"m","max_tokens":100,"max_completion_tokens":200}`, 200},
 		{"max_tokens only", `{"model":"m","max_tokens":100}`, 100},
 		{"max_completion_tokens only", `{"model":"m","max_completion_tokens":200}`, 200},
-		{"null controls: both present but null decode to nil", `{"model":"m","max_tokens":null,"max_completion_tokens":null}`, 0},
+		{"max_output_tokens only (Responses spelling)", `{"model":"m","max_output_tokens":300}`, 300},
+		{"Chat spelling wins over max_output_tokens", `{"model":"m","max_tokens":100,"max_output_tokens":300}`, 100},
+		{"max_completion_tokens wins over both others", `{"model":"m","max_tokens":100,"max_completion_tokens":200,"max_output_tokens":300}`, 200},
+		{"null controls: all present but null decode to nil", `{"model":"m","max_tokens":null,"max_completion_tokens":null,"max_output_tokens":null}`, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var rec metrics.Record

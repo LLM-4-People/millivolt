@@ -27,6 +27,15 @@ func isOpenAIWire(format string) bool {
 	return format == "" || format == "openai"
 }
 
+// isOpenAICompatibleWire extends the Chat-wire predicate with the Responses
+// wire for decisions that only depend on the OpenAI error/envelope family.
+// Body-shape decisions (ensured tools, request-override fields) keep using
+// isOpenAIWire: the Chat wire and the Responses wire are not interchangeable
+// request shapes.
+func isOpenAICompatibleWire(format string) bool {
+	return isOpenAIWire(format) || format == "openai-responses"
+}
+
 // quotaPauseArmed reports whether any durable quota/billing reaction is
 // configured. Off keeps every existing behavior: the 429 surfaces verbatim
 // and nothing is parked or retried.
@@ -51,7 +60,7 @@ func (s *Server) quotaPauseArmed() bool {
 // the pause. When false is returned the permit is released and the caller
 // keeps its existing surface-immediately behavior.
 func (s *Server) settleQuotaFailure(permit *scheduler.StormPermit, format, client, provider, reason string, retryAfter time.Duration) bool {
-	if !s.quotaPauseArmed() || !isOpenAIWire(format) || provider == "" {
+	if !s.quotaPauseArmed() || !isOpenAICompatibleWire(format) || provider == "" {
 		permit.Cancel()
 		return false
 	}
