@@ -2362,6 +2362,17 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 	// blank-line boundary, and the event name is remembered so a type-less
 	// document can still be classified there. No artificial blank line is
 	// fed at the overflow point - that would split the document mid-event.
+	//
+	// Known malformed-input residual (F5-7): after this commit, later bytes
+	// of the same malformed event continue through the ordinary verbatim
+	// relay. A delta, [DONE] or response.failed that follows an over-bound
+	// terminal is therefore relayed after the completion, while the record
+	// keeps the finish the terminal already signed. The normal path stops
+	// reading post-terminal debris, but here the terminal was never held as
+	// a unit and the relay has committed to byte preservation. Stopping or
+	// withholding the tail would require rejecting bytes the client's SSE
+	// parser may still accept, so this residual is documented rather than
+	// changed.
 	abandonEventBuffer := func(now time.Time) {
 		raw := make([]byte, 0, len(eventName)+len(eventBody))
 		raw = append(raw, eventName...)
