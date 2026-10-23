@@ -152,11 +152,12 @@ upstream send and at both trust boundaries - the original body's decode and
 the re-decode of a translated body - for any spelling (`max_tokens`,
 `max_completion_tokens` or `max_output_tokens`). A valid request is also
 rejected with HTTP 400 before an upstream send when it carries more than 10,000
-entries in a `messages`,
-`tools` or `stop` array, more than 1,024 aggregate `tool_calls` members across
-every message, more than 10,000 distinct top-level members, or more
-than 10,000 distinct `logit_bias` keys merged across duplicate top-level
-objects. Content composition has two independent limits. A content array above
+entries in a `messages`, `tools`, `functions`, `input` or `stop` array, more
+than 10,000 members in a `metadata` object, more than 1,024 aggregate
+`tool_calls` members across every message, more than 10,000 distinct top-level
+members, or more than 10,000 distinct `logit_bias` keys merged across duplicate
+top-level objects. Content composition has two independent limits. A content
+array above
 4,096 parts is not rejected for that reason: within the aggregate budget it
 still relays unchanged, but composition skips it, so it contributes no
 dashboard composition counts. Composition reads the Chat `messages`/`system`
