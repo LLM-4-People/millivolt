@@ -642,6 +642,8 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 		} `json:"response"`
 	}
 	parsed := json.Unmarshal(payload, &ev) == nil
+	terminalUnits := 0
+	hadStreamedAnswer := !a.firstAnswerAt.IsZero()
 	if parsed {
 		if ev.Response.ID != "" {
 			a.responseID = ev.Response.ID
@@ -662,12 +664,12 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				if text != "" {
 					a.answerishSeen = true
 					// The terminal document is the whole stream for a
-					// terminal-only answer: mark content presence and TTFT so
-					// the record matches the streamed equivalent (N17).
-					// A streamed text delta already owns the timestamp; the
+					// terminal-only answer: count every non-empty text unit so
+					// the no-usage fallback matches the streamed equivalent.
+					// A streamed text delta already owns the chunk count; the
 					// terminal document merely repeats its value.
-					if a.firstAnswerAt.IsZero() {
-						a.recordTerminalAnswer(now)
+					if !hadStreamedAnswer {
+						terminalUnits += terminalTextUnits(item.Content)
 					}
 					if a.CapturePreview && a.preview == nil {
 						a.preview = []byte(metrics.TruncatePreview(text))
@@ -687,6 +689,9 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				}
 			}
 		}
+	}
+	if terminalUnits > 0 {
+		a.recordTerminalAnswerUnits(now, terminalUnits)
 	}
 	if a.finishReason != "" {
 		return
@@ -718,16 +723,58 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 }
 
-// recordTerminalAnswer records the first content-bearing unit of a terminal
-// Responses document. The terminal event is the chunk that carried it, so it
-// feeds the same TTFT/chunk-count accounting as a streamed output_text delta.
-func (a *Analyzer) recordTerminalAnswer(now time.Time) {
+// recordTerminalAnswerUnits records the content-bearing units of a
+// terminal-only Responses document. The terminal event is the chunk that
+// carried them, so it feeds the same TTFT/chunk-count accounting as the
+// equivalent streamed output_text deltas. units is already the count of
+// non-empty message text parts, so a no-usage record keeps one chunk per unit.
+func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
+	if units <= 0 {
+		return
+	}
 	if a.firstTokenAt.IsZero() {
 		a.firstTokenAt = now
 	}
 	a.lastTokenAt = now
-	a.chunkCount++
+	a.chunkCount += int64(units)
 	a.firstAnswerAt = now
+}
+
+// terminalTextUnits counts the non-empty answer text units in a message item's
+// terminal content: one per output_text/input_text/text part, or one for a
+// plain string. Refusal parts are answer-shaped but not content and never
+// count.
+func terminalTextUnits(raw json.RawMessage) int {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return 0
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		if plain != "" {
+			return 1
+		}
+		return 0
+	}
+	if !metrics.ContentPartsWithinLimit(raw) {
+		return 0
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return 0
+	}
+	units := 0
+	for _, part := range parts {
+		switch part.Type {
+		case "output_text", "input_text", "text":
+			if part.Text != "" {
+				units++
+			}
+		}
+	}
+	return units
 }
 
 // terminalMessageText returns the first non-empty answer text and refusal text
