@@ -744,3 +744,111 @@ func (t rewriteTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	clone.Host = u.Host
 	return http.DefaultTransport.RoundTrip(clone)
 }
+
+// TestPreCommitErrorsUseTheClientProtocol pins the failure-shape contract on a
+// translated Anthropic or Responses client path: a failure before the status
+// line is committed must answer in the client's own error envelope, not the
+// OpenAI envelope the historical Chat-only proxy always wrote.
+func TestPreCommitErrorsUseTheClientProtocol(t *testing.T) {
+	anthropicErrorType := func(t *testing.T, body string) (string, string) {
+		t.Helper()
+		var doc struct {
+			Type  string `json:"type"`
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("decode anthropic error %q: %v", body, err)
+		}
+		return doc.Type, doc.Error.Type
+	}
+	openAIErrorType := func(t *testing.T, body string) string {
+		t.Helper()
+		var doc struct {
+			Error struct {
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(body), &doc); err != nil {
+			t.Fatalf("decode openai error %q: %v", body, err)
+		}
+		return doc.Error.Type
+	}
+
+	t.Run("anthropic decode failure", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200, `{}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","max_tokens":8,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"c1","name":"f","input":[1,2]}]}]}`
+		w := proxyRequest(t, s, "/v1/messages", "openai", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		typ, inner := anthropicErrorType(t, w.Body.String())
+		if typ != "error" || inner != "invalid_request_error" {
+			t.Fatalf("envelope = type %q inner %q (body %s)", typ, inner, w.Body.String())
+		}
+		if up.calls.Load() != 0 {
+			t.Fatalf("upstream calls = %d, want 0", up.calls.Load())
+		}
+	})
+
+	t.Run("responses rejected loss", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200, `{}`)
+		cfg := config.Default()
+		cfg.TranslationLoss = config.TranslationLossReject
+		s := New(cfg, metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","input":"hi","include":["message.output_text.logprobs"]}`
+		w := proxyRequest(t, s, "/v1/responses", "anthropic", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		if got := openAIErrorType(t, w.Body.String()); got != "invalid_request_error" {
+			t.Fatalf("error type = %q (body %s)", got, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "include") {
+			t.Fatalf("rejection does not name the lossy field: %s", w.Body.String())
+		}
+		if up.calls.Load() != 0 {
+			t.Fatalf("upstream calls = %d, want 0", up.calls.Load())
+		}
+	})
+
+	t.Run("anthropic hostile token cap", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200, `{}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","max_tokens":1000001,"messages":[{"role":"user","content":"hi"}]}`
+		w := proxyRequest(t, s, "/v1/messages", "openai", body)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (body %s)", w.Code, w.Body.String())
+		}
+		if typ, inner := anthropicErrorType(t, w.Body.String()); typ != "error" || inner != "invalid_request_error" {
+			t.Fatalf("envelope = type %q inner %q (body %s)", typ, inner, w.Body.String())
+		}
+		if up.calls.Load() != 0 {
+			t.Fatalf("upstream calls = %d, want 0", up.calls.Load())
+		}
+	})
+
+	t.Run("anthropic translated transform failure", func(t *testing.T) {
+		up := newFixtureUpstream(t, "application/json", 200,
+			`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"f","arguments":"not json"}}]},"finish_reason":"tool_calls"}]}`)
+		s := New(config.Default(), metrics.Noop{})
+		s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+		body := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+		w := proxyRequest(t, s, "/v1/messages", "openai", body)
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("status = %d, want 502 (body %s)", w.Code, w.Body.String())
+		}
+		if typ, inner := anthropicErrorType(t, w.Body.String()); typ != "error" || inner != "api_error" {
+			t.Fatalf("envelope = type %q inner %q (body %s)", typ, inner, w.Body.String())
+		}
+		if up.calls.Load() != 1 {
+			t.Fatalf("upstream calls = %d, want 1", up.calls.Load())
+		}
+	})
+}

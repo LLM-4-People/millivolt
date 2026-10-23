@@ -471,6 +471,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// terminal 429/502, validation 4xx, storm queue 429s) carries it through
 	// one owner instead of per-sink calls.
 	w = &clientRetryDirective{ResponseWriter: w, srv: s}
+	// The client protocol is a property of the path and its explicit override.
+	// Resolve it before target validation so an early failure on a known
+	// Anthropic or Responses path still answers in that protocol's envelope;
+	// resolveTarget calls the same owner for the authoritative value.
+	inbound, _ := inboundProtocol(r)
 	// Reserve the declared upload now. A chunked body has no length yet, so it
 	// reserves the configured request cap; admission therefore bounds both the
 	// handler set and the heap those bodies can occupy before routing.
@@ -489,18 +494,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// what a client would otherwise control. The directive writer above
 		// carries the no-retry header like every other error sink.
 		w.Header().Set("Retry-After", "1")
-		http.Error(w, errJSON(typeAPIError, "proxy is at its in-flight request limit"), http.StatusServiceUnavailable)
+		writeProtocolHTTPError(w, inbound, http.StatusServiceUnavailable, typeAPIError,
+			"proxy is at its in-flight request limit")
 		return
 	}
 	defer s.inflight.release(reserve)
 	t, err := resolveTarget(r, s.cfg())
 	if err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 	session, parentSession, err := requestConversation(r.Header)
 	if err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -513,7 +519,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// record, and request-overrides matching: classify once, use everywhere.
 	client := classifyClient(r)
 	if err := s.applyThrottleHeaders(r, t.provider, client); err != nil {
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+		writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 		return
 	}
 
@@ -531,7 +537,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &overflow) {
 			status = http.StatusRequestEntityTooLarge
 		}
-		http.Error(w, errJSON(typeInvalidRequestError, err.Error()), status)
+		writeProtocolHTTPError(w, t.inbound, status, typeInvalidRequestError, err.Error())
 		return
 	}
 	// Hold the inbound body size readRequest captured: the rewrite engine
@@ -642,7 +648,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
 	if hostileTokenCap(rec.ReqMaxTokens) {
-		writeHostileTokenCap(w)
+		writeHostileTokenCap(w, t.inbound)
 		return
 	}
 	stream, model := rec.Stream, rec.Model
@@ -662,7 +668,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req, translated, warnings, err := providerformat.TranslateRequestBetweenIR(
 			t.inbound, t.outbound, body, s.cfg().AnthropicDefaultMaxTokens, subValue)
 		if err != nil {
-			http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 			return
 		}
 		// The inbound cap covered the client's body, not the translated wire
@@ -670,15 +676,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// fragments, tool-result blocks) and a map/raw re-marshal must not
 		// silently bypass max_request_bytes. Fail closed before any send.
 		if int64(len(translated)) > int64(s.cfg().MaxRequestBytes) {
-			http.Error(w, errJSON(typeInvalidRequestError,
-				"translated request body exceeds "+config.FormatByteSize(int64(s.cfg().MaxRequestBytes))),
-				http.StatusRequestEntityTooLarge)
+			writeProtocolHTTPError(w, t.inbound, http.StatusRequestEntityTooLarge, typeInvalidRequestError,
+				"translated request body exceeds "+config.FormatByteSize(int64(s.cfg().MaxRequestBytes)))
 			return
 		}
 		if s.cfg().TranslationLoss == config.TranslationLossReject {
 			if fields := translationLossFields(warnings); len(fields) > 0 {
-				http.Error(w, errJSON(typeInvalidRequestError,
-					"translation cannot represent: "+strings.Join(fields, ", ")), http.StatusBadRequest)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+					"translation cannot represent: "+strings.Join(fields, ", "))
 				return
 			}
 		}
@@ -692,7 +697,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if t.outbound == ir.Chat || t.outbound == ir.Anthropic {
 			rec = &metrics.Record{Start: rec.Start}
 			if err := parseLLMRequest(body, rec, s.cfg().CaptureBodyPreview); err != nil {
-				http.Error(w, errJSON(typeInvalidRequestError, err.Error()), http.StatusBadRequest)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError, err.Error())
 				return
 			}
 		} else {
@@ -707,7 +712,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// original decode's ReqMaxTokens nil while the translator still
 		// carries the hostile cap into the translated body.
 		if hostileTokenCap(rec.ReqMaxTokens) {
-			writeHostileTokenCap(w)
+			writeHostileTokenCap(w, t.inbound)
 			return
 		}
 	}
@@ -787,8 +792,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// silently defaulted (same contract as X-Proxy-Timeout-Ms).
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
-			http.Error(w, errJSON(typeInvalidRequestError,
-				errInvalidHeader(hdrMaxConcurrency, v).Error()), http.StatusBadRequest)
+			writeProtocolHTTPError(w, t.inbound, http.StatusBadRequest, typeInvalidRequestError,
+				errInvalidHeader(hdrMaxConcurrency, v).Error())
 			return
 		}
 		maxConc = n

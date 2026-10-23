@@ -592,7 +592,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 					return
 				}
 				rec.StatusCode = http.StatusBadGateway
-				http.Error(w, errJSON(typeAPIError, "upstream error: "+transportErrText(rerr)), http.StatusBadGateway)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
+					"upstream error: "+transportErrText(rerr))
 				return
 			}
 			// Past the cap the document cannot be translated, and verbatim
@@ -602,7 +603,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "response_too_large"
 				rec.ErrorMsg = "upstream translated body exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
-				http.Error(w, errJSON(typeAPIError, "upstream response too large to translate"), http.StatusBadGateway)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
+					"upstream response too large to translate")
 				return
 			}
 			// The provider's in-band error envelope on a 200 is its own
@@ -621,7 +623,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				if errors.Is(terr, metrics.ErrMetricRange) {
 					invalidateUsage(rec, terr)
 				}
-				http.Error(w, errJSON(typeAPIError, "translate upstream response: "+terr.Error()), http.StatusBadGateway)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
+					"translate upstream response: "+terr.Error())
 				return
 			}
 			// Translation can still grow the document (wrapper fields and
@@ -633,7 +636,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 				rec.StatusCode = http.StatusBadGateway
 				rec.ErrorType = "response_too_large"
 				rec.ErrorMsg = "translated response exceeds " + config.FormatByteSize(maxTranslateBodyBytes)
-				http.Error(w, errJSON(typeAPIError, "translated response too large"), http.StatusBadGateway)
+				writeProtocolHTTPError(w, t.inbound, http.StatusBadGateway, typeAPIError,
+					"translated response too large")
 				return
 			}
 			// The translated response owns completion shape and normalized

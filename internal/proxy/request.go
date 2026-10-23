@@ -1572,9 +1572,9 @@ func hostileTokenCap(v *int) bool {
 // writeHostileTokenCap rejects a hostile token cap with the shared 400
 // envelope. Both ServeHTTP enforcement sites use it, so the two trust
 // boundaries can never drift in status, type or wording.
-func writeHostileTokenCap(w http.ResponseWriter) {
-	http.Error(w, errJSON(typeInvalidRequestError,
-		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens)), http.StatusBadRequest)
+func writeHostileTokenCap(w http.ResponseWriter, inbound ir.Protocol) {
+	writeProtocolHTTPError(w, inbound, http.StatusBadRequest, typeInvalidRequestError,
+		fmt.Sprintf("max_tokens must not exceed %d", maxRequestOutputTokens))
 }
 
 type requestRouting struct {

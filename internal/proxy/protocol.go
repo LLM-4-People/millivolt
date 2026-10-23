@@ -192,6 +192,25 @@ func translationLossFields(warnings ir.Warnings) []string {
 	return out
 }
 
+// writeProtocolHTTPError writes a pre-commit JSON error in the client's
+// protocol. Chat and unknown paths keep the historical OpenAI envelope; a
+// known Anthropic or Responses client gets its own shape.
+func writeProtocolHTTPError(w http.ResponseWriter, inbound ir.Protocol, status int, typ, msg string) {
+	if inbound == "" || inbound == ir.Chat {
+		http.Error(w, errJSON(typ, msg), status)
+		return
+	}
+	body, err := providerformat.EncodeError(inbound, &ir.Error{Type: typ, Message: msg, Status: status})
+	if err != nil {
+		http.Error(w, errJSON(typ, msg), status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
 func setWarningsHeader(h http.Header, warnings ir.Warnings) {
 	if len(warnings) == 0 {
 		return
