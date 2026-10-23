@@ -1024,6 +1024,10 @@ func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 				file["filename"] = b.File.Filename
 			}
 			parts = append(parts, map[string]any{"type": "file", "file": file})
+		default:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result."+string(b.Type), "block has no Chat tool-result equivalent")
+			}
 		}
 	}
 	if hasPart {

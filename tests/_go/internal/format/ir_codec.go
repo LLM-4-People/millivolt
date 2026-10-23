@@ -676,6 +676,34 @@ func TestCodecReportsMetadataLossOnce(t *testing.T) {
 	}
 }
 
+func TestToolResultDropsAudioWithWarning(t *testing.T) {
+	for name, encode := range map[string]func(*ir.Request) ([]byte, error){
+		"chat": func(r *ir.Request) ([]byte, error) { return EncodeChatRequest(r) },
+		"anthropic": func(r *ir.Request) ([]byte, error) {
+			return EncodeAnthropicRequest(r, 8, "")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := &ir.Request{Model: "m", Messages: []ir.Message{{
+				Role: ir.RoleUser,
+				Content: []ir.Block{{Type: ir.BlockToolResult, ToolResult: &ir.ToolResult{
+					CallID: "c1",
+					Content: []ir.Block{
+						ir.TextBlock("heard"),
+						{Type: ir.BlockAudio, Audio: &ir.Audio{Data: "AAAA", Format: "wav"}},
+					},
+				}}},
+			}}}
+			if _, err := encode(req); err != nil {
+				t.Fatal(err)
+			}
+			if !warningField(req.Warnings, "tool_result.audio") {
+				t.Fatalf("missing audio warning: %+v", req.Warnings)
+			}
+		})
+	}
+}
+
 func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
 	in := `{"model":"m","messages":[` +
 		`{"role":"user","content":"hi"},` +

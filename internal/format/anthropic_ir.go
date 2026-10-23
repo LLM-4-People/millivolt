@@ -741,7 +741,7 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			}
 			out = append(out, block)
 		case ir.BlockToolResult:
-			content := encodeAnthropicToolResultContent(b.ToolResult.Content)
+			content := encodeAnthropicToolResultContent(b.ToolResult.Content, warns)
 			block := map[string]any{
 				"type": "tool_result", "tool_use_id": b.ToolResult.CallID, "content": content,
 			}
@@ -809,7 +809,7 @@ func encodeAnthropicFile(f *ir.File) map[string]any {
 	return map[string]any{"type": "base64", "media_type": f.MediaType, "data": f.FileData}
 }
 
-func encodeAnthropicToolResultContent(blocks []ir.Block) any {
+func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {
 	if len(blocks) == 0 {
 		return ""
 	}
@@ -834,6 +834,14 @@ func encodeAnthropicToolResultContent(blocks []ir.Block) any {
 			out = append(out, map[string]any{"type": "image", "source": encodeAnthropicImage(b.Image)})
 		case ir.BlockFile:
 			out = append(out, map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)})
+		case ir.BlockAudio:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result.audio", "Anthropic tool results have no audio part")
+			}
+		default:
+			if warns != nil {
+				warns.Add(ir.WarningDropped, "tool_result."+string(b.Type), "block has no Anthropic tool-result equivalent")
+			}
 		}
 	}
 	return out
