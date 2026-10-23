@@ -132,11 +132,18 @@ func TranslateResponse(anthropicBody []byte) ([]byte, error) {
 // StreamToOpenAI reads an Anthropic SSE stream and writes an OpenAI-compatible
 // SSE stream to dst. It is the Chat-from-Anthropic specialization of
 // TranslateStreamBetween; observe receives every raw upstream data payload for
-// source-only cost accounting and must not retain the borrowed bytes.
+// source-only cost accounting and must not retain the borrowed bytes. The
+// event name is dropped here because this wrapper's callers account the
+// payload only; TranslateStreamBetween callers that need terminal
+// classification receive it.
 func StreamToOpenAI(dst io.Writer, src io.Reader, flusher interface{ Flush() }, observe func([]byte)) error {
 	var f http.Flusher
 	if flusher != nil {
 		f = flusher
 	}
-	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, observe)
+	var typed func(string, []byte)
+	if observe != nil {
+		typed = func(_ string, payload []byte) { observe(payload) }
+	}
+	return TranslateStreamBetween(ir.Chat, ir.Anthropic, dst, src, f, typed)
 }

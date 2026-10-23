@@ -1925,8 +1925,8 @@ func (s *Server) transformResponse(ctx context.Context, w http.ResponseWriter, r
 				// (translation failure vs client disconnect) itself. The
 				// tracking writer records the translator's terminal frames so
 				// the handler can close an incomplete stream exactly once.
-				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(payload []byte) {
-					sourceAnalyzer.Feed(payload, time.Now())
+				translationErr = providerformat.TranslateStreamBetween(t.inbound, t.outbound, tracked, resp.Body, nil, func(eventType string, payload []byte) {
+					sourceAnalyzer.FeedEvent(eventType, payload, time.Now())
 					if cost, ok := metrics.ExtractCost(payload, costKeys); ok {
 						sourceCost, sourceCostReported = cost, true
 					}

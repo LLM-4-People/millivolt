@@ -262,8 +262,10 @@ func TranslateResponseBetweenIR(inbound, outbound ir.Protocol, body []byte, sour
 
 // TranslateStreamBetween converts one upstream SSE stream into the inbound
 // protocol's SSE stream. observe, when non-nil, receives every raw upstream
-// data payload (used for source-only cost accounting).
-func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func([]byte)) error {
+// event name and data payload (used for source-only cost accounting). The
+// name is needed for a type-less terminal document whose SSE event name is
+// its only classifier.
+func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io.Reader, flusher http.Flusher, observe func(string, []byte)) error {
 	var dec StreamDecoder
 	switch outbound {
 	case ir.Chat:

@@ -58,7 +58,7 @@ type AnthropicStreamDecoder struct {
 	usage          ir.Usage
 	usageBaseInput int64
 	skipped        map[int]bool
-	observe        func([]byte)
+	observe        func(string, []byte)
 	sawStopReason  bool
 
 	openToolBlocks   int
@@ -69,7 +69,7 @@ type AnthropicStreamDecoder struct {
 
 // NewAnthropicStreamDecoder builds a decoder over one upstream body. observe,
 // when non-nil, receives every raw data payload synchronously.
-func NewAnthropicStreamDecoder(r io.Reader, observe func([]byte)) *AnthropicStreamDecoder {
+func NewAnthropicStreamDecoder(r io.Reader, observe func(string, []byte)) *AnthropicStreamDecoder {
 	return &AnthropicStreamDecoder{
 		r:           newSSEReader(r),
 		skipped:     map[int]bool{},
@@ -109,7 +109,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 		if d.observe != nil {
-			d.observe(raw.Data)
+			d.observe(raw.Name, raw.Data)
 		}
 		var ev anthropicStreamEvent
 		if err := json.Unmarshal(raw.Data, &ev); err != nil {
