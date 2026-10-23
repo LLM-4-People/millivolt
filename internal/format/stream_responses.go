@@ -24,12 +24,12 @@ import (
 // user-tunable.
 const ResponsesStreamRetainedMaxBytes = 8 << 20
 
-// ResponsesStreamItemEnvelopeBytes is the conservative fixed cost charged for
+// responsesStreamItemEnvelopeBytes is the conservative fixed cost charged for
 // one synthesized item's terminal envelope: its type, generated id, status,
 // role and map keys. Provider-controlled call ids and names are charged
 // separately at their actual length. Internal safety guardrail, not
 // user-tunable.
-const ResponsesStreamItemEnvelopeBytes = 512
+const responsesStreamItemEnvelopeBytes = 512
 
 // WireJSONEscapeExpansion is the largest number of bytes MarshalWireJSON emits
 // per retained byte: a control byte becomes the six-byte \u00XX escape. The
@@ -931,7 +931,7 @@ func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) (*respo
 	if len(e.order) >= WireCollectionMax {
 		return nil, fmt.Errorf("responses stream exceeds %d items", WireCollectionMax)
 	}
-	if err := e.retain(ResponsesStreamItemEnvelopeBytes, "item envelope"); err != nil {
+	if err := e.retain(responsesStreamItemEnvelopeBytes, "item envelope"); err != nil {
 		return nil, err
 	}
 	item := &responsesItemState{

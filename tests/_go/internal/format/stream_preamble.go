@@ -298,6 +298,31 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("text followed by delta", func(t *testing.T) {
+		var buf bytes.Buffer
+		enc := NewChatStreamEncoder(&buf, nil)
+		for _, ev := range []*ir.Event{
+			{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
+			{Type: ir.EventBlockStart, Index: 0, Block: &ir.Block{Type: ir.BlockText, Text: "hello"}},
+			{Type: ir.EventBlockDelta, Index: 0, Delta: &ir.Delta{Text: " world"}},
+			{Type: ir.EventBlockEnd, Index: 0},
+			{Type: ir.EventDone},
+		} {
+			if err := enc.Write(ev); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+		}
+		if err := enc.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if got := strings.Count(buf.String(), `"content":"hello"`); got != 1 {
+			t.Fatalf("initial text emitted %d times: %s", got, buf.String())
+		}
+		if !strings.Contains(buf.String(), `"content":" world"`) {
+			t.Fatalf("delta missing after initial text: %s", buf.String())
+		}
+	})
 }
 
 // TestResponsesInitialToolArguments pins C6 on the decoder that discarded
