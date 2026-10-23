@@ -330,6 +330,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// Content parts arrive in response.content_part.added. The
 				// item id is still announced so a terminal document that
 				// repeats the item at another array position is recognized.
+				if err := checkNativeIdentity("message id", item.ID); err != nil {
+					return nil, err
+				}
 				if _, err := d.announceItem(messageItemKey(item.ID, ev.OutputIndex)); err != nil {
 					return nil, err
 				}
@@ -363,9 +366,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// Streaming cannot report the loss, so it is dropped silently.
 				continue
 			}
+			if err := checkNativeIdentity("item id", ev.ItemID); err != nil {
+				return nil, err
+			}
 			itemID := ev.ItemID
 			if itemID == "" {
 				itemID = d.itemIDByOutput[ev.OutputIndex]
+			}
+			if err := checkNativeIdentity("item id", itemID); err != nil {
+				return nil, err
 			}
 			key := contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
 			admitted, err := d.announcePart(key)
@@ -1111,6 +1120,9 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				pending = append(pending, emission)
 			}
 		case "message":
+			if err := checkNativeIdentity("message id", item.ID); err != nil {
+				return nil, err
+			}
 			parts, err := terminalMessageParts(item.Content)
 			if err != nil {
 				return nil, err
