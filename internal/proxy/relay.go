@@ -225,6 +225,34 @@ func (s *Server) nonStreamBody(ctx context.Context, w http.ResponseWriter, body 
 	}
 }
 
+// isNonCompletionStatus reports an upstream status that acknowledges a
+// request without carrying a completion: 202 is an asynchronous acceptance
+// (its body, when present, belongs to the upstream protocol) and 204/205 are
+// status-only. These never enter translation or completion classification.
+func isNonCompletionStatus(status int) bool {
+	return status == http.StatusAccepted || status == http.StatusNoContent || status == http.StatusResetContent
+}
+
+// relayNonCompletionStatus relays a non-completion status verbatim with the
+// upstream headers. It is the one writer for 202/204/205 on both the native and
+// translated paths, so a translated stream cannot inherit its SSE content type
+// before the real status is known.
+func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record) {
+	copyResponseHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
+		return
+	}
+	if isEventStream(resp.Header.Get("Content-Type")) {
+		flusher, _ := w.(http.Flusher)
+		if cerr := copyFlushing(disconnectWriter{w, rec}, resp.Body, flusher); cerr != nil {
+			markStreamErr(ctx, rec, cerr)
+		}
+		return
+	}
+	s.nonStreamBody(ctx, w, resp.Body, rec)
+}
+
 // nonStreamAnalysis is the proxy's single call point for the metrics body
 // analysis. Production always uses metrics.AnalyzeNonStreamBody; the variable
 // is a test seam so the request-path regression can count analyses (one per
@@ -577,22 +605,8 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 		// protocol before the translation and quality branches so neither
 		// path invents an empty completion or translates a non-completion
 		// acknowledgement body.
-		if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
-			copyResponseHeaders(w.Header(), resp.Header)
-			w.WriteHeader(resp.StatusCode)
-			return
-		}
-		if resp.StatusCode == http.StatusAccepted {
-			copyResponseHeaders(w.Header(), resp.Header)
-			w.WriteHeader(resp.StatusCode)
-			if isEventStream(resp.Header.Get("Content-Type")) {
-				flusher, _ := w.(http.Flusher)
-				if cerr := copyFlushing(disconnectWriter{w, rec}, resp.Body, flusher); cerr != nil {
-					markStreamErr(ctx, rec, cerr)
-				}
-			} else {
-				s.nonStreamBody(ctx, w, resp.Body, rec)
-			}
+		if isNonCompletionStatus(resp.StatusCode) {
+			s.relayNonCompletionStatus(ctx, w, resp, rec)
 			return
 		}
 

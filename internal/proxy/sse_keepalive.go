@@ -65,6 +65,18 @@ func (s *Server) newSSEPacerFor(w http.ResponseWriter) *ssePacer {
 
 func (p *ssePacer) Header() http.Header { return p.w.Header() }
 
+// headersCommitted reports whether the status line and headers are already on
+// the wire. A response whose real status and content type still must be
+// preserved can only be relayed while this is false.
+func (p *ssePacer) headersCommitted() bool {
+	if p == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.started
+}
+
 func (p *ssePacer) Unwrap() http.ResponseWriter { return p.w }
 
 func (p *ssePacer) WriteHeader(code int) {
