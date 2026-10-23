@@ -258,3 +258,129 @@ func reasoningDeltaCount(t *testing.T, protocol ir.Protocol, out, want string) i
 	}
 	return count
 }
+
+// TestResponsesNonEmptyStartPayloadEmittedOnce pins R4-1: a non-empty
+// content_part.added start payload is already on the target wire, so a
+// repeated delta or terminal copy must add only the missing suffix.
+func TestResponsesNonEmptyStartPayloadEmittedOnce(t *testing.T) {
+	cases := []struct {
+		name      string
+		value     string
+		source    string
+		countFunc func(*testing.T, ir.Protocol, string, string) int
+	}{
+		{
+			name:  "text terminal repeat",
+			value: "hello",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}
+
+`,
+			countFunc: textDeltaCount,
+		},
+		{
+			name:  "text repeated delta",
+			value: "hello",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello"}}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"hello"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}}
+
+`,
+			countFunc: textDeltaCount,
+		},
+		{
+			name:  "refusal",
+			value: "nope",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"refusal","refusal":"nope"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"refusal","refusal":"nope"}]}]}}
+
+`,
+			countFunc: refusalDeltaCount,
+		},
+		{
+			name:  "reasoning content",
+			value: "think",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"reasoning_text","text":"think"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"think"}]}]}}
+
+`,
+			countFunc: reasoningDeltaCount,
+		},
+	}
+	for _, tc := range cases {
+		for _, target := range terminalTargets {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+					t.Fatalf("TranslateStreamBetween: %v", err)
+				}
+				if got := tc.countFunc(t, target.inbound, buf.String(), tc.value); got != 1 {
+					t.Fatalf("%q emitted %d times, want once: %s", tc.value, got, buf.String())
+				}
+			})
+		}
+	}
+
+	rec := responsesRecord(t, terminalStreamCreated+cases[0].source)
+	if !rec.HadAnswerContent || rec.Chunks != 1 || rec.AnswerTokens != 1 || rec.GenTokens != 1 {
+		t.Fatalf("record = %+v, want one answer chunk without usage", rec)
+	}
+}
+
+func refusalDeltaCount(t *testing.T, protocol ir.Protocol, out, want string) int {
+	t.Helper()
+	count := 0
+	switch protocol {
+	case ir.Responses:
+		for _, payload := range mustResponsePayloads(t, out) {
+			if payload["type"] == "response.refusal.delta" && payload["delta"] == want {
+				count++
+			}
+		}
+	case ir.Anthropic:
+		for _, payload := range mustAnthropicPayloads(t, out) {
+			delta, _ := payload["delta"].(map[string]any)
+			if delta["type"] == "text_delta" && delta["text"] == want {
+				count++
+			}
+		}
+	case ir.Chat:
+		for _, payload := range chatPayloads(t, out) {
+			choices, _ := payload["choices"].([]any)
+			if len(choices) == 0 {
+				continue
+			}
+			delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+			if delta["refusal"] == want {
+				count++
+			}
+		}
+	}
+	return count
+}

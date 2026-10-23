@@ -472,8 +472,12 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			}); err != nil {
 				return err
 			}
-			if ev.Block.Text != "" {
-				return e.emitTextDelta(ev.Index, ev.Block.Text)
+			initial := ev.Block.Text
+			if ev.Block.Type == ir.BlockRefusal {
+				initial = ev.Block.Refusal
+			}
+			if initial != "" {
+				return e.emitTextDelta(ev.Index, initial)
 			}
 			return nil
 		case ir.BlockToolCall:

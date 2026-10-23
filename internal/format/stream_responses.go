@@ -111,11 +111,15 @@ type ResponsesStreamDecoder struct {
 	keyByOutput      map[int]string
 	keyByPart        map[[2]int]string
 	itemIDByOutput   map[int]string
-	// payloadParts and payloadSummary record that an announced channel
-	// actually emitted bytes. Terminal payload is applied only to
-	// announced-but-empty blocks, so an empty announcement cannot suppress
-	// the authoritative terminal value (N14).
-	payloadParts   map[string]bool
+	// emittedText records the bytes already emitted for one announced channel
+	// (content part or reasoning summary part). The terminal document is
+	// authoritative, so a longer value contributes only its missing suffix;
+	// an identical or shorter value is never re-emitted. Keyed by the part
+	// identity (and summary index), never by wire position.
+	emittedText map[string]string
+	// payloadSummary records that a reasoning item's summary channel emitted
+	// bytes. It is retained for the item-level fill guard; per-part coverage
+	// lives in emittedText.
 	payloadSummary map[string]bool
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
@@ -144,7 +148,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		keyByOutput:      map[int]string{},
 		keyByPart:        map[[2]int]string{},
 		itemIDByOutput:   map[int]string{},
-		payloadParts:     map[string]bool{},
+		emittedText:      map[string]string{},
 		payloadSummary:   map[string]bool{},
 		open:             map[int]bool{},
 	}
@@ -350,17 +354,36 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			d.keyByPart[[2]int{ev.OutputIndex, ev.ContentIndex}] = key
 			d.itemIDByOutput[ev.OutputIndex] = itemID
 			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &block})
+			// A non-empty start payload is already on the target wire as part
+			// of the block start. Record it as emitted so a delta or terminal
+			// document that repeats the prefix contributes only new bytes.
+			switch block.Type {
+			case ir.BlockText:
+				if block.Text != "" {
+					d.emittedText[key] = block.Text
+				}
+			case ir.BlockRefusal:
+				if block.Refusal != "" {
+					d.emittedText[key] = block.Refusal
+				}
+			case ir.BlockReasoning:
+				if block.Reasoning != nil && block.Reasoning.Text != "" {
+					d.emittedText[key] = block.Reasoning.Text
+				}
+			}
 		case "response.output_text.delta", "response.refusal.delta":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			idx, ok := d.partBlock[pos]
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" {
-				if key, ok := d.keyByPart[pos]; ok {
-					d.payloadParts[key] = true
+			key := d.keyByPart[pos]
+			if ev.Delta != "" && key != "" {
+				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
+				d.emittedText[key] = coverage
+				if emit != "" {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
 				}
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: ev.Delta}})
 			}
 		case "response.output_text.done", "response.refusal.done":
 			// The done payload is the authoritative full part value. Emit it
@@ -378,7 +401,8 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				text = ev.Refusal
 				block = ir.Block{Type: ir.BlockRefusal}
 			}
-			if d.payloadParts[key] || text == "" {
+			emit := pendingValueSuffix(d.emittedText[key], text)
+			if emit == "" {
 				continue
 			}
 			if _, announced := d.announcedParts[key]; !announced {
@@ -391,14 +415,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				}
 			}
 			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: text}})
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
 			} else {
 				d.terminalPending = append(d.terminalPending, terminalEmission{
 					block: block,
-					delta: &ir.Delta{Text: text},
+					delta: &ir.Delta{Text: emit},
 				})
 			}
-			d.payloadParts[key] = true
+			d.emittedText[key] = text
 		case "response.function_call_arguments.delta":
 			idx, ok := d.itemBlock[ev.OutputIndex]
 			if !ok {
@@ -452,11 +476,13 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" {
-				if key, ok := d.keyByPart[pos]; ok {
-					d.payloadParts[key] = true
+			key := d.keyByPart[pos]
+			if ev.Delta != "" && key != "" {
+				emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
+				d.emittedText[key] = coverage
+				if emit != "" {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 				}
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 			}
 		case "response.reasoning_text.done":
 			// The done payload is authoritative. Emit it only when no delta
@@ -470,9 +496,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				key = contentPartKey(itemID, ev.OutputIndex, ev.ContentIndex)
 			}
-			if d.payloadParts[key] || ev.Text == "" {
-				continue
-			}
 			if _, announced := d.announcedParts[key]; !announced {
 				admitted, err := d.announcePart(key)
 				if err != nil {
@@ -482,17 +505,21 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					continue
 				}
 			}
+			emit := pendingValueSuffix(d.emittedText[key], ev.Text)
+			if emit == "" {
+				continue
+			}
 			if idx, ok := d.partBlock[pos]; ok && d.open[idx] {
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 			} else if idx, ok := d.itemBlock[ev.OutputIndex]; ok && d.open[idx] {
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 			} else {
 				d.terminalPending = append(d.terminalPending, terminalEmission{
 					block: ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Provider: ir.Responses}},
-					delta: &ir.Delta{Reasoning: ev.Text},
+					delta: &ir.Delta{Reasoning: emit},
 				})
 			}
-			d.payloadParts[key] = true
+			d.emittedText[key] = ev.Text
 		case "response.content_part.done":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			idx, ok := d.partBlock[pos]
@@ -798,15 +825,20 @@ func (d *ResponsesStreamDecoder) fillAnnouncedTerminal(output []responsesWireIte
 			}
 			for _, part := range parts {
 				key := d.terminalPartKey(item.ID, i, part.contentIndex)
-				if !d.announcedParts[key] || d.payloadParts[key] {
+				if !d.announcedParts[key] {
+					continue
+				}
+				value := part.delta.Text
+				emit := pendingValueSuffix(d.emittedText[key], value)
+				if emit == "" {
 					continue
 				}
 				if idx, ok := d.partBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: part.delta})
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
 				} else {
-					pending = append(pending, terminalEmission{block: part.block, delta: part.delta})
+					pending = append(pending, terminalEmission{block: part.block, delta: &ir.Delta{Text: emit}})
 				}
-				d.payloadParts[key] = true
+				d.emittedText[key] = value
 			}
 		case "reasoning":
 			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
@@ -834,34 +866,36 @@ func (d *ResponsesStreamDecoder) fillAnnouncedTerminal(output []responsesWireIte
 					continue
 				}
 				partKey := d.terminalPartKey(item.ID, i, part.contentIndex)
-				if d.payloadParts[partKey] {
-					continue
-				}
-				if d.announcedParts[partKey] {
-					if idx, ok := d.partBlockByKey[partKey]; ok && d.open[idx] {
-						d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.delta.Text}})
-					} else {
+				if !d.announcedParts[partKey] {
+					// The item was announced but this content part was not;
+					// the terminal document is the only source for it.
+					admitted, err := d.announcePart(partKey)
+					if err != nil {
+						return nil, err
+					}
+					if admitted {
 						pending = append(pending, terminalEmission{
 							block: reasoningTerminalBlock(item),
 							delta: &ir.Delta{Reasoning: part.delta.Text},
 						})
+						d.emittedText[partKey] = part.delta.Text
 					}
-					d.payloadParts[partKey] = true
 					continue
 				}
-				// The item was announced but this content part was not; the
-				// terminal document is the only source for it.
-				admitted, err := d.announcePart(partKey)
-				if err != nil {
-					return nil, err
+				value := part.delta.Text
+				emit := pendingValueSuffix(d.emittedText[partKey], value)
+				if emit == "" {
+					continue
 				}
-				if admitted {
+				if idx, ok := d.partBlockByKey[partKey]; ok && d.open[idx] {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+				} else {
 					pending = append(pending, terminalEmission{
 						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: part.delta.Text},
+						delta: &ir.Delta{Reasoning: emit},
 					})
-					d.payloadParts[partKey] = true
 				}
+				d.emittedText[partKey] = value
 			}
 		}
 	}
@@ -1123,6 +1157,45 @@ func contentPartKey(itemID string, outputIndex, contentIndex int) string {
 		return "part:" + itemID + ":" + strconv.Itoa(contentIndex)
 	}
 	return "output:" + strconv.Itoa(outputIndex) + ":part:" + strconv.Itoa(contentIndex)
+}
+
+// pendingDeltaSuffix returns the bytes a streamed delta contributes after the
+// coverage already emitted for its channel, plus the new coverage. A delta
+// that repeats the emitted prefix contributes only its continuation; an exact
+// or shorter repeat contributes nothing. Anything else is ordinary
+// continuation text.
+func pendingDeltaSuffix(emitted, delta string) (string, string) {
+	if delta == "" {
+		return "", emitted
+	}
+	if emitted == "" {
+		return delta, delta
+	}
+	if strings.HasPrefix(delta, emitted) {
+		return delta[len(emitted):], delta
+	}
+	if strings.HasPrefix(emitted, delta) {
+		return "", emitted
+	}
+	return delta, emitted + delta
+}
+
+// pendingValueSuffix returns the bytes of a cumulative done/terminal value not
+// already emitted for its channel. A value that is identical to or a prefix of
+// the emitted bytes contributes nothing. A divergent value contributes nothing
+// as well: re-emitting it would duplicate a visible prefix, which is worse
+// than keeping the bytes the client already saw.
+func pendingValueSuffix(emitted, value string) string {
+	if value == "" {
+		return ""
+	}
+	if emitted == "" {
+		return value
+	}
+	if strings.HasPrefix(value, emitted) {
+		return value[len(emitted):]
+	}
+	return ""
 }
 
 // responsesSummaryText joins the non-empty text parts of a Responses
