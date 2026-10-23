@@ -520,8 +520,19 @@ func TerminalLine(line []byte) bool {
 	if !ok {
 		return false
 	}
-	return string(bytes.TrimRight(payload, "\r")) == "[DONE]" ||
-		responsesTerminalEvent(responseEventType(payload))
+	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" || responsesTerminalEvent(responseEventType(payload)) {
+		return true
+	}
+	// Anthropic Messages closes with message_stop. A content string that
+	// happens to contain the same text is not a top-level type, so decode the
+	// discriminator rather than scanning for the bytes.
+	if !bytes.Contains(payload, []byte(`"type"`)) {
+		return false
+	}
+	var ev struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(payload, &ev) == nil && ev.Type == "message_stop"
 }
 
 // Fill populates rec with the analyzer's accumulated state. Call after the

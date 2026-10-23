@@ -287,6 +287,30 @@ func chatRequestBody(b []byte) bool {
 		bytes.Contains(b, []byte(`"prompt"`))
 }
 
+// chatShapedResponse reports whether the UPSTREAM response follows the
+// Chat/Responses completion contract. The known target protocols are
+// authoritative; an arbitrary passthrough path falls back to the request-body
+// heuristic. Anthropic Messages also uses a "messages" array, so the heuristic
+// alone would put its legitimate empty and thinking-only turns into the
+// OpenAI degenerate-substitution and rescue rules.
+func chatShapedResponse(t *target, body []byte) bool {
+	if t != nil {
+		switch t.outbound {
+		case ir.Chat, ir.Responses, ir.Cursor:
+			return true
+		case ir.Anthropic:
+			return false
+		}
+		switch t.inbound {
+		case ir.Chat, ir.Responses, ir.Cursor:
+			return true
+		case ir.Anthropic:
+			return false
+		}
+	}
+	return chatRequestBody(body)
+}
+
 // qualitySpoolReadCap is the most one spool attempt can hold: the kept body
 // cap plus the single overflowing read chunk. The overflowing chunk is
 // retained so the verbatim streaming passthrough loses no byte, so the
@@ -732,7 +756,7 @@ func (s *Server) serveNonStreaming(ctx context.Context, w http.ResponseWriter, r
 			return
 		}
 
-		if code := analysis.Outcome; code != "" || (len(bytes.TrimSpace(spooled)) == 0 && chatRequestBody(body)) {
+		if code := analysis.Outcome; code != "" || (len(bytes.TrimSpace(spooled)) == 0 && chatShapedResponse(t, body)) {
 			if code == "" {
 				// An entirely empty 200 body classifies as the same void the
 				// structured forms do - gated on the REQUEST being chat-shaped
@@ -842,7 +866,7 @@ func (s *Server) streamBodyWithRetry(ctx context.Context, w http.ResponseWriter,
 	thinkingLeft := s.cfg().ThinkingRetries
 	for {
 		uerr := &upstreamErrorRescue{}
-		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, chatRequestBody(body))
+		rescue := s.streamBody(ctx, w, resp.Body, rec, qualityLeft > 0, thinkingLeft > 0, uerr, chatShapedResponse(t, body))
 		if rescue == rescueNone {
 			return
 		}

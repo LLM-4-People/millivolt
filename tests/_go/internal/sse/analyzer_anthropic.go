@@ -122,6 +122,15 @@ func TestAnalyzerAnthropicTruncationAndError(t *testing.T) {
 	})
 }
 
+func TestTerminalLineAnthropicMessageStop(t *testing.T) {
+	if !TerminalLine([]byte(`data: {"type":"message_stop"}`)) {
+		t.Fatal("message_stop was not recognized as a terminal line")
+	}
+	if TerminalLine([]byte(`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"message_stop"}}`)) {
+		t.Fatal("a content string containing message_stop was treated as terminal")
+	}
+}
+
 func TestAnalyzerAnthropicDoesNotClassifyChat(t *testing.T) {
 	var a Analyzer
 	a.Feed([]byte(`data: {"choices":[{"delta":{"content":"hi"}}]}`), time.Unix(1, 0))

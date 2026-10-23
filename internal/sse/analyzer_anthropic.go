@@ -63,7 +63,10 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 	}
 	switch ev.Type {
 	case "message_start":
-		a.chatlike = true
+		// The caller owns the chatlike seed: an Anthropic wire is not a
+		// Chat/Responses feed, so its legitimate empty or thinking-only turn
+		// must never enter the OpenAI degenerate substitution rules. Token,
+		// usage, tool and finish accounting below still applies.
 		if ev.Message.ID != "" {
 			a.reqID = ev.Message.ID
 		}

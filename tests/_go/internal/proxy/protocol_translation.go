@@ -351,6 +351,71 @@ func TestTranslationLossPolicy(t *testing.T) {
 	})
 }
 
+// TestAnthropicPassthroughKeepsDegenerateTurns pins the no-translation
+// contract for the new Anthropic client path: an empty end_turn and a
+// thinking-only end_turn are legitimate Anthropic turns, so the OpenAI
+// degenerate substitution and reasoning rescue must not rewrite them or
+// re-send the request.
+func TestAnthropicPassthroughKeepsDegenerateTurns(t *testing.T) {
+	streams := map[string]string{
+		"empty end_turn": strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":3,"output_tokens":0}}}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":0}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+			``,
+		}, "\n"),
+		"thinking only": strings.Join([]string{
+			`event: message_start`,
+			`data: {"type":"message_start","message":{"id":"msg_1","model":"claude","usage":{"input_tokens":3,"output_tokens":0}}}`,
+			``,
+			`event: content_block_start`,
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+			``,
+			`event: content_block_delta`,
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}`,
+			``,
+			`event: content_block_stop`,
+			`data: {"type":"content_block_stop","index":0}`,
+			``,
+			`event: message_delta`,
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`,
+			``,
+			`event: message_stop`,
+			`data: {"type":"message_stop"}`,
+			``,
+			``,
+		}, "\n"),
+	}
+	for name, stream := range streams {
+		t.Run(name, func(t *testing.T) {
+			up := newFixtureUpstream(t, "text/event-stream", 200, stream)
+			s := New(config.Default(), metrics.Noop{})
+			s.client.Store(&http.Client{Transport: rewriteTransport{target: up.server.URL}})
+
+			body := `{"model":"claude","max_tokens":16,"stream":true,"messages":[{"role":"user","content":"hi"}]}`
+			w := proxyRequest(t, s, "/v1/messages", "", body)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", w.Code, w.Body.String())
+			}
+			if got := w.Body.String(); got != stream {
+				t.Fatalf("passthrough body changed:\n got %q\nwant %q", got, stream)
+			}
+			if up.calls.Load() != 1 {
+				t.Fatalf("upstream calls = %d, want 1 (no degenerate re-send)", up.calls.Load())
+			}
+			if strings.Contains(w.Body.String(), "[DONE]") || strings.Contains(w.Body.String(), `"choices"`) {
+				t.Fatalf("Anthropic passthrough gained OpenAI frames: %s", w.Body.String())
+			}
+		})
+	}
+}
+
 // TestCursorTargetRejectsNonChatClient pins the documented bridge limitation:
 // a Responses or Anthropic client targeting Cursor is rejected at the routing
 // boundary instead of receiving a Chat-shaped envelope.
