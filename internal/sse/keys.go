@@ -16,6 +16,7 @@ import (
 // frames.
 type frameKeys struct {
 	content      []byte
+	delta        []byte
 	toolCalls    []byte
 	finishReason []byte
 	usage        []byte
@@ -134,7 +135,7 @@ const (
 	keyNone frameKey = iota
 	keyID
 	keyType
-	keyDelta
+	keyDeltaValue
 	keyUsage
 	keyModel
 	keyError
@@ -162,7 +163,7 @@ func identifyFrameKey(key []byte) frameKey {
 	case "type":
 		return keyType
 	case "delta":
-		return keyDelta
+		return keyDeltaValue
 	case "usage":
 		return keyUsage
 	case "model":
@@ -307,9 +308,12 @@ func (k *frameKeys) observe(id frameKey, value []byte, top bool, depth int) {
 		if top && len(value) > 0 && value[0] == '"' {
 			k.eventType = value
 		}
-	case keyDelta:
+	case keyDeltaValue:
 		if !k.deltaNonEmpty {
 			k.deltaNonEmpty = nonEmptyJSONValue(value)
+		}
+		if k.delta == nil {
+			k.delta = value
 		}
 	case keyUsage:
 		if k.usage == nil {

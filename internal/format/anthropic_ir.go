@@ -748,6 +748,9 @@ func encodeAnthropicBlocks(blocks []ir.Block, role ir.Role, warns *ir.Warnings) 
 			out = append(out, block)
 		case ir.BlockFile:
 			block := map[string]any{"type": "document", "source": encodeAnthropicFile(b.File)}
+			if b.File != nil && b.File.Filename != "" {
+				block["title"] = b.File.Filename
+			}
 			if b.CacheControl != nil {
 				block["cache_control"] = b.CacheControl
 			}

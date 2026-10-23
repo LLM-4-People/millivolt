@@ -183,3 +183,27 @@ func warned(warnings ir.Warnings, field string) bool {
 	}
 	return false
 }
+
+func TestAnthropicDocumentTitlePreserved(t *testing.T) {
+	body := `{"model":"m","max_tokens":10,"messages":[{"role":"user","content":[` +
+		`{"type":"document","title":"spec.pdf","source":{"type":"base64",` +
+		`"media_type":"application/pdf","data":"JVBERi0="}}]}]}`
+	req, err := DecodeAnthropicRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(req.Messages) != 1 || len(req.Messages[0].Content) != 1 {
+		t.Fatalf("decoded content = %+v", req.Messages)
+	}
+	file := req.Messages[0].Content[0].File
+	if file == nil || file.Filename != "spec.pdf" {
+		t.Fatalf("document title = %+v, want spec.pdf", file)
+	}
+	out, err := EncodeAnthropicRequest(req, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"title":"spec.pdf"`) {
+		t.Fatalf("document title was not re-emitted: %s", out)
+	}
+}

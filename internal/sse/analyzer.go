@@ -312,6 +312,11 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 			if a.preview == nil {
 				a.preview = extractPreview(keys.text)
 			}
+			if a.preview == nil && responsesContentEvent(eventType, &keys) {
+				// Responses streams carry answer text in a top-level "delta"
+				// string, not choices[].content/text.
+				a.preview = extractPreview(keys.delta)
+			}
 		}
 	}
 

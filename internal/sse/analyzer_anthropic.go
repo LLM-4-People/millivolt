@@ -11,6 +11,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"time"
+
+	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
 type anthropicAnalyzerUsage struct {
@@ -24,22 +26,24 @@ type anthropicAnalyzerUsage struct {
 }
 
 type anthropicAnalyzerEvent struct {
-	Type    string `json:"type"`
-	Message struct {
-		ID    string                  `json:"id"`
-		Model string                  `json:"model"`
-		Usage *anthropicAnalyzerUsage `json:"usage"`
-	} `json:"message"`
+	Type string `json:"type"`
+	// Message is raw because it is an object on message_start and a plain
+	// string on a standalone error event; a typed object field would reject
+	// the whole error frame.
+	Message      json.RawMessage `json:"message"`
+	Code         string          `json:"code"`
 	ContentBlock struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-		ID   string `json:"id"`
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		ID    string `json:"id"`
+		Title string `json:"title"`
 	} `json:"content_block"`
 	Delta struct {
-		Type       string `json:"type"`
-		Text       string `json:"text"`
-		Thinking   string `json:"thinking"`
-		StopReason string `json:"stop_reason"`
+		Type        string `json:"type"`
+		Text        string `json:"text"`
+		Thinking    string `json:"thinking"`
+		PartialJSON string `json:"partial_json"`
+		StopReason  string `json:"stop_reason"`
 	} `json:"delta"`
 	Usage *anthropicAnalyzerUsage `json:"usage"`
 	Error *struct {
@@ -72,28 +76,50 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 		// Chat/Responses feed, so its legitimate empty or thinking-only turn
 		// must never enter the OpenAI degenerate substitution rules. Token,
 		// usage, tool and finish accounting below still applies.
-		if ev.Message.ID != "" {
-			a.reqID = ev.Message.ID
+		var msg struct {
+			ID    string                  `json:"id"`
+			Model string                  `json:"model"`
+			Usage *anthropicAnalyzerUsage `json:"usage"`
 		}
-		if ev.Message.Model != "" {
-			a.model = ev.Message.Model
-		}
-		if ev.Message.Usage != nil {
-			a.setAnthropicUsage(ev.Message.Usage)
+		if json.Unmarshal(ev.Message, &msg) == nil {
+			if msg.ID != "" {
+				a.reqID = msg.ID
+			}
+			if msg.Model != "" {
+				a.model = msg.Model
+			}
+			if msg.Usage != nil {
+				a.setAnthropicUsage(msg.Usage)
+			}
 		}
 		return true
 	case "content_block_start":
 		if ev.ContentBlock.Type == "tool_use" {
 			a.toolCalls++
 			a.retainToolName(ev.ContentBlock.Name)
+			// A tool-only Anthropic stream must still record its first token
+			// and a chunk count: the arguments are generated output even
+			// though they are not answer text.
+			a.recordAnthropicToolToken(now)
 		}
 		return true
 	case "content_block_delta":
 		switch ev.Delta.Type {
 		case "text_delta":
-			a.recordAnthropicToken(now, true)
+			if ev.Delta.Text != "" {
+				a.recordAnthropicToken(now, true)
+				if a.CapturePreview && a.preview == nil {
+					a.preview = []byte(metrics.TruncatePreview(ev.Delta.Text))
+				}
+			}
 		case "thinking_delta":
-			a.recordAnthropicToken(now, false)
+			if ev.Delta.Thinking != "" {
+				a.recordAnthropicToken(now, false)
+			}
+		case "input_json_delta":
+			if ev.Delta.PartialJSON != "" {
+				a.recordAnthropicToolToken(now)
+			}
 		}
 		return true
 	case "message_delta":
@@ -111,7 +137,19 @@ func (a *Analyzer) feedAnthropic(payload []byte, now time.Time) bool {
 	case "error":
 		if ev.Error != nil {
 			a.setStreamError(ev.Error.Type, "", ev.Error.Message)
+		} else {
+			// A standalone Responses error event has no nested error object:
+			// its code and message are top-level siblings of the type. The
+			// message is a plain string, decoded from the raw field.
+			var msg string
+			_ = json.Unmarshal(ev.Message, &msg)
+			if ev.Code != "" || msg != "" {
+				a.setStreamError("provider_error", ev.Code, msg)
+			}
 		}
+		// An error event is a terminal statement on every wire that carries
+		// one; never leave the analyzer waiting for a marker after it.
+		a.terminatorSeen = true
 		return true
 	case "ping":
 		return true
@@ -134,6 +172,17 @@ func (a *Analyzer) recordAnthropicToken(now time.Time, answer bool) {
 	if a.firstReasoningAt.IsZero() {
 		a.firstReasoningAt = now
 	}
+}
+
+// recordAnthropicToolToken accounts one tool-call event as generated output:
+// it sets TTFT and the chunk count but never marks answer text or reasoning.
+func (a *Analyzer) recordAnthropicToolToken(now time.Time) {
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount++
+	a.toolChunks++
 }
 
 // setAnthropicUsage folds Anthropic's split cache accounting into the
