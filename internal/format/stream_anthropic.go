@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
@@ -211,6 +212,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: ev.Index, Delta: out})
 		case "content_block_stop":
+			open := d.openBlocks[ev.Index]
 			delete(d.openBlocks, ev.Index)
 			if n, ok := d.toolInitial[ev.Index]; ok {
 				d.openToolBlocks--
@@ -219,6 +221,11 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			if d.skipped[ev.Index] {
 				delete(d.skipped, ev.Index)
+				continue
+			}
+			if !open {
+				// A terminal event already closed this block; a late stop must
+				// not emit a second BlockEnd for an index the client saw closed.
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: ev.Index})
@@ -240,6 +247,7 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			if delta.StopReason != "" {
 				d.sawStopReason = true
 			}
+			d.closeOpenBlocks()
 			finish := &ir.Finish{Reason: anthropicFinishReason(delta.StopReason)}
 			if delta.StopSequence != nil {
 				finish.StopSequence = *delta.StopSequence
@@ -248,19 +256,13 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			d.q.push(&ir.Event{Type: ir.EventMessageDelta, Finish: finish, Usage: &u})
 		case "message_stop":
 			d.terminal = true
-			d.openToolBlocks = 0
-			d.toolInitialBytes = 0
-			d.toolInitial = map[int]int{}
-			d.openBlocks = map[int]bool{}
+			d.closeOpenBlocks()
 			d.q.push(&ir.Event{Type: ir.EventDone})
 		case "ping":
 			continue
 		case "error":
 			d.terminal = true
-			d.openToolBlocks = 0
-			d.toolInitialBytes = 0
-			d.toolInitial = map[int]int{}
-			d.openBlocks = map[int]bool{}
+			d.closeOpenBlocks()
 			if ev.Error == nil || (ev.Error.Type == "" && ev.Error.Message == "") {
 				// An empty error object is not a provider statement; treat it
 				// exactly like a missing completion marker.
@@ -277,6 +279,25 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			continue
 		}
 	}
+}
+
+// closeOpenBlocks emits one BlockEnd for every block still open when a
+// terminal event arrives, in index order. Anthropic normally sends an explicit
+// content_block_stop, but a provider may omit it before message_delta or
+// message_stop; every target encoder requires the block lifecycle to close.
+func (d *AnthropicStreamDecoder) closeOpenBlocks() {
+	indices := make([]int, 0, len(d.openBlocks))
+	for idx := range d.openBlocks {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, idx := range indices {
+		d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
+	}
+	clear(d.openBlocks)
+	clear(d.toolInitial)
+	d.openToolBlocks = 0
+	d.toolInitialBytes = 0
 }
 
 func (d *AnthropicStreamDecoder) mergeUsage(u *anthropicStreamUsage) error {

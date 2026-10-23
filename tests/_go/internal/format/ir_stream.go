@@ -357,6 +357,40 @@ func TestResponsesStreamRetainedBound(t *testing.T) {
 	}
 }
 
+// TestAnthropicTerminalClosesOpenBlocks pins the target-encoder invariant when
+// an Anthropic provider omits content_block_stop: the decoder closes the block
+// before the finish event, and a late stop does not close it twice.
+func TestAnthropicTerminalClosesOpenBlocks(t *testing.T) {
+	in := `event: message_start
+data: {"type":"message_start","message":{"id":"msg_1","model":"m","usage":{"input_tokens":1,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_stop
+data: {"type":"message_stop"}
+
+`
+	var buf bytes.Buffer
+	collectStream(t, NewAnthropicStreamDecoder(strings.NewReader(in), nil), NewResponsesStreamEncoder(&buf, nil))
+	out := buf.String()
+	if n := strings.Count(out, "event: response.content_part.done"); n != 1 {
+		t.Fatalf("content_part.done count = %d, want 1:\n%s", n, out)
+	}
+	if n := strings.Count(out, "event: response.completed"); n != 1 {
+		t.Fatalf("response.completed count = %d, want 1:\n%s", n, out)
+	}
+}
+
 func TestChatStreamUsagePositions(t *testing.T) {
 	const (
 		head   = `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}` + "\n\n"
