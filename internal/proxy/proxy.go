@@ -584,13 +584,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// one that supplied the tracked value.
 		stripParams = subEntry.Params
 	}
-	// The provider's ensured tool names are a third actor of the same engine,
-	// but only on the OpenAI wire: the stubs are chat/completions-shaped, so
-	// a translated-anthropic or cursor body must not receive them. Token
-	// ceilings and strip keep their wider wire reach.
-	// ensure_tools stubs are Chat-shaped and must be injected into a Chat
-	// client body on a Chat outbound wire; any other combination is either
-	// already a different tool schema or not a Chat body at all.
+	// ensure_tools is a third actor of the same engine. Its stubs are
+	// Chat-shaped, so they are injected only into a Chat client body on a Chat
+	// outbound wire; any other combination is already a different tool schema
+	// or not a Chat body at all.
 	var ensureTools []string
 	if isOpenAIWire(t.format) && t.inbound == ir.Chat {
 		if prof, ok := s.cfg().Providers[t.provider]; ok {
@@ -639,8 +636,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// feeds the Acquire-time token estimate with no further range check, so
 	// an unbounded cap could wrap the estimate negative (skipping the
 	// reservation) or debit the provider token bucket by the attacker-chosen
-	// amount. max_tokens and max_completion_tokens both decode into
-	// ReqMaxTokens, so one bound covers every spelling. Only the top end:
+	// amount. Every accepted token-ceiling spelling decodes into ReqMaxTokens,
+	// so one bound covers all of them. Only the top end:
 	// zero/negative values cannot reach the overflow arithmetic and some
 	// backends treat 0/-1 as unlimited.
 	if hostileTokenCap(rec.ReqMaxTokens) {
