@@ -829,33 +829,35 @@ func TestTranslateResponseContentAllocationLinear(t *testing.T) {
 }
 
 // TestTranslateRequestToolChoiceShapes pins every accepted and rejected
-// tool_choice shape at the translator owner. Object cases compare the emitted
-// tool_choice document byte-for-byte against fixed fixtures, including the
-// established absent-name null and non-string-name pass-through behavior.
+// tool_choice shape at the translator owner. A restriction the target cannot
+// represent (allowed_tools, an unknown type, a missing or non-string name)
+// fails closed: dropping it would broaden tool access.
 func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		raw  string // empty means the key is absent
-		want string // empty means the translated request carries no tool_choice
+		name    string
+		raw     string // empty means the key is absent
+		want    string // empty means the translated request carries no tool_choice
+		wantErr bool
 	}{
-		{"absent", "", ""},
-		{"null", "null", ""},
-		{"auto", `"auto"`, `{"type":"auto"}`},
-		{"none", `"none"`, `{"type":"none"}`},
-		{"required", `"required"`, `{"type":"any"}`},
-		{"unknown shorthand", `"sometimes"`, ""},
-		{"function object", `{"type":"function","function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
-		{"object without type", `{"function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`},
-		{"empty name", `{"function":{"name":""}}`, `{"name":"","type":"tool"}`},
-		{"function without name", `{"function":{}}`, `{"name":null,"type":"tool"}`},
-		{"null name", `{"function":{"name":null}}`, `{"name":null,"type":"tool"}`},
-		{"non-string name", `{"function":{"name":7}}`, `{"name":7,"type":"tool"}`},
-		{"null function", `{"function":null}`, ""},
-		{"string function", `{"function":"weather"}`, ""},
-		{"array", `[1,2]`, ""},
-		{"number", `7`, ""},
-		{"boolean", `true`, ""},
-		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`},
+		{"absent", "", "", false},
+		{"null", "null", "", false},
+		{"auto", `"auto"`, `{"type":"auto"}`, false},
+		{"none", `"none"`, `{"type":"none"}`, false},
+		{"required", `"required"`, `{"type":"any"}`, false},
+		{"unknown shorthand", `"sometimes"`, "", true},
+		{"function object", `{"type":"function","function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`, false},
+		{"object without type", `{"function":{"name":"weather"}}`, `{"name":"weather","type":"tool"}`, false},
+		{"empty name", `{"function":{"name":""}}`, "", true},
+		{"function without name", `{"function":{}}`, "", true},
+		{"null name", `{"function":{"name":null}}`, "", true},
+		{"non-string name", `{"function":{"name":7}}`, "", true},
+		{"null function", `{"function":null}`, "", true},
+		{"string function", `{"function":"weather"}`, "", true},
+		{"array", `[1,2]`, "", true},
+		{"number", `7`, "", true},
+		{"boolean", `true`, "", true},
+		{"allowed tools", `{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[]}}`, "", true},
+		{"unknown members", `{"type":"function","function":{"name":"f"},"x":[1,{"y":2}]}`, `{"name":"f","type":"tool"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := `{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"lookup","parameters":{}}}]`
@@ -864,6 +866,12 @@ func TestTranslateRequestToolChoiceShapes(t *testing.T) {
 			}
 			body += `}`
 			out, err := TranslateRequest([]byte(body), 64, "")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("tool_choice %s was accepted: %s", tc.raw, out)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

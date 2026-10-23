@@ -266,10 +266,6 @@ const (
 type ToolChoice struct {
 	Mode ToolChoiceMode `json:"mode"`
 	Name string         `json:"name,omitempty"`
-	// NameRaw preserves a non-string or absent function name from a lenient
-	// source. The Anthropic encoder passes it through; other encoders use
-	// Name and warn when it is empty.
-	NameRaw json.RawMessage `json:"name_raw,omitempty"`
 }
 
 // ResponseFormat is the normalized structured-output request.
@@ -486,12 +482,19 @@ func ValidateRequest(r *Request) error {
 		if t.Type != "" && t.Type != "function" {
 			return fmt.Errorf("ir: tool %d has unsupported type %q", i, t.Type)
 		}
+		if params := bytes.TrimSpace(t.Parameters); len(params) > 0 {
+			if !json.Valid(params) || params[0] != '{' {
+				return fmt.Errorf("ir: tool %d parameters must be a JSON object", i)
+			}
+		}
 	}
 	if r.ToolChoice != nil {
 		switch r.ToolChoice.Mode {
 		case ToolChoiceAuto, ToolChoiceNone, ToolChoiceRequired:
 		case ToolChoiceTool:
-			if strings.TrimSpace(r.ToolChoice.Name) == "" && len(r.ToolChoice.NameRaw) == 0 {
+			// A non-string wire name is rejected by the decoder; a tool
+			// choice without a real name would broaden access to every tool.
+			if strings.TrimSpace(r.ToolChoice.Name) == "" {
 				return fmt.Errorf("ir: tool_choice mode %q requires a name", r.ToolChoice.Mode)
 			}
 		default:

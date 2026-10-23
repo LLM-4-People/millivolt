@@ -930,11 +930,7 @@ func encodeAnthropicToolChoice(tc *ir.ToolChoice, parallel *bool) map[string]any
 		out["type"] = "any"
 	case ir.ToolChoiceTool:
 		out["type"] = "tool"
-		if len(tc.NameRaw) > 0 {
-			out["name"] = tc.NameRaw
-		} else {
-			out["name"] = tc.Name
-		}
+		out["name"] = tc.Name
 	default:
 		out["type"] = "auto"
 	}

@@ -735,8 +735,10 @@ func decodeChatToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
 			return &ir.ToolChoice{Mode: ir.ToolChoiceNone}, nil
 		case "required":
 			return &ir.ToolChoice{Mode: ir.ToolChoiceRequired}, nil
+		case "":
+			return nil, nil
 		}
-		return nil, nil
+		return nil, errParseOpenAIBody(fmt.Errorf("unsupported tool_choice %q", shorthand))
 	}
 	var obj struct {
 		Type     string `json:"type"`
@@ -745,23 +747,26 @@ func decodeChatToolChoice(raw json.RawMessage) (*ir.ToolChoice, error) {
 		} `json:"function"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, nil
+		return nil, errParseOpenAIBody(err)
 	}
-	if obj.Function == nil || (obj.Type != "" && obj.Type != "function") {
-		return nil, nil
+	if obj.Type != "" && obj.Type != "function" {
+		// allowed_tools names an explicit subset of tools. Dropping it would
+		// let the model call tools the client excluded, so refuse instead.
+		return nil, errParseOpenAIBody(fmt.Errorf(
+			"tool_choice type %q cannot be translated without broadening tool access", obj.Type))
+	}
+	if obj.Function == nil {
+		return nil, errParseOpenAIBody(errors.New("tool_choice object has no function"))
 	}
 	tc := &ir.ToolChoice{Mode: ir.ToolChoiceTool}
-	if len(obj.Function.Name) == 0 || bytes.Equal(bytes.TrimSpace(obj.Function.Name), []byte("null")) {
-		tc.NameRaw = json.RawMessage("null")
-		return tc, nil
+	if len(obj.Function.Name) == 0 || !json.Valid(obj.Function.Name) {
+		return nil, errParseOpenAIBody(errors.New("tool_choice.function.name must be a string"))
 	}
 	var name string
-	if err := json.Unmarshal(obj.Function.Name, &name); err == nil {
-		tc.Name = name
-		tc.NameRaw = obj.Function.Name
-		return tc, nil
+	if err := json.Unmarshal(obj.Function.Name, &name); err != nil || strings.TrimSpace(name) == "" {
+		return nil, errParseOpenAIBody(errors.New("tool_choice.function.name must be a non-empty string"))
 	}
-	tc.NameRaw = obj.Function.Name
+	tc.Name = name
 	return tc, nil
 }
 
