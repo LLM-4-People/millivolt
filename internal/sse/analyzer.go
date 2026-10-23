@@ -397,7 +397,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	if responsesTerminalEvent(eventType) {
 		a.terminatorSeen = true
 		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.captureResponsesTerminalFinish(eventType, payload)
+		a.captureResponsesTerminalFinish(eventType, payload, now)
 	}
 	// A Responses failure states its provider error under response.error, not
 	// the top-level error key the frame gate looks for. Decode it only on the
@@ -566,7 +566,7 @@ func responsesTerminalEvent(eventType string) bool {
 // classified as an empty completion and a completed answer kept no reason.
 // The terminal document may also be the only place the turn's output appears,
 // so text, refusal and reasoning presence are recorded here before classifying.
-func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte) {
+func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte, now time.Time) {
 	var ev struct {
 		Response struct {
 			ID                string `json:"id"`
@@ -602,10 +602,27 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 				// is never classified as empty and replaced by a failure.
 				a.countResponsesToolCall(item.CallID, item.Name)
 			case "message":
-				if text := terminalMessageText(item.Content); text != "" {
+				text, refusal := terminalMessageText(item.Content)
+				if text != "" {
 					a.answerishSeen = true
+					// The terminal document is the whole stream for a
+					// terminal-only answer: mark content presence and TTFT so
+					// the record matches the streamed equivalent (N17).
+					// A streamed text delta already owns the timestamp; the
+					// terminal document merely repeats its value.
+					if a.firstAnswerAt.IsZero() {
+						a.recordTerminalAnswer(now)
+					}
 					if a.CapturePreview && a.preview == nil {
 						a.preview = []byte(metrics.TruncatePreview(text))
+					}
+				} else if refusal != "" {
+					// A refusal is answer-shaped output but not answer
+					// content, exactly like a refusal delta: presence for
+					// classification/rescue gates, never HadAnswerContent.
+					a.answerishSeen = true
+					if a.CapturePreview && a.preview == nil {
+						a.preview = []byte(metrics.TruncatePreview(refusal))
 					}
 				}
 			case "reasoning":
@@ -645,19 +662,32 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 }
 
-// terminalMessageText returns the first non-empty answer or refusal text in a
-// message item's terminal content. The value may be a plain string or the
-// documented part array.
-func terminalMessageText(raw json.RawMessage) string {
-	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return ""
+// recordTerminalAnswer records the first content-bearing unit of a terminal
+// Responses document. The terminal event is the chunk that carried it, so it
+// feeds the same TTFT/chunk-count accounting as a streamed output_text delta.
+func (a *Analyzer) recordTerminalAnswer(now time.Time) {
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
 	}
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text
+	a.lastTokenAt = now
+	a.chunkCount++
+	a.firstAnswerAt = now
+}
+
+// terminalMessageText returns the first non-empty answer text and refusal text
+// in a message item's terminal content. The value may be a plain string or the
+// documented part array. The two kinds stay separate: only text is answer
+// content, while a refusal is answer-shaped bytes.
+func terminalMessageText(raw json.RawMessage) (text, refusal string) {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return "", ""
+	}
+	var plain string
+	if json.Unmarshal(raw, &plain) == nil {
+		return plain, ""
 	}
 	if !metrics.ContentPartsWithinLimit(raw) {
-		return ""
+		return "", ""
 	}
 	var parts []struct {
 		Type    string `json:"type"`
@@ -665,21 +695,21 @@ func terminalMessageText(raw json.RawMessage) string {
 		Refusal string `json:"refusal"`
 	}
 	if json.Unmarshal(raw, &parts) != nil {
-		return ""
+		return "", ""
 	}
 	for _, part := range parts {
 		switch part.Type {
 		case "output_text", "input_text", "text":
-			if part.Text != "" {
-				return part.Text
+			if part.Text != "" && text == "" {
+				text = part.Text
 			}
 		case "refusal":
-			if part.Refusal != "" {
-				return part.Refusal
+			if part.Refusal != "" && refusal == "" {
+				refusal = part.Refusal
 			}
 		}
 	}
-	return ""
+	return text, refusal
 }
 
 // terminalReasoningPresent reports non-empty summary or reasoning_text content
