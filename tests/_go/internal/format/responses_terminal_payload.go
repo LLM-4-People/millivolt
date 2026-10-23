@@ -384,3 +384,55 @@ func refusalDeltaCount(t *testing.T, protocol ir.Protocol, out, want string) int
 	}
 	return count
 }
+
+// TestResponsesReasoningSummaryPartCoverage pins R4-3: summary coverage is
+// tracked per summary_index, so a later part or a longer terminal summary is
+// not suppressed by the first part's bytes.
+func TestResponsesReasoningSummaryPartCoverage(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+	}{
+		{
+			name: "two summary parts",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":0,"part":{"type":"summary_text","text":"alpha"}}
+
+event: response.reasoning_summary_part.added
+data: {"type":"response.reasoning_summary_part.added","output_index":0,"summary_index":1,"part":{"type":"summary_text","text":"beta"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"alpha"},{"type":"summary_text","text":"beta"}]}]}}
+
+`,
+		},
+		{
+			name: "short added summary longer terminal",
+			source: `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"alpha"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"alpha"},{"type":"summary_text","text":"beta"}]}]}}
+
+`,
+		},
+	}
+	for _, tc := range cases {
+		for _, target := range terminalTargets {
+			t.Run(tc.name+"/"+target.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
+					t.Fatalf("TranslateStreamBetween: %v", err)
+				}
+				for _, want := range []string{"alpha", "beta"} {
+					if got := reasoningDeltaCount(t, target.inbound, buf.String(), want); got != 1 {
+						t.Fatalf("%q emitted %d times, want once: %s", want, got, buf.String())
+					}
+				}
+			})
+		}
+	}
+}

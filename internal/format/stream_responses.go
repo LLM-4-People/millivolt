@@ -117,10 +117,6 @@ type ResponsesStreamDecoder struct {
 	// an identical or shorter value is never re-emitted. Keyed by the part
 	// identity (and summary index), never by wire position.
 	emittedText map[string]string
-	// payloadSummary records that a reasoning item's summary channel emitted
-	// bytes. It is retained for the item-level fill guard; per-part coverage
-	// lives in emittedText.
-	payloadSummary map[string]bool
 	// terminalPending holds authoritative done-event values whose target block
 	// already ended or was never opened. They are emitted after every streamed
 	// block closes (closeAll), so target lifecycles never nest.
@@ -149,7 +145,6 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		keyByPart:        map[[2]int]string{},
 		itemIDByOutput:   map[int]string{},
 		emittedText:      map[string]string{},
-		payloadSummary:   map[string]bool{},
 		open:             map[int]bool{},
 	}
 }
@@ -292,12 +287,15 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 						ID: item.ID, Encrypted: item.EncryptedContent, Provider: ir.Responses,
 					},
 				}})
-				// The added item may already carry summary text. Emit it as
-				// the block's first reasoning delta so the value is not lost
-				// when no summary delta follows.
-				if summary := responsesSummaryText(item.Summary); summary != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: summary}})
-					d.payloadSummary[key] = true
+				// The added item may already carry summary text. Emit each
+				// part in order and record its coverage so a later delta,
+				// done event or terminal copy adds only the missing suffix.
+				for summaryIndex, part := range item.Summary {
+					if part.Text == "" {
+						continue
+					}
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
+					d.emittedText[summaryPartKey(key, summaryIndex)] = part.Text
 				}
 			case "message":
 				// Content parts arrive in response.content_part.added. The
@@ -434,11 +432,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			if ev.Delta != "" {
-				if key := d.keyByOutput[ev.OutputIndex]; key != "" {
-					d.payloadSummary[key] = true
+			key := d.keyByOutput[ev.OutputIndex]
+			if ev.Delta != "" && key != "" {
+				partKey := summaryPartKey(key, ev.SummaryIndex)
+				emit, coverage := pendingDeltaSuffix(d.emittedText[partKey], ev.Delta)
+				d.emittedText[partKey] = coverage
+				if emit != "" {
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 				}
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 			}
 		case "response.reasoning_summary_part.added":
 			// Some providers put the summary text in the part-start payload
@@ -451,21 +452,31 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			key := d.keyByOutput[ev.OutputIndex]
 			idx, ok := d.itemBlock[ev.OutputIndex]
-			if part.Text == "" || !ok || key == "" || d.payloadSummary[key] {
+			if part.Text == "" || !ok || key == "" {
 				continue
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
-			d.payloadSummary[key] = true
+			partKey := summaryPartKey(key, ev.SummaryIndex)
+			emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
+			if emit == "" {
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+			d.emittedText[partKey] = part.Text
 		case "response.reasoning_summary_text.done":
-			// The done payload is authoritative. Emit it only when no delta
-			// carried summary bytes.
+			// The done payload is authoritative per summary part. Emit only
+			// the bytes no delta or start payload already covered.
 			key := d.keyByOutput[ev.OutputIndex]
 			idx, ok := d.itemBlock[ev.OutputIndex]
-			if ev.Text == "" || !ok || key == "" || d.payloadSummary[key] {
+			if ev.Text == "" || !ok || key == "" {
 				continue
 			}
-			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Text}})
-			d.payloadSummary[key] = true
+			partKey := summaryPartKey(key, ev.SummaryIndex)
+			emit := pendingValueSuffix(d.emittedText[partKey], ev.Text)
+			if emit == "" {
+				continue
+			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+			d.emittedText[partKey] = ev.Text
 		case "response.reasoning_text.delta":
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
@@ -846,16 +857,24 @@ func (d *ResponsesStreamDecoder) fillAnnouncedTerminal(output []responsesWireIte
 				// A terminal-only reasoning item is synthesized whole below.
 				continue
 			}
-			if summary := responsesSummaryText(item.Summary); summary != "" && !d.payloadSummary[key] {
+			for summaryIndex, part := range item.Summary {
+				if part.Text == "" {
+					continue
+				}
+				partKey := summaryPartKey(key, summaryIndex)
+				emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
+				if emit == "" {
+					continue
+				}
 				if idx, ok := d.itemBlockByKey[key]; ok && d.open[idx] {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: summary}})
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
 				} else {
 					pending = append(pending, terminalEmission{
 						block: reasoningTerminalBlock(item),
-						delta: &ir.Delta{Reasoning: summary},
+						delta: &ir.Delta{Reasoning: emit},
 					})
 				}
-				d.payloadSummary[key] = true
+				d.emittedText[partKey] = part.Text
 			}
 			parts, err := terminalMessageParts(item.Content)
 			if err != nil {
@@ -1157,6 +1176,13 @@ func contentPartKey(itemID string, outputIndex, contentIndex int) string {
 		return "part:" + itemID + ":" + strconv.Itoa(contentIndex)
 	}
 	return "output:" + strconv.Itoa(outputIndex) + ":part:" + strconv.Itoa(contentIndex)
+}
+
+// summaryPartKey identifies one reasoning summary part. Summary parts share a
+// single item block but each part owns its coverage, so a later part or a
+// longer terminal summary is not suppressed by the first part's bytes.
+func summaryPartKey(itemKey string, summaryIndex int) string {
+	return "summary:" + itemKey + ":" + strconv.Itoa(summaryIndex)
 }
 
 // pendingDeltaSuffix returns the bytes a streamed delta contributes after the
