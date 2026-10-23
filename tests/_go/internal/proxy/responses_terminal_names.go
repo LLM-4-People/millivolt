@@ -184,7 +184,7 @@ func TestResponsesMismatchedTerminalNameOverFailedData(t *testing.T) {
 // ends with an answer text after the overflow point, so the test proves the
 // buffered prefix and the later data lines stay one reassembled document.
 func responsesOverBoundTerminal(typed bool) string {
-	const filler = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	filler := strings.Repeat("x", 800)
 	var b strings.Builder
 	b.WriteString("event: response.completed\n")
 	b.WriteString("data: {\n")
@@ -197,7 +197,11 @@ func responsesOverBoundTerminal(typed bool) string {
 	}
 	b.WriteString("data:     {\"type\": \"message\", \"id\": \"msg_last\", \"role\": \"assistant\", \"content\": [{\"type\": \"output_text\", \"text\": \"hello\"}]}\n")
 	b.WriteString("data:   ]},\n")
-	b.WriteString("data:   \"usage\": {\"input_tokens\": 3, \"output_tokens\": 5, \"total_tokens\": 8}\n")
+	b.WriteString("data:   \"usage\": {\n")
+	b.WriteString("data:     \"input_tokens\": 3,\n")
+	b.WriteString("data:     \"output_tokens\": 5,\n")
+	b.WriteString("data:     \"total_tokens\": 8\n")
+	b.WriteString("data:   }\n")
 	b.WriteString("data: }\n\n")
 	return responsesCreatedFrame + b.String()
 }
@@ -260,10 +264,11 @@ func TestResponsesOverBoundTerminalResolves(t *testing.T) {
 func TestResponsesLateTerminalEventNameKeepsOrder(t *testing.T) {
 	const typeLess = `{"response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}}`
 	cases := []struct {
-		name string
-		doc  string
+		name     string
+		doc      string
+		wantType int
 	}{
-		{name: "typed document", doc: responsesTextDocument},
+		{name: "typed document", doc: responsesTextDocument, wantType: 1},
 		{name: "type-less document", doc: typeLess},
 	}
 	for _, tc := range cases {
@@ -287,12 +292,8 @@ func TestResponsesLateTerminalEventNameKeepsOrder(t *testing.T) {
 				t.Fatalf("terminal event name appeared %d times, want once: %s",
 					strings.Count(got, "event: response.completed\n"), got)
 			}
-			wantType := 0
-			if tc.name == "typed document" {
-				wantType = 1
-			}
-			if gotType := strings.Count(got, `"type":"response.completed"`); gotType != wantType {
-				t.Fatalf("terminal document type count = %d, want %d: %s", gotType, wantType, got)
+			if gotType := strings.Count(got, `"type":"response.completed"`); gotType != tc.wantType {
+				t.Fatalf("terminal document type count = %d, want %d: %s", gotType, tc.wantType, got)
 			}
 			if strings.Contains(got, "response.failed") || strings.Contains(got, `"code":"truncated"`) {
 				t.Fatalf("late terminal name produced a synthetic failure: %s", got)
@@ -306,7 +307,7 @@ func TestResponsesLateTerminalEventNameKeepsOrder(t *testing.T) {
 				rec.ErrorType != "" || rec.ErrorCode != "" {
 				t.Fatalf("record = %+v, want a clean stop with an answer and TTFT", rec)
 			}
-			if tc.name == "type-less document" && rec.Usage.OutputTokens != 5 {
+			if tc.wantType == 0 && rec.Usage.OutputTokens != 5 {
 				t.Fatalf("usage output = %d, want 5 from the reassembled document", rec.Usage.OutputTokens)
 			}
 		})

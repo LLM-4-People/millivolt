@@ -323,10 +323,31 @@ func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
 			a.terminatorSeen = true
 			a.responsesStream = true
 			a.usageChunk = append(a.usageChunk[:0], a.eventData...)
+			// The reassembled document is the whole event, so its usage
+			// object may span several data: lines that no per-line scan could
+			// parse. Capture it here exactly like feedData does for a
+			// single-line document.
+			var keys frameKeys
+			keys.scan(a.eventData)
+			a.captureUsage(&keys, a.eventData)
 			a.captureResponsesTerminalFinish(typ, a.eventData, now)
 		}
 	}
 	a.flushEvent(now)
+}
+
+// captureUsage records the last usage object of one payload. The enclosing
+// chunk is kept too (copied - payload aliases the reused line buffer):
+// cost_keys paths are relative to the response root, and cost or token counts
+// may live in a sibling of usage.
+func (a *Analyzer) captureUsage(keys *frameKeys, payload []byte) {
+	raw := extractObject(keys.usage)
+	if raw == nil {
+		return
+	}
+	a.usage = append(a.usage[:0], raw...)
+	a.usageChunk = append(a.usageChunk[:0], payload...)
+	a.usageSeen = true
 }
 
 // feedData classifies one data payload. forcedType supplies the Responses
@@ -515,14 +536,7 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 
 	// Capture the usage blob from the final chunk. Usage appears as
 	// "usage":{...} near the end of the payload. Only the last one wins.
-	// The enclosing chunk is kept too (copied - payload aliases the reused
-	// line buffer): cost_keys paths are relative to the response root, and
-	// the cost / token counts may live in a sibling of usage.
-	if raw := extractObject(keys.usage); raw != nil {
-		a.usage = append(a.usage[:0], raw...)
-		a.usageChunk = append(a.usageChunk[:0], payload...)
-		a.usageSeen = true
-	}
+	a.captureUsage(&keys, payload)
 
 	// Capture an in-band error payload. Providers and gateways signal failures
 	// mid-stream under a top-level "error" key in several shapes, all sharing
