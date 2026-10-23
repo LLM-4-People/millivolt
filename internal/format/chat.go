@@ -1051,6 +1051,21 @@ func encodeChatMessages(in []ir.Message, warns *ir.Warnings) []map[string]any {
 	return out
 }
 
+// chatReasoningText is the one owner of the visible reasoning text Chat can
+// carry: the raw reasoning text followed by its summaries, shared by the
+// non-streaming and streaming encoders.
+func chatReasoningText(r *ir.Reasoning) string {
+	if r == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString(r.Text)
+	for _, s := range r.Summary {
+		b.WriteString(s)
+	}
+	return b.String()
+}
+
 // encodeChatContent returns the Chat content value (string or part array),
 // tool calls, refusal text and reasoning text from canonical blocks. Each Chat
 // role accepts a documented subset of content parts: system and developer
@@ -1196,12 +1211,7 @@ func encodeChatContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings) (any
 				}
 				continue
 			}
-			if b.Reasoning.Text != "" {
-				reasoning.WriteString(b.Reasoning.Text)
-			}
-			for _, s := range b.Reasoning.Summary {
-				reasoning.WriteString(s)
-			}
+			reasoning.WriteString(chatReasoningText(b.Reasoning))
 			if warns != nil && (b.Reasoning.Signature != "" || b.Reasoning.Encrypted != "") {
 				warns.Add(ir.WarningOpaque, "reasoning", "provider-specific reasoning artifact cannot be replayed on Chat Completions")
 			}

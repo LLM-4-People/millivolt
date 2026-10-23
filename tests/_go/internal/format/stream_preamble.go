@@ -262,3 +262,155 @@ func mustAnthropicPayloads(t *testing.T, out string) []map[string]any {
 	_, payloads := anthropicEventData(t, out)
 	return payloads
 }
+
+// TestChatEncoderInitialBlockPayloads pins the Chat encoder's start-only
+// payload path: text, refusal and reasoning delivered in BlockStart must reach
+// the client when no matching delta follows.
+func TestChatEncoderInitialBlockPayloads(t *testing.T) {
+	cases := []struct {
+		name  string
+		block *ir.Block
+		want  string
+	}{
+		{"text", &ir.Block{Type: ir.BlockText, Text: "hello"}, `"content":"hello"`},
+		{"refusal", &ir.Block{Type: ir.BlockRefusal, Refusal: "no"}, `"refusal":"no"`},
+		{"reasoning", &ir.Block{Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: "think", Summary: []string{" more"}}}, `"reasoning_content":"think more"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			enc := NewChatStreamEncoder(&buf, nil)
+			for _, ev := range []*ir.Event{
+				{Type: ir.EventStart, Response: &ir.Response{ID: "c1", Model: "m", Created: 1}},
+				{Type: ir.EventBlockStart, Index: 0, Block: tc.block},
+				{Type: ir.EventBlockEnd, Index: 0},
+				{Type: ir.EventDone},
+			} {
+				if err := enc.Write(ev); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if err := enc.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			if !strings.Contains(buf.String(), tc.want) {
+				t.Fatalf("start-only %s missing %s: %s", tc.name, tc.want, buf.String())
+			}
+		})
+	}
+}
+
+// TestResponsesInitialToolArguments pins C6 on the decoder that discarded
+// output_item.added.item.arguments. The initial object must reach every target,
+// and a later delta must continue it rather than duplicate it.
+func TestResponsesInitialToolArguments(t *testing.T) {
+	const startOnly = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+
+`
+	const withDelta = `event: response.created
+data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+
+`
+	const terminal = `event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}]}}
+
+`
+	for _, proto := range []struct {
+		name     string
+		inbound  ir.Protocol
+		evidence func(t *testing.T, out string) string
+	}{
+		{"chat", ir.Chat, chatToolArguments},
+		{"anthropic", ir.Anthropic, anthropicToolArguments},
+		{"responses", ir.Responses, responsesToolArguments},
+	} {
+		for _, variant := range []struct {
+			name   string
+			stream string
+		}{
+			{"start-only", startOnly + terminal},
+			{"delta-continues", withDelta + terminal},
+		} {
+			t.Run(proto.name+"/"+variant.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(variant.stream), nil, nil); err != nil {
+					t.Fatalf("TranslateStreamBetween: %v", err)
+				}
+				if got := proto.evidence(t, buf.String()); got != `{"q":1}` {
+					t.Fatalf("tool arguments = %q, want {\"q\":1}: %s", got, buf.String())
+				}
+			})
+		}
+	}
+}
+
+func chatToolArguments(t *testing.T, out string) string {
+	t.Helper()
+	var args strings.Builder
+	for _, frame := range strings.Split(out, "\n\n") {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(frame), "data: ")
+		if !ok || payload == "[DONE]" {
+			continue
+		}
+		var obj map[string]any
+		if err := json.Unmarshal([]byte(payload), &obj); err != nil {
+			t.Fatalf("frame %q: %v", frame, err)
+		}
+		choices, _ := obj["choices"].([]any)
+		if len(choices) == 0 {
+			continue
+		}
+		delta, _ := choices[0].(map[string]any)["delta"].(map[string]any)
+		calls, _ := delta["tool_calls"].([]any)
+		for _, c := range calls {
+			fn, _ := c.(map[string]any)["function"].(map[string]any)
+			if v, ok := fn["arguments"].(string); ok {
+				args.WriteString(v)
+			}
+		}
+	}
+	return args.String()
+}
+
+func anthropicToolArguments(t *testing.T, out string) string {
+	t.Helper()
+	var args strings.Builder
+	for _, payload := range mustAnthropicPayloads(t, out) {
+		delta, _ := payload["delta"].(map[string]any)
+		if partial, ok := delta["partial_json"].(string); ok {
+			args.WriteString(partial)
+		}
+	}
+	return args.String()
+}
+
+func responsesToolArguments(t *testing.T, out string) string {
+	t.Helper()
+	for _, payload := range mustResponsePayloads(t, out) {
+		if typ, _ := payload["type"].(string); typ != "response.completed" {
+			continue
+		}
+		response, _ := payload["response"].(map[string]any)
+		output, _ := response["output"].([]any)
+		if len(output) == 0 {
+			return ""
+		}
+		item, _ := output[0].(map[string]any)
+		args, _ := item["arguments"].(string)
+		return args
+	}
+	return ""
+}

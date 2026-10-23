@@ -168,15 +168,22 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				d.sawToolCall = true
 				idx := d.newBlock()
 				d.itemBlock[ev.OutputIndex] = idx
-				args := item.Arguments
-				if args == "" {
-					args = "{}"
-				}
 				d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: idx, Block: &ir.Block{
 					Type: ir.BlockToolCall, ToolCall: &ir.ToolCall{
 						ID: item.CallID, Name: item.Name, Arguments: json.RawMessage(`{}`),
 					},
 				}})
+				// output_item.added may carry the arguments already produced.
+				// Emit them as the first delta, matching the Chat decoder's
+				// initial-argument path; the placeholder above must not win.
+				// Mark args seen so a terminal output document does not repeat
+				// the same value at block close.
+				args := item.Arguments
+				if args != "" && args != "{}" {
+					d.argsSeen[ev.OutputIndex] = true
+					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx,
+						Delta: &ir.Delta{Arguments: args}})
+				}
 			case "reasoning":
 				if err := checkNativeIdentity("reasoning id", item.ID); err != nil {
 					return nil, err

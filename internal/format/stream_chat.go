@@ -405,6 +405,7 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 			}
 			return e.emit(map[string]any{"tool_calls": []any{tc}}, nil, nil)
 		}
+		return e.emitInitialBlock(ev.Block)
 	case ir.EventBlockDelta:
 		if ev.Delta == nil {
 			return nil
@@ -490,6 +491,29 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 			}
 		}
 		return e.done()
+	}
+	return nil
+}
+
+// emitInitialBlock emits the payload a BlockStart already carries. Decoders
+// may deliver complete text, a refusal or visible reasoning at start time
+// (Responses content parts and some native presets); without this path the
+// value is lost whenever no matching delta follows. A later delta is a
+// separate increment, so this never duplicates it.
+func (e *ChatStreamEncoder) emitInitialBlock(block *ir.Block) error {
+	switch block.Type {
+	case ir.BlockText:
+		if block.Text != "" {
+			return e.emit(map[string]any{"content": block.Text}, nil, nil)
+		}
+	case ir.BlockRefusal:
+		if block.Refusal != "" {
+			return e.emit(map[string]any{"refusal": block.Refusal}, nil, nil)
+		}
+	case ir.BlockReasoning:
+		if text := chatReasoningText(block.Reasoning); text != "" {
+			return e.emit(map[string]any{"reasoning_content": text}, nil, nil)
+		}
 	}
 	return nil
 }
