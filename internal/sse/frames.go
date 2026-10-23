@@ -88,6 +88,21 @@ func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error
 	return json.Marshal(obj)
 }
 
+// EventName returns the name declared by one raw SSE line ("event: name"), or
+// "" when the line is not an event field. The name is trimmed like the SSE
+// parser trims it.
+func EventName(line []byte) string {
+	const prefix = "event:"
+	if !bytes.HasPrefix(line, []byte(prefix)) {
+		return ""
+	}
+	return string(bytes.TrimSpace(line[len(prefix):]))
+}
+
+// ResponsesTerminalEventName reports whether name is one of the Responses API
+// terminal event names.
+func ResponsesTerminalEventName(name string) bool { return responsesTerminalEvent(name) }
+
 // DataPayload extracts the payload of one raw SSE line: ok is false when the
 // line is not a data line - the full "data:" prefix is required (never just a
 // leading 'd') so a short or garbled upstream line can never slice out of

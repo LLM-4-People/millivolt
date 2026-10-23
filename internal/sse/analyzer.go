@@ -90,14 +90,20 @@ type Analyzer struct {
 	// have no ordering fields and accumulate independently.
 	responsesStream bool
 
-	// answerishSeen marks a delta that carried answer-shaped bytes the
-	// streaming rescue must never append after, even though they are not
-	// metrics content: a refusal message (the official delta field for
-	// refusals) or a deprecated function_call declaration. It also feeds
-	// OutcomeCode's answer presence (a clean stop after either is a delivered
-	// answer, not a degenerate void); it never changes the record's content
-	// accounting (HadAnswerContent stays content-only).
+	// answerishSeen marks answer-shaped output the streaming rescue must never
+	// append after, even though it is not metrics content: a refusal message
+	// (the official delta field for refusals), a deprecated function_call
+	// declaration, or a non-empty text/refusal part in a Responses terminal
+	// document. It also feeds OutcomeCode's answer presence (a clean stop
+	// after any of these is a delivered answer, not a degenerate void); it
+	// never changes the record's content accounting (HadAnswerContent stays
+	// content-only).
 	answerishSeen bool
+
+	// terminalReasoningSeen marks reasoning delivered only inside a Responses
+	// terminal document (summary or reasoning_text). OutcomeCode treats it as
+	// reasoning presence exactly like a streamed reasoning delta.
+	terminalReasoningSeen bool
 
 	// toolChunks counts content-bearing chunks that carry tool-call deltas.
 	// chunkCount (every content-bearing chunk: content, reasoning, AND tool
@@ -558,7 +564,57 @@ func responsesTerminalEvent(eventType string) bool {
 // canonical finish vocabulary the record and the degenerate classifier read.
 // Without it, a legitimate response.incomplete on a short max_output_tokens was
 // classified as an empty completion and a completed answer kept no reason.
+// The terminal document may also be the only place the turn's output appears,
+// so text, refusal and reasoning presence are recorded here before classifying.
 func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []byte) {
+	var ev struct {
+		Response struct {
+			ID                string `json:"id"`
+			IncompleteDetails *struct {
+				Reason string `json:"reason"`
+			} `json:"incomplete_details"`
+			Output []struct {
+				Type    string          `json:"type"`
+				Role    string          `json:"role"`
+				CallID  string          `json:"call_id"`
+				Name    string          `json:"name"`
+				Content json.RawMessage `json:"content"`
+				Summary []struct {
+					Text string `json:"text"`
+				} `json:"summary"`
+			} `json:"output"`
+		} `json:"response"`
+	}
+	parsed := json.Unmarshal(payload, &ev) == nil
+	if parsed {
+		if ev.Response.ID != "" {
+			a.responseID = ev.Response.ID
+		}
+		for _, item := range ev.Response.Output {
+			typ := item.Type
+			if typ == "" && item.Role != "" {
+				typ = "message"
+			}
+			switch typ {
+			case "function_call":
+				// A function call may appear only in the terminal document;
+				// count each call once per call_id so a legitimate tool turn
+				// is never classified as empty and replaced by a failure.
+				a.countResponsesToolCall(item.CallID, item.Name)
+			case "message":
+				if text := terminalMessageText(item.Content); text != "" {
+					a.answerishSeen = true
+					if a.CapturePreview && a.preview == nil {
+						a.preview = []byte(metrics.TruncatePreview(text))
+					}
+				}
+			case "reasoning":
+				if terminalReasoningPresent(item.Content, item.Summary) {
+					a.terminalReasoningSeen = true
+				}
+			}
+		}
+	}
 	if a.finishReason != "" {
 		return
 	}
@@ -568,15 +624,8 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	case "response.cancelled":
 		a.finishReason = string(ir.FinishCancelled)
 	case "response.incomplete":
-		var ev struct {
-			Response struct {
-				IncompleteDetails *struct {
-					Reason string `json:"reason"`
-				} `json:"incomplete_details"`
-			} `json:"response"`
-		}
 		reason := ""
-		if json.Unmarshal(payload, &ev) == nil && ev.Response.IncompleteDetails != nil {
+		if parsed && ev.Response.IncompleteDetails != nil {
 			reason = ev.Response.IncompleteDetails.Reason
 		}
 		switch reason {
@@ -588,36 +637,74 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			a.finishReason = string(ir.FinishOther)
 		}
 	default: // response.completed
-		// A provider may send only the terminal document: its output is then
-		// the sole place a function call appears. Count those calls before
-		// deciding finish so a legitimate tool turn is never classified as an
-		// empty completion and replaced with a synthetic failure.
-		var ev struct {
-			Response struct {
-				ID     string `json:"id"`
-				Output []struct {
-					Type   string `json:"type"`
-					CallID string `json:"call_id"`
-					Name   string `json:"name"`
-				} `json:"output"`
-			} `json:"response"`
-		}
-		if json.Unmarshal(payload, &ev) == nil {
-			if ev.Response.ID != "" {
-				a.responseID = ev.Response.ID
-			}
-			for _, item := range ev.Response.Output {
-				if item.Type == "function_call" {
-					a.countResponsesToolCall(item.CallID, item.Name)
-				}
-			}
-		}
 		if a.toolCalls > 0 {
 			a.finishReason = string(ir.FinishToolCalls)
 		} else {
 			a.finishReason = string(ir.FinishStop)
 		}
 	}
+}
+
+// terminalMessageText returns the first non-empty answer or refusal text in a
+// message item's terminal content. The value may be a plain string or the
+// documented part array.
+func terminalMessageText(raw json.RawMessage) string {
+	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		return text
+	}
+	var parts []struct {
+		Type    string `json:"type"`
+		Text    string `json:"text"`
+		Refusal string `json:"refusal"`
+	}
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	for _, part := range parts {
+		switch part.Type {
+		case "output_text", "input_text", "text":
+			if part.Text != "" {
+				return part.Text
+			}
+		case "refusal":
+			if part.Refusal != "" {
+				return part.Refusal
+			}
+		}
+	}
+	return ""
+}
+
+// terminalReasoningPresent reports non-empty summary or reasoning_text content
+// in a terminal reasoning item.
+func terminalReasoningPresent(content json.RawMessage, summary []struct {
+	Text string `json:"text"`
+}) bool {
+	for _, part := range summary {
+		if part.Text != "" {
+			return true
+		}
+	}
+	if len(content) == 0 {
+		return false
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &parts) != nil {
+		return false
+	}
+	for _, part := range parts {
+		if part.Type == "reasoning_text" && part.Text != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ResponsesStream reports whether the feed carried Responses-API typed events.
@@ -830,8 +917,9 @@ func (a *Analyzer) OutcomeCode() string {
 		return ""
 	}
 	hadAnswer := !a.firstAnswerAt.IsZero() || a.answerishSeen
+	hadReasoning := !a.firstReasoningAt.IsZero() || a.terminalReasoningSeen
 	return metrics.ClassifyOutcome(a.finishReason, a.terminatorSeen,
-		hadAnswer, !a.firstReasoningAt.IsZero(), a.toolCalls, a.chatlike)
+		hadAnswer, hadReasoning, a.toolCalls, a.chatlike)
 }
 
 // ChatLike reports whether the analyzed feed follows the Chat/Responses

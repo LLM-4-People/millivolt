@@ -2141,7 +2141,12 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		out     bytes.Buffer // released bytes awaiting one client write
 		hold    []byte       // bytes withheld from the terminal-candidate event onward
 		holding bool
-		buf     [4096]byte
+		// pendingEvent withholds a Responses terminal event's name line until
+		// its data line arrives. A terminal name written immediately would
+		// remain on the wire if the data line is later replaced by a synthetic
+		// failure; holding the pair together lets substitution discard both.
+		pendingEvent []byte
+		buf          [4096]byte
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// the terminalHoldMax overflow): the stream then COMMITS to verbatim
 		// relay - no degenerate classification may substitute anything (a
@@ -2270,6 +2275,31 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				line := b[:idx]
 				prev := a.Terminated()
 				a.Feed(line, now)
+				// A Responses terminal event arrives as an `event:` name
+				// line followed by its `data:` line. Hold the name until the
+				// data arrives so a held terminal event and its name are
+				// substituted or released as one unit.
+				if name := sse.EventName(line); name != "" && !holding && sse.ResponsesTerminalEventName(name) {
+					pendingEvent = append(pendingEvent[:0], line...)
+					pendingEvent = append(pendingEvent, '\n')
+					lineBuf.Next(idx + 1)
+					continue
+				}
+				if len(pendingEvent) > 0 {
+					if len(bytes.TrimSpace(line)) == 0 {
+						// The named event ended without data: it carries no
+						// bytes a client can act on, and keeping the name
+						// would attach it to a later event or precede a
+						// synthetic failure.
+						pendingEvent = pendingEvent[:0]
+					} else if !prev && a.Terminated() {
+						hold = append(hold, pendingEvent...)
+						pendingEvent = pendingEvent[:0]
+					} else {
+						out.Write(pendingEvent)
+						pendingEvent = pendingEvent[:0]
+					}
+				}
 				switch {
 				case holding:
 					hold = append(hold, line...)
@@ -2431,6 +2461,10 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				// the held bytes verbatim (byte preservation) and never
 				// substitute a synthetic outcome on top.
 				markStreamErr(ctx, rec, err)
+				if len(pendingEvent) > 0 {
+					out.Write(pendingEvent)
+					pendingEvent = pendingEvent[:0]
+				}
 				if holding {
 					if _, werr := w.Write(hold); werr != nil {
 						clientGone()
@@ -2466,6 +2500,15 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 			}
 			if allowThinkingRescue && a.RetryableReasoningTruncation() && !rec.ClientDisconnected {
 				return rescueReasoningTruncation
+			}
+			if len(pendingEvent) > 0 {
+				// A terminal event name with no data is a substituted-failure
+				// candidate: put it in the held region so finishHold can drop
+				// it instead of leaving a stale terminal line before the
+				// synthetic failure.
+				hold = append(hold, pendingEvent...)
+				pendingEvent = pendingEvent[:0]
+				holding = true
 			}
 			if !finishHold() {
 				return rescueNone

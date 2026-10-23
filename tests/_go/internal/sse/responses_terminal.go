@@ -128,3 +128,88 @@ func TestResponsesTerminalOnlyFunctionCall(t *testing.T) {
 		t.Fatalf("response id = %q, want resp_1", got)
 	}
 }
+
+// TestResponsesTerminalOnlyOutputPresence pins N9: answer, refusal, reasoning
+// and tool output that appears only in the terminal document is real output.
+// It must feed finish classification, the degenerate outcome rules, the
+// retained tool names and the preview, exactly like streamed deltas.
+func TestResponsesTerminalOnlyOutputPresence(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	cases := []struct {
+		name          string
+		output        string
+		wantFinish    string
+		wantOutcome   string
+		wantPreview   string
+		wantTools     int
+		wantToolNames []string
+	}{
+		{
+			name:        "text",
+			output:      `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]`,
+			wantFinish:  "stop",
+			wantOutcome: "",
+			wantPreview: "hello",
+		},
+		{
+			name:        "refusal",
+			output:      `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"refusal","refusal":"no"}]}]`,
+			wantFinish:  "stop",
+			wantOutcome: "",
+			wantPreview: "no",
+		},
+		{
+			name:        "reasoning summary",
+			output:      `[{"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"think"}]}]`,
+			wantFinish:  "stop",
+			wantOutcome: metrics.CodeReasoningOnly,
+		},
+		{
+			name:        "reasoning content",
+			output:      `[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"deep"}]}]`,
+			wantFinish:  "stop",
+			wantOutcome: metrics.CodeReasoningOnly,
+		},
+		{
+			name: "mixed text and tool",
+			output: `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]},` +
+				`{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]`,
+			wantFinish:    "tool_calls",
+			wantOutcome:   "",
+			wantPreview:   "hello",
+			wantTools:     1,
+			wantToolNames: []string{"lookup"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var a Analyzer
+			a.CapturePreview = true
+			a.Feed([]byte(`data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`), now)
+			a.Feed([]byte(`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":`+tc.output+`}}`), now)
+			a.Feed([]byte(""), now)
+			var rec metrics.Record
+			a.Fill(&rec)
+			if a.finishReason != tc.wantFinish || rec.FinishReason != tc.wantFinish {
+				t.Fatalf("finish = %q/%q, want %q", a.finishReason, rec.FinishReason, tc.wantFinish)
+			}
+			if got := a.OutcomeCode(); got != tc.wantOutcome {
+				t.Fatalf("outcome = %q, want %q", got, tc.wantOutcome)
+			}
+			if rec.ResponsePreview != tc.wantPreview {
+				t.Fatalf("preview = %q, want %q", rec.ResponsePreview, tc.wantPreview)
+			}
+			if rec.ToolCalls != tc.wantTools || a.toolCalls != tc.wantTools {
+				t.Fatalf("tool calls = %d/%d, want %d", a.toolCalls, rec.ToolCalls, tc.wantTools)
+			}
+			if len(rec.ToolNames) != len(tc.wantToolNames) {
+				t.Fatalf("tool names = %v, want %v", rec.ToolNames, tc.wantToolNames)
+			}
+			for i, name := range tc.wantToolNames {
+				if rec.ToolNames[i] != name {
+					t.Fatalf("tool names = %v, want %v", rec.ToolNames, tc.wantToolNames)
+				}
+			}
+		})
+	}
+}
