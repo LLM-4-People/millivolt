@@ -656,6 +656,9 @@ func terminalMessageText(raw json.RawMessage) string {
 	if json.Unmarshal(raw, &text) == nil {
 		return text
 	}
+	if !metrics.ContentPartsWithinLimit(raw) {
+		return ""
+	}
 	var parts []struct {
 		Type    string `json:"type"`
 		Text    string `json:"text"`
@@ -690,6 +693,9 @@ func terminalReasoningPresent(content json.RawMessage, summary []struct {
 		}
 	}
 	if len(content) == 0 {
+		return false
+	}
+	if !metrics.ContentPartsWithinLimit(content) {
 		return false
 	}
 	var parts []struct {
