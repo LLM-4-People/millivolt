@@ -49,6 +49,7 @@ type chatWireRequest struct {
 	Metadata    map[string]json.RawMessage `json:"metadata"`
 	ServiceTier string                     `json:"service_tier"`
 	User        string                     `json:"user"`
+	Store       *bool                      `json:"store"`
 	N           *int                       `json:"n"`
 }
 
@@ -111,6 +112,7 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		ParallelToolCalls: in.ParallelToolCalls,
 		Stream:            in.Stream,
 		ServiceTier:       in.ServiceTier,
+		Store:             in.Store,
 		User:              in.User,
 	}
 	if in.StreamOptions != nil {

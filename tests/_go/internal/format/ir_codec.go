@@ -478,6 +478,21 @@ func TestCodecRejectsStatefulReplay(t *testing.T) {
 	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
 		t.Fatal("anthropic target accepted store=true")
 	}
+	chatStored := `{"model":"gpt","messages":[{"role":"user","content":"hi"}],"store":true}`
+	req, err = DecodeChatRequest([]byte(chatStored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EncodeAnthropicRequest(req, 4096, ""); err == nil {
+		t.Fatal("chat store=true reached a stateless anthropic target")
+	}
+	out, err := EncodeResponsesRequest(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decodeJSONMap(t, out)["store"]; got != true {
+		t.Fatalf("responses store = %v, want true", got)
+	}
 }
 
 func TestCodecRejectsInvalidToolArguments(t *testing.T) {
