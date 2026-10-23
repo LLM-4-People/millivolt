@@ -676,6 +676,49 @@ func TestCodecReportsMetadataLossOnce(t *testing.T) {
 	}
 }
 
+func TestChatReasoningIsDecoded(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+	}{
+		{"reasoning_content", "reasoning_content"},
+		{"reasoning", "reasoning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			respBody := `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,` +
+				`"message":{"role":"assistant","content":"answer","` + tc.field + `":"thought"},"finish_reason":"stop"}]}`
+			resp, err := DecodeChatResponse([]byte(respBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(resp.Blocks) != 2 || resp.Blocks[0].Type != ir.BlockReasoning || resp.Blocks[0].Reasoning.Text != "thought" {
+				t.Fatalf("response blocks = %+v", resp.Blocks)
+			}
+			if resp.Blocks[1].Type != ir.BlockText || resp.Blocks[1].Text != "answer" {
+				t.Fatalf("response answer = %+v", resp.Blocks[1])
+			}
+
+			reqBody := `{"model":"m","messages":[` +
+				`{"role":"assistant","content":"answer","` + tc.field + `":"thought"},` +
+				`{"role":"user","content":"next"}]}`
+			req, err := DecodeChatRequest([]byte(reqBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			first := req.Messages[0].Content
+			if len(first) != 2 || first[0].Type != ir.BlockReasoning || first[1].Type != ir.BlockText {
+				t.Fatalf("request blocks = %+v", first)
+			}
+			if _, err := EncodeAnthropicRequest(req, 8, ""); err != nil {
+				t.Fatal(err)
+			}
+			if !warningField(req.Warnings, "reasoning") {
+				t.Fatalf("foreign reasoning did not warn: %+v", req.Warnings)
+			}
+		})
+	}
+}
+
 func TestToolResultDropsAudioWithWarning(t *testing.T) {
 	for name, encode := range map[string]func(*ir.Request) ([]byte, error){
 		"chat": func(r *ir.Request) ([]byte, error) { return EncodeChatRequest(r) },

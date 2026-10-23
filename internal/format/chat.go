@@ -63,13 +63,15 @@ type chatWireRequest struct {
 }
 
 type chatWireMessage struct {
-	Role         string             `json:"role"`
-	Content      json.RawMessage    `json:"content"`
-	Name         string             `json:"name"`
-	ToolCalls    []chatWireToolCall `json:"tool_calls"`
-	ToolCallID   string             `json:"tool_call_id"`
-	Refusal      *string            `json:"refusal"`
-	FunctionCall json.RawMessage    `json:"function_call"`
+	Role             string             `json:"role"`
+	Content          json.RawMessage    `json:"content"`
+	Name             string             `json:"name"`
+	ToolCalls        []chatWireToolCall `json:"tool_calls"`
+	ToolCallID       string             `json:"tool_call_id"`
+	Refusal          *string            `json:"refusal"`
+	FunctionCall     json.RawMessage    `json:"function_call"`
+	ReasoningContent string             `json:"reasoning_content"`
+	Reasoning        string             `json:"reasoning"`
 }
 
 // chatLegacyFunction is one deprecated Chat "functions" entry: the function
@@ -352,6 +354,12 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 				return nil, nil, fmt.Errorf("message %d: %w", i, err)
 			}
 			warns = append(warns, w...)
+			if reasoning := m.reasoningText(); reasoning != "" {
+				// Reasoning precedes the visible answer in canonical order.
+				blocks = append([]ir.Block{{
+					Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
+				}}, blocks...)
+			}
 			if m.Refusal != nil && *m.Refusal != "" {
 				blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *m.Refusal})
 			}
@@ -399,6 +407,16 @@ func decodeChatMessages(in []chatWireMessage) ([]ir.Message, ir.Warnings, error)
 	}
 	flush()
 	return out, warns, nil
+}
+
+// reasoningText returns the provider's hidden chain-of-thought spelling.
+// reasoning_content is the Chat-compatible convention; some gateways use
+// reasoning instead.
+func (m chatWireMessage) reasoningText() string {
+	if m.ReasoningContent != "" {
+		return m.ReasoningContent
+	}
+	return m.Reasoning
 }
 
 // rawPresent reports whether a JSON field was supplied with a non-null value.
@@ -1153,6 +1171,11 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	blocks, warns, err := decodeChatContent(choice.Message.Content, ir.RoleAssistant)
 	if err != nil {
 		return nil, err
+	}
+	if reasoning := choice.Message.reasoningText(); reasoning != "" {
+		blocks = append([]ir.Block{{
+			Type: ir.BlockReasoning, Reasoning: &ir.Reasoning{Text: reasoning, Provider: ir.Chat},
+		}}, blocks...)
 	}
 	if choice.Message.Refusal != nil && *choice.Message.Refusal != "" {
 		blocks = append(blocks, ir.Block{Type: ir.BlockRefusal, Refusal: *choice.Message.Refusal})
