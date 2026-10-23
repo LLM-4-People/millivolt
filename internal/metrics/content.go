@@ -33,6 +33,53 @@ func ArrayWithinLimit(raw []byte, max int) bool {
 	return ok && n <= max
 }
 
+// ObjectWithinLimit reports whether a raw JSON value is an object with at most
+// max members. A non-object value is accepted because the caller's decoder owns
+// its shape. Keys are located lexically: a string at the root object's depth
+// followed by a colon, so nested objects and array elements never count.
+func ObjectWithinLimit(raw []byte, max int) bool {
+	i := SkipSpace(raw, 0)
+	if i >= len(raw) || raw[i] != '{' {
+		return true
+	}
+	depth := 0
+	count := 0
+	for i < len(raw) {
+		switch raw[i] {
+		case '"':
+			if depth == 1 {
+				next := SkipJSONString(raw, i)
+				if next < 0 {
+					return false
+				}
+				if j := SkipSpace(raw, next); j < len(raw) && raw[j] == ':' {
+					count++
+					if count > max {
+						return false
+					}
+				}
+				i = next
+				continue
+			}
+			next := SkipJSONString(raw, i)
+			if next < 0 {
+				return false
+			}
+			i = next
+			continue
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth == 0 {
+				return true
+			}
+		}
+		i++
+	}
+	return false
+}
+
 // CountJSONArrayBytes counts top-level members of a JSON array at i without
 // materializing them. A non-array value is skipped and reported as zero so
 // only actual collection overflows are rejected. Counting stops as soon as

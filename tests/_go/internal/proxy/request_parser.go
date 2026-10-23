@@ -293,16 +293,21 @@ func TestRequestMetadataKeyCountBounded(t *testing.T) {
 	body.WriteString(`}}`)
 	raw := []byte(body.String())
 	var rec metrics.Record
-	parseLLMRequest(raw, &rec, false)
-	if rec.ReqMetadataKeys != requestMetadataKeysMax {
-		t.Fatalf("hostile metadata count = %d, want the %d-key cap", rec.ReqMetadataKeys, requestMetadataKeysMax)
+	err := parseLLMRequest(raw, &rec, false)
+	if err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Fatalf("hostile metadata error = %v, want the metadata preflight rejection", err)
+	}
+	if rec.ReqMetadataKeys != 0 {
+		t.Fatalf("hostile metadata decoded %d keys before rejection", rec.ReqMetadataKeys)
 	}
 	res := testing.Benchmark(func(b *testing.B) {
 		for b.Loop() {
 			var rec metrics.Record
-			parseLLMRequest(raw, &rec, false)
-			if rec.ReqMetadataKeys != requestMetadataKeysMax {
-				b.Fatalf("ReqMetadataKeys = %d, want the cap", rec.ReqMetadataKeys)
+			if err := parseLLMRequest(raw, &rec, false); err == nil {
+				b.Fatal("hostile metadata accepted")
+			}
+			if rec.ReqMetadataKeys != 0 {
+				b.Fatalf("ReqMetadataKeys = %d, want no typed decode", rec.ReqMetadataKeys)
 			}
 		}
 	})

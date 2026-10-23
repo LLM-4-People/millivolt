@@ -117,6 +117,8 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 		Tools     json.RawMessage `json:"tools"`
 		Functions json.RawMessage `json:"functions"`
 		Stop      json.RawMessage `json:"stop"`
+		Metadata  json.RawMessage `json:"metadata"`
+		LogitBias json.RawMessage `json:"logit_bias"`
 	}
 	if err := json.Unmarshal(body, &bounds); err != nil {
 		return nil, errParseOpenAIBody(err)
@@ -132,6 +134,34 @@ func DecodeChatRequest(body []byte) (*ir.Request, error) {
 	} {
 		if err := checkWireArray(b.raw, b.field, WireCollectionMax); err != nil {
 			return nil, errParseOpenAIBody(err)
+		}
+	}
+	for _, b := range []struct {
+		raw   json.RawMessage
+		field string
+	}{
+		{bounds.Metadata, "metadata"},
+		{bounds.LogitBias, "logit_bias"},
+	} {
+		if err := checkWireObject(b.raw, b.field, WireCollectionMax); err != nil {
+			return nil, errParseOpenAIBody(err)
+		}
+	}
+	// Bound the aggregate tool-call members of every message. Each member
+	// expands into a typed call and, on a translated wire, a content block; the
+	// proxy preflights the same aggregate so both paths accept the same body.
+	if len(bounds.Messages) > 0 {
+		var messages []struct {
+			ToolCalls json.RawMessage `json:"tool_calls"`
+		}
+		if err := json.Unmarshal(bounds.Messages, &messages); err != nil {
+			return nil, errParseOpenAIBody(err)
+		}
+		total := 0
+		for i, message := range messages {
+			if err := addWireArray(&total, message.ToolCalls, fmt.Sprintf("messages[%d].tool_calls", i), WireToolCallsMax); err != nil {
+				return nil, errParseOpenAIBody(err)
+			}
 		}
 	}
 	var in chatWireRequest
@@ -1141,18 +1171,23 @@ func encodeChatResponseFormat(rf *ir.ResponseFormat) any {
 	}
 }
 
-// chatWireResponse is the non-streaming Chat response shape.
+// chatWireResponse is the non-streaming Chat response shape. Choices stay raw
+// so only the first (the only translated one) is materialized: a body with many
+// bounded choices each carrying a large tool_calls array must not expand every
+// choice before the first is chosen.
 type chatWireResponse struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Model   string `json:"model"`
-	Choices []struct {
-		Index   int             `json:"index"`
-		Message chatWireMessage `json:"message"`
-		Finish  string          `json:"finish_reason"`
-	} `json:"choices"`
-	Usage *chatWireUsage `json:"usage"`
+	ID      string            `json:"id"`
+	Object  string            `json:"object"`
+	Created int64             `json:"created"`
+	Model   string            `json:"model"`
+	Choices []json.RawMessage `json:"choices"`
+	Usage   *chatWireUsage    `json:"usage"`
+}
+
+type chatWireChoice struct {
+	Index   int             `json:"index"`
+	Message chatWireMessage `json:"message"`
+	Finish  string          `json:"finish_reason"`
 }
 
 type chatWireUsage struct {
@@ -1186,26 +1221,29 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if !metrics.ContentPartsWithinLimit(probe.Choices) {
 		return nil, fmt.Errorf("chat response choices exceed %d items", metrics.ContentPartMax)
 	}
-	// The first choice is the one translated; bound its tool_calls array with
-	// the same lexical gate so a single item cannot expand past the limit.
-	var choiceBounds struct {
-		Choices []struct {
-			Message struct {
-				ToolCalls json.RawMessage `json:"tool_calls"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if err := json.Unmarshal(body, &choiceBounds); err != nil {
-		return nil, fmt.Errorf("parse chat response: %w", err)
-	}
-	if len(choiceBounds.Choices) > 0 {
-		if err := checkWireArray(choiceBounds.Choices[0].Message.ToolCalls, "message.tool_calls", metrics.ContentPartMax); err != nil {
-			return nil, err
-		}
-	}
+	// The first choice is the one translated; decode it alone from its raw
+	// bytes and bound its tool_calls array so the other choices' arrays are
+	// never materialized.
 	var in chatWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {
 		return nil, fmt.Errorf("parse chat response: %w", err)
+	}
+	var choice chatWireChoice
+	if len(in.Choices) > 0 {
+		var choiceBounds struct {
+			Message struct {
+				ToolCalls json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+		}
+		if err := json.Unmarshal(in.Choices[0], &choiceBounds); err != nil {
+			return nil, fmt.Errorf("parse chat response: %w", err)
+		}
+		if err := checkWireArray(choiceBounds.Message.ToolCalls, "message.tool_calls", metrics.ContentPartMax); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(in.Choices[0], &choice); err != nil {
+			return nil, fmt.Errorf("parse chat response: %w", err)
+		}
 	}
 	if typ, code, msg := metrics.ParseErrorEnvelope(body); typ != "" {
 		// A gateway can return an error envelope on HTTP 200. ParseErrorEnvelope
@@ -1225,7 +1263,6 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 	if len(in.Choices) == 0 {
 		return nil, errors.New("chat response has no choices")
 	}
-	choice := in.Choices[0]
 	blocks, warns, err := decodeChatContent(choice.Message.Content, ir.RoleAssistant)
 	if err != nil {
 		return nil, err

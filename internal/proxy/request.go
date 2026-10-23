@@ -1780,7 +1780,7 @@ const requestContentPartsMax = 16_384
 // over a hundred MiB of transient allocation. Internal DoS guardrail, not a
 // wire-format or user-tunable limit; real requests carry a handful of calls
 // per turn.
-const requestToolCallsMax = 1024
+const requestToolCallsMax = providerformat.WireToolCallsMax
 
 // boundRequestMetadata is a lexical preflight over the top-level document. It
 // rejects only a valid JSON document whose messages/tools/stop array,
@@ -1870,13 +1870,25 @@ func boundRequestMetadata(body []byte) error {
 				toolCalls += calls
 			}
 			i = next
-		case "tools":
+		case "tools", "functions", "input":
 			n, next, ok := metrics.CountJSONArrayBytes(body, i, requestMetadataMaxElements)
 			if !ok {
 				return nil
 			}
 			if n > requestMetadataMaxElements {
 				return requestMetadataOverflow(body, fmt.Errorf("request %s exceeds %d elements", collection, requestMetadataMaxElements))
+			}
+			i = next
+		case "metadata":
+			// The metadata map is decoded into a typed map; a hostile member
+			// count would expand there even though the top-level preflight saw
+			// only one value.
+			if !metrics.ObjectWithinLimit(body[i:], requestMetadataMaxElements) {
+				return requestMetadataOverflow(body, fmt.Errorf("request metadata exceeds %d members", requestMetadataMaxElements))
+			}
+			next := skipJSONValue(body, i)
+			if next < 0 {
+				return nil
 			}
 			i = next
 		case "stop":
@@ -2013,6 +2025,12 @@ func (k requestKey) collection() string {
 		return "messages"
 	case k.equal("tools"):
 		return "tools"
+	case k.equal("functions"):
+		return "functions"
+	case k.equal("input"):
+		return "input"
+	case k.equal("metadata"):
+		return "metadata"
 	case k.equal("logit_bias"):
 		return "logit_bias"
 	case k.equal("stop"):

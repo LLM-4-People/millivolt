@@ -203,20 +203,25 @@ func decodeResponsesInput(raw json.RawMessage) ([]ir.Message, ir.Warnings, error
 		}
 		return []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock(text)}}}, nil, nil
 	}
-	if !metrics.ContentPartsWithinLimit(raw) {
-		return nil, nil, fmt.Errorf("responses input exceeds %d items", metrics.ContentPartMax)
+	if err := checkWireArray(raw, "input", WireCollectionMax); err != nil {
+		return nil, nil, err
 	}
 	// Reasoning items carry a summary array that the typed item decode would
-	// materialize unbounded. The enclosing item array is bounded above, so
-	// this probe slice is too.
+	// materialize unbounded. The enclosing item array is bounded above; the
+	// summaries also share one aggregate budget so thousands of items at the
+	// per-item cap cannot multiply.
 	var itemBounds []struct {
 		Summary json.RawMessage `json:"summary"`
 	}
 	if err := json.Unmarshal(raw, &itemBounds); err != nil {
 		return nil, nil, fmt.Errorf("responses input: %w", err)
 	}
+	summaryTotal := 0
 	for _, item := range itemBounds {
 		if err := checkWireArray(item.Summary, "input.summary", metrics.ContentPartMax); err != nil {
+			return nil, nil, err
+		}
+		if err := addWireArray(&summaryTotal, item.Summary, "input.summary", WireNestedCollectionMax); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -874,7 +879,6 @@ type responsesWireResponse struct {
 	Temperature        *float64            `json:"temperature"`
 	Text               json.RawMessage     `json:"text"`
 	ToolChoice         json.RawMessage     `json:"tool_choice"`
-	Tools              []responsesWireTool `json:"tools"`
 	TopP               *float64            `json:"top_p"`
 	Truncation         string              `json:"truncation"`
 	Usage              *responsesWireUsage `json:"usage"`
@@ -927,8 +931,12 @@ func DecodeResponsesResponse(body []byte) (*ir.Response, error) {
 		if err := json.Unmarshal(probe.Output, &itemBounds); err != nil {
 			return nil, fmt.Errorf("parse responses response: %w", err)
 		}
+		summaryTotal := 0
 		for _, item := range itemBounds {
 			if err := checkWireArray(item.Summary, "output.summary", metrics.ContentPartMax); err != nil {
+				return nil, err
+			}
+			if err := addWireArray(&summaryTotal, item.Summary, "output.summary", WireNestedCollectionMax); err != nil {
 				return nil, err
 			}
 		}

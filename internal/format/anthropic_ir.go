@@ -249,6 +249,9 @@ func decodeAnthropicContent(raw json.RawMessage) ([]ir.Block, ir.Warnings, error
 	if !metrics.ContentPartsWithinLimit(raw) {
 		return nil, nil, fmt.Errorf("anthropic content block array exceeds %d blocks", metrics.ContentPartMax)
 	}
+	if err := checkAnthropicCitations(raw, "content"); err != nil {
+		return nil, nil, err
+	}
 	var parts []anthropicWireBlock
 	if err := json.Unmarshal(raw, &parts); err != nil {
 		return nil, nil, err
@@ -1023,6 +1026,9 @@ func DecodeAnthropicResponse(body []byte) (*ir.Response, error) {
 	}
 	if len(probe.Content) > 0 && !metrics.ContentPartsWithinLimit(probe.Content) {
 		return nil, fmt.Errorf("%w (limit %d parts)", errNativeContentParts, metrics.ContentPartMax)
+	}
+	if err := checkAnthropicCitations(probe.Content, "response content"); err != nil {
+		return nil, err
 	}
 	var in anthropicWireResponse
 	if err := json.Unmarshal(body, &in); err != nil {
