@@ -159,10 +159,9 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
 			delta := choice.Delta
-			if delta.Content != nil && *delta.Content != "" {
-				d.ensureText()
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.textIndex, Delta: &ir.Delta{Text: *delta.Content}})
-			}
+			// Reasoning is thinking-first even when one provider chunk carries
+			// both fields: opening text first would close it again immediately
+			// and reverse the canonical block order.
 			reasoning := delta.ReasoningContent
 			if reasoning == "" {
 				reasoning = delta.Reasoning
@@ -170,6 +169,10 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			if reasoning != "" {
 				d.ensureReasoning()
 				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.reasoningIndex, Delta: &ir.Delta{Reasoning: reasoning}})
+			}
+			if delta.Content != nil && *delta.Content != "" {
+				d.ensureText()
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: d.textIndex, Delta: &ir.Delta{Text: *delta.Content}})
 			}
 			if delta.Refusal != nil && *delta.Refusal != "" {
 				d.ensureRefusal()

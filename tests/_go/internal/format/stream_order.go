@@ -295,3 +295,43 @@ data: {"type":"message_stop"}
 		t.Fatalf("finish chunk is after the sentinel: %v", frames)
 	}
 }
+
+// TestChatChunkOpensReasoningBeforeText pins H16: when one provider chunk
+// carries content and reasoning, the canonical order is thinking-first.
+func TestChatChunkOpensReasoningBeforeText(t *testing.T) {
+	in := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"think","content":"Hi"},"finish_reason":null}]}
+
+data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+`
+	var buf bytes.Buffer
+	collectStream(t, NewChatStreamDecoder(strings.NewReader(in)), NewAnthropicStreamEncoder(&buf, nil))
+	frames := parseWireFrames(t, buf.String())
+	reasoningStart, textStart := -1, -1
+	for i, frame := range frames {
+		if frame.event != "content_block_start" {
+			continue
+		}
+		block, _ := frame.data["content_block"].(map[string]any)
+		switch block["type"] {
+		case "thinking":
+			reasoningStart = i
+		case "text":
+			textStart = i
+		}
+	}
+	if reasoningStart < 0 || textStart < 0 {
+		t.Fatalf("missing block starts: %v", frames)
+	}
+	if reasoningStart >= textStart {
+		t.Fatalf("text block opened before reasoning: reasoning=%d text=%d", reasoningStart, textStart)
+	}
+	if got := intField(t, frames[reasoningStart], "index"); got != 0 {
+		t.Fatalf("reasoning index = %d, want 0", got)
+	}
+	if got := intField(t, frames[textStart], "index"); got != 1 {
+		t.Fatalf("text index = %d, want 1", got)
+	}
+}

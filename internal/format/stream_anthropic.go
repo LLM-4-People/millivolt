@@ -49,7 +49,6 @@ type anthropicStreamMessage struct {
 type AnthropicStreamDecoder struct {
 	r        *sseReader
 	q        eventQueue
-	started  bool
 	terminal bool
 
 	id      string
@@ -139,7 +138,6 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 					return nil, err
 				}
 			}
-			d.started = true
 			u := d.usage
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created, Usage: u,
