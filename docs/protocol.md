@@ -27,8 +27,14 @@ client chooses the upstream endpoint and model.
 A known client path is translated only when `X-Proxy-Format` selects a
 different upstream protocol. An absent `X-Proxy-Format` is byte-transparent
 passthrough, and an explicit format equal to the client protocol is also
-passthrough. Client paths outside the three known endpoints are never
-translated.
+passthrough. `X-Proxy-In-Format` overrides the protocol named by the path, so an
+otherwise unknown path is translated when that header names the inbound wire;
+without the override, paths outside the three known endpoints are never
+translated. A translated request addresses the outbound protocol's canonical
+endpoint (`/v1/chat/completions`, `/v1/responses` or `/v1/messages`) instead of
+forwarding the client's path. A same-protocol request on one of those three
+endpoints normalizes to the same canonical spelling, while one on any other path
+keeps the path the client chose.
 
 Forwarding a body is not the same as understanding every field in it. The normal
 relay does not rewrite an unfamiliar JSON shape just to observe it, but usage,
@@ -143,9 +149,10 @@ to `max_request_bytes` before metadata extraction and sending. Larger requests
 are rejected with HTTP 413 without an upstream send. A decoded output cap
 above 1,000,000 tokens is rejected with HTTP 400 the same way, before any
 upstream send and at both trust boundaries - the original body's decode and
-the re-decode of a translated body - for either spelling (`max_tokens` or
-`max_completion_tokens`). A valid request is also rejected with HTTP 400 before
-an upstream send when it carries more than 10,000 entries in a `messages`,
+the re-decode of a translated body - for any spelling (`max_tokens`,
+`max_completion_tokens` or `max_output_tokens`). A valid request is also
+rejected with HTTP 400 before an upstream send when it carries more than 10,000
+entries in a `messages`,
 `tools` or `stop` array, more than 1,024 aggregate `tool_calls` members across
 every message, more than 10,000 distinct top-level members, or more
 than 10,000 distinct `logit_bias` keys merged across duplicate top-level

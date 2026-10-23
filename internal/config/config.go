@@ -329,16 +329,19 @@ type Config struct {
 
 	// ---- format translation ----
 	// AnthropicDefaultMaxTokens is injected into translated Anthropic requests
-	// when the client sent neither max_tokens nor max_completion_tokens
-	// (Anthropic requires max_tokens).
+	// when the client sent none of max_tokens, max_completion_tokens or
+	// max_output_tokens (Anthropic requires max_tokens).
 	AnthropicDefaultMaxTokens int `yaml:"anthropic_default_max_tokens" json:"anthropic_default_max_tokens"`
 	// TranslationLoss selects what a cross-protocol translation does when the
 	// target cannot represent a client field: warn (default) drops optional
 	// fields and reports them in X-Proxy-Warnings; reject fails the request
-	// with 400 naming the fields before any upstream send. Structural
-	// features are rejected in both modes when they cannot be honored; a
-	// response-side loss is always reported, never fatal, because the status
-	// line may already be committed. Hot-reloads.
+	// with 400 naming the fields before any upstream send. Reject refuses
+	// every recorded loss, including a documented approximation such as a
+	// clamped temperature. Structural features are rejected in both modes
+	// when they cannot be honored. A response-side loss is never fatal
+	// because the status line may already be committed: a non-streaming
+	// response reports it in X-Proxy-Warnings, and a streaming response
+	// drops it without a header. Hot-reloads.
 	TranslationLoss string `yaml:"translation_loss" json:"translation_loss"`
 	// CursorDefaultContextWindow is an optional context-window hint (tokens)
 	// stamped onto every model in the GET /v1/models listing when X-Proxy-Format

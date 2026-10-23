@@ -88,7 +88,8 @@ A JSON response means the relay worked. The request should appear in the
 dashboard within a second or two. On a shared Compose network, use
 `http://millivolt:8080/v1` instead of loopback. `/v1/chat/completions`,
 `/v1/responses` and `/v1/messages` are all available; any of them can target a
-different upstream protocol. Read
+different upstream protocol, and a Chat client can also target the Cursor
+bridge. Read
 [upstream compatibility](docs/adapters.md#client-and-upstream-compatibility)
 and [cross-protocol translation](docs/adapters.md#cross-protocol-translation).
 
@@ -152,9 +153,10 @@ inference.
 Choose the upstream base URL, credentials, authentication header or prefix,
 path, and query on each request. Constrain accepted URL prefixes in
 configuration. Optional adapters translate between OpenAI Chat Completions,
-OpenAI Responses, Anthropic Messages, and Cursor Connect through one canonical
-model; coverage and limits are documented, not implied. There is no separate
-provider registry or API-key vault in the proxy.
+OpenAI Responses and Anthropic Messages through one canonical model; the Cursor
+Connect bridge is a separate direct path that requires a Chat client and is not
+an IR-translated protocol. Coverage and limits are documented, not implied.
+There is no separate provider registry or API-key vault in the proxy.
 
 See [routing, timing and discovery](docs/protocol.md) and
 [adapter support and limitations](docs/adapters.md).

@@ -547,17 +547,19 @@ sub_conversations:
 
 # ---- Format translation ----
 # Cross-protocol translation policy, Anthropic defaults and Cursor agent.v1 bridging.
-# Injected into translated Anthropic requests when the client sent neither max_tokens nor
-# max_completion_tokens.
+# Injected into translated Anthropic requests when the client sent none of max_tokens,
+# max_completion_tokens or max_output_tokens.
 # Hot-reload: yes.
 #   type: int (tokens) · range 1..1000000 · default 4096
 anthropic_default_max_tokens: 4096
 
 # What a cross-protocol translation does when the target cannot represent a client field.
 # warn (default) drops optional fields and reports them in X-Proxy-Warnings; reject fails
-# the request with 400 naming the fields before any upstream send. Structural features are
-# always rejected when they cannot be honored; response-side losses are always reported,
-# never fatal. Hot-reloads.
+# the request with 400 naming the fields before any upstream send and refuses every
+# recorded loss, including a documented approximation. Structural features are always
+# rejected when they cannot be honored. A response-side loss is never fatal: a
+# non-streaming response reports it in X-Proxy-Warnings, and a streaming response drops it
+# without a header. Hot-reloads.
 # Hot-reload: yes.
 #   type: string · default warn
 translation_loss: "warn"

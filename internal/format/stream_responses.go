@@ -77,7 +77,6 @@ type ResponsesStreamDecoder struct {
 	open      map[int]bool
 
 	usage       ir.Usage
-	warnings    ir.Warnings
 	finish      ir.FinishReason
 	sawToolCall bool
 }
@@ -92,9 +91,6 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		open:      map[int]bool{},
 	}
 }
-
-// Warnings returns the decode-time translation warnings.
-func (d *ResponsesStreamDecoder) Warnings() ir.Warnings { return d.warnings }
 
 // Next returns the next canonical event.
 func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
@@ -195,7 +191,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			case "message":
 				// Content parts arrive in response.content_part.added.
 			default:
-				d.warnings.Add(ir.WarningDropped, "output."+item.Type, "provider-specific item has no cross-protocol equivalent")
+				// A provider-specific item has no cross-protocol equivalent.
+				// Streaming cannot report the loss (the status line is already
+				// committed), so it is dropped without a record.
 			}
 		case "response.content_part.added":
 			var part struct {
@@ -218,7 +216,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				// Allocate the block only after the part type is accepted: an
 				// unsupported part must not consume an index or leave an open
 				// block whose stop would reach the client without a start.
-				d.warnings.Add(ir.WarningDropped, "content."+part.Type, "unsupported content part")
+				// Streaming cannot report the loss, so it is dropped silently.
 				continue
 			}
 			idx := d.newBlock()

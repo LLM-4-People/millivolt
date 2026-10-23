@@ -79,21 +79,33 @@ target cannot consume them:
   pairs with its `role: function` reply by function name. Chat `prediction`,
   audio output, non-text `modalities`, and `web_search_options` have no target
   equivalent and are dropped with a warning.
+- A `json_schema` response format must carry its `schema` object to translate;
+  a schema-less `json_schema` is rejected with 400 because a cross-protocol
+  target has no meaningful mapping for one. A native same-protocol Chat
+  request is relayed unchanged, so the passthrough path still forwards it.
 - A non-function tool type and malformed tool arguments are rejected before any
   upstream send.
 
 `translation_loss` selects the policy. `warn` (default) drops optional fields
 the target cannot represent and reports each one in `X-Proxy-Warnings`.
-`reject` fails the request with 400 naming the fields before any upstream send.
-The header is proxy-owned: a provider response header of the same name is never
-forwarded. Response-side warnings are never fatal; a non-streaming response reports them
-in `X-Proxy-Warnings`, while a streaming response cannot add a header after the
-status line is committed. The field is described under
+`reject` fails the request with 400 naming the fields before any upstream send,
+and it refuses every recorded loss, including a documented approximation such
+as a clamped temperature, a moved system message, a generated tool-call id or
+a `json_object` response format, not only a field the target cannot represent
+at all. The header is proxy-owned: a provider response header of the same name
+is never forwarded. Its whole value is bounded at 1024 bytes; an over-cap list
+is cut at a field boundary and ends with `; truncated`. Response-side warnings
+are never fatal; a non-streaming response reports them in `X-Proxy-Warnings`,
+while a streaming response cannot add a header after the status line is
+committed and drops them. The field is described under
 [settings](operations.md#finding-a-setting).
 
 A provider error envelope that arrives inside HTTP 200 is translated too, but
 the client status becomes 502: a translated client would read 200 as a
-successful completion. Pre-commit failures (routing, request validation,
+successful completion. A non-200 translated error body is buffered before the
+client sees it, at most 64 KiB, under `whole_document_read_timeout` (default 2
+minutes), so a provider that holds an error stream open can delay the client
+until that bound expires. Pre-commit failures (routing, request validation,
 translation, or an oversized translated body) answer in the client protocol's
 own error envelope.
 
@@ -191,18 +203,28 @@ must supply the native endpoint's correct auth/version/path headers; the
 
 Stored parameter and conversation-composition metadata describe the translated
 upstream body, not an exact copy of the original request. If the caller omits
-both output-limit fields, translation supplies `anthropic_default_max_tokens`,
+all three output-limit spellings (`max_tokens`, `max_completion_tokens` and
+`max_output_tokens`), translation supplies `anthropic_default_max_tokens`,
 which can therefore appear in request details as a captured value. When a
-request supplies both output-limit fields, translation prefers
-`max_completion_tokens`; the proxy's request decode applies the same
-precedence when capturing the cap, so the captured value always agrees with
-the one the translated body carries upstream.
+request supplies both Chat spellings, translation prefers
+`max_completion_tokens`; the proxy's request decode applies the same precedence
+when capturing the cap, so the captured value always agrees with the one the
+translated body carries upstream.
+
+A translated Chat body always spells its output cap `max_tokens`: it has the
+widest OpenAI-compatible support. OpenAI documents `max_tokens` as deprecated
+and its o-series reasoning models require `max_completion_tokens` instead. A
+native Chat client may send either spelling, and the decoder prefers
+`max_completion_tokens`, but a translated Chat request still carries
+`max_tokens` and can therefore be refused by a target that accepts only the
+newer spelling.
 
 Non-streaming translation buffers the full response before committing status;
-a translation failure can therefore return a real error status. Streaming
-translation emits OpenAI-shaped events and observes original-source custom cost
-privately before final accounting. Cache-inclusive native usage conversion has
-one owner; never add reasoning twice when it is already part of output.
+a translation failure can therefore return a real error status. A translated
+stream is emitted in the client's protocol, not as OpenAI-shaped events, and it
+observes original-source custom cost privately before final accounting.
+Cache-inclusive native usage conversion has one owner; never add reasoning
+twice when it is already part of output.
 
 A valid native stop marker closes the turn. Missing completion/error state must
 not be converted into a fabricated clean finish. Legitimate empty/refusal/native

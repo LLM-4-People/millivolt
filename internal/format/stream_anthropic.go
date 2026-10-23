@@ -57,7 +57,6 @@ type AnthropicStreamDecoder struct {
 	created int64
 
 	usage         ir.Usage
-	warnings      ir.Warnings
 	skipped       map[int]bool
 	observe       func([]byte)
 	sawStopReason bool
@@ -79,9 +78,6 @@ func NewAnthropicStreamDecoder(r io.Reader, observe func([]byte)) *AnthropicStre
 		openBlocks:  map[int]bool{},
 	}
 }
-
-// Warnings returns the decode-time translation warnings.
-func (d *AnthropicStreamDecoder) Warnings() ir.Warnings { return d.warnings }
 
 // Next returns the next canonical event.
 func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
@@ -175,8 +171,10 @@ func (d *AnthropicStreamDecoder) Next() (*ir.Event, error) {
 			}
 			irBlock, ok := anthropicStreamBlock(block)
 			if !ok {
+				// A provider-executed block has no cross-protocol equivalent.
+				// Streaming cannot report the loss (the status line is already
+				// committed), so it is skipped without a record.
 				d.skipped[ev.Index] = true
-				d.warnings.Add(ir.WarningDropped, "content."+block.Type, "provider-executed block has no cross-protocol equivalent")
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockStart, Index: ev.Index, Block: &irBlock})

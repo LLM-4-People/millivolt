@@ -73,7 +73,6 @@ type ChatStreamDecoder struct {
 	finishSeen    bool
 	pendingFinish *ir.Finish
 	usage         ir.Usage
-	warnings      ir.Warnings
 }
 
 // NewChatStreamDecoder builds a decoder over one upstream body.
@@ -86,9 +85,6 @@ func NewChatStreamDecoder(r io.Reader) *ChatStreamDecoder {
 		toolBlocks:     map[int]int{},
 	}
 }
-
-// Warnings returns the decode-time translation warnings.
-func (d *ChatStreamDecoder) Warnings() ir.Warnings { return d.warnings }
 
 // Next returns the next canonical event.
 func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
@@ -159,9 +155,6 @@ func (d *ChatStreamDecoder) Next() (*ir.Event, error) {
 			d.q.push(&ir.Event{Type: ir.EventStart, Response: &ir.Response{
 				ID: d.id, Model: d.model, Created: d.created,
 			}})
-		}
-		if len(chunk.Choices) > 1 {
-			d.warnings.Add(ir.WarningDropped, "choices", "only the first choice is translated")
 		}
 		if len(chunk.Choices) > 0 {
 			choice := chunk.Choices[0]
