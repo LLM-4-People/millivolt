@@ -8,6 +8,7 @@ package format
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -325,34 +326,55 @@ func TestChatEncoderInitialBlockPayloads(t *testing.T) {
 	})
 }
 
-// TestResponsesInitialToolArguments pins C6 on the decoder that discarded
-// output_item.added.item.arguments. The initial object must reach every target,
-// and a later delta must continue it rather than duplicate it.
+// TestResponsesInitialToolArguments pins C6/N10 on output_item.added
+// arguments. A partial prefix must never reach the target alone: the decoder
+// buffers it until the first delta or the done/terminal full value decides
+// the continuation. Every target must receive one complete JSON object.
 func TestResponsesInitialToolArguments(t *testing.T) {
-	const startOnly = `event: response.created
+	const created = `event: response.created
 data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
-
-event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
 
 `
-	const withDelta = `event: response.created
-data: {"type":"response.created","response":{"id":"resp_1","model":"m","status":"in_progress"}}
+	added := func(args string) string {
+		return fmt.Sprintf(`event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":%q}}
 
-event: response.output_item.added
-data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1"}}
-
-event: response.function_call_arguments.delta
-data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"}"}
+`, args)
+	}
+	delta := func(deltaArgs, doneArgs string) string {
+		return fmt.Sprintf(`event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":%q}
 
 event: response.output_item.done
-data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}}
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":%q}}
 
-`
-	const terminal = `event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}]}}
+`, deltaArgs, doneArgs)
+	}
+	done := func(args string) string {
+		return fmt.Sprintf(`event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":%q}}
 
-`
+`, args)
+	}
+	terminal := func(args string) string {
+		return fmt.Sprintf(`event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":%q}]}}
+
+`, args)
+	}
+	variants := []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{"start-only-then-terminal", added(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"partial-then-done", added(`{"q":1`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"partial-then-terminal", added(`{"q":1`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"full-then-done", added(`{"q":1}`) + done(`{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"full-then-repeated-delta", added(`{"q":1}`) + delta(`{"q":1}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"partial-then-suffix-delta", added(`{"q":1`) + delta(`}`, `{"q":1}`) + terminal(`{"q":1}`), `{"q":1}`},
+		{"partial-no-full-value", added(`{"q":1`) + done("") + terminal(""), `{"q":1`},
+	}
 	for _, proto := range []struct {
 		name     string
 		inbound  ir.Protocol
@@ -362,20 +384,14 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		{"anthropic", ir.Anthropic, anthropicToolArguments},
 		{"responses", ir.Responses, responsesToolArguments},
 	} {
-		for _, variant := range []struct {
-			name   string
-			stream string
-		}{
-			{"start-only", startOnly + terminal},
-			{"delta-continues", withDelta + terminal},
-		} {
+		for _, variant := range variants {
 			t.Run(proto.name+"/"+variant.name, func(t *testing.T) {
 				var buf bytes.Buffer
-				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(variant.stream), nil, nil); err != nil {
+				if err := TranslateStreamBetween(proto.inbound, ir.Responses, &buf, strings.NewReader(created+variant.stream), nil, nil); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
-				if got := proto.evidence(t, buf.String()); got != `{"q":1}` {
-					t.Fatalf("tool arguments = %q, want {\"q\":1}: %s", got, buf.String())
+				if got := proto.evidence(t, buf.String()); got != variant.want {
+					t.Fatalf("tool arguments = %q, want %q: %s", got, variant.want, buf.String())
 				}
 			})
 		}
@@ -430,12 +446,15 @@ func responsesToolArguments(t *testing.T, out string) string {
 		}
 		response, _ := payload["response"].(map[string]any)
 		output, _ := response["output"].([]any)
-		if len(output) == 0 {
-			return ""
+		for _, raw := range output {
+			item, _ := raw.(map[string]any)
+			if item["type"] != "function_call" {
+				continue
+			}
+			args, _ := item["arguments"].(string)
+			return args
 		}
-		item, _ := output[0].(map[string]any)
-		args, _ := item["arguments"].(string)
-		return args
+		return ""
 	}
 	return ""
 }
