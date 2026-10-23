@@ -65,16 +65,26 @@ func (s *Server) newSSEPacerFor(w http.ResponseWriter) *ssePacer {
 
 func (p *ssePacer) Header() http.Header { return p.w.Header() }
 
-// headersCommitted reports whether the status line and headers are already on
-// the wire. A response whose real status and content type still must be
-// preserved can only be relayed while this is false.
-func (p *ssePacer) headersCommitted() bool {
+// applyStatus writes an upstream status with its own headers while the pacer
+// has not committed anything, and reports whether it won that race. The
+// unclassified-status path needs the real status and content type, so it must
+// not interleave with a keepalive commit.
+func (p *ssePacer) applyStatus(hdr http.Header, status int) bool {
 	if p == nil {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.started
+	if p.stopped || p.started {
+		return false
+	}
+	if hdr != nil {
+		copyResponseHeaders(p.w.Header(), hdr)
+	}
+	p.started = true
+	p.lastWrite = time.Now()
+	p.w.WriteHeader(status)
+	return true
 }
 
 func (p *ssePacer) Unwrap() http.ResponseWriter { return p.w }

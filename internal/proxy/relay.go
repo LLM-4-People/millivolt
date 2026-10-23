@@ -234,12 +234,18 @@ func isNonCompletionStatus(status int) bool {
 }
 
 // relayNonCompletionStatus relays a non-completion status verbatim with the
-// upstream headers. It is the one writer for 202/204/205 on both the native and
-// translated paths, so a translated stream cannot inherit its SSE content type
-// before the real status is known.
+// upstream headers. It is the one writer for 202/204/205 on the native and
+// non-streaming translated paths, so neither translation nor completion
+// classification can replace the upstream status.
 func (s *Server) relayNonCompletionStatus(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record) {
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
+	s.relayNonCompletionBody(ctx, w, resp, rec)
+}
+
+// relayNonCompletionBody relays the body of a response whose status and
+// headers are already committed.
+func (s *Server) relayNonCompletionBody(ctx context.Context, w http.ResponseWriter, resp *http.Response, rec *metrics.Record) {
 	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusResetContent {
 		return
 	}

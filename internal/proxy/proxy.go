@@ -956,10 +956,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// A 202 acceptance or a status-only 204/205 is not an SSE stream, even
 		// when the request asked for one and a target format is configured.
-		// Relay it with the upstream content type before the translated-SSE
-		// override and the pacer commit, while the headers are still open.
-		if isNonCompletionStatus(resp.StatusCode) && !pacer.headersCommitted() {
-			s.relayNonCompletionStatus(ctx, w, resp, rec)
+		// Commit its real status and content type before the translated-SSE
+		// override, atomically against a pacer keepalive commit.
+		if isNonCompletionStatus(resp.StatusCode) && pacer.applyStatus(resp.Header, resp.StatusCode) {
+			s.relayNonCompletionBody(ctx, w, resp, rec)
 			return
 		}
 		// A translated stream always speaks SSE, whatever Content-Type the
