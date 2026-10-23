@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/LLM-4-People/millivolt/internal/config"
+	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
 )
 
@@ -349,6 +350,26 @@ func TestTranslationLossPolicy(t *testing.T) {
 			t.Fatalf("upstream calls = %d, want 0", up.calls.Load())
 		}
 	})
+}
+
+func TestWarningsHeaderMergesAndSanitizes(t *testing.T) {
+	h := http.Header{}
+	setWarningsHeader(h, ir.Warnings{{Kind: ir.WarningDropped, Field: "seed"}})
+	setWarningsHeader(h, ir.Warnings{{Kind: ir.WarningDropped, Field: "output.bad\nname"}})
+	got := h.Get("X-Proxy-Warnings")
+	if !strings.Contains(got, "seed") || !strings.Contains(got, "output.bad?name") {
+		t.Fatalf("merged warnings = %q", got)
+	}
+	if strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("control byte reached the header: %q", got)
+	}
+
+	long := http.Header{}
+	setWarningsHeader(long, ir.Warnings{{Kind: ir.WarningDropped, Field: strings.Repeat("x", 3000)}})
+	value := long.Get("X-Proxy-Warnings")
+	if len(value) > warningsHeaderMax || !strings.HasSuffix(value, "; truncated") {
+		t.Fatalf("long warning value = %d bytes, suffix %q", len(value), value[max(0, len(value)-20):])
+	}
 }
 
 // TestAnthropicPassthroughKeepsDegenerateTurns pins the no-translation

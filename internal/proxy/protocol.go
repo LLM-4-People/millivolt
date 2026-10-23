@@ -196,9 +196,32 @@ func setWarningsHeader(h http.Header, warnings ir.Warnings) {
 	if len(warnings) == 0 {
 		return
 	}
-	v := warnings.Header()
-	if len(v) > warningsHeaderMax {
-		v = v[:warningsHeaderMax]
+	add := headerSafe(warnings.Header())
+	prev := h.Get("X-Proxy-Warnings")
+	if prev != "" {
+		add = prev + "; " + add
 	}
-	h.Set("X-Proxy-Warnings", v)
+	if len(add) > warningsHeaderMax {
+		// Keep the value valid UTF-8 and leave room for the marker: a field
+		// boundary is more useful than a cut mid-rune.
+		cut := warningsHeaderMax - len("; truncated")
+		if cut < 0 {
+			cut = 0
+		}
+		add = strings.ToValidUTF8(add[:cut], "") + "; truncated"
+	}
+	h.Set("X-Proxy-Warnings", add)
+}
+
+// headerSafe keeps a warning value printable ASCII. Warning fields can carry
+// provider-controlled type names, so a raw control byte must not reach the
+// response header writer.
+func headerSafe(v string) string {
+	b := []byte(v)
+	for i, c := range b {
+		if c < 0x20 || c > 0x7e {
+			b[i] = '?'
+		}
+	}
+	return string(b)
 }
