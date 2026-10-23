@@ -123,8 +123,11 @@ type ResponsesStreamDecoder struct {
 	// (content part or reasoning summary part). The terminal document is
 	// authoritative, so a longer value contributes only its missing suffix;
 	// an identical or shorter value is never re-emitted. Keyed by the part
-	// identity (and summary index), never by wire position.
-	emittedText map[string]string
+	// identity (and summary index), never by wire position. A builder makes
+	// incremental delta appends amortized instead of copying the whole channel
+	// on every token; retainedText bounds the aggregate.
+	emittedText  map[string]*strings.Builder
+	retainedText int
 	// partOwner maps a content or summary part key to the logical item it
 	// belongs to, and partKind maps a content part key to its target channel.
 	// Terminal reconciliation compares the whole emitted channel with the
@@ -164,7 +167,7 @@ func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 		itemIDByOutput:   map[int]string{},
 		partSeed:         map[string]ir.Block{},
 		partPosition:     map[string][2]int{},
-		emittedText:      map[string]string{},
+		emittedText:      map[string]*strings.Builder{},
 		partOwner:        map[string]string{},
 		partKind:         map[string]partChannel{},
 		open:             map[int]bool{},
@@ -319,7 +322,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					partKey := summaryPartKey(key, summaryIndex)
 					d.partOwner[partKey] = key
 					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: part.Text}})
-					d.emittedText[partKey] = part.Text
+					if err := d.setEmittedText(partKey, part.Text); err != nil {
+						return nil, err
+					}
 				}
 			case "message":
 				// Content parts arrive in response.content_part.added. The
@@ -401,7 +406,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			// A non-empty start payload is already on the target wire as part
 			// of the block start. Record it as emitted so a delta or terminal
 			// document that repeats the prefix contributes only new bytes.
-			d.emittedText[key] = start
+			if err := d.setEmittedText(key, start); err != nil {
+				return nil, err
+			}
 		case "response.output_text.delta", "response.refusal.delta":
 			// An empty delta carries no bytes and must not materialize a
 			// deferred part: doing so would fix its target position before any
@@ -418,11 +425,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-			d.emittedText[key] = coverage
-			if emit != "" {
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: emit}})
+			if err := d.appendEmittedText(key, ev.Delta); err != nil {
+				return nil, err
 			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Text: ev.Delta}})
 		case "response.output_text.done", "response.refusal.done":
 			// The done payload is the authoritative full part value. Emit it
 			// only when no delta carried bytes; repeating streamed text would
@@ -439,7 +445,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				text = ev.Refusal
 				block = ir.Block{Type: ir.BlockRefusal}
 			}
-			emit := pendingValueSuffix(d.emittedText[key], text)
+			emit := pendingValueSuffix(d.emittedValue(key), text)
 			if emit == "" {
 				continue
 			}
@@ -466,7 +472,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					delta: &ir.Delta{Text: emit},
 				})
 			}
-			d.emittedText[key] = text
+			if err := d.setEmittedText(key, text); err != nil {
+				return nil, err
+			}
 		case "response.function_call_arguments.delta":
 			idx, ok := d.itemBlock[ev.OutputIndex]
 			if !ok {
@@ -482,11 +490,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if ev.Delta != "" && key != "" {
 				partKey := summaryPartKey(key, ev.SummaryIndex)
 				d.partOwner[partKey] = key
-				emit, coverage := pendingDeltaSuffix(d.emittedText[partKey], ev.Delta)
-				d.emittedText[partKey] = coverage
-				if emit != "" {
-					d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+				if err := d.appendEmittedText(partKey, ev.Delta); err != nil {
+					return nil, err
 				}
+				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 			}
 		case "response.reasoning_summary_part.added":
 			// Some providers put the summary text in the part-start payload
@@ -504,12 +511,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
 			d.partOwner[partKey] = key
-			emit := pendingValueSuffix(d.emittedText[partKey], part.Text)
+			emit := pendingValueSuffix(d.emittedValue(partKey), part.Text)
 			if emit == "" {
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			d.emittedText[partKey] = part.Text
+			if err := d.setEmittedText(partKey, part.Text); err != nil {
+				return nil, err
+			}
 		case "response.reasoning_summary_text.done":
 			// The done payload is authoritative per summary part. Emit only
 			// the bytes no delta or start payload already covered.
@@ -520,12 +529,14 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			}
 			partKey := summaryPartKey(key, ev.SummaryIndex)
 			d.partOwner[partKey] = key
-			emit := pendingValueSuffix(d.emittedText[partKey], ev.Text)
+			emit := pendingValueSuffix(d.emittedValue(partKey), ev.Text)
 			if emit == "" {
 				continue
 			}
 			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
-			d.emittedText[partKey] = ev.Text
+			if err := d.setEmittedText(partKey, ev.Text); err != nil {
+				return nil, err
+			}
 		case "response.reasoning_text.delta":
 			// reasoning_text is a content part of the reasoning item, so its
 			// deltas belong to the part block the added event opened (C12).
@@ -543,11 +554,10 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if !ok {
 				continue
 			}
-			emit, coverage := pendingDeltaSuffix(d.emittedText[key], ev.Delta)
-			d.emittedText[key] = coverage
-			if emit != "" {
-				d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: emit}})
+			if err := d.appendEmittedText(key, ev.Delta); err != nil {
+				return nil, err
 			}
+			d.q.push(&ir.Event{Type: ir.EventBlockDelta, Index: idx, Delta: &ir.Delta{Reasoning: ev.Delta}})
 		case "response.reasoning_text.done":
 			// The done payload is authoritative. Emit it only when no delta
 			// carried the part's bytes. A provider may omit the part-start
@@ -575,7 +585,7 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if _, kind := d.partKind[key]; !kind {
 				d.partKind[key] = partChannelReasoning
 			}
-			emit := pendingValueSuffix(d.emittedText[key], ev.Text)
+			emit := pendingValueSuffix(d.emittedValue(key), ev.Text)
 			if emit == "" {
 				continue
 			}
@@ -589,7 +599,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 					delta: &ir.Delta{Reasoning: emit},
 				})
 			}
-			d.emittedText[key] = ev.Text
+			if err := d.setEmittedText(key, ev.Text); err != nil {
+				return nil, err
+			}
 		case "response.content_part.done":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			key := d.keyByPart[pos]
@@ -778,6 +790,7 @@ func (d *ResponsesStreamDecoder) closeAll(output []responsesWireItem) error {
 	clear(d.partSeed)
 	clear(d.partPosition)
 	clear(d.emittedText)
+	d.retainedText = 0
 	d.openToolItems = 0
 	for _, block := range pending {
 		d.syntheticBlock(block.block, block.delta)
@@ -921,7 +934,8 @@ func partKeyIndex(key string) (int, bool) {
 // content channel, ordered by the part index the client saw.
 func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel partChannel) []channelPart {
 	var out []channelPart
-	for key, value := range d.emittedText {
+	for key, builder := range d.emittedText {
+		value := builder.String()
 		if value == "" || d.partOwner[key] != itemKey || d.partKind[key] != channel {
 			continue
 		}
@@ -945,7 +959,8 @@ func (d *ResponsesStreamDecoder) emittedContentParts(itemKey string, channel par
 func (d *ResponsesStreamDecoder) emittedSummaryParts(itemKey string) []channelPart {
 	prefix := "summary:" + itemKey + ":"
 	var out []channelPart
-	for key, value := range d.emittedText {
+	for key, builder := range d.emittedText {
+		value := builder.String()
 		if value == "" || !strings.HasPrefix(key, prefix) {
 			continue
 		}
@@ -1139,9 +1154,11 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				if _, kind := d.partKind[part.key]; !kind {
 					d.partKind[part.key] = part.channel
 				}
-				before := d.emittedText[part.key]
+				before := d.emittedValue(part.key)
 				d.appendContentValue(part, &pending)
-				d.emittedText[part.key] = before + part.value
+				if err := d.setEmittedText(part.key, before+part.value); err != nil {
+					return nil, err
+				}
 			}
 		case "reasoning":
 			key, announced := d.terminalAnnouncedItemKey(i, item.ID)
@@ -1180,9 +1197,11 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 			}
 			summaryRec := d.reconcileChannel("summary_partition", d.emittedSummaryParts(key), summaryTerminal)
 			for _, part := range summaryRec.emit {
-				before := d.emittedText[part.key]
+				before := d.emittedValue(part.key)
 				d.appendReasoningValue(item, key, part.value, &pending)
-				d.emittedText[part.key] = before + part.value
+				if err := d.setEmittedText(part.key, before+part.value); err != nil {
+					return nil, err
+				}
 			}
 			parts, err := terminalMessageParts(item.Content)
 			if err != nil {
@@ -1219,9 +1238,11 @@ func (d *ResponsesStreamDecoder) collectTerminalOutput(output []responsesWireIte
 				if _, kind := d.partKind[part.key]; !kind {
 					d.partKind[part.key] = partChannelReasoning
 				}
-				before := d.emittedText[part.key]
+				before := d.emittedValue(part.key)
 				d.appendContentValue(part, &pending)
-				d.emittedText[part.key] = before + part.value
+				if err := d.setEmittedText(part.key, before+part.value); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -1561,25 +1582,68 @@ func summaryPartKey(itemKey string, summaryIndex int) string {
 	return "summary:" + itemKey + ":" + strconv.Itoa(summaryIndex)
 }
 
-// pendingDeltaSuffix returns the bytes a streamed delta contributes after the
-// coverage already emitted for its channel, plus the new coverage. A delta
-// that repeats the emitted prefix contributes only its continuation; an exact
-// or shorter repeat contributes nothing. Anything else is ordinary
-// continuation text.
-func pendingDeltaSuffix(emitted, delta string) (string, string) {
-	if delta == "" {
-		return "", emitted
+// emittedValue returns the bytes already emitted for one channel. Builder
+// strings are safe to retain because appends never mutate existing bytes and
+// a replacement abandons the old builder.
+func (d *ResponsesStreamDecoder) emittedValue(key string) string {
+	if b := d.emittedText[key]; b != nil {
+		return b.String()
 	}
-	if emitted == "" {
-		return delta, delta
+	return ""
+}
+
+// appendEmittedText records incremental delta bytes for one channel without
+// copying the existing coverage. The aggregate retained-text bound mirrors the
+// encoder budget so a token-level stream cannot grow decoder memory without
+// limit.
+func (d *ResponsesStreamDecoder) appendEmittedText(key, value string) error {
+	if value == "" {
+		return nil
 	}
-	if strings.HasPrefix(delta, emitted) {
-		return delta[len(emitted):], delta
+	if d.retainedText+len(value) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses stream exceeds %d retained text bytes", ResponsesStreamRetainedMaxBytes)
 	}
-	if strings.HasPrefix(emitted, delta) {
-		return "", emitted
+	b := d.emittedText[key]
+	if b == nil {
+		b = &strings.Builder{}
+		d.emittedText[key] = b
 	}
-	return delta, emitted + delta
+	b.WriteString(value)
+	d.retainedText += len(value)
+	return nil
+}
+
+// setEmittedText records a cumulative done/terminal value for one channel. A
+// value that extends the current coverage appends only the suffix; a shorter
+// or divergent authoritative value replaces the builder.
+func (d *ResponsesStreamDecoder) setEmittedText(key, value string) error {
+	old := d.emittedText[key]
+	oldLen := 0
+	if old != nil {
+		oldLen = old.Len()
+	}
+	if value == "" {
+		if old != nil {
+			delete(d.emittedText, key)
+			d.retainedText -= oldLen
+		}
+		return nil
+	}
+	if old != nil && strings.HasPrefix(value, old.String()) {
+		return d.appendEmittedText(key, value[oldLen:])
+	}
+	if d.retainedText-oldLen+len(value) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses stream exceeds %d retained text bytes", ResponsesStreamRetainedMaxBytes)
+	}
+	if old != nil {
+		delete(d.emittedText, key)
+		d.retainedText -= oldLen
+	}
+	b := &strings.Builder{}
+	b.WriteString(value)
+	d.emittedText[key] = b
+	d.retainedText += len(value)
+	return nil
 }
 
 // pendingValueSuffix returns the bytes of a cumulative done/terminal value not

@@ -266,6 +266,7 @@ func TestResponsesNonEmptyStartPayloadEmittedOnce(t *testing.T) {
 	cases := []struct {
 		name      string
 		value     string
+		want      int
 		source    string
 		countFunc func(*testing.T, ir.Protocol, string, string) int
 	}{
@@ -285,8 +286,11 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 			countFunc: textDeltaCount,
 		},
 		{
+			// Deltas are incremental, not cumulative. A delta that repeats
+			// the start payload is a second occurrence of those bytes.
 			name:  "text repeated delta",
 			value: "hello",
+			want:  2,
 			source: `event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
 
@@ -340,8 +344,12 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 				if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+tc.source), nil, nil); err != nil {
 					t.Fatalf("TranslateStreamBetween: %v", err)
 				}
-				if got := tc.countFunc(t, target.inbound, buf.String(), tc.value); got != 1 {
-					t.Fatalf("%q emitted %d times, want once: %s", tc.value, got, buf.String())
+				want := tc.want
+				if want == 0 {
+					want = 1
+				}
+				if got := tc.countFunc(t, target.inbound, buf.String(), tc.value); got != want {
+					t.Fatalf("%q emitted %d times, want %d: %s", tc.value, got, want, buf.String())
 				}
 			})
 		}
