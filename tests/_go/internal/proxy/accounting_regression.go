@@ -47,6 +47,36 @@ func TestBridgeKeepsNativeAccountingAndSourceCost(t *testing.T) {
 	}
 }
 
+// TestTranslatedChatStreamKeepsSourceCost proves the source observer reaches
+// every upstream decoder, not only Anthropic: a Chat stream's provider-specific
+// cost key cannot survive re-encoding, so it must be captured from the original
+// payloads while the translated wire carries normalized usage.
+func TestTranslatedChatStreamKeepsSourceCost(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.ProviderOverride{"up.example": {CostKeys: []string{"billing.amount"}}}
+	s := New(cfg, metrics.NewBuffer(8))
+	rec := &metrics.Record{StatusCode: 200, Provider: "up.example"}
+	w := httptest.NewRecorder()
+	body := strings.Join([]string{
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"role":"assistant"}}]}`,
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{"content":"hi"}}]}`,
+		`data: {"id":"c1","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15},"billing":{"amount":0.03}}`,
+		`data: [DONE]`,
+	}, "\n\n") + "\n\n"
+	resp := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(body))}
+	target := &target{format: "openai-responses", inbound: ir.Responses, outbound: ir.Chat, translate: true}
+	s.transformResponse(t.Context(), w, resp, rec, target, true)
+	if rec.Cost != .03 {
+		t.Fatalf("cost = %v, want 0.03 (body %s)", rec.Cost, w.Body.String())
+	}
+	if rec.Usage.InputTokens != 10 || rec.Usage.OutputTokens != 5 || rec.Usage.TotalTokens != 15 {
+		t.Fatalf("usage = %+v", rec.Usage)
+	}
+	if !strings.Contains(w.Body.String(), "event: response.completed") {
+		t.Fatalf("translated stream has no terminal event: %s", w.Body.String())
+	}
+}
+
 func TestBridgeToolAccountingCountsIdentityNotFragments(t *testing.T) {
 	body := strings.Join([]string{
 		`data: {"type":"message_start","message":{"id":"req-a","model":"model-a","usage":{"input_tokens":3}}}`,

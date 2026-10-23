@@ -48,6 +48,11 @@ type ResponsesStreamDecoder struct {
 	started  bool
 	terminal bool
 
+	// observe receives every raw source data payload before it is parsed.
+	// The translation facade uses it for source-only accounting (cost keys
+	// the target wire cannot carry); decoding itself never depends on it.
+	observe func([]byte)
+
 	id      string
 	model   string
 	created int64
@@ -101,6 +106,9 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		}
 		if len(raw.Data) == 0 {
 			continue
+		}
+		if d.observe != nil {
+			d.observe(raw.Data)
 		}
 		var ev responsesStreamEvent
 		if err := json.Unmarshal(raw.Data, &ev); err != nil {

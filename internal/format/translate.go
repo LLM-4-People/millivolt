@@ -236,9 +236,13 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 	var dec StreamDecoder
 	switch outbound {
 	case ir.Chat:
-		dec = NewChatStreamDecoder(src)
+		d := NewChatStreamDecoder(src)
+		d.observe = observe
+		dec = d
 	case ir.Responses:
-		dec = NewResponsesStreamDecoder(src)
+		d := NewResponsesStreamDecoder(src)
+		d.observe = observe
+		dec = d
 	case ir.Anthropic:
 		dec = NewAnthropicStreamDecoder(src, observe)
 	default:
