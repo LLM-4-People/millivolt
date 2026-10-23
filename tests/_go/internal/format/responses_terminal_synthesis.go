@@ -173,3 +173,32 @@ func completedFunctionCalls(t *testing.T, out string) int {
 	}
 	return 0
 }
+
+// TestResponsesIncompleteTerminalOnlyToolCall pins synthesis on
+// response.incomplete: the tool call is emitted and counted while the
+// documented incomplete reason still owns the finish (length), exactly like
+// the non-streaming decoder.
+func TestResponsesIncompleteTerminalOnlyToolCall(t *testing.T) {
+	output := `[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{\"q\":1}"}]`
+	source := terminalStreamCreated + `event: response.incomplete
+data: {"type":"response.incomplete","response":{"id":"resp_1","model":"m","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":` + output + `}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := target.evidence(t, buf.String()); got != `{"q":1}` {
+				t.Fatalf("tool arguments = %q, want {\"q\":1}: %s", got, buf.String())
+			}
+			want := map[ir.Protocol]string{
+				ir.Chat: `"finish_reason":"length"`, ir.Anthropic: `"stop_reason":"max_tokens"`, ir.Responses: `"status":"incomplete"`,
+			}[target.inbound]
+			if !strings.Contains(buf.String(), want) {
+				t.Fatalf("missing %s in %s output: %s", want, target.name, buf.String())
+			}
+		})
+	}
+}

@@ -441,7 +441,8 @@ func anthropicToolArguments(t *testing.T, out string) string {
 func responsesToolArguments(t *testing.T, out string) string {
 	t.Helper()
 	for _, payload := range mustResponsePayloads(t, out) {
-		if typ, _ := payload["type"].(string); typ != "response.completed" {
+		typ, _ := payload["type"].(string)
+		if typ != "response.completed" && typ != "response.incomplete" {
 			continue
 		}
 		response, _ := payload["response"].(map[string]any)

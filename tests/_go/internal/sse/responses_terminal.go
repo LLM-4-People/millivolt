@@ -48,6 +48,15 @@ func TestResponsesTerminalMapsFinishReason(t *testing.T) {
 			finish: "length",
 		},
 		{
+			name: "incomplete max output with terminal tool",
+			lines: []string{
+				`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`,
+				`data: {"type":"response.incomplete","response":{"id":"r1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call","id":"fc_1","call_id":"c1","name":"lookup","arguments":"{}"}]}}`,
+			},
+			finish: "length",
+			tools:  1,
+		},
+		{
 			name: "incomplete max messages",
 			lines: []string{
 				`data: {"type":"response.created","response":{"id":"r1","status":"in_progress"}}`,
