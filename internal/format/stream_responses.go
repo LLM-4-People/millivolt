@@ -58,7 +58,6 @@ type ResponsesStreamDecoder struct {
 	created int64
 
 	nextIndex int
-	itemType  map[int]string
 	itemBlock map[int]int
 	partBlock map[[2]int]int
 	argsSeen  map[int]bool
@@ -74,7 +73,6 @@ type ResponsesStreamDecoder struct {
 func NewResponsesStreamDecoder(r io.Reader) *ResponsesStreamDecoder {
 	return &ResponsesStreamDecoder{
 		r:         newSSEReader(r),
-		itemType:  map[int]string{},
 		itemBlock: map[int]int{},
 		partBlock: map[[2]int]int{},
 		argsSeen:  map[int]bool{},
@@ -140,7 +138,6 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 			if err := json.Unmarshal(ev.Item, &item); err != nil {
 				return nil, err
 			}
-			d.itemType[ev.OutputIndex] = item.Type
 			switch item.Type {
 			case "function_call":
 				d.sawToolCall = true
@@ -392,6 +389,7 @@ type responsesItemState struct {
 	partType     string
 	name         string
 	callID       string
+	encrypted    string
 	text         strings.Builder
 	args         strings.Builder
 	reasoning    strings.Builder
@@ -404,42 +402,53 @@ func NewResponsesStreamEncoder(w io.Writer, flusher http.Flusher) *ResponsesStre
 	return &ResponsesStreamEncoder{w: w, flusher: flusher, items: map[int]*responsesItemState{}}
 }
 
+// startStream emits the mandatory response.created/response.in_progress pair
+// once, synthesizing identity for a source stream that never delivered its own
+// start event.
+func (e *ResponsesStreamEncoder) startStream() error {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	if e.id == "" {
+		e.id = "resp_" + randomID()
+	}
+	if e.created == 0 {
+		e.created = time.Now().Unix()
+	}
+	if err := e.emit("response.created", map[string]any{
+		"type": "response.created", "sequence_number": e.nextSeq(),
+		"response": e.responseObject("in_progress", nil),
+	}); err != nil {
+		return err
+	}
+	return e.emit("response.in_progress", map[string]any{
+		"type": "response.in_progress", "sequence_number": e.nextSeq(),
+		"response": e.responseObject("in_progress", nil),
+	})
+}
+
 // Write renders one canonical event.
 func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
+	if ev.Type != ir.EventStart {
+		if err := e.startStream(); err != nil {
+			return err
+		}
+	}
 	switch ev.Type {
 	case ir.EventStart:
 		if ev.Response != nil {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			e.usage = ev.Response.Usage
 		}
-		if e.created == 0 {
-			e.created = time.Now().Unix()
-		}
-		e.started = true
-		if err := e.emit("response.created", map[string]any{
-			"type": "response.created", "sequence_number": e.nextSeq(),
-			"response": e.responseObject("in_progress", nil),
-		}); err != nil {
-			return err
-		}
-		return e.emit("response.in_progress", map[string]any{
-			"type": "response.in_progress", "sequence_number": e.nextSeq(),
-			"response": e.responseObject("in_progress", nil),
-		})
+		return e.startStream()
 	case ir.EventBlockStart:
 		if ev.Block == nil {
 			return nil
 		}
-		item := &responsesItemState{
-			id:          e.newItemID(ev.Block.Type),
-			outputIndex: e.outputIndex,
-			kind:        string(ev.Block.Type),
-		}
-		e.outputIndex++
-		e.items[ev.Index] = item
-		e.order = append(e.order, ev.Index)
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
+			item := e.startItem(ev.Index, ev.Block.Type)
 			item.kind = "message"
 			item.partType = "output_text"
 			if ev.Block.Type == ir.BlockRefusal {
@@ -459,65 +468,73 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			if item.partType == "refusal" {
 				part = map[string]any{"type": "refusal", "refusal": ""}
 			}
-			return e.emit("response.content_part.added", map[string]any{
+			if err := e.emit("response.content_part.added", map[string]any{
 				"type": "response.content_part.added", "sequence_number": e.nextSeq(),
 				"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
 				"part": part,
-			})
+			}); err != nil {
+				return err
+			}
+			initial := ev.Block.Text
+			if item.partType == "refusal" {
+				initial = ev.Block.Refusal
+			}
+			return e.appendText(item, initial)
 		case ir.BlockToolCall:
 			tc := ev.Block.ToolCall
+			item := e.startItem(ev.Index, ev.Block.Type)
 			item.kind = "function_call"
-			item.name = tc.Name
-			item.callID = tc.ID
+			if tc != nil {
+				item.name = tc.Name
+				item.callID = tc.ID
+				if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
+					item.args.Write(tc.Arguments)
+				}
+			}
 			return e.emit("response.output_item.added", map[string]any{
 				"type": "response.output_item.added", "sequence_number": e.nextSeq(),
 				"output_index": item.outputIndex,
 				"item": map[string]any{
-					"type": "function_call", "id": item.id, "call_id": tc.ID,
-					"name": tc.Name, "arguments": "", "status": "in_progress",
+					"type": "function_call", "id": item.id, "call_id": item.callID,
+					"name": item.name, "arguments": "", "status": "in_progress",
 				},
 			})
-		case ir.BlockReasoning:
+		case ir.BlockReasoning, ir.BlockRedactedReasoning:
+			item := e.startItem(ev.Index, ev.Block.Type)
 			item.kind = "reasoning"
-			return e.emit("response.output_item.added", map[string]any{
+			initial := ""
+			if ev.Block.Reasoning != nil {
+				item.encrypted = ev.Block.Reasoning.Encrypted
+				initial = ev.Block.Reasoning.Text
+				if initial == "" && len(ev.Block.Reasoning.Summary) > 0 {
+					initial = strings.Join(ev.Block.Reasoning.Summary, "\n")
+				}
+			}
+			if err := e.emit("response.output_item.added", map[string]any{
 				"type": "response.output_item.added", "sequence_number": e.nextSeq(),
 				"output_index": item.outputIndex,
 				"item": map[string]any{
 					"type": "reasoning", "id": item.id, "summary": []any{}, "status": "in_progress",
 				},
-			})
+			}); err != nil {
+				return err
+			}
+			return e.appendReasoning(item, initial)
 		default:
-			item.kind = "skipped"
+			// No Responses item shape exists for this assistant block. Do not
+			// allocate an output index: a skipped item would leave a gap in
+			// the client's contiguous output_index sequence.
 			return nil
 		}
 	case ir.EventBlockDelta:
 		item := e.items[ev.Index]
-		if item == nil || item.kind == "skipped" || ev.Delta == nil {
+		if item == nil || ev.Delta == nil {
 			return nil
 		}
 		switch {
 		case ev.Delta.Text != "":
 			if item.kind == "message" {
-				if item.partType == "refusal" {
-					if item.refusal.Len()+len(ev.Delta.Text) > ResponsesStreamRetainedMaxBytes {
-						return fmt.Errorf("responses refusal exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
-					}
-					item.refusal.WriteString(ev.Delta.Text)
-					return e.emit("response.refusal.delta", map[string]any{
-						"type": "response.refusal.delta", "sequence_number": e.nextSeq(),
-						"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-						"delta": ev.Delta.Text,
-					})
-				}
-				if item.text.Len()+len(ev.Delta.Text) > ResponsesStreamRetainedMaxBytes {
-					return fmt.Errorf("responses output text exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
-				}
-				item.text.WriteString(ev.Delta.Text)
-				return e.emit("response.output_text.delta", map[string]any{
-					"type": "response.output_text.delta", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
-					"delta": ev.Delta.Text, "logprobs": []any{},
-				})
+				return e.appendText(item, ev.Delta.Text)
 			}
 		case ev.Delta.Arguments != "":
 			if item.kind == "function_call" {
@@ -532,30 +549,12 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			}
 		case ev.Delta.Reasoning != "":
 			if item.kind == "reasoning" {
-				if !item.summaryOpen {
-					item.summaryOpen = true
-					if err := e.emit("response.reasoning_summary_part.added", map[string]any{
-						"type": "response.reasoning_summary_part.added", "sequence_number": e.nextSeq(),
-						"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
-						"part": map[string]any{"type": "summary_text", "text": ""},
-					}); err != nil {
-						return err
-					}
-				}
-				if item.reasoning.Len()+len(ev.Delta.Reasoning) > ResponsesStreamRetainedMaxBytes {
-					return fmt.Errorf("responses reasoning exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
-				}
-				item.reasoning.WriteString(ev.Delta.Reasoning)
-				return e.emit("response.reasoning_summary_text.delta", map[string]any{
-					"type": "response.reasoning_summary_text.delta", "sequence_number": e.nextSeq(),
-					"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
-					"delta": ev.Delta.Reasoning,
-				})
+				return e.appendReasoning(item, ev.Delta.Reasoning)
 			}
 		}
 	case ir.EventBlockEnd:
 		item := e.items[ev.Index]
-		if item == nil || item.kind == "skipped" {
+		if item == nil {
 			return nil
 		}
 		switch item.kind {
@@ -652,11 +651,7 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 			return e.emit("response.output_item.done", map[string]any{
 				"type": "response.output_item.done", "sequence_number": e.nextSeq(),
 				"output_index": item.outputIndex,
-				"item": map[string]any{
-					"type": "reasoning", "id": item.id, "summary": []any{
-						map[string]any{"type": "summary_text", "text": text},
-					}, "status": "completed",
-				},
+				"item":         reasoningItem(item, text),
 			})
 		}
 	case ir.EventMessageDelta:
@@ -686,6 +681,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 func (e *ResponsesStreamEncoder) finishResponse() error {
 	if e.doneSent {
 		return nil
+	}
+	if err := e.startStream(); err != nil {
+		return err
 	}
 	e.doneSent = true
 	status := "completed"
@@ -738,7 +736,7 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 	var out []map[string]any
 	for _, idx := range e.order {
 		item := e.items[idx]
-		if item == nil || item.kind == "skipped" {
+		if item == nil {
 			continue
 		}
 		switch item.kind {
@@ -761,13 +759,96 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 				"name": item.name, "arguments": args, "status": "completed",
 			})
 		case "reasoning":
-			out = append(out, map[string]any{
-				"type": "reasoning", "id": item.id, "status": "completed",
-				"summary": []any{map[string]any{"type": "summary_text", "text": item.reasoning.String()}},
-			})
+			out = append(out, reasoningItem(item, item.reasoning.String()))
 		}
 	}
 	return out
+}
+
+// reasoningItem renders one completed Responses reasoning item. An opaque
+// encrypted artifact the source provided (Anthropic redacted_thinking or a
+// Responses encrypted reasoning item) is preserved where the target accepts it.
+func reasoningItem(item *responsesItemState, text string) map[string]any {
+	summary := []any{}
+	if text != "" {
+		summary = []any{map[string]any{"type": "summary_text", "text": text}}
+	}
+	out := map[string]any{
+		"type": "reasoning", "id": item.id, "status": "completed", "summary": summary,
+	}
+	if item.encrypted != "" {
+		out["encrypted_content"] = item.encrypted
+	}
+	return out
+}
+
+// startItem allocates the next contiguous Responses output index for one
+// canonical block. Only a block whose target shape exists may call it.
+func (e *ResponsesStreamEncoder) startItem(index int, kind ir.BlockType) *responsesItemState {
+	item := &responsesItemState{
+		id:          e.newItemID(kind),
+		outputIndex: e.outputIndex,
+		kind:        string(kind),
+	}
+	e.outputIndex++
+	e.items[index] = item
+	e.order = append(e.order, index)
+	return item
+}
+
+// appendText retains and emits one message text or refusal delta. A block-start
+// payload and later deltas share the same path, so an initial value is never
+// dropped when no delta follows.
+func (e *ResponsesStreamEncoder) appendText(item *responsesItemState, delta string) error {
+	if delta == "" {
+		return nil
+	}
+	if item.partType == "refusal" {
+		if item.refusal.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
+			return fmt.Errorf("responses refusal exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+		}
+		item.refusal.WriteString(delta)
+		return e.emit("response.refusal.delta", map[string]any{
+			"type": "response.refusal.delta", "sequence_number": e.nextSeq(),
+			"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+			"delta": delta,
+		})
+	}
+	if item.text.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses output text exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+	}
+	item.text.WriteString(delta)
+	return e.emit("response.output_text.delta", map[string]any{
+		"type": "response.output_text.delta", "sequence_number": e.nextSeq(),
+		"item_id": item.id, "output_index": item.outputIndex, "content_index": 0,
+		"delta": delta, "logprobs": []any{},
+	})
+}
+
+// appendReasoning retains and emits one reasoning summary delta.
+func (e *ResponsesStreamEncoder) appendReasoning(item *responsesItemState, delta string) error {
+	if delta == "" {
+		return nil
+	}
+	if !item.summaryOpen {
+		item.summaryOpen = true
+		if err := e.emit("response.reasoning_summary_part.added", map[string]any{
+			"type": "response.reasoning_summary_part.added", "sequence_number": e.nextSeq(),
+			"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
+			"part": map[string]any{"type": "summary_text", "text": ""},
+		}); err != nil {
+			return err
+		}
+	}
+	if item.reasoning.Len()+len(delta) > ResponsesStreamRetainedMaxBytes {
+		return fmt.Errorf("responses reasoning exceeds %d bytes", ResponsesStreamRetainedMaxBytes)
+	}
+	item.reasoning.WriteString(delta)
+	return e.emit("response.reasoning_summary_text.delta", map[string]any{
+		"type": "response.reasoning_summary_text.delta", "sequence_number": e.nextSeq(),
+		"item_id": item.id, "output_index": item.outputIndex, "summary_index": 0,
+		"delta": delta,
+	})
 }
 
 func randomID() string {
@@ -782,7 +863,7 @@ func (e *ResponsesStreamEncoder) newItemID(kind ir.BlockType) string {
 	switch kind {
 	case ir.BlockToolCall:
 		return "fc_" + randomID()
-	case ir.BlockReasoning:
+	case ir.BlockReasoning, ir.BlockRedactedReasoning:
 		return "rs_" + randomID()
 	default:
 		return "msg_" + randomID()

@@ -372,6 +372,8 @@ type AnthropicStreamEncoder struct {
 	started    bool
 	skipped    map[int]bool
 	unopened   map[int]bool
+	blockArgs  map[int]json.RawMessage
+	argSent    map[int]bool
 	finishSent bool
 	usage      ir.Usage
 	doneSent   bool
@@ -379,46 +381,82 @@ type AnthropicStreamEncoder struct {
 
 // NewAnthropicStreamEncoder builds an encoder over one client response writer.
 func NewAnthropicStreamEncoder(w io.Writer, flusher http.Flusher) *AnthropicStreamEncoder {
-	return &AnthropicStreamEncoder{w: w, flusher: flusher, skipped: map[int]bool{}, unopened: map[int]bool{}}
+	return &AnthropicStreamEncoder{
+		w: w, flusher: flusher,
+		skipped:   map[int]bool{},
+		unopened:  map[int]bool{},
+		blockArgs: map[int]json.RawMessage{},
+		argSent:   map[int]bool{},
+	}
+}
+
+// startStream emits the mandatory message_start once, synthesizing identity for
+// a source stream that never delivered its own start event.
+func (e *AnthropicStreamEncoder) startStream() error {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	if e.id == "" {
+		e.id = "msg_" + randomID()
+	}
+	if e.created == 0 {
+		e.created = time.Now().Unix()
+	}
+	return e.emit("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": e.id, "type": "message", "role": "assistant", "content": []any{},
+			"model": e.model, "stop_reason": nil, "stop_sequence": nil,
+			"usage": map[string]any{
+				"input_tokens":                nonNegative(e.usage.InputTokens - e.usage.CacheReadTokens - e.usage.CacheWriteTokens),
+				"output_tokens":               e.usage.OutputTokens,
+				"cache_creation_input_tokens": e.usage.CacheWriteTokens,
+				"cache_read_input_tokens":     e.usage.CacheReadTokens,
+			},
+		},
+	})
 }
 
 // Write renders one canonical event.
 func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
+	if ev.Type != ir.EventStart {
+		if err := e.startStream(); err != nil {
+			return err
+		}
+	}
 	switch ev.Type {
 	case ir.EventStart:
 		if ev.Response != nil {
 			e.id, e.model, e.created = ev.Response.ID, ev.Response.Model, ev.Response.Created
 			e.usage = ev.Response.Usage
 		}
-		if e.created == 0 {
-			e.created = time.Now().Unix()
-		}
-		e.started = true
-		return e.emit("message_start", map[string]any{
-			"type": "message_start",
-			"message": map[string]any{
-				"id": e.id, "type": "message", "role": "assistant", "content": []any{},
-				"model": e.model, "stop_reason": nil, "stop_sequence": nil,
-				"usage": map[string]any{
-					"input_tokens":                nonNegative(e.usage.InputTokens - e.usage.CacheReadTokens - e.usage.CacheWriteTokens),
-					"output_tokens":               e.usage.OutputTokens,
-					"cache_creation_input_tokens": e.usage.CacheWriteTokens,
-					"cache_read_input_tokens":     e.usage.CacheReadTokens,
-				},
-			},
-		})
+		return e.startStream()
 	case ir.EventBlockStart:
 		if ev.Block == nil {
 			return nil
 		}
 		switch ev.Block.Type {
 		case ir.BlockText, ir.BlockRefusal:
-			return e.emit("content_block_start", map[string]any{
+			if err := e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
 				"content_block": map[string]any{"type": "text", "text": ""},
-			})
+			}); err != nil {
+				return err
+			}
+			if ev.Block.Text != "" {
+				return e.emitTextDelta(ev.Index, ev.Block.Text)
+			}
+			return nil
 		case ir.BlockToolCall:
 			tc := ev.Block.ToolCall
+			if tc == nil {
+				e.unopened[ev.Index] = true
+				return nil
+			}
+			if len(tc.Arguments) > 0 && string(tc.Arguments) != "{}" {
+				e.blockArgs[ev.Index] = tc.Arguments
+			}
 			return e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
 				"content_block": map[string]any{
@@ -426,10 +464,23 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 				},
 			})
 		case ir.BlockReasoning:
-			return e.emit("content_block_start", map[string]any{
+			if err := e.emit("content_block_start", map[string]any{
 				"type": "content_block_start", "index": ev.Index,
 				"content_block": map[string]any{"type": "thinking", "thinking": "", "signature": ""},
-			})
+			}); err != nil {
+				return err
+			}
+			if ev.Block.Reasoning != nil {
+				if ev.Block.Reasoning.Text != "" {
+					if err := e.emitReasoningDelta(ev.Index, ev.Block.Reasoning.Text); err != nil {
+						return err
+					}
+				}
+				if ev.Block.Reasoning.Signature != "" {
+					return e.emitSignatureDelta(ev.Index, ev.Block.Reasoning.Signature)
+				}
+			}
+			return nil
 		case ir.BlockRedactedReasoning:
 			data := ""
 			if ev.Block.Reasoning != nil {
@@ -453,25 +504,14 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		}
 		switch {
 		case ev.Delta.Text != "":
-			return e.emit("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": ev.Index,
-				"delta": map[string]any{"type": "text_delta", "text": ev.Delta.Text},
-			})
+			return e.emitTextDelta(ev.Index, ev.Delta.Text)
 		case ev.Delta.Reasoning != "":
-			return e.emit("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": ev.Index,
-				"delta": map[string]any{"type": "thinking_delta", "thinking": ev.Delta.Reasoning},
-			})
+			return e.emitReasoningDelta(ev.Index, ev.Delta.Reasoning)
 		case ev.Delta.Signature != "":
-			return e.emit("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": ev.Index,
-				"delta": map[string]any{"type": "signature_delta", "signature": ev.Delta.Signature},
-			})
+			return e.emitSignatureDelta(ev.Index, ev.Delta.Signature)
 		case ev.Delta.Arguments != "":
-			return e.emit("content_block_delta", map[string]any{
-				"type": "content_block_delta", "index": ev.Index,
-				"delta": map[string]any{"type": "input_json_delta", "partial_json": ev.Delta.Arguments},
-			})
+			e.argSent[ev.Index] = true
+			return e.emitJSONDelta(ev.Index, ev.Delta.Arguments)
 		case ev.Delta.Citation != nil:
 			return e.emit("content_block_delta", map[string]any{
 				"type": "content_block_delta", "index": ev.Index,
@@ -483,6 +523,14 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 			delete(e.unopened, ev.Index)
 			return nil
 		}
+		if args, ok := e.blockArgs[ev.Index]; ok && !e.argSent[ev.Index] {
+			e.argSent[ev.Index] = true
+			if err := e.emitJSONDelta(ev.Index, string(args)); err != nil {
+				return err
+			}
+		}
+		delete(e.blockArgs, ev.Index)
+		delete(e.argSent, ev.Index)
 		delete(e.skipped, ev.Index)
 		return e.emit("content_block_stop", map[string]any{
 			"type": "content_block_stop", "index": ev.Index,
@@ -538,6 +586,34 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 	return nil
 }
 
+func (e *AnthropicStreamEncoder) emitTextDelta(index int, text string) error {
+	return e.emit("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": index,
+		"delta": map[string]any{"type": "text_delta", "text": text},
+	})
+}
+
+func (e *AnthropicStreamEncoder) emitReasoningDelta(index int, thinking string) error {
+	return e.emit("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": index,
+		"delta": map[string]any{"type": "thinking_delta", "thinking": thinking},
+	})
+}
+
+func (e *AnthropicStreamEncoder) emitSignatureDelta(index int, signature string) error {
+	return e.emit("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": index,
+		"delta": map[string]any{"type": "signature_delta", "signature": signature},
+	})
+}
+
+func (e *AnthropicStreamEncoder) emitJSONDelta(index int, partial string) error {
+	return e.emit("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": index,
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": partial},
+	})
+}
+
 func (e *AnthropicStreamEncoder) emit(name string, obj any) error {
 	payload, err := sse.MarshalWireJSON(obj)
 	if err != nil {
@@ -562,6 +638,9 @@ func (e *AnthropicStreamEncoder) emit(name string, obj any) error {
 func (e *AnthropicStreamEncoder) finish() error {
 	if e.doneSent {
 		return nil
+	}
+	if err := e.startStream(); err != nil {
+		return err
 	}
 	e.doneSent = true
 	return e.emit("message_stop", map[string]any{"type": "message_stop"})
