@@ -104,6 +104,36 @@ func sseFrameName(p []byte) string {
 	return ""
 }
 
+// frameDataPayload returns the payload of a frame's first data line. The
+// translators emit one event per write, so a frame's error object lives behind
+// its optional "event:" line; DataPayload alone only matches a raw data line.
+func frameDataPayload(p []byte) []byte {
+	for len(p) > 0 {
+		line := p
+		if i := bytes.IndexByte(p, '\n'); i >= 0 {
+			line, p = p[:i], p[i+1:]
+		} else {
+			p = nil
+		}
+		if payload, ok := sse.DataPayload(bytes.TrimRight(line, "\r")); ok {
+			return payload
+		}
+	}
+	return nil
+}
+
+// frameIsError reports whether a translated frame already tells the client
+// about a provider failure. Chat carries a top-level error object in a bare
+// data frame; Anthropic and Responses name the event "error" (the Responses
+// payload has no error key, so the event name is the discriminator).
+func frameIsError(p []byte) bool {
+	if sseFrameName(p) == "error" {
+		return true
+	}
+	payload := frameDataPayload(p)
+	return payload != nil && metrics.HasErrorKey(payload)
+}
+
 // terminalFrameFor reports whether one complete encoder write is the inbound
 // protocol's terminal frame.
 func terminalFrameFor(inbound ir.Protocol) func([]byte) bool {

@@ -372,6 +372,36 @@ func TestTerminalFrameForOnlyReadsTheEventLine(t *testing.T) {
 	}
 }
 
+// TestTranslatedStreamWriterDetectsForwardedErrors pins the failure-closing
+// gate: a provider error event that already reached the client must suppress
+// the synthetic translation_error frame. Anthropic and Responses frames put
+// the event name before the data line, so error detection must read the
+// frame's data line rather than only a bare data frame.
+func TestTranslatedStreamWriterDetectsForwardedErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		frame string
+		want  bool
+	}{
+		{"chat error data", "data: {\"error\":{\"message\":\"boom\"}}\n\n", true},
+		{"anthropic error event", "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n", true},
+		{"responses error event", "event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"boom\"}\n\n", true},
+		{"anthropic text delta", "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"error\"}}\n\n", false},
+		{"chat content", "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			w := &translatedStreamWriter{dst: &buf, terminal: func([]byte) bool { return false }}
+			if _, err := w.Write([]byte(tc.frame)); err != nil {
+				t.Fatal(err)
+			}
+			if w.errorFrame != tc.want {
+				t.Fatalf("errorFrame = %v, want %v for %q", w.errorFrame, tc.want, tc.frame)
+			}
+		})
+	}
+}
+
 func TestWarningsHeaderMergesAndSanitizes(t *testing.T) {
 	h := http.Header{}
 	setWarningsHeader(h, ir.Warnings{{Kind: ir.WarningDropped, Field: "seed"}})

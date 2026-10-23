@@ -1764,10 +1764,8 @@ func (t *translatedStreamWriter) Write(p []byte) (int, error) {
 		t.done = true
 		return n, nil
 	}
-	if !t.errorFrame {
-		if payload, ok := sse.DataPayload(bytes.TrimSpace(p)); ok && metrics.HasErrorKey(payload) {
-			t.errorFrame = true
-		}
+	if !t.errorFrame && frameIsError(p) {
+		t.errorFrame = true
 	}
 	return n, nil
 }
