@@ -142,3 +142,75 @@ data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status
 		})
 	}
 }
+
+// TestResponsesEmptyContentPartDoneOpensNoBlock pins F5-5: an empty done for a
+// deferred part must keep it deferred. Starting it just to close it would open
+// an empty target block (visible as an empty Anthropic text block) and fix its
+// position before terminal content exists.
+func TestResponsesEmptyContentPartDoneOpensNoBlock(t *testing.T) {
+	source := `event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_1","role":"assistant","content":[]}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","output_index":0,"content_index":1,"part":{"type":"output_text","text":""}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"alpha"},{"type":"output_text","text":"beta"}]}]}}
+
+`
+	for _, target := range terminalTargets {
+		t.Run(target.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := TranslateStreamBetween(target.inbound, ir.Responses, &buf, strings.NewReader(terminalStreamCreated+source), nil, nil); err != nil {
+				t.Fatalf("TranslateStreamBetween: %v", err)
+			}
+			if got := textEmissionOrder(t, target.inbound, buf.String()); strings.Join(got, " ") != "alpha beta" {
+				t.Fatalf("order = %v, want [alpha beta]: %s", got, buf.String())
+			}
+			if target.inbound == ir.Anthropic {
+				if got := emptyAnthropicTextBlocks(t, buf.String()); got != 0 {
+					t.Fatalf("empty Anthropic text blocks = %d, want 0: %s", got, buf.String())
+				}
+			}
+		})
+	}
+}
+
+// emptyAnthropicTextBlocks counts Anthropic text blocks that started but never
+// received a non-empty text delta.
+func emptyAnthropicTextBlocks(t *testing.T, out string) int {
+	t.Helper()
+	starts := map[int]bool{}
+	deltas := map[int]bool{}
+	for _, payload := range mustAnthropicPayloads(t, out) {
+		switch payload["type"] {
+		case "content_block_start":
+			block, _ := payload["content_block"].(map[string]any)
+			if block["type"] != "text" {
+				continue
+			}
+			idx, _ := payload["index"].(float64)
+			starts[int(idx)] = true
+		case "content_block_delta":
+			delta, _ := payload["delta"].(map[string]any)
+			if delta["type"] != "text_delta" {
+				continue
+			}
+			if text, _ := delta["text"].(string); text == "" {
+				continue
+			}
+			idx, _ := payload["index"].(float64)
+			deltas[int(idx)] = true
+		}
+	}
+	empty := 0
+	for idx := range starts {
+		if !deltas[idx] {
+			empty++
+		}
+	}
+	return empty
+}

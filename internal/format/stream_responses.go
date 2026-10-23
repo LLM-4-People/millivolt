@@ -561,6 +561,26 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 		case "response.content_part.done":
 			pos := [2]int{ev.OutputIndex, ev.ContentIndex}
 			key := d.keyByPart[pos]
+			// A done payload that is empty must not materialize a deferred
+			// part. Keep the seed so terminal content can still fill it, and
+			// open no target block that would have no bytes.
+			if _, started := d.partBlockByKey[key]; !started && len(ev.Part) > 0 {
+				var part struct {
+					Type    string `json:"type"`
+					Text    string `json:"text"`
+					Refusal string `json:"refusal"`
+				}
+				if err := json.Unmarshal(ev.Part, &part); err != nil {
+					return nil, err
+				}
+				value := part.Text
+				if part.Type == "refusal" {
+					value = part.Refusal
+				}
+				if value == "" {
+					continue
+				}
+			}
 			idx, ok := d.startPartBlock(key)
 			if !ok {
 				continue
@@ -594,16 +614,17 @@ func (d *ResponsesStreamDecoder) Next() (*ir.Event, error) {
 				delete(d.open, idx)
 				d.q.push(&ir.Event{Type: ir.EventBlockEnd, Index: idx})
 			} else if item.Type == "message" {
-				// Some providers skip content_part.done; close any part
-				// block that is still open for this output item, starting a
-				// deferred empty part first so its lifecycle stays valid.
+				// Some providers skip content_part.done; close any part block
+				// that is still open for this output item. A deferred empty part
+				// never reached the target, so discard its seed rather than
+				// opening and immediately closing an empty block.
 				for pos, key := range d.keyByPart {
 					if pos[0] != ev.OutputIndex {
 						continue
 					}
-					d.startPartBlock(key)
-					idx, ok := d.partBlock[pos]
-					if !ok {
+					idx, started := d.partBlockByKey[key]
+					if !started || !d.open[idx] {
+						delete(d.partSeed, key)
 						continue
 					}
 					delete(d.partBlock, pos)
