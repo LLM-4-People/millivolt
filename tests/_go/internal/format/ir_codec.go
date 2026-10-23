@@ -705,6 +705,35 @@ func TestAnthropicTemperatureClamp(t *testing.T) {
 	}
 }
 
+func TestAnthropicEffortMapping(t *testing.T) {
+	for _, tc := range []struct {
+		effort string
+		want   string
+		warn   bool
+	}{
+		{"minimal", "low", true},
+		{"low", "low", false},
+		{"xhigh", "xhigh", false},
+	} {
+		t.Run(tc.effort, func(t *testing.T) {
+			req := &ir.Request{Model: "m",
+				Reasoning: &ir.ReasoningConfig{Effort: tc.effort},
+				Messages:  []ir.Message{{Role: ir.RoleUser, Content: []ir.Block{ir.TextBlock("hi")}}}}
+			out, err := EncodeAnthropicRequest(req, 8, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			oc, _ := decodeJSONMap(t, out)["output_config"].(map[string]any)
+			if oc["effort"] != tc.want {
+				t.Fatalf("effort = %v, want %q", oc["effort"], tc.want)
+			}
+			if got := warningField(req.Warnings, "reasoning.effort"); got != tc.warn {
+				t.Fatalf("warning = %v, want %v (%+v)", got, tc.warn, req.Warnings)
+			}
+		})
+	}
+}
+
 func TestCodecRejectsNonFunctionTool(t *testing.T) {
 	chat := `{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"web_search"}]}`
 	if _, err := DecodeChatRequest([]byte(chat)); err == nil {

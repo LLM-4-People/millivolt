@@ -549,7 +549,7 @@ func EncodeAnthropicRequest(req *ir.Request, defaultMaxTokens int, promptCacheKe
 	if thinking := encodeAnthropicThinking(req.Reasoning); thinking != nil {
 		out["thinking"] = thinking
 	}
-	if oc := encodeAnthropicOutputConfig(req.ResponseFormat, req.Reasoning); oc != nil {
+	if oc := encodeAnthropicOutputConfig(req.ResponseFormat, req.Reasoning, &req.Warnings); oc != nil {
 		out["output_config"] = oc
 	}
 	if req.User != "" {
@@ -906,10 +906,20 @@ func encodeAnthropicThinking(r *ir.ReasoningConfig) map[string]any {
 	return nil
 }
 
-func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningConfig) map[string]any {
+func encodeAnthropicOutputConfig(rf *ir.ResponseFormat, reasoning *ir.ReasoningConfig, warns *ir.Warnings) map[string]any {
 	out := map[string]any{}
 	if reasoning != nil && reasoning.Effort != "" {
-		out["effort"] = reasoning.Effort
+		effort := reasoning.Effort
+		if effort == "minimal" {
+			// Anthropic's documented effort levels start at low; minimal has
+			// no exact spelling there, so the nearest level preserves the
+			// client's low-reasoning intent instead of failing the request.
+			effort = "low"
+			if warns != nil {
+				warns.Add(ir.WarningApproximated, "reasoning.effort", "Anthropic Messages has no minimal effort; mapped to low")
+			}
+		}
+		out["effort"] = effort
 	}
 	if rf != nil && rf.Type == "json_schema" && len(rf.Schema) > 0 {
 		out["format"] = map[string]any{"type": "json_schema", "schema": rf.Schema}
