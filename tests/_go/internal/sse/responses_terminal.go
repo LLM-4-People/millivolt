@@ -341,3 +341,83 @@ func TestResponsesTerminalMultiTextUnitsMatchStreamed(t *testing.T) {
 		}
 	})
 }
+
+// TestResponsesTerminalMixedToolFallbackMatchesStreamed pins F5-6: the
+// no-usage fallback counts a terminal function call as the chunk an announced
+// tool item contributes, and counts only terminal text units that no streamed
+// text chunk already represents. Provider usage stays authoritative.
+func TestResponsesTerminalMixedToolFallbackMatchesStreamed(t *testing.T) {
+	now := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
+	run := func(lines []string) metrics.Record {
+		var a Analyzer
+		for _, line := range lines {
+			a.Feed([]byte(line), now)
+		}
+		var rec metrics.Record
+		rec.FinalAttemptAt = now.Add(-time.Millisecond)
+		a.Fill(&rec)
+		metrics.FinalizeRecord(&rec)
+		return rec
+	}
+	const created = `data: {"type":"response.created","response":{"id":"resp_1","status":"in_progress"}}`
+	const twoTextsAndTool = `[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"}]`
+
+	terminal := run([]string{
+		created,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":` + twoTextsAndTool + `}}`,
+	})
+	streamed := run([]string{
+		created,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"one"}`,
+		`data: {"type":"response.output_text.delta","output_index":0,"content_index":1,"delta":"two"}`,
+		`data: {"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","call_id":"call_1","name":"lookup","arguments":"{}"}}`,
+		`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":` + twoTextsAndTool + `}}`,
+	})
+	if terminal.HadAnswerContent != streamed.HadAnswerContent ||
+		terminal.Chunks != streamed.Chunks ||
+		terminal.AnswerTokens != streamed.AnswerTokens ||
+		terminal.GenTokens != streamed.GenTokens ||
+		terminal.TTFTMs != streamed.TTFTMs {
+		t.Fatalf("terminal record %+v does not match streamed %+v", terminal, streamed)
+	}
+	if !terminal.HadAnswerContent || terminal.Chunks != 3 ||
+		terminal.AnswerTokens != 3 || terminal.GenTokens != 2 || terminal.TTFTMs != 1 {
+		t.Fatalf("terminal chunks/answer/gen/ttft = %d/%d/%d/%d, want 3/3/2/1ms",
+			terminal.Chunks, terminal.AnswerTokens, terminal.GenTokens, terminal.TTFTMs)
+	}
+
+	t.Run("streamed one plus terminal two", func(t *testing.T) {
+		got := run([]string{
+			created,
+			`data: {"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"one"}`,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]}]}}`,
+		})
+		if !got.HadAnswerContent || got.Chunks != 2 ||
+			got.AnswerTokens != 2 || got.GenTokens != 2 || got.TTFTMs != 1 {
+			t.Fatalf("chunks/answer/gen/ttft = %d/%d/%d/%d, want 2/2/2/1ms",
+				got.Chunks, got.AnswerTokens, got.GenTokens, got.TTFTMs)
+		}
+	})
+
+	t.Run("each terminal call is one tool chunk", func(t *testing.T) {
+		got := run([]string{
+			created,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"one"},{"type":"output_text","text":"two"}]},{"type":"function_call","id":"fc_1","call_id":"call_1","name":"lookup","arguments":"{}"},{"type":"function_call","id":"fc_2","call_id":"call_2","name":"lookup","arguments":"{}"}]}}`,
+		})
+		if got.Chunks != 4 || got.AnswerTokens != 4 || got.GenTokens != 2 || got.ToolCalls != 2 {
+			t.Fatalf("chunks/answer/gen/tools = %d/%d/%d/%d, want 4/4/2/2",
+				got.Chunks, got.AnswerTokens, got.GenTokens, got.ToolCalls)
+		}
+	})
+
+	t.Run("usage remains authoritative", func(t *testing.T) {
+		got := run([]string{
+			created,
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":3,"output_tokens":7,"total_tokens":10},"output":` + twoTextsAndTool + `}}`,
+		})
+		if got.AnswerTokens != 7 || got.GenTokens != 7 || got.ToolCalls != 1 {
+			t.Fatalf("answer/gen/tools = %d/%d/%d, want provider usage 7/7 and one tool",
+				got.AnswerTokens, got.GenTokens, got.ToolCalls)
+		}
+	})
+}

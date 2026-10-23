@@ -113,6 +113,11 @@ type Analyzer struct {
 	// lets Fill derive the content+reasoning-only chunk count.
 	toolChunks int64
 
+	// textChunks counts streamed chunks that carry answer text. The terminal
+	// Responses document repeats the whole answer, so its text units must
+	// count only the units that no streamed chunk already represents.
+	textChunks int64
+
 	// err captures an IN-BAND error payload (data: {"error":{...}}): some
 	// providers signal failures inside a 200-OK stream instead of via the HTTP
 	// status. The client sees these, so the record must too - otherwise the
@@ -441,6 +446,9 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 		if (hasToolCall || hasToolDelta) && !hasContent && !hasReasoning {
 			a.toolChunks++
 		}
+		if hasContent {
+			a.textChunks++
+		}
 	}
 
 	// Reasoning/answer separation for thinking models.
@@ -714,7 +722,6 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 	parsed := json.Unmarshal(payload, &ev) == nil
 	terminalUnits := 0
-	hadStreamedAnswer := !a.firstAnswerAt.IsZero()
 	if parsed {
 		if ev.Response.ID != "" {
 			a.responseID = ev.Response.ID
@@ -728,20 +735,20 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			case "function_call":
 				// A function call may appear only in the terminal document;
 				// count each call once per call_id so a legitimate tool turn
-				// is never classified as empty and replaced by a failure.
-				a.countResponsesToolCall(item.CallID, item.Name)
+				// is never classified as empty and replaced by a failure. A
+				// call that was not announced by a streamed item contributes
+				// the chunk that announcement would have counted.
+				if a.countResponsesToolCall(item.CallID, item.Name) {
+					a.recordTerminalToolUnit(now)
+				}
 			case "message":
 				text, refusal := terminalMessageText(item.Content)
 				if text != "" {
 					a.answerishSeen = true
-					// The terminal document is the whole stream for a
-					// terminal-only answer: count every non-empty text unit so
-					// the no-usage fallback matches the streamed equivalent.
-					// A streamed text delta already owns the chunk count; the
-					// terminal document merely repeats its value.
-					if !hadStreamedAnswer {
-						terminalUnits += terminalTextUnits(item.Content)
-					}
+					// The terminal document repeats the whole answer. Count
+					// every non-empty text unit here; only the units no
+					// streamed text chunk already represents are added below.
+					terminalUnits += terminalTextUnits(item.Content)
 					if a.CapturePreview && a.preview == nil {
 						a.preview = []byte(metrics.TruncatePreview(text))
 					}
@@ -761,8 +768,8 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 			}
 		}
 	}
-	if terminalUnits > 0 {
-		a.recordTerminalAnswerUnits(now, terminalUnits)
+	if a.textChunks < int64(terminalUnits) {
+		a.recordTerminalAnswerUnits(now, terminalUnits-int(a.textChunks))
 	}
 	if a.finishReason != "" {
 		return
@@ -794,11 +801,12 @@ func (a *Analyzer) captureResponsesTerminalFinish(eventType string, payload []by
 	}
 }
 
-// recordTerminalAnswerUnits records the content-bearing units of a
-// terminal-only Responses document. The terminal event is the chunk that
-// carried them, so it feeds the same TTFT/chunk-count accounting as the
-// equivalent streamed output_text deltas. units is already the count of
-// non-empty message text parts, so a no-usage record keeps one chunk per unit.
+// recordTerminalAnswerUnits records the content-bearing units of a Responses
+// terminal document that were not already streamed. The terminal event is the
+// chunk that carried them, so it feeds the same TTFT/chunk-count accounting as
+// the equivalent output_text delta. units is the number of non-empty message
+// text parts left after subtracting streamed answer chunks, so a no-usage
+// record keeps one chunk per unit without counting the same text twice.
 func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
 	if units <= 0 {
 		return
@@ -809,6 +817,19 @@ func (a *Analyzer) recordTerminalAnswerUnits(now time.Time, units int) {
 	a.lastTokenAt = now
 	a.chunkCount += int64(units)
 	a.firstAnswerAt = now
+}
+
+// recordTerminalToolUnit records a function call that appeared only in the
+// terminal document. It contributes the same content-bearing tool chunk an
+// announced function-call item would have: TTFT plus a chunk that is not
+// generation, so the no-usage fallback matches the streamed equivalent.
+func (a *Analyzer) recordTerminalToolUnit(now time.Time) {
+	if a.firstTokenAt.IsZero() {
+		a.firstTokenAt = now
+	}
+	a.lastTokenAt = now
+	a.chunkCount++
+	a.toolChunks++
 }
 
 // terminalTextUnits counts the non-empty answer text units in a message item's
@@ -1340,18 +1361,21 @@ func responsesContentEvent(eventType string, keys *frameKeys) bool {
 
 // countResponsesToolCall records one Responses function_call item exactly once
 // per call id. The name is retained in first-seen order like the Chat path.
-func (a *Analyzer) countResponsesToolCall(callID, name string) {
+// It reports whether this call is new, so the caller can add the one chunk an
+// announced or terminal-only call contributes without double counting.
+func (a *Analyzer) countResponsesToolCall(callID, name string) bool {
 	if callID != "" {
 		if a.toolCallIDs == nil {
 			a.toolCallIDs = make(map[string]struct{}, 4)
 		}
 		if _, seen := a.toolCallIDs[callID]; seen {
-			return
+			return false
 		}
 		a.toolCallIDs[callID] = struct{}{}
 	}
 	a.toolCalls++
 	a.retainToolName(name)
+	return true
 }
 
 // jsonValueString extracts the string text from a raw JSON value (the probe's
