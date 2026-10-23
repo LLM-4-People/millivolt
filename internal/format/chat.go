@@ -602,9 +602,9 @@ func decodeChatContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.Warnin
 				warns.Add(ir.WarningDropped, "content.file", "missing payload")
 				continue
 			}
-			out = append(out, ir.Block{Type: ir.BlockFile, File: &ir.File{
-				FileID: p.File.FileID, FileData: p.File.FileData, Filename: p.File.Filename,
-			}})
+			file := &ir.File{FileID: p.File.FileID, FileData: p.File.FileData, Filename: p.File.Filename}
+			normalizeFileData(file)
+			out = append(out, ir.Block{Type: ir.BlockFile, File: file})
 		default:
 			warns.Add(ir.WarningDropped, "content."+p.Type, "unsupported content part")
 		}
@@ -949,8 +949,8 @@ func encodeChatContent(blocks []ir.Block, warns *ir.Warnings) (any, []map[string
 			if b.File.FileID != "" {
 				file["file_id"] = b.File.FileID
 			}
-			if b.File.FileData != "" {
-				file["file_data"] = b.File.FileData
+			if data := fileDataURL(b.File); data != "" {
+				file["file_data"] = data
 			}
 			if b.File.Filename != "" {
 				file["filename"] = b.File.Filename
@@ -1039,8 +1039,8 @@ func encodeChatContentText(blocks []ir.Block, warns *ir.Warnings) any {
 			if b.File.FileID != "" {
 				file["file_id"] = b.File.FileID
 			}
-			if b.File.FileData != "" {
-				file["file_data"] = b.File.FileData
+			if data := fileDataURL(b.File); data != "" {
+				file["file_data"] = data
 			}
 			if b.File.Filename != "" {
 				file["filename"] = b.File.Filename

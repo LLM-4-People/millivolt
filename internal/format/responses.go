@@ -342,10 +342,12 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 			normalizeImageURL(img)
 			out = append(out, ir.Block{Type: ir.BlockImage, Image: img})
 		case "input_file":
-			out = append(out, ir.Block{Type: ir.BlockFile, File: &ir.File{
+			file := &ir.File{
 				FileID: p.FileID, FileData: p.FileData, FileURL: p.FileURL,
 				Filename: p.Filename, Detail: p.Detail,
-			}})
+			}
+			normalizeFileData(file)
+			out = append(out, ir.Block{Type: ir.BlockFile, File: file})
 		case "input_audio":
 			if p.InputAudio == nil {
 				warns.Add(ir.WarningDropped, "content.input_audio", "missing payload")
@@ -709,8 +711,8 @@ func encodeResponsesContent(blocks []ir.Block, role ir.Role, warns *ir.Warnings)
 			if b.File.FileID != "" {
 				part["file_id"] = b.File.FileID
 			}
-			if b.File.FileData != "" {
-				part["file_data"] = b.File.FileData
+			if data := fileDataURL(b.File); data != "" {
+				part["file_data"] = data
 			}
 			if b.File.FileURL != "" {
 				part["file_url"] = b.File.FileURL

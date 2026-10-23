@@ -798,17 +798,24 @@ func encodeAnthropicImage(img *ir.Image) map[string]any {
 }
 
 func encodeAnthropicFile(f *ir.File) map[string]any {
+	mediaType, data := f.MediaType, f.FileData
+	if media, raw, ok := splitBase64DataURL(f.FileData); ok {
+		data = raw
+		if mediaType == "" {
+			mediaType = media
+		}
+	}
 	switch {
 	case f.FileID != "":
 		return map[string]any{"type": "file", "file_id": f.FileID}
 	case f.FileURL != "":
 		return map[string]any{"type": "url", "url": f.FileURL}
-	case strings.HasPrefix(f.MediaType, "text/"):
-		if data, err := base64.StdEncoding.DecodeString(f.FileData); err == nil {
-			return map[string]any{"type": "text", "media_type": f.MediaType, "data": string(data)}
+	case strings.HasPrefix(mediaType, "text/"):
+		if decoded, err := base64.StdEncoding.DecodeString(data); err == nil {
+			return map[string]any{"type": "text", "media_type": mediaType, "data": string(decoded)}
 		}
 	}
-	return map[string]any{"type": "base64", "media_type": f.MediaType, "data": f.FileData}
+	return map[string]any{"type": "base64", "media_type": mediaType, "data": data}
 }
 
 func encodeAnthropicToolResultContent(blocks []ir.Block, warns *ir.Warnings) any {

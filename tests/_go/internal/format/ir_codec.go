@@ -767,6 +767,50 @@ func TestToolResultDropsAudioWithWarning(t *testing.T) {
 	}
 }
 
+func TestInlineFileDataURLRoundTrip(t *testing.T) {
+	chatBody := `{"model":"m","messages":[{"role":"user","content":[` +
+		`{"type":"file","file":{"filename":"a.pdf","file_data":"data:application/pdf;base64,JVBER"}}]}]}`
+	req, err := DecodeChatRequest([]byte(chatBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := req.Messages[0].Content[0].File
+	if file.FileData != "JVBER" || file.MediaType != "application/pdf" {
+		t.Fatalf("decoded file = %+v", file)
+	}
+	anthropicOut, err := EncodeAnthropicRequest(req, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := decodeJSONMap(t, anthropicOut)["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["source"].(map[string]any)
+	if source["type"] != "base64" || source["media_type"] != "application/pdf" || source["data"] != "JVBER" {
+		t.Fatalf("anthropic source = %v", source)
+	}
+
+	anthropicBody := `{"model":"m","max_tokens":8,"messages":[{"role":"user","content":[` +
+		`{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBER"},"title":"a.pdf"}]}]}`
+	anthropicReq, err := DecodeAnthropicRequest([]byte(anthropicBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatOut, err := EncodeChatRequest(anthropicReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	part := decodeJSONMap(t, chatOut)["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	filePart, _ := part["file"].(map[string]any)
+	if filePart["file_data"] != "data:application/pdf;base64,JVBER" {
+		t.Fatalf("chat file = %v", part)
+	}
+
+	if _, err := EncodeChatRequest(&ir.Request{Model: "m", Messages: []ir.Message{{
+		Role:    ir.RoleUser,
+		Content: []ir.Block{{Type: ir.BlockFile, File: &ir.File{FileData: "JVBER"}}},
+	}}}); err == nil {
+		t.Fatal("inline file data without a media type was accepted")
+	}
+}
+
 func TestAnthropicLiftsLateSystemMessage(t *testing.T) {
 	in := `{"model":"m","messages":[` +
 		`{"role":"user","content":"hi"},` +

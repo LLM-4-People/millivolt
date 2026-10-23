@@ -528,6 +528,9 @@ func validateBlock(b Block) error {
 		if b.File.FileID == "" && b.File.FileData == "" && b.File.FileURL == "" {
 			return fmt.Errorf("file block has no file_id, file_data or file_url")
 		}
+		if b.File.FileData != "" && b.File.MediaType == "" {
+			return fmt.Errorf("inline file data has no media_type")
+		}
 	case BlockAudio:
 		if b.Audio == nil || b.Audio.Data == "" {
 			return fmt.Errorf("audio block has no data")

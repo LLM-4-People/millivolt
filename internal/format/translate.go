@@ -60,6 +60,36 @@ func splitBase64DataURL(raw string) (mediaType, data string, ok bool) {
 	return parts[0], payload, true
 }
 
+// normalizeFileData folds a base64 data URL into the canonical inline file
+// fields. Chat and Responses spell inline file bytes as a data URL, while
+// Anthropic's base64 source keeps the bytes and media type separate.
+func normalizeFileData(file *ir.File) {
+	if file == nil || file.FileData == "" {
+		return
+	}
+	mediaType, data, ok := splitBase64DataURL(file.FileData)
+	if !ok {
+		return
+	}
+	file.FileData = data
+	if file.MediaType == "" {
+		file.MediaType = mediaType
+	}
+}
+
+// fileDataURL renders canonical inline file bytes in the data-URL spelling
+// Chat and Responses accept. A value that already carries the prefix passes
+// through unchanged, as does raw base64 with no declared media type.
+func fileDataURL(file *ir.File) string {
+	if file == nil || file.FileData == "" {
+		return ""
+	}
+	if strings.HasPrefix(file.FileData, "data:") || file.MediaType == "" {
+		return file.FileData
+	}
+	return "data:" + file.MediaType + ";base64," + file.FileData
+}
+
 // imageDataURL renders a canonical inline image as a data URL for wire
 // families whose image part accepts a URL. URL wins when present; otherwise the
 // validated inline payload is encoded with its declared media type.
