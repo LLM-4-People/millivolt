@@ -618,7 +618,9 @@ func decodeChatImage(raw json.RawMessage) (*ir.Image, error) {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return &ir.Image{URL: s}, nil
+		img := &ir.Image{URL: s}
+		normalizeImageURL(img)
+		return img, nil
 	}
 	var obj struct {
 		URL    string `json:"url"`
@@ -630,7 +632,9 @@ func decodeChatImage(raw json.RawMessage) (*ir.Image, error) {
 	if obj.URL == "" {
 		return nil, errors.New("image_url part has no url")
 	}
-	return &ir.Image{URL: obj.URL, Detail: obj.Detail}, nil
+	img := &ir.Image{URL: obj.URL, Detail: obj.Detail}
+	normalizeImageURL(img)
+	return img, nil
 }
 
 func decodeChatTools(in []chatWireTool) ([]ir.Tool, error) {

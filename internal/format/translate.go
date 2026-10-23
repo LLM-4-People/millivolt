@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/LLM-4-People/millivolt/internal/format/ir"
 	"github.com/LLM-4-People/millivolt/internal/metrics"
@@ -16,6 +17,48 @@ import (
 // these functions decode one wire shape into the canonical IR and encode the
 // other. Same-protocol requests never reach here: the proxy relays them
 // byte-transparently.
+
+// normalizeImageURL folds a base64 data URL into the canonical inline fields.
+// Chat and Responses clients commonly send inline images that way, while
+// Anthropic's URL image source expects a hosted URL; keeping the bytes and
+// media type separate lets every encoder choose the shape its target accepts.
+func normalizeImageURL(img *ir.Image) {
+	if img == nil || img.URL == "" {
+		return
+	}
+	mediaType, data, ok := splitBase64DataURL(img.URL)
+	if !ok {
+		return
+	}
+	img.URL, img.MediaType, img.Data = "", mediaType, data
+}
+
+// splitBase64DataURL parses data:[<media-type>][;<param>]*;base64,<payload>.
+// A non-base64 or malformed data URL is left for the wire encoder unchanged.
+func splitBase64DataURL(raw string) (mediaType, data string, ok bool) {
+	rest, found := strings.CutPrefix(raw, "data:")
+	if !found {
+		return "", "", false
+	}
+	meta, payload, found := strings.Cut(rest, ",")
+	if !found || payload == "" {
+		return "", "", false
+	}
+	parts := strings.Split(meta, ";")
+	if len(parts) < 2 || parts[0] == "" {
+		return "", "", false
+	}
+	base64 := false
+	for _, part := range parts[1:] {
+		if part == "base64" {
+			base64 = true
+		}
+	}
+	if !base64 {
+		return "", "", false
+	}
+	return parts[0], payload, true
+}
 
 // imageDataURL renders a canonical inline image as a data URL for wire
 // families whose image part accepts a URL. URL wins when present; otherwise the

@@ -315,7 +315,9 @@ func decodeAnthropicImage(src *struct {
 	case "base64":
 		return &ir.Image{Data: src.Data, MediaType: src.MediaType}, nil
 	case "url":
-		return &ir.Image{URL: src.URL}, nil
+		img := &ir.Image{URL: src.URL}
+		normalizeImageURL(img)
+		return img, nil
 	case "file":
 		return &ir.Image{FileID: src.FileID}, nil
 	default:

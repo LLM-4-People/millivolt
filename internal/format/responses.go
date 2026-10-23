@@ -338,9 +338,9 @@ func decodeResponsesContent(raw json.RawMessage, role ir.Role) ([]ir.Block, ir.W
 		case "refusal":
 			out = append(out, ir.Block{Type: ir.BlockRefusal, Refusal: p.Refusal})
 		case "input_image":
-			out = append(out, ir.Block{Type: ir.BlockImage, Image: &ir.Image{
-				URL: p.ImageURL, FileID: p.FileID, Detail: p.Detail,
-			}})
+			img := &ir.Image{URL: p.ImageURL, FileID: p.FileID, Detail: p.Detail}
+			normalizeImageURL(img)
+			out = append(out, ir.Block{Type: ir.BlockImage, Image: img})
 		case "input_file":
 			out = append(out, ir.Block{Type: ir.BlockFile, File: &ir.File{
 				FileID: p.FileID, FileData: p.FileData, FileURL: p.FileURL,

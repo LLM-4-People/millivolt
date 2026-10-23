@@ -594,6 +594,26 @@ func TestCodecPreservesInlineMedia(t *testing.T) {
 		t.Fatalf("responses image = %v", part)
 	}
 
+	// A Chat data URL carries the same inline bytes; Anthropic's URL source
+	// expects a hosted URL, so the decoder folds it into the base64 source.
+	chatImageBody := `{"model":"m","messages":[{"role":"user","content":[` +
+		`{"type":"image_url","image_url":{"url":"data:image/png;base64,BBBB"}}]}]}`
+	chatReq, err := DecodeChatRequest([]byte(chatImageBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img := chatReq.Messages[0].Content[0].Image; img.Data != "BBBB" || img.MediaType != "image/png" || img.URL != "" {
+		t.Fatalf("chat data URL = %+v", img)
+	}
+	anthropicOut, err := EncodeAnthropicRequest(chatReq, 8, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := decodeJSONMap(t, anthropicOut)["messages"].([]any)[0].(map[string]any)["content"].([]any)[0].(map[string]any)["source"].(map[string]any)
+	if source["type"] != "base64" || source["media_type"] != "image/png" || source["data"] != "BBBB" {
+		t.Fatalf("anthropic source = %v", source)
+	}
+
 	// A provider file id has no Chat image_url equivalent: the block is
 	// dropped with a warning rather than emitted as an empty URL.
 	fileReq := &ir.Request{Model: "m", Messages: []ir.Message{{
