@@ -921,6 +921,23 @@ func TestLegacyChatFunctionCallPairsWithResult(t *testing.T) {
 	}
 }
 
+func TestLegacyChatResponseFunctionCall(t *testing.T) {
+	resp, err := DecodeChatResponse([]byte(`{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","function_call":{"name":"lookup","arguments":"{\"q\":1}"}},"finish_reason":"function_call"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Blocks) != 1 || resp.Blocks[0].Type != ir.BlockToolCall {
+		t.Fatalf("blocks = %+v", resp.Blocks)
+	}
+	call := resp.Blocks[0].ToolCall
+	if call.ID != "lookup" || call.Name != "lookup" || string(call.Arguments) != `{"q":1}` {
+		t.Fatalf("call = %+v", call)
+	}
+	if resp.Finish != ir.FinishToolCalls {
+		t.Fatalf("finish = %q, want tool_calls", resp.Finish)
+	}
+}
+
 func TestChatWarnsOnUnrepresentableFields(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

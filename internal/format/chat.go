@@ -1188,6 +1188,15 @@ func DecodeChatResponse(body []byte) (*ir.Response, error) {
 		warns = append(warns, w...)
 		blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
 	}
+	if rawPresent(choice.Message.FunctionCall) {
+		if len(choice.Message.ToolCalls) > 0 {
+			warns.Add(ir.WarningDropped, "message.function_call", "ignored because tool_calls is present")
+		} else if call, err := decodeLegacyMessageFunctionCall(choice.Message.FunctionCall); err != nil {
+			return nil, err
+		} else {
+			blocks = append(blocks, ir.Block{Type: ir.BlockToolCall, ToolCall: call})
+		}
+	}
 	resp := &ir.Response{
 		ID:       in.ID,
 		Model:    in.Model,
