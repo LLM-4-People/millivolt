@@ -2171,11 +2171,20 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		// failure. Non-terminal events keep the ordinary line path.
 		eventName []byte
 		eventBody []byte
-		// pendingName is the terminal event name for a buffered event that
-		// was released verbatim at the hold bound. It classifies the
-		// reassembled document at the real blank-line boundary.
+		// pendingName is the terminal event name for an event that could not
+		// be buffered as a unit: a late name after the event's data lines, or
+		// a buffered event released verbatim at the hold bound. It classifies
+		// the reassembled document at the real blank-line boundary.
 		pendingName string
-		buf         [4096]byte
+		// eventHasData records that the current SSE event already produced a
+		// data: line, so a terminal name arriving for it belongs to the same
+		// event and must keep its original position.
+		eventHasData bool
+		// deferredFinish keeps a terminal document's hold until its SSE
+		// boundary: the event may still name itself after its data line, and
+		// resolving at the data line would drop that late name.
+		deferredFinish bool
+		buf            [4096]byte
 		// holdAborted marks that the hold was abandoned (its bytes flushed on
 		// the terminalHoldMax overflow): the stream then COMMITS to verbatim
 		// relay - no degenerate classification may substitute anything (a
@@ -2359,6 +2368,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 		raw = append(raw, eventBody...)
 		out.Write(raw)
 		pendingName = string(sse.EventName(eventName))
+		eventHasData = true
 		a.FeedBufferedEvent(raw, now)
 		eventName = eventName[:0]
 		eventBody = eventBody[:0]
@@ -2376,16 +2386,23 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					break
 				}
 				line := b[:idx]
-				// Buffer a Responses terminal-named event whole. Its document
-				// may only become parseable after several data: lines, and its
-				// name must be kept or dropped together with the document.
-				if len(eventName) == 0 && !holding {
-					if name := sse.EventName(line); name != "" && sse.ResponsesTerminalEventName(name) {
-						eventName = append(eventName[:0], line...)
-						eventName = append(eventName, '\n')
-						lineBuf.Next(idx + 1)
-						continue
-					}
+				name := sse.EventName(line)
+				terminalName := name != "" && sse.ResponsesTerminalEventName(name)
+				// A terminal name that follows this event's data lines belongs
+				// to the same event. Relay it in its original position and
+				// classify the reassembled document at the blank boundary.
+				if terminalName && len(eventName) == 0 && (holding || eventHasData) {
+					pendingName = name
+				}
+				// Buffer a terminal-named event whole when its name opens the
+				// event. Its document may only become parseable after several
+				// data: lines, and its name must be kept or dropped together
+				// with the document.
+				if terminalName && len(eventName) == 0 && !holding && !eventHasData {
+					eventName = append(eventName[:0], line...)
+					eventName = append(eventName, '\n')
+					lineBuf.Next(idx + 1)
+					continue
 				}
 				if len(eventName) > 0 {
 					if len(eventName)+len(eventBody)+len(line)+2 > terminalHoldMax {
@@ -2406,6 +2423,7 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					if processEventBuffer(now) {
 						return rescueRequested
 					}
+					eventHasData = false
 					if !writeOut() {
 						return rescueNone
 					}
@@ -2413,11 +2431,32 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 				}
 				blank := len(bytes.TrimSpace(line)) == 0
 				prev := a.Terminated()
-				if blank && pendingName != "" {
-					name := pendingName
-					pendingName = ""
-					a.FlushEventWithName(name, now)
+				if blank {
+					eventHasData = false
+					if pendingName != "" {
+						name := pendingName
+						pendingName = ""
+						a.FlushEventWithName(name, now)
+					} else {
+						a.Feed(line, now)
+					}
+					if !prev && a.Terminated() && !holding {
+						// The boundary completed a terminal document that was
+						// never buffered as a unit (multi-line data or a late
+						// event name). Relay the boundary, resolve the record,
+						// and stop reading post-terminal debris.
+						out.Write(line)
+						out.WriteByte('\n')
+						if !writeOut() {
+							return rescueNone
+						}
+						a.Fill(rec)
+						return rescueNone
+					}
 				} else {
+					if _, isData := sse.DataPayload(line); isData {
+						eventHasData = true
+					}
 					a.Feed(line, now)
 				}
 				switch {
@@ -2425,46 +2464,50 @@ func (s *Server) streamBody(ctx context.Context, w http.ResponseWriter, body io.
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
 					if sse.TerminalLine(line) {
-						// The stream stops reading at the terminal marker, so
-						// the blank line that terminates its SSE block is no
-						// longer consumed from upstream; emit it here to keep
-						// the client wire byte-identical.
-						hold = append(hold, '\n')
+						deferredFinish = true
 					}
-					// The terminal marker itself: everything that defines the
-					// outcome has arrived - resolve the hold NOW instead of
-					// waiting for EOF (a stalled upstream that keeps the
-					// connection open after [DONE] must not starve the client's
-					// completion forever).
-					if sse.TerminalLine(line) {
+					if sse.DoneLine(line) {
+						// [DONE] ends the stream at the line itself; emit the
+						// blank line its SSE block would have carried.
+						hold = append(hold, '\n')
 						if !finishHold() {
 							return rescueNone
 						}
 						if rescueRequested != rescueNone {
 							return rescueRequested
 						}
-						// One terminal owner: the marker resolved the record and
-						// released the terminal region. Stop reading so a client
-						// that closes right after [DONE] cannot turn this into a
-						// 499, and post-terminal debris (including a scanner
-						// overflow) cannot rewrite the completed record. The
-						// caller closes the upstream body.
 						a.Fill(rec)
 						return rescueNone
 					}
-				case !prev && a.Terminated():
+					// A Responses/Anthropic terminal document stays held until
+					// its blank-line boundary so a late event name can follow
+					// in its original position.
+					if blank && (deferredFinish || (!prev && a.Terminated())) {
+						if !finishHold() {
+							return rescueNone
+						}
+						if rescueRequested != rescueNone {
+							return rescueRequested
+						}
+						a.Fill(rec)
+						return rescueNone
+					}
+				case !prev && a.Terminated() && !blank:
 					// This line opened the terminal region: withhold it (and
 					// everything after) until the outcome is decided.
 					holding = true
 					hold = append(hold, line...)
 					hold = append(hold, '\n')
-					if sse.TerminalLine(line) {
+					if sse.DoneLine(line) {
 						hold = append(hold, '\n')
+					}
+					if sse.TerminalLine(line) {
+						deferredFinish = true
 					}
 					if !writeOut() {
 						return rescueNone
 					}
-					if sse.TerminalLine(line) {
+					if sse.DoneLine(line) {
 						if !finishHold() {
 							return rescueNone
 						}

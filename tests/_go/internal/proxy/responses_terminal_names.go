@@ -252,3 +252,63 @@ func TestResponsesOverBoundTerminalResolves(t *testing.T) {
 		})
 	}
 }
+
+// TestResponsesLateTerminalEventNameKeepsOrder pins R4-5: SSE field order is
+// data-then-name, so the name arrives after the terminal document. Both lines
+// stay in their original positions and the record still resolves (the typed
+// document by its own type, the type-less one by the late name).
+func TestResponsesLateTerminalEventNameKeepsOrder(t *testing.T) {
+	const typeLess = `{"response":{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":3,"output_tokens":5,"total_tokens":8}}}`
+	cases := []struct {
+		name string
+		doc  string
+	}{
+		{name: "typed document", doc: responsesTextDocument},
+		{name: "type-less document", doc: typeLess},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := responsesCreatedFrame + "data: " + tc.doc + "\nevent: response.completed\n\n"
+			upstream := streamUpstream(t, stream)
+			defer upstream.Close()
+			buf := metrics.NewBuffer(8)
+			srv := httptest.NewServer(New(config.Default(), buf))
+			defer srv.Close()
+
+			status, got := streamRequestTo(t, srv, upstream, "/v1/responses",
+				`{"model":"m","stream":true,"input":"hi"}`)
+			if status != http.StatusOK {
+				t.Fatalf("status = %d (body %s)", status, got)
+			}
+			if got != stream {
+				t.Fatalf("late terminal name was not relayed in order:\nIN =%q\nOUT=%q", stream, got)
+			}
+			if strings.Count(got, "event: response.completed\n") != 1 {
+				t.Fatalf("terminal event name appeared %d times, want once: %s",
+					strings.Count(got, "event: response.completed\n"), got)
+			}
+			wantType := 0
+			if tc.name == "typed document" {
+				wantType = 1
+			}
+			if gotType := strings.Count(got, `"type":"response.completed"`); gotType != wantType {
+				t.Fatalf("terminal document type count = %d, want %d: %s", gotType, wantType, got)
+			}
+			if strings.Contains(got, "response.failed") || strings.Contains(got, `"code":"truncated"`) {
+				t.Fatalf("late terminal name produced a synthetic failure: %s", got)
+			}
+			recs := waitForRecord(t, buf, 1)
+			if len(recs) != 1 {
+				t.Fatalf("records = %d, want 1", len(recs))
+			}
+			rec := recs[0]
+			if rec.FinishReason != "stop" || !rec.HadAnswerContent || rec.TTFTMs <= 0 ||
+				rec.ErrorType != "" || rec.ErrorCode != "" {
+				t.Fatalf("record = %+v, want a clean stop with an answer and TTFT", rec)
+			}
+			if tc.name == "type-less document" && rec.Usage.OutputTokens != 5 {
+				t.Fatalf("usage output = %d, want 5 from the reassembled document", rec.Usage.OutputTokens)
+			}
+		})
+	}
+}

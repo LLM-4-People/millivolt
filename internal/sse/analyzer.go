@@ -238,7 +238,7 @@ func (a *Analyzer) Feed(line []byte, now time.Time) {
 	// Fast-path: check for the [DONE] sentinel. Tolerate "data:[DONE]" (no
 	// space) and a trailing \r. Anything else (e.g. "[DONE]extra") falls
 	// through to the normal JSON scan.
-	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" {
+	if isDonePayload(payload) {
 		a.terminatorSeen = true
 		return
 	}
@@ -260,7 +260,7 @@ func (a *Analyzer) FeedEvent(eventType string, data []byte, now time.Time) {
 	if len(data) == 0 {
 		return
 	}
-	if string(bytes.TrimRight(data, "\r")) == "[DONE]" {
+	if isDonePayload(data) {
 		a.terminatorSeen = true
 		return
 	}
@@ -333,6 +333,12 @@ func (a *Analyzer) FlushEventWithName(name string, now time.Time) {
 // event type when the document itself omits it (a terminal event named only
 // on the SSE event: line).
 func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
+	// One escape-aware pass records every key this frame classifies; the
+	// predicates below read that result instead of rescanning the payload per
+	// key. Results are per-frame only - nothing is cached across frames.
+	var keys frameKeys
+	keys.scan(payload)
+
 	// Accumulate this data: line into the current event buffer so a multi-line
 	// event (data split across lines per the SSE spec) can be parsed whole at
 	// the boundary. Joined with "\n" per spec; bounded by eventDataMax - past
@@ -343,11 +349,15 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	// in-band error, and a complete object cannot continue into a later data
 	// line as valid JSON. Skipping the copy keeps the buffer empty for the
 	// ordinary one-object-per-event stream, saving a frame-sized copy and a
-	// second scan per frame plus the largest-frame retention.
+	// second scan per frame plus the largest-frame retention. A type-less
+	// complete object on a Responses-shaped stream is the exception: it may be
+	// a terminal document whose SSE name arrives after its data line, so its
+	// bytes are retained for the boundary classifier.
 	firstDataFrame := !a.eventDataSeen
 	if firstDataFrame {
 		a.eventDataSeen = true
-		a.eventSkipAccum = completeJSONObject(payload)
+		a.eventSkipAccum = completeJSONObject(payload) &&
+			!(a.responsesStream && keys.eventType == nil)
 	}
 	if !a.eventSkipAccum && len(a.eventData)+len(payload)+1 <= eventDataMax {
 		if len(a.eventData) > 0 {
@@ -357,12 +367,6 @@ func (a *Analyzer) feedData(payload []byte, forcedType string, now time.Time) {
 	}
 	// We only inspect content-bearing data: lines. We look for key patterns
 	// within the JSON payload without fully decoding.
-
-	// One escape-aware pass records every key this frame classifies; the
-	// predicates below read that result instead of rescanning the payload per
-	// key. Results are per-frame only - nothing is cached across frames.
-	var keys frameKeys
-	keys.scan(payload)
 
 	// Track first/last token of any kind (content, reasoning, or tool call).
 	// The first content-bearing chunk marks TTFT.
@@ -916,7 +920,7 @@ func TerminalLine(line []byte) bool {
 	if !ok {
 		return false
 	}
-	if string(bytes.TrimRight(payload, "\r")) == "[DONE]" || responsesTerminalEvent(responseEventType(payload)) {
+	if isDonePayload(payload) || responsesTerminalEvent(responseEventType(payload)) {
 		return true
 	}
 	// Anthropic Messages closes with message_stop. A content string that

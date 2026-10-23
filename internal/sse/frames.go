@@ -88,6 +88,22 @@ func ErrorEnvelope(id, typ string, code any, msg string) (json.RawMessage, error
 	return json.Marshal(obj)
 }
 
+// DoneLine reports whether one raw SSE line carries the [DONE] sentinel.
+// The sentinel ends an OpenAI-compatible stream at the line itself: no later
+// field can belong to it, so the relay resolves its hold without waiting for
+// the blank-line boundary. A Responses terminal document is different - its
+// event may still name itself on a later line - and is never a DoneLine.
+func DoneLine(line []byte) bool {
+	payload, ok := DataPayload(line)
+	return ok && isDonePayload(payload)
+}
+
+// isDonePayload reports whether one data payload is the [DONE] sentinel,
+// tolerating a trailing CR.
+func isDonePayload(payload []byte) bool {
+	return string(bytes.TrimRight(payload, "\r")) == "[DONE]"
+}
+
 // EventName returns the name declared by one raw SSE line ("event: name"), or
 // "" when the line is not an event field. The name is trimmed like the SSE
 // parser trims it.
