@@ -395,6 +395,13 @@ func (d *ResponsesStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
+// AbortBlocks closes every open block for a hard decoder failure without
+// flushing queued payload events.
+func (d *ResponsesStreamDecoder) AbortBlocks() []*ir.Event {
+	d.closeAll(nil)
+	return drainAbortBlocks(&d.q)
+}
+
 func (d *ResponsesStreamDecoder) newBlock() int {
 	idx := d.nextIndex
 	d.nextIndex++
@@ -618,6 +625,9 @@ func (e *ResponsesStreamEncoder) Write(ev *ir.Event) error {
 		item := e.items[ev.Index]
 		if item == nil {
 			return nil
+		}
+		if ev.Abort {
+			return e.emitAbortedItem(ev.Index, item)
 		}
 		switch item.kind {
 		case "message":
@@ -843,6 +853,30 @@ func (e *ResponsesStreamEncoder) outputItems() []map[string]any {
 		}
 	}
 	return out
+}
+
+// emitAbortedItem closes one Responses item for a fail-closed decoder flush
+// without emitting any retained content. The item keeps its identity and is
+// marked incomplete; the proxy's protocol error frame then terminates the
+// stream.
+func (e *ResponsesStreamEncoder) emitAbortedItem(index int, item *responsesItemState) error {
+	closed := map[string]any{"type": item.kind, "id": item.id, "status": "incomplete"}
+	switch item.kind {
+	case "message":
+		closed["role"] = "assistant"
+		closed["content"] = []any{}
+	case "function_call":
+		closed["call_id"] = item.callID
+		closed["name"] = item.name
+		closed["arguments"] = "{}"
+	case "reasoning":
+		closed["summary"] = []any{}
+	}
+	delete(e.items, index)
+	return e.emit("response.output_item.done", map[string]any{
+		"type": "response.output_item.done", "sequence_number": e.nextSeq(),
+		"output_index": item.outputIndex, "item": closed,
+	})
 }
 
 // reasoningItem renders one completed Responses reasoning item. An opaque

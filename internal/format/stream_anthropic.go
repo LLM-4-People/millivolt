@@ -307,6 +307,13 @@ func (d *AnthropicStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
+// AbortBlocks closes every open block for a hard decoder failure without
+// flushing queued payload events.
+func (d *AnthropicStreamDecoder) AbortBlocks() []*ir.Event {
+	d.closeOpenBlocks()
+	return drainAbortBlocks(&d.q)
+}
+
 // mergeUsage folds one Anthropic usage object into the stream total. The wire
 // reports non-cached input_tokens separately, so the decoder retains the base
 // count and the cache totals independently and recomputes the full prompt
@@ -549,6 +556,14 @@ func (e *AnthropicStreamEncoder) Write(ev *ir.Event) error {
 		if e.unopened[ev.Index] {
 			delete(e.unopened, ev.Index)
 			return nil
+		}
+		if ev.Abort {
+			delete(e.blockArgs, ev.Index)
+			delete(e.argSent, ev.Index)
+			delete(e.skipped, ev.Index)
+			return e.emit("content_block_stop", map[string]any{
+				"type": "content_block_stop", "index": ev.Index,
+			})
 		}
 		if args, ok := e.blockArgs[ev.Index]; ok && !e.argSent[ev.Index] {
 			e.argSent[ev.Index] = true

@@ -298,11 +298,7 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 		if err != nil {
 			// Close every block the decoder still holds before the abnormal
 			// terminal event: a target client must never receive an error or
-			// terminal frame for a block that is still open. A hard decoder
-			// failure (for example a safety budget) is not flushed: emitting
-			// retained payload after fail-closed validation would defeat the
-			// bound, and the proxy's protocol-native error frame terminates
-			// the stream.
+			// terminal frame for a block that is still open.
 			if errors.Is(err, ErrTruncatedStream) {
 				for _, pending := range dec.FlushBlocks() {
 					if writeErr := enc.Write(pending); writeErr != nil {
@@ -320,6 +316,15 @@ func TranslateStreamBetween(inbound, outbound ir.Protocol, dst io.Writer, src io
 				}})
 				_ = enc.Close()
 				return nil
+			}
+			// A hard decoder failure is fail-closed: close the target blocks
+			// with the abort flag so the encoder does not flush payload that
+			// the same failure budget refused. The proxy's protocol-native
+			// error frame terminates the stream.
+			for _, pending := range dec.AbortBlocks() {
+				if writeErr := enc.Write(pending); writeErr != nil {
+					return writeErr
+				}
 			}
 			return err
 		}

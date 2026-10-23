@@ -343,6 +343,13 @@ func (d *ChatStreamDecoder) FlushBlocks() []*ir.Event {
 	return drainQueue(&d.q)
 }
 
+// AbortBlocks closes every open block for a hard decoder failure without
+// flushing queued payload events.
+func (d *ChatStreamDecoder) AbortBlocks() []*ir.Event {
+	d.closeAll()
+	return drainAbortBlocks(&d.q)
+}
+
 // ChatStreamEncoder renders canonical events as Chat Completions SSE.
 type ChatStreamEncoder struct {
 	w       io.Writer
@@ -429,6 +436,10 @@ func (e *ChatStreamEncoder) Write(ev *ir.Event) error {
 			}}}, nil, nil)
 		}
 	case ir.EventBlockEnd:
+		if ev.Abort {
+			e.releaseBlock(ev.Index)
+			return nil
+		}
 		if e.blockTypes[ev.Index] == ir.BlockToolCall && !e.argsEmitted[ev.Index] {
 			if idx, ok := e.toolIndex[ev.Index]; ok {
 				args := string(e.blockArgs[ev.Index])

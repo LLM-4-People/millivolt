@@ -260,3 +260,96 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text
 		})
 	}
 }
+
+// TestHardDecoderErrorClosesBlocks pins C7: a malformed source chunk after a
+// block opened must close that block for the client, but the fail-closed flush
+// must not emit retained payload or a clean terminal frame.
+func TestHardDecoderErrorClosesBlocks(t *testing.T) {
+	cases := []struct {
+		name     string
+		inbound  ir.Protocol
+		outbound ir.Protocol
+		in       string
+	}{
+		{
+			name:     "chat source to anthropic client",
+			inbound:  ir.Anthropic,
+			outbound: ir.Chat,
+			in: `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}
+
+data: not-json
+
+`,
+		},
+		{
+			name:     "responses source to anthropic client",
+			inbound:  ir.Anthropic,
+			outbound: ir.Responses,
+			in: `event: response.created
+data: {"type":"response.created","response":{"id":"r1","model":"m","status":"in_progress"}}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","output_index":0,"content_index":0,"part":{"type":"output_text","text":"hello"}}
+
+event: response.output_text.delta
+data: not-json
+
+`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := TranslateStreamBetween(tc.inbound, tc.outbound, &buf, strings.NewReader(tc.in), nil, nil)
+			if err == nil {
+				t.Fatal("TranslateStreamBetween returned nil for a malformed source")
+			}
+			got := parseAnthropicLifecycle(t, buf.String())
+			if len(got.starts) == 0 {
+				t.Fatalf("no block started before the failure: %s", buf.String())
+			}
+			assertSingleLifecycle(t, got)
+			if strings.Contains(buf.String(), "event: message_stop") {
+				t.Fatalf("hard failure emitted a clean terminal frame: %s", buf.String())
+			}
+		})
+	}
+
+	t.Run("anthropic source to responses client", func(t *testing.T) {
+		in := `data: {"type":"message_start","message":{"id":"m1","model":"m"}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"secret"}}
+
+data: not-json
+
+`
+		var buf bytes.Buffer
+		if err := TranslateStreamBetween(ir.Responses, ir.Anthropic, &buf, strings.NewReader(in), nil, nil); err == nil {
+			t.Fatal("TranslateStreamBetween returned nil for a malformed source")
+		}
+		out := buf.String()
+		if strings.Contains(out, "event: response.completed") {
+			t.Fatalf("hard failure emitted a clean terminal frame: %s", out)
+		}
+		frames := parseWireFrames(t, out)
+		done := -1
+		for i, frame := range frames {
+			if frame.event != "response.output_item.done" {
+				continue
+			}
+			done = i
+			item, _ := frame.data["item"].(map[string]any)
+			if item["status"] != "incomplete" {
+				t.Fatalf("aborted item status = %v: %v", item["status"], frame.data)
+			}
+			if content, _ := item["content"].([]any); len(content) != 0 {
+				t.Fatalf("aborted item flushed retained content: %v", content)
+			}
+		}
+		if done < 0 {
+			t.Fatalf("no output_item.done for the aborted block: %s", out)
+		}
+	})
+}

@@ -434,6 +434,12 @@ type Event struct {
 	Usage    *Usage    `json:"usage,omitempty"`
 	Finish   *Finish   `json:"finish,omitempty"`
 	Error    *Error    `json:"error,omitempty"`
+
+	// Abort marks a BlockEnd produced by a fail-closed decoder flush. Encoders
+	// close the block but must not flush payload they retained for it: the
+	// stream is being terminated by an error, and retained data may exceed the
+	// budget that caused the failure. It is never set by a provider event.
+	Abort bool `json:"abort,omitempty"`
 }
 
 // Finish is the terminal cause carried by EventMessageDelta.

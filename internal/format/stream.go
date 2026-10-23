@@ -24,6 +24,10 @@ type StreamDecoder interface {
 	// translation facade calls it before it emits an abnormal terminal event,
 	// so a target encoder never has to close an unclosed block itself.
 	FlushBlocks() []*ir.Event
+	// AbortBlocks closes every open block for a hard decoder failure. The
+	// returned BlockEnds are marked Abort so the target encoder does not flush
+	// payload it retained for the block; queued payload events are discarded.
+	AbortBlocks() []*ir.Event
 }
 
 // StreamEncoder writes one client-facing SSE stream from canonical events.
@@ -113,6 +117,24 @@ func (q *eventQueue) pop() (*ir.Event, bool) {
 // drainQueue returns every queued event and empties the queue.
 func drainQueue(q *eventQueue) []*ir.Event {
 	out := append([]*ir.Event(nil), q.pending...)
+	q.pending = nil
+	return out
+}
+
+// drainAbortBlocks returns only queued block closings, marked Abort, and drops
+// every buffered payload event. A hard decoder failure is fail-closed: the
+// target must see the block closed without the encoder flushing retained data
+// that the same failure budget refused.
+func drainAbortBlocks(q *eventQueue) []*ir.Event {
+	var out []*ir.Event
+	for _, ev := range q.pending {
+		if ev.Type != ir.EventBlockEnd {
+			continue
+		}
+		aborted := *ev
+		aborted.Abort = true
+		out = append(out, &aborted)
+	}
 	q.pending = nil
 	return out
 }
